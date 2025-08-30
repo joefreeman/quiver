@@ -1,5 +1,6 @@
 use crate::bytecode::{Constant, Function, Instruction, TypeId};
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -20,6 +21,34 @@ impl Value {
             Value::Binary(_) => "binary",
             Value::Tuple(_, _) => "tuple",
             Value::Function { .. } => "function",
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Integer(i) => write!(f, "{}", i),
+            Value::Binary(_) => write!(f, "<binary>"), // TODO: show actual binary content
+            Value::Tuple(type_id, elements) => {
+                if *type_id == TypeId::NIL {
+                    write!(f, "[]")
+                } else if *type_id == TypeId::OK {
+                    write!(f, "Ok")
+                } else if elements.is_empty() {
+                    write!(f, "[]")
+                } else {
+                    write!(f, "[")?;
+                    for (i, element) in elements.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", element)?;
+                    }
+                    write!(f, "]")
+                }
+            }
+            Value::Function { .. } => write!(f, "<function>"),
         }
     }
 }
@@ -172,7 +201,9 @@ impl VM {
                 Instruction::Store(ref name) => self.handle_store(name)?,
                 Instruction::Tuple(type_id, size) => self.handle_tuple(type_id, size)?,
                 Instruction::Get(index) => self.handle_get(index)?,
-                Instruction::Is(type_id) => self.handle_is(type_id)?,
+                Instruction::IsInteger => self.handle_is_integer()?,
+                Instruction::IsBinary => self.handle_is_binary()?,
+                Instruction::IsTuple(type_id) => self.handle_is_tuple(type_id)?,
                 Instruction::Jump(offset) => self.handle_jump(offset)?,
                 Instruction::JumpIfNil(offset) => self.handle_jump_if_nil(offset)?,
                 Instruction::JumpIfNotNil(offset) => self.handle_jump_if_not_nil(offset)?,
@@ -324,7 +355,27 @@ impl VM {
         }
     }
 
-    fn handle_is(&mut self, expected_type_id: TypeId) -> Result<(), Error> {
+    fn handle_is_integer(&mut self) -> Result<(), Error> {
+        let value = self.stack.last().ok_or(Error::StackUnderflow)?;
+        let is_match = matches!(value, Value::Integer(_));
+        self.stack.push(Value::Tuple(
+            if is_match { TypeId::OK } else { TypeId::NIL },
+            vec![],
+        ));
+        Ok(())
+    }
+
+    fn handle_is_binary(&mut self) -> Result<(), Error> {
+        let value = self.stack.last().ok_or(Error::StackUnderflow)?;
+        let is_match = matches!(value, Value::Binary(_));
+        self.stack.push(Value::Tuple(
+            if is_match { TypeId::OK } else { TypeId::NIL },
+            vec![],
+        ));
+        Ok(())
+    }
+
+    fn handle_is_tuple(&mut self, expected_type_id: TypeId) -> Result<(), Error> {
         let value = self.stack.last().ok_or(Error::StackUnderflow)?;
         let is_match = matches!(value, Value::Tuple(type_id, _) if (type_id == &expected_type_id));
         self.stack.push(Value::Tuple(
@@ -466,5 +517,26 @@ impl VM {
     fn jump(&mut self, offset: isize) {
         let frame = self.frames.last_mut().unwrap();
         frame.counter = frame.counter.wrapping_add_signed(offset);
+    }
+
+    pub fn list_variables(&self) -> Vec<(String, Value)> {
+        let mut variables = Vec::new();
+
+        // Collect from all scopes (inner scopes override outer scopes)
+        for scope in &self.scopes {
+            for (name, value) in &scope.variables {
+                variables.push((name.clone(), value.clone()));
+            }
+        }
+
+        // Also include frame captures if we're in a function call
+        if let Some(frame) = self.frames.last() {
+            for (name, value) in &frame.captures {
+                variables.push((name.clone(), value.clone()));
+            }
+        }
+
+        variables.sort_by(|a, b| a.0.cmp(&b.0));
+        variables
     }
 }

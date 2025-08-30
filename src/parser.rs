@@ -15,19 +15,19 @@ pub enum Error {
     UnexpectedRule(Rule),
 }
 
-// impl std::fmt::Display for Error {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             Error::ParseError(err) => write!(f, "Parse error: {}", err),
-//             Error::InvalidLiteral(lit) => write!(f, "Invalid literal: {}", lit),
-//             Error::InvalidParameter(param) => write!(f, "Invalid parameter: {}", param),
-//             Error::InvalidOperator(op) => write!(f, "Invalid operator: {}", op),
-//             Error::UnexpectedRule(rule) => write!(f, "Unexpected rule: {:?}", rule),
-//         }
-//     }
-// }
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::ParseError(err) => write!(f, "Parse error: {}", err),
+            Error::InvalidLiteral(lit) => write!(f, "Invalid literal: {}", lit),
+            Error::InvalidParameter(param) => write!(f, "Invalid parameter: {}", param),
+            Error::InvalidOperator(op) => write!(f, "Invalid operator: {}", op),
+            Error::UnexpectedRule(rule) => write!(f, "Unexpected rule: {:?}", rule),
+        }
+    }
+}
 
-// impl std::error::Error for Error {}
+impl std::error::Error for Error {}
 
 pub fn parse(source: &str) -> Result<Program, Error> {
     let pairs = Grammar::parse(Rule::program, source).map_err(Error::ParseError)?;
@@ -204,6 +204,11 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error> {
 
 fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error> {
     match pair.as_rule() {
+        Rule::operation => {
+            // Operation is a wrapper, get the inner rule
+            let inner_pair = pair.into_inner().next().unwrap();
+            parse_operation(inner_pair)
+        }
         Rule::operator => Ok(Operation::Operator(parse_operator(pair)?)),
         Rule::tuple_construction => Ok(Operation::TupleConstruction(parse_tuple_construction(
             pair,

@@ -2,7 +2,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use quiver::Quiver;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Read};
+use std::fs;
 
 #[derive(Parser)]
 #[command(name = "quiv")]
@@ -96,26 +97,47 @@ fn run_repl() -> Result<(), ReadlineError> {
 
                     "\\!" => {
                         quiver = Quiver::new();
+                        println!("Environment reset");
+                        continue;
                     }
 
                     "\\v" => {
-                        // TODO
+                        let variables = quiver.list_variables();
+                        if variables.is_empty() {
+                            println!("No variables defined");
+                        } else {
+                            println!("Variables:");
+                            for (name, value) in variables {
+                                println!("  {} = {}", name, value);
+                            }
+                        }
                         continue;
                     }
 
                     "\\t" => {
-                        // TODO
+                        let types = quiver.list_type_aliases();
+                        if types.is_empty() {
+                            println!("No type aliases defined");
+                        } else {
+                            println!("Type aliases:");
+                            for (name, _id) in types {
+                                println!("  {}", name);
+                            }
+                        }
                         continue;
                     }
 
                     _ => {
                         match quiver.evaluate(line) {
                             Ok(Some(value)) => {
-                                // TODO: show result
+                                println!("{}", value);
                             }
-                            Ok(None) => {}
-                            // TODO: show error
-                            Err(error) => eprintln!("Error"),
+                            Ok(None) => {
+                                // No result to display
+                            }
+                            Err(error) => {
+                                eprintln!("Error: {}", error);
+                            }
                         }
                     }
                 }
@@ -130,8 +152,7 @@ fn run_repl() -> Result<(), ReadlineError> {
             }
 
             Err(error) => {
-                // TODO: show error
-                eprintln!("Error");
+                eprintln!("Error: {}", error);
                 break;
             }
         }
@@ -152,7 +173,32 @@ fn compile_command(
     debug: bool,
     eval: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO
+    let mut quiver = Quiver::new();
+    
+    let source = if let Some(code) = eval {
+        code
+    } else if let Some(path) = input {
+        fs::read_to_string(&path)?
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    };
+    
+    let bytecode = quiver.compile_to_bytecode(&source, true)?;
+    
+    let json = if debug {
+        serde_json::to_string_pretty(&bytecode)?
+    } else {
+        serde_json::to_string(&bytecode)?
+    };
+    
+    if let Some(output_path) = output {
+        fs::write(output_path, json)?;
+    } else {
+        println!("{}", json);
+    }
+    
     Ok(())
 }
 
@@ -160,11 +206,63 @@ fn run_command(
     input: Option<String>,
     eval: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO
+    let mut quiver = Quiver::new();
+    
+    let source = if let Some(code) = eval {
+        code
+    } else if let Some(path) = input {
+        fs::read_to_string(&path)?
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    };
+    
+    match quiver.evaluate(&source) {
+        Ok(Some(value)) => println!("{}", value),
+        Ok(None) => {}, // No output for expressions that don't return values
+        Err(err) => {
+            eprintln!("Error: {}", err);
+            std::process::exit(1);
+        }
+    }
+    
     Ok(())
 }
 
 fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO
+    let content = if let Some(path) = input {
+        fs::read_to_string(&path)?
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    };
+    
+    let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
+    
+    println!("Bytecode Inspection:");
+    println!("==================");
+    println!("Constants: {}", bytecode.constants.len());
+    for (i, constant) in bytecode.constants.iter().enumerate() {
+        println!("  {}: {:?}", i, constant);
+    }
+    
+    println!("\nFunctions: {}", bytecode.functions.len());
+    for (i, function) in bytecode.functions.iter().enumerate() {
+        println!("  Function {}:", i);
+        println!("    Captures: {:?}", function.captures);
+        println!("    Instructions: {}", function.instructions.len());
+        for (j, instruction) in function.instructions.iter().enumerate() {
+            println!("      {}: {:?}", j, instruction);
+        }
+    }
+    
+    if let Some(entry) = bytecode.entry {
+        println!("\nEntry point: Function {}", entry);
+    } else {
+        println!("\nNo entry point defined");
+    }
+    
     Ok(())
 }

@@ -1,23 +1,26 @@
-#[derive(Debug, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum Constant {
     Integer(i64),
     Binary(Vec<u8>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Function {
     // TODO: type_id?
     pub captures: Vec<String>,
     pub instructions: Vec<Instruction>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Bytecode {
     pub constants: Vec<Constant>,
     pub functions: Vec<Function>,
     pub entry: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TypeId(pub usize);
 
 impl TypeId {
@@ -25,7 +28,7 @@ impl TypeId {
     pub const OK: TypeId = TypeId(1);
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction {
     Constant(usize),
     Pop,
@@ -46,7 +49,9 @@ pub enum Instruction {
     Store(String),
     Tuple(TypeId, usize),
     Get(usize),
-    Is(TypeId),
+    IsInteger,
+    IsBinary,
+    IsTuple(TypeId),
     Jump(isize),
     JumpIfNil(isize),
     JumpIfNotNil(isize),
