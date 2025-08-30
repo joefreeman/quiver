@@ -1,0 +1,237 @@
+#[derive(Debug, Clone, PartialEq)]
+pub struct Program {
+    pub statements: Vec<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Statement {
+    TypeAlias {
+        name: String,
+        type_def: Type,
+    },
+    TypeImport {
+        pattern: TypeImportPattern,
+        module_path: String,
+    },
+    Expression(Expression),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeImportPattern {
+    Star,
+    Partial(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expression {
+    pub branches: Vec<Branch>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Branch {
+    pub condition: Sequence,
+    pub consequence: Option<Sequence>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sequence {
+    pub terms: Vec<Term>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Term {
+    Assignment { pattern: Pattern, value: Chain },
+    Chain(Chain),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chain {
+    pub value: Value,
+    pub operations: Vec<Operation>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Literal(Literal),
+    TupleConstruction(TupleConstruction),
+    FunctionDefinition(FunctionDefinition),
+    Block(Block),
+    Parameter(Parameter),
+    MemberAccess(MemberAccess),
+    Identifier(String),
+    TailCall(String),
+    Import(String),
+    Parenthesized(Box<Expression>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Operation {
+    Operator(Operator),
+    TupleConstruction(TupleConstruction),
+    Block(Block),
+    MemberAccess(MemberAccess),
+    Identifier(String),
+    FieldAccess(String),
+    PositionalAccess(usize),
+    TailCall(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Literal {
+    Integer(i64),
+    Binary(Vec<u8>),
+    String(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleConstruction {
+    pub name: Option<String>,
+    pub fields: Vec<TupleField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleField {
+    pub name: Option<String>,
+    pub value: TupleFieldValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TupleFieldValue {
+    Ripple,
+    Chain(Chain),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionDefinition {
+    pub parameter_type: Option<Type>,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    pub expression: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Parameter {
+    Self_,
+    Indexed(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberAccess {
+    pub object: String,
+    pub path: Vec<AccessPath>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccessPath {
+    Field(String),
+    Index(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Operator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Equal,
+    NotEqual,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    Literal(Literal),
+    Identifier(String),
+    TuplePattern(TuplePattern),
+    PartialPattern(Vec<String>),
+    Star,
+    Wildcard,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuplePattern {
+    pub name: Option<String>,
+    pub fields: Vec<PatternField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternField {
+    pub name: Option<String>,
+    pub pattern: Pattern,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Primitive(PrimitiveType),
+    Tuple(TupleType),
+    Function(FunctionType),
+    Union(UnionType),
+    Identifier(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrimitiveType {
+    Int,
+    Bin,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleType {
+    pub name: Option<String>,
+    pub fields: Vec<FieldType>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldType {
+    pub name: Option<String>,
+    pub type_def: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionType {
+    pub input: Box<Type>,
+    pub output: Box<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnionType {
+    pub types: Vec<Type>,
+}
+
+// impl std::fmt::Display for Operator {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         let symbol = match self {
+//             Operator::Add => "+",
+//             Operator::Subtract => "-",
+//             Operator::Multiply => "*",
+//             Operator::Divide => "/",
+//             Operator::Modulo => "%",
+//             Operator::Equal => "==",
+//             Operator::NotEqual => "!=",
+//             Operator::LessThan => "<",
+//             Operator::LessThanOrEqual => "<=",
+//             Operator::GreaterThan => ">",
+//             Operator::GreaterThanOrEqual => ">=",
+//         };
+//         write!(f, "{}", symbol)
+//     }
+// }
+
+impl Parameter {
+    pub fn from_string(s: &str) -> Option<Self> {
+        if s == "$" {
+            Some(Parameter::Self_)
+        } else if s.starts_with('$') {
+            s[1..].parse().ok().map(Parameter::Indexed)
+        } else {
+            None
+        }
+    }
+}

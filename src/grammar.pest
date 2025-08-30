@@ -1,0 +1,140 @@
+// Comments (// ...)
+COMMENT = _{ "//" ~ (!("\n" | "\r") ~ ANY)* }
+
+// Whitespace, space, newline
+ws = _{ (" " | "\t" | "\n" | "\r\n" | "\r")+ }
+sp = _{ (" " | "\t")+ }
+nl = _{ "\n" | "\r\n" | "\r" }
+
+// Identifiers
+identifier = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* }
+tuple_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Function types
+function_type = { "#" ~ function_input_type ~ sp ~ "->" ~ sp ~ type_definition }
+function_input_type = {
+    "(" ~ ws? ~ function_type ~ ws? ~ ")" |
+    union_type |
+    tuple_type |
+    primitive_type |
+    identifier
+}
+
+// Tuple types ([Type, Type, ...], Name[Type, ...], Name)
+tuple_type = {
+    tuple_name ~ "[" ~ ws? ~ field_type_list? ~ ws? ~ "]" |
+    "[" ~ ws? ~ field_type_list? ~ ws? ~ "]" |
+    tuple_name
+}
+field_type_list = { field_type ~ (ws? ~ "," ~ ws ~ field_type)* }
+field_type = { (identifier ~ ":" ~ sp)? ~ type_definition }
+
+// Types
+primitive_type = { "int" | "bin" }
+base_type = { function_type | tuple_type | primitive_type | identifier }
+union_type = { "(" ~ ws? ~ base_type ~ (ws? ~ "," ~ ws ~ base_type)+ ~ ws? ~ ")" }
+type_definition = { union_type | base_type }
+
+// Literals
+integer_literal = @{ "-"? ~ ASCII_DIGIT+ }
+binary_literal = @{ "'" ~ (ASCII_HEX_DIGIT{2})* ~ "'" }
+escape = @{ "\\" ~ ("\"" | "\\" | "n" | "r" | "t") }
+string_literal = @{ "\"" ~ (!"\"" ~ (escape | ANY))* ~ "\"" }
+literal = { integer_literal | binary_literal | string_literal }
+
+// Patterns
+partial_field_list = { identifier ~ (ws? ~ "," ~ ws ~ identifier)* }
+partial_pattern = { "(" ~ ws? ~ partial_field_list ~ ws? ~ ")" }
+pattern_field = { (identifier ~ ":" ~ sp)? ~ pattern }
+pattern_field_list = { pattern_field ~ (ws? ~ "," ~ ws ~ pattern_field)* }
+tuple_pattern = {
+    tuple_name ~ "[" ~ ws? ~ pattern_field_list? ~ ws? ~ "]" |
+    "[" ~ ws? ~ pattern_field_list? ~ ws? ~ "]" |
+    tuple_name
+}
+star = { "*" }
+wildcard = { "_" }
+pattern = { partial_pattern | tuple_pattern | literal | star | wildcard | identifier }
+
+// Ripple operator: (~)
+ripple = { "~" }
+
+// Tuple construction (Name[field: value, value, ...], [value, ...], Name)
+tuple_field = { (identifier ~ ":" ~ sp)? ~ (ripple | chain) }
+tuple_field_list = { tuple_field ~ (ws? ~ "," ~ ws ~ tuple_field)* }
+tuple_construction = {
+    tuple_name ~ "[" ~ ws? ~ tuple_field_list? ~ ws? ~ "]" |
+    "[" ~ ws? ~ tuple_field_list? ~ ws? ~ "]" |
+    tuple_name
+}
+
+// Function definitions (#Type { ... }, #[Type, ...] { ... }, #{ ... })
+function_definition = { "#" ~ (type_definition? ~ sp)? ~ block }
+
+// Blocks ({ ... })
+block = { "{" ~ ws? ~ expression ~ ws? ~ "}" }
+
+// Parameter references ($, $0, $1, etc)
+parameter = @{ "$" ~ ASCII_DIGIT* }
+
+// Member access (identifier.field.0.field)
+member_access = @{ identifier ~ ("." ~ (identifier | ASCII_DIGIT+))+ }
+
+// Field/positional access (.foo, .0, .1)
+field_access = @{ "." ~ identifier }
+positional_access = @{ "." ~ ASCII_DIGIT+ }
+
+// Operators
+operator = { "==" | "!=" | "<=" | ">=" | "+" | "-" | "*" | "/" | "%" | "<" | ">" }
+
+// Tail-call
+tail_call = { "&" ~ identifier }
+
+// Import expression: %"path"
+import = { "%" ~ string_literal }
+
+// Chain
+value = {
+    literal |
+    tuple_construction |
+    function_definition |
+    block |
+    parameter |
+    member_access |
+    identifier |
+    tail_call |
+    import |
+    "(" ~ ws? ~ expression ~ ws? ~ ")"
+}
+operation = {
+    operator |
+    tuple_construction |
+    block |
+    member_access |
+    identifier |
+    field_access |
+    positional_access |
+    tail_call
+}
+chain = { value ~ (ws ~ "~>" ~ sp ~ operation)* }
+
+// Assignment (pattern = chain)
+assignment = { pattern ~ sp ~ "=" ~ sp ~ chain }
+
+// Expressions
+term = { assignment | chain }
+sequence = { term ~ (ws? ~ "," ~ ws ~ term)* }
+branch = { sequence ~ (sp ~ "=>" ~ ws ~ sequence)? }
+expression = { ("|" ~ ws)? ~ branch ~ (ws ~ "|" ~ ws ~ branch)* }
+
+// Type aliases/imports
+type_alias = { "type" ~ sp ~ !primitive_type ~ identifier ~ sp ~ "=" ~ sp ~ type_definition }
+type_star_pattern = { "*" }
+type_partial_pattern = { "(" ~ ws? ~ identifier ~ (ws? ~ "," ~ ws ~ identifier)* ~ ws? ~ ")" }
+type_import_pattern = { type_star_pattern | type_partial_pattern }
+type_import = { "type" ~ sp ~ type_import_pattern ~ sp ~ "=" ~ sp ~ import }
+
+// Program
+statement = { type_import | type_alias | expression }
+statements = { statement ~ sp? ~ ((nl | ";") ~ ws? ~ statement)* ~ ws? ~ ";"? }
+program = { SOI ~ ws? ~ statements? ~ ws? ~ EOI }
