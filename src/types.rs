@@ -4,11 +4,17 @@ use std::collections::HashMap;
 use crate::bytecode::TypeId;
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct FunctionType {
+    pub parameter: Vec<Type>,
+    pub result: Vec<Type>,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Type {
     Integer,
     Binary,
     Tuple(TypeId),
-    Function(Box<Type>, Box<Type>),
+    Function(Box<FunctionType>),
 }
 
 #[derive(Debug, Clone)]

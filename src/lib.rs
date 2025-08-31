@@ -90,7 +90,7 @@ impl Quiver {
             constants: self.vm.get_constants().clone(),
             functions: self.vm.get_functions().clone(),
             entry,
-            types: self.type_registry.get_types().clone(),
+            types: Some(self.type_registry.get_types().clone()),
         };
 
         Ok(bytecode)

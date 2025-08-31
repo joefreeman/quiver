@@ -99,6 +99,15 @@ enum Type {
     Unresolved(Vec<types::Type>),
 }
 
+impl Type {
+    fn to_type_vec(&self) -> Vec<types::Type> {
+        match self {
+            Type::Resolved(t) => vec![t.clone()],
+            Type::Unresolved(types) => types.clone(),
+        }
+    }
+}
+
 fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
     let mut flattened = Vec::new();
     for t in types {
@@ -394,20 +403,30 @@ impl<'a> Compiler<'a> {
             self.compile_expression(function_definition.body.expression, parameter_type.clone())?;
         self.add_instruction(Instruction::Return);
 
+        let param_types = parameter_type.to_type_vec();
+        let result_types = body_type.to_type_vec();
+
+        if param_types.is_empty() {
+            return Err(Error::TypeUnresolved(
+                "Function parameter type cannot be resolved".to_string(),
+            ));
+        }
+        if result_types.is_empty() {
+            return Err(Error::TypeUnresolved(
+                "Function body type cannot be resolved".to_string(),
+            ));
+        }
+
+        let func_type = types::FunctionType {
+            parameter: param_types,
+            result: result_types,
+        };
+
         let function_instructions = std::mem::take(&mut self.instructions);
         let function_index = self.vm.register_function(Function {
             instructions: function_instructions,
             captures: captures.into_iter().collect(),
-            function_type: Some((
-                match &parameter_type {
-                    Type::Resolved(param_type) => param_type.clone(),
-                    _ => types::Type::Tuple(TypeId::NIL),
-                },
-                match &body_type {
-                    Type::Resolved(ret_type) => ret_type.clone(),
-                    _ => types::Type::Tuple(TypeId::NIL),
-                },
-            )),
+            function_type: Some(func_type.clone()),
         });
 
         self.instructions = saved_instructions;
@@ -415,68 +434,9 @@ impl<'a> Compiler<'a> {
 
         self.add_instruction(Instruction::Function(function_index));
 
-        match (&parameter_type, &body_type) {
-            (Type::Resolved(param_t), Type::Resolved(body_t)) => Ok(Type::Resolved(
-                types::Type::Function(Box::new(param_t.clone()), Box::new(body_t.clone())),
-            )),
-            (Type::Unresolved(param_types), Type::Resolved(body_t)) => {
-                if param_types.is_empty() {
-                    Err(Error::TypeUnresolved(
-                        "Function parameter type cannot be resolved".to_string(),
-                    ))
-                } else {
-                    // For union parameter types, we need to create function variants for each possible parameter type
-                    let mut function_variants = Vec::new();
-                    for param_t in param_types {
-                        function_variants.push(types::Type::Function(
-                            Box::new(param_t.clone()),
-                            Box::new(body_t.clone()),
-                        ));
-                    }
-                    Ok(Type::Unresolved(function_variants))
-                }
-            }
-            (Type::Resolved(param_t), Type::Unresolved(body_types)) => {
-                if body_types.is_empty() {
-                    Err(Error::TypeUnresolved(
-                        "Function body type cannot be resolved".to_string(),
-                    ))
-                } else {
-                    // For union body types, we need to create function variants for each possible body type
-                    let mut function_variants = Vec::new();
-                    for body_t in body_types {
-                        function_variants.push(types::Type::Function(
-                            Box::new(param_t.clone()),
-                            Box::new(body_t.clone()),
-                        ));
-                    }
-                    Ok(Type::Unresolved(function_variants))
-                }
-            }
-            (Type::Unresolved(param_types), Type::Unresolved(body_types)) => {
-                if param_types.is_empty() {
-                    Err(Error::TypeUnresolved(
-                        "Function parameter type cannot be resolved".to_string(),
-                    ))
-                } else if body_types.is_empty() {
-                    Err(Error::TypeUnresolved(
-                        "Function body type cannot be resolved".to_string(),
-                    ))
-                } else {
-                    // For both union parameter and body types, create all combinations
-                    let mut function_variants = Vec::new();
-                    for param_t in param_types {
-                        for body_t in body_types {
-                            function_variants.push(types::Type::Function(
-                                Box::new(param_t.clone()),
-                                Box::new(body_t.clone()),
-                            ));
-                        }
-                    }
-                    Ok(Type::Unresolved(function_variants))
-                }
-            }
-        }
+        let function_type = types::Type::Function(Box::new(func_type));
+
+        Ok(Type::Resolved(function_type))
     }
 
     fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Result<Type, Error> {
@@ -549,10 +509,10 @@ impl<'a> Compiler<'a> {
                     .into_iter()
                     .flat_map(|input_type| {
                         output_possibilities.iter().map(move |output_type| {
-                            types::Type::Function(
-                                Box::new(input_type.clone()),
-                                Box::new(output_type.clone()),
-                            )
+                            types::Type::Function(Box::new(types::FunctionType {
+                                parameter: vec![input_type.clone()],
+                                result: vec![output_type.clone()],
+                            }))
                         })
                     })
                     .collect();
@@ -1075,29 +1035,10 @@ impl<'a> Compiler<'a> {
                 for capture in captures {
                     self.value_to_instructions(capture)?;
                 }
-                let func_def = {
-                    let functions = self.vm.get_functions();
-                    functions.get(*function).cloned()
-                };
-
-                if let Some(func_def) = func_def {
-                    let func_index = self.vm.register_function(func_def.clone());
+                if let Some(func_def) = self.vm.get_functions().get(*function).cloned() {
+                    let func_index = self.vm.register_function(func_def);
                     self.add_instruction(Instruction::Function(func_index));
-
-                    let function_type =
-                        if let Some((param_type, return_type)) = &func_def.function_type {
-                            types::Type::Function(
-                                Box::new(param_type.clone()),
-                                Box::new(return_type.clone()),
-                            )
-                        } else {
-                            types::Type::Function(
-                                Box::new(types::Type::Tuple(TypeId::NIL)),
-                                Box::new(types::Type::Tuple(TypeId::NIL)),
-                            )
-                        };
-
-                    Ok(Type::Resolved(function_type))
+                    Ok(Type::Resolved(self.function_to_type(func_index)))
                 } else {
                     Err(Error::FeatureUnsupported(
                         "Invalid function reference".to_string(),
@@ -1430,7 +1371,9 @@ impl<'a> Compiler<'a> {
         }
 
         match &last_type {
-            Type::Resolved(types::Type::Function(parameter_type, return_type)) => {
+            Type::Resolved(types::Type::Function(func_type)) => {
+                let parameter_type = &func_type.parameter[0]; // For now, take first parameter type
+                let return_type = &func_type.result[0]; // For now, take first result type
                 // Extract the inner type from value_type for comparison
                 let value_inner_type = match &value_type {
                     Type::Resolved(inner_type) => inner_type,
@@ -1442,7 +1385,7 @@ impl<'a> Compiler<'a> {
                     }
                 };
 
-                if value_inner_type != parameter_type.as_ref() {
+                if value_inner_type != parameter_type {
                     return Err(Error::TypeMismatch {
                         expected: format!("{:?}", parameter_type),
                         found: format!("{:?}", value_inner_type),
@@ -1450,7 +1393,7 @@ impl<'a> Compiler<'a> {
                 }
 
                 self.add_instruction(Instruction::Call);
-                Ok(Type::Resolved((**return_type).clone()))
+                Ok(Type::Resolved(return_type.clone()))
             }
             Type::Unresolved(function_types) => {
                 if function_types.is_empty() {
@@ -1464,8 +1407,10 @@ impl<'a> Compiler<'a> {
                     // Extract all possible return types from function variants
                     let mut return_types = Vec::new();
                     for func_type in function_types {
-                        if let types::Type::Function(_, return_type) = func_type {
-                            return_types.push((**return_type).clone());
+                        if let types::Type::Function(func_type_inner) = func_type {
+                            for return_type in &func_type_inner.result {
+                                return_types.push(return_type.clone());
+                            }
                         }
                     }
                     if return_types.is_empty() {
@@ -1542,29 +1487,29 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    fn function_to_type(&self, function_index: usize) -> types::Type {
+        if let Some(func_def) = self.vm.get_functions().get(function_index) {
+            if let Some(func_type) = &func_def.function_type {
+                types::Type::Function(Box::new(func_type.clone()))
+            } else {
+                // Fallback if no type information is available
+                types::Type::Function(Box::new(types::FunctionType {
+                    parameter: vec![types::Type::Tuple(TypeId::NIL)],
+                    result: vec![types::Type::Tuple(TypeId::NIL)],
+                }))
+            }
+        } else {
+            types::Type::Tuple(TypeId::NIL)
+        }
+    }
+
     fn value_to_type(&self, value: &vm::Value) -> Type {
         match value {
             vm::Value::Integer(_) => Type::Resolved(types::Type::Integer),
             vm::Value::Binary(_) => Type::Resolved(types::Type::Binary),
             vm::Value::Tuple(type_id, _) => Type::Resolved(types::Type::Tuple(*type_id)),
             vm::Value::Function { function, .. } => {
-                if let Some(func_def) = self.vm.get_functions().get(*function) {
-                    let function_type =
-                        if let Some((param_type, return_type)) = &func_def.function_type {
-                            types::Type::Function(
-                                Box::new(param_type.clone()),
-                                Box::new(return_type.clone()),
-                            )
-                        } else {
-                            types::Type::Function(
-                                Box::new(types::Type::Tuple(TypeId::NIL)),
-                                Box::new(types::Type::Tuple(TypeId::NIL)),
-                            )
-                        };
-                    Type::Resolved(function_type)
-                } else {
-                    Type::Resolved(types::Type::Tuple(TypeId::NIL))
-                }
+                Type::Resolved(self.function_to_type(*function))
             }
         }
     }

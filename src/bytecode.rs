@@ -13,7 +13,7 @@ pub struct Function {
     pub captures: Vec<String>,
     pub instructions: Vec<Instruction>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub function_type: Option<(types::Type, types::Type)>, // (parameter, return)
+    pub function_type: Option<types::FunctionType>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,7 +21,8 @@ pub struct Bytecode {
     pub constants: Vec<Constant>,
     pub functions: Vec<Function>,
     pub entry: Option<usize>,
-    pub types: HashMap<TypeId, (Option<String>, Vec<(Option<String>, types::Type)>)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub types: Option<HashMap<TypeId, (Option<String>, Vec<(Option<String>, types::Type)>)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
