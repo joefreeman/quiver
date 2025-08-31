@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::bytecode::TypeId;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Type {
     Integer,
     Binary,
@@ -55,5 +56,22 @@ impl TypeRegistry {
         type_id: &TypeId,
     ) -> Option<&(Option<String>, Vec<(Option<String>, Type)>)> {
         self.types.get(type_id)
+    }
+
+    pub fn get_types(&self) -> &HashMap<TypeId, (Option<String>, Vec<(Option<String>, Type)>)> {
+        &self.types
+    }
+
+    pub fn find_type(
+        &self,
+        name: Option<String>,
+        fields: &[(Option<String>, Type)],
+    ) -> Option<TypeId> {
+        for (&existing_id, existing_type) in &self.types {
+            if existing_type.0 == name && existing_type.1 == fields {
+                return Some(existing_id);
+            }
+        }
+        None
     }
 }

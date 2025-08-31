@@ -36,9 +36,9 @@ impl fmt::Display for Value {
                 } else if *type_id == TypeId::OK {
                     write!(f, "Ok")
                 } else if elements.is_empty() {
-                    write!(f, "[]")
+                    write!(f, "Type{}[]", type_id.0)
                 } else {
-                    write!(f, "[")?;
+                    write!(f, "Type{}[", type_id.0)?;
                     for (i, element) in elements.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
@@ -219,12 +219,8 @@ impl VM {
                 Instruction::Modulo(tuple_size) => {
                     self.handle_arithmetic(tuple_size, |a, b| a % b)?
                 }
-                Instruction::Equal(tuple_size) => {
-                    self.handle_comparison(tuple_size, |a, b| a == b)?
-                }
-                Instruction::NotEqual(tuple_size) => {
-                    self.handle_comparison(tuple_size, |a, b| a != b)?
-                }
+                Instruction::Equal(tuple_size) => self.handle_equality(tuple_size, false)?,
+                Instruction::NotEqual(tuple_size) => self.handle_equality(tuple_size, true)?,
                 Instruction::Less(tuple_size) => {
                     self.handle_comparison(tuple_size, |a, b| a < b)?
                 }
@@ -325,6 +321,76 @@ impl VM {
         let result = values.into_iter().reduce(op).unwrap();
         self.stack.push(Value::Integer(result));
         Ok(())
+    }
+
+    fn handle_equality(&mut self, tuple_size: usize, invert: bool) -> Result<(), Error> {
+        if tuple_size == 0 {
+            return Err(Error::TupleEmpty);
+        }
+
+        let mut values = Vec::new();
+        for _ in 0..tuple_size {
+            match self.stack.pop() {
+                Some(value) => values.push(value),
+                None => return Err(Error::StackUnderflow),
+            }
+        }
+        values.reverse();
+
+        let all_equal = if values.is_empty() {
+            true
+        } else {
+            let first = &values[0];
+            values.iter().all(|v| self.values_equal(first, v))
+        };
+
+        let success = if invert { !all_equal } else { all_equal };
+
+        if success {
+            self.stack.push(
+                values
+                    .into_iter()
+                    .next()
+                    .unwrap_or(Value::Tuple(TypeId::NIL, vec![])),
+            );
+        } else {
+            self.stack.push(Value::Tuple(TypeId::NIL, vec![]));
+        }
+
+        Ok(())
+    }
+
+    fn values_equal(&self, a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Binary(a), Value::Binary(b)) => a == b,
+            (Value::Tuple(type_a, elems_a), Value::Tuple(type_b, elems_b)) => {
+                type_a == type_b
+                    && elems_a.len() == elems_b.len()
+                    && elems_a
+                        .iter()
+                        .zip(elems_b.iter())
+                        .all(|(x, y)| self.values_equal(x, y))
+            }
+            (
+                Value::Function {
+                    function: a,
+                    captures: cap_a,
+                },
+                Value::Function {
+                    function: b,
+                    captures: cap_b,
+                },
+            ) => {
+                a == b
+                    && cap_a.len() == cap_b.len()
+                    && cap_a
+                        .iter()
+                        .zip(cap_b.iter())
+                        .all(|(x, y)| self.values_equal(x, y))
+            }
+            _ => false,
+        }
     }
 
     fn handle_comparison<F>(&mut self, tuple_size: usize, test: F) -> Result<(), Error>

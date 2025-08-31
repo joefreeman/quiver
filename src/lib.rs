@@ -90,6 +90,7 @@ impl Quiver {
             constants: self.vm.get_constants().clone(),
             functions: self.vm.get_functions().clone(),
             entry,
+            types: self.type_registry.get_types().clone(),
         };
 
         Ok(bytecode)
@@ -109,6 +110,10 @@ impl Quiver {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_type_info(&self, type_id: &bytecode::TypeId) -> Option<&(Option<String>, Vec<(Option<String>, types::Type)>)> {
+        self.type_registry.lookup_type(type_id)
     }
 }
 
