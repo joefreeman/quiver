@@ -306,54 +306,44 @@ impl<'a> Compiler<'a> {
             None => Type::Resolved(types::Type::Tuple(TypeId::NIL)),
         };
 
-        // Instead of creating a new compiler with all the fields,
-        // we'll compile in place and manage the scope manually
-        self.scopes.push(HashMap::new());
+        let mut compiler = Self {
+            instructions: Vec::new(),
+            scopes: vec![HashMap::new()],
+            type_aliases: self.type_aliases.clone(),
+            type_registry: self.type_registry.clone(),
+            vm: self.vm.clone(),
+            module_loader: self.module_loader,
+            module_path: self.module_path.clone(),
+        };
 
         for capture_name in &captures {
             if let Some(var_type) = self.lookup_variable(&capture_name) {
-                self.define_variable(&capture_name, var_type);
+                compiler.define_variable(&capture_name, var_type);
             }
         }
-
-        let saved_instructions_len = self.instructions.len();
 
         if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
                 // TODO: determine whether field is used
                 if let Some(field_name) = &field.name {
-                    self.add_instruction(Instruction::Parameter);
-                    self.add_instruction(Instruction::Get(field_index));
-                    self.add_instruction(Instruction::Store(field_name.clone()));
-                    let field_type = self.resolve_ast_type(field.type_def.clone());
-                    self.define_variable(field_name, field_type);
+                    compiler.add_instruction(Instruction::Parameter);
+                    compiler.add_instruction(Instruction::Get(field_index));
+                    compiler.add_instruction(Instruction::Store(field_name.clone()));
+                    let field_type = compiler.resolve_ast_type(field.type_def.clone());
+                    compiler.define_variable(field_name, field_type);
                 }
             }
         }
-        let body_type =
-            self.compile_expression(function_definition.body.expression, parameter_type.clone())?;
 
-        self.add_instruction(Instruction::Return);
-
-        // Extract the function instructions
-        let function_instructions = self.instructions.split_off(saved_instructions_len);
-
-        // Pop the function scope
-        self.scopes.pop();
-
-        // TODO: record function type?
-        // let param_compiler_type =
-        //     self.ast_type_to_compiler_type(&function.parameter_type, type_registry);
-        // let func_type_id = type_registry.register_function_type(
-        //     None, // Anonymous function, no name
-        //     param_compiler_type.clone(),
-        //     body_type.clone(),
-        // );
+        let body_type = compiler
+            .compile_expression(function_definition.body.expression, parameter_type.clone())?;
+        compiler.add_instruction(Instruction::Return);
 
         let function_index = self.vm.borrow_mut().register_function(Function {
-            instructions: function_instructions,
+            instructions: compiler.instructions,
             captures: captures.into_iter().collect(),
         });
+
         self.add_instruction(Instruction::Function(function_index));
 
         Ok(Type::Resolved(types::Type::Function(
