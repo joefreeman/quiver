@@ -97,7 +97,7 @@ impl Frame {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct VM {
     constants: Vec<Constant>,
     functions: Vec<Function>,

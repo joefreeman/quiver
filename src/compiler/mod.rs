@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::PathBuf,
+    rc::Rc,
 };
 
 mod free_variables;
@@ -54,7 +56,8 @@ pub struct Compiler<'a> {
     instructions: Vec<Instruction>,
     scopes: Vec<HashMap<String, Type>>,
     type_aliases: HashMap<String, Type>,
-    type_registry: types::TypeRegistry,
+    type_registry: Rc<RefCell<types::TypeRegistry>>,
+    vm: Rc<RefCell<VM>>,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
 }
@@ -67,22 +70,37 @@ impl<'a> Compiler<'a> {
         vm: &mut VM,
         module_path: Option<PathBuf>,
     ) -> Result<Vec<Instruction>, Error> {
+        let type_registry_rc = Rc::new(RefCell::new(std::mem::replace(
+            type_registry,
+            types::TypeRegistry::new(),
+        )));
+        let vm_rc = Rc::new(RefCell::new(std::mem::replace(vm, VM::new())));
+
         let mut compiler = Self {
             instructions: Vec::new(),
             scopes: vec![HashMap::new()],
             type_aliases: HashMap::new(),
-            type_registry: type_registry.clone(),
+            type_registry: type_registry_rc.clone(),
+            vm: vm_rc.clone(),
             module_loader,
             module_path,
         };
 
         for statement in program.statements {
-            compiler.compile_statement(statement, vm)?;
+            compiler.compile_statement(statement)?;
         }
+
+        *type_registry = Rc::try_unwrap(type_registry_rc)
+            .map(|cell| cell.into_inner())
+            .unwrap_or_else(|rc| rc.borrow().clone());
+        *vm = Rc::try_unwrap(vm_rc)
+            .map(|cell| cell.into_inner())
+            .unwrap_or_else(|rc| rc.borrow().clone());
+
         Ok(compiler.instructions)
     }
 
-    fn compile_statement(&mut self, statement: ast::Statement, vm: &mut VM) -> Result<(), Error> {
+    fn compile_statement(&mut self, statement: ast::Statement) -> Result<(), Error> {
         match statement {
             ast::Statement::TypeAlias {
                 name,
@@ -91,12 +109,11 @@ impl<'a> Compiler<'a> {
             ast::Statement::TypeImport {
                 pattern,
                 module_path,
-            } => self.compile_type_import(pattern, &module_path, vm),
+            } => self.compile_type_import(pattern, &module_path),
             ast::Statement::Expression(expression) => {
                 self.compile_expression(
                     expression,
                     Type::Resolved(types::Type::Tuple(TypeId::NIL)),
-                    vm,
                 )?;
                 Ok(())
             }
@@ -113,7 +130,6 @@ impl<'a> Compiler<'a> {
         &mut self,
         pattern: ast::TypeImportPattern,
         module_path: &str,
-        vm: &mut VM,
     ) -> Result<(), Error> {
         let content = self
             .module_loader
@@ -161,22 +177,31 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_literal(&mut self, literal: ast::Literal, vm: &mut VM) -> Result<Type, Error> {
+    fn compile_literal(&mut self, literal: ast::Literal) -> Result<Type, Error> {
         match literal {
             ast::Literal::Integer(integer) => {
-                let index = vm.register_constant(Constant::Integer(integer));
+                let index = self
+                    .vm
+                    .borrow_mut()
+                    .register_constant(Constant::Integer(integer));
                 self.add_instruction(Instruction::Constant(index));
                 Ok(Type::Resolved(types::Type::Integer))
             }
             ast::Literal::Binary(bytes) => {
                 // TODO: is clone bad?
-                let index = vm.register_constant(Constant::Binary(bytes.clone()));
+                let index = self
+                    .vm
+                    .borrow_mut()
+                    .register_constant(Constant::Binary(bytes.clone()));
                 self.add_instruction(Instruction::Constant(index));
                 Ok(Type::Resolved(types::Type::Binary))
             }
             ast::Literal::String(string) => {
                 let bytes = string.as_bytes().to_vec();
-                let index = vm.register_constant(Constant::Binary(bytes));
+                let index = self
+                    .vm
+                    .borrow_mut()
+                    .register_constant(Constant::Binary(bytes));
                 self.add_instruction(Instruction::Constant(index));
                 Ok(Type::Resolved(types::Type::Binary))
             }
@@ -188,7 +213,6 @@ impl<'a> Compiler<'a> {
         tuple_name: Option<String>,
         fields: Vec<ast::ValueTupleField>,
         parameter_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut field_types = Vec::new();
         let mut seen_names = HashSet::new();
@@ -198,7 +222,7 @@ impl<'a> Compiler<'a> {
                     return Err(Error::DuplicatedFieldName(field_name.clone()));
                 }
             }
-            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone(), vm)?;
+            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
             if let Type::Resolved(resolved_type) = field_type {
                 field_types.push((field.name.clone(), resolved_type));
             } else {
@@ -206,7 +230,10 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let type_id = self.type_registry.register_type(tuple_name, field_types);
+        let type_id = self
+            .type_registry
+            .borrow_mut()
+            .register_type(tuple_name, field_types);
         self.add_instruction(Instruction::Tuple(type_id, fields.len()));
         Ok(Type::Resolved(types::Type::Tuple(type_id)))
     }
@@ -217,7 +244,6 @@ impl<'a> Compiler<'a> {
         fields: Vec<ast::OperationTupleField>,
         value_type: Type,
         parameter_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         // TODO: check that ripple is used (otherwise error)
 
@@ -236,7 +262,7 @@ impl<'a> Compiler<'a> {
                     value_type.clone()
                 }
                 ast::OperationTupleFieldValue::Chain(chain) => {
-                    self.compile_chain(chain.clone(), parameter_type.clone(), vm)?
+                    self.compile_chain(chain.clone(), parameter_type.clone())?
                 }
             };
 
@@ -247,7 +273,10 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let type_id = self.type_registry.register_type(name, field_types);
+        let type_id = self
+            .type_registry
+            .borrow_mut()
+            .register_type(name, field_types);
         self.add_instruction(Instruction::Tuple(type_id, fields.len()));
         Ok(Type::Resolved(types::Type::Tuple(type_id)))
     }
@@ -255,7 +284,6 @@ impl<'a> Compiler<'a> {
     fn compile_function_definition(
         &mut self,
         function_definition: ast::FunctionDefinition,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut function_params: HashSet<String> = HashSet::new();
 
@@ -303,7 +331,7 @@ impl<'a> Compiler<'a> {
             }
         }
         let body_type =
-            self.compile_expression(function_definition.body.expression, parameter_type.clone(), vm)?;
+            self.compile_expression(function_definition.body.expression, parameter_type.clone())?;
 
         self.add_instruction(Instruction::Return);
 
@@ -322,7 +350,7 @@ impl<'a> Compiler<'a> {
         //     body_type.clone(),
         // );
 
-        let function_index = vm.register_function(Function {
+        let function_index = self.vm.borrow_mut().register_function(Function {
             instructions: function_instructions,
             captures: captures.into_iter().collect(),
         });
@@ -364,9 +392,8 @@ impl<'a> Compiler<'a> {
         pattern: ast::Pattern,
         value: ast::Chain,
         parameter_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
-        let expression_type = self.compile_chain(value, parameter_type, vm)?;
+        let expression_type = self.compile_chain(value, parameter_type)?;
 
         match pattern {
             ast::Pattern::Identifier(name) => {
@@ -380,7 +407,10 @@ impl<'a> Compiler<'a> {
             ast::Pattern::Literal(literal_value) => {
                 match literal_value {
                     ast::Literal::Integer(integer) => {
-                        let index = vm.register_constant(Constant::Integer(integer));
+                        let index = self
+                            .vm
+                            .borrow_mut()
+                            .register_constant(Constant::Integer(integer));
                         self.add_instruction(Instruction::Constant(index));
                     }
                     ast::Literal::Binary(_) => {
@@ -416,7 +446,6 @@ impl<'a> Compiler<'a> {
         &mut self,
         expression: ast::Expression,
         parameter_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
@@ -435,7 +464,7 @@ impl<'a> Compiler<'a> {
             }
 
             let condition_type =
-                self.compile_sequence(branch.condition.clone(), parameter_type.clone(), vm)?;
+                self.compile_sequence(branch.condition.clone(), parameter_type.clone())?;
 
             if branch.consequence.is_some() {
                 self.add_instruction(Instruction::Duplicate);
@@ -447,7 +476,6 @@ impl<'a> Compiler<'a> {
                 let consequence_type = self.compile_sequence(
                     branch.consequence.clone().unwrap(),
                     parameter_type.clone(),
-                    vm,
                 )?;
                 branch_types.push(consequence_type);
 
@@ -497,7 +525,6 @@ impl<'a> Compiler<'a> {
         &mut self,
         sequence: ast::Sequence,
         parameter_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
@@ -505,10 +532,10 @@ impl<'a> Compiler<'a> {
         for (i, term) in sequence.terms.iter().enumerate() {
             last_type = Some(match term {
                 ast::Term::Assignment { pattern, value } => {
-                    self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone(), vm)
+                    self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone())
                 }
                 ast::Term::Chain(chain) => {
-                    self.compile_chain(chain.clone(), parameter_type.clone(), vm)
+                    self.compile_chain(chain.clone(), parameter_type.clone())
                 }
             }?);
 
@@ -530,10 +557,10 @@ impl<'a> Compiler<'a> {
         Ok(last_type.unwrap())
     }
 
-    fn compile_block(&mut self, block: ast::Block, value_type: Type, vm: &mut VM) -> Result<Type, Error> {
+    fn compile_block(&mut self, block: ast::Block, value_type: Type) -> Result<Type, Error> {
         self.add_instruction(Instruction::Enter);
         self.scopes.push(HashMap::new());
-        let result_type = self.compile_expression(block.expression, value_type, vm)?;
+        let result_type = self.compile_expression(block.expression, value_type)?;
         self.scopes.pop();
         self.add_instruction(Instruction::Exit);
         Ok(result_type)
@@ -543,7 +570,6 @@ impl<'a> Compiler<'a> {
         &mut self,
         parameter: ast::Parameter,
         parameter_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         match parameter {
             ast::Parameter::Self_ => {
@@ -556,7 +582,7 @@ impl<'a> Compiler<'a> {
 
                 match parameter_type {
                     Type::Resolved(types::Type::Tuple(type_id)) => {
-                        if let Some(type_info) = self.type_registry.lookup_type(&type_id) {
+                        if let Some(type_info) = self.type_registry.borrow().lookup_type(&type_id) {
                             if let Some(field) = type_info.1.get(index) {
                                 Ok(Type::Resolved(field.1.clone()))
                             } else {
@@ -572,33 +598,33 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type, vm: &mut VM) -> Result<Type, Error> {
+    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
         let mut value_type = match chain.value {
-            ast::Value::Literal(literal) => self.compile_literal(literal, vm),
+            ast::Value::Literal(literal) => self.compile_literal(literal),
             ast::Value::Tuple(tuple) => {
-                self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone(), vm)
+                self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone())
             }
             ast::Value::FunctionDefinition(function_definition) => {
-                self.compile_function_definition(function_definition, vm)
+                self.compile_function_definition(function_definition)
             }
             ast::Value::Block(block) => {
-                self.compile_block(block, Type::Resolved(types::Type::Tuple(TypeId::NIL)), vm)
+                self.compile_block(block, Type::Resolved(types::Type::Tuple(TypeId::NIL)))
             }
             ast::Value::Parameter(parameter) => {
-                self.compile_parameter(parameter, parameter_type.clone(), vm)
+                self.compile_parameter(parameter, parameter_type.clone())
             }
             ast::Value::MemberAccess(member_access) => {
-                self.compile_value_member_access(&member_access.target, member_access.accessors, vm)
+                self.compile_value_member_access(&member_access.target, member_access.accessors)
             }
             ast::Value::TailCall(identifier) => self.compile_value_tail_call(&identifier),
-            ast::Value::Import(path) => self.compile_value_import(&path, vm),
+            ast::Value::Import(path) => self.compile_value_import(&path),
             ast::Value::Parenthesized(expression) => {
-                self.compile_expression(*expression, parameter_type.clone(), vm)
+                self.compile_expression(*expression, parameter_type.clone())
             }
         }?;
 
         for operation in chain.operations {
-            value_type = self.compile_operation(operation, value_type, parameter_type.clone(), vm)?;
+            value_type = self.compile_operation(operation, value_type, parameter_type.clone())?;
         }
 
         Ok(value_type)
@@ -608,7 +634,7 @@ impl<'a> Compiler<'a> {
         todo!()
     }
 
-    fn compile_value_import(&mut self, module_path: &str, vm: &mut VM) -> Result<Type, Error> {
+    fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
         // TODO: cache
         // TODO: check for circular imports
 
@@ -623,12 +649,15 @@ impl<'a> Compiler<'a> {
         // TODO: update module path (to path of resolved module)
         let instructions = Compiler::compile(
             parsed,
-            &mut self.type_registry,
+            &mut *self.type_registry.borrow_mut(),
             self.module_loader,
-            vm,
+            &mut *self.vm.borrow_mut(),
             self.module_path.clone(),
         )?;
-        let _result = vm.execute_instructions(instructions, true);
+        let _result = self
+            .vm
+            .borrow_mut()
+            .execute_instructions(instructions, true);
 
         // TODO: 'emit_value_reconstruction'
         todo!()
@@ -639,19 +668,17 @@ impl<'a> Compiler<'a> {
         operation: ast::Operation,
         value_type: Type,
         parameter_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         match operation {
             ast::Operation::Operator(operator) => self.compile_operator(operator, value_type),
             ast::Operation::Tuple(tuple) => {
-                self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type, vm)
+                self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type)
             }
-            ast::Operation::Block(block) => self.compile_block(block, value_type, vm),
+            ast::Operation::Block(block) => self.compile_block(block, value_type),
             ast::Operation::MemberAccess(member_access) => self.compile_operation_member_access(
                 &member_access.target,
                 member_access.accessors,
                 value_type,
-                vm,
             ),
             ast::Operation::FieldAccess(field) => {
                 self.compile_operation_field_access(field, value_type)
@@ -670,13 +697,15 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
-                let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
+                let type_registry = self.type_registry.borrow();
+                let tuple_type = type_registry.lookup_type(&type_id).unwrap();
                 let index = tuple_type
                     .1
                     .iter()
                     .position(|f| f.0 == Some(field_name.clone()))
                     .ok_or(Error::Generic("".to_string()))?;
                 let result_type = tuple_type.1[index].1.clone();
+                drop(type_registry); // Drop the borrow before calling add_instruction
                 self.add_instruction(Instruction::Get(index));
                 Ok(Type::Resolved(result_type))
             }
@@ -694,8 +723,10 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
-                let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
+                let type_registry = self.type_registry.borrow();
+                let tuple_type = type_registry.lookup_type(&type_id).unwrap();
                 let result_type = tuple_type.1[index].1.clone();
+                drop(type_registry); // Drop the borrow before calling add_instruction
                 self.add_instruction(Instruction::Get(index));
                 Ok(Type::Resolved(result_type))
             }
@@ -717,11 +748,12 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
-                let tuple_type = self
-                    .type_registry
+                let type_registry = self.type_registry.borrow();
+                let tuple_type = type_registry
                     .lookup_type(&type_id)
                     .ok_or(Error::Generic("".to_string()))?;
                 let tuple_size = tuple_type.1.len();
+                drop(type_registry); // Drop the borrow before calling add_instruction
 
                 // TODO: check all tuple items are integers
 
@@ -808,7 +840,6 @@ impl<'a> Compiler<'a> {
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         self.add_instruction(Instruction::Load(target.to_string()));
 
@@ -819,7 +850,8 @@ impl<'a> Compiler<'a> {
         for accessor in accessors {
             match last_type {
                 Type::Resolved(types::Type::Tuple(type_id)) => {
-                    let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
+                    let type_registry = self.type_registry.borrow();
+                    let tuple_type = type_registry.lookup_type(&type_id).unwrap();
                     let index = match accessor {
                         ast::AccessPath::Field(field_name) => tuple_type
                             .1
@@ -829,6 +861,7 @@ impl<'a> Compiler<'a> {
                         ast::AccessPath::Index(index) => index,
                     };
                     let new_type = tuple_type.1[index].1.clone();
+                    drop(type_registry); // Drop the borrow before calling add_instruction
                     self.add_instruction(Instruction::Get(index));
                     last_type = Type::Resolved(new_type);
                 }
@@ -844,7 +877,6 @@ impl<'a> Compiler<'a> {
         target: &str,
         accessors: Vec<ast::AccessPath>,
         value_type: Type,
-        vm: &mut VM,
     ) -> Result<Type, Error> {
         self.add_instruction(Instruction::Load(target.to_string()));
 
@@ -855,7 +887,8 @@ impl<'a> Compiler<'a> {
         for accessor in accessors {
             match last_type {
                 Type::Resolved(types::Type::Tuple(type_id)) => {
-                    let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
+                    let type_registry = self.type_registry.borrow();
+                    let tuple_type = type_registry.lookup_type(&type_id).unwrap();
                     let index = match accessor {
                         ast::AccessPath::Field(field_name) => tuple_type
                             .1
@@ -865,6 +898,7 @@ impl<'a> Compiler<'a> {
                         ast::AccessPath::Index(index) => index,
                     };
                     let new_type = tuple_type.1[index].1.clone();
+                    drop(type_registry); // Drop the borrow before calling add_instruction
                     self.add_instruction(Instruction::Get(index));
                     last_type = Type::Resolved(new_type);
                 }

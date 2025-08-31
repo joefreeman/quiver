@@ -10,7 +10,7 @@ pub enum Type {
     Function(Box<Type>, Box<Type>),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TypeRegistry {
     types: HashMap<TypeId, (Option<String>, Vec<(Option<String>, Type)>)>,
     next_id: usize,
