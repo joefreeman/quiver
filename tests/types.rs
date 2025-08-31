@@ -1,5 +1,4 @@
 mod common;
-
 use common::*;
 use quiver::vm::Value;
 
@@ -211,10 +210,10 @@ fn test_higher_kinded_types() {
 #[test]
 fn test_type_aliases() {
     quiver()
-        .evaluate("UserId = int; user_id = 123; user_id")
+        .evaluate("type UserId = int; user_id = 123; user_id")
         .expect_int(123);
     quiver()
-        .evaluate("Coordinates = Point[x: int, y: int]; pos = Point[x: 5, y: 10]; pos")
+        .evaluate("type Coordinates = Point[x: int, y: int]; pos = Point[x: 5, y: 10]; pos")
         .expect_tuple(vec![Value::Integer(5), Value::Integer(10)]);
 }
 

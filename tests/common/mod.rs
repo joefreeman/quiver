@@ -1,10 +1,12 @@
 use quiver::{Quiver, bytecode::TypeId, vm::Value};
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 pub struct TestBuilder {
     modules: Option<HashMap<String, String>>,
 }
 
+#[allow(dead_code)]
 impl TestBuilder {
     pub fn new() -> Self {
         Self { modules: None }
@@ -25,11 +27,13 @@ impl TestBuilder {
     }
 }
 
+#[allow(dead_code)]
 pub struct TestResult {
     result: Result<Option<Value>, quiver::Error>,
     source: String,
 }
 
+#[allow(dead_code)]
 impl TestResult {
     pub fn expect_int(self, expected: i64) {
         match self.result {
@@ -242,6 +246,7 @@ impl TestResult {
     }
 }
 
+#[allow(dead_code)]
 pub fn quiver() -> TestBuilder {
     TestBuilder::new()
 }

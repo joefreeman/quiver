@@ -1,5 +1,4 @@
 mod common;
-
 use common::*;
 
 #[test]
