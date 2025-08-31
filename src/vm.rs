@@ -78,12 +78,14 @@ pub enum Error {
     UndefinedFunction(usize),
     InvalidFieldAccess(usize),
     EmptyTuple,
+    InvalidScopeCount { expected: usize, found: usize },
 }
 
 #[derive(Debug, Clone)]
 pub struct Frame {
     instructions: Vec<Instruction>,
     captures: HashMap<String, Value>,
+    scopes: usize,
     counter: usize,
 }
 
@@ -92,6 +94,7 @@ impl Frame {
         Self {
             instructions,
             captures,
+            scopes: 1,
             counter: 0,
         }
     }
@@ -154,6 +157,16 @@ impl VM {
         }
         self.frames.push(Frame::new(instructions, HashMap::new()));
         let result = self.run();
+
+        if let Some(frame) = self.frames.last() {
+            if frame.scopes != 1 {
+                return Err(Error::InvalidScopeCount {
+                    expected: 1,
+                    found: frame.scopes,
+                });
+            }
+        }
+
         self.frames.pop();
         if new_scope {
             self.scopes.pop();
@@ -170,10 +183,7 @@ impl VM {
         self.scopes
             .push(Scope::new(Value::Tuple(TypeId::NIL, vec![])));
         self.frames.push(Frame::new(instructions, HashMap::new()));
-        let result = self.run();
-        self.frames.pop();
-        self.scopes.pop();
-        result
+        self.run()
     }
 
     fn run(&mut self) -> Result<Option<Value>, Error> {
@@ -480,6 +490,16 @@ impl VM {
     }
 
     fn handle_return(&mut self) -> Result<(), Error> {
+        if let Some(frame) = self.frames.last() {
+            if frame.scopes != 1 {
+                return Err(Error::InvalidScopeCount {
+                    expected: 1,
+                    found: frame.scopes,
+                });
+            }
+        }
+
+        self.scopes.pop();
         self.frames.pop();
         Ok(())
     }
@@ -512,23 +532,54 @@ impl VM {
             parameter,
             variables: HashMap::new(),
         });
+        if let Some(frame) = self.frames.last_mut() {
+            frame.scopes += 1;
+        }
         Ok(())
     }
 
     fn handle_exit(&mut self) -> Result<(), Error> {
-        // TODO: keep track of number of scopes for each frame, and prevent exiting above frame?
+        if let Some(frame) = self.frames.last() {
+            if frame.scopes <= 1 {
+                return Err(Error::InvalidScopeCount {
+                    expected: 2, // Need at least 2 to exit one
+                    found: frame.scopes,
+                });
+            }
+        }
+
         self.scopes.pop();
+
+        if let Some(frame) = self.frames.last_mut() {
+            frame.scopes -= 1;
+        }
+
         Ok(())
     }
 
     fn get_variable(&self, name: &str) -> Result<Value, Error> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.variables.get(name))
-            .or_else(|| self.frames.last()?.captures.get(name))
-            .cloned()
-            .ok_or_else(|| Error::UndefinedVariable(name.to_string()))
+        if let Some(frame) = self.frames.last() {
+            let accessible_scopes = frame.scopes;
+            let start_index = self.scopes.len().saturating_sub(accessible_scopes);
+
+            for scope in self.scopes[start_index..].iter().rev() {
+                if let Some(value) = scope.variables.get(name) {
+                    return Ok(value.clone());
+                }
+            }
+
+            if let Some(value) = frame.captures.get(name) {
+                return Ok(value.clone());
+            }
+        } else {
+            for scope in self.scopes.iter().rev() {
+                if let Some(value) = scope.variables.get(name) {
+                    return Ok(value.clone());
+                }
+            }
+        }
+
+        Err(Error::UndefinedVariable(name.to_string()))
     }
 
     fn jump(&mut self, offset: isize) {
@@ -539,17 +590,24 @@ impl VM {
     pub fn list_variables(&self) -> Vec<(String, Value)> {
         let mut variables = Vec::new();
 
-        // Collect from all scopes (inner scopes override outer scopes)
-        for scope in &self.scopes {
-            for (name, value) in &scope.variables {
-                variables.push((name.clone(), value.clone()));
-            }
-        }
-
-        // Also include frame captures if we're in a function call
         if let Some(frame) = self.frames.last() {
+            let accessible_scopes = frame.scopes;
+            let start_index = self.scopes.len().saturating_sub(accessible_scopes);
+
+            for scope in &self.scopes[start_index..] {
+                for (name, value) in &scope.variables {
+                    variables.push((name.clone(), value.clone()));
+                }
+            }
+
             for (name, value) in &frame.captures {
                 variables.push((name.clone(), value.clone()));
+            }
+        } else {
+            for scope in &self.scopes {
+                for (name, value) in &scope.variables {
+                    variables.push((name.clone(), value.clone()));
+                }
             }
         }
 
