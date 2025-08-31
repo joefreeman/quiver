@@ -11,8 +11,7 @@ use crate::{
     ast,
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
-    parser, types,
-    vm::VM,
+    parser, types, vm,
 };
 
 #[derive(Debug)]
@@ -57,7 +56,7 @@ pub struct Compiler<'a> {
     scopes: Vec<HashMap<String, Type>>,
     type_aliases: HashMap<String, Type>,
     type_registry: Rc<RefCell<types::TypeRegistry>>,
-    vm: Rc<RefCell<VM>>,
+    vm: Rc<RefCell<vm::VM>>,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
 }
@@ -67,14 +66,14 @@ impl<'a> Compiler<'a> {
         program: ast::Program,
         type_registry: &mut types::TypeRegistry,
         module_loader: &'a dyn ModuleLoader,
-        vm: &mut VM,
+        vm: &mut vm::VM,
         module_path: Option<PathBuf>,
     ) -> Result<Vec<Instruction>, Error> {
         let type_registry_rc = Rc::new(RefCell::new(std::mem::replace(
             type_registry,
             types::TypeRegistry::new(),
         )));
-        let vm_rc = Rc::new(RefCell::new(std::mem::replace(vm, VM::new())));
+        let vm_rc = Rc::new(RefCell::new(std::mem::replace(vm, vm::VM::new())));
 
         let mut compiler = Self {
             instructions: Vec::new(),
@@ -86,10 +85,21 @@ impl<'a> Compiler<'a> {
             module_path,
         };
 
-        for statement in program.statements {
-            compiler.compile_statement(statement)?;
+        // Initialize compiler scope with existing VM variables
+        let existing_variables = vm_rc.borrow().list_variables();
+        for (name, value) in existing_variables {
+            let var_type = compiler.value_to_type(&value);
+            compiler.define_variable(&name, var_type);
         }
 
+        let result = (|| -> Result<Vec<Instruction>, Error> {
+            for statement in program.statements {
+                compiler.compile_statement(statement)?;
+            }
+            Ok(compiler.instructions)
+        })();
+
+        // Always restore state, regardless of success or failure
         *type_registry = Rc::try_unwrap(type_registry_rc)
             .map(|cell| cell.into_inner())
             .unwrap_or_else(|rc| rc.borrow().clone());
@@ -97,7 +107,7 @@ impl<'a> Compiler<'a> {
             .map(|cell| cell.into_inner())
             .unwrap_or_else(|rc| rc.borrow().clone());
 
-        Ok(compiler.instructions)
+        result
     }
 
     fn compile_statement(&mut self, statement: ast::Statement) -> Result<(), Error> {
@@ -1055,6 +1065,19 @@ impl<'a> Compiler<'a> {
     fn define_variable(&mut self, name: &str, var_type: Type) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), var_type);
+        }
+    }
+
+    fn value_to_type(&self, value: &vm::Value) -> Type {
+        match value {
+            vm::Value::Integer(_) => Type::Resolved(types::Type::Integer),
+            vm::Value::Binary(_) => Type::Resolved(types::Type::Binary),
+            vm::Value::Tuple(type_id, _) => Type::Resolved(types::Type::Tuple(*type_id)),
+            vm::Value::Function { .. } => {
+                // For functions, we could try to infer the type, but for now use a generic function type
+                // This is a simplified approach - in practice we'd need more sophisticated type inference
+                Type::Resolved(types::Type::Tuple(TypeId::NIL)) // Placeholder
+            }
         }
     }
 
