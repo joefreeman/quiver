@@ -112,8 +112,15 @@ impl Quiver {
         }
     }
 
-    pub fn get_type_info(&self, type_id: &bytecode::TypeId) -> Option<&(Option<String>, Vec<(Option<String>, types::Type)>)> {
+    pub fn get_type_info(
+        &self,
+        type_id: &bytecode::TypeId,
+    ) -> Option<&(Option<String>, Vec<(Option<String>, types::Type)>)> {
         self.type_registry.lookup_type(type_id)
+    }
+
+    pub fn format_value(&self, value: &Value) -> String {
+        value.format_with_types(&self.type_registry)
     }
 }
 

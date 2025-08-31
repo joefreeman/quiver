@@ -1,4 +1,5 @@
 use crate::bytecode::{Constant, Function, Instruction, TypeId};
+use crate::types::TypeRegistry;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -23,6 +24,56 @@ impl Value {
             Value::Function { .. } => "function",
         }
     }
+
+    pub fn format_with_types(&self, type_registry: &TypeRegistry) -> String {
+        match self {
+            Value::Integer(i) => i.to_string(),
+            Value::Binary(_) => "<binary>".to_string(),
+            Value::Function { .. } => "<function>".to_string(),
+            Value::Tuple(type_id, elements) => {
+                if *type_id == TypeId::NIL {
+                    return "[]".to_string();
+                }
+                if *type_id == TypeId::OK {
+                    return "Ok".to_string();
+                }
+
+                if let Some((name, fields)) = type_registry.lookup_type(type_id) {
+                    let default_name = format!("Type{}", type_id.0);
+                    let type_name = name.as_deref().unwrap_or(&default_name);
+
+                    if elements.is_empty() {
+                        return format!("{}", type_name);
+                    }
+
+                    let mut result = format!("{}[", type_name);
+                    for (i, element) in elements.iter().enumerate() {
+                        if i > 0 {
+                            result.push_str(", ");
+                        }
+
+                        if i < fields.len() {
+                            if let Some(field_name) = &fields[i].0 {
+                                result.push_str(&format!(
+                                    "{}: {}",
+                                    field_name,
+                                    element.format_with_types(type_registry)
+                                ));
+                            } else {
+                                result.push_str(&element.format_with_types(type_registry));
+                            }
+                        } else {
+                            result.push_str(&element.format_with_types(type_registry));
+                        }
+                    }
+                    result.push(']');
+                    result
+                } else {
+                    self.to_string()
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -36,7 +87,7 @@ impl fmt::Display for Value {
                 } else if *type_id == TypeId::OK {
                     write!(f, "Ok")
                 } else if elements.is_empty() {
-                    write!(f, "Type{}[]", type_id.0)
+                    write!(f, "Type{}", type_id.0)
                 } else {
                     write!(f, "Type{}[", type_id.0)?;
                     for (i, element) in elements.iter().enumerate() {

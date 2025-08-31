@@ -111,7 +111,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                         } else {
                             println!("Variables:");
                             for (name, value) in variables {
-                                println!("  {} = {}", name, value);
+                                println!("  {} = {}", name, quiver.format_value(&value));
                             }
                         }
                         continue;
@@ -133,7 +133,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                     _ => {
                         match quiver.evaluate(line) {
                             Ok(Some(value)) => {
-                                println!("{}", value);
+                                println!("{}", quiver.format_value(&value));
                             }
                             Ok(None) => {
                                 // No result to display
@@ -205,9 +205,9 @@ fn compile_command(
     Ok(())
 }
 
-fn handle_result(result: Result<Option<quiver::vm::Value>, quiver::Error>) {
+fn handle_result(result: Result<Option<quiver::vm::Value>, quiver::Error>, quiver: &Quiver) {
     match result {
-        Ok(Some(value)) => println!("{}", value),
+        Ok(Some(value)) => println!("{}", quiver.format_value(&value)),
         Ok(None) => {}
         Err(err) => {
             eprintln!("Error: {}", err);
@@ -223,15 +223,15 @@ fn run_command(
     let mut quiver = Quiver::new(None);
 
     if let Some(code) = eval {
-        handle_result(quiver.evaluate(&code));
+        handle_result(quiver.evaluate(&code), &quiver);
     } else if let Some(path) = input {
         let content = fs::read_to_string(&path)?;
 
         if path.ends_with(".qv") {
-            handle_result(quiver.evaluate(&content));
+            handle_result(quiver.evaluate(&content), &quiver);
         } else if path.ends_with(".qx") {
             let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
-            handle_result(quiver.execute(bytecode));
+            handle_result(quiver.execute(bytecode), &quiver);
         } else {
             eprintln!(
                 "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
@@ -244,11 +244,11 @@ fn run_command(
 
         if buffer.trim_start().starts_with('{') {
             match serde_json::from_str::<quiver::bytecode::Bytecode>(&buffer) {
-                Ok(bytecode) => handle_result(quiver.execute(bytecode)),
-                Err(_) => handle_result(quiver.evaluate(&buffer)),
+                Ok(bytecode) => handle_result(quiver.execute(bytecode), &quiver),
+                Err(_) => handle_result(quiver.evaluate(&buffer), &quiver),
             }
         } else {
-            handle_result(quiver.evaluate(&buffer));
+            handle_result(quiver.evaluate(&buffer), &quiver);
         }
     }
 
