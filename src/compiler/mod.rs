@@ -121,7 +121,7 @@ impl<'a> Compiler<'a> {
             .map_err(Error::ModuleError)?;
 
         let parsed = parser::parse(&content)
-            .map_err(|e| Error::Generic("Failed to parse imported module".to_string()))?;
+            .map_err(|_e| Error::Generic("Failed to parse imported module".to_string()))?;
 
         let type_aliases: Vec<_> = parsed
             .statements
@@ -341,16 +341,16 @@ impl<'a> Compiler<'a> {
         match ast_type {
             ast::Type::Primitive(ast::PrimitiveType::Int) => Type::Resolved(types::Type::Integer),
             ast::Type::Primitive(ast::PrimitiveType::Bin) => Type::Resolved(types::Type::Integer),
-            ast::Type::Tuple(tuple) => {
+            ast::Type::Tuple(_tuple) => {
                 todo!()
             }
-            ast::Type::Function(function) => {
+            ast::Type::Function(_function) => {
                 todo!()
             }
-            ast::Type::Union(union) => {
+            ast::Type::Union(_union) => {
                 todo!()
             }
-            ast::Type::Identifier(alias) => {
+            ast::Type::Identifier(_alias) => {
                 todo!()
             }
         }
@@ -396,11 +396,11 @@ impl<'a> Compiler<'a> {
         Ok(Type::Resolved(types::Type::Tuple(TypeId::OK)))
     }
 
-    fn compile_tuple_destructuring(&mut self, tuple_pattern: ast::TuplePattern) {
+    fn compile_tuple_destructuring(&mut self, _tuple_pattern: ast::TuplePattern) {
         todo!()
     }
 
-    fn compile_partial_destructuring(&mut self, field_names: Vec<String>) {
+    fn compile_partial_destructuring(&mut self, _field_names: Vec<String>) {
         todo!()
     }
 
@@ -596,7 +596,7 @@ impl<'a> Compiler<'a> {
         Ok(value_type)
     }
 
-    fn compile_value_tail_call(&self, identifier: &str) -> Result<Type, Error> {
+    fn compile_value_tail_call(&self, _identifier: &str) -> Result<Type, Error> {
         todo!()
     }
 
@@ -610,7 +610,7 @@ impl<'a> Compiler<'a> {
             .map_err(Error::ModuleError)?;
 
         let parsed = parser::parse(&content)
-            .map_err(|e| Error::Generic("Failed to parse imported module".to_string()))?;
+            .map_err(|_e| Error::Generic("Failed to parse imported module".to_string()))?;
 
         // TODO: update module path (to path of resolved module)
         let instructions = Compiler::compile(
@@ -620,7 +620,7 @@ impl<'a> Compiler<'a> {
             &mut self.vm,
             self.module_path.clone(),
         )?;
-        let result = self.vm.execute_instructions(instructions, true);
+        let _result = self.vm.execute_instructions(instructions, true);
 
         // TODO: 'emit_value_reconstruction'
         todo!()
@@ -696,7 +696,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_tail_call(&self, identifier: &str) -> Result<Type, Error> {
+    fn compile_operation_tail_call(&self, _identifier: &str) -> Result<Type, Error> {
         todo!()
     }
 
