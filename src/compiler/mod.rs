@@ -398,6 +398,16 @@ impl<'a> Compiler<'a> {
         let function_index = self.vm.register_function(Function {
             instructions: function_instructions,
             captures: captures.into_iter().collect(),
+            function_type: Some((
+                match &parameter_type {
+                    Type::Resolved(param_type) => param_type.clone(),
+                    _ => types::Type::Tuple(TypeId::NIL),
+                },
+                match &body_type {
+                    Type::Resolved(ret_type) => ret_type.clone(),
+                    _ => types::Type::Tuple(TypeId::NIL),
+                },
+            )),
         });
 
         self.instructions = saved_instructions;
@@ -1071,11 +1081,23 @@ impl<'a> Compiler<'a> {
                 };
 
                 if let Some(func_def) = func_def {
-                    let func_index = self.vm.register_function(func_def);
+                    let func_index = self.vm.register_function(func_def.clone());
                     self.add_instruction(Instruction::Function(func_index));
 
-                    // TODO: set correct type
-                    Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)))
+                    let function_type =
+                        if let Some((param_type, return_type)) = &func_def.function_type {
+                            types::Type::Function(
+                                Box::new(param_type.clone()),
+                                Box::new(return_type.clone()),
+                            )
+                        } else {
+                            types::Type::Function(
+                                Box::new(types::Type::Tuple(TypeId::NIL)),
+                                Box::new(types::Type::Tuple(TypeId::NIL)),
+                            )
+                        };
+
+                    Ok(Type::Resolved(function_type))
                 } else {
                     Err(Error::FeatureUnsupported(
                         "Invalid function reference".to_string(),
@@ -1525,10 +1547,24 @@ impl<'a> Compiler<'a> {
             vm::Value::Integer(_) => Type::Resolved(types::Type::Integer),
             vm::Value::Binary(_) => Type::Resolved(types::Type::Binary),
             vm::Value::Tuple(type_id, _) => Type::Resolved(types::Type::Tuple(*type_id)),
-            vm::Value::Function { .. } => {
-                // For functions, we could try to infer the type, but for now use a generic function type
-                // This is a simplified approach - in practice we'd need more sophisticated type inference
-                Type::Resolved(types::Type::Tuple(TypeId::NIL)) // Placeholder
+            vm::Value::Function { function, .. } => {
+                if let Some(func_def) = self.vm.get_functions().get(*function) {
+                    let function_type =
+                        if let Some((param_type, return_type)) = &func_def.function_type {
+                            types::Type::Function(
+                                Box::new(param_type.clone()),
+                                Box::new(return_type.clone()),
+                            )
+                        } else {
+                            types::Type::Function(
+                                Box::new(types::Type::Tuple(TypeId::NIL)),
+                                Box::new(types::Type::Tuple(TypeId::NIL)),
+                            )
+                        };
+                    Type::Resolved(function_type)
+                } else {
+                    Type::Resolved(types::Type::Tuple(TypeId::NIL))
+                }
             }
         }
     }

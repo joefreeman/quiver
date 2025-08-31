@@ -1,6 +1,6 @@
+use crate::types;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::types;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Constant {
@@ -10,9 +10,10 @@ pub enum Constant {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Function {
-    // TODO: type_id?
     pub captures: Vec<String>,
     pub instructions: Vec<Instruction>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub function_type: Option<(types::Type, types::Type)>, // (parameter, return)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
