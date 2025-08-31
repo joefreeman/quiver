@@ -5,6 +5,8 @@ use rustyline::error::ReadlineError;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
+const HISTORY_FILE: &str = ".quiv_history";
+
 #[derive(Parser)]
 #[command(name = "quiv")]
 struct Cli {
@@ -67,6 +69,7 @@ fn run_repl() -> Result<(), ReadlineError> {
     }
 
     let mut rl = Editor::<(), rustyline::history::DefaultHistory>::new()?;
+    let _ = rl.load_history(HISTORY_FILE);
     let mut quiver = Quiver::new(None);
 
     loop {
@@ -158,7 +161,7 @@ fn run_repl() -> Result<(), ReadlineError> {
         }
     }
 
-    rl.save_history(".quiver_history")?;
+    rl.save_history(HISTORY_FILE)?;
 
     if std::io::stdin().is_terminal() {
         println!("Bye!")
