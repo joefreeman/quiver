@@ -14,20 +14,83 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Error {
-    UndefinedVariable(String),
-    DuplicatedFieldName(String),
-    NotSupported(String),
-    NoChainedValue,
-    UnusedChainedValue,
-    TypeMismatch { expected: String, found: String },
-    ModuleError(ModuleError),
-    UnresolvedType(String),
-    UnknownTypeAlias(String),
-    TypeIndexOutOfBounds { type_name: String, field_index: usize },
-    UnknownFieldName { type_name: String, field_name: String },
-    NonTupleDestructuring(String),
+    // Variable & scope errors
+    VariableUndefined(String),
 
-    Generic(String), // TODO: remove
+    // Type system errors
+    TypeUnresolved(String),
+    TypeAliasMissing(String),
+    TypeMismatch {
+        expected: String,
+        found: String,
+    },
+
+    // Structure errors
+    FieldDuplicated(String),
+    TupleFieldTypeUnresolved {
+        field_index: usize,
+    },
+
+    // Access errors
+    FieldNotFound {
+        field_name: String,
+        type_name: String,
+    },
+    FieldAccessOnNonTuple {
+        field_name: String,
+    },
+    PositionalAccessOnNonTuple {
+        index: usize,
+    },
+
+    // Member access
+    MemberFieldNotFound {
+        field_name: String,
+        target: String,
+    },
+    MemberAccessOnNonTuple {
+        target: String,
+    },
+
+    // Parameter access
+    ParameterIndexOutOfBounds {
+        index: usize,
+    },
+    ParameterTypeNotInRegistry {
+        type_id: String,
+    },
+    ParameterAccessOnNonTuple {
+        index: usize,
+    },
+
+    // Operator errors
+    OperatorTypeNotInRegistry {
+        type_id: String,
+    },
+    OperatorOnNonTuple {
+        operator: String,
+    },
+
+    // Module errors
+    ModuleLoad(ModuleError),
+    ModuleParse(String),
+    ModuleTypeMissing {
+        type_name: String,
+        module_path: String,
+    },
+
+    // Language feature errors
+    FeatureUnsupported(String),
+
+    // Compilation flow errors
+    ChainValueUnused,
+
+    // Destructuring errors
+    DestructuringOnNonTuple(String),
+    DestructuringFieldMissing {
+        type_name: String,
+        field_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,7 +105,9 @@ fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
         match t {
             Type::Unresolved(ts) => {
                 if ts.is_empty() {
-                    return Err(Error::UnresolvedType("Empty type union in branch narrowing".to_string()));
+                    return Err(Error::TypeUnresolved(
+                        "Empty type union in branch narrowing".to_string(),
+                    ));
                 }
                 flattened.extend(ts);
             }
@@ -53,7 +118,9 @@ fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
     flattened.dedup();
 
     match flattened.len() {
-        0 => Err(Error::UnresolvedType("No valid types found in narrowing".to_string())),
+        0 => Err(Error::TypeUnresolved(
+            "No valid types found in narrowing".to_string(),
+        )),
         1 => Ok(Type::Resolved(flattened.get(0).unwrap().clone())),
         _ => Ok(Type::Unresolved(flattened)),
     }
@@ -136,10 +203,10 @@ impl<'a> Compiler<'a> {
         let content = self
             .module_loader
             .load(module_path, self.module_path.as_deref())
-            .map_err(Error::ModuleError)?;
+            .map_err(Error::ModuleLoad)?;
 
         let parsed = parser::parse(&content)
-            .map_err(|_e| Error::Generic("Failed to parse imported module".to_string()))?;
+            .map_err(|_e| Error::ModuleParse(format!("Failed to parse module: {}", module_path)))?;
 
         let type_aliases: Vec<_> = parsed
             .statements
@@ -167,10 +234,10 @@ impl<'a> Compiler<'a> {
                     {
                         self.compile_type_alias(name, (*type_definition).clone())?;
                     } else {
-                        return Err(Error::Generic(format!(
-                            "Type '{}' not found in module '{}'",
-                            requested_name, module_path
-                        )));
+                        return Err(Error::ModuleTypeMissing {
+                            type_name: requested_name.clone(),
+                            module_path: module_path.to_string(),
+                        });
                     }
                 }
             }
@@ -212,14 +279,16 @@ impl<'a> Compiler<'a> {
         for field in &fields {
             if let Some(ref field_name) = field.name {
                 if !seen_names.insert(field_name.clone()) {
-                    return Err(Error::DuplicatedFieldName(field_name.clone()));
+                    return Err(Error::FieldDuplicated(field_name.clone()));
                 }
             }
             let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
             if let Type::Resolved(resolved_type) = field_type {
                 field_types.push((field.name.clone(), resolved_type));
             } else {
-                return Err(Error::Generic(format!("Tuple field type unresolved")));
+                return Err(Error::TupleFieldTypeUnresolved {
+                    field_index: field_types.len(),
+                });
             }
         }
 
@@ -242,7 +311,7 @@ impl<'a> Compiler<'a> {
         for field in &fields {
             if let Some(ref name) = field.name {
                 if !seen_names.insert(name.clone()) {
-                    return Err(Error::DuplicatedFieldName(name.clone()));
+                    return Err(Error::FieldDuplicated(name.clone()));
                 }
             }
             let field_type = match &field.value {
@@ -259,7 +328,9 @@ impl<'a> Compiler<'a> {
             if let Type::Resolved(resolved_type) = field_type {
                 field_types.push((field.name.clone(), resolved_type));
             } else {
-                return Err(Error::Generic(format!("Tuple field type unresolved")));
+                return Err(Error::TupleFieldTypeUnresolved {
+                    field_index: field_types.len(),
+                });
             }
         }
 
@@ -347,8 +418,12 @@ impl<'a> Compiler<'a> {
 
     fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Result<Type, Error> {
         match ast_type {
-            ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(Type::Resolved(types::Type::Integer)),
-            ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(Type::Resolved(types::Type::Binary)),
+            ast::Type::Primitive(ast::PrimitiveType::Int) => {
+                Ok(Type::Resolved(types::Type::Integer))
+            }
+            ast::Type::Primitive(ast::PrimitiveType::Bin) => {
+                Ok(Type::Resolved(types::Type::Binary))
+            }
             ast::Type::Tuple(tuple) => {
                 // Collect all possible types for each field
                 let mut field_variants: Vec<(Option<String>, Vec<types::Type>)> = Vec::new();
@@ -358,7 +433,9 @@ impl<'a> Compiler<'a> {
                         Type::Resolved(t) => vec![t],
                         Type::Unresolved(ts) => {
                             if ts.is_empty() {
-                                return Err(Error::UnresolvedType("Empty field type possibilities".to_string()));
+                                return Err(Error::TypeUnresolved(
+                                    "Empty field type possibilities".to_string(),
+                                ));
                             }
                             ts
                         }
@@ -371,7 +448,11 @@ impl<'a> Compiler<'a> {
                     self.cartesian_product_tuple_types(&tuple.name, field_variants);
 
                 Ok(match tuple_variants.len() {
-                    0 => return Err(Error::UnresolvedType("No valid tuple type variants found".to_string())),
+                    0 => {
+                        return Err(Error::TypeUnresolved(
+                            "No valid tuple type variants found".to_string(),
+                        ));
+                    }
                     1 => Type::Resolved(tuple_variants.into_iter().next().unwrap()),
                     _ => Type::Unresolved(tuple_variants),
                 })
@@ -381,7 +462,9 @@ impl<'a> Compiler<'a> {
                     Type::Resolved(t) => vec![t],
                     Type::Unresolved(ts) => {
                         if ts.is_empty() {
-                            return Err(Error::UnresolvedType("Empty function input type possibilities".to_string()));
+                            return Err(Error::TypeUnresolved(
+                                "Empty function input type possibilities".to_string(),
+                            ));
                         }
                         ts
                     }
@@ -390,7 +473,9 @@ impl<'a> Compiler<'a> {
                     Type::Resolved(t) => vec![t],
                     Type::Unresolved(ts) => {
                         if ts.is_empty() {
-                            return Err(Error::UnresolvedType("Empty function output type possibilities".to_string()));
+                            return Err(Error::TypeUnresolved(
+                                "Empty function output type possibilities".to_string(),
+                            ));
                         }
                         ts
                     }
@@ -410,7 +495,11 @@ impl<'a> Compiler<'a> {
                     .collect();
 
                 Ok(match function_variants.len() {
-                    0 => return Err(Error::UnresolvedType("No valid function type variants found".to_string())),
+                    0 => {
+                        return Err(Error::TypeUnresolved(
+                            "No valid function type variants found".to_string(),
+                        ));
+                    }
                     1 => Type::Resolved(function_variants.into_iter().next().unwrap()),
                     _ => Type::Unresolved(function_variants),
                 })
@@ -423,7 +512,9 @@ impl<'a> Compiler<'a> {
                         Type::Resolved(t) => resolved_types.push(t),
                         Type::Unresolved(ts) => {
                             if ts.is_empty() {
-                                return Err(Error::UnresolvedType("Empty union member type".to_string()));
+                                return Err(Error::TypeUnresolved(
+                                    "Empty union member type".to_string(),
+                                ));
                             }
                             resolved_types.extend(ts);
                         }
@@ -432,7 +523,7 @@ impl<'a> Compiler<'a> {
 
                 // Return as unresolved union type
                 if resolved_types.is_empty() {
-                    return Err(Error::UnresolvedType("Empty union type".to_string()));
+                    return Err(Error::TypeUnresolved("Empty union type".to_string()));
                 }
                 Ok(Type::Unresolved(resolved_types))
             }
@@ -441,7 +532,7 @@ impl<'a> Compiler<'a> {
                 if let Some(aliased_type) = self.type_aliases.get(&alias) {
                     Ok(aliased_type.clone())
                 } else {
-                    Err(Error::UnknownTypeAlias(alias))
+                    Err(Error::TypeAliasMissing(alias))
                 }
             }
         }
@@ -477,10 +568,10 @@ impl<'a> Compiler<'a> {
                         self.add_instruction(Instruction::Constant(index));
                     }
                     ast::Literal::Binary(_) => {
-                        Err(Error::NotSupported("binary matching".to_string()))?;
+                        Err(Error::FeatureUnsupported("binary matching".to_string()))?;
                     }
                     ast::Literal::String(_) => {
-                        Err(Error::NotSupported("string matching".to_string()))?;
+                        Err(Error::FeatureUnsupported("string matching".to_string()))?;
                     }
                 }
                 self.add_instruction(Instruction::Equal(2));
@@ -536,7 +627,11 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_partial_destructuring(&mut self, field_names: Vec<String>, expression_type: &Type) -> Result<(), Error> {
+    fn compile_partial_destructuring(
+        &mut self,
+        field_names: Vec<String>,
+        expression_type: &Type,
+    ) -> Result<(), Error> {
         for field_name in field_names {
             self.add_instruction(Instruction::Duplicate);
 
@@ -551,16 +646,22 @@ impl<'a> Compiler<'a> {
                         {
                             (index, Type::Resolved(field_type.clone()))
                         } else {
-                            return Err(Error::UnknownFieldName { 
-                                type_name: format!("{:?}", type_id), 
-                                field_name: field_name.clone() 
+                            return Err(Error::DestructuringFieldMissing {
+                                type_name: format!("{:?}", type_id),
+                                field_name: field_name.clone(),
                             });
                         }
                     } else {
-                        return Err(Error::UnresolvedType("Type not found in registry".to_string()));
+                        return Err(Error::TypeUnresolved(
+                            "Type not found in registry".to_string(),
+                        ));
                     }
                 }
-                _ => return Err(Error::NonTupleDestructuring("Cannot destructure non-tuple type".to_string())),
+                _ => {
+                    return Err(Error::DestructuringOnNonTuple(
+                        "Cannot destructure non-tuple type".to_string(),
+                    ));
+                }
             };
 
             self.add_instruction(Instruction::Get(field_index));
@@ -600,7 +701,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             _ => {
-                return Err(Error::NonTupleDestructuring("Cannot star-destructure non-tuple type".to_string()));
+                return Err(Error::DestructuringOnNonTuple(
+                    "Cannot star-destructure non-tuple type".to_string(),
+                ));
             }
         }
 
@@ -753,13 +856,15 @@ impl<'a> Compiler<'a> {
                             if let Some(field) = type_info.1.get(index) {
                                 Ok(Type::Resolved(field.1.clone()))
                             } else {
-                                Err(Error::Generic("".to_string()))
+                                Err(Error::ParameterIndexOutOfBounds { index })
                             }
                         } else {
-                            Err(Error::Generic("".to_string()))
+                            Err(Error::ParameterTypeNotInRegistry {
+                                type_id: format!("{:?}", type_id),
+                            })
                         }
                     }
-                    _ => Err(Error::Generic("".to_string())),
+                    _ => Err(Error::ParameterAccessOnNonTuple { index }),
                 }
             }
         }
@@ -808,10 +913,11 @@ impl<'a> Compiler<'a> {
         let content = self
             .module_loader
             .load(module_path, self.module_path.as_deref())
-            .map_err(Error::ModuleError)?;
+            .map_err(Error::ModuleLoad)?;
 
-        let parsed = parser::parse(&content)
-            .map_err(|_e| Error::Generic("Failed to parse imported module".to_string()))?;
+        let parsed = parser::parse(&content).map_err(|_e| {
+            Error::ModuleParse(format!("Failed to parse imported module: {}", module_path))
+        })?;
 
         // TODO: update module path (to path of resolved module)
         let instructions = Compiler::compile(
@@ -867,15 +973,15 @@ impl<'a> Compiler<'a> {
                     .1
                     .iter()
                     .position(|f| f.0 == Some(field_name.clone()))
-                    .ok_or(Error::Generic("".to_string()))?;
+                    .ok_or(Error::FieldNotFound {
+                        field_name: field_name.clone(),
+                        type_name: format!("{:?}", type_id),
+                    })?;
                 let result_type = tuple_type.1[index].1.clone();
                 self.add_instruction(Instruction::Get(index));
                 Ok(Type::Resolved(result_type))
             }
-            _ => Err(Error::Generic(format!(
-                "Cannot access field '{}' on non-tuple type",
-                field_name
-            ))),
+            _ => Err(Error::FieldAccessOnNonTuple { field_name }),
         }
     }
 
@@ -892,10 +998,7 @@ impl<'a> Compiler<'a> {
                 self.add_instruction(Instruction::Get(index));
                 Ok(Type::Resolved(result_type))
             }
-            _ => Err(Error::Generic(format!(
-                "Cannot access field at position {} on non-tuple type",
-                index
-            ))),
+            _ => Err(Error::PositionalAccessOnNonTuple { index }),
         }
     }
 
@@ -911,9 +1014,11 @@ impl<'a> Compiler<'a> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
                 let type_registry = &self.type_registry;
-                let tuple_type = type_registry
-                    .lookup_type(&type_id)
-                    .ok_or(Error::Generic("".to_string()))?;
+                let tuple_type = type_registry.lookup_type(&type_id).ok_or(
+                    Error::OperatorTypeNotInRegistry {
+                        type_id: format!("{:?}", type_id),
+                    },
+                )?;
                 let tuple_size = tuple_type.1.len();
 
                 // TODO: check all tuple items are integers
@@ -993,7 +1098,9 @@ impl<'a> Compiler<'a> {
                     }
                 }
             }
-            _ => Err(Error::Generic("".to_string())),
+            _ => Err(Error::OperatorOnNonTuple {
+                operator: format!("{:?}", operator),
+            }),
         }
     }
 
@@ -1006,7 +1113,7 @@ impl<'a> Compiler<'a> {
 
         let mut last_type = self
             .lookup_variable(target)
-            .ok_or(Error::UndefinedVariable(target.to_string()))?;
+            .ok_or(Error::VariableUndefined(target.to_string()))?;
 
         for accessor in accessors {
             match last_type {
@@ -1018,14 +1125,21 @@ impl<'a> Compiler<'a> {
                             .1
                             .iter()
                             .position(|f| f.0 == Some(field_name.clone()))
-                            .ok_or(Error::Generic("".to_string()))?,
+                            .ok_or(Error::MemberFieldNotFound {
+                                field_name: field_name.clone(),
+                                target: target.to_string(),
+                            })?,
                         ast::AccessPath::Index(index) => index,
                     };
                     let new_type = tuple_type.1[index].1.clone();
                     self.add_instruction(Instruction::Get(index));
                     last_type = Type::Resolved(new_type);
                 }
-                _ => return Err(Error::Generic("".to_string())),
+                _ => {
+                    return Err(Error::MemberAccessOnNonTuple {
+                        target: target.to_string(),
+                    });
+                }
             }
         }
 
@@ -1042,7 +1156,7 @@ impl<'a> Compiler<'a> {
 
         let mut last_type = self
             .lookup_variable(target)
-            .ok_or(Error::UndefinedVariable(target.to_string()))?;
+            .ok_or(Error::VariableUndefined(target.to_string()))?;
 
         for accessor in accessors {
             match last_type {
@@ -1054,14 +1168,21 @@ impl<'a> Compiler<'a> {
                             .1
                             .iter()
                             .position(|f| f.0 == Some(field_name.clone()))
-                            .ok_or(Error::Generic("".to_string()))?,
+                            .ok_or(Error::MemberFieldNotFound {
+                                field_name: field_name.clone(),
+                                target: target.to_string(),
+                            })?,
                         ast::AccessPath::Index(index) => index,
                     };
                     let new_type = tuple_type.1[index].1.clone();
                     self.add_instruction(Instruction::Get(index));
                     last_type = Type::Resolved(new_type);
                 }
-                _ => return Err(Error::Generic("".to_string())),
+                _ => {
+                    return Err(Error::MemberAccessOnNonTuple {
+                        target: target.to_string(),
+                    });
+                }
             }
         }
 
@@ -1094,7 +1215,7 @@ impl<'a> Compiler<'a> {
                 self.add_instruction(Instruction::Call);
                 Ok(Type::Unresolved(vec![]))
             }
-            _ => Err(Error::UnusedChainedValue),
+            _ => Err(Error::ChainValueUnused),
         }
     }
 
