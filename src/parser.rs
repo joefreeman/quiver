@@ -8,21 +8,36 @@ pub struct Grammar;
 
 #[derive(Debug, Clone)]
 pub enum Error {
-    ParseError(pest::error::Error<Rule>),
-    InvalidLiteral(String),
-    InvalidParameter(String),
-    InvalidOperator(String),
-    UnexpectedRule(Rule),
+    // Grammar parsing errors
+    SyntaxError(pest::error::Error<Rule>),
+
+    // Literal parsing errors
+    IntegerMalformed(String),
+    HexMalformed(String),
+    StringEscapeInvalid(String),
+    IndexMalformed(String),
+
+    // Language construct errors
+    ParameterInvalid(String),
+    OperatorUnknown(String),
+
+    // Structure errors
+    RuleUnexpected { found: Rule, context: String },
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::ParseError(err) => write!(f, "Parse error: {}", err),
-            Error::InvalidLiteral(lit) => write!(f, "Invalid literal: {}", lit),
-            Error::InvalidParameter(param) => write!(f, "Invalid parameter: {}", param),
-            Error::InvalidOperator(op) => write!(f, "Invalid operator: {}", op),
-            Error::UnexpectedRule(rule) => write!(f, "Unexpected rule: {:?}", rule),
+            Error::SyntaxError(err) => write!(f, "Syntax error: {}", err),
+            Error::IntegerMalformed(lit) => write!(f, "Malformed integer: {}", lit),
+            Error::HexMalformed(lit) => write!(f, "Malformed hex literal: {}", lit),
+            Error::StringEscapeInvalid(esc) => write!(f, "Invalid string escape: {}", esc),
+            Error::IndexMalformed(idx) => write!(f, "Malformed index: {}", idx),
+            Error::ParameterInvalid(param) => write!(f, "Invalid parameter: {}", param),
+            Error::OperatorUnknown(op) => write!(f, "Unknown operator: {}", op),
+            Error::RuleUnexpected { found, context } => {
+                write!(f, "Unexpected {:?} in {}", found, context)
+            }
         }
     }
 }
@@ -30,7 +45,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn parse(source: &str) -> Result<Program, Error> {
-    let pairs = Grammar::parse(Rule::program, source).map_err(Error::ParseError)?;
+    let pairs = Grammar::parse(Rule::program, source).map_err(Error::SyntaxError)?;
 
     let program_pair = pairs.into_iter().next().unwrap();
     parse_program(program_pair)
@@ -61,7 +76,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>) -> Result<Statement, Error
         Rule::type_alias => parse_type_alias(inner_pair),
         Rule::type_import => parse_type_import(inner_pair),
         Rule::expression => Ok(Statement::Expression(parse_expression(inner_pair)?)),
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "statement".to_string(),
+        }),
     }
 }
 
@@ -104,7 +122,10 @@ fn parse_type_import_pattern(
                 .collect();
             Ok(TypeImportPattern::Partial(identifiers))
         }
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "type import pattern".to_string(),
+        }),
     }
 }
 
@@ -151,7 +172,10 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> Result<Term, Error> {
     match inner_pair.as_rule() {
         Rule::assignment => parse_assignment(inner_pair),
         Rule::chain => Ok(Term::Chain(parse_chain(inner_pair)?)),
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "term".to_string(),
+        }),
     }
 }
 
@@ -199,7 +223,10 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error> {
         Rule::expression => Ok(Value::Parenthesized(Box::new(parse_expression(
             inner_pair,
         )?))),
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "value".to_string(),
+        }),
     }
 }
 
@@ -223,14 +250,17 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
             let index_str = &pair.as_str()[1..]; // Remove leading '.'
             let index = index_str
                 .parse()
-                .map_err(|_| Error::InvalidLiteral(index_str.to_string()))?;
+                .map_err(|_| Error::IndexMalformed(index_str.to_string()))?;
             Ok(Operation::PositionalAccess(index))
         }
         Rule::tail_call => {
             let name = pair.into_inner().next().unwrap().as_str().to_string();
             Ok(Operation::TailCall(name))
         }
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "operation".to_string(),
+        }),
     }
 }
 
@@ -242,20 +272,23 @@ fn parse_literal(pair: pest::iterators::Pair<Rule>) -> Result<Literal, Error> {
             let value = inner_pair
                 .as_str()
                 .parse()
-                .map_err(|_| Error::InvalidLiteral(inner_pair.as_str().to_string()))?;
+                .map_err(|_| Error::IntegerMalformed(inner_pair.as_str().to_string()))?;
             Ok(Literal::Integer(value))
         }
         Rule::binary_literal => {
             let hex_str = &inner_pair.as_str()[1..inner_pair.as_str().len() - 1]; // Remove quotes
             let bytes = hex::decode(hex_str)
-                .map_err(|_| Error::InvalidLiteral(inner_pair.as_str().to_string()))?;
+                .map_err(|_| Error::HexMalformed(inner_pair.as_str().to_string()))?;
             Ok(Literal::Binary(bytes))
         }
         Rule::string_literal => {
             let string_value = parse_string_literal(inner_pair.as_str())?;
             Ok(Literal::String(string_value))
         }
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "literal".to_string(),
+        }),
     }
 }
 
@@ -272,8 +305,8 @@ fn parse_string_literal(s: &str) -> Result<String, Error> {
                 Some('n') => result.push('\n'),
                 Some('r') => result.push('\r'),
                 Some('t') => result.push('\t'),
-                Some(c) => return Err(Error::InvalidLiteral(format!("\\{}", c))),
-                None => return Err(Error::InvalidLiteral("\\".to_string())),
+                Some(c) => return Err(Error::StringEscapeInvalid(format!("\\{}", c))),
+                None => return Err(Error::StringEscapeInvalid("\\".to_string())),
             }
         } else {
             result.push(ch);
@@ -389,7 +422,7 @@ fn parse_block(pair: pest::iterators::Pair<Rule>) -> Result<Block, Error> {
 
 fn parse_parameter(pair: pest::iterators::Pair<Rule>) -> Result<Parameter, Error> {
     Parameter::from_string(pair.as_str())
-        .ok_or_else(|| Error::InvalidParameter(pair.as_str().to_string()))
+        .ok_or_else(|| Error::ParameterInvalid(pair.as_str().to_string()))
 }
 
 fn parse_member_access(pair: pest::iterators::Pair<Rule>) -> Result<MemberAccess, Error> {
@@ -402,7 +435,7 @@ fn parse_member_access(pair: pest::iterators::Pair<Rule>) -> Result<MemberAccess
         if part.chars().all(|c| c.is_ascii_digit()) {
             let index = part
                 .parse()
-                .map_err(|_| Error::InvalidLiteral(part.to_string()))?;
+                .map_err(|_| Error::IndexMalformed(part.to_string()))?;
             accessors.push(AccessPath::Index(index));
         } else {
             accessors.push(AccessPath::Field(part.to_string()));
@@ -425,7 +458,7 @@ fn parse_operator(pair: pest::iterators::Pair<Rule>) -> Result<Operator, Error> 
         "<=" => Ok(Operator::LessThanOrEqual),
         ">" => Ok(Operator::GreaterThan),
         ">=" => Ok(Operator::GreaterThanOrEqual),
-        op => Err(Error::InvalidOperator(op.to_string())),
+        op => Err(Error::OperatorUnknown(op.to_string())),
     }
 }
 
@@ -439,7 +472,10 @@ fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Pattern, Error> {
         Rule::partial_pattern => Ok(Pattern::Partial(parse_partial_pattern(inner_pair)?)),
         Rule::star => Ok(Pattern::Star),
         Rule::wildcard => Ok(Pattern::Wildcard),
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "pattern".to_string(),
+        }),
     }
 }
 
@@ -507,7 +543,10 @@ fn parse_type_definition(pair: pest::iterators::Pair<Rule>) -> Result<Type, Erro
     match inner_pair.as_rule() {
         Rule::union_type => parse_union_type(inner_pair),
         Rule::base_type => parse_base_type(inner_pair),
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "type definition".to_string(),
+        }),
     }
 }
 
@@ -519,7 +558,10 @@ fn parse_base_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
         Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(inner_pair)?)),
         Rule::function_type => Ok(Type::Function(parse_function_type(inner_pair)?)),
         Rule::identifier => Ok(Type::Identifier(inner_pair.as_str().to_string())),
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "base type".to_string(),
+        }),
     }
 }
 
@@ -527,7 +569,10 @@ fn parse_primitive_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error
     match pair.as_str() {
         "int" => Ok(Type::Primitive(PrimitiveType::Int)),
         "bin" => Ok(Type::Primitive(PrimitiveType::Bin)),
-        _ => Err(Error::InvalidLiteral(pair.as_str().to_string())),
+        _ => Err(Error::RuleUnexpected {
+            found: Rule::primitive_type,
+            context: "primitive type".to_string(),
+        }),
     }
 }
 
@@ -585,7 +630,10 @@ fn parse_function_input_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, 
         Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(inner_pair)?)),
         Rule::primitive_type => parse_primitive_type(inner_pair),
         Rule::identifier => Ok(Type::Identifier(inner_pair.as_str().to_string())),
-        rule => Err(Error::UnexpectedRule(rule)),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "function input type".to_string(),
+        }),
     }
 }
 
