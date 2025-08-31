@@ -365,47 +365,55 @@ impl<'a> Compiler<'a> {
             ast::Type::Primitive(ast::PrimitiveType::Int) => Type::Resolved(types::Type::Integer),
             ast::Type::Primitive(ast::PrimitiveType::Bin) => Type::Resolved(types::Type::Binary),
             ast::Type::Tuple(tuple) => {
-                // Recursively resolve field types
-                let mut field_types = Vec::new();
+                // Collect all possible types for each field
+                let mut field_variants: Vec<(Option<String>, Vec<types::Type>)> = Vec::new();
+
                 for field in tuple.fields {
-                    let resolved_field_type = match self.resolve_ast_type(field.type_def) {
-                        Type::Resolved(t) => t,
-                        Type::Unresolved(_) => {
-                            // For now, we can't handle unresolved types in tuple fields
-                            return Type::Unresolved(vec![]);
-                        }
+                    let field_possibilities = match self.resolve_ast_type(field.type_def) {
+                        Type::Resolved(t) => vec![t],
+                        Type::Unresolved(ts) => ts,
                     };
-                    field_types.push((field.name, resolved_field_type));
+                    field_variants.push((field.name, field_possibilities));
                 }
 
-                // Register the tuple type in the type registry
-                let type_id = self
-                    .type_registry
-                    .borrow_mut()
-                    .register_type(tuple.name, field_types);
+                // Generate cartesian product of all field type combinations
+                let tuple_variants =
+                    self.cartesian_product_tuple_types(&tuple.name, field_variants);
 
-                Type::Resolved(types::Type::Tuple(type_id))
+                match tuple_variants.len() {
+                    0 => Type::Unresolved(vec![]),
+                    1 => Type::Resolved(tuple_variants.into_iter().next().unwrap()),
+                    _ => Type::Unresolved(tuple_variants),
+                }
             }
             ast::Type::Function(function) => {
-                let input_type = match self.resolve_ast_type(*function.input) {
-                    Type::Resolved(t) => t,
-                    Type::Unresolved(_) => {
-                        // For now, we can't handle unresolved types in function signatures
-                        return Type::Unresolved(vec![]);
-                    }
+                let input_possibilities = match self.resolve_ast_type(*function.input) {
+                    Type::Resolved(t) => vec![t],
+                    Type::Unresolved(ts) => ts,
                 };
-                let output_type = match self.resolve_ast_type(*function.output) {
-                    Type::Resolved(t) => t,
-                    Type::Unresolved(_) => {
-                        // For now, we can't handle unresolved types in function signatures
-                        return Type::Unresolved(vec![]);
-                    }
+                let output_possibilities = match self.resolve_ast_type(*function.output) {
+                    Type::Resolved(t) => vec![t],
+                    Type::Unresolved(ts) => ts,
                 };
 
-                Type::Resolved(types::Type::Function(
-                    Box::new(input_type),
-                    Box::new(output_type),
-                ))
+                // Generate cartesian product of input × output types
+                let function_variants: Vec<types::Type> = input_possibilities
+                    .into_iter()
+                    .flat_map(|input_type| {
+                        output_possibilities.iter().map(move |output_type| {
+                            types::Type::Function(
+                                Box::new(input_type.clone()),
+                                Box::new(output_type.clone()),
+                            )
+                        })
+                    })
+                    .collect();
+
+                match function_variants.len() {
+                    0 => Type::Unresolved(vec![]),
+                    1 => Type::Resolved(function_variants.into_iter().next().unwrap()),
+                    _ => Type::Unresolved(function_variants),
+                }
             }
             ast::Type::Union(union) => {
                 // Resolve all union member types
@@ -983,6 +991,61 @@ impl<'a> Compiler<'a> {
             }
             _ => Err(Error::UnusedChainedValue),
         }
+    }
+
+    fn cartesian_product_tuple_types(
+        &mut self,
+        tuple_name: &Option<String>,
+        field_variants: Vec<(Option<String>, Vec<types::Type>)>,
+    ) -> Vec<types::Type> {
+        // Handle empty fields case
+        if field_variants.is_empty() {
+            let type_id = self
+                .type_registry
+                .borrow_mut()
+                .register_type(tuple_name.clone(), vec![]);
+            return vec![types::Type::Tuple(type_id)];
+        }
+
+        // Generate all combinations using recursive cartesian product
+        let combinations = self.cartesian_product_recursive(&field_variants, 0, vec![]);
+
+        // Register each combination as a tuple type
+        combinations
+            .into_iter()
+            .map(|field_types| {
+                let type_id = self
+                    .type_registry
+                    .borrow_mut()
+                    .register_type(tuple_name.clone(), field_types);
+                types::Type::Tuple(type_id)
+            })
+            .collect()
+    }
+
+    fn cartesian_product_recursive(
+        &self,
+        field_variants: &[(Option<String>, Vec<types::Type>)],
+        index: usize,
+        current: Vec<(Option<String>, types::Type)>,
+    ) -> Vec<Vec<(Option<String>, types::Type)>> {
+        if index >= field_variants.len() {
+            return vec![current];
+        }
+
+        let (field_name, type_options) = &field_variants[index];
+        let mut results = Vec::new();
+
+        for type_option in type_options {
+            let mut new_current = current.clone();
+            new_current.push((field_name.clone(), type_option.clone()));
+
+            let sub_results =
+                self.cartesian_product_recursive(field_variants, index + 1, new_current);
+            results.extend(sub_results);
+        }
+
+        results
     }
 
     fn add_instruction(&mut self, instruction: Instruction) {
