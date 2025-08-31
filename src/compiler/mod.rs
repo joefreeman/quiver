@@ -57,7 +57,6 @@ pub struct Compiler<'a> {
     type_registry: types::TypeRegistry,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
-    vm: VM,
 }
 
 impl<'a> Compiler<'a> {
@@ -75,16 +74,15 @@ impl<'a> Compiler<'a> {
             type_registry: type_registry.clone(),
             module_loader,
             module_path,
-            vm: vm.clone(),
         };
 
         for statement in program.statements {
-            compiler.compile_statement(statement)?;
+            compiler.compile_statement(statement, vm)?;
         }
         Ok(compiler.instructions)
     }
 
-    fn compile_statement(&mut self, statement: ast::Statement) -> Result<(), Error> {
+    fn compile_statement(&mut self, statement: ast::Statement, vm: &mut VM) -> Result<(), Error> {
         match statement {
             ast::Statement::TypeAlias {
                 name,
@@ -93,11 +91,12 @@ impl<'a> Compiler<'a> {
             ast::Statement::TypeImport {
                 pattern,
                 module_path,
-            } => self.compile_type_import(pattern, &module_path),
+            } => self.compile_type_import(pattern, &module_path, vm),
             ast::Statement::Expression(expression) => {
                 self.compile_expression(
                     expression,
                     Type::Resolved(types::Type::Tuple(TypeId::NIL)),
+                    vm,
                 )?;
                 Ok(())
             }
@@ -114,6 +113,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         pattern: ast::TypeImportPattern,
         module_path: &str,
+        vm: &mut VM,
     ) -> Result<(), Error> {
         let content = self
             .module_loader
@@ -161,22 +161,22 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_literal(&mut self, literal: ast::Literal) -> Result<Type, Error> {
+    fn compile_literal(&mut self, literal: ast::Literal, vm: &mut VM) -> Result<Type, Error> {
         match literal {
             ast::Literal::Integer(integer) => {
-                let index = self.vm.register_constant(Constant::Integer(integer));
+                let index = vm.register_constant(Constant::Integer(integer));
                 self.add_instruction(Instruction::Constant(index));
                 Ok(Type::Resolved(types::Type::Integer))
             }
             ast::Literal::Binary(bytes) => {
                 // TODO: is clone bad?
-                let index = self.vm.register_constant(Constant::Binary(bytes.clone()));
+                let index = vm.register_constant(Constant::Binary(bytes.clone()));
                 self.add_instruction(Instruction::Constant(index));
                 Ok(Type::Resolved(types::Type::Binary))
             }
             ast::Literal::String(string) => {
                 let bytes = string.as_bytes().to_vec();
-                let index = self.vm.register_constant(Constant::Binary(bytes));
+                let index = vm.register_constant(Constant::Binary(bytes));
                 self.add_instruction(Instruction::Constant(index));
                 Ok(Type::Resolved(types::Type::Binary))
             }
@@ -188,6 +188,7 @@ impl<'a> Compiler<'a> {
         tuple_name: Option<String>,
         fields: Vec<ast::ValueTupleField>,
         parameter_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut field_types = Vec::new();
         let mut seen_names = HashSet::new();
@@ -197,7 +198,7 @@ impl<'a> Compiler<'a> {
                     return Err(Error::DuplicatedFieldName(field_name.clone()));
                 }
             }
-            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
+            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone(), vm)?;
             if let Type::Resolved(resolved_type) = field_type {
                 field_types.push((field.name.clone(), resolved_type));
             } else {
@@ -216,6 +217,7 @@ impl<'a> Compiler<'a> {
         fields: Vec<ast::OperationTupleField>,
         value_type: Type,
         parameter_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         // TODO: check that ripple is used (otherwise error)
 
@@ -234,7 +236,7 @@ impl<'a> Compiler<'a> {
                     value_type.clone()
                 }
                 ast::OperationTupleFieldValue::Chain(chain) => {
-                    self.compile_chain(chain.clone(), parameter_type.clone())?
+                    self.compile_chain(chain.clone(), parameter_type.clone(), vm)?
                 }
             };
 
@@ -253,6 +255,7 @@ impl<'a> Compiler<'a> {
     fn compile_function_definition(
         &mut self,
         function_definition: ast::FunctionDefinition,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut function_params: HashSet<String> = HashSet::new();
 
@@ -300,7 +303,7 @@ impl<'a> Compiler<'a> {
             }
         }
         let body_type =
-            self.compile_expression(function_definition.body.expression, parameter_type.clone())?;
+            self.compile_expression(function_definition.body.expression, parameter_type.clone(), vm)?;
 
         self.add_instruction(Instruction::Return);
 
@@ -319,7 +322,7 @@ impl<'a> Compiler<'a> {
         //     body_type.clone(),
         // );
 
-        let function_index = self.vm.register_function(Function {
+        let function_index = vm.register_function(Function {
             instructions: function_instructions,
             captures: captures.into_iter().collect(),
         });
@@ -361,8 +364,9 @@ impl<'a> Compiler<'a> {
         pattern: ast::Pattern,
         value: ast::Chain,
         parameter_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
-        let expression_type = self.compile_chain(value, parameter_type)?;
+        let expression_type = self.compile_chain(value, parameter_type, vm)?;
 
         match pattern {
             ast::Pattern::Identifier(name) => {
@@ -376,7 +380,7 @@ impl<'a> Compiler<'a> {
             ast::Pattern::Literal(literal_value) => {
                 match literal_value {
                     ast::Literal::Integer(integer) => {
-                        let index = self.vm.register_constant(Constant::Integer(integer));
+                        let index = vm.register_constant(Constant::Integer(integer));
                         self.add_instruction(Instruction::Constant(index));
                     }
                     ast::Literal::Binary(_) => {
@@ -412,6 +416,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         expression: ast::Expression,
         parameter_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
@@ -430,7 +435,7 @@ impl<'a> Compiler<'a> {
             }
 
             let condition_type =
-                self.compile_sequence(branch.condition.clone(), parameter_type.clone())?;
+                self.compile_sequence(branch.condition.clone(), parameter_type.clone(), vm)?;
 
             if branch.consequence.is_some() {
                 self.add_instruction(Instruction::Duplicate);
@@ -442,6 +447,7 @@ impl<'a> Compiler<'a> {
                 let consequence_type = self.compile_sequence(
                     branch.consequence.clone().unwrap(),
                     parameter_type.clone(),
+                    vm,
                 )?;
                 branch_types.push(consequence_type);
 
@@ -491,6 +497,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         sequence: ast::Sequence,
         parameter_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
@@ -498,10 +505,10 @@ impl<'a> Compiler<'a> {
         for (i, term) in sequence.terms.iter().enumerate() {
             last_type = Some(match term {
                 ast::Term::Assignment { pattern, value } => {
-                    self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone())
+                    self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone(), vm)
                 }
                 ast::Term::Chain(chain) => {
-                    self.compile_chain(chain.clone(), parameter_type.clone())
+                    self.compile_chain(chain.clone(), parameter_type.clone(), vm)
                 }
             }?);
 
@@ -523,10 +530,10 @@ impl<'a> Compiler<'a> {
         Ok(last_type.unwrap())
     }
 
-    fn compile_block(&mut self, block: ast::Block, value_type: Type) -> Result<Type, Error> {
+    fn compile_block(&mut self, block: ast::Block, value_type: Type, vm: &mut VM) -> Result<Type, Error> {
         self.add_instruction(Instruction::Enter);
         self.scopes.push(HashMap::new());
-        let result_type = self.compile_expression(block.expression, value_type)?;
+        let result_type = self.compile_expression(block.expression, value_type, vm)?;
         self.scopes.pop();
         self.add_instruction(Instruction::Exit);
         Ok(result_type)
@@ -536,6 +543,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         parameter: ast::Parameter,
         parameter_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         match parameter {
             ast::Parameter::Self_ => {
@@ -564,33 +572,33 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
+    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type, vm: &mut VM) -> Result<Type, Error> {
         let mut value_type = match chain.value {
-            ast::Value::Literal(literal) => self.compile_literal(literal),
+            ast::Value::Literal(literal) => self.compile_literal(literal, vm),
             ast::Value::Tuple(tuple) => {
-                self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone())
+                self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone(), vm)
             }
             ast::Value::FunctionDefinition(function_definition) => {
-                self.compile_function_definition(function_definition)
+                self.compile_function_definition(function_definition, vm)
             }
             ast::Value::Block(block) => {
-                self.compile_block(block, Type::Resolved(types::Type::Tuple(TypeId::NIL)))
+                self.compile_block(block, Type::Resolved(types::Type::Tuple(TypeId::NIL)), vm)
             }
             ast::Value::Parameter(parameter) => {
-                self.compile_parameter(parameter, parameter_type.clone())
+                self.compile_parameter(parameter, parameter_type.clone(), vm)
             }
             ast::Value::MemberAccess(member_access) => {
-                self.compile_value_member_access(&member_access.target, member_access.accessors)
+                self.compile_value_member_access(&member_access.target, member_access.accessors, vm)
             }
             ast::Value::TailCall(identifier) => self.compile_value_tail_call(&identifier),
-            ast::Value::Import(path) => self.compile_value_import(&path),
+            ast::Value::Import(path) => self.compile_value_import(&path, vm),
             ast::Value::Parenthesized(expression) => {
-                self.compile_expression(*expression, parameter_type.clone())
+                self.compile_expression(*expression, parameter_type.clone(), vm)
             }
         }?;
 
         for operation in chain.operations {
-            value_type = self.compile_operation(operation, value_type, parameter_type.clone())?;
+            value_type = self.compile_operation(operation, value_type, parameter_type.clone(), vm)?;
         }
 
         Ok(value_type)
@@ -600,7 +608,7 @@ impl<'a> Compiler<'a> {
         todo!()
     }
 
-    fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
+    fn compile_value_import(&mut self, module_path: &str, vm: &mut VM) -> Result<Type, Error> {
         // TODO: cache
         // TODO: check for circular imports
 
@@ -617,10 +625,10 @@ impl<'a> Compiler<'a> {
             parsed,
             &mut self.type_registry,
             self.module_loader,
-            &mut self.vm,
+            vm,
             self.module_path.clone(),
         )?;
-        let _result = self.vm.execute_instructions(instructions, true);
+        let _result = vm.execute_instructions(instructions, true);
 
         // TODO: 'emit_value_reconstruction'
         todo!()
@@ -631,17 +639,19 @@ impl<'a> Compiler<'a> {
         operation: ast::Operation,
         value_type: Type,
         parameter_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         match operation {
             ast::Operation::Operator(operator) => self.compile_operator(operator, value_type),
             ast::Operation::Tuple(tuple) => {
-                self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type)
+                self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type, vm)
             }
-            ast::Operation::Block(block) => self.compile_block(block, value_type),
+            ast::Operation::Block(block) => self.compile_block(block, value_type, vm),
             ast::Operation::MemberAccess(member_access) => self.compile_operation_member_access(
                 &member_access.target,
                 member_access.accessors,
                 value_type,
+                vm,
             ),
             ast::Operation::FieldAccess(field) => {
                 self.compile_operation_field_access(field, value_type)
@@ -798,6 +808,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         self.add_instruction(Instruction::Load(target.to_string()));
 
@@ -833,6 +844,7 @@ impl<'a> Compiler<'a> {
         target: &str,
         accessors: Vec<ast::AccessPath>,
         value_type: Type,
+        vm: &mut VM,
     ) -> Result<Type, Error> {
         self.add_instruction(Instruction::Load(target.to_string()));
 
