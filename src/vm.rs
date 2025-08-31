@@ -39,14 +39,17 @@ impl Value {
                 }
 
                 if let Some((name, fields)) = type_registry.lookup_type(type_id) {
-                    let default_name = format!("Type{}", type_id.0);
-                    let type_name = name.as_deref().unwrap_or(&default_name);
-
                     if elements.is_empty() {
-                        return format!("{}", type_name);
+                        return name.as_deref().unwrap_or("[]").to_string();
                     }
 
-                    let mut result = format!("{}[", type_name);
+                    let prefix = if let Some(type_name) = name {
+                        format!("{}[", type_name)
+                    } else {
+                        "[".to_string()
+                    };
+
+                    let mut result = prefix;
                     for (i, element) in elements.iter().enumerate() {
                         if i > 0 {
                             result.push_str(", ");
@@ -69,7 +72,20 @@ impl Value {
                     result.push(']');
                     result
                 } else {
-                    self.to_string()
+                    let type_name = format!("Type{}", type_id.0);
+                    if elements.is_empty() {
+                        return type_name;
+                    }
+
+                    let mut result = format!("{}[", type_name);
+                    for (i, element) in elements.iter().enumerate() {
+                        if i > 0 {
+                            result.push_str(", ");
+                        }
+                        result.push_str(&element.format_with_types(type_registry));
+                    }
+                    result.push(']');
+                    result
                 }
             }
         }

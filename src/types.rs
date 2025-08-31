@@ -80,4 +80,69 @@ impl TypeRegistry {
         }
         None
     }
+
+    pub fn get_tuple_name(&self, type_id: &TypeId) -> String {
+        if let Some((name, _)) = self.lookup_type(type_id) {
+            let default_name = format!("Type{}", type_id.0);
+            name.as_deref().unwrap_or(&default_name).to_string()
+        } else {
+            format!("Type{}", type_id.0)
+        }
+    }
+
+    pub fn format_type(&self, type_def: &Type) -> String {
+        match type_def {
+            Type::Integer => "int".to_string(),
+            Type::Binary => "bin".to_string(),
+            Type::Tuple(type_id) => {
+                if let Some((name, fields)) = self.lookup_type(type_id) {
+                    if fields.is_empty() {
+                        name.as_deref().unwrap_or("[]").to_string()
+                    } else {
+                        let field_strs: Vec<String> = fields
+                            .iter()
+                            .map(|(field_name, field_type)| {
+                                if let Some(field_name) = field_name {
+                                    format!("{}: {}", field_name, self.format_type(field_type))
+                                } else {
+                                    self.format_type(field_type)
+                                }
+                            })
+                            .collect();
+
+                        if let Some(type_name) = name {
+                            format!("{}[{}]", type_name, field_strs.join(", "))
+                        } else {
+                            format!("[{}]", field_strs.join(", "))
+                        }
+                    }
+                } else {
+                    format!("Type{}", type_id.0)
+                }
+            }
+            Type::Function(func_type) => {
+                let param_str = if func_type.parameter.len() == 1 {
+                    self.format_type(&func_type.parameter[0])
+                } else {
+                    let params: Vec<String> = func_type
+                        .parameter
+                        .iter()
+                        .map(|t| self.format_type(t))
+                        .collect();
+                    format!("({})", params.join(", "))
+                };
+                let result_str = if func_type.result.len() == 1 {
+                    self.format_type(&func_type.result[0])
+                } else {
+                    let results: Vec<String> = func_type
+                        .result
+                        .iter()
+                        .map(|t| self.format_type(t))
+                        .collect();
+                    format!("({})", results.join(", "))
+                };
+                format!("#{} -> {}", param_str, result_str)
+            }
+        }
+    }
 }

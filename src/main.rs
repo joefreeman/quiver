@@ -118,13 +118,13 @@ fn run_repl() -> Result<(), ReadlineError> {
                     }
 
                     "\\t" => {
-                        let types = quiver.list_type_aliases();
+                        let types = quiver.list_types();
                         if types.is_empty() {
-                            println!("No type aliases defined");
+                            println!("No types defined");
                         } else {
-                            println!("Type aliases:");
-                            for (name, _id) in types {
-                                println!("  {}", name);
+                            println!("Type:");
+                            for (_name, type_id) in types {
+                                println!("  {}", quiver.format_type(&type_id));
                             }
                         }
                         continue;

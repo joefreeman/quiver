@@ -56,9 +56,18 @@ impl Quiver {
         self.vm.list_variables()
     }
 
-    pub fn list_type_aliases(&self) -> Vec<(String, bytecode::TypeId)> {
-        // self.compiler.list_type_aliases()
-        todo!()
+    pub fn list_types(&self) -> Vec<(String, bytecode::TypeId)> {
+        self.type_registry
+            .get_types()
+            .iter()
+            .map(|(&type_id, (name, _fields))| {
+                let display_name = name
+                    .as_deref()
+                    .unwrap_or(&format!("Type{}", type_id.0))
+                    .to_string();
+                (display_name, type_id)
+            })
+            .collect()
     }
 
     pub fn compile(&mut self, source: &str) -> Result<bytecode::Bytecode, Error> {
@@ -120,7 +129,24 @@ impl Quiver {
     }
 
     pub fn format_value(&self, value: &Value) -> String {
-        value.format_with_types(&self.type_registry)
+        match value {
+            Value::Function { function, .. } => {
+                if let Some(func_def) = self.vm.get_functions().get(*function) {
+                    if let Some(func_type) = &func_def.function_type {
+                        return self
+                            .type_registry
+                            .format_type(&types::Type::Function(Box::new(func_type.clone())));
+                    }
+                }
+                "<function>".to_string()
+            }
+            _ => value.format_with_types(&self.type_registry),
+        }
+    }
+
+    pub fn format_type(&self, type_id: &bytecode::TypeId) -> String {
+        self.type_registry
+            .format_type(&types::Type::Tuple(*type_id))
     }
 }
 
