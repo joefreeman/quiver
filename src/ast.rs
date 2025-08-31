@@ -7,7 +7,7 @@ pub struct Program {
 pub enum Statement {
     TypeAlias {
         name: String,
-        type_def: Type,
+        type_definition: Type,
     },
     TypeImport {
         pattern: TypeImportPattern,
@@ -53,12 +53,11 @@ pub struct Chain {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Literal(Literal),
-    TupleConstruction(TupleConstruction),
+    Tuple(ValueTuple),
     FunctionDefinition(FunctionDefinition),
     Block(Block),
     Parameter(Parameter),
     MemberAccess(MemberAccess),
-    Identifier(String),
     TailCall(String),
     Import(String),
     Parenthesized(Box<Expression>),
@@ -67,10 +66,9 @@ pub enum Value {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
     Operator(Operator),
-    TupleConstruction(TupleConstruction),
+    Tuple(OperationTuple),
     Block(Block),
     MemberAccess(MemberAccess),
-    Identifier(String),
     FieldAccess(String),
     PositionalAccess(usize),
     TailCall(String),
@@ -84,19 +82,31 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TupleConstruction {
+pub struct ValueTuple {
     pub name: Option<String>,
-    pub fields: Vec<TupleField>,
+    pub fields: Vec<ValueTupleField>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TupleField {
+pub struct ValueTupleField {
     pub name: Option<String>,
-    pub value: TupleFieldValue,
+    pub value: Chain,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TupleFieldValue {
+pub struct OperationTuple {
+    pub name: Option<String>,
+    pub fields: Vec<OperationTupleField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperationTupleField {
+    pub name: Option<String>,
+    pub value: OperationTupleFieldValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OperationTupleFieldValue {
     Ripple,
     Chain(Chain),
 }
@@ -120,8 +130,8 @@ pub enum Parameter {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberAccess {
-    pub object: String,
-    pub path: Vec<AccessPath>,
+    pub target: String,
+    pub accessors: Vec<AccessPath>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,8 +159,8 @@ pub enum Operator {
 pub enum Pattern {
     Literal(Literal),
     Identifier(String),
-    TuplePattern(TuplePattern),
-    PartialPattern(Vec<String>),
+    Tuple(TuplePattern),
+    Partial(Vec<String>),
     Star,
     Wildcard,
 }

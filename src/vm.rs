@@ -137,10 +137,18 @@ impl VM {
     pub fn execute_instructions(
         &mut self,
         instructions: Vec<Instruction>,
+        new_scope: bool,
     ) -> Result<Option<Value>, Error> {
+        if new_scope {
+            self.scopes
+                .push(Scope::new(Value::Tuple(TypeId::NIL, vec![])));
+        }
         self.frames.push(Frame::new(instructions, HashMap::new()));
         let result = self.run();
         self.frames.pop();
+        if new_scope {
+            self.scopes.pop();
+        }
         result
     }
 

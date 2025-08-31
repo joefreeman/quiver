@@ -59,12 +59,21 @@ pattern = { partial_pattern | tuple_pattern | literal | star | wildcard | identi
 // Ripple operator: (~)
 ripple = { "~" }
 
-// Tuple construction (Name[field: value, value, ...], [value, ...], Name)
-tuple_field = { (identifier ~ ":" ~ sp)? ~ (ripple | chain) }
-tuple_field_list = { tuple_field ~ (ws? ~ "," ~ ws ~ tuple_field)* }
-tuple_construction = {
-    tuple_name ~ "[" ~ ws? ~ tuple_field_list? ~ ws? ~ "]" |
-    "[" ~ ws? ~ tuple_field_list? ~ ws? ~ "]" |
+// Value tuple construction (Name[field: value, value, ...], [value, ...], Name)
+value_tuple_field = { (identifier ~ ":" ~ sp)? ~ chain }
+value_tuple_field_list = { value_tuple_field ~ (ws? ~ "," ~ ws ~ value_tuple_field)* }
+value_tuple = {
+    tuple_name ~ "[" ~ ws? ~ value_tuple_field_list? ~ ws? ~ "]" |
+    "[" ~ ws? ~ value_tuple_field_list? ~ ws? ~ "]" |
+    tuple_name
+}
+
+// Operation tuple construction (supports ripple)
+operation_tuple_field = { (identifier ~ ":" ~ sp)? ~ (ripple | chain) }
+operation_tuple_field_list = { operation_tuple_field ~ (ws? ~ "," ~ ws ~ operation_tuple_field)* }
+operation_tuple = {
+    tuple_name ~ "[" ~ ws? ~ operation_tuple_field_list? ~ ws? ~ "]" |
+    "[" ~ ws? ~ operation_tuple_field_list? ~ ws? ~ "]" |
     tuple_name
 }
 
@@ -78,7 +87,7 @@ block = { "{" ~ ws? ~ expression ~ ws? ~ "}" }
 parameter = @{ "$" ~ ASCII_DIGIT* }
 
 // Member access (identifier.field.0.field)
-member_access = @{ identifier ~ ("." ~ (identifier | ASCII_DIGIT+))+ }
+member_access = @{ identifier ~ ("." ~ (identifier | ASCII_DIGIT+))* }
 
 // Field/positional access (.foo, .0, .1)
 field_access = @{ "." ~ identifier }
@@ -96,22 +105,20 @@ import = { "%" ~ string_literal }
 // Chain
 value = {
     literal |
-    tuple_construction |
+    value_tuple |
     function_definition |
     block |
     parameter |
     member_access |
-    identifier |
     tail_call |
     import |
     "(" ~ ws? ~ expression ~ ws? ~ ")"
 }
 operation = {
     operator |
-    tuple_construction |
+    operation_tuple |
     block |
     member_access |
-    identifier |
     field_access |
     positional_access |
     tail_call
