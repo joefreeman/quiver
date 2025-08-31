@@ -37,8 +37,10 @@ impl ModuleLoader for InMemoryModuleLoader {
                 path.to_string()
             }
         } else {
-            // TODO: handle standard library, and 3rd-party dependencies
-            return Err(ModuleError::NotFound(path.to_string()));
+            return Err(ModuleError::NotFound(format!(
+                "Module path must be relative (start with ./ or ../): {}",
+                path
+            )));
         };
 
         self.modules
@@ -69,8 +71,10 @@ impl ModuleLoader for FileSystemModuleLoader {
                 return Err(ModuleError::NotFound(path.to_string()));
             }
         } else {
-            // TODO: handle standard library, and 3rd-party dependencies
-            return Err(ModuleError::NotFound(path.to_string()));
+            return Err(ModuleError::NotFound(format!(
+                "Module path must be relative (start with ./ or ../): {}",
+                path
+            )));
         };
 
         std::fs::read_to_string(&resolved).map_err(|e| ModuleError::IoError(e.to_string()))

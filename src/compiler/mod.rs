@@ -134,6 +134,11 @@ pub struct Compiler<'a> {
     vm: &'a mut vm::VM,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
+    // Module caches
+    ast_cache: HashMap<String, ast::Program>,
+    evaluation_cache: HashMap<String, vm::Value>,
+    // Circular import detection
+    import_stack: Vec<String>,
 }
 
 impl<'a> Compiler<'a> {
@@ -155,6 +160,9 @@ impl<'a> Compiler<'a> {
             vm,
             module_loader,
             module_path,
+            ast_cache: HashMap::new(),
+            evaluation_cache: HashMap::new(),
+            import_stack: Vec::new(),
         };
 
         for (name, value) in existing_variables {
@@ -200,13 +208,7 @@ impl<'a> Compiler<'a> {
         pattern: ast::TypeImportPattern,
         module_path: &str,
     ) -> Result<(), Error> {
-        let content = self
-            .module_loader
-            .load(module_path, self.module_path.as_deref())
-            .map_err(Error::ModuleLoad)?;
-
-        let parsed = parser::parse(&content)
-            .map_err(|_e| Error::ModuleParse(format!("Failed to parse module: {}", module_path)))?;
+        let parsed = self.load_and_cache_ast(module_path)?;
 
         let type_aliases: Vec<_> = parsed
             .statements
@@ -1041,9 +1043,70 @@ impl<'a> Compiler<'a> {
         todo!()
     }
 
+    fn value_to_instructions(&mut self, value: &vm::Value) -> Result<Type, Error> {
+        match value {
+            vm::Value::Integer(int_value) => {
+                let index = self.vm.register_constant(Constant::Integer(*int_value));
+                self.add_instruction(Instruction::Constant(index));
+                Ok(Type::Resolved(types::Type::Integer))
+            }
+            vm::Value::Binary(const_index) => {
+                self.add_instruction(Instruction::Constant(*const_index));
+                Ok(Type::Resolved(types::Type::Binary))
+            }
+            vm::Value::Tuple(type_id, fields) => {
+                for field in fields {
+                    self.value_to_instructions(field)?;
+                }
+                self.add_instruction(Instruction::Tuple(*type_id, fields.len()));
+                Ok(Type::Resolved(types::Type::Tuple(*type_id)))
+            }
+            vm::Value::Function { function, captures } => {
+                for capture in captures {
+                    self.value_to_instructions(capture)?;
+                }
+                let func_def = {
+                    let functions = self.vm.get_functions();
+                    functions.get(*function).cloned()
+                };
+
+                if let Some(func_def) = func_def {
+                    let func_index = self.vm.register_function(func_def);
+                    self.add_instruction(Instruction::Function(func_index));
+
+                    // TODO: set correct type
+                    Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)))
+                } else {
+                    Err(Error::FeatureUnsupported(
+                        "Invalid function reference".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
     fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
-        // TODO: cache
-        // TODO: check for circular imports
+        if self.import_stack.contains(&module_path.to_string()) {
+            return Err(Error::FeatureUnsupported(
+                "Circular import detected".to_string(),
+            ));
+        }
+
+        if let Some(cached_value) = self.evaluation_cache.get(module_path).cloned() {
+            return self.value_to_instructions(&cached_value);
+        }
+
+        self.import_stack.push(module_path.to_string());
+        let result = self.import_module_internal(module_path);
+        self.import_stack.pop();
+
+        result
+    }
+
+    fn load_and_cache_ast(&mut self, module_path: &str) -> Result<ast::Program, Error> {
+        if let Some(cached_ast) = self.ast_cache.get(module_path).cloned() {
+            return Ok(cached_ast);
+        }
 
         let content = self
             .module_loader
@@ -1054,18 +1117,41 @@ impl<'a> Compiler<'a> {
             Error::ModuleParse(format!("Failed to parse imported module: {}", module_path))
         })?;
 
-        // TODO: update module path (to path of resolved module)
-        let instructions = Compiler::compile(
-            parsed,
-            self.type_registry,
-            self.module_loader,
-            self.vm,
-            self.module_path.clone(),
-        )?;
-        let _result = self.vm.execute_instructions(instructions, true);
+        self.ast_cache
+            .insert(module_path.to_string(), parsed.clone());
 
-        // TODO: 'emit_value_reconstruction'
-        todo!()
+        Ok(parsed)
+    }
+
+    fn import_module_internal(&mut self, module_path: &str) -> Result<Type, Error> {
+        let parsed = self.load_and_cache_ast(module_path)?;
+
+        let saved_instructions = std::mem::take(&mut self.instructions);
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_type_aliases = std::mem::take(&mut self.type_aliases);
+
+        self.scopes = vec![HashMap::new()];
+        self.type_aliases = HashMap::new();
+
+        for statement in parsed.statements {
+            self.compile_statement(statement)?;
+        }
+
+        let module_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = saved_instructions;
+        self.scopes = saved_scopes;
+        self.type_aliases = saved_type_aliases;
+
+        let value = self
+            .vm
+            .execute_instructions(module_instructions, true)
+            .map_err(|_e| Error::FeatureUnsupported("Module execution failed".to_string()))?
+            .unwrap_or(vm::Value::Tuple(TypeId::NIL, vec![]));
+
+        self.evaluation_cache
+            .insert(module_path.to_string(), value.clone());
+        self.value_to_instructions(&value)
     }
 
     fn compile_operation(
