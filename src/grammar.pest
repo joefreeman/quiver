@@ -97,7 +97,7 @@ positional_access = @{ "." ~ ASCII_DIGIT+ }
 operator = { "==" | "!=" | "<=" | ">=" | "+" | "-" | "*" | "/" | "%" | "<" | ">" }
 
 // Tail-call
-tail_call = { "&" ~ identifier }
+tail_call = { "&" ~ identifier? }
 
 // Import expression: %"path"
 import = { "%" ~ string_literal }
@@ -110,7 +110,6 @@ value = {
     block |
     parameter |
     member_access |
-    tail_call |
     import |
     "(" ~ ws? ~ expression ~ ws? ~ ")"
 }

@@ -58,7 +58,6 @@ pub enum Value {
     Block(Block),
     Parameter(Parameter),
     MemberAccess(MemberAccess),
-    TailCall(String),
     Import(String),
     Parenthesized(Box<Expression>),
 }

@@ -373,7 +373,7 @@ impl VM {
             return Err(Error::TupleEmpty);
         }
         let mut values = vec![0; tuple_size];
-        for i in 0..tuple_size {
+        for i in (0..tuple_size).rev() {
             match self.stack.pop() {
                 Some(Value::Integer(v)) => values[i] = v,
                 Some(value) => {

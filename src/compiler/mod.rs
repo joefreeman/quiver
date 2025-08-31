@@ -112,14 +112,7 @@ fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
     let mut flattened = Vec::new();
     for t in types {
         match t {
-            Type::Unresolved(ts) => {
-                if ts.is_empty() {
-                    return Err(Error::TypeUnresolved(
-                        "Empty type union in branch narrowing".to_string(),
-                    ));
-                }
-                flattened.extend(ts);
-            }
+            Type::Unresolved(ts) => flattened.extend(ts),
             Type::Resolved(t) => flattened.push(t),
         }
     }
@@ -995,7 +988,6 @@ impl<'a> Compiler<'a> {
             ast::Value::MemberAccess(member_access) => {
                 self.compile_value_member_access(&member_access.target, member_access.accessors)
             }
-            ast::Value::TailCall(identifier) => self.compile_value_tail_call(&identifier),
             ast::Value::Import(path) => self.compile_value_import(&path),
             ast::Value::Parenthesized(expression) => {
                 self.compile_expression(*expression, parameter_type.clone())
@@ -1007,10 +999,6 @@ impl<'a> Compiler<'a> {
         }
 
         Ok(value_type)
-    }
-
-    fn compile_value_tail_call(&self, _identifier: &str) -> Result<Type, Error> {
-        todo!()
     }
 
     fn value_to_instructions(&mut self, value: &vm::Value) -> Result<Type, Error> {
@@ -1186,8 +1174,19 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_tail_call(&self, _identifier: &str) -> Result<Type, Error> {
-        todo!()
+    fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<Type, Error> {
+        if identifier.is_empty() {
+            self.add_instruction(Instruction::TailCall(true));
+            Ok(Type::Unresolved(vec![]))
+        } else {
+            self.add_instruction(Instruction::Load(identifier.to_string()));
+            self.add_instruction(Instruction::TailCall(false));
+
+            match self.lookup_variable(identifier) {
+                Some(function_type) => Ok(function_type),
+                None => Err(Error::VariableUndefined(identifier.to_string())),
+            }
+        }
     }
 
     fn compile_operator(

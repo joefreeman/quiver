@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use crate::ast;
+use std::collections::HashSet;
 
 pub fn collect_free_variables(
     expression: &ast::Expression,
@@ -72,9 +72,6 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Value::Parameter(_) => {}
             ast::Value::MemberAccess(member_access) => {
                 self.visit_identifier(&member_access.target);
-            }
-            ast::Value::TailCall(identifier) => {
-                self.visit_identifier(identifier);
             }
             ast::Value::Import(_) => {}
             ast::Value::Parenthesized(expr) => {

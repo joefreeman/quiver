@@ -212,10 +212,6 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error> {
         Rule::parameter => Ok(Value::Parameter(parse_parameter(inner_pair)?)),
         Rule::member_access => Ok(Value::MemberAccess(parse_member_access(inner_pair)?)),
         // Rule::identifier => Ok(Value::Identifier(inner_pair.as_str().to_string())),
-        Rule::tail_call => {
-            let name = inner_pair.into_inner().next().unwrap().as_str().to_string();
-            Ok(Value::TailCall(name))
-        }
         Rule::import => {
             let path = parse_string_literal(inner_pair.into_inner().next().unwrap().as_str())?;
             Ok(Value::Import(path))
@@ -254,7 +250,11 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
             Ok(Operation::PositionalAccess(index))
         }
         Rule::tail_call => {
-            let name = pair.into_inner().next().unwrap().as_str().to_string();
+            let name = pair
+                .into_inner()
+                .next()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| "".to_string());
             Ok(Operation::TailCall(name))
         }
         rule => Err(Error::RuleUnexpected {
