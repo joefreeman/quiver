@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Constant {
     Integer(i64),
     Binary(Vec<u8>),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Function {
     // TODO: type_id?
     pub captures: Vec<String>,

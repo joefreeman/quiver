@@ -24,6 +24,7 @@ pub enum Error {
     Generic(String), // TODO: remove
 }
 
+#[derive(Debug, Clone, PartialEq)]
 enum Type {
     Resolved(types::Type),
     Unresolved(Vec<types::Type>),
@@ -42,26 +43,26 @@ fn narrow_types(types: Vec<Type>) -> Type {
 
     match flattened.len() {
         0 => panic!("Cannot create union with no types"),
-        1 => Type::Resolved(flattened.get(0).unwrap()),
+        1 => Type::Resolved(flattened.get(0).unwrap().clone()),
         _ => Type::Unresolved(flattened),
     }
 }
 
-pub struct Compiler {
+pub struct Compiler<'a> {
     instructions: Vec<Instruction>,
     scopes: Vec<HashMap<String, Type>>,
     type_aliases: HashMap<String, Type>,
     type_registry: types::TypeRegistry,
-    module_loader: ModuleLoader,
+    module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
     vm: VM,
 }
 
-impl Compiler {
+impl<'a> Compiler<'a> {
     pub fn compile(
         program: ast::Program,
         type_registry: &mut types::TypeRegistry,
-        module_loader: &mut ModuleLoader,
+        module_loader: &'a dyn ModuleLoader,
         vm: &mut VM,
         module_path: Option<PathBuf>,
     ) -> Result<Vec<Instruction>, Error> {
@@ -69,10 +70,10 @@ impl Compiler {
             instructions: Vec::new(),
             scopes: vec![HashMap::new()],
             type_aliases: HashMap::new(),
-            type_registry,
+            type_registry: type_registry.clone(),
             module_loader,
             module_path,
-            vm,
+            vm: vm.clone(),
         };
 
         for statement in program.statements {
@@ -102,8 +103,8 @@ impl Compiler {
     }
 
     fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
-        self.type_aliases
-            .insert(name, self.resolve_ast_type(type_definition));
+        let resolved_type = self.resolve_ast_type(type_definition);
+        self.type_aliases.insert(name.to_string(), resolved_type);
         Ok(())
     }
 
@@ -114,13 +115,13 @@ impl Compiler {
     ) -> Result<(), Error> {
         let content = self
             .module_loader
-            .load(module_path, self.module_path)
-            .map_err(Error::ModuleError);
+            .load(module_path, self.module_path.as_deref())
+            .map_err(Error::ModuleError)?;
 
-        let parsed = parser::parse(content)
+        let parsed = parser::parse(&content)
             .map_err(|e| Error::Generic("Failed to parse imported module".to_string()))?;
 
-        let type_aliases = parsed
+        let type_aliases: Vec<_> = parsed
             .statements
             .iter()
             .filter_map(|stmt| match stmt {
@@ -135,16 +136,16 @@ impl Compiler {
         match &pattern {
             ast::TypeImportPattern::Star => {
                 for (name, type_definition) in type_aliases {
-                    self.compile_type_alias(name, type_definition)?;
+                    self.compile_type_alias(name, type_definition.clone())?;
                 }
             }
             ast::TypeImportPattern::Partial(requested_names) => {
                 for requested_name in requested_names {
                     if let Some((name, type_definition)) = type_aliases
                         .iter()
-                        .find(|alias| &alias.name == requested_name)
+                        .find(|alias| alias.0.as_str() == *requested_name)
                     {
-                        self.compile_type_alias(name, type_definition)?;
+                        self.compile_type_alias(name, (*type_definition).clone())?;
                     } else {
                         return Err(Error::Generic(format!(
                             "Type '{}' not found in module '{}'",
@@ -180,14 +181,6 @@ impl Compiler {
         }
     }
 
-    fn compile_variable(&mut self, name: &str) -> Result<Type, Error> {
-        let variable_type = self
-            .lookup_variable(name)
-            .ok_or(Error::UndefinedVariable(name.to_string()))?;
-        self.add_instruction(Instruction::Load(name.to_string()));
-        Ok(variable_type)
-    }
-
     fn compile_value_tuple(
         &mut self,
         tuple_name: Option<String>,
@@ -196,15 +189,15 @@ impl Compiler {
     ) -> Result<Type, Error> {
         let mut field_types = Vec::new();
         let mut seen_names = HashSet::new();
-        for field in fields {
-            if let Some(field_name) = field.name {
-                if !seen_names.insert(field_name) {
-                    return Err(Error::DuplicatedFieldName(field_name));
+        for field in &fields {
+            if let Some(ref field_name) = field.name {
+                if !seen_names.insert(field_name.clone()) {
+                    return Err(Error::DuplicatedFieldName(field_name.clone()));
                 }
             }
-            let field_type = self.compile_chain(field.value, parameter_type)?;
+            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
             if let Type::Resolved(resolved_type) = field_type {
-                field_types.push((field.name, resolved_type));
+                field_types.push((field.name.clone(), resolved_type));
             } else {
                 return Err(Error::Generic(format!("Tuple field type unresolved")));
             }
@@ -226,25 +219,25 @@ impl Compiler {
 
         let mut field_types = Vec::new();
         let mut seen_names = HashSet::new();
-        for field in fields {
-            if let Some(name) = field.name {
-                if !seen_names.insert(name) {
-                    return Err(Error::DuplicatedFieldName(name));
+        for field in &fields {
+            if let Some(ref name) = field.name {
+                if !seen_names.insert(name.clone()) {
+                    return Err(Error::DuplicatedFieldName(name.clone()));
                 }
             }
-            let field_type = match field.value {
+            let field_type = match &field.value {
                 ast::OperationTupleFieldValue::Ripple => {
                     // TODO: avoid using variable?
                     self.add_instruction(Instruction::Load("~".to_string()));
-                    value_type
+                    value_type.clone()
                 }
                 ast::OperationTupleFieldValue::Chain(chain) => {
-                    self.compile_chain(chain, parameter_type)?
+                    self.compile_chain(chain.clone(), parameter_type.clone())?
                 }
             };
 
             if let Type::Resolved(resolved_type) = field_type {
-                field_types.push((field.name, resolved_type));
+                field_types.push((field.name.clone(), resolved_type));
             } else {
                 return Err(Error::Generic(format!("Tuple field type unresolved")));
             }
@@ -259,58 +252,63 @@ impl Compiler {
         &mut self,
         function_definition: ast::FunctionDefinition,
     ) -> Result<Type, Error> {
-        let mut function_params = HashSet::new();
+        let mut function_params: HashSet<String> = HashSet::new();
 
-        if let Some(ast::Type::Tuple(tuple_type)) = function_definition.parameter_type {
+        if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
             for field in &tuple_type.fields {
                 if let Some(field_name) = &field.name {
-                    function_params.insert(field_name);
+                    function_params.insert(field_name.clone());
                 }
             }
         }
 
-        let mut captures = HashSet::new();
-        self.collect_free_variables(
-            function_definition.body.expression,
-            function_params,
-            &mut captures,
-        );
+        let mut captures: HashSet<String> = HashSet::new();
+        // TODO: Implement collect_free_variables for expressions
+        // self.collect_free_variables(
+        //     function_definition.body.expression,
+        //     function_params,
+        //     &mut captures,
+        // );
 
-        let parameter_type = match function_definition.parameter_type {
-            Some(t) => self.resolve_ast_type(t),
+        let parameter_type = match &function_definition.parameter_type {
+            Some(t) => self.resolve_ast_type(t.clone()),
             None => Type::Resolved(types::Type::Tuple(TypeId::NIL)),
         };
 
-        let mut compiler = Self {
-            instructions: Vec::new(),
-            scopes: vec![HashMap::new()],
-            type_aliases: self.type_aliases,
-            type_registry: self.type_registry,
-            module_loader: self.module_loader,
-            module_path: self.module_path,
-        };
+        // Instead of creating a new compiler with all the fields,
+        // we'll compile in place and manage the scope manually
+        self.scopes.push(HashMap::new());
 
-        for capture_name in captures {
+        for capture_name in &captures {
             if let Some(var_type) = self.lookup_variable(&capture_name) {
-                compiler.define_variable(&capture_name, var_type);
+                self.define_variable(&capture_name, var_type);
             }
         }
 
-        if let Some(ast::Type::Tuple(tuple_type)) = function_definition.parameter_type {
+        let saved_instructions_len = self.instructions.len();
+
+        if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
                 // TODO: determine whether field is used
-                if let Some(field_name) = field.name {
-                    compiler.add_instruction(Instruction::Parameter);
-                    compiler.add_instruction(Instruction::Get(field_index));
-                    compiler.add_instruction(Instruction::Store(field_name));
-                    compiler.define_variable(&field_name, field.type_def); // TODO: convert to compiler type
+                if let Some(field_name) = &field.name {
+                    self.add_instruction(Instruction::Parameter);
+                    self.add_instruction(Instruction::Get(field_index));
+                    self.add_instruction(Instruction::Store(field_name.clone()));
+                    let field_type = self.resolve_ast_type(field.type_def.clone());
+                    self.define_variable(field_name, field_type);
                 }
             }
         }
         let body_type =
-            compiler.compile_expression(function_definition.body.expression, parameter_type)?;
+            self.compile_expression(function_definition.body.expression, parameter_type.clone())?;
 
-        compiler.add_instruction(Instruction::Return);
+        self.add_instruction(Instruction::Return);
+
+        // Extract the function instructions
+        let function_instructions = self.instructions.split_off(saved_instructions_len);
+
+        // Pop the function scope
+        self.scopes.pop();
 
         // TODO: record function type?
         // let param_compiler_type =
@@ -322,14 +320,20 @@ impl Compiler {
         // );
 
         let function_index = self.vm.register_function(Function {
-            instructions: compiler.instructions,
+            instructions: function_instructions,
             captures: captures.into_iter().collect(),
         });
         self.add_instruction(Instruction::Function(function_index));
 
         Ok(Type::Resolved(types::Type::Function(
-            parameter_type,
-            body_type,
+            Box::new(match parameter_type {
+                Type::Resolved(t) => t,
+                Type::Unresolved(_) => todo!("Handle unresolved parameter type"),
+            }),
+            Box::new(match body_type {
+                Type::Resolved(t) => t,
+                Type::Unresolved(_) => todo!("Handle unresolved body type"),
+            }),
         )))
     }
 
@@ -434,7 +438,8 @@ impl Compiler {
                 self.add_instruction(Instruction::Pop);
             }
 
-            let condition_type = self.compile_sequence(branch.condition, parameter_type)?;
+            let condition_type =
+                self.compile_sequence(branch.condition.clone(), parameter_type.clone())?;
 
             if branch.consequence.is_some() {
                 self.add_instruction(Instruction::Duplicate);
@@ -443,8 +448,10 @@ impl Compiler {
                 next_branch_jumps.push((next_branch_jump, i + 1));
                 self.add_instruction(Instruction::Pop);
 
-                let consequence_type =
-                    self.compile_sequence(branch.consequence.unwrap(), parameter_type)?;
+                let consequence_type = self.compile_sequence(
+                    branch.consequence.clone().unwrap(),
+                    parameter_type.clone(),
+                )?;
                 branch_types.push(consequence_type);
 
                 if !is_last_branch {
@@ -500,9 +507,11 @@ impl Compiler {
         for (i, term) in sequence.terms.iter().enumerate() {
             last_type = Some(match term {
                 ast::Term::Assignment { pattern, value } => {
-                    self.compile_assigment(pattern, value, parameter_type)
+                    self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone())
                 }
-                ast::Term::Chain(chain) => self.compile_chain(chain, parameter_type),
+                ast::Term::Chain(chain) => {
+                    self.compile_chain(chain.clone(), parameter_type.clone())
+                }
             }?);
 
             if i < sequence.terms.len() - 1 {
@@ -548,9 +557,9 @@ impl Compiler {
 
                 match parameter_type {
                     Type::Resolved(types::Type::Tuple(type_id)) => {
-                        if let Some(type_info) = self.type_registry.lookup_type(type_id) {
+                        if let Some(type_info) = self.type_registry.lookup_type(&type_id) {
                             if let Some(field) = type_info.1.get(index) {
-                                Ok(Type::Resolved(field.1))
+                                Ok(Type::Resolved(field.1.clone()))
                             } else {
                                 Err(Error::Generic("".to_string()))
                             }
@@ -568,7 +577,7 @@ impl Compiler {
         let mut value_type = match chain.value {
             ast::Value::Literal(literal) => self.compile_literal(literal),
             ast::Value::Tuple(tuple) => {
-                self.compile_value_tuple(tuple.name, tuple.fields, parameter_type)
+                self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone())
             }
             ast::Value::FunctionDefinition(function_definition) => {
                 self.compile_function_definition(function_definition)
@@ -576,19 +585,21 @@ impl Compiler {
             ast::Value::Block(block) => {
                 self.compile_block(block, Type::Resolved(types::Type::Tuple(TypeId::NIL)))
             }
-            ast::Value::Parameter(parameter) => self.compile_parameter(parameter, parameter_type),
+            ast::Value::Parameter(parameter) => {
+                self.compile_parameter(parameter, parameter_type.clone())
+            }
             ast::Value::MemberAccess(member_access) => {
                 self.compile_value_member_access(&member_access.target, member_access.accessors)
             }
             ast::Value::TailCall(identifier) => self.compile_value_tail_call(&identifier),
             ast::Value::Import(path) => self.compile_value_import(&path),
             ast::Value::Parenthesized(expression) => {
-                self.compile_expression(expression, parameter_type)
+                self.compile_expression(*expression, parameter_type.clone())
             }
         }?;
 
         for operation in chain.operations {
-            value_type = self.compile_operation(operation, value_type, parameter_type)?;
+            value_type = self.compile_operation(operation, value_type, parameter_type.clone())?;
         }
 
         Ok(value_type)
@@ -598,25 +609,25 @@ impl Compiler {
         todo!()
     }
 
-    fn compile_value_import(&self, module_path: &str) -> Result<Type, Error> {
+    fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
         // TODO: cache
         // TODO: check for circular imports
 
         let content = self
             .module_loader
-            .load(module_path, self.module_path)
-            .map_err(Error::ModuleError);
+            .load(module_path, self.module_path.as_deref())
+            .map_err(Error::ModuleError)?;
 
-        let parsed = parser::parse(content)
+        let parsed = parser::parse(&content)
             .map_err(|e| Error::Generic("Failed to parse imported module".to_string()))?;
 
         // TODO: update module path (to path of resolved module)
         let instructions = Compiler::compile(
             parsed,
-            self.type_registry,
+            &mut self.type_registry,
             self.module_loader,
-            self.vm,
-            self.module_path,
+            &mut self.vm,
+            self.module_path.clone(),
         )?;
         let result = self.vm.execute_instructions(instructions, true);
 
@@ -658,14 +669,15 @@ impl Compiler {
     ) -> Result<Type, Error> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
-                let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+                let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
                 let index = tuple_type
                     .1
                     .iter()
-                    .position(|f| f.0 == Some(field_name))
+                    .position(|f| f.0 == Some(field_name.clone()))
                     .ok_or(Error::Generic("".to_string()))?;
+                let result_type = tuple_type.1[index].1.clone();
                 self.add_instruction(Instruction::Get(index));
-                Ok(Type::Resolved(tuple_type.1[index].1))
+                Ok(Type::Resolved(result_type))
             }
             _ => Err(Error::Generic(format!(
                 "Cannot access field '{}' on non-tuple type",
@@ -681,9 +693,10 @@ impl Compiler {
     ) -> Result<Type, Error> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
-                let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+                let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
+                let result_type = tuple_type.1[index].1.clone();
                 self.add_instruction(Instruction::Get(index));
-                Ok(Type::Resolved(tuple_type.1[index].1))
+                Ok(Type::Resolved(result_type))
             }
             _ => Err(Error::Generic(format!(
                 "Cannot access field at position {} on non-tuple type",
@@ -704,7 +717,8 @@ impl Compiler {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
                 let tuple_type = self
-                    .lookup_tuple_type(type_id)
+                    .type_registry
+                    .lookup_type(&type_id)
                     .ok_or(Error::Generic("".to_string()))?;
                 let tuple_size = tuple_type.1.len();
 
@@ -803,17 +817,18 @@ impl Compiler {
         for accessor in accessors {
             match last_type {
                 Type::Resolved(types::Type::Tuple(type_id)) => {
-                    let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+                    let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
                     let index = match accessor {
                         ast::AccessPath::Field(field_name) => tuple_type
                             .1
                             .iter()
-                            .position(|f| f.0 == Some(field_name))
+                            .position(|f| f.0 == Some(field_name.clone()))
                             .ok_or(Error::Generic("".to_string()))?,
                         ast::AccessPath::Index(index) => index,
                     };
+                    let new_type = tuple_type.1[index].1.clone();
                     self.add_instruction(Instruction::Get(index));
-                    last_type = Type::Resolved(tuple_type.1[index].1);
+                    last_type = Type::Resolved(new_type);
                 }
                 _ => return Err(Error::Generic("".to_string())),
             }
@@ -837,17 +852,18 @@ impl Compiler {
         for accessor in accessors {
             match last_type {
                 Type::Resolved(types::Type::Tuple(type_id)) => {
-                    let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+                    let tuple_type = self.type_registry.lookup_type(&type_id).unwrap();
                     let index = match accessor {
                         ast::AccessPath::Field(field_name) => tuple_type
                             .1
                             .iter()
-                            .position(|f| f.0 == Some(field_name))
+                            .position(|f| f.0 == Some(field_name.clone()))
                             .ok_or(Error::Generic("".to_string()))?,
                         ast::AccessPath::Index(index) => index,
                     };
+                    let new_type = tuple_type.1[index].1.clone();
                     self.add_instruction(Instruction::Get(index));
-                    last_type = Type::Resolved(tuple_type.1[index].1);
+                    last_type = Type::Resolved(new_type);
                 }
                 _ => return Err(Error::Generic("".to_string())),
             }
@@ -855,15 +871,26 @@ impl Compiler {
 
         match &last_type {
             Type::Resolved(types::Type::Function(parameter_type, return_type)) => {
-                if value_type != &parameter_type {
+                // Extract the inner type from value_type for comparison
+                let value_inner_type = match &value_type {
+                    Type::Resolved(inner_type) => inner_type,
+                    Type::Unresolved(_) => {
+                        return Err(Error::TypeMismatch {
+                            expected: format!("{:?}", parameter_type),
+                            found: "unresolved type".to_string(),
+                        });
+                    }
+                };
+
+                if value_inner_type != parameter_type.as_ref() {
                     return Err(Error::TypeMismatch {
                         expected: format!("{:?}", parameter_type),
-                        found: format!("{:?}", value_type),
+                        found: format!("{:?}", value_inner_type),
                     });
                 }
 
                 self.add_instruction(Instruction::Call);
-                Ok(Type::Resolved(return_type))
+                Ok(Type::Resolved((**return_type).clone()))
             }
             _ => Err(Error::UnusedChainedValue),
         }
@@ -882,7 +909,7 @@ impl Compiler {
     fn lookup_variable(&self, name: &str) -> Option<Type> {
         for scope in self.scopes.iter().rev() {
             if let Some(variable_type) = scope.get(name) {
-                return Some(variable_type);
+                return Some(variable_type.clone());
             }
         }
         None

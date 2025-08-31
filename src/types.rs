@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::bytecode::TypeId;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Type {
     Integer,
     Binary,
@@ -10,6 +10,7 @@ pub enum Type {
     Function(Box<Type>, Box<Type>),
 }
 
+#[derive(Clone)]
 pub struct TypeRegistry {
     types: HashMap<TypeId, (Option<String>, Vec<(Option<String>, Type)>)>,
     next_id: usize,
@@ -26,7 +27,7 @@ impl TypeRegistry {
         assert_eq!(nil_type_id, TypeId::NIL);
 
         let nil_type_id = registry.register_type(Some("Ok".to_string()), vec![]);
-        assert_eq!(nil_type_id, TypeId::NIL);
+        assert_eq!(nil_type_id, TypeId::OK);
 
         registry
     }
@@ -50,9 +51,9 @@ impl TypeRegistry {
     }
 
     pub fn lookup_type(
-        self,
-        type_id: TypeId,
-    ) -> Option<(Option<String>, Vec<(Option<String>, Type)>)> {
+        &self,
+        type_id: &TypeId,
+    ) -> Option<&(Option<String>, Vec<(Option<String>, Type)>)> {
         self.types.get(type_id)
     }
 }

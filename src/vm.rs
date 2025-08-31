@@ -53,7 +53,7 @@ impl fmt::Display for Value {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scope {
     parameter: Value,
     variables: HashMap<String, Value>,
@@ -80,7 +80,7 @@ pub enum Error {
     EmptyTuple,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Frame {
     instructions: Vec<Instruction>,
     captures: HashMap<String, Value>,
@@ -97,6 +97,7 @@ impl Frame {
     }
 }
 
+#[derive(Clone)]
 pub struct VM {
     constants: Vec<Constant>,
     functions: Vec<Function>,

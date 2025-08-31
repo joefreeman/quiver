@@ -15,7 +15,7 @@ use vm::{VM, Value};
 
 pub struct Quiver {
     type_registry: TypeRegistry,
-    module_loader: ModuleLoader,
+    module_loader: Box<dyn ModuleLoader>,
     vm: VM,
 }
 
@@ -25,8 +25,8 @@ impl Quiver {
             // TODO: constant/function pools?
             type_registry: TypeRegistry::new(),
             module_loader: match modules {
-                Some(modules) => InMemoryModuleLoader::new(modules),
-                None => FileSystemModuleLoader::new(),
+                Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
+                None => Box::new(FileSystemModuleLoader::new()),
             },
             vm: VM::new(),
         }
@@ -38,7 +38,7 @@ impl Quiver {
         let instructions = Compiler::compile(
             program,
             &mut self.type_registry,
-            &mut self.module_loader,
+            self.module_loader.as_ref(),
             &mut self.vm,
             None,
         )
@@ -71,7 +71,7 @@ impl Quiver {
         let instructions = Compiler::compile(
             program,
             &mut self.type_registry,
-            &mut self.module_loader,
+            self.module_loader.as_ref(),
             &mut self.vm,
             None, // TODO: module path
         )
