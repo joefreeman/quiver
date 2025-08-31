@@ -107,7 +107,9 @@ fn test_function_parameter_types() {
 #[test]
 fn test_union_type_patterns() {
     // Simplified test - full pattern matching syntax not yet supported by parser
-    quiver().evaluate("process = #(int, Point[x: int, y: int]) { $ }; 42 ~> process").expect_int(42);
+    quiver()
+        .evaluate("process = #(int, Point[x: int, y: int]) { $ }; 42 ~> process")
+        .expect_int(42);
 }
 
 #[test]
@@ -307,18 +309,18 @@ fn test_gradual_typing() {
         .expect_int(42);
 }
 
-#[test] 
+#[test]
 fn test_union_propagation_in_functions() {
     // Test function with union parameter type - without union propagation,
     // this would fail when called with different argument types
     // With union propagation: #(int, bin) creates variants #int -> int and #bin -> int
-    
+
     // Test with integer argument - matches #int -> int variant
     quiver()
         .evaluate("f = #(int, bin) { 42 }; 5 ~> f")
         .expect_int(42);
-        
-    // Test with binary argument - matches #bin -> int variant  
+
+    // Test with binary argument - matches #bin -> int variant
     quiver()
         .evaluate("f = #(int, bin) { 42 }; \"hello\" ~> f")
         .expect_int(42);
@@ -329,14 +331,14 @@ fn test_union_propagation_enables_polymorphism() {
     // Test that union propagation enables functions to work with multiple types
     // The key insight: without union propagation, this function couldn't type-check
     // because the parameter type (int, bin) would be unresolved
-    
+
     // Function that returns the parameter - should work with both int and bin
     quiver()
         .evaluate("identity = #(int, bin) { $ }; 42 ~> identity")
         .expect_int(42);
-    
+
     quiver()
-        .evaluate("identity = #(int, bin) { $ }; \"test\" ~> identity")  
+        .evaluate("identity = #(int, bin) { $ }; \"test\" ~> identity")
         .expect_binary(0);
 }
 
@@ -345,12 +347,12 @@ fn test_union_propagation_in_nested_functions() {
     // Test union propagation with function types that have union inputs and outputs
     // #(int, bin) -> (int, bin) should create 4 variants:
     // #int -> int, #int -> bin, #bin -> int, #bin -> bin
-    
+
     // This function takes a union and returns a constant - tests input union propagation
     quiver()
         .evaluate("processor = #(int, bin) { 100 }; 42 ~> processor")
         .expect_int(100);
-    
+
     // Test with the other union variant
     quiver()
         .evaluate("processor = #(int, bin) { 100 }; \"data\" ~> processor")
@@ -362,14 +364,50 @@ fn test_union_propagation_demonstrates_type_precision() {
     // Test that demonstrates union propagation provides precise type information
     // Without union propagation, functions with union parameters would be unresolved
     // With union propagation, each variant is precisely typed
-    
+
     // This function can handle both int and bin arguments precisely
     quiver()
         .evaluate("flexible = #(int, bin) { $ }; result1 = 42 ~> flexible; result1")
         .expect_int(42);
-        
-    // And it preserves the type of binary arguments too  
+
+    // And it preserves the type of binary arguments too
     quiver()
         .evaluate("flexible = #(int, bin) { $ }; result2 = \"hello\" ~> flexible; result2")
         .expect_binary(0);
+}
+
+#[test]
+fn test_tuple_destructuring() {
+    // Test basic tuple destructuring: [a, b] = [1, 2]; a
+    quiver().evaluate("[a, b] = [10, 20]; a").expect_int(10);
+
+    // Test second field access
+    quiver()
+        .evaluate("[first, second] = [100, 200]; second")
+        .expect_int(200);
+}
+
+#[test]
+fn test_named_tuple_destructuring() {
+    // Test named tuple destructuring: Point[x: px, y: py] = Point[x: 3, y: 4]; px
+    quiver()
+        .evaluate("Point[x: px, y: py] = Point[x: 5, y: 15]; px")
+        .expect_int(5);
+
+    quiver()
+        .evaluate("Point[x: px, y: py] = Point[x: 8, y: 12]; py")
+        .expect_int(12);
+}
+
+#[test]
+fn test_star_destructuring() {
+    // Test star destructuring: * = X[a: 1, b: 2, c: 3]; a
+    // This should extract all named fields as variables
+    quiver()
+        .evaluate("* = Point[x: 42, y: 84]; x")
+        .expect_int(42);
+
+    quiver()
+        .evaluate("* = Point[x: 10, y: 20]; y")
+        .expect_int(20);
 }

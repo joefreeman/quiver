@@ -465,9 +465,13 @@ impl<'a> Compiler<'a> {
                 self.define_variable(&name, expression_type);
                 self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
             }
-            ast::Pattern::Tuple(tuple_pattern) => self.compile_tuple_destructuring(tuple_pattern),
-            ast::Pattern::Partial(field_names) => self.compile_partial_destructuring(field_names),
-            ast::Pattern::Star => self.compile_star_destructuring(),
+            ast::Pattern::Tuple(tuple_pattern) => {
+                self.compile_tuple_destructuring(tuple_pattern, &expression_type)
+            }
+            ast::Pattern::Partial(field_names) => {
+                self.compile_partial_destructuring(field_names, &expression_type)
+            }
+            ast::Pattern::Star => self.compile_star_destructuring(&expression_type),
             ast::Pattern::Literal(literal_value) => {
                 match literal_value {
                     ast::Literal::Integer(integer) => {
@@ -494,16 +498,115 @@ impl<'a> Compiler<'a> {
         Ok(Type::Resolved(types::Type::Tuple(TypeId::OK)))
     }
 
-    fn compile_tuple_destructuring(&mut self, _tuple_pattern: ast::TuplePattern) {
-        todo!()
+    fn compile_tuple_destructuring(
+        &mut self,
+        tuple_pattern: ast::TuplePattern,
+        expression_type: &Type,
+    ) {
+        for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
+            self.add_instruction(Instruction::Duplicate);
+            self.add_instruction(Instruction::Get(field_index));
+
+            let field_type = match expression_type {
+                Type::Resolved(types::Type::Tuple(type_id)) => {
+                    if let Some(type_info) = self.type_registry.borrow().lookup_type(type_id) {
+                        if let Some(field_info) = type_info.1.get(field_index) {
+                            Type::Resolved(field_info.1.clone())
+                        } else {
+                            Type::Unresolved(vec![]) // Field index out of bounds
+                        }
+                    } else {
+                        Type::Unresolved(vec![]) // Type not found
+                    }
+                }
+                _ => Type::Unresolved(vec![]), // Non-tuple type
+            };
+
+            match &field.pattern {
+                ast::Pattern::Identifier(name) => {
+                    self.add_instruction(Instruction::Store(name.clone()));
+                    self.define_variable(name, field_type);
+                }
+                ast::Pattern::Wildcard => {
+                    self.add_instruction(Instruction::Pop);
+                }
+                _ => {
+                    self.add_instruction(Instruction::Pop);
+                }
+            }
+        }
+
+        self.add_instruction(Instruction::Pop);
+        self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
     }
 
-    fn compile_partial_destructuring(&mut self, _field_names: Vec<String>) {
-        todo!()
+    fn compile_partial_destructuring(&mut self, field_names: Vec<String>, expression_type: &Type) {
+        for field_name in field_names {
+            self.add_instruction(Instruction::Duplicate);
+
+            let (field_index, field_type) = match expression_type {
+                Type::Resolved(types::Type::Tuple(type_id)) => {
+                    if let Some(type_info) = self.type_registry.borrow().lookup_type(type_id) {
+                        if let Some((index, (_, field_type))) = type_info
+                            .1
+                            .iter()
+                            .enumerate()
+                            .find(|(_, (name, _))| name.as_ref() == Some(&field_name))
+                        {
+                            (index, Type::Resolved(field_type.clone()))
+                        } else {
+                            // Field not found - use index 0 as fallback
+                            (0, Type::Unresolved(vec![]))
+                        }
+                    } else {
+                        (0, Type::Unresolved(vec![]))
+                    }
+                }
+                _ => (0, Type::Unresolved(vec![])), // Non-tuple type
+            };
+
+            self.add_instruction(Instruction::Get(field_index));
+            self.add_instruction(Instruction::Store(field_name.clone()));
+            self.define_variable(&field_name, field_type);
+        }
+
+        self.add_instruction(Instruction::Pop);
+        self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
     }
 
-    fn compile_star_destructuring(&mut self) {
-        todo!()
+    fn compile_star_destructuring(&mut self, expression_type: &Type) {
+        match expression_type {
+            Type::Resolved(types::Type::Tuple(type_id)) => {
+                let named_fields: Vec<(usize, String, types::Type)> = {
+                    if let Some(type_info) = self.type_registry.borrow().lookup_type(type_id) {
+                        type_info
+                            .1
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, (name, field_type))| {
+                                name.as_ref()
+                                    .map(|n| (index, n.clone(), field_type.clone()))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+
+                for (field_index, name, field_type) in named_fields {
+                    self.add_instruction(Instruction::Duplicate);
+                    self.add_instruction(Instruction::Get(field_index));
+                    self.add_instruction(Instruction::Store(name.clone()));
+                    self.define_variable(&name, Type::Resolved(field_type));
+                }
+            }
+            _ => {
+                // Non-tuple type or unresolved type - can't extract fields
+            }
+        }
+
+        self.add_instruction(Instruction::Pop); // Pop the original tuple
+        self.add_instruction(Instruction::Tuple(TypeId::OK, 0)); // Push OK
     }
 
     fn compile_expression(
