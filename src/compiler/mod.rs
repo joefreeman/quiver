@@ -46,7 +46,7 @@ fn narrow_types(types: Vec<Type>) -> Type {
     flattened.dedup();
 
     match flattened.len() {
-        0 => panic!("Cannot create union with no types"),
+        0 => Type::Unresolved(vec![]), // Handle empty case gracefully
         1 => Type::Resolved(flattened.get(0).unwrap().clone()),
         _ => Type::Unresolved(flattened),
     }
@@ -346,33 +346,89 @@ impl<'a> Compiler<'a> {
 
         self.add_instruction(Instruction::Function(function_index));
 
-        Ok(Type::Resolved(types::Type::Function(
-            Box::new(match parameter_type {
-                Type::Resolved(t) => t,
-                Type::Unresolved(_) => todo!("Handle unresolved parameter type"),
-            }),
-            Box::new(match body_type {
-                Type::Resolved(t) => t,
-                Type::Unresolved(_) => todo!("Handle unresolved body type"),
-            }),
-        )))
+        // For unresolved parameter or body types, we return the whole function type as unresolved
+        match (&parameter_type, &body_type) {
+            (Type::Resolved(param_t), Type::Resolved(body_t)) => Ok(Type::Resolved(
+                types::Type::Function(Box::new(param_t.clone()), Box::new(body_t.clone())),
+            )),
+            _ => {
+                // If either parameter or body type is unresolved, return an unresolved function type
+                // For now, we'll represent this as an unresolved type with an empty vector
+                // In a more complete implementation, we'd preserve the unresolved nature
+                Ok(Type::Unresolved(vec![]))
+            }
+        }
     }
 
     fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Type {
         match ast_type {
             ast::Type::Primitive(ast::PrimitiveType::Int) => Type::Resolved(types::Type::Integer),
-            ast::Type::Primitive(ast::PrimitiveType::Bin) => Type::Resolved(types::Type::Integer),
-            ast::Type::Tuple(_tuple) => {
-                todo!()
+            ast::Type::Primitive(ast::PrimitiveType::Bin) => Type::Resolved(types::Type::Binary),
+            ast::Type::Tuple(tuple) => {
+                // Recursively resolve field types
+                let mut field_types = Vec::new();
+                for field in tuple.fields {
+                    let resolved_field_type = match self.resolve_ast_type(field.type_def) {
+                        Type::Resolved(t) => t,
+                        Type::Unresolved(_) => {
+                            // For now, we can't handle unresolved types in tuple fields
+                            return Type::Unresolved(vec![]);
+                        }
+                    };
+                    field_types.push((field.name, resolved_field_type));
+                }
+
+                // Register the tuple type in the type registry
+                let type_id = self
+                    .type_registry
+                    .borrow_mut()
+                    .register_type(tuple.name, field_types);
+
+                Type::Resolved(types::Type::Tuple(type_id))
             }
-            ast::Type::Function(_function) => {
-                todo!()
+            ast::Type::Function(function) => {
+                let input_type = match self.resolve_ast_type(*function.input) {
+                    Type::Resolved(t) => t,
+                    Type::Unresolved(_) => {
+                        // For now, we can't handle unresolved types in function signatures
+                        return Type::Unresolved(vec![]);
+                    }
+                };
+                let output_type = match self.resolve_ast_type(*function.output) {
+                    Type::Resolved(t) => t,
+                    Type::Unresolved(_) => {
+                        // For now, we can't handle unresolved types in function signatures
+                        return Type::Unresolved(vec![]);
+                    }
+                };
+
+                Type::Resolved(types::Type::Function(
+                    Box::new(input_type),
+                    Box::new(output_type),
+                ))
             }
-            ast::Type::Union(_union) => {
-                todo!()
+            ast::Type::Union(union) => {
+                // Resolve all union member types
+                let mut resolved_types = Vec::new();
+                for member_type in union.types {
+                    match self.resolve_ast_type(member_type) {
+                        Type::Resolved(t) => resolved_types.push(t),
+                        Type::Unresolved(ts) => resolved_types.extend(ts),
+                    }
+                }
+
+                // Return as unresolved union type
+                Type::Unresolved(resolved_types)
             }
-            ast::Type::Identifier(_alias) => {
-                todo!()
+            ast::Type::Identifier(alias) => {
+                // Look up type alias
+                if let Some(aliased_type) = self.type_aliases.get(&alias) {
+                    aliased_type.clone()
+                } else {
+                    // Unknown type alias - for now return an unresolved type
+                    // In a more complete implementation, this should be an error
+                    Type::Unresolved(vec![])
+                }
             }
         }
     }
@@ -918,6 +974,12 @@ impl<'a> Compiler<'a> {
 
                 self.add_instruction(Instruction::Call);
                 Ok(Type::Resolved((**return_type).clone()))
+            }
+            Type::Unresolved(_) => {
+                // For unresolved function types, we'll allow the call but return an unresolved result
+                // This is a more permissive approach for cases where types can't be fully resolved
+                self.add_instruction(Instruction::Call);
+                Ok(Type::Unresolved(vec![]))
             }
             _ => Err(Error::UnusedChainedValue),
         }
