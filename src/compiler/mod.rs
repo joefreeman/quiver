@@ -3,6 +3,8 @@ use std::{
     path::PathBuf,
 };
 
+mod free_variables;
+
 use crate::{
     ast,
     bytecode::{Constant, Function, Instruction, TypeId},
@@ -262,13 +264,11 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let mut captures: HashSet<String> = HashSet::new();
-        // TODO: Implement collect_free_variables for expressions
-        // self.collect_free_variables(
-        //     function_definition.body.expression,
-        //     function_params,
-        //     &mut captures,
-        // );
+        let captures = free_variables::collect_free_variables(
+            &function_definition.body.expression,
+            &function_params,
+            &|name| self.lookup_variable(name).is_some(),
+        );
 
         let parameter_type = match &function_definition.parameter_type {
             Some(t) => self.resolve_ast_type(t.clone()),
@@ -354,15 +354,6 @@ impl<'a> Compiler<'a> {
                 todo!()
             }
         }
-    }
-
-    fn collect_free_variables(
-        &self,
-        term: ast::Term,
-        local_vars: HashSet<&String>,
-        captures: &mut HashSet<String>,
-    ) {
-        // TODO
     }
 
     fn compile_assigment(
