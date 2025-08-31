@@ -185,7 +185,7 @@ fn compile_command(
         buffer
     };
 
-    let bytecode = quiver.compile_to_bytecode(&source, true)?;
+    let bytecode = quiver.compile(&source)?;
 
     let json = if debug {
         serde_json::to_string_pretty(&bytecode)?

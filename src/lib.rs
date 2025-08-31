@@ -61,11 +61,7 @@ impl Quiver {
         todo!()
     }
 
-    pub fn compile_to_bytecode(
-        &mut self,
-        source: &str,
-        use_filesystem: bool,
-    ) -> Result<bytecode::Bytecode, Error> {
+    pub fn compile(&mut self, source: &str) -> Result<bytecode::Bytecode, Error> {
         let program = parser::parse(source).map_err(Error::ParseError)?;
 
         let instructions = Compiler::compile(
@@ -77,10 +73,23 @@ impl Quiver {
         )
         .map_err(Error::CompileError)?;
 
+        let result = self
+            .vm
+            .execute_instructions(instructions, false)
+            .map_err(Error::RuntimeError)?;
+
+        let entry = match result {
+            Some(Value::Function {
+                function,
+                captures: _,
+            }) => Some(function),
+            _ => None,
+        };
+
         let bytecode = bytecode::Bytecode {
-            constants: Vec::new(), // TODO: extract constants from VM
-            functions: Vec::new(), // TODO: extract functions from VM
-            entry: None,           // TODO: set entry point if needed
+            constants: self.vm.get_constants().clone(),
+            functions: self.vm.get_functions().clone(),
+            entry,
         };
 
         Ok(bytecode)

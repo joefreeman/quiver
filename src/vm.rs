@@ -126,6 +126,10 @@ impl VM {
         }
     }
 
+    pub fn get_constants(&self) -> &Vec<Constant> {
+        &self.constants
+    }
+
     pub fn register_function(&mut self, function: Function) -> usize {
         if let Some(index) = self.functions.iter().position(|f| f == &function) {
             index
@@ -133,6 +137,10 @@ impl VM {
             self.functions.push(function);
             self.functions.len() - 1
         }
+    }
+
+    pub fn get_functions(&self) -> &Vec<Function> {
+        &self.functions
     }
 
     pub fn execute_instructions(
