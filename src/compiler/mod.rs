@@ -21,6 +21,11 @@ pub enum Error {
     UnusedChainedValue,
     TypeMismatch { expected: String, found: String },
     ModuleError(ModuleError),
+    UnresolvedType(String),
+    UnknownTypeAlias(String),
+    TypeIndexOutOfBounds { type_name: String, field_index: usize },
+    UnknownFieldName { type_name: String, field_name: String },
+    NonTupleDestructuring(String),
 
     Generic(String), // TODO: remove
 }
@@ -31,11 +36,16 @@ enum Type {
     Unresolved(Vec<types::Type>),
 }
 
-fn narrow_types(types: Vec<Type>) -> Type {
+fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
     let mut flattened = Vec::new();
     for t in types {
         match t {
-            Type::Unresolved(ts) => flattened.extend(ts),
+            Type::Unresolved(ts) => {
+                if ts.is_empty() {
+                    return Err(Error::UnresolvedType("Empty type union in branch narrowing".to_string()));
+                }
+                flattened.extend(ts);
+            }
             Type::Resolved(t) => flattened.push(t),
         }
     }
@@ -43,9 +53,9 @@ fn narrow_types(types: Vec<Type>) -> Type {
     flattened.dedup();
 
     match flattened.len() {
-        0 => Type::Unresolved(vec![]), // Handle empty case gracefully
-        1 => Type::Resolved(flattened.get(0).unwrap().clone()),
-        _ => Type::Unresolved(flattened),
+        0 => Err(Error::UnresolvedType("No valid types found in narrowing".to_string())),
+        1 => Ok(Type::Resolved(flattened.get(0).unwrap().clone())),
+        _ => Ok(Type::Unresolved(flattened)),
     }
 }
 
@@ -113,7 +123,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
-        let resolved_type = self.resolve_ast_type(type_definition);
+        let resolved_type = self.resolve_ast_type(type_definition)?;
         self.type_aliases.insert(name.to_string(), resolved_type);
         Ok(())
     }
@@ -279,7 +289,7 @@ impl<'a> Compiler<'a> {
         );
 
         let parameter_type = match &function_definition.parameter_type {
-            Some(t) => self.resolve_ast_type(t.clone()),
+            Some(t) => self.resolve_ast_type(t.clone())?,
             None => Type::Resolved(types::Type::Tuple(TypeId::NIL)),
         };
 
@@ -301,7 +311,7 @@ impl<'a> Compiler<'a> {
                     self.add_instruction(Instruction::Parameter);
                     self.add_instruction(Instruction::Get(field_index));
                     self.add_instruction(Instruction::Store(field_name.clone()));
-                    let field_type = self.resolve_ast_type(field.type_def.clone());
+                    let field_type = self.resolve_ast_type(field.type_def.clone())?;
                     self.define_variable(field_name, field_type);
                 }
             }
@@ -335,18 +345,23 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Type {
+    fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Result<Type, Error> {
         match ast_type {
-            ast::Type::Primitive(ast::PrimitiveType::Int) => Type::Resolved(types::Type::Integer),
-            ast::Type::Primitive(ast::PrimitiveType::Bin) => Type::Resolved(types::Type::Binary),
+            ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(Type::Resolved(types::Type::Integer)),
+            ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(Type::Resolved(types::Type::Binary)),
             ast::Type::Tuple(tuple) => {
                 // Collect all possible types for each field
                 let mut field_variants: Vec<(Option<String>, Vec<types::Type>)> = Vec::new();
 
                 for field in tuple.fields {
-                    let field_possibilities = match self.resolve_ast_type(field.type_def) {
+                    let field_possibilities = match self.resolve_ast_type(field.type_def)? {
                         Type::Resolved(t) => vec![t],
-                        Type::Unresolved(ts) => ts,
+                        Type::Unresolved(ts) => {
+                            if ts.is_empty() {
+                                return Err(Error::UnresolvedType("Empty field type possibilities".to_string()));
+                            }
+                            ts
+                        }
                     };
                     field_variants.push((field.name, field_possibilities));
                 }
@@ -355,20 +370,30 @@ impl<'a> Compiler<'a> {
                 let tuple_variants =
                     self.cartesian_product_tuple_types(&tuple.name, field_variants);
 
-                match tuple_variants.len() {
-                    0 => Type::Unresolved(vec![]),
+                Ok(match tuple_variants.len() {
+                    0 => return Err(Error::UnresolvedType("No valid tuple type variants found".to_string())),
                     1 => Type::Resolved(tuple_variants.into_iter().next().unwrap()),
                     _ => Type::Unresolved(tuple_variants),
-                }
+                })
             }
             ast::Type::Function(function) => {
-                let input_possibilities = match self.resolve_ast_type(*function.input) {
+                let input_possibilities = match self.resolve_ast_type(*function.input)? {
                     Type::Resolved(t) => vec![t],
-                    Type::Unresolved(ts) => ts,
+                    Type::Unresolved(ts) => {
+                        if ts.is_empty() {
+                            return Err(Error::UnresolvedType("Empty function input type possibilities".to_string()));
+                        }
+                        ts
+                    }
                 };
-                let output_possibilities = match self.resolve_ast_type(*function.output) {
+                let output_possibilities = match self.resolve_ast_type(*function.output)? {
                     Type::Resolved(t) => vec![t],
-                    Type::Unresolved(ts) => ts,
+                    Type::Unresolved(ts) => {
+                        if ts.is_empty() {
+                            return Err(Error::UnresolvedType("Empty function output type possibilities".to_string()));
+                        }
+                        ts
+                    }
                 };
 
                 // Generate cartesian product of input × output types
@@ -384,33 +409,39 @@ impl<'a> Compiler<'a> {
                     })
                     .collect();
 
-                match function_variants.len() {
-                    0 => Type::Unresolved(vec![]),
+                Ok(match function_variants.len() {
+                    0 => return Err(Error::UnresolvedType("No valid function type variants found".to_string())),
                     1 => Type::Resolved(function_variants.into_iter().next().unwrap()),
                     _ => Type::Unresolved(function_variants),
-                }
+                })
             }
             ast::Type::Union(union) => {
                 // Resolve all union member types
                 let mut resolved_types = Vec::new();
                 for member_type in union.types {
-                    match self.resolve_ast_type(member_type) {
+                    match self.resolve_ast_type(member_type)? {
                         Type::Resolved(t) => resolved_types.push(t),
-                        Type::Unresolved(ts) => resolved_types.extend(ts),
+                        Type::Unresolved(ts) => {
+                            if ts.is_empty() {
+                                return Err(Error::UnresolvedType("Empty union member type".to_string()));
+                            }
+                            resolved_types.extend(ts);
+                        }
                     }
                 }
 
                 // Return as unresolved union type
-                Type::Unresolved(resolved_types)
+                if resolved_types.is_empty() {
+                    return Err(Error::UnresolvedType("Empty union type".to_string()));
+                }
+                Ok(Type::Unresolved(resolved_types))
             }
             ast::Type::Identifier(alias) => {
                 // Look up type alias
                 if let Some(aliased_type) = self.type_aliases.get(&alias) {
-                    aliased_type.clone()
+                    Ok(aliased_type.clone())
                 } else {
-                    // Unknown type alias - for now return an unresolved type
-                    // In a more complete implementation, this should be an error
-                    Type::Unresolved(vec![])
+                    Err(Error::UnknownTypeAlias(alias))
                 }
             }
         }
@@ -431,12 +462,14 @@ impl<'a> Compiler<'a> {
                 self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
             }
             ast::Pattern::Tuple(tuple_pattern) => {
-                self.compile_tuple_destructuring(tuple_pattern, &expression_type)
+                self.compile_tuple_destructuring(tuple_pattern, &expression_type)?;
             }
             ast::Pattern::Partial(field_names) => {
-                self.compile_partial_destructuring(field_names, &expression_type)
+                self.compile_partial_destructuring(field_names, &expression_type)?;
             }
-            ast::Pattern::Star => self.compile_star_destructuring(&expression_type),
+            ast::Pattern::Star => {
+                self.compile_star_destructuring(&expression_type)?;
+            }
             ast::Pattern::Literal(literal_value) => {
                 match literal_value {
                     ast::Literal::Integer(integer) => {
@@ -464,7 +497,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         tuple_pattern: ast::TuplePattern,
         expression_type: &Type,
-    ) {
+    ) -> Result<(), Error> {
         for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
             self.add_instruction(Instruction::Duplicate);
             self.add_instruction(Instruction::Get(field_index));
@@ -500,9 +533,10 @@ impl<'a> Compiler<'a> {
 
         self.add_instruction(Instruction::Pop);
         self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
+        Ok(())
     }
 
-    fn compile_partial_destructuring(&mut self, field_names: Vec<String>, expression_type: &Type) {
+    fn compile_partial_destructuring(&mut self, field_names: Vec<String>, expression_type: &Type) -> Result<(), Error> {
         for field_name in field_names {
             self.add_instruction(Instruction::Duplicate);
 
@@ -517,14 +551,16 @@ impl<'a> Compiler<'a> {
                         {
                             (index, Type::Resolved(field_type.clone()))
                         } else {
-                            // Field not found - use index 0 as fallback
-                            (0, Type::Unresolved(vec![]))
+                            return Err(Error::UnknownFieldName { 
+                                type_name: format!("{:?}", type_id), 
+                                field_name: field_name.clone() 
+                            });
                         }
                     } else {
-                        (0, Type::Unresolved(vec![]))
+                        return Err(Error::UnresolvedType("Type not found in registry".to_string()));
                     }
                 }
-                _ => (0, Type::Unresolved(vec![])), // Non-tuple type
+                _ => return Err(Error::NonTupleDestructuring("Cannot destructure non-tuple type".to_string())),
             };
 
             self.add_instruction(Instruction::Get(field_index));
@@ -534,9 +570,10 @@ impl<'a> Compiler<'a> {
 
         self.add_instruction(Instruction::Pop);
         self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
+        Ok(())
     }
 
-    fn compile_star_destructuring(&mut self, expression_type: &Type) {
+    fn compile_star_destructuring(&mut self, expression_type: &Type) -> Result<(), Error> {
         match expression_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
                 let named_fields: Vec<(usize, String, types::Type)> = {
@@ -563,12 +600,13 @@ impl<'a> Compiler<'a> {
                 }
             }
             _ => {
-                // Non-tuple type or unresolved type - can't extract fields
+                return Err(Error::NonTupleDestructuring("Cannot star-destructure non-tuple type".to_string()));
             }
         }
 
         self.add_instruction(Instruction::Pop); // Pop the original tuple
         self.add_instruction(Instruction::Tuple(TypeId::OK, 0)); // Push OK
+        Ok(())
     }
 
     fn compile_expression(
@@ -647,7 +685,7 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        Ok(narrow_types(branch_types))
+        narrow_types(branch_types)
     }
 
     fn compile_sequence(
