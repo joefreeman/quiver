@@ -202,28 +202,50 @@ fn compile_command(
     Ok(())
 }
 
+fn handle_result(result: Result<Option<quiver::vm::Value>, quiver::Error>) {
+    match result {
+        Ok(Some(value)) => println!("{}", value),
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("Error: {}", err);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn run_command(
     input: Option<String>,
     eval: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut quiver = Quiver::new(None);
 
-    let source = if let Some(code) = eval {
-        code
+    if let Some(code) = eval {
+        handle_result(quiver.evaluate(&code));
     } else if let Some(path) = input {
-        fs::read_to_string(&path)?
+        let content = fs::read_to_string(&path)?;
+
+        if path.ends_with(".qv") {
+            handle_result(quiver.evaluate(&content));
+        } else if path.ends_with(".qx") {
+            let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
+            handle_result(quiver.execute(bytecode));
+        } else {
+            eprintln!(
+                "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
+            );
+            std::process::exit(1);
+        }
     } else {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
-        buffer
-    };
 
-    match quiver.evaluate(&source) {
-        Ok(Some(value)) => println!("{}", value),
-        Ok(None) => {} // No output for expressions that don't return values
-        Err(err) => {
-            eprintln!("Error: {}", err);
-            std::process::exit(1);
+        if buffer.trim_start().starts_with('{') {
+            match serde_json::from_str::<quiver::bytecode::Bytecode>(&buffer) {
+                Ok(bytecode) => handle_result(quiver.execute(bytecode)),
+                Err(_) => handle_result(quiver.evaluate(&buffer)),
+            }
+        } else {
+            handle_result(quiver.evaluate(&buffer));
         }
     }
 

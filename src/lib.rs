@@ -94,6 +94,22 @@ impl Quiver {
 
         Ok(bytecode)
     }
+
+    pub fn execute(&mut self, bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
+        for constant in bytecode.constants {
+            self.vm.register_constant(constant);
+        }
+
+        for function in bytecode.functions {
+            self.vm.register_function(function);
+        }
+
+        if let Some(entry) = bytecode.entry {
+            self.vm.execute_function(entry).map_err(Error::RuntimeError)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Debug)]
