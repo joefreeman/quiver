@@ -70,15 +70,28 @@ impl Scope {
 
 #[derive(Debug)]
 pub enum Error {
+    // Stack operation errors
     StackUnderflow,
-    InvalidCall,
+
+    // Function and call errors
+    CallInvalid,
+    FunctionUndefined(usize),
+
+    // Variable and constant access errors
+    VariableUndefined(String),
+    ConstantUndefined(usize),
+
+    // Data access errors
+    FieldAccessInvalid(usize),
+
+    // Type system errors
     TypeMismatch { expected: String, found: String },
-    UndefinedVariable(String),
-    UndefinedConstant(usize),
-    UndefinedFunction(usize),
-    InvalidFieldAccess(usize),
-    EmptyTuple,
-    InvalidScopeCount { expected: usize, found: usize },
+
+    // Tuple and structure errors
+    TupleEmpty,
+
+    // Scope management errors
+    ScopeCountInvalid { expected: usize, found: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +173,7 @@ impl VM {
 
         if let Some(frame) = self.frames.last() {
             if frame.scopes != 1 {
-                return Err(Error::InvalidScopeCount {
+                return Err(Error::ScopeCountInvalid {
                     expected: 1,
                     found: frame.scopes,
                 });
@@ -178,7 +191,7 @@ impl VM {
         let function = self
             .functions
             .get(entry)
-            .ok_or(Error::UndefinedFunction(entry))?;
+            .ok_or(Error::FunctionUndefined(entry))?;
         let instructions = function.instructions.clone();
         self.scopes
             .push(Scope::new(Value::Tuple(TypeId::NIL, vec![])));
@@ -261,7 +274,7 @@ impl VM {
         let constant = self
             .constants
             .get(index)
-            .ok_or(Error::UndefinedConstant(index))?;
+            .ok_or(Error::ConstantUndefined(index))?;
         let value = match constant {
             Constant::Integer(integer) => Value::Integer(*integer),
             Constant::Binary(_) => Value::Binary(index),
@@ -294,7 +307,7 @@ impl VM {
         F: Fn(i64, i64) -> i64,
     {
         if tuple_size == 0 {
-            return Err(Error::EmptyTuple);
+            return Err(Error::TupleEmpty);
         }
         let mut values = vec![0; tuple_size];
         for i in 0..tuple_size {
@@ -319,7 +332,7 @@ impl VM {
         F: Fn(i64, i64) -> bool,
     {
         if tuple_size == 0 {
-            return Err(Error::EmptyTuple);
+            return Err(Error::TupleEmpty);
         }
         let mut values = vec![0; tuple_size];
         for i in (0..tuple_size).rev() {
@@ -371,7 +384,7 @@ impl VM {
         let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
         match value {
             Value::Tuple(_type_id, fields) => {
-                fields.get(index).ok_or(Error::InvalidFieldAccess(index))?;
+                fields.get(index).ok_or(Error::FieldAccessInvalid(index))?;
                 self.stack.push(fields[index].clone());
                 Ok(())
             }
@@ -441,7 +454,7 @@ impl VM {
                 let func = self
                     .functions
                     .get(function)
-                    .ok_or(Error::UndefinedFunction(function))?;
+                    .ok_or(Error::FunctionUndefined(function))?;
                 let instructions = func.instructions.clone();
                 let capture_map = func
                     .captures
@@ -452,7 +465,7 @@ impl VM {
                 self.frames.push(Frame::new(instructions, capture_map));
                 Ok(())
             }
-            Some(_) => Err(Error::InvalidCall),
+            Some(_) => Err(Error::CallInvalid),
             None => Err(Error::StackUnderflow),
         }
     }
@@ -471,7 +484,7 @@ impl VM {
                     let func = self
                         .functions
                         .get(function)
-                        .ok_or(Error::UndefinedFunction(function))?;
+                        .ok_or(Error::FunctionUndefined(function))?;
                     let instructions = func.instructions.clone();
                     let capture_map = func
                         .captures
@@ -483,7 +496,7 @@ impl VM {
                     *self.scopes.last_mut().unwrap() = Scope::new(argument);
                     Ok(())
                 }
-                Some(_) => Err(Error::InvalidCall),
+                Some(_) => Err(Error::CallInvalid),
                 None => Err(Error::StackUnderflow),
             }
         }
@@ -492,7 +505,7 @@ impl VM {
     fn handle_return(&mut self) -> Result<(), Error> {
         if let Some(frame) = self.frames.last() {
             if frame.scopes != 1 {
-                return Err(Error::InvalidScopeCount {
+                return Err(Error::ScopeCountInvalid {
                     expected: 1,
                     found: frame.scopes,
                 });
@@ -514,7 +527,7 @@ impl VM {
         let captures = self
             .functions
             .get(index)
-            .ok_or(Error::UndefinedFunction(index))?
+            .ok_or(Error::FunctionUndefined(index))?
             .captures
             .iter()
             .map(|n| self.get_variable(n))
@@ -541,7 +554,7 @@ impl VM {
     fn handle_exit(&mut self) -> Result<(), Error> {
         if let Some(frame) = self.frames.last() {
             if frame.scopes <= 1 {
-                return Err(Error::InvalidScopeCount {
+                return Err(Error::ScopeCountInvalid {
                     expected: 2, // Need at least 2 to exit one
                     found: frame.scopes,
                 });
@@ -579,7 +592,7 @@ impl VM {
             }
         }
 
-        Err(Error::UndefinedVariable(name.to_string()))
+        Err(Error::VariableUndefined(name.to_string()))
     }
 
     fn jump(&mut self, offset: isize) {
