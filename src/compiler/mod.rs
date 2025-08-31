@@ -407,11 +407,62 @@ impl<'a> Compiler<'a> {
             (Type::Resolved(param_t), Type::Resolved(body_t)) => Ok(Type::Resolved(
                 types::Type::Function(Box::new(param_t.clone()), Box::new(body_t.clone())),
             )),
-            _ => {
-                // If either parameter or body type is unresolved, return an unresolved function type
-                // For now, we'll represent this as an unresolved type with an empty vector
-                // In a more complete implementation, we'd preserve the unresolved nature
-                Ok(Type::Unresolved(vec![]))
+            (Type::Unresolved(param_types), Type::Resolved(body_t)) => {
+                if param_types.is_empty() {
+                    Err(Error::TypeUnresolved(
+                        "Function parameter type cannot be resolved".to_string(),
+                    ))
+                } else {
+                    // For union parameter types, we need to create function variants for each possible parameter type
+                    let mut function_variants = Vec::new();
+                    for param_t in param_types {
+                        function_variants.push(types::Type::Function(
+                            Box::new(param_t.clone()),
+                            Box::new(body_t.clone()),
+                        ));
+                    }
+                    Ok(Type::Unresolved(function_variants))
+                }
+            }
+            (Type::Resolved(param_t), Type::Unresolved(body_types)) => {
+                if body_types.is_empty() {
+                    Err(Error::TypeUnresolved(
+                        "Function body type cannot be resolved".to_string(),
+                    ))
+                } else {
+                    // For union body types, we need to create function variants for each possible body type
+                    let mut function_variants = Vec::new();
+                    for body_t in body_types {
+                        function_variants.push(types::Type::Function(
+                            Box::new(param_t.clone()),
+                            Box::new(body_t.clone()),
+                        ));
+                    }
+                    Ok(Type::Unresolved(function_variants))
+                }
+            }
+            (Type::Unresolved(param_types), Type::Unresolved(body_types)) => {
+                if param_types.is_empty() {
+                    Err(Error::TypeUnresolved(
+                        "Function parameter type cannot be resolved".to_string(),
+                    ))
+                } else if body_types.is_empty() {
+                    Err(Error::TypeUnresolved(
+                        "Function body type cannot be resolved".to_string(),
+                    ))
+                } else {
+                    // For both union parameter and body types, create all combinations
+                    let mut function_variants = Vec::new();
+                    for param_t in param_types {
+                        for body_t in body_types {
+                            function_variants.push(types::Type::Function(
+                                Box::new(param_t.clone()),
+                                Box::new(body_t.clone()),
+                            ));
+                        }
+                    }
+                    Ok(Type::Unresolved(function_variants))
+                }
             }
         }
     }
@@ -1293,11 +1344,30 @@ impl<'a> Compiler<'a> {
                 self.add_instruction(Instruction::Call);
                 Ok(Type::Resolved((**return_type).clone()))
             }
-            Type::Unresolved(_) => {
-                // For unresolved function types, we'll allow the call but return an unresolved result
-                // This is a more permissive approach for cases where types can't be fully resolved
-                self.add_instruction(Instruction::Call);
-                Ok(Type::Unresolved(vec![]))
+            Type::Unresolved(function_types) => {
+                if function_types.is_empty() {
+                    Err(Error::TypeUnresolved(
+                        "Cannot call function with unresolved type".to_string(),
+                    ))
+                } else {
+                    // For union function types, try to find a matching variant
+                    // For now, we'll be permissive and allow the call
+                    self.add_instruction(Instruction::Call);
+                    // Extract all possible return types from function variants
+                    let mut return_types = Vec::new();
+                    for func_type in function_types {
+                        if let types::Type::Function(_, return_type) = func_type {
+                            return_types.push((**return_type).clone());
+                        }
+                    }
+                    if return_types.is_empty() {
+                        Err(Error::TypeUnresolved(
+                            "No function variants found in union".to_string(),
+                        ))
+                    } else {
+                        Ok(Type::Unresolved(return_types))
+                    }
+                }
             }
             _ => Err(Error::ChainValueUnused),
         }
