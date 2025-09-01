@@ -75,7 +75,7 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>) -> Result<Statement, Error
     match inner_pair.as_rule() {
         Rule::type_alias => parse_type_alias(inner_pair),
         Rule::type_import => parse_type_import(inner_pair),
-        Rule::expression => Ok(Statement::Expression(parse_expression(inner_pair)?)),
+        Rule::sequence => Ok(Statement::Sequence(parse_sequence(inner_pair)?)),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "statement".to_string(),
@@ -129,7 +129,7 @@ fn parse_type_import_pattern(
     }
 }
 
-fn parse_expression(pair: pest::iterators::Pair<Rule>) -> Result<Expression, Error> {
+fn parse_block(pair: pest::iterators::Pair<Rule>) -> Result<Block, Error> {
     let mut branches = Vec::new();
 
     for inner_pair in pair.into_inner() {
@@ -139,7 +139,7 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> Result<Expression, Err
         }
     }
 
-    Ok(Expression { branches })
+    Ok(Block { branches })
 }
 
 fn parse_branch(pair: pest::iterators::Pair<Rule>) -> Result<Branch, Error> {
@@ -211,14 +211,10 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error> {
         Rule::block => Ok(Value::Block(parse_block(inner_pair)?)),
         Rule::parameter => Ok(Value::Parameter(parse_parameter(inner_pair)?)),
         Rule::member_access => Ok(Value::MemberAccess(parse_member_access(inner_pair)?)),
-        // Rule::identifier => Ok(Value::Identifier(inner_pair.as_str().to_string())),
         Rule::import => {
             let path = parse_string_literal(inner_pair.into_inner().next().unwrap().as_str())?;
             Ok(Value::Import(path))
         }
-        Rule::expression => Ok(Value::Parenthesized(Box::new(parse_expression(
-            inner_pair,
-        )?))),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "value".to_string(),
@@ -410,13 +406,6 @@ fn parse_function_definition(
     Ok(FunctionDefinition {
         parameter_type,
         body: body.unwrap(),
-    })
-}
-
-fn parse_block(pair: pest::iterators::Pair<Rule>) -> Result<Block, Error> {
-    let expression_pair = pair.into_inner().next().unwrap();
-    Ok(Block {
-        expression: parse_expression(expression_pair)?,
     })
 }
 

@@ -50,7 +50,7 @@ impl Quiver {
 
         let result = self
             .vm
-            .execute_instructions(instructions, false)
+            .execute_instructions(instructions, true)
             .map_err(Error::RuntimeError)?;
 
         Ok(result)

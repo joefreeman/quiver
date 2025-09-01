@@ -13,7 +13,7 @@ pub enum Statement {
         pattern: TypeImportPattern,
         module_path: String,
     },
-    Expression(Expression),
+    Sequence(Sequence),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,7 +23,7 @@ pub enum TypeImportPattern {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Expression {
+pub struct Block {
     pub branches: Vec<Branch>,
 }
 
@@ -59,7 +59,6 @@ pub enum Value {
     Parameter(Parameter),
     MemberAccess(MemberAccess),
     Import(String),
-    Parenthesized(Box<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,11 +113,6 @@ pub enum OperationTupleFieldValue {
 pub struct FunctionDefinition {
     pub parameter_type: Option<Type>,
     pub body: Block,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Block {
-    pub expression: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -213,25 +207,6 @@ pub struct FunctionType {
 pub struct UnionType {
     pub types: Vec<Type>,
 }
-
-// impl std::fmt::Display for Operator {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         let symbol = match self {
-//             Operator::Add => "+",
-//             Operator::Subtract => "-",
-//             Operator::Multiply => "*",
-//             Operator::Divide => "/",
-//             Operator::Modulo => "%",
-//             Operator::Equal => "==",
-//             Operator::NotEqual => "!=",
-//             Operator::LessThan => "<",
-//             Operator::LessThanOrEqual => "<=",
-//             Operator::GreaterThan => ">",
-//             Operator::GreaterThanOrEqual => ">=",
-//         };
-//         write!(f, "{}", symbol)
-//     }
-// }
 
 impl Parameter {
     pub fn from_string(s: &str) -> Option<Self> {

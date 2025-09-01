@@ -2,7 +2,7 @@ use crate::ast;
 use std::collections::HashSet;
 
 pub fn collect_free_variables(
-    expression: &ast::Expression,
+    block: &ast::Block,
     function_parameters: &HashSet<String>,
     defined_variables: &dyn Fn(&str) -> bool,
 ) -> HashSet<String> {
@@ -11,7 +11,7 @@ pub fn collect_free_variables(
         defined_variables,
         captures: HashSet::new(),
     };
-    collector.visit_expression(expression);
+    collector.visit_block(block);
     collector.captures
 }
 
@@ -22,7 +22,7 @@ struct FreeVariableCollector<'a> {
 }
 
 impl<'a> FreeVariableCollector<'a> {
-    fn visit_expression(&mut self, expression: &ast::Expression) {
+    fn visit_block(&mut self, expression: &ast::Block) {
         for branch in &expression.branches {
             self.visit_sequence(&branch.condition);
             if let Some(ref consequence) = branch.consequence {
@@ -64,19 +64,16 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Value::FunctionDefinition(func) => {
-                self.visit_expression(&func.body.expression);
+                self.visit_block(&func.body);
             }
             ast::Value::Block(block) => {
-                self.visit_expression(&block.expression);
+                self.visit_block(&block);
             }
             ast::Value::Parameter(_) => {}
             ast::Value::MemberAccess(member_access) => {
                 self.visit_identifier(&member_access.target);
             }
             ast::Value::Import(_) => {}
-            ast::Value::Parenthesized(expr) => {
-                self.visit_expression(expr);
-            }
         }
     }
 
@@ -91,7 +88,7 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Operation::Block(block) => {
-                self.visit_expression(&block.expression);
+                self.visit_block(&block);
             }
             ast::Operation::MemberAccess(member_access) => {
                 self.visit_identifier(&member_access.target);

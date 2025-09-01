@@ -189,11 +189,8 @@ impl<'a> Compiler<'a> {
                 pattern,
                 module_path,
             } => self.compile_type_import(pattern, &module_path),
-            ast::Statement::Expression(expression) => {
-                self.compile_expression(
-                    expression,
-                    Type::Resolved(types::Type::Tuple(TypeId::NIL)),
-                )?;
+            ast::Statement::Sequence(sequence) => {
+                self.compile_sequence(sequence, Type::Resolved(types::Type::Tuple(TypeId::NIL)))?;
                 Ok(())
             }
         }
@@ -366,7 +363,7 @@ impl<'a> Compiler<'a> {
         }
 
         let captures = free_variables::collect_free_variables(
-            &function_definition.body.expression,
+            &function_definition.body,
             &function_params,
             &|name| self.lookup_variable(name).is_some(),
         );
@@ -400,8 +397,7 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let body_type =
-            self.compile_expression(function_definition.body.expression, parameter_type.clone())?;
+        let body_type = self.compile_block(function_definition.body, parameter_type.clone())?;
         self.add_instruction(Instruction::Return);
 
         let param_types = parameter_type.to_type_vec();
@@ -568,22 +564,22 @@ impl<'a> Compiler<'a> {
         value: ast::Chain,
         parameter_type: Type,
     ) -> Result<Type, Error> {
-        let expression_type = self.compile_chain(value, parameter_type)?;
+        let value_type = self.compile_chain(value, parameter_type)?;
 
         match pattern {
             ast::Pattern::Identifier(name) => {
                 self.add_instruction(Instruction::Store(name.clone()));
-                self.define_variable(&name, expression_type);
+                self.define_variable(&name, value_type);
                 self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
             }
             ast::Pattern::Tuple(tuple_pattern) => {
-                self.compile_tuple_destructuring(tuple_pattern, &expression_type)?;
+                self.compile_tuple_destructuring(tuple_pattern, &value_type)?;
             }
             ast::Pattern::Partial(field_names) => {
-                self.compile_partial_destructuring(field_names, &expression_type)?;
+                self.compile_partial_destructuring(field_names, &value_type)?;
             }
             ast::Pattern::Star => {
-                self.compile_star_destructuring(&expression_type)?;
+                self.compile_star_destructuring(&value_type)?;
             }
             ast::Pattern::Literal(literal_value) => {
                 match literal_value {
@@ -611,9 +607,9 @@ impl<'a> Compiler<'a> {
     fn compile_tuple_destructuring(
         &mut self,
         tuple_pattern: ast::TuplePattern,
-        expression_type: &Type,
+        value_type: &Type,
     ) -> Result<(), Error> {
-        if self.compile_tuple_destructuring_impl(tuple_pattern, expression_type)? {
+        if self.compile_tuple_destructuring_impl(tuple_pattern, value_type)? {
             self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
         } else {
             self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
@@ -624,20 +620,18 @@ impl<'a> Compiler<'a> {
     fn compile_tuple_destructuring_impl(
         &mut self,
         tuple_pattern: ast::TuplePattern,
-        expression_type: &Type,
+        value_type: &Type,
     ) -> Result<bool, Error> {
-        match expression_type {
-            Type::Resolved(types::Type::Tuple(expression_type_id)) => {
-                let expression_type_info = self
+        match value_type {
+            Type::Resolved(types::Type::Tuple(value_type_id)) => {
+                let value_type_info = self
                     .type_registry
-                    .lookup_type(expression_type_id)
-                    .ok_or_else(|| {
-                        Error::TypeUnresolved("Expression type not found".to_string())
-                    })?;
+                    .lookup_type(value_type_id)
+                    .ok_or_else(|| Error::TypeUnresolved("Tuple type not found".to_string()))?;
 
                 let mut pattern_field_types = Vec::new();
                 for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
-                    if let Some(expr_field_info) = expression_type_info.1.get(field_index) {
+                    if let Some(expr_field_info) = value_type_info.1.get(field_index) {
                         pattern_field_types.push((field.name.clone(), expr_field_info.1.clone()));
                     } else {
                         self.add_instruction(Instruction::Pop);
@@ -649,7 +643,7 @@ impl<'a> Compiler<'a> {
                     .type_registry
                     .find_type(tuple_pattern.name.clone(), &pattern_field_types);
 
-                if pattern_type_id != Some(*expression_type_id) {
+                if pattern_type_id != Some(*value_type_id) {
                     self.add_instruction(Instruction::Pop);
                     return Ok(false);
                 }
@@ -679,12 +673,12 @@ impl<'a> Compiler<'a> {
     fn compile_pattern_destructuring(
         &mut self,
         pattern: ast::Pattern,
-        expression_type: &Type,
+        value_type: &Type,
     ) -> Result<bool, Error> {
         match pattern {
             ast::Pattern::Identifier(name) => {
                 self.add_instruction(Instruction::Store(name.clone()));
-                self.define_variable(&name, expression_type.clone());
+                self.define_variable(&name, value_type.clone());
                 Ok(true)
             }
             ast::Pattern::Wildcard => {
@@ -692,7 +686,7 @@ impl<'a> Compiler<'a> {
                 Ok(true)
             }
             ast::Pattern::Tuple(tuple_pattern) => {
-                self.compile_tuple_destructuring_impl(tuple_pattern, expression_type)
+                self.compile_tuple_destructuring_impl(tuple_pattern, value_type)
             }
             ast::Pattern::Literal(literal_value) => {
                 match literal_value {
@@ -714,18 +708,18 @@ impl<'a> Compiler<'a> {
                 Ok(true)
             }
             ast::Pattern::Partial(field_names) => {
-                self.compile_partial_destructuring_impl(field_names, expression_type)
+                self.compile_partial_destructuring_impl(field_names, value_type)
             }
-            ast::Pattern::Star => self.compile_star_destructuring_impl(expression_type),
+            ast::Pattern::Star => self.compile_star_destructuring_impl(value_type),
         }
     }
 
     fn compile_partial_destructuring(
         &mut self,
         field_names: Vec<String>,
-        expression_type: &Type,
+        value_type: &Type,
     ) -> Result<(), Error> {
-        if self.compile_partial_destructuring_impl(field_names, expression_type)? {
+        if self.compile_partial_destructuring_impl(field_names, value_type)? {
             self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
         } else {
             self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
@@ -736,12 +730,12 @@ impl<'a> Compiler<'a> {
     fn compile_partial_destructuring_impl(
         &mut self,
         field_names: Vec<String>,
-        expression_type: &Type,
+        value_type: &Type,
     ) -> Result<bool, Error> {
         for field_name in field_names {
             self.add_instruction(Instruction::Duplicate);
 
-            let (field_index, field_type) = match expression_type {
+            let (field_index, field_type) = match value_type {
                 Type::Resolved(types::Type::Tuple(type_id)) => {
                     if let Some(type_info) = self.type_registry.lookup_type(type_id) {
                         if let Some((index, (_, field_type))) = type_info
@@ -775,8 +769,8 @@ impl<'a> Compiler<'a> {
         Ok(true)
     }
 
-    fn compile_star_destructuring(&mut self, expression_type: &Type) -> Result<(), Error> {
-        if self.compile_star_destructuring_impl(expression_type)? {
+    fn compile_star_destructuring(&mut self, value_type: &Type) -> Result<(), Error> {
+        if self.compile_star_destructuring_impl(value_type)? {
             self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
         } else {
             self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
@@ -784,8 +778,8 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_star_destructuring_impl(&mut self, expression_type: &Type) -> Result<bool, Error> {
-        match expression_type {
+    fn compile_star_destructuring_impl(&mut self, value_type: &Type) -> Result<bool, Error> {
+        match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
                 let named_fields: Vec<(usize, String, types::Type)> = {
                     if let Some(type_info) = self.type_registry.lookup_type(type_id) {
@@ -820,26 +814,23 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_expression(
-        &mut self,
-        expression: ast::Expression,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+    fn compile_block(&mut self, block: ast::Block, parameter_type: Type) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
         let mut branch_starts = Vec::new();
 
-        for (i, branch) in expression.branches.iter().enumerate() {
-            let is_last_branch = i == expression.branches.len() - 1;
+        for (i, branch) in block.branches.iter().enumerate() {
+            let is_last_branch = i == block.branches.len() - 1;
 
             branch_starts.push(self.instructions.len());
 
             if i > 0 {
-                // Pop the nil result from previous branch
-                // TODO: can this be removed?
                 self.add_instruction(Instruction::Pop);
             }
+
+            self.add_instruction(Instruction::Enter);
+            self.scopes.push(HashMap::new());
 
             let condition_type =
                 self.compile_sequence(branch.condition.clone(), parameter_type.clone())?;
@@ -856,20 +847,24 @@ impl<'a> Compiler<'a> {
                     parameter_type.clone(),
                 )?;
                 branch_types.push(consequence_type);
+            } else {
+                branch_types.push(condition_type);
+            }
 
-                if !is_last_branch {
+            self.scopes.pop();
+            self.add_instruction(Instruction::Exit);
+
+            if !is_last_branch {
+                if branch.consequence.is_some() {
                     let end_jump = self.instructions.len();
                     self.add_instruction(Instruction::Jump(0));
                     end_jumps.push(end_jump);
-                }
-            } else {
-                if !is_last_branch {
+                } else {
                     self.add_instruction(Instruction::Duplicate);
                     let success_jump = self.instructions.len();
                     self.add_instruction(Instruction::JumpIfNotNil(0));
                     end_jumps.push(success_jump);
                 }
-                branch_types.push(condition_type);
             }
         }
 
@@ -935,15 +930,6 @@ impl<'a> Compiler<'a> {
         Ok(last_type.unwrap())
     }
 
-    fn compile_block(&mut self, block: ast::Block, value_type: Type) -> Result<Type, Error> {
-        self.add_instruction(Instruction::Enter);
-        self.scopes.push(HashMap::new());
-        let result_type = self.compile_expression(block.expression, value_type)?;
-        self.scopes.pop();
-        self.add_instruction(Instruction::Exit);
-        Ok(result_type)
-    }
-
     fn compile_parameter(
         &mut self,
         parameter: ast::Parameter,
@@ -988,6 +974,7 @@ impl<'a> Compiler<'a> {
                 self.compile_function_definition(function_definition)
             }
             ast::Value::Block(block) => {
+                self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
                 self.compile_block(block, Type::Resolved(types::Type::Tuple(TypeId::NIL)))
             }
             ast::Value::Parameter(parameter) => {
@@ -997,9 +984,6 @@ impl<'a> Compiler<'a> {
                 self.compile_value_member_access(&member_access.target, member_access.accessors)
             }
             ast::Value::Import(path) => self.compile_value_import(&path),
-            ast::Value::Parenthesized(expression) => {
-                self.compile_expression(*expression, parameter_type.clone())
-            }
         }?;
 
         for operation in chain.operations {
@@ -1104,7 +1088,7 @@ impl<'a> Compiler<'a> {
 
         let value = self
             .vm
-            .execute_instructions(module_instructions, true)
+            .execute_instructions(module_instructions, false)
             .map_err(|_e| Error::FeatureUnsupported("Module execution failed".to_string()))?
             .unwrap_or(vm::Value::Tuple(TypeId::NIL, vec![]));
 

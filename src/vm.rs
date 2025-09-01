@@ -120,21 +120,6 @@ impl fmt::Display for Value {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Scope {
-    parameter: Value,
-    variables: HashMap<String, Value>,
-}
-
-impl Scope {
-    pub fn new(parameter: Value) -> Self {
-        Self {
-            variables: HashMap::new(),
-            parameter,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum Error {
     // Stack operation errors
@@ -143,6 +128,7 @@ pub enum Error {
     // Function and call errors
     CallInvalid,
     FunctionUndefined(usize),
+    FrameUnderflow,
 
     // Variable and constant access errors
     VariableUndefined(String),
@@ -159,6 +145,22 @@ pub enum Error {
 
     // Scope management errors
     ScopeCountInvalid { expected: usize, found: usize },
+    ScopeUnderflow,
+}
+
+#[derive(Debug, Clone)]
+pub struct Scope {
+    parameter: Value,
+    variables: HashMap<String, Value>,
+}
+
+impl Scope {
+    pub fn new(parameter: Value) -> Self {
+        Self {
+            variables: HashMap::new(),
+            parameter,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -174,7 +176,7 @@ impl Frame {
         Self {
             instructions,
             captures,
-            scopes: 1,
+            scopes: 0,
             counter: 0,
         }
     }
@@ -229,29 +231,30 @@ impl VM {
     pub fn execute_instructions(
         &mut self,
         instructions: Vec<Instruction>,
-        new_scope: bool,
+        access_globals: bool,
     ) -> Result<Option<Value>, Error> {
-        if new_scope {
-            self.scopes
-                .push(Scope::new(Value::Tuple(TypeId::NIL, vec![])));
+        self.frames
+            .push(Frame::new(instructions.clone(), HashMap::new()));
+        if access_globals {
+            self.frames.last_mut().unwrap().scopes += 1;
         }
-        self.frames.push(Frame::new(instructions, HashMap::new()));
-        let result = self.run();
+        for i in instructions {
+            eprintln!("{:?}", i);
+        }
+        eprintln!("--");
 
-        if let Some(frame) = self.frames.last() {
-            if frame.scopes != 1 {
-                return Err(Error::ScopeCountInvalid {
-                    expected: 1,
-                    found: frame.scopes,
-                });
-            }
+        let value = self.run()?;
+
+        let frame = self.frames.pop().ok_or(Error::FrameUnderflow)?;
+        let expected_scopes = if access_globals { 1 } else { 0 };
+        if frame.scopes != expected_scopes {
+            return Err(Error::ScopeCountInvalid {
+                expected: expected_scopes,
+                found: frame.scopes,
+            });
         }
 
-        self.frames.pop();
-        if new_scope {
-            self.scopes.pop();
-        }
-        result
+        Ok(value)
     }
 
     pub fn execute_function(&mut self, entry: usize) -> Result<Option<Value>, Error> {
@@ -260,14 +263,13 @@ impl VM {
             .get(entry)
             .ok_or(Error::FunctionUndefined(entry))?;
         let instructions = function.instructions.clone();
-        self.scopes
-            .push(Scope::new(Value::Tuple(TypeId::NIL, vec![])));
         self.frames.push(Frame::new(instructions, HashMap::new()));
         self.run()
     }
 
     fn run(&mut self) -> Result<Option<Value>, Error> {
         while let Some(instruction) = self.get_instruction() {
+            eprintln!("{:?}", instruction);
             match instruction {
                 Instruction::Constant(index) => self.handle_constant(index)?,
                 Instruction::Pop => self.handle_pop()?,
@@ -376,15 +378,14 @@ impl VM {
         }
         let mut values = vec![0; tuple_size];
         for i in (0..tuple_size).rev() {
-            match self.stack.pop() {
-                Some(Value::Integer(v)) => values[i] = v,
-                Some(value) => {
+            match self.stack.pop().ok_or(Error::StackUnderflow)? {
+                Value::Integer(v) => values[i] = v,
+                other => {
                     return Err(Error::TypeMismatch {
                         expected: "integer".to_string(),
-                        found: value.type_name().to_string(),
+                        found: other.type_name().to_string(),
                     });
                 }
-                None => return Err(Error::StackUnderflow),
             }
         }
         let result = values.into_iter().reduce(op).unwrap();
@@ -399,10 +400,8 @@ impl VM {
 
         let mut values = Vec::new();
         for _ in 0..tuple_size {
-            match self.stack.pop() {
-                Some(value) => values.push(value),
-                None => return Err(Error::StackUnderflow),
-            }
+            let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
+            values.push(value);
         }
         values.reverse();
 
@@ -471,15 +470,14 @@ impl VM {
         }
         let mut values = vec![0; tuple_size];
         for i in (0..tuple_size).rev() {
-            match self.stack.pop() {
-                Some(Value::Integer(v)) => values[i] = v,
-                Some(value) => {
+            match self.stack.pop().ok_or(Error::StackUnderflow)? {
+                Value::Integer(v) => values[i] = v,
+                other => {
                     return Err(Error::TypeMismatch {
                         expected: "integer".to_string(),
-                        found: value.type_name().to_string(),
+                        found: other.type_name().to_string(),
                     });
                 }
-                None => return Err(Error::StackUnderflow),
             }
         }
         let result = values.windows(2).all(|w| test(w[0], w[1]));
@@ -582,10 +580,8 @@ impl VM {
     }
 
     fn handle_call(&mut self) -> Result<(), Error> {
-        match self.stack.pop() {
-            Some(Value::Function { function, captures }) => {
-                let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
-                self.scopes.push(Scope::new(argument));
+        match self.stack.pop().ok_or(Error::StackUnderflow)? {
+            Value::Function { function, captures } => {
                 let func = self
                     .functions
                     .get(function)
@@ -600,21 +596,24 @@ impl VM {
                 self.frames.push(Frame::new(instructions, capture_map));
                 Ok(())
             }
-            Some(_) => Err(Error::CallInvalid),
-            None => Err(Error::StackUnderflow),
+            _ => Err(Error::CallInvalid),
         }
     }
 
     fn handle_tail_call(&mut self, recurse: bool) -> Result<(), Error> {
         if recurse {
             let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
-            let frame = self.frames.last_mut().unwrap();
-            frame.counter = 0;
-            *self.scopes.last_mut().unwrap() = Scope::new(argument);
+            let frame = self.frames.last().unwrap();
+            for _ in 0..frame.scopes {
+                self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
+            }
+            self.scopes.last_mut().unwrap().parameter = argument;
+            *self.frames.last_mut().unwrap() =
+                Frame::new(frame.instructions.clone(), frame.captures.clone());
             Ok(())
         } else {
-            match self.stack.pop() {
-                Some(Value::Function { function, captures }) => {
+            match self.stack.pop().ok_or(Error::StackUnderflow)? {
+                Value::Function { function, captures } => {
                     let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
                     let func = self
                         .functions
@@ -627,28 +626,20 @@ impl VM {
                         .zip(captures.iter())
                         .map(|(name, value)| (name.clone(), value.clone()))
                         .collect::<HashMap<String, Value>>();
+                    for _ in 0..self.frames.last().unwrap().scopes {
+                        self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
+                    }
+                    self.scopes.last_mut().unwrap().parameter = argument;
                     *self.frames.last_mut().unwrap() = Frame::new(instructions, capture_map);
-                    *self.scopes.last_mut().unwrap() = Scope::new(argument);
                     Ok(())
                 }
-                Some(_) => Err(Error::CallInvalid),
-                None => Err(Error::StackUnderflow),
+                _ => Err(Error::CallInvalid),
             }
         }
     }
 
     fn handle_return(&mut self) -> Result<(), Error> {
-        if let Some(frame) = self.frames.last() {
-            if frame.scopes != 1 {
-                return Err(Error::ScopeCountInvalid {
-                    expected: 1,
-                    found: frame.scopes,
-                });
-            }
-        }
-
-        self.scopes.pop();
-        self.frames.pop();
+        self.frames.pop().ok_or(Error::FrameUnderflow)?;
         Ok(())
     }
 
@@ -676,10 +667,7 @@ impl VM {
 
     fn handle_enter(&mut self) -> Result<(), Error> {
         let parameter = self.stack.pop().ok_or(Error::StackUnderflow)?;
-        self.scopes.push(Scope {
-            parameter,
-            variables: HashMap::new(),
-        });
+        self.scopes.push(Scope::new(parameter));
         if let Some(frame) = self.frames.last_mut() {
             frame.scopes += 1;
         }
@@ -687,16 +675,7 @@ impl VM {
     }
 
     fn handle_exit(&mut self) -> Result<(), Error> {
-        if let Some(frame) = self.frames.last() {
-            if frame.scopes <= 1 {
-                return Err(Error::ScopeCountInvalid {
-                    expected: 2, // Need at least 2 to exit one
-                    found: frame.scopes,
-                });
-            }
-        }
-
-        self.scopes.pop();
+        self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
 
         if let Some(frame) = self.frames.last_mut() {
             frame.scopes -= 1;

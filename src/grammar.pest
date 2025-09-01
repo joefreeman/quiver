@@ -80,13 +80,14 @@ operation_tuple = {
 // Function definitions (#Type { ... }, #[Type, ...] { ... }, #{ ... })
 function_definition = { "#" ~ (type_definition? ~ sp)? ~ block }
 
-// Blocks ({ ... })
-block = { "{" ~ ws? ~ expression ~ ws? ~ "}" }
+// Blocks
+branch = { sequence ~ (sp ~ "=>" ~ ws ~ sequence)? }
+block = { "{" ~ ws? ~ ("|" ~ ws)? ~ branch ~ (ws ~ "|" ~ ws ~ branch)* ~ ws? ~ "}" }
 
 // Parameter references ($, $0, $1, etc)
 parameter = @{ "$" ~ ASCII_DIGIT* }
 
-// Member access (identifier.field.0.field)
+// Member access (identifier.foo.0.bar)
 member_access = @{ identifier ~ ("." ~ (identifier | ASCII_DIGIT+))* }
 
 // Field/positional access (.foo, .0, .1)
@@ -99,7 +100,7 @@ operator = { "==" | "!=" | "<=" | ">=" | "+" | "-" | "*" | "/" | "%" | "<" | ">"
 // Tail-call
 tail_call = { "&" ~ identifier? }
 
-// Import expression: %"path"
+// Import (%"path")
 import = { "%" ~ string_literal }
 
 // Chain
@@ -110,8 +111,7 @@ value = {
     block |
     parameter |
     member_access |
-    import |
-    "(" ~ ws? ~ expression ~ ws? ~ ")"
+    import
 }
 operation = {
     operator |
@@ -127,11 +127,9 @@ chain = { value ~ (ws ~ "~>" ~ sp ~ operation)* }
 // Assignment (pattern = chain)
 assignment = { pattern ~ sp ~ "=" ~ sp ~ chain }
 
-// Expressions
+// Sequences
 term = { assignment | chain }
 sequence = { term ~ (ws? ~ "," ~ ws ~ term)* }
-branch = { sequence ~ (sp ~ "=>" ~ ws ~ sequence)? }
-expression = { ("|" ~ ws)? ~ branch ~ (ws ~ "|" ~ ws ~ branch)* }
 
 // Type aliases/imports
 type_alias = { "type" ~ sp ~ !primitive_type ~ identifier ~ sp ~ "=" ~ sp ~ type_definition }
@@ -141,6 +139,6 @@ type_import_pattern = { type_star_pattern | type_partial_pattern }
 type_import = { "type" ~ sp ~ type_import_pattern ~ sp ~ "=" ~ sp ~ import }
 
 // Program
-statement = { type_import | type_alias | expression }
+statement = { type_import | type_alias | sequence }
 statements = { statement ~ sp? ~ ((nl | ";") ~ ws? ~ statement)* ~ ws? ~ ";"? }
 program = { SOI ~ ws? ~ statements? ~ ws? ~ EOI }
