@@ -24,15 +24,15 @@ struct FreeVariableCollector<'a> {
 impl<'a> FreeVariableCollector<'a> {
     fn visit_block(&mut self, expression: &ast::Block) {
         for branch in &expression.branches {
-            self.visit_sequence(&branch.condition);
+            self.visit_expression(&branch.condition);
             if let Some(ref consequence) = branch.consequence {
-                self.visit_sequence(consequence);
+                self.visit_expression(consequence);
             }
         }
     }
 
-    fn visit_sequence(&mut self, sequence: &ast::Sequence) {
-        for term in &sequence.terms {
+    fn visit_expression(&mut self, expression: &ast::Expression) {
+        for term in &expression.terms {
             self.visit_term(term);
         }
     }

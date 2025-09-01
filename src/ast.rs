@@ -13,7 +13,7 @@ pub enum Statement {
         pattern: TypeImportPattern,
         module_path: String,
     },
-    Sequence(Sequence),
+    Expression(Expression),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,12 +29,12 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Branch {
-    pub condition: Sequence,
-    pub consequence: Option<Sequence>,
+    pub condition: Expression,
+    pub consequence: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Sequence {
+pub struct Expression {
     pub terms: Vec<Term>,
 }
 

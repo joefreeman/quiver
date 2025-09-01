@@ -75,7 +75,7 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>) -> Result<Statement, Error
     match inner_pair.as_rule() {
         Rule::type_alias => parse_type_alias(inner_pair),
         Rule::type_import => parse_type_import(inner_pair),
-        Rule::sequence => Ok(Statement::Sequence(parse_sequence(inner_pair)?)),
+        Rule::expression => Ok(Statement::Expression(parse_expression(inner_pair)?)),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "statement".to_string(),
@@ -144,8 +144,8 @@ fn parse_block(pair: pest::iterators::Pair<Rule>) -> Result<Block, Error> {
 
 fn parse_branch(pair: pest::iterators::Pair<Rule>) -> Result<Branch, Error> {
     let mut inner = pair.into_inner();
-    let condition = parse_sequence(inner.next().unwrap())?;
-    let consequence = inner.next().map(parse_sequence).transpose()?;
+    let condition = parse_expression(inner.next().unwrap())?;
+    let consequence = inner.next().map(parse_expression).transpose()?;
 
     Ok(Branch {
         condition,
@@ -153,7 +153,7 @@ fn parse_branch(pair: pest::iterators::Pair<Rule>) -> Result<Branch, Error> {
     })
 }
 
-fn parse_sequence(pair: pest::iterators::Pair<Rule>) -> Result<Sequence, Error> {
+fn parse_expression(pair: pest::iterators::Pair<Rule>) -> Result<Expression, Error> {
     let mut terms = Vec::new();
 
     for inner_pair in pair.into_inner() {
@@ -163,7 +163,7 @@ fn parse_sequence(pair: pest::iterators::Pair<Rule>) -> Result<Sequence, Error> 
         }
     }
 
-    Ok(Sequence { terms })
+    Ok(Expression { terms })
 }
 
 fn parse_term(pair: pest::iterators::Pair<Rule>) -> Result<Term, Error> {

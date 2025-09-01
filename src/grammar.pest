@@ -81,7 +81,7 @@ operation_tuple = {
 function_definition = { "#" ~ (type_definition? ~ sp)? ~ block }
 
 // Blocks
-branch = { sequence ~ (sp ~ "=>" ~ ws ~ sequence)? }
+branch = { expression ~ (sp ~ "=>" ~ ws ~ expression)? }
 block = { "{" ~ ws? ~ ("|" ~ ws)? ~ branch ~ (ws ~ "|" ~ ws ~ branch)* ~ ws? ~ "}" }
 
 // Parameter references ($, $0, $1, etc)
@@ -127,9 +127,9 @@ chain = { value ~ (ws ~ "~>" ~ sp ~ operation)* }
 // Assignment (pattern = chain)
 assignment = { pattern ~ sp ~ "=" ~ sp ~ chain }
 
-// Sequences
+// Expressions
 term = { assignment | chain }
-sequence = { term ~ (ws? ~ "," ~ ws ~ term)* }
+expression = { term ~ (ws? ~ "," ~ ws ~ term)* }
 
 // Type aliases/imports
 type_alias = { "type" ~ sp ~ !primitive_type ~ identifier ~ sp ~ "=" ~ sp ~ type_definition }
@@ -139,6 +139,6 @@ type_import_pattern = { type_star_pattern | type_partial_pattern }
 type_import = { "type" ~ sp ~ type_import_pattern ~ sp ~ "=" ~ sp ~ import }
 
 // Program
-statement = { type_import | type_alias | sequence }
+statement = { type_import | type_alias | expression }
 statements = { statement ~ sp? ~ ((nl | ";") ~ ws? ~ statement)* ~ ws? ~ ";"? }
 program = { SOI ~ ws? ~ statements? ~ ws? ~ EOI }

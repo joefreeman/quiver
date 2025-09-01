@@ -189,8 +189,11 @@ impl<'a> Compiler<'a> {
                 pattern,
                 module_path,
             } => self.compile_type_import(pattern, &module_path),
-            ast::Statement::Sequence(sequence) => {
-                self.compile_sequence(sequence, Type::Resolved(types::Type::Tuple(TypeId::NIL)))?;
+            ast::Statement::Expression(expression) => {
+                self.compile_expression(
+                    expression,
+                    Type::Resolved(types::Type::Tuple(TypeId::NIL)),
+                )?;
                 Ok(())
             }
         }
@@ -835,7 +838,7 @@ impl<'a> Compiler<'a> {
             }
 
             let condition_type =
-                self.compile_sequence(branch.condition.clone(), parameter_type.clone())?;
+                self.compile_expression(branch.condition.clone(), parameter_type.clone())?;
 
             if branch.consequence.is_some() {
                 self.add_instruction(Instruction::Duplicate);
@@ -844,7 +847,7 @@ impl<'a> Compiler<'a> {
                 next_branch_jumps.push((next_branch_jump, i + 1));
                 self.add_instruction(Instruction::Pop);
 
-                let consequence_type = self.compile_sequence(
+                let consequence_type = self.compile_expression(
                     branch.consequence.clone().unwrap(),
                     parameter_type.clone(),
                 )?;
@@ -896,15 +899,15 @@ impl<'a> Compiler<'a> {
         narrow_types(branch_types)
     }
 
-    fn compile_sequence(
+    fn compile_expression(
         &mut self,
-        sequence: ast::Sequence,
+        expression: ast::Expression,
         parameter_type: Type,
     ) -> Result<Type, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
 
-        for (i, term) in sequence.terms.iter().enumerate() {
+        for (i, term) in expression.terms.iter().enumerate() {
             last_type = Some(match term {
                 ast::Term::Assignment { pattern, value } => {
                     self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone())
@@ -914,7 +917,7 @@ impl<'a> Compiler<'a> {
                 }
             }?);
 
-            if i < sequence.terms.len() - 1 {
+            if i < expression.terms.len() - 1 {
                 self.add_instruction(Instruction::Duplicate);
                 let end_jump = self.instructions.len();
                 self.add_instruction(Instruction::JumpIfNil(0));

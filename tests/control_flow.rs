@@ -10,7 +10,7 @@ fn test_truthiness_basics() {
 }
 
 #[test]
-fn test_simple_comma_sequences() {
+fn test_simple_comma_expressions() {
     quiver().evaluate("42, 100").expect_int(100);
     quiver().evaluate("1, 2, 3, 4").expect_int(4);
     quiver().evaluate("[], 42").expect_int(42);
