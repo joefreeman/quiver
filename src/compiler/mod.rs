@@ -308,7 +308,15 @@ impl<'a> Compiler<'a> {
         value_type: Type,
         parameter_type: Type,
     ) -> Result<Type, Error> {
-        // TODO: check that ripple is used (otherwise error)
+        let has_ripple = fields
+            .iter()
+            .any(|field| matches!(field.value, ast::OperationTupleFieldValue::Ripple));
+
+        if !has_ripple {
+            return Err(Error::ChainValueUnused);
+        }
+
+        self.add_instruction(Instruction::Store("~".to_string()));
 
         let mut field_types = Vec::new();
         let mut seen_names = HashSet::new();
