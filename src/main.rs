@@ -225,14 +225,14 @@ fn run_command(
 
     if let Some(code) = eval {
         let module_path = Some(std::env::current_dir()?);
-        handle_result(quiver.evaluate(&code, module_path), &quiver);
+        compile_execute(&mut quiver, &code, module_path)?;
     } else if let Some(path) = input {
         let content = fs::read_to_string(&path)?;
 
         if path.ends_with(".qv") {
             let script_path = std::path::Path::new(&path);
             let module_path = script_path.parent().map(|p| p.to_path_buf());
-            handle_result(quiver.evaluate(&content, module_path), &quiver);
+            compile_execute(&mut quiver, &content, module_path)?;
         } else if path.ends_with(".qx") {
             let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
             handle_result(quiver.execute(bytecode), &quiver);
@@ -251,14 +251,31 @@ fn run_command(
                 Ok(bytecode) => handle_result(quiver.execute(bytecode), &quiver),
                 Err(_) => {
                     let module_path = Some(std::env::current_dir()?);
-                    handle_result(quiver.evaluate(&buffer, module_path), &quiver);
+                    compile_execute(&mut quiver, &buffer, module_path)?;
                 }
             }
         } else {
             let module_path = Some(std::env::current_dir()?);
-            handle_result(quiver.evaluate(&buffer, module_path), &quiver);
+            compile_execute(&mut quiver, &buffer, module_path)?;
         }
     }
+
+    Ok(())
+}
+
+fn compile_execute(
+    quiver: &mut Quiver,
+    source: &str,
+    module_path: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytecode = quiver.compile(source, module_path)?;
+
+    if bytecode.entry.is_none() {
+        return Err("Program not executable".into());
+    }
+
+    let result = quiver.execute(bytecode)?;
+    handle_result(Ok(result), quiver);
 
     Ok(())
 }

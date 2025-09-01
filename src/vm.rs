@@ -319,7 +319,9 @@ impl VM {
                 Instruction::Exit => self.handle_exit()?,
             }
             if !matches!(instruction, Instruction::Call | Instruction::TailCall(_)) {
-                self.frames.last_mut().unwrap().counter += 1;
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.counter += 1;
+                }
             }
         }
         Ok(self.stack.pop())
