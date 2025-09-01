@@ -19,7 +19,7 @@ impl TestBuilder {
 
     pub fn evaluate(self, source: &str) -> TestResult {
         let mut quiver = Quiver::new(self.modules);
-        let result = quiver.evaluate(source);
+        let result = quiver.evaluate(source, None);
         TestResult {
             result,
             source: source.to_string(),

@@ -32,7 +32,11 @@ impl Quiver {
         }
     }
 
-    pub fn evaluate(&mut self, source: &str) -> Result<Option<Value>, Error> {
+    pub fn evaluate(
+        &mut self,
+        source: &str,
+        module_path: Option<std::path::PathBuf>,
+    ) -> Result<Option<Value>, Error> {
         let program = parser::parse(source).map_err(Error::ParseError)?;
 
         let instructions = Compiler::compile(
@@ -40,7 +44,7 @@ impl Quiver {
             &mut self.type_registry,
             self.module_loader.as_ref(),
             &mut self.vm,
-            None,
+            module_path,
         )
         .map_err(Error::CompileError)?;
 
@@ -70,7 +74,11 @@ impl Quiver {
             .collect()
     }
 
-    pub fn compile(&mut self, source: &str) -> Result<bytecode::Bytecode, Error> {
+    pub fn compile(
+        &mut self,
+        source: &str,
+        module_path: Option<std::path::PathBuf>,
+    ) -> Result<bytecode::Bytecode, Error> {
         let program = parser::parse(source).map_err(Error::ParseError)?;
 
         let instructions = Compiler::compile(
@@ -78,7 +86,7 @@ impl Quiver {
             &mut self.type_registry,
             self.module_loader.as_ref(),
             &mut self.vm,
-            None, // TODO: module path
+            module_path,
         )
         .map_err(Error::CompileError)?;
 

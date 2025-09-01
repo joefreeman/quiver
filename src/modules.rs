@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub trait ModuleLoader {
-    fn load(&self, path: &str, from: Option<&Path>) -> Result<String, ModuleError>;
+    fn load(&self, path: &str, from_dir: Option<&Path>) -> Result<String, ModuleError>;
 }
 
 #[derive(Debug, Clone)]
@@ -23,11 +23,10 @@ impl InMemoryModuleLoader {
 }
 
 impl ModuleLoader for InMemoryModuleLoader {
-    fn load(&self, path: &str, from: Option<&Path>) -> Result<String, ModuleError> {
+    fn load(&self, path: &str, from_dir: Option<&Path>) -> Result<String, ModuleError> {
         let normalised = if path.starts_with("./") || path.starts_with("../") {
-            if let Some(base) = from {
-                base.parent()
-                    .unwrap_or(base)
+            if let Some(base_dir) = from_dir {
+                base_dir
                     .join(path)
                     .components()
                     .collect::<PathBuf>()
@@ -59,12 +58,9 @@ impl FileSystemModuleLoader {
 }
 
 impl ModuleLoader for FileSystemModuleLoader {
-    fn load(&self, path: &str, from: Option<&Path>) -> Result<String, ModuleError> {
+    fn load(&self, path: &str, from_dir: Option<&Path>) -> Result<String, ModuleError> {
         let resolved = if path.starts_with("./") || path.starts_with("../") {
-            let full_path = from
-                .and_then(|p| p.parent())
-                .unwrap_or(Path::new("."))
-                .join(path);
+            let full_path = from_dir.unwrap_or(Path::new(".")).join(path);
             if full_path.exists() {
                 full_path
             } else {

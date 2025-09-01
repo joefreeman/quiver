@@ -131,16 +131,11 @@ fn run_repl() -> Result<(), ReadlineError> {
                     }
 
                     _ => {
-                        match quiver.evaluate(line) {
-                            Ok(Some(value)) => {
-                                println!("{}", quiver.format_value(&value));
-                            }
-                            Ok(None) => {
-                                // No result to display
-                            }
-                            Err(error) => {
-                                eprintln!("Error: {}", error);
-                            }
+                        let module_path = std::env::current_dir().ok();
+                        match quiver.evaluate(line, module_path) {
+                            Ok(Some(value)) => println!("{}", quiver.format_value(&value)),
+                            Ok(None) => {}
+                            Err(error) => eprintln!("{}", error),
                         }
                     }
                 }
@@ -178,17 +173,19 @@ fn compile_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut quiver = Quiver::new(None);
 
-    let source = if let Some(code) = eval {
-        code
+    let (source, module_path) = if let Some(code) = eval {
+        (code, Some(std::env::current_dir()?))
     } else if let Some(path) = input {
-        fs::read_to_string(&path)?
+        let script_path = std::path::Path::new(&path);
+        let module_path = script_path.parent().map(|p| p.to_path_buf());
+        (fs::read_to_string(&path)?, module_path)
     } else {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
-        buffer
+        (buffer, Some(std::env::current_dir()?))
     };
 
-    let mut bytecode = quiver.compile(&source)?;
+    let mut bytecode = quiver.compile(&source, module_path)?;
 
     if !debug {
         bytecode = bytecode.without_debug_info();
@@ -227,12 +224,15 @@ fn run_command(
     let mut quiver = Quiver::new(None);
 
     if let Some(code) = eval {
-        handle_result(quiver.evaluate(&code), &quiver);
+        let module_path = Some(std::env::current_dir()?);
+        handle_result(quiver.evaluate(&code, module_path), &quiver);
     } else if let Some(path) = input {
         let content = fs::read_to_string(&path)?;
 
         if path.ends_with(".qv") {
-            handle_result(quiver.evaluate(&content), &quiver);
+            let script_path = std::path::Path::new(&path);
+            let module_path = script_path.parent().map(|p| p.to_path_buf());
+            handle_result(quiver.evaluate(&content, module_path), &quiver);
         } else if path.ends_with(".qx") {
             let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
             handle_result(quiver.execute(bytecode), &quiver);
@@ -249,10 +249,14 @@ fn run_command(
         if buffer.trim_start().starts_with('{') {
             match serde_json::from_str::<quiver::bytecode::Bytecode>(&buffer) {
                 Ok(bytecode) => handle_result(quiver.execute(bytecode), &quiver),
-                Err(_) => handle_result(quiver.evaluate(&buffer), &quiver),
+                Err(_) => {
+                    let module_path = Some(std::env::current_dir()?);
+                    handle_result(quiver.evaluate(&buffer, module_path), &quiver);
+                }
             }
         } else {
-            handle_result(quiver.evaluate(&buffer), &quiver);
+            let module_path = Some(std::env::current_dir()?);
+            handle_result(quiver.evaluate(&buffer, module_path), &quiver);
         }
     }
 
