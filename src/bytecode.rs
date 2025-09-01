@@ -33,6 +33,25 @@ impl TypeId {
     pub const OK: TypeId = TypeId(1);
 }
 
+impl Bytecode {
+    pub fn without_debug_info(&self) -> Self {
+        Self {
+            constants: self.constants.clone(),
+            functions: self
+                .functions
+                .iter()
+                .map(|f| Function {
+                    captures: f.captures.clone(),
+                    instructions: f.instructions.clone(),
+                    function_type: None,
+                })
+                .collect(),
+            entry: self.entry,
+            types: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction {
     Constant(usize),

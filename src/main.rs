@@ -188,7 +188,11 @@ fn compile_command(
         buffer
     };
 
-    let bytecode = quiver.compile(&source)?;
+    let mut bytecode = quiver.compile(&source)?;
+
+    if !debug {
+        bytecode = bytecode.without_debug_info();
+    }
 
     let json = if debug {
         serde_json::to_string_pretty(&bytecode)?
