@@ -82,8 +82,9 @@ pub enum Instruction {
     Call,
     TailCall(bool),
     Return,
-    Parameter, // TODO: remove? (get from stack..?)
+    Parameter,
     Function(usize),
     Enter,
     Exit,
+    Reset,
 }

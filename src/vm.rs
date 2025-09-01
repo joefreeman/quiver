@@ -238,10 +238,6 @@ impl VM {
         if access_globals {
             self.frames.last_mut().unwrap().scopes += 1;
         }
-        for i in instructions {
-            eprintln!("{:?}", i);
-        }
-        eprintln!("--");
 
         let value = self.run()?;
 
@@ -269,7 +265,6 @@ impl VM {
 
     fn run(&mut self) -> Result<Option<Value>, Error> {
         while let Some(instruction) = self.get_instruction() {
-            eprintln!("{:?}", instruction);
             match instruction {
                 Instruction::Constant(index) => self.handle_constant(index)?,
                 Instruction::Pop => self.handle_pop()?,
@@ -319,6 +314,7 @@ impl VM {
                 Instruction::Function(index) => self.handle_function(index)?,
                 Instruction::Enter => self.handle_enter()?,
                 Instruction::Exit => self.handle_exit()?,
+                Instruction::Reset => self.handle_reset()?,
             }
             if !matches!(instruction, Instruction::Call | Instruction::TailCall(_)) {
                 if let Some(frame) = self.frames.last_mut() {
@@ -681,6 +677,12 @@ impl VM {
             frame.scopes -= 1;
         }
 
+        Ok(())
+    }
+
+    fn handle_reset(&mut self) -> Result<(), Error> {
+        let scope = self.scopes.last_mut().ok_or(Error::ScopeUnderflow)?;
+        scope.variables.clear();
         Ok(())
     }
 

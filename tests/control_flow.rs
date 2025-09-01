@@ -285,3 +285,16 @@ fn test_error_propagation_in_conditionals() {
     quiver().evaluate("[5, 0] ~> / => 100 | 200").expect_error();
     quiver().evaluate("[] => [5, 0] ~> / | 42").expect_int(42);
 }
+
+#[test]
+fn test_block_parameter_access_across_branches() {
+    quiver()
+        .evaluate("A[1] ~> { A[a] = $ => 100 | B[b] = $ => 200 }")
+        .expect_int(100);
+    quiver()
+        .evaluate("B[1] ~> { A[a] = $ => 100 | B[b] = $ => 200 }")
+        .expect_int(200);
+    quiver()
+        .evaluate("C[1] ~> { A[a] = $ => 100 | B[b] = $ => 200 }")
+        .expect_nil();
+}

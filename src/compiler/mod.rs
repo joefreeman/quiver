@@ -820,6 +820,9 @@ impl<'a> Compiler<'a> {
         let mut branch_types = Vec::new();
         let mut branch_starts = Vec::new();
 
+        self.add_instruction(Instruction::Enter);
+        self.scopes.push(HashMap::new());
+
         for (i, branch) in block.branches.iter().enumerate() {
             let is_last_branch = i == block.branches.len() - 1;
 
@@ -827,10 +830,9 @@ impl<'a> Compiler<'a> {
 
             if i > 0 {
                 self.add_instruction(Instruction::Pop);
+                self.add_instruction(Instruction::Reset);
+                self.scopes.last_mut().unwrap().clear();
             }
-
-            self.add_instruction(Instruction::Enter);
-            self.scopes.push(HashMap::new());
 
             let condition_type =
                 self.compile_sequence(branch.condition.clone(), parameter_type.clone())?;
@@ -851,9 +853,6 @@ impl<'a> Compiler<'a> {
                 branch_types.push(condition_type);
             }
 
-            self.scopes.pop();
-            self.add_instruction(Instruction::Exit);
-
             if !is_last_branch {
                 if branch.consequence.is_some() {
                     let end_jump = self.instructions.len();
@@ -869,6 +868,9 @@ impl<'a> Compiler<'a> {
         }
 
         let end_addr = self.instructions.len();
+
+        self.add_instruction(Instruction::Exit);
+        self.scopes.pop();
 
         for (jump_addr, next_branch_idx) in next_branch_jumps {
             let target_addr = if next_branch_idx >= branch_starts.len() {
