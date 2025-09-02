@@ -231,21 +231,17 @@ impl VM {
     pub fn execute_instructions(
         &mut self,
         instructions: Vec<Instruction>,
-        access_globals: bool,
     ) -> Result<Option<Value>, Error> {
-        self.frames
-            .push(Frame::new(instructions.clone(), HashMap::new()));
-        if access_globals {
-            self.frames.last_mut().unwrap().scopes += 1;
-        }
+        let mut frame = Frame::new(instructions.clone(), HashMap::new());
+        frame.scopes += 1;
+        self.frames.push(frame);
 
         let value = self.run()?;
 
         let frame = self.frames.pop().ok_or(Error::FrameUnderflow)?;
-        let expected_scopes = if access_globals { 1 } else { 0 };
-        if frame.scopes != expected_scopes {
+        if frame.scopes != 1 {
             return Err(Error::ScopeCountInvalid {
-                expected: expected_scopes,
+                expected: 1,
                 found: frame.scopes,
             });
         }

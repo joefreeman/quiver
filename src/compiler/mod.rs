@@ -1093,7 +1093,7 @@ impl<'a> Compiler<'a> {
 
         let value = self
             .vm
-            .execute_instructions(module_instructions, false)
+            .execute_instructions(module_instructions)
             .map_err(|_e| Error::FeatureUnsupported("Module execution failed".to_string()))?
             .unwrap_or(vm::Value::Tuple(TypeId::NIL, vec![]));
 
