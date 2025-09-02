@@ -141,6 +141,8 @@ pub struct Compiler<'a> {
     evaluation_cache: HashMap<String, vm::Value>,
     // Circular import detection
     import_stack: Vec<String>,
+    // Parameter field tracking for nested function definitions
+    parameter_fields_stack: Vec<HashMap<String, (usize, Type)>>,
 }
 
 impl<'a> Compiler<'a> {
@@ -165,6 +167,7 @@ impl<'a> Compiler<'a> {
             ast_cache: HashMap::new(),
             evaluation_cache: HashMap::new(),
             import_stack: Vec::new(),
+            parameter_fields_stack: Vec::new(),
         };
 
         for (name, value) in existing_variables {
@@ -388,20 +391,21 @@ impl<'a> Compiler<'a> {
             }
         }
 
+        let mut parameter_fields = HashMap::new();
         if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
                 if let Some(field_name) = &field.name {
-                    self.add_instruction(Instruction::Parameter);
-                    self.add_instruction(Instruction::Get(field_index));
-                    self.add_instruction(Instruction::Store(field_name.clone()));
                     let field_type = self.resolve_ast_type(field.type_def.clone())?;
-                    self.define_variable(field_name, field_type);
+                    parameter_fields.insert(field_name.clone(), (field_index, field_type));
                 }
             }
         }
+        self.parameter_fields_stack.push(parameter_fields);
 
         let body_type = self.compile_block(function_definition.body, parameter_type.clone())?;
         self.add_instruction(Instruction::Return);
+
+        self.parameter_fields_stack.pop();
 
         let param_types = parameter_type.to_type_vec();
         let result_types = body_type.to_type_vec();
@@ -1284,16 +1288,31 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    fn compile_target_access(&mut self, target: &str) -> Result<Type, Error> {
+        if let Some(var_type) = self.lookup_variable(target) {
+            self.add_instruction(Instruction::Load(target.to_string()));
+            return Ok(var_type);
+        }
+
+        if let Some(parameter_fields) = self.parameter_fields_stack.last() {
+            if let Some(&(field_index, ref field_type)) = parameter_fields.get(target) {
+                let field_index_copy = field_index;
+                let field_type_copy = field_type.clone();
+                self.add_instruction(Instruction::Parameter);
+                self.add_instruction(Instruction::Get(field_index_copy));
+                return Ok(field_type_copy);
+            }
+        }
+
+        Err(Error::VariableUndefined(target.to_string()))
+    }
+
     fn compile_value_member_access(
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
     ) -> Result<Type, Error> {
-        self.add_instruction(Instruction::Load(target.to_string()));
-
-        let mut last_type = self
-            .lookup_variable(target)
-            .ok_or(Error::VariableUndefined(target.to_string()))?;
+        let mut last_type = self.compile_target_access(target)?;
 
         for accessor in accessors {
             match last_type {
