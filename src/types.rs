@@ -11,9 +11,13 @@ pub struct FunctionType {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Type {
+    #[serde(rename = "int")]
     Integer,
+    #[serde(rename = "bin")]
     Binary,
+    #[serde(rename = "tuple")]
     Tuple(TypeId),
+    #[serde(rename = "fn")]
     Function(Box<FunctionType>),
 }
 

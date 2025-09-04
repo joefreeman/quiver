@@ -107,7 +107,7 @@ impl Quiver {
             constants: self.vm.get_constants().clone(),
             functions: self.vm.get_functions().clone(),
             entry,
-            types: Some(self.type_registry.get_types().clone()),
+            tuples: Some(self.type_registry.get_types().clone()),
         };
 
         Ok(bytecode)

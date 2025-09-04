@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Constant {
+    #[serde(rename = "int")]
     Integer(i64),
+    #[serde(rename = "bin")]
     Binary(Vec<u8>),
 }
 
@@ -22,7 +24,7 @@ pub struct Bytecode {
     pub functions: Vec<Function>,
     pub entry: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub types: Option<HashMap<TypeId, (Option<String>, Vec<(Option<String>, types::Type)>)>>,
+    pub tuples: Option<HashMap<TypeId, (Option<String>, Vec<(Option<String>, types::Type)>)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,7 +49,7 @@ impl Bytecode {
                 })
                 .collect(),
             entry: self.entry,
-            types: None,
+            tuples: None,
         }
     }
 }
