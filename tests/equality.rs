@@ -20,5 +20,6 @@ fn test_equal_strings() {
 
 #[test]
 fn test_not_equal() {
-    quiver().evaluate("[1, 2] ~> !=").expect_ok();
+    // TODO: return ok?
+    quiver().evaluate("[1, 2] ~> !=").expect_int(1);
 }

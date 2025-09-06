@@ -460,7 +460,7 @@ fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Pattern, Error> {
         Rule::tuple_pattern => Ok(Pattern::Tuple(parse_tuple_pattern(inner_pair)?)),
         Rule::partial_pattern => Ok(Pattern::Partial(parse_partial_pattern(inner_pair)?)),
         Rule::star => Ok(Pattern::Star),
-        Rule::wildcard => Ok(Pattern::Wildcard),
+        Rule::placeholder => Ok(Pattern::Placeholder),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "pattern".to_string(),

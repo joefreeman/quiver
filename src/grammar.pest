@@ -53,8 +53,8 @@ tuple_pattern = {
     tuple_name
 }
 star = { "*" }
-wildcard = { "_" }
-pattern = { partial_pattern | tuple_pattern | literal | star | wildcard | identifier }
+placeholder = { "_" }
+pattern = { partial_pattern | tuple_pattern | literal | star | placeholder | identifier }
 
 // Ripple operator: (~)
 ripple = { "~" }

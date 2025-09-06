@@ -265,6 +265,7 @@ impl VM {
                 Instruction::Constant(index) => self.handle_constant(index)?,
                 Instruction::Pop => self.handle_pop()?,
                 Instruction::Duplicate => self.handle_duplicate()?,
+                Instruction::Copy(depth) => self.handle_copy(depth)?,
                 Instruction::Swap => self.handle_swap()?,
                 Instruction::Add(tuple_size) => self.handle_arithmetic(tuple_size, |a, b| a + b)?,
                 Instruction::Subtract(tuple_size) => {
@@ -350,6 +351,16 @@ impl VM {
     fn handle_duplicate(&mut self) -> Result<(), Error> {
         let value = self.stack.last().ok_or(Error::StackUnderflow)?;
         self.stack.push(value.clone());
+        Ok(())
+    }
+
+    fn handle_copy(&mut self, depth: usize) -> Result<(), Error> {
+        if depth >= self.stack.len() {
+            return Err(Error::StackUnderflow);
+        }
+        let stack_index = self.stack.len() - 1 - depth;
+        let value = self.stack[stack_index].clone();
+        self.stack.push(value);
         Ok(())
     }
 

@@ -573,250 +573,675 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         let value_type = self.compile_chain(value, parameter_type)?;
 
-        match pattern {
-            ast::Pattern::Identifier(name) => {
-                self.add_instruction(Instruction::Store(name.clone()));
-                self.define_variable(&name, value_type);
-                self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
+        // Duplicate the value on the stack for pattern matching
+        self.add_instruction(Instruction::Duplicate);
+
+        // Try to match the pattern against the value
+        let match_success_addr = self.instructions.len();
+        self.add_instruction(Instruction::Jump(0)); // Will be patched
+
+        // Pattern matching - if it fails, we jump here (to cleanup section)
+        let cleanup_jump_addr = self.instructions.len();
+        self.add_instruction(Instruction::Jump(0)); // Will be patched to jump to cleanup
+
+        // Pattern matching success - if it succeeds, we jump here
+        let success_addr = self.instructions.len();
+
+        // Patch the initial jump to go to pattern matching logic
+        self.instructions[match_success_addr] =
+            Instruction::Jump((success_addr as isize) - (match_success_addr as isize) - 1);
+
+        // Attempt pattern matching
+        match self.compile_pattern_match(&pattern, &value_type, cleanup_jump_addr)? {
+            None => {
+                // Pattern definitely won't match - cleanup directly
+                // Remove the duplicated value and return NIL tuple
+                self.add_instruction(Instruction::Pop);
+                self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
+
+                return Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)));
             }
-            ast::Pattern::Tuple(tuple_pattern) => {
-                self.compile_tuple_destructuring(tuple_pattern, &value_type)?;
-            }
-            ast::Pattern::Partial(field_names) => {
-                self.compile_partial_destructuring(field_names, &value_type)?;
-            }
-            ast::Pattern::Star => {
-                self.compile_star_destructuring(&value_type)?;
-            }
-            ast::Pattern::Literal(literal_value) => {
-                match literal_value {
-                    ast::Literal::Integer(integer) => {
-                        let index = self.vm.register_constant(Constant::Integer(integer));
-                        self.add_instruction(Instruction::Constant(index));
-                    }
-                    ast::Literal::Binary(_) => {
-                        Err(Error::FeatureUnsupported("binary matching".to_string()))?;
-                    }
-                    ast::Literal::String(_) => {
-                        Err(Error::FeatureUnsupported("string matching".to_string()))?;
-                    }
+            Some(pending_assignments) => {
+                // Pattern can match - generate normal assignment code
+
+                // Pattern matched successfully - now commit all variable assignments
+                for (variable_name, variable_type) in &pending_assignments {
+                    self.add_instruction(Instruction::Store(variable_name.clone()));
+                    self.define_variable(variable_name, variable_type.clone());
                 }
-                self.add_instruction(Instruction::Equal(2));
-            }
-            ast::Pattern::Wildcard => {
+
+                // Remove the duplicated value and return OK tuple
                 self.add_instruction(Instruction::Pop);
                 self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
-            }
-        }
-        Ok(Type::Resolved(types::Type::Tuple(TypeId::OK)))
-    }
 
-    fn compile_tuple_destructuring(
-        &mut self,
-        tuple_pattern: ast::TuplePattern,
-        value_type: &Type,
-    ) -> Result<(), Error> {
-        if self.compile_tuple_destructuring_impl(tuple_pattern, value_type)? {
-            self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
-        } else {
-            self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
-        }
-        Ok(())
-    }
+                // Jump to end
+                let success_end_jump_addr = self.instructions.len();
+                self.add_instruction(Instruction::Jump(0));
 
-    fn compile_tuple_destructuring_impl(
-        &mut self,
-        tuple_pattern: ast::TuplePattern,
-        value_type: &Type,
-    ) -> Result<bool, Error> {
-        match value_type {
-            Type::Resolved(types::Type::Tuple(value_type_id)) => {
-                let value_type_info = self
-                    .type_registry
-                    .lookup_type(value_type_id)
-                    .ok_or_else(|| Error::TypeUnresolved("Tuple type not found".to_string()))?;
+                // Cleanup section - if pattern matching failed, we come here
+                let cleanup_addr = self.instructions.len();
 
-                let mut pattern_field_types = Vec::new();
-                for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
-                    if let Some(expr_field_info) = value_type_info.1.get(field_index) {
-                        pattern_field_types.push((field.name.clone(), expr_field_info.1.clone()));
-                    } else {
-                        self.add_instruction(Instruction::Pop);
-                        return Ok(false);
-                    }
-                }
-
-                let pattern_type_id = self
-                    .type_registry
-                    .find_type(tuple_pattern.name.clone(), &pattern_field_types);
-
-                if pattern_type_id != Some(*value_type_id) {
+                // Pop all the values that were left on stack for pending assignments
+                for _ in 0..pending_assignments.len() {
                     self.add_instruction(Instruction::Pop);
-                    return Ok(false);
                 }
 
-                for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
-                    self.add_instruction(Instruction::Duplicate);
-                    self.add_instruction(Instruction::Get(field_index));
-
-                    let field_type = Type::Resolved(pattern_field_types[field_index].1.clone());
-
-                    if !self.compile_pattern_destructuring(field.pattern.clone(), &field_type)? {
-                        self.add_instruction(Instruction::Pop);
-                        return Ok(false);
-                    }
-                }
-
+                // Remove the duplicated value and return NIL tuple
                 self.add_instruction(Instruction::Pop);
-                Ok(true)
-            }
-            _ => {
-                self.add_instruction(Instruction::Pop);
-                Ok(false)
+                self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
+
+                // End of assignment
+                let end_addr = self.instructions.len();
+
+                // Patch the cleanup jump to go to cleanup section
+                let cleanup_offset = (cleanup_addr as isize) - (cleanup_jump_addr as isize) - 1;
+                self.instructions[cleanup_jump_addr] = Instruction::Jump(cleanup_offset);
+
+                // Patch the success end jump to go to end
+                let success_end_offset = (end_addr as isize) - (success_end_jump_addr as isize) - 1;
+                self.instructions[success_end_jump_addr] = Instruction::Jump(success_end_offset);
             }
         }
+
+        Ok(Type::Unresolved(vec![
+            types::Type::Tuple(TypeId::OK),
+            types::Type::Tuple(TypeId::NIL),
+        ]))
     }
 
-    fn compile_pattern_destructuring(
+    fn compile_pattern_match(
         &mut self,
-        pattern: ast::Pattern,
+        pattern: &ast::Pattern,
         value_type: &Type,
-    ) -> Result<bool, Error> {
+        fail_addr: usize,
+    ) -> Result<Option<Vec<(String, Type)>>, Error> {
         match pattern {
-            ast::Pattern::Identifier(name) => {
-                self.add_instruction(Instruction::Store(name.clone()));
-                self.define_variable(&name, value_type.clone());
-                Ok(true)
+            ast::Pattern::Literal(literal) => {
+                self.compile_literal_pattern_match(literal, fail_addr)
             }
-            ast::Pattern::Wildcard => {
-                self.add_instruction(Instruction::Pop);
-                Ok(true)
+            ast::Pattern::Identifier(name) => {
+                self.compile_identifier_pattern_match(name, value_type)
+            }
+            ast::Pattern::Placeholder => {
+                // Placeholder always matches, just consume the value
+                Ok(Some(vec![]))
             }
             ast::Pattern::Tuple(tuple_pattern) => {
-                self.compile_tuple_destructuring_impl(tuple_pattern, value_type)
-            }
-            ast::Pattern::Literal(literal_value) => {
-                match literal_value {
-                    ast::Literal::Integer(integer) => {
-                        let index = self.vm.register_constant(Constant::Integer(integer));
-                        self.add_instruction(Instruction::Constant(index));
-                    }
-                    ast::Literal::Binary(bytes) => {
-                        let index = self.vm.register_constant(Constant::Binary(bytes));
-                        self.add_instruction(Instruction::Constant(index));
-                    }
-                    ast::Literal::String(string) => {
-                        let bytes = string.as_bytes().to_vec();
-                        let index = self.vm.register_constant(Constant::Binary(bytes));
-                        self.add_instruction(Instruction::Constant(index));
-                    }
-                }
-                self.add_instruction(Instruction::Equal(2));
-                Ok(true)
+                self.compile_tuple_pattern_match(tuple_pattern, value_type, fail_addr)
             }
             ast::Pattern::Partial(field_names) => {
-                self.compile_partial_destructuring_impl(field_names, value_type)
+                self.compile_partial_pattern_match(field_names, value_type, fail_addr)
             }
-            ast::Pattern::Star => self.compile_star_destructuring_impl(value_type),
+            ast::Pattern::Star => self.compile_star_pattern_match(value_type, fail_addr),
         }
     }
 
-    fn compile_partial_destructuring(
+    fn compile_literal_pattern_match(
         &mut self,
-        field_names: Vec<String>,
-        value_type: &Type,
-    ) -> Result<(), Error> {
-        if self.compile_partial_destructuring_impl(field_names, value_type)? {
-            self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
-        } else {
-            self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
-        }
-        Ok(())
-    }
+        literal: &ast::Literal,
+        fail_addr: usize,
+    ) -> Result<Option<Vec<(String, Type)>>, Error> {
+        // Duplicate the value for comparison
+        self.add_instruction(Instruction::Duplicate);
 
-    fn compile_partial_destructuring_impl(
-        &mut self,
-        field_names: Vec<String>,
-        value_type: &Type,
-    ) -> Result<bool, Error> {
-        for field_name in field_names {
-            self.add_instruction(Instruction::Duplicate);
-
-            let (field_index, field_type) = match value_type {
-                Type::Resolved(types::Type::Tuple(type_id)) => {
-                    if let Some(type_info) = self.type_registry.lookup_type(type_id) {
-                        if let Some((index, (_, field_type))) = type_info
-                            .1
-                            .iter()
-                            .enumerate()
-                            .find(|(_, (name, _))| name.as_ref() == Some(&field_name))
-                        {
-                            (index, Type::Resolved(field_type.clone()))
-                        } else {
-                            self.add_instruction(Instruction::Pop);
-                            return Ok(false);
-                        }
-                    } else {
-                        self.add_instruction(Instruction::Pop);
-                        return Ok(false);
-                    }
-                }
-                _ => {
-                    self.add_instruction(Instruction::Pop);
-                    return Ok(false);
-                }
-            };
-
-            self.add_instruction(Instruction::Get(field_index));
-            self.add_instruction(Instruction::Store(field_name.clone()));
-            self.define_variable(&field_name, field_type);
+        // Push the literal onto the stack
+        match literal {
+            ast::Literal::Integer(int_val) => {
+                let index = self.vm.register_constant(Constant::Integer(*int_val));
+                self.add_instruction(Instruction::Constant(index));
+            }
+            ast::Literal::Binary(bytes) => {
+                let index = self.vm.register_constant(Constant::Binary(bytes.clone()));
+                self.add_instruction(Instruction::Constant(index));
+            }
+            ast::Literal::String(string) => {
+                let bytes = string.as_bytes().to_vec();
+                let index = self.vm.register_constant(Constant::Binary(bytes));
+                self.add_instruction(Instruction::Constant(index));
+            }
         }
 
+        // Compare using Equal
+        self.add_instruction(Instruction::Equal(2));
+
+        // If comparison fails (result is NIL), jump to fail address
+        self.add_instruction(Instruction::Duplicate);
+        let jump_addr = self.instructions.len();
+        self.add_instruction(Instruction::JumpIfNil(0));
+        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
+        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+
+        // Pop comparison result
         self.add_instruction(Instruction::Pop);
-        Ok(true)
+
+        Ok(Some(vec![]))
     }
 
-    fn compile_star_destructuring(&mut self, value_type: &Type) -> Result<(), Error> {
-        if self.compile_star_destructuring_impl(value_type)? {
-            self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
-        } else {
-            self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
-        }
-        Ok(())
+    fn compile_identifier_pattern_match(
+        &mut self,
+        name: &str,
+        value_type: &Type,
+    ) -> Result<Option<Vec<(String, Type)>>, Error> {
+        // Determine the variable type
+        let var_type = match value_type {
+            Type::Resolved(_) => value_type.clone(),
+            Type::Unresolved(types) if !types.is_empty() => value_type.clone(),
+            _ => {
+                // Fallback for unknown types
+                Type::Unresolved(vec![
+                    types::Type::Integer,
+                    types::Type::Binary,
+                    types::Type::Tuple(TypeId::NIL),
+                ])
+            }
+        };
+
+        Ok(Some(vec![(name.to_string(), var_type)]))
     }
 
-    fn compile_star_destructuring_impl(&mut self, value_type: &Type) -> Result<bool, Error> {
+    fn compile_tuple_pattern_match(
+        &mut self,
+        tuple_pattern: &ast::TuplePattern,
+        value_type: &Type,
+        fail_addr: usize,
+    ) -> Result<Option<Vec<(String, Type)>>, Error> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
-                let named_fields: Vec<(usize, String, types::Type)> = {
-                    if let Some(type_info) = self.type_registry.lookup_type(type_id) {
-                        type_info
+                if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
+                    // For resolved tuple types, check if the pattern structure matches
+                    if let Some(ref tuple_name) = tuple_pattern.name {
+                        // Named tuple pattern - check the exact tuple name matches
+                        if tuple_info.0.as_ref() != Some(tuple_name) {
+                            // Type names don't match - this is a compile-time failure
+                            return Ok(None);
+                        }
+                    }
+
+                    // Check field count matches
+                    if tuple_pattern.fields.len() != tuple_info.1.len() {
+                        // Field count mismatch - this is a compile-time failure
+                        return Ok(None);
+                    }
+
+                    // Collect field types to avoid borrow checker issues
+                    let field_types: Vec<types::Type> = tuple_info
+                        .1
+                        .iter()
+                        .map(|(_, field_type)| field_type.clone())
+                        .collect();
+
+                    // Match each field in the tuple pattern and accumulate assignments
+                    let mut all_assignments = Vec::new();
+
+                    // Extract all field values using the generalized Copy approach
+                    // Process fields in reverse order to maintain correct stack layout
+                    let num_fields = tuple_pattern.fields.len();
+                    for i in (0..num_fields).rev() {
+                        // Copy tuple from depth (num_fields - 1 - i) to top of stack
+                        self.add_instruction(Instruction::Copy(num_fields - 1 - i));
+                        // Extract field i from the copied tuple
+                        self.add_instruction(Instruction::Get(i));
+                    }
+                    // Final stack: [tuple, valueN-1, ..., value1, value0] (value0 on top)
+
+                    // Now create pending assignments for each field
+                    // Stack is: [tuple, valueN-1, ..., value1, value0] (value0 on top)
+                    // Process in forward order: field 0 first (takes value0), field 1 second (takes value1)
+                    for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
+                        // Get the field type
+                        let field_type = if let Some(field_type) = field_types.get(field_index) {
+                            Type::Resolved(field_type.clone())
+                        } else {
+                            Type::Unresolved(vec![])
+                        };
+
+                        // Match the pattern against this field value (top of stack)
+                        match self.compile_pattern_match(&field.pattern, &field_type, fail_addr)? {
+                            Some(assignments) => {
+                                all_assignments.extend(assignments);
+                            }
+                            None => {
+                                // If any field can't match, the whole pattern can't match
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    return Ok(Some(all_assignments));
+                } else {
+                    // Tuple type not found in registry - treat as compile-time failure
+                    return Ok(None);
+                }
+            }
+            Type::Unresolved(types) => {
+                // For unresolved types, check if we can find a matching tuple type
+                if let Some(ref tuple_name) = tuple_pattern.name {
+                    // Find the first matching tuple type from the unresolved types
+                    let mut matching_type_id = None;
+                    for tuple_type in types {
+                        if let types::Type::Tuple(type_id) = tuple_type {
+                            if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
+                                if tuple_info.0.as_ref() == Some(tuple_name) {
+                                    matching_type_id = Some(*type_id);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(expected_type_id) = matching_type_id {
+                        // Emit runtime type check
+                        self.add_instruction(Instruction::Duplicate);
+                        self.add_instruction(Instruction::IsTuple(expected_type_id));
+
+                        // Jump to fail if type check fails
+                        let jump_addr = self.instructions.len();
+                        self.add_instruction(Instruction::JumpIfNil(0));
+                        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
+                        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+
+                        // Pop the boolean result from IsTuple
+                        self.add_instruction(Instruction::Pop);
+
+                        // Now get the tuple info for field matching
+                        if let Some(tuple_info) = self.type_registry.lookup_type(&expected_type_id)
+                        {
+                            // Check field count matches
+                            if tuple_pattern.fields.len() != tuple_info.1.len() {
+                                // Length mismatch, jump to fail
+                                let jump_addr = self.instructions.len();
+                                self.add_instruction(Instruction::Jump(0));
+                                let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
+                                self.instructions[jump_addr] = Instruction::Jump(offset);
+
+                                // Field count mismatch with runtime check - still need to generate code but mark as might match
+                                return Ok(Some(self.extract_bindings_from_pattern(
+                                    &ast::Pattern::Tuple(tuple_pattern.clone()),
+                                    Some(value_type),
+                                )));
+                            }
+
+                            // Collect field types to avoid borrow checker issues
+                            let field_types: Vec<types::Type> = tuple_info
+                                .1
+                                .iter()
+                                .map(|(_, field_type)| field_type.clone())
+                                .collect();
+
+                            // Match each field in the tuple pattern and accumulate assignments
+                            let mut all_assignments = Vec::new();
+
+                            // Extract all field values using the generalized Copy approach
+                            // Process fields in reverse order to maintain correct stack layout
+                            let num_fields = tuple_pattern.fields.len();
+                            for i in (0..num_fields).rev() {
+                                // Copy tuple from depth (num_fields - 1 - i) to top of stack
+                                self.add_instruction(Instruction::Copy(num_fields - 1 - i));
+                                // Extract field i from the copied tuple
+                                self.add_instruction(Instruction::Get(i));
+                            }
+
+                            // Now create assignments for each field in forward order
+                            for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
+                                // Get the field type
+                                let field_type =
+                                    if let Some(field_type) = field_types.get(field_index) {
+                                        Type::Resolved(field_type.clone())
+                                    } else {
+                                        Type::Unresolved(vec![])
+                                    };
+
+                                // Match the pattern against this field value (top of stack)
+                                match self.compile_pattern_match(
+                                    &field.pattern,
+                                    &field_type,
+                                    fail_addr,
+                                )? {
+                                    Some(assignments) => {
+                                        all_assignments.extend(assignments);
+                                    }
+                                    None => {
+                                        // If any field can't match, the whole pattern can't match
+                                        return Ok(None);
+                                    }
+                                }
+                            }
+                            return Ok(Some(all_assignments));
+                        }
+                    }
+                }
+
+                // For anonymous tuple patterns or when type not found - might match at runtime
+                let jump_addr = self.instructions.len();
+                self.add_instruction(Instruction::Jump(0));
+                let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
+                self.instructions[jump_addr] = Instruction::Jump(offset);
+                Ok(Some(vec![]))
+            }
+            _ => {
+                // Non-tuple type - this is a compile-time failure
+                Ok(None)
+            }
+        }
+    }
+
+    fn compile_partial_pattern_match(
+        &mut self,
+        field_names: &[String],
+        value_type: &Type,
+        fail_addr: usize,
+    ) -> Result<Option<Vec<(String, Type)>>, Error> {
+        match value_type {
+            Type::Resolved(types::Type::Tuple(type_id)) => {
+                // For resolved tuple types, extract the named fields
+                let mut field_data = Vec::new();
+                if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
+                    for field_name in field_names {
+                        if let Some((field_index, (_, field_type))) = tuple_info
                             .1
                             .iter()
                             .enumerate()
-                            .filter_map(|(index, (name, field_type))| {
-                                name.as_ref()
-                                    .map(|n| (index, n.clone(), field_type.clone()))
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
+                            .find(|(_, field)| field.0.as_ref() == Some(field_name))
+                        {
+                            field_data.push((field_name.clone(), field_index, field_type.clone()));
+                        } else {
+                            // Field not found - this is a compile-time failure for resolved types
+                            return Ok(None);
+                        }
                     }
-                };
-
-                for (field_index, name, field_type) in named_fields {
-                    self.add_instruction(Instruction::Duplicate);
-                    self.add_instruction(Instruction::Get(field_index));
-                    self.add_instruction(Instruction::Store(name.clone()));
-                    self.define_variable(&name, Type::Resolved(field_type));
+                } else {
+                    // Tuple type not found in registry - this is a compile-time failure
+                    return Ok(None);
                 }
 
-                self.add_instruction(Instruction::Pop);
-                Ok(true)
+                // Extract all field values with correct stack management
+                let mut assignments = Vec::new();
+
+                // Extract fields using the generalized Copy approach
+                // Process fields in reverse order to maintain correct stack layout
+                for (i, (field_name, field_index, field_type)) in
+                    field_data.iter().rev().enumerate()
+                {
+                    // Copy tuple from depth i to top of stack
+                    self.add_instruction(Instruction::Copy(i));
+                    // Extract field from the copied tuple
+                    self.add_instruction(Instruction::Get(*field_index));
+
+                    // Create assignment (fields will be processed in forward order)
+                    assignments.push((field_name.clone(), Type::Resolved(field_type.clone())));
+                }
+                // Reverse assignments to match the order fields were requested in
+                assignments.reverse();
+                Ok(Some(assignments))
+            }
+            Type::Unresolved(types) => {
+                // For unresolved types, enumerate through all possible tuple types
+                // and use IsTuple instructions to handle each case
+                let mut possible_matches = Vec::new();
+
+                // Find all tuple types that have all the requested fields
+                for tuple_type in types {
+                    if let types::Type::Tuple(type_id) = tuple_type {
+                        if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
+                            let has_all_fields = field_names.iter().all(|field_name| {
+                                tuple_info.1.iter().any(|(field_name_opt, _)| {
+                                    field_name_opt.as_ref() == Some(field_name)
+                                })
+                            });
+                            if has_all_fields {
+                                possible_matches.push(*type_id);
+                            }
+                        }
+                    }
+                }
+
+                if possible_matches.is_empty() {
+                    // No tuple types have all the required fields - compile-time failure
+                    return Ok(None);
+                }
+
+                // Generate code to check each possible tuple type
+                let mut next_check_jumps = Vec::new();
+                let mut success_jumps = Vec::new();
+
+                for (i, type_id) in possible_matches.iter().enumerate() {
+                    let is_last = i == possible_matches.len() - 1;
+
+                    // Duplicate value for type check
+                    self.add_instruction(Instruction::Duplicate);
+                    self.add_instruction(Instruction::IsTuple(*type_id));
+
+                    if !is_last {
+                        // If not the last option, jump to next check if this fails
+                        let next_check_jump = self.instructions.len();
+                        self.add_instruction(Instruction::JumpIfNil(0));
+                        next_check_jumps.push(next_check_jump);
+                    } else {
+                        // Last option - jump to fail if this doesn't match
+                        let jump_addr = self.instructions.len();
+                        self.add_instruction(Instruction::JumpIfNil(0));
+                        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
+                        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+                    }
+
+                    // Pop the boolean result from IsTuple
+                    self.add_instruction(Instruction::Pop);
+
+                    // Extract fields for this tuple type
+                    if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
+                        let mut field_data = Vec::new();
+                        for field_name in field_names {
+                            if let Some((field_index, (_, field_type))) = tuple_info
+                                .1
+                                .iter()
+                                .enumerate()
+                                .find(|(_, field)| field.0.as_ref() == Some(field_name))
+                            {
+                                field_data.push((
+                                    field_name.clone(),
+                                    field_index,
+                                    field_type.clone(),
+                                ));
+                            }
+                        }
+
+                        // Extract fields using the generalized Copy approach
+                        // Process fields in reverse order to maintain correct stack layout
+                        for (i, (_, field_index, _)) in field_data.iter().rev().enumerate() {
+                            // Copy tuple from depth i to top of stack
+                            self.add_instruction(Instruction::Copy(i));
+                            // Extract field from the copied tuple
+                            self.add_instruction(Instruction::Get(*field_index));
+                        }
+
+                        // Jump to success (will be patched later)
+                        let success_jump = self.instructions.len();
+                        self.add_instruction(Instruction::Jump(0));
+                        success_jumps.push(success_jump);
+
+                        // Patch the "next check" jump to point here (start of next iteration)
+                        if i > 0 {
+                            let next_check_addr = self.instructions.len();
+                            let prev_jump_addr = next_check_jumps[i - 1];
+                            let offset = (next_check_addr as isize) - (prev_jump_addr as isize) - 1;
+                            self.instructions[prev_jump_addr] = Instruction::JumpIfNil(offset);
+                        }
+                    }
+                }
+
+                // Success address - all success jumps point here
+                let success_addr = self.instructions.len();
+                for &jump_addr in &success_jumps {
+                    let offset = (success_addr as isize) - (jump_addr as isize) - 1;
+                    self.instructions[jump_addr] = Instruction::Jump(offset);
+                }
+
+                // Create assignments based on the first matching type (they should all have the same field structure for the requested fields)
+                let first_type_id = possible_matches[0];
+                let mut assignments = Vec::new();
+                if let Some(tuple_info) = self.type_registry.lookup_type(&first_type_id) {
+                    for field_name in field_names.iter().rev() {
+                        if let Some((_, (_, field_type))) = tuple_info
+                            .1
+                            .iter()
+                            .enumerate()
+                            .find(|(_, field)| field.0.as_ref() == Some(field_name))
+                        {
+                            assignments
+                                .push((field_name.clone(), Type::Resolved(field_type.clone())));
+                        }
+                    }
+                }
+                Ok(Some(assignments))
             }
             _ => {
-                self.add_instruction(Instruction::Pop);
-                Ok(false)
+                // Non-tuple type - this is a compile-time failure
+                Ok(None)
+            }
+        }
+    }
+
+    fn compile_star_pattern_match(
+        &mut self,
+        value_type: &Type,
+        fail_addr: usize,
+    ) -> Result<Option<Vec<(String, Type)>>, Error> {
+        match value_type {
+            Type::Resolved(types::Type::Tuple(type_id)) => {
+                // Star pattern extracts all named fields from resolved tuple types
+                let mut named_fields = Vec::new();
+                if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
+                    for (field_index, (field_name, field_type)) in tuple_info.1.iter().enumerate() {
+                        if let Some(name) = field_name {
+                            named_fields.push((name.clone(), field_index, field_type.clone()));
+                        }
+                    }
+                } else {
+                    // Tuple type not found in registry - compile-time failure
+                    return Ok(None);
+                }
+
+                // Extract all named fields with correct stack management
+                let mut assignments = Vec::new();
+
+                // Extract fields using the generalized Copy approach
+                // Process fields in reverse order to maintain correct stack layout
+                for (i, (name, field_index, field_type)) in named_fields.iter().rev().enumerate() {
+                    // Copy tuple from depth i to top of stack
+                    self.add_instruction(Instruction::Copy(i));
+                    // Extract field from the copied tuple
+                    self.add_instruction(Instruction::Get(*field_index));
+
+                    // Create assignment (fields will be processed in forward order)
+                    assignments.push((name.clone(), Type::Resolved(field_type.clone())));
+                }
+                // Reverse assignments to match the order fields were requested in
+                assignments.reverse();
+                Ok(Some(assignments))
+            }
+            Type::Unresolved(types) => {
+                // For star patterns with unresolved types, enumerate through all possible tuple types
+                // and use IsTuple instructions to handle each case
+                let mut possible_matches = Vec::new();
+
+                // Find all tuple types (star pattern extracts all named fields from any tuple)
+                for tuple_type in types {
+                    if let types::Type::Tuple(type_id) = tuple_type {
+                        if self.type_registry.lookup_type(type_id).is_some() {
+                            possible_matches.push(*type_id);
+                        }
+                    }
+                }
+
+                if possible_matches.is_empty() {
+                    // No tuple types found - compile-time failure
+                    return Ok(None);
+                }
+
+                // Generate code to check each possible tuple type
+                let mut next_check_jumps = Vec::new();
+                let mut success_jumps = Vec::new();
+
+                for (i, type_id) in possible_matches.iter().enumerate() {
+                    let is_last = i == possible_matches.len() - 1;
+
+                    // Duplicate value for type check
+                    self.add_instruction(Instruction::Duplicate);
+                    self.add_instruction(Instruction::IsTuple(*type_id));
+
+                    if !is_last {
+                        // If not the last option, jump to next check if this fails
+                        let next_check_jump = self.instructions.len();
+                        self.add_instruction(Instruction::JumpIfNil(0));
+                        next_check_jumps.push(next_check_jump);
+                    } else {
+                        // Last option - jump to fail if this doesn't match
+                        let jump_addr = self.instructions.len();
+                        self.add_instruction(Instruction::JumpIfNil(0));
+                        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
+                        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+                    }
+
+                    // Pop the boolean result from IsTuple
+                    self.add_instruction(Instruction::Pop);
+
+                    // Extract all named fields for this tuple type
+                    if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
+                        let mut named_fields = Vec::new();
+                        for (field_index, (field_name, field_type)) in
+                            tuple_info.1.iter().enumerate()
+                        {
+                            if let Some(name) = field_name {
+                                named_fields.push((name.clone(), field_index, field_type.clone()));
+                            }
+                        }
+
+                        // Extract fields using the generalized Copy approach
+                        // Process fields in reverse order to maintain correct stack layout
+                        for (i, (_, field_index, _)) in named_fields.iter().rev().enumerate() {
+                            // Copy tuple from depth i to top of stack
+                            self.add_instruction(Instruction::Copy(i));
+                            // Extract field from the copied tuple
+                            self.add_instruction(Instruction::Get(*field_index));
+                        }
+
+                        // Jump to success (will be patched later)
+                        let success_jump = self.instructions.len();
+                        self.add_instruction(Instruction::Jump(0));
+                        success_jumps.push(success_jump);
+
+                        // Patch the "next check" jump to point here (start of next iteration)
+                        if i > 0 {
+                            let next_check_addr = self.instructions.len();
+                            let prev_jump_addr = next_check_jumps[i - 1];
+                            let offset = (next_check_addr as isize) - (prev_jump_addr as isize) - 1;
+                            self.instructions[prev_jump_addr] = Instruction::JumpIfNil(offset);
+                        }
+                    }
+                }
+
+                // Success address - all success jumps point here
+                let success_addr = self.instructions.len();
+                for &jump_addr in &success_jumps {
+                    let offset = (success_addr as isize) - (jump_addr as isize) - 1;
+                    self.instructions[jump_addr] = Instruction::Jump(offset);
+                }
+
+                // Create assignments based on the first matching type
+                // For star patterns, we need to collect all named fields from whichever type matches
+                let first_type_id = possible_matches[0];
+                let mut assignments = Vec::new();
+                if let Some(tuple_info) = self.type_registry.lookup_type(&first_type_id) {
+                    for (_, (field_name, field_type)) in tuple_info.1.iter().enumerate().rev() {
+                        if let Some(name) = field_name {
+                            assignments.push((name.clone(), Type::Resolved(field_type.clone())));
+                        }
+                    }
+                }
+                Ok(Some(assignments))
+            }
+            _ => {
+                // Non-tuple type - this is a compile-time failure
+                Ok(None)
             }
         }
     }
@@ -844,7 +1269,14 @@ impl<'a> Compiler<'a> {
             let condition_type =
                 self.compile_expression(branch.condition.clone(), parameter_type.clone())?;
 
+            // If condition is compile-time NIL (won't match), skip this branch entirely
+            if condition_type == Type::Resolved(types::Type::Tuple(TypeId::NIL)) {
+                // Don't add to branch_types, continue to next branch
+                continue;
+            }
+
             if branch.consequence.is_some() {
+                // Branch has a consequence - compile it
                 self.add_instruction(Instruction::Duplicate);
                 let next_branch_jump = self.instructions.len();
                 self.add_instruction(Instruction::JumpIfNil(0));
@@ -857,6 +1289,7 @@ impl<'a> Compiler<'a> {
                 )?;
                 branch_types.push(consequence_type);
             } else {
+                // No consequence - use condition type
                 branch_types.push(condition_type);
             }
 
@@ -920,6 +1353,11 @@ impl<'a> Compiler<'a> {
                     self.compile_chain(chain.clone(), parameter_type.clone())
                 }
             }?);
+
+            // If last_type is NIL, subsequent terms are unreachable - break early
+            if let Some(Type::Resolved(types::Type::Tuple(TypeId::NIL))) = last_type {
+                break;
+            }
 
             if i < expression.terms.len() - 1 {
                 self.add_instruction(Instruction::Duplicate);
@@ -1544,5 +1982,51 @@ impl<'a> Compiler<'a> {
             }
         }
         None
+    }
+
+    // Extract bindings from patterns recursively, with type information when available
+    fn extract_bindings_from_pattern(
+        &self,
+        pattern: &ast::Pattern,
+        expected_type: Option<&Type>,
+    ) -> Vec<(String, Type)> {
+        let mut bindings = Vec::new();
+        match pattern {
+            ast::Pattern::Identifier(name) => {
+                let var_type = expected_type.cloned().unwrap_or(Type::Unresolved(vec![]));
+                bindings.push((name.clone(), var_type));
+            }
+            ast::Pattern::Literal(_) => {}  // No variables
+            ast::Pattern::Placeholder => {} // No variables
+            ast::Pattern::Tuple(tuple_pattern) => {
+                // Try to get field types from expected tuple type
+                let field_types =
+                    if let Some(Type::Resolved(types::Type::Tuple(type_id))) = expected_type {
+                        self.type_registry
+                            .lookup_type(type_id)
+                            .map(|info| {
+                                info.1
+                                    .iter()
+                                    .map(|(_, t)| Type::Resolved(t.clone()))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    };
+
+                for (i, field) in tuple_pattern.fields.iter().enumerate() {
+                    let field_type = field_types.get(i);
+                    bindings.extend(self.extract_bindings_from_pattern(&field.pattern, field_type));
+                }
+            }
+            ast::Pattern::Partial(field_names) => {
+                for name in field_names {
+                    bindings.push((name.clone(), Type::Unresolved(vec![])));
+                }
+            }
+            ast::Pattern::Star => {} // No variables in star pattern itself
+        }
+        bindings
     }
 }

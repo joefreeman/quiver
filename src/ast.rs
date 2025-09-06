@@ -155,7 +155,7 @@ pub enum Pattern {
     Tuple(TuplePattern),
     Partial(Vec<String>),
     Star,
-    Wildcard,
+    Placeholder,
 }
 
 #[derive(Debug, Clone, PartialEq)]

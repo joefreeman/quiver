@@ -36,12 +36,29 @@ fn test_function_with_enumerated_type_parameter() {
 
 #[test]
 fn test_higher_order_function() {
-    quiver().evaluate("apply = #[#int -> int, int] { $1 ~> $0 }; double = #int { [$, 2] ~> * }; [double, 5] ~> apply").expect_int(10);
+    quiver()
+        .evaluate(
+            r#"
+            apply = #[#int -> int, int] { $1 ~> $0 };
+            double = #int { [$, 2] ~> * };
+            [double, 5] ~> apply
+            "#,
+        )
+        .expect_int(10);
 }
 
 #[test]
 fn test_nested_function_return() {
     quiver()
-        .evaluate("f = #int { x = $, #int { [$, x] ~> + } }, g = 3 ~> f, 5 ~> g")
+        .evaluate(
+            r#"
+            f = #int {
+              x = $,
+              #int { [$, x] ~> + }
+            },
+            g = 3 ~> f,
+            5 ~> g
+            "#,
+        )
         .expect_int(8);
 }
