@@ -610,7 +610,7 @@ impl VM {
             for _ in 0..frame.scopes {
                 self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
             }
-            self.scopes.last_mut().unwrap().parameter = argument;
+            self.stack.push(argument);
             *self.frames.last_mut().unwrap() =
                 Frame::new(frame.instructions.clone(), frame.captures.clone());
             Ok(())
@@ -632,7 +632,7 @@ impl VM {
                     for _ in 0..self.frames.last().unwrap().scopes {
                         self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
                     }
-                    self.scopes.last_mut().unwrap().parameter = argument;
+                    self.stack.push(argument);
                     *self.frames.last_mut().unwrap() = Frame::new(instructions, capture_map);
                     Ok(())
                 }
