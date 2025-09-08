@@ -66,6 +66,7 @@ pub enum Operation {
     Operator(Operator),
     Tuple(OperationTuple),
     Block(Block),
+    Parameter(Parameter),
     MemberAccess(MemberAccess),
     FieldAccess(String),
     PositionalAccess(usize),

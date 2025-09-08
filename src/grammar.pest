@@ -117,6 +117,7 @@ operation = {
     operator |
     operation_tuple |
     block |
+    parameter |
     member_access |
     field_access |
     positional_access |

@@ -232,6 +232,7 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
         Rule::operator => Ok(Operation::Operator(parse_operator(pair)?)),
         Rule::operation_tuple => Ok(Operation::Tuple(parse_operation_tuple(pair)?)),
         Rule::block => Ok(Operation::Block(parse_block(pair)?)),
+        Rule::parameter => Ok(Operation::Parameter(parse_parameter(pair)?)),
         Rule::member_access => Ok(Operation::MemberAccess(parse_member_access(pair)?)),
         // Rule::identifier => Ok(Operation::Identifier(pair.as_str().to_string())),
         Rule::field_access => {

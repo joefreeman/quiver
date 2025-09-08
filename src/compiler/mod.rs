@@ -1568,6 +1568,9 @@ impl<'a> Compiler<'a> {
                 self.compile_operation_positional_access(position, value_type)
             }
             ast::Operation::TailCall(identifier) => self.compile_operation_tail_call(&identifier),
+            ast::Operation::Parameter(parameter) => {
+                self.compile_operation_parameter(parameter, value_type, parameter_type)
+            }
         }
     }
 
@@ -1626,6 +1629,112 @@ impl<'a> Compiler<'a> {
                 None => Err(Error::VariableUndefined(identifier.to_string())),
             }
         }
+    }
+
+    fn compile_operation_parameter(
+        &mut self,
+        parameter: ast::Parameter,
+        value_type: Type,
+        parameter_type: Type,
+    ) -> Result<Type, Error> {
+        // Get the operation type from the parameter (could be function or other callable)
+        let function_type = match parameter {
+            ast::Parameter::Self_ => {
+                self.add_instruction(Instruction::Parameter);
+                parameter_type
+            }
+            ast::Parameter::Indexed(index) => {
+                self.add_instruction(Instruction::Parameter);
+                self.add_instruction(Instruction::Get(index));
+
+                let param_types = parameter_type.to_type_vec();
+                let mut field_type_results = Vec::new();
+
+                for param_type in param_types {
+                    match param_type {
+                        types::Type::Tuple(type_id) => {
+                            if let Some(type_info) = self.type_registry.lookup_type(&type_id) {
+                                if let Some(field) = type_info.1.get(index) {
+                                    field_type_results.push(Type::Resolved(field.1.clone()));
+                                } else {
+                                    return Err(Error::ParameterIndexOutOfBounds { index });
+                                }
+                            } else {
+                                return Err(Error::ParameterTypeNotInRegistry {
+                                    type_id: format!("{:?}", type_id),
+                                });
+                            }
+                        }
+                        _ => return Err(Error::ParameterAccessOnNonTuple { index }),
+                    }
+                }
+
+                if field_type_results.is_empty() {
+                    return Err(Error::ParameterIndexOutOfBounds { index });
+                }
+
+                // Use narrow_types to properly combine the field types
+                narrow_types(field_type_results)?
+            }
+        };
+
+        // Get all possible operation types and value types
+        let operation_types = function_type.to_type_vec();
+        let value_types = value_type.to_type_vec();
+
+        // Find all function types in the operation
+        let mut function_variants = Vec::new();
+        let mut non_function_types = Vec::new();
+
+        for op_type in &operation_types {
+            match op_type {
+                types::Type::Function(func_type) => function_variants.push(func_type),
+                _ => non_function_types.push(op_type),
+            }
+        }
+
+        if function_variants.is_empty() {
+            // No function types found in operation
+            return Err(Error::ChainValueUnused);
+        }
+
+        // Check if ALL function variants are compatible with the value types
+        let mut all_return_types = Vec::new();
+        for func_type in &function_variants {
+            let mut func_is_compatible = false;
+
+            // Check if this function is compatible with any of the value types
+            for func_param_type in &func_type.parameter {
+                for value_inner_type in &value_types {
+                    if func_param_type == value_inner_type {
+                        func_is_compatible = true;
+                        break;
+                    }
+                }
+                if func_is_compatible {
+                    break;
+                }
+            }
+
+            if !func_is_compatible {
+                // This function variant is not compatible with any value type
+                return Err(Error::TypeMismatch {
+                    expected: format!("function parameter compatible with {:?}", value_types),
+                    found: format!("function parameter {:?}", func_type.parameter),
+                });
+            }
+
+            // This function is compatible - collect its return types
+            for return_type in &func_type.result {
+                all_return_types.push(Type::Resolved(return_type.clone()));
+            }
+        }
+
+        // Generate the call instruction
+        self.add_instruction(Instruction::Call);
+
+        // Use narrow_types to properly handle the return type combinations
+        narrow_types(all_return_types)
     }
 
     fn compile_operator(

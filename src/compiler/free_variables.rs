@@ -90,6 +90,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Operation::Block(block) => {
                 self.visit_block(&block);
             }
+            ast::Operation::Parameter(_) => {}
             ast::Operation::MemberAccess(member_access) => {
                 self.visit_identifier(&member_access.target);
             }
