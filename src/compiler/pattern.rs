@@ -281,9 +281,150 @@ impl<'a> PatternCompiler<'a> {
         value_type: &Type,
         fail_addr: usize,
     ) -> Result<Option<Vec<(String, Type)>>, Error> {
-        // Implementation would be similar to the original - simplified for brevity
-        // This would need the full implementation from the original code
-        Ok(Some(vec![]))
+        match value_type {
+            Type::Resolved(types::Type::Tuple(type_id)) => {
+                // For resolved tuple types, extract the named fields
+                let mut field_data = Vec::new();
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    for field_name in field_names {
+                        if let Some((field_index, (_, field_type))) = tuple_info
+                            .1
+                            .iter()
+                            .enumerate()
+                            .find(|(_, field)| field.0.as_deref() == Some(field_name))
+                        {
+                            field_data.push((field_name.clone(), field_index, field_type.clone()));
+                        } else {
+                            // Field not found - this is a compile-time failure for resolved types
+                            return Ok(None);
+                        }
+                    }
+                } else {
+                    // Tuple type not found in registry - this is a compile-time failure
+                    return Ok(None);
+                }
+
+                // Extract all field values with correct stack management
+                let field_indices: Vec<usize> = field_data.iter().map(|(_, idx, _)| *idx).collect();
+                self.codegen.emit_extract_specific_fields(&field_indices);
+
+                // Create assignments for extracted fields (fields will be processed in forward order)
+                let mut assignments = Vec::new();
+                for (field_name, _, field_type) in field_data.iter().rev() {
+                    assignments.push((field_name.clone(), Type::Resolved(field_type.clone())));
+                }
+                // Reverse assignments to match the order fields were requested in
+                assignments.reverse();
+                Ok(Some(assignments))
+            }
+            Type::Unresolved(types) => {
+                // For unresolved types, enumerate through all possible tuple types
+                // and use IsTuple instructions to handle each case
+                let mut possible_matches = Vec::new();
+
+                // Find all tuple types that have all the requested fields
+                for tuple_type in types {
+                    if let types::Type::Tuple(type_id) = tuple_type {
+                        if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                            let has_all_fields = field_names.iter().all(|field_name| {
+                                tuple_info.1.iter().any(|(field_name_opt, _)| {
+                                    field_name_opt.as_deref() == Some(field_name)
+                                })
+                            });
+                            if has_all_fields {
+                                possible_matches.push(*type_id);
+                            }
+                        }
+                    }
+                }
+
+                if possible_matches.is_empty() {
+                    // No tuple types have all the required fields - compile-time failure
+                    return Ok(None);
+                }
+
+                // Generate code to check each possible tuple type
+                let mut next_check_jumps = Vec::new();
+                let mut success_jumps = Vec::new();
+
+                for (i, type_id) in possible_matches.iter().enumerate() {
+                    let is_last = i == possible_matches.len() - 1;
+
+                    if !is_last {
+                        // Duplicate value for type check with placeholder for next check
+                        self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
+                        self.codegen.add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
+                        let next_check_jump = self.codegen.emit_jump_if_nil_placeholder();
+                        next_check_jumps.push(next_check_jump);
+                        self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
+                    } else {
+                        // Last option - emit runtime type check with direct fail
+                        self.codegen.emit_runtime_tuple_type_check(*type_id, fail_addr);
+                    }
+
+                    // Extract fields for this tuple type
+                    if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                        let mut field_data = Vec::new();
+                        for field_name in field_names {
+                            if let Some((field_index, (_, field_type))) = tuple_info
+                                .1
+                                .iter()
+                                .enumerate()
+                                .find(|(_, field)| field.0.as_deref() == Some(field_name))
+                            {
+                                field_data.push((
+                                    field_name.clone(),
+                                    field_index,
+                                    field_type.clone(),
+                                ));
+                            }
+                        }
+
+                        // Extract specific fields from tuple
+                        let field_indices: Vec<usize> = field_data.iter().map(|(_, idx, _)| *idx).collect();
+                        self.codegen.emit_extract_specific_fields(&field_indices);
+
+                        // Jump to success (will be patched later)
+                        let success_jump = self.codegen.emit_jump_placeholder();
+                        success_jumps.push(success_jump);
+
+                        // Patch the "next check" jump to point here (start of next iteration)
+                        if i > 0 {
+                            let next_check_addr = self.codegen.instructions.len();
+                            let prev_jump_addr = next_check_jumps[i - 1];
+                            self.codegen.patch_jump_to_addr(prev_jump_addr, next_check_addr);
+                        }
+                    }
+                }
+
+                // Success address - all success jumps point here
+                for jump_addr in success_jumps {
+                    self.codegen.patch_jump_to_here(jump_addr);
+                }
+
+                // Create assignments based on the first matching type (they should all have the same field structure for the requested fields)
+                let first_type_id = possible_matches[0];
+                let mut assignments = Vec::new();
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&first_type_id) {
+                    for field_name in field_names.iter().rev() {
+                        if let Some((_, (_, field_type))) = tuple_info
+                            .1
+                            .iter()
+                            .enumerate()
+                            .find(|(_, field)| field.0.as_deref() == Some(field_name))
+                        {
+                            assignments
+                                .push((field_name.clone(), Type::Resolved(field_type.clone())));
+                        }
+                    }
+                }
+                Ok(Some(assignments))
+            }
+            _ => {
+                // Non-tuple type - this is a compile-time failure
+                Ok(None)
+            }
+        }
     }
 
     fn compile_star_pattern_match(
@@ -291,9 +432,123 @@ impl<'a> PatternCompiler<'a> {
         value_type: &Type,
         fail_addr: usize,
     ) -> Result<Option<Vec<(String, Type)>>, Error> {
-        // Implementation would be similar to the original - simplified for brevity
-        // This would need the full implementation from the original code
-        Ok(Some(vec![]))
+        match value_type {
+            Type::Resolved(types::Type::Tuple(type_id)) => {
+                // Star pattern extracts all named fields from resolved tuple types
+                let mut named_fields = Vec::new();
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    for (field_index, (field_name, field_type)) in tuple_info.1.iter().enumerate() {
+                        if let Some(name) = field_name {
+                            named_fields.push((name.clone(), field_index, field_type.clone()));
+                        }
+                    }
+                } else {
+                    // Tuple type not found in registry - compile-time failure
+                    return Ok(None);
+                }
+
+                // Extract all named fields with correct stack management
+                let field_indices: Vec<usize> = named_fields.iter().map(|(_, idx, _)| *idx).collect();
+                self.codegen.emit_extract_specific_fields(&field_indices);
+
+                // Create assignments for extracted fields (fields will be processed in forward order)
+                let mut assignments = Vec::new();
+                for (name, _, field_type) in named_fields.iter().rev() {
+                    assignments.push((name.clone(), Type::Resolved(field_type.clone())));
+                }
+                // Reverse assignments to match the order fields were requested in
+                assignments.reverse();
+                Ok(Some(assignments))
+            }
+            Type::Unresolved(types) => {
+                // For star patterns with unresolved types, enumerate through all possible tuple types
+                // and use IsTuple instructions to handle each case
+                let mut possible_matches = Vec::new();
+
+                // Find all tuple types (star pattern extracts all named fields from any tuple)
+                for tuple_type in types {
+                    if let types::Type::Tuple(type_id) = tuple_type {
+                        if self.type_context.type_registry.lookup_type(type_id).is_some() {
+                            possible_matches.push(*type_id);
+                        }
+                    }
+                }
+
+                if possible_matches.is_empty() {
+                    // No tuple types found - compile-time failure
+                    return Ok(None);
+                }
+
+                // Generate code to check each possible tuple type
+                let mut next_check_jumps = Vec::new();
+                let mut success_jumps = Vec::new();
+
+                for (i, type_id) in possible_matches.iter().enumerate() {
+                    let is_last = i == possible_matches.len() - 1;
+
+                    if !is_last {
+                        // Duplicate value for type check with placeholder for next check
+                        self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
+                        self.codegen.add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
+                        let next_check_jump = self.codegen.emit_jump_if_nil_placeholder();
+                        next_check_jumps.push(next_check_jump);
+                        self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
+                    } else {
+                        // Last option - emit runtime type check with direct fail
+                        self.codegen.emit_runtime_tuple_type_check(*type_id, fail_addr);
+                    }
+
+                    // Extract all named fields for this tuple type
+                    if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                        let mut named_fields = Vec::new();
+                        for (field_index, (field_name, field_type)) in
+                            tuple_info.1.iter().enumerate()
+                        {
+                            if let Some(name) = field_name {
+                                named_fields.push((name.clone(), field_index, field_type.clone()));
+                            }
+                        }
+
+                        // Extract named fields from tuple
+                        let field_indices: Vec<usize> = named_fields.iter().map(|(_, idx, _)| *idx).collect();
+                        self.codegen.emit_extract_specific_fields(&field_indices);
+
+                        // Jump to success (will be patched later)
+                        let success_jump = self.codegen.emit_jump_placeholder();
+                        success_jumps.push(success_jump);
+
+                        // Patch the "next check" jump to point here (start of next iteration)
+                        if i > 0 {
+                            let next_check_addr = self.codegen.instructions.len();
+                            let prev_jump_addr = next_check_jumps[i - 1];
+                            self.codegen.patch_jump_to_addr(prev_jump_addr, next_check_addr);
+                        }
+                    }
+                }
+
+                // Success address - all success jumps point here
+                for jump_addr in success_jumps {
+                    self.codegen.patch_jump_to_here(jump_addr);
+                }
+
+                // Create assignments based on the first matching type
+                // For star patterns, we need to collect all named fields from whichever type matches
+                let first_type_id = possible_matches[0];
+                let mut assignments = Vec::new();
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&first_type_id) {
+                    for (_, (field_name, field_type)) in tuple_info.1.iter().enumerate().rev() {
+                        if let Some(name) = field_name {
+                            assignments.push((name.clone(), Type::Resolved(field_type.clone())));
+                        }
+                    }
+                }
+                Ok(Some(assignments))
+            }
+            _ => {
+                // Non-tuple type - this is a compile-time failure
+                Ok(None)
+            }
+        }
     }
 
     // Extract bindings from patterns recursively, with type information when available

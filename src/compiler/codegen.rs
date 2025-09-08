@@ -112,10 +112,9 @@ impl InstructionBuilder {
     }
 
     /// Emits pattern match success sequence (store variables and return OK)
-    pub fn emit_pattern_match_success(&mut self, assignments: &[(String, Type)], define_variable: &mut dyn FnMut(&str, Type)) {
-        for (variable_name, variable_type) in assignments {
+    pub fn emit_pattern_match_success(&mut self, assignments: &[(String, Type)]) {
+        for (variable_name, _variable_type) in assignments {
             self.add_instruction(Instruction::Store(variable_name.clone()));
-            define_variable(variable_name, variable_type.clone());
         }
         self.add_instruction(Instruction::Pop); // Remove duplicated value
         self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
