@@ -20,7 +20,7 @@ use crate::{
     ast,
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
-    parser, types, vm,
+    types, vm,
 };
 
 use type_system::TypeContext;
@@ -637,6 +637,7 @@ impl<'a> Compiler<'a> {
         Ok(value_type)
     }
 
+    #[allow(dead_code)]
     fn value_to_instructions(&mut self, value: &vm::Value) -> Result<Type, Error> {
         match value {
             vm::Value::Integer(int_value) => {
@@ -673,9 +674,17 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
-        // For now, just return a simple tuple value. This will need proper module import handling later.
+        // For now, just load and parse the module to get its AST structure
+        let _parsed = self.module_cache.load_and_cache_ast(
+            module_path,
+            self.module_loader,
+            self.module_path.as_ref(),
+        )?;
+        
+        // Assume the module returns a tuple for now
+        // In a real implementation, we would compile and execute the module
         self.codegen.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
-        Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)))
+        Ok(Type::Resolved(crate::types::Type::Tuple(TypeId::NIL)))
     }
 
 
@@ -1051,196 +1060,6 @@ impl<'a> Compiler<'a> {
         narrow_types(all_return_types)
     }
 
-    fn cartesian_product_tuple_types(
-        &mut self,
-        tuple_name: &Option<String>,
-        field_variants: Vec<(Option<String>, Vec<types::Type>)>,
-    ) -> Vec<types::Type> {
-        // Handle empty fields case
-        if field_variants.is_empty() {
-            let type_id = self.type_context.type_registry.register_type(tuple_name.clone(), vec![]);
-            return vec![types::Type::Tuple(type_id)];
-        }
-
-        // Generate all combinations using recursive cartesian product
-        let combinations = self.cartesian_product_recursive(&field_variants, 0, vec![]);
-
-        // Register each combination as a tuple type
-        combinations
-            .into_iter()
-            .map(|field_types| {
-                let type_id = self
-                    .type_context.type_registry
-                    .register_type(tuple_name.clone(), field_types);
-                types::Type::Tuple(type_id)
-            })
-            .collect()
-    }
-
-    fn cartesian_product_recursive(
-        &self,
-        field_variants: &[(Option<String>, Vec<types::Type>)],
-        index: usize,
-        current: Vec<(Option<String>, types::Type)>,
-    ) -> Vec<Vec<(Option<String>, types::Type)>> {
-        if index >= field_variants.len() {
-            return vec![current];
-        }
-
-        let (field_name, type_options) = &field_variants[index];
-        let mut results = Vec::new();
-
-        for type_option in type_options {
-            let mut new_current = current.clone();
-            new_current.push((field_name.clone(), type_option.clone()));
-
-            let sub_results =
-                self.cartesian_product_recursive(field_variants, index + 1, new_current);
-            results.extend(sub_results);
-        }
-
-        results
-    }
-
-    fn add_instruction(&mut self, instruction: Instruction) {
-        self.codegen.instructions.push(instruction)
-    }
-
-    /// Extracts all fields from a tuple on the stack, placing field values on top.
-    /// Assumes tuple is on top of stack. After execution:
-    /// Stack: [tuple, valueN-1, ..., value1, value0] (value0 on top)
-    fn emit_extract_tuple_fields(&mut self, num_fields: usize) {
-        for i in (0..num_fields).rev() {
-            // Copy tuple from depth (num_fields - 1 - i) to top of stack
-            self.codegen.add_instruction(Instruction::Copy(num_fields - 1 - i));
-            // Extract field i from the copied tuple
-            self.codegen.add_instruction(Instruction::Get(i));
-        }
-    }
-
-    /// Extracts specific fields from a tuple by field indices.
-    /// Assumes tuple is on top of stack. After execution:
-    /// Stack: [tuple, fieldN-1, ..., field1, field0] (field0 on top)
-    fn emit_extract_specific_fields(&mut self, field_indices: &[usize]) {
-        for (i, &field_index) in field_indices.iter().rev().enumerate() {
-            // Copy tuple from depth i to top of stack
-            self.codegen.add_instruction(Instruction::Copy(i));
-            // Extract field from the copied tuple
-            self.codegen.add_instruction(Instruction::Get(field_index));
-        }
-    }
-
-    /// Emits a jump placeholder and returns the address to patch later
-    fn emit_jump_placeholder(&mut self) -> usize {
-        let addr = self.codegen.instructions.len();
-        self.codegen.add_instruction(Instruction::Jump(0));
-        addr
-    }
-
-    /// Emits a conditional jump placeholder and returns the address to patch later
-    fn emit_jump_if_nil_placeholder(&mut self) -> usize {
-        let addr = self.codegen.instructions.len();
-        self.codegen.add_instruction(Instruction::JumpIfNil(0));
-        addr
-    }
-
-    /// Emits a conditional jump placeholder and returns the address to patch later
-    fn emit_jump_if_not_nil_placeholder(&mut self) -> usize {
-        let addr = self.codegen.instructions.len();
-        self.codegen.add_instruction(Instruction::JumpIfNotNil(0));
-        addr
-    }
-
-    /// Patches a jump instruction to target the current instruction address
-    fn patch_jump_to_here(&mut self, jump_addr: usize) {
-        let target_addr = self.codegen.instructions.len();
-        let offset = (target_addr as isize) - (jump_addr as isize) - 1;
-        self.codegen.instructions[jump_addr] = match &self.codegen.instructions[jump_addr] {
-            Instruction::Jump(_) => Instruction::Jump(offset),
-            Instruction::JumpIfNil(_) => Instruction::JumpIfNil(offset),
-            Instruction::JumpIfNotNil(_) => Instruction::JumpIfNotNil(offset),
-            _ => panic!("Cannot patch non-jump instruction"),
-        };
-    }
-
-    /// Patches a jump instruction to target a specific address
-    fn patch_jump_to_addr(&mut self, jump_addr: usize, target_addr: usize) {
-        let offset = (target_addr as isize) - (jump_addr as isize) - 1;
-        self.codegen.instructions[jump_addr] = match &self.codegen.instructions[jump_addr] {
-            Instruction::Jump(_) => Instruction::Jump(offset),
-            Instruction::JumpIfNil(_) => Instruction::JumpIfNil(offset),
-            Instruction::JumpIfNotNil(_) => Instruction::JumpIfNotNil(offset),
-            _ => panic!("Cannot patch non-jump instruction"),
-        };
-    }
-
-    /// Emits a conditional jump that immediately targets the fail address
-    fn emit_jump_if_nil_to_addr(&mut self, fail_addr: usize) {
-        let jump_addr = self.codegen.instructions.len();
-        self.codegen.add_instruction(Instruction::JumpIfNil(0));
-        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-        self.codegen.instructions[jump_addr] = Instruction::JumpIfNil(offset);
-    }
-
-    /// Gets field type from a tuple type by field name
-    fn get_tuple_field_type_by_name(
-        &self,
-        type_id: &TypeId,
-        field_name: &str,
-    ) -> Result<(usize, types::Type), Error> {
-        let tuple_type = self.type_context.type_registry.lookup_type(type_id).unwrap();
-        let (index, (_, field_type)) = tuple_type
-            .1
-            .iter()
-            .enumerate()
-            .find(|(_, field)| field.0.as_deref() == Some(field_name))
-            .ok_or(Error::FieldNotFound {
-                field_name: field_name.to_string(),
-                type_name: format!("{:?}", type_id),
-            })?;
-        Ok((index, field_type.clone()))
-    }
-
-    /// Gets field type from a tuple type by position
-    fn get_tuple_field_type_by_position(
-        &self,
-        type_id: &TypeId,
-        position: usize,
-    ) -> Result<types::Type, Error> {
-        let tuple_type = self.type_context.type_registry.lookup_type(type_id).unwrap();
-        if position >= tuple_type.1.len() {
-            return Err(Error::PositionalAccessOnNonTuple { index: position });
-        }
-        Ok(tuple_type.1[position].1.clone())
-    }
-
-    /// Emits runtime type check for tuple type
-    fn emit_runtime_tuple_type_check(&mut self, type_id: TypeId, fail_addr: usize) {
-        self.codegen.add_instruction(Instruction::Duplicate);
-        self.codegen.add_instruction(Instruction::IsTuple(type_id));
-        self.emit_jump_if_nil_to_addr(fail_addr);
-        self.codegen.add_instruction(Instruction::Pop);
-    }
-
-    /// Emits a sequence of instructions for cleanup pattern (pop values and return NIL)
-    fn emit_pattern_match_cleanup(&mut self, num_values_to_pop: usize) {
-        for _ in 0..num_values_to_pop {
-            self.codegen.add_instruction(Instruction::Pop);
-        }
-        self.codegen.add_instruction(Instruction::Pop); // Remove duplicated value
-        self.codegen.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
-    }
-
-    /// Emits pattern match success sequence (store variables and return OK)
-    fn emit_pattern_match_success(&mut self, assignments: &[(String, Type)]) {
-        for (variable_name, variable_type) in assignments {
-            self.codegen.add_instruction(Instruction::Store(variable_name.clone()));
-            self.define_variable(variable_name, variable_type.clone());
-        }
-        self.codegen.add_instruction(Instruction::Pop); // Remove duplicated value
-        self.codegen.add_instruction(Instruction::Tuple(TypeId::OK, 0));
-    }
-
     fn define_variable(&mut self, name: &str, var_type: Type) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), var_type);
@@ -1292,6 +1111,7 @@ impl<'a> Compiler<'a> {
     }
 
     // Extract bindings from patterns recursively, with type information when available
+    #[allow(dead_code)]
     fn extract_bindings_from_pattern(
         &self,
         pattern: &ast::Pattern,

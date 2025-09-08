@@ -1,6 +1,6 @@
 use crate::bytecode::{Instruction, TypeId};
 
-use super::{type_system::Type, Error};
+use super::type_system::Type;
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {

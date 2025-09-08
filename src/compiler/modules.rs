@@ -2,12 +2,12 @@ use std::{collections::HashMap, path::PathBuf};
 
 use crate::{
     ast, 
-    modules::{ModuleError, ModuleLoader}, 
+    modules::ModuleLoader, 
     parser, 
     vm
 };
 
-use super::{type_system::{Type, TypeContext}, Error};
+use super::{type_system::TypeContext, Error};
 
 pub struct ModuleCache {
     pub ast_cache: HashMap<String, ast::Program>,
@@ -53,7 +53,7 @@ impl ModuleCache {
         module_path: &str,
         module_loader: &dyn ModuleLoader,
         current_module_path: Option<&PathBuf>,
-        vm: &mut vm::VM,
+        _vm: &mut vm::VM,
         compile_statement: &mut dyn FnMut(ast::Statement) -> Result<(), Error>,
     ) -> Result<vm::Value, Error> {
         if self.import_stack.contains(&module_path.to_string()) {
@@ -76,7 +76,8 @@ impl ModuleCache {
 
         self.import_stack.pop();
 
-        // This would need to be implemented properly with execution context
+        // For now, return a simple value. In a real implementation this would
+        // compile and execute the module to get the actual result.
         let value = vm::Value::Tuple(crate::bytecode::TypeId::NIL, vec![]);
         
         self.evaluation_cache

@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::{ast, bytecode::{Constant, TypeId}, types, vm};
 
 use super::{

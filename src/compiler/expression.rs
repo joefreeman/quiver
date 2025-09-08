@@ -21,7 +21,7 @@ impl<'a> ExpressionCompiler<'a> {
         Self { codegen, scopes }
     }
 
-    pub fn compile_block(&mut self, block: ast::Block, parameter_type: Type) -> Result<Type, Error> {
+    pub fn compile_block(&mut self, block: ast::Block, _parameter_type: Type) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -101,7 +101,7 @@ impl<'a> ExpressionCompiler<'a> {
     pub fn compile_expression(
         &mut self,
         expression: ast::Expression,
-        parameter_type: Type,
+        _parameter_type: Type,
     ) -> Result<Type, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
