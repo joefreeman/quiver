@@ -7,7 +7,7 @@ fn test_module_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./math.qv".to_string(),
-        "add = #[int, int] { [$0, $1] ~> + }".to_string(),
+        "[add: #[int, int] { [$0, $1] ~> + }]".to_string(),
     );
 
     quiver()
@@ -21,7 +21,11 @@ fn test_destructured_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./math.qv".to_string(),
-        "add = #[int, int] { [$0, $1] ~> + }, sub = #[int, int] { [$0, $1] ~> - }".to_string(),
+        r#"[
+          add: #[int, int] { [$0, $1] ~> + },
+          sub: #[int, int] { [$0, $1] ~> - }
+        ]"#
+        .to_string(),
     );
 
     quiver()
@@ -35,7 +39,7 @@ fn test_star_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./math.qv".to_string(),
-        "add = #[int, int] { [$0, $1] ~> + }".to_string(),
+        "[add: #[int, int] { [$0, $1] ~> + }]".to_string(),
     );
 
     quiver()

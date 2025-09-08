@@ -20,10 +20,10 @@ fn test_function_with_type_pattern() {
     quiver()
         .evaluate(
             r#"
-            type shape = (Circle[r: int], Rectangle[w: int, h: int]),
+            type shape = (Circle[r: int], Rectangle[w: int, h: int]);
             area = #shape {
-              | Circle[r: r] : [r, r] ~> *
-              | Rectangle[w: w, h: h] : [w, h] ~> *
+              | Circle[r: r] = $ => [r, r] ~> *
+              | Rectangle[w: w, h: h] = $ => [w, h] ~> *
             },
             a1 = Circle[r: 5] ~> area,
             a2 = Rectangle[w: 4, h: 3] ~> area,
