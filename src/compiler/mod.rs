@@ -99,6 +99,12 @@ enum Type {
     Unresolved(Vec<types::Type>),
 }
 
+#[derive(Debug, Clone)]
+enum TupleAccessor {
+    Field(String),
+    Position(usize),
+}
+
 impl Type {
     fn to_type_vec(&self) -> Vec<types::Type> {
         match self {
@@ -577,69 +583,36 @@ impl<'a> Compiler<'a> {
         self.add_instruction(Instruction::Duplicate);
 
         // Try to match the pattern against the value
-        let match_success_addr = self.instructions.len();
-        self.add_instruction(Instruction::Jump(0)); // Will be patched
+        let match_success_addr = self.emit_jump_placeholder();
 
         // Pattern matching - if it fails, we jump here (to cleanup section)
-        let cleanup_jump_addr = self.instructions.len();
-        self.add_instruction(Instruction::Jump(0)); // Will be patched to jump to cleanup
+        let cleanup_jump_addr = self.emit_jump_placeholder();
 
         // Pattern matching success - if it succeeds, we jump here
-        let success_addr = self.instructions.len();
-
-        // Patch the initial jump to go to pattern matching logic
-        self.instructions[match_success_addr] =
-            Instruction::Jump((success_addr as isize) - (match_success_addr as isize) - 1);
+        self.patch_jump_to_here(match_success_addr);
 
         // Attempt pattern matching
         match self.compile_pattern_match(&pattern, &value_type, cleanup_jump_addr)? {
             None => {
                 // Pattern definitely won't match - cleanup directly
-                // Remove the duplicated value and return NIL tuple
-                self.add_instruction(Instruction::Pop);
-                self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
-
+                self.emit_pattern_match_cleanup(0);
                 return Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)));
             }
             Some(pending_assignments) => {
                 // Pattern can match - generate normal assignment code
 
-                // Pattern matched successfully - now commit all variable assignments
-                for (variable_name, variable_type) in &pending_assignments {
-                    self.add_instruction(Instruction::Store(variable_name.clone()));
-                    self.define_variable(variable_name, variable_type.clone());
-                }
-
-                // Remove the duplicated value and return OK tuple
-                self.add_instruction(Instruction::Pop);
-                self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
+                // Pattern matched successfully - commit all variable assignments
+                self.emit_pattern_match_success(&pending_assignments);
 
                 // Jump to end
-                let success_end_jump_addr = self.instructions.len();
-                self.add_instruction(Instruction::Jump(0));
+                let success_end_jump_addr = self.emit_jump_placeholder();
 
                 // Cleanup section - if pattern matching failed, we come here
-                let cleanup_addr = self.instructions.len();
-
-                // Pop all the values that were left on stack for pending assignments
-                for _ in 0..pending_assignments.len() {
-                    self.add_instruction(Instruction::Pop);
-                }
-
-                // Remove the duplicated value and return NIL tuple
-                self.add_instruction(Instruction::Pop);
-                self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
+                self.patch_jump_to_here(cleanup_jump_addr);
+                self.emit_pattern_match_cleanup(pending_assignments.len());
 
                 // End of assignment
-                let end_addr = self.instructions.len();
-
-                // Patch the cleanup jump to go to cleanup section
-                let cleanup_offset = (cleanup_addr as isize) - (cleanup_jump_addr as isize) - 1;
-                self.instructions[cleanup_jump_addr] = Instruction::Jump(cleanup_offset);
-
-                // Patch the success end jump to go to end
-                let success_end_offset = (end_addr as isize) - (success_end_jump_addr as isize) - 1;
-                self.instructions[success_end_jump_addr] = Instruction::Jump(success_end_offset);
+                self.patch_jump_to_here(success_end_jump_addr);
             }
         }
 
@@ -706,10 +679,7 @@ impl<'a> Compiler<'a> {
 
         // If comparison fails (result is NIL), jump to fail address
         self.add_instruction(Instruction::Duplicate);
-        let jump_addr = self.instructions.len();
-        self.add_instruction(Instruction::JumpIfNil(0));
-        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+        self.emit_jump_if_nil_to_addr(fail_addr);
 
         // Pop comparison result
         self.add_instruction(Instruction::Pop);
@@ -773,15 +743,8 @@ impl<'a> Compiler<'a> {
                     // Match each field in the tuple pattern and accumulate assignments
                     let mut all_assignments = Vec::new();
 
-                    // Extract all field values using the generalized Copy approach
-                    // Process fields in reverse order to maintain correct stack layout
-                    let num_fields = tuple_pattern.fields.len();
-                    for i in (0..num_fields).rev() {
-                        // Copy tuple from depth (num_fields - 1 - i) to top of stack
-                        self.add_instruction(Instruction::Copy(num_fields - 1 - i));
-                        // Extract field i from the copied tuple
-                        self.add_instruction(Instruction::Get(i));
-                    }
+                    // Extract all field values from tuple
+                    self.emit_extract_tuple_fields(tuple_pattern.fields.len());
                     // Final stack: [tuple, valueN-1, ..., value1, value0] (value0 on top)
 
                     // Now create pending assignments for each field
@@ -830,17 +793,7 @@ impl<'a> Compiler<'a> {
 
                     if let Some(expected_type_id) = matching_type_id {
                         // Emit runtime type check
-                        self.add_instruction(Instruction::Duplicate);
-                        self.add_instruction(Instruction::IsTuple(expected_type_id));
-
-                        // Jump to fail if type check fails
-                        let jump_addr = self.instructions.len();
-                        self.add_instruction(Instruction::JumpIfNil(0));
-                        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-                        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
-
-                        // Pop the boolean result from IsTuple
-                        self.add_instruction(Instruction::Pop);
+                        self.emit_runtime_tuple_type_check(expected_type_id, fail_addr);
 
                         // Now get the tuple info for field matching
                         if let Some(tuple_info) = self.type_registry.lookup_type(&expected_type_id)
@@ -870,15 +823,8 @@ impl<'a> Compiler<'a> {
                             // Match each field in the tuple pattern and accumulate assignments
                             let mut all_assignments = Vec::new();
 
-                            // Extract all field values using the generalized Copy approach
-                            // Process fields in reverse order to maintain correct stack layout
-                            let num_fields = tuple_pattern.fields.len();
-                            for i in (0..num_fields).rev() {
-                                // Copy tuple from depth (num_fields - 1 - i) to top of stack
-                                self.add_instruction(Instruction::Copy(num_fields - 1 - i));
-                                // Extract field i from the copied tuple
-                                self.add_instruction(Instruction::Get(i));
-                            }
+                            // Extract all field values from tuple
+                            self.emit_extract_tuple_fields(tuple_pattern.fields.len());
 
                             // Now create assignments for each field in forward order
                             for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
@@ -940,7 +886,7 @@ impl<'a> Compiler<'a> {
                             .1
                             .iter()
                             .enumerate()
-                            .find(|(_, field)| field.0.as_ref() == Some(field_name))
+                            .find(|(_, field)| field.0.as_deref() == Some(field_name))
                         {
                             field_data.push((field_name.clone(), field_index, field_type.clone()));
                         } else {
@@ -954,19 +900,12 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Extract all field values with correct stack management
+                let field_indices: Vec<usize> = field_data.iter().map(|(_, idx, _)| *idx).collect();
+                self.emit_extract_specific_fields(&field_indices);
+
+                // Create assignments for extracted fields (fields will be processed in forward order)
                 let mut assignments = Vec::new();
-
-                // Extract fields using the generalized Copy approach
-                // Process fields in reverse order to maintain correct stack layout
-                for (i, (field_name, field_index, field_type)) in
-                    field_data.iter().rev().enumerate()
-                {
-                    // Copy tuple from depth i to top of stack
-                    self.add_instruction(Instruction::Copy(i));
-                    // Extract field from the copied tuple
-                    self.add_instruction(Instruction::Get(*field_index));
-
-                    // Create assignment (fields will be processed in forward order)
+                for (field_name, _, field_type) in field_data.iter().rev() {
                     assignments.push((field_name.clone(), Type::Resolved(field_type.clone())));
                 }
                 // Reverse assignments to match the order fields were requested in
@@ -1006,25 +945,17 @@ impl<'a> Compiler<'a> {
                 for (i, type_id) in possible_matches.iter().enumerate() {
                     let is_last = i == possible_matches.len() - 1;
 
-                    // Duplicate value for type check
-                    self.add_instruction(Instruction::Duplicate);
-                    self.add_instruction(Instruction::IsTuple(*type_id));
-
                     if !is_last {
-                        // If not the last option, jump to next check if this fails
-                        let next_check_jump = self.instructions.len();
-                        self.add_instruction(Instruction::JumpIfNil(0));
+                        // Duplicate value for type check with placeholder for next check
+                        self.add_instruction(Instruction::Duplicate);
+                        self.add_instruction(Instruction::IsTuple(*type_id));
+                        let next_check_jump = self.emit_jump_if_nil_placeholder();
                         next_check_jumps.push(next_check_jump);
+                        self.add_instruction(Instruction::Pop);
                     } else {
-                        // Last option - jump to fail if this doesn't match
-                        let jump_addr = self.instructions.len();
-                        self.add_instruction(Instruction::JumpIfNil(0));
-                        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-                        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+                        // Last option - emit runtime type check with direct fail
+                        self.emit_runtime_tuple_type_check(*type_id, fail_addr);
                     }
-
-                    // Pop the boolean result from IsTuple
-                    self.add_instruction(Instruction::Pop);
 
                     // Extract fields for this tuple type
                     if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
@@ -1034,7 +965,7 @@ impl<'a> Compiler<'a> {
                                 .1
                                 .iter()
                                 .enumerate()
-                                .find(|(_, field)| field.0.as_ref() == Some(field_name))
+                                .find(|(_, field)| field.0.as_deref() == Some(field_name))
                             {
                                 field_data.push((
                                     field_name.clone(),
@@ -1044,14 +975,10 @@ impl<'a> Compiler<'a> {
                             }
                         }
 
-                        // Extract fields using the generalized Copy approach
-                        // Process fields in reverse order to maintain correct stack layout
-                        for (i, (_, field_index, _)) in field_data.iter().rev().enumerate() {
-                            // Copy tuple from depth i to top of stack
-                            self.add_instruction(Instruction::Copy(i));
-                            // Extract field from the copied tuple
-                            self.add_instruction(Instruction::Get(*field_index));
-                        }
+                        // Extract specific fields from tuple
+                        let field_indices: Vec<usize> =
+                            field_data.iter().map(|(_, idx, _)| *idx).collect();
+                        self.emit_extract_specific_fields(&field_indices);
 
                         // Jump to success (will be patched later)
                         let success_jump = self.instructions.len();
@@ -1084,7 +1011,7 @@ impl<'a> Compiler<'a> {
                             .1
                             .iter()
                             .enumerate()
-                            .find(|(_, field)| field.0.as_ref() == Some(field_name))
+                            .find(|(_, field)| field.0.as_deref() == Some(field_name))
                         {
                             assignments
                                 .push((field_name.clone(), Type::Resolved(field_type.clone())));
@@ -1121,17 +1048,13 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Extract all named fields with correct stack management
+                let field_indices: Vec<usize> =
+                    named_fields.iter().map(|(_, idx, _)| *idx).collect();
+                self.emit_extract_specific_fields(&field_indices);
+
+                // Create assignments for extracted fields (fields will be processed in forward order)
                 let mut assignments = Vec::new();
-
-                // Extract fields using the generalized Copy approach
-                // Process fields in reverse order to maintain correct stack layout
-                for (i, (name, field_index, field_type)) in named_fields.iter().rev().enumerate() {
-                    // Copy tuple from depth i to top of stack
-                    self.add_instruction(Instruction::Copy(i));
-                    // Extract field from the copied tuple
-                    self.add_instruction(Instruction::Get(*field_index));
-
-                    // Create assignment (fields will be processed in forward order)
+                for (name, _, field_type) in named_fields.iter().rev() {
                     assignments.push((name.clone(), Type::Resolved(field_type.clone())));
                 }
                 // Reverse assignments to match the order fields were requested in
@@ -1164,25 +1087,17 @@ impl<'a> Compiler<'a> {
                 for (i, type_id) in possible_matches.iter().enumerate() {
                     let is_last = i == possible_matches.len() - 1;
 
-                    // Duplicate value for type check
-                    self.add_instruction(Instruction::Duplicate);
-                    self.add_instruction(Instruction::IsTuple(*type_id));
-
                     if !is_last {
-                        // If not the last option, jump to next check if this fails
-                        let next_check_jump = self.instructions.len();
-                        self.add_instruction(Instruction::JumpIfNil(0));
+                        // Duplicate value for type check with placeholder for next check
+                        self.add_instruction(Instruction::Duplicate);
+                        self.add_instruction(Instruction::IsTuple(*type_id));
+                        let next_check_jump = self.emit_jump_if_nil_placeholder();
                         next_check_jumps.push(next_check_jump);
+                        self.add_instruction(Instruction::Pop);
                     } else {
-                        // Last option - jump to fail if this doesn't match
-                        let jump_addr = self.instructions.len();
-                        self.add_instruction(Instruction::JumpIfNil(0));
-                        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-                        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+                        // Last option - emit runtime type check with direct fail
+                        self.emit_runtime_tuple_type_check(*type_id, fail_addr);
                     }
-
-                    // Pop the boolean result from IsTuple
-                    self.add_instruction(Instruction::Pop);
 
                     // Extract all named fields for this tuple type
                     if let Some(tuple_info) = self.type_registry.lookup_type(type_id) {
@@ -1195,14 +1110,10 @@ impl<'a> Compiler<'a> {
                             }
                         }
 
-                        // Extract fields using the generalized Copy approach
-                        // Process fields in reverse order to maintain correct stack layout
-                        for (i, (_, field_index, _)) in named_fields.iter().rev().enumerate() {
-                            // Copy tuple from depth i to top of stack
-                            self.add_instruction(Instruction::Copy(i));
-                            // Extract field from the copied tuple
-                            self.add_instruction(Instruction::Get(*field_index));
-                        }
+                        // Extract named fields from tuple
+                        let field_indices: Vec<usize> =
+                            named_fields.iter().map(|(_, idx, _)| *idx).collect();
+                        self.emit_extract_specific_fields(&field_indices);
 
                         // Jump to success (will be patched later)
                         let success_jump = self.instructions.len();
@@ -1278,8 +1189,7 @@ impl<'a> Compiler<'a> {
             if branch.consequence.is_some() {
                 // Branch has a consequence - compile it
                 self.add_instruction(Instruction::Duplicate);
-                let next_branch_jump = self.instructions.len();
-                self.add_instruction(Instruction::JumpIfNil(0));
+                let next_branch_jump = self.emit_jump_if_nil_placeholder();
                 next_branch_jumps.push((next_branch_jump, i + 1));
                 self.add_instruction(Instruction::Pop);
 
@@ -1295,13 +1205,11 @@ impl<'a> Compiler<'a> {
 
             if !is_last_branch {
                 if branch.consequence.is_some() {
-                    let end_jump = self.instructions.len();
-                    self.add_instruction(Instruction::Jump(0));
+                    let end_jump = self.emit_jump_placeholder();
                     end_jumps.push(end_jump);
                 } else {
                     self.add_instruction(Instruction::Duplicate);
-                    let success_jump = self.instructions.len();
-                    self.add_instruction(Instruction::JumpIfNotNil(0));
+                    let success_jump = self.emit_jump_if_not_nil_placeholder();
                     end_jumps.push(success_jump);
                 }
             }
@@ -1318,19 +1226,11 @@ impl<'a> Compiler<'a> {
             } else {
                 branch_starts[next_branch_idx]
             };
-            let offset = target_addr as isize - jump_addr as isize - 1;
-            self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+            self.patch_jump_to_addr(jump_addr, target_addr);
         }
 
         for jump_addr in end_jumps {
-            let offset = end_addr as isize - jump_addr as isize - 1;
-            if let Some(instruction) = self.instructions.get_mut(jump_addr) {
-                *instruction = match instruction {
-                    Instruction::Jump(_) => Instruction::Jump(offset),
-                    Instruction::JumpIfNotNil(_) => Instruction::JumpIfNotNil(offset),
-                    _ => instruction.clone(),
-                };
-            }
+            self.patch_jump_to_addr(jump_addr, end_addr);
         }
 
         narrow_types(branch_types)
@@ -1361,8 +1261,7 @@ impl<'a> Compiler<'a> {
 
             if i < expression.terms.len() - 1 {
                 self.add_instruction(Instruction::Duplicate);
-                let end_jump = self.instructions.len();
-                self.add_instruction(Instruction::JumpIfNil(0));
+                let end_jump = self.emit_jump_if_nil_placeholder();
                 end_jumps.push(end_jump);
                 self.add_instruction(Instruction::Pop);
             }
@@ -1370,8 +1269,7 @@ impl<'a> Compiler<'a> {
 
         let end_addr = self.instructions.len();
         for jump_addr in end_jumps {
-            let offset = (end_addr - jump_addr - 1) as isize;
-            self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+            self.patch_jump_to_addr(jump_addr, end_addr);
         }
 
         Ok(last_type.unwrap())
@@ -1562,10 +1460,10 @@ impl<'a> Compiler<'a> {
                 value_type,
             ),
             ast::Operation::FieldAccess(field) => {
-                self.compile_operation_field_access(field, value_type)
+                self.compile_tuple_element_access(TupleAccessor::Field(field), value_type)
             }
             ast::Operation::PositionalAccess(position) => {
-                self.compile_operation_positional_access(position, value_type)
+                self.compile_tuple_element_access(TupleAccessor::Position(position), value_type)
             }
             ast::Operation::TailCall(identifier) => self.compile_operation_tail_call(&identifier),
             ast::Operation::Parameter(parameter) => {
@@ -1574,45 +1472,38 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_field_access(
+    fn compile_tuple_element_access(
         &mut self,
-        field_name: String,
+        accessor: TupleAccessor,
         value_type: Type,
     ) -> Result<Type, Error> {
         match value_type {
             Type::Resolved(types::Type::Tuple(type_id)) => {
-                let type_registry = &self.type_registry;
-                let tuple_type = type_registry.lookup_type(&type_id).unwrap();
-                let index = tuple_type
-                    .1
-                    .iter()
-                    .position(|f| f.0 == Some(field_name.clone()))
-                    .ok_or(Error::FieldNotFound {
-                        field_name: field_name.clone(),
-                        type_name: format!("{:?}", type_id),
-                    })?;
-                let result_type = tuple_type.1[index].1.clone();
+                let (index, result_type) = match accessor {
+                    TupleAccessor::Field(field_name) => {
+                        self.get_tuple_field_type_by_name(&type_id, &field_name)?
+                    }
+                    TupleAccessor::Position(position) => {
+                        let field_type =
+                            self.get_tuple_field_type_by_position(&type_id, position)?;
+                        (position, field_type)
+                    }
+                };
                 self.add_instruction(Instruction::Get(index));
                 Ok(Type::Resolved(result_type))
             }
-            _ => Err(Error::FieldAccessOnNonTuple { field_name }),
-        }
-    }
-
-    fn compile_operation_positional_access(
-        &mut self,
-        index: usize,
-        value_type: Type,
-    ) -> Result<Type, Error> {
-        match value_type {
-            Type::Resolved(types::Type::Tuple(type_id)) => {
-                let type_registry = &self.type_registry;
-                let tuple_type = type_registry.lookup_type(&type_id).unwrap();
-                let result_type = tuple_type.1[index].1.clone();
-                self.add_instruction(Instruction::Get(index));
-                Ok(Type::Resolved(result_type))
-            }
-            _ => Err(Error::PositionalAccessOnNonTuple { index }),
+            Type::Resolved(_) => match accessor {
+                TupleAccessor::Field(field_name) => {
+                    Err(Error::FieldAccessOnNonTuple { field_name })
+                }
+                TupleAccessor::Position(index) => Err(Error::PositionalAccessOnNonTuple { index }),
+            },
+            Type::Unresolved(_) => match accessor {
+                TupleAccessor::Field(field_name) => {
+                    Err(Error::FieldAccessOnNonTuple { field_name })
+                }
+                TupleAccessor::Position(index) => Err(Error::PositionalAccessOnNonTuple { index }),
+            },
         }
     }
 
@@ -1799,32 +1690,41 @@ impl<'a> Compiler<'a> {
         Err(Error::VariableUndefined(target.to_string()))
     }
 
-    fn compile_value_member_access(
+    fn compile_member_access_chain(
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
+        emit_load: bool,
     ) -> Result<Type, Error> {
-        let mut last_type = self.compile_target_access(target)?;
+        let mut last_type = if emit_load {
+            self.add_instruction(Instruction::Load(target.to_string()));
+            self.lookup_variable(target)
+                .ok_or(Error::VariableUndefined(target.to_string()))?
+        } else {
+            self.compile_target_access(target)?
+        };
 
         for accessor in accessors {
             match last_type {
                 Type::Resolved(types::Type::Tuple(type_id)) => {
-                    let type_registry = &self.type_registry;
-                    let tuple_type = type_registry.lookup_type(&type_id).unwrap();
-                    let index = match accessor {
-                        ast::AccessPath::Field(field_name) => tuple_type
-                            .1
-                            .iter()
-                            .position(|f| f.0 == Some(field_name.clone()))
-                            .ok_or(Error::MemberFieldNotFound {
+                    let (index, result_type) = match accessor {
+                        ast::AccessPath::Field(field_name) => self
+                            .get_tuple_field_type_by_name(&type_id, &field_name)
+                            .map_err(|_| Error::MemberFieldNotFound {
                                 field_name: field_name.clone(),
                                 target: target.to_string(),
                             })?,
-                        ast::AccessPath::Index(index) => index,
+                        ast::AccessPath::Index(index) => {
+                            let field_type = self
+                                .get_tuple_field_type_by_position(&type_id, index)
+                                .map_err(|_| Error::MemberAccessOnNonTuple {
+                                    target: target.to_string(),
+                                })?;
+                            (index, field_type)
+                        }
                     };
-                    let new_type = tuple_type.1[index].1.clone();
                     self.add_instruction(Instruction::Get(index));
-                    last_type = Type::Resolved(new_type);
+                    last_type = Type::Resolved(result_type);
                 }
                 _ => {
                     return Err(Error::MemberAccessOnNonTuple {
@@ -1837,48 +1737,23 @@ impl<'a> Compiler<'a> {
         Ok(last_type)
     }
 
+    fn compile_value_member_access(
+        &mut self,
+        target: &str,
+        accessors: Vec<ast::AccessPath>,
+    ) -> Result<Type, Error> {
+        self.compile_member_access_chain(target, accessors, false)
+    }
+
     fn compile_operation_member_access(
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
         value_type: Type,
     ) -> Result<Type, Error> {
-        self.add_instruction(Instruction::Load(target.to_string()));
-
-        let mut last_type = self
-            .lookup_variable(target)
-            .ok_or(Error::VariableUndefined(target.to_string()))?;
-
-        for accessor in accessors {
-            match last_type {
-                Type::Resolved(types::Type::Tuple(type_id)) => {
-                    let type_registry = &self.type_registry;
-                    let tuple_type = type_registry.lookup_type(&type_id).unwrap();
-                    let index = match accessor {
-                        ast::AccessPath::Field(field_name) => tuple_type
-                            .1
-                            .iter()
-                            .position(|f| f.0 == Some(field_name.clone()))
-                            .ok_or(Error::MemberFieldNotFound {
-                                field_name: field_name.clone(),
-                                target: target.to_string(),
-                            })?,
-                        ast::AccessPath::Index(index) => index,
-                    };
-                    let new_type = tuple_type.1[index].1.clone();
-                    self.add_instruction(Instruction::Get(index));
-                    last_type = Type::Resolved(new_type);
-                }
-                _ => {
-                    return Err(Error::MemberAccessOnNonTuple {
-                        target: target.to_string(),
-                    });
-                }
-            }
-        }
-
+        let function_type = self.compile_member_access_chain(target, accessors, true)?;
         // Use the unified function call handler
-        self.compile_function_call(last_type, value_type)
+        self.compile_function_call(function_type, value_type)
     }
 
     fn compile_function_call(
@@ -1992,6 +1867,141 @@ impl<'a> Compiler<'a> {
 
     fn add_instruction(&mut self, instruction: Instruction) {
         self.instructions.push(instruction)
+    }
+
+    /// Extracts all fields from a tuple on the stack, placing field values on top.
+    /// Assumes tuple is on top of stack. After execution:
+    /// Stack: [tuple, valueN-1, ..., value1, value0] (value0 on top)
+    fn emit_extract_tuple_fields(&mut self, num_fields: usize) {
+        for i in (0..num_fields).rev() {
+            // Copy tuple from depth (num_fields - 1 - i) to top of stack
+            self.add_instruction(Instruction::Copy(num_fields - 1 - i));
+            // Extract field i from the copied tuple
+            self.add_instruction(Instruction::Get(i));
+        }
+    }
+
+    /// Extracts specific fields from a tuple by field indices.
+    /// Assumes tuple is on top of stack. After execution:
+    /// Stack: [tuple, fieldN-1, ..., field1, field0] (field0 on top)
+    fn emit_extract_specific_fields(&mut self, field_indices: &[usize]) {
+        for (i, &field_index) in field_indices.iter().rev().enumerate() {
+            // Copy tuple from depth i to top of stack
+            self.add_instruction(Instruction::Copy(i));
+            // Extract field from the copied tuple
+            self.add_instruction(Instruction::Get(field_index));
+        }
+    }
+
+    /// Emits a jump placeholder and returns the address to patch later
+    fn emit_jump_placeholder(&mut self) -> usize {
+        let addr = self.instructions.len();
+        self.add_instruction(Instruction::Jump(0));
+        addr
+    }
+
+    /// Emits a conditional jump placeholder and returns the address to patch later
+    fn emit_jump_if_nil_placeholder(&mut self) -> usize {
+        let addr = self.instructions.len();
+        self.add_instruction(Instruction::JumpIfNil(0));
+        addr
+    }
+
+    /// Emits a conditional jump placeholder and returns the address to patch later
+    fn emit_jump_if_not_nil_placeholder(&mut self) -> usize {
+        let addr = self.instructions.len();
+        self.add_instruction(Instruction::JumpIfNotNil(0));
+        addr
+    }
+
+    /// Patches a jump instruction to target the current instruction address
+    fn patch_jump_to_here(&mut self, jump_addr: usize) {
+        let target_addr = self.instructions.len();
+        let offset = (target_addr as isize) - (jump_addr as isize) - 1;
+        self.instructions[jump_addr] = match &self.instructions[jump_addr] {
+            Instruction::Jump(_) => Instruction::Jump(offset),
+            Instruction::JumpIfNil(_) => Instruction::JumpIfNil(offset),
+            Instruction::JumpIfNotNil(_) => Instruction::JumpIfNotNil(offset),
+            _ => panic!("Cannot patch non-jump instruction"),
+        };
+    }
+
+    /// Patches a jump instruction to target a specific address
+    fn patch_jump_to_addr(&mut self, jump_addr: usize, target_addr: usize) {
+        let offset = (target_addr as isize) - (jump_addr as isize) - 1;
+        self.instructions[jump_addr] = match &self.instructions[jump_addr] {
+            Instruction::Jump(_) => Instruction::Jump(offset),
+            Instruction::JumpIfNil(_) => Instruction::JumpIfNil(offset),
+            Instruction::JumpIfNotNil(_) => Instruction::JumpIfNotNil(offset),
+            _ => panic!("Cannot patch non-jump instruction"),
+        };
+    }
+
+    /// Emits a conditional jump that immediately targets the fail address
+    fn emit_jump_if_nil_to_addr(&mut self, fail_addr: usize) {
+        let jump_addr = self.instructions.len();
+        self.add_instruction(Instruction::JumpIfNil(0));
+        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
+        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+    }
+
+    /// Gets field type from a tuple type by field name
+    fn get_tuple_field_type_by_name(
+        &self,
+        type_id: &TypeId,
+        field_name: &str,
+    ) -> Result<(usize, types::Type), Error> {
+        let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+        let (index, (_, field_type)) = tuple_type
+            .1
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.0.as_deref() == Some(field_name))
+            .ok_or(Error::FieldNotFound {
+                field_name: field_name.to_string(),
+                type_name: format!("{:?}", type_id),
+            })?;
+        Ok((index, field_type.clone()))
+    }
+
+    /// Gets field type from a tuple type by position
+    fn get_tuple_field_type_by_position(
+        &self,
+        type_id: &TypeId,
+        position: usize,
+    ) -> Result<types::Type, Error> {
+        let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+        if position >= tuple_type.1.len() {
+            return Err(Error::PositionalAccessOnNonTuple { index: position });
+        }
+        Ok(tuple_type.1[position].1.clone())
+    }
+
+    /// Emits runtime type check for tuple type
+    fn emit_runtime_tuple_type_check(&mut self, type_id: TypeId, fail_addr: usize) {
+        self.add_instruction(Instruction::Duplicate);
+        self.add_instruction(Instruction::IsTuple(type_id));
+        self.emit_jump_if_nil_to_addr(fail_addr);
+        self.add_instruction(Instruction::Pop);
+    }
+
+    /// Emits a sequence of instructions for cleanup pattern (pop values and return NIL)
+    fn emit_pattern_match_cleanup(&mut self, num_values_to_pop: usize) {
+        for _ in 0..num_values_to_pop {
+            self.add_instruction(Instruction::Pop);
+        }
+        self.add_instruction(Instruction::Pop); // Remove duplicated value
+        self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
+    }
+
+    /// Emits pattern match success sequence (store variables and return OK)
+    fn emit_pattern_match_success(&mut self, assignments: &[(String, Type)]) {
+        for (variable_name, variable_type) in assignments {
+            self.add_instruction(Instruction::Store(variable_name.clone()));
+            self.define_variable(variable_name, variable_type.clone());
+        }
+        self.add_instruction(Instruction::Pop); // Remove duplicated value
+        self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
     }
 
     fn define_variable(&mut self, name: &str, var_type: Type) {
