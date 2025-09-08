@@ -33,9 +33,9 @@ fn test_branch_pattern_matching() {
         .expect_int(2);
 }
 
-// #[test]
-// fn test_branch_pattern_no_match() {
-//     quiver()
-//         .evaluate("C ~> { A = $ => 1 | B = $ => 2 }")
-//         .expect_nil();
-// }
+#[test]
+fn test_string_match() {
+    quiver()
+        .evaluate("\"bar\" ~> { \"foo\" = $ => 1 | \"bar\" = $ => 2 }")
+        .expect_int(2);
+}
