@@ -4,6 +4,17 @@ use std::{
 };
 
 mod free_variables;
+mod type_system;
+mod codegen;
+mod pattern;
+mod modules;
+mod expression;
+
+pub use type_system::{Type, TupleAccessor, narrow_types};
+pub use codegen::InstructionBuilder;
+pub use pattern::PatternCompiler;
+pub use modules::{ModuleCache, compile_type_import};
+pub use expression::ExpressionCompiler;
 
 use crate::{
     ast,
@@ -93,46 +104,8 @@ pub enum Error {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum Type {
-    Resolved(types::Type),
-    Unresolved(Vec<types::Type>),
-}
 
-#[derive(Debug, Clone)]
-enum TupleAccessor {
-    Field(String),
-    Position(usize),
-}
 
-impl Type {
-    fn to_type_vec(&self) -> Vec<types::Type> {
-        match self {
-            Type::Resolved(t) => vec![t.clone()],
-            Type::Unresolved(types) => types.clone(),
-        }
-    }
-}
-
-fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
-    let mut flattened = Vec::new();
-    for t in types {
-        match t {
-            Type::Unresolved(ts) => flattened.extend(ts),
-            Type::Resolved(t) => flattened.push(t),
-        }
-    }
-
-    flattened.dedup();
-
-    match flattened.len() {
-        0 => Err(Error::TypeUnresolved(
-            "No valid types found in narrowing".to_string(),
-        )),
-        1 => Ok(Type::Resolved(flattened.get(0).unwrap().clone())),
-        _ => Ok(Type::Unresolved(flattened)),
-    }
-}
 
 pub struct Compiler<'a> {
     instructions: Vec<Instruction>,
