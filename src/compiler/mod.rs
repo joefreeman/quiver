@@ -1678,63 +1678,8 @@ impl<'a> Compiler<'a> {
             }
         };
 
-        // Get all possible operation types and value types
-        let operation_types = function_type.to_type_vec();
-        let value_types = value_type.to_type_vec();
-
-        // Find all function types in the operation
-        let mut function_variants = Vec::new();
-        let mut non_function_types = Vec::new();
-
-        for op_type in &operation_types {
-            match op_type {
-                types::Type::Function(func_type) => function_variants.push(func_type),
-                _ => non_function_types.push(op_type),
-            }
-        }
-
-        if function_variants.is_empty() {
-            // No function types found in operation
-            return Err(Error::ChainValueUnused);
-        }
-
-        // Check if ALL function variants are compatible with the value types
-        let mut all_return_types = Vec::new();
-        for func_type in &function_variants {
-            let mut func_is_compatible = false;
-
-            // Check if this function is compatible with any of the value types
-            for func_param_type in &func_type.parameter {
-                for value_inner_type in &value_types {
-                    if func_param_type == value_inner_type {
-                        func_is_compatible = true;
-                        break;
-                    }
-                }
-                if func_is_compatible {
-                    break;
-                }
-            }
-
-            if !func_is_compatible {
-                // This function variant is not compatible with any value type
-                return Err(Error::TypeMismatch {
-                    expected: format!("function parameter compatible with {:?}", value_types),
-                    found: format!("function parameter {:?}", func_type.parameter),
-                });
-            }
-
-            // This function is compatible - collect its return types
-            for return_type in &func_type.result {
-                all_return_types.push(Type::Resolved(return_type.clone()));
-            }
-        }
-
-        // Generate the call instruction
-        self.add_instruction(Instruction::Call);
-
-        // Use narrow_types to properly handle the return type combinations
-        narrow_types(all_return_types)
+        // Use the unified function call handler
+        self.compile_function_call(function_type, value_type)
     }
 
     fn compile_operator(
@@ -1932,60 +1877,66 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        match &last_type {
-            Type::Resolved(types::Type::Function(func_type)) => {
-                let parameter_type = &func_type.parameter[0]; // For now, take first parameter type
-                let return_type = &func_type.result[0]; // For now, take first result type
-                // Extract the inner type from value_type for comparison
-                let value_inner_type = match &value_type {
-                    Type::Resolved(inner_type) => inner_type,
-                    Type::Unresolved(_) => {
-                        return Err(Error::TypeMismatch {
-                            expected: format!("{:?}", parameter_type),
-                            found: "unresolved type".to_string(),
-                        });
-                    }
-                };
+        // Use the unified function call handler
+        self.compile_function_call(last_type, value_type)
+    }
 
-                if value_inner_type != parameter_type {
-                    return Err(Error::TypeMismatch {
-                        expected: format!("{:?}", parameter_type),
-                        found: format!("{:?}", value_inner_type),
-                    });
-                }
+    fn compile_function_call(
+        &mut self,
+        operation_type: Type,
+        value_type: Type,
+    ) -> Result<Type, Error> {
+        let operation_types = operation_type.to_type_vec();
+        let value_types = value_type.to_type_vec();
 
-                self.add_instruction(Instruction::Call);
-                Ok(Type::Resolved(return_type.clone()))
+        // Separate function types from non-function types
+        let mut function_variants = Vec::new();
+        let mut non_function_types = Vec::new();
+
+        for op_type in &operation_types {
+            match op_type {
+                types::Type::Function(func_type) => function_variants.push(func_type),
+                _ => non_function_types.push(op_type),
             }
-            Type::Unresolved(function_types) => {
-                if function_types.is_empty() {
-                    Err(Error::TypeUnresolved(
-                        "Cannot call function with unresolved type".to_string(),
-                    ))
-                } else {
-                    // For union function types, try to find a matching variant
-                    // For now, we'll be permissive and allow the call
-                    self.add_instruction(Instruction::Call);
-                    // Extract all possible return types from function variants
-                    let mut return_types = Vec::new();
-                    for func_type in function_types {
-                        if let types::Type::Function(func_type_inner) = func_type {
-                            for return_type in &func_type_inner.result {
-                                return_types.push(return_type.clone());
-                            }
-                        }
-                    }
-                    if return_types.is_empty() {
-                        Err(Error::TypeUnresolved(
-                            "No function variants found in union".to_string(),
-                        ))
-                    } else {
-                        Ok(Type::Unresolved(return_types))
-                    }
-                }
-            }
-            _ => Err(Error::ChainValueUnused),
         }
+
+        // Error if we have any non-function types in what should be callable
+        if !non_function_types.is_empty() {
+            return Err(Error::ChainValueUnused);
+        }
+
+        // Error if we have no function types at all
+        if function_variants.is_empty() {
+            return Err(Error::ChainValueUnused);
+        }
+
+        // Check compatibility and collect return types
+        let mut all_return_types = Vec::new();
+
+        for func_type in &function_variants {
+            // Check if this function accepts any of the value types
+            let is_compatible = func_type.parameter.iter().any(|func_param_type| {
+                value_types
+                    .iter()
+                    .any(|value_type| func_param_type == value_type)
+            });
+
+            if !is_compatible {
+                return Err(Error::TypeMismatch {
+                    expected: format!("function parameter compatible with {:?}", value_types),
+                    found: format!("function parameter {:?}", func_type.parameter),
+                });
+            }
+
+            // Collect return types from this compatible function
+            all_return_types.extend(func_type.result.iter().map(|t| Type::Resolved(t.clone())));
+        }
+
+        // Generate the call instruction
+        self.add_instruction(Instruction::Call);
+
+        // Combine return types using narrow_types
+        narrow_types(all_return_types)
     }
 
     fn cartesian_product_tuple_types(
