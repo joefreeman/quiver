@@ -1,10 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{
-    ast,
-    bytecode::TypeId,
-    types,
-};
+use crate::{ast, bytecode::TypeId, types};
 
 use super::Error;
 

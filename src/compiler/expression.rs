@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use crate::{ast, bytecode::TypeId};
 
 use super::{
+    Error,
     codegen::InstructionBuilder,
-    type_system::{Type, narrow_types}, 
-    Error
+    typing::{Type, narrow_types},
 };
 
 pub struct ExpressionCompiler<'a> {
@@ -21,13 +21,18 @@ impl<'a> ExpressionCompiler<'a> {
         Self { codegen, scopes }
     }
 
-    pub fn compile_block(&mut self, block: ast::Block, _parameter_type: Type) -> Result<Type, Error> {
+    pub fn compile_block(
+        &mut self,
+        block: ast::Block,
+        _parameter_type: Type,
+    ) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
         let mut branch_starts = Vec::new();
 
-        self.codegen.add_instruction(crate::bytecode::Instruction::Enter);
+        self.codegen
+            .add_instruction(crate::bytecode::Instruction::Enter);
         self.scopes.push(HashMap::new());
 
         for (i, branch) in block.branches.iter().enumerate() {
@@ -36,8 +41,10 @@ impl<'a> ExpressionCompiler<'a> {
             branch_starts.push(self.codegen.instructions.len());
 
             if i > 0 {
-                self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
-                self.codegen.add_instruction(crate::bytecode::Instruction::Reset);
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Pop);
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Reset);
                 self.scopes.last_mut().unwrap().clear();
             }
 
@@ -52,10 +59,12 @@ impl<'a> ExpressionCompiler<'a> {
 
             if branch.consequence.is_some() {
                 // Branch has a consequence - compile it
-                self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Duplicate);
                 let next_branch_jump = self.codegen.emit_jump_if_nil_placeholder();
                 next_branch_jumps.push((next_branch_jump, i + 1));
-                self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Pop);
 
                 // This would need proper consequence compilation
                 let consequence_type = Type::Resolved(crate::types::Type::Integer); // Placeholder
@@ -70,7 +79,8 @@ impl<'a> ExpressionCompiler<'a> {
                     let end_jump = self.codegen.emit_jump_placeholder();
                     end_jumps.push(end_jump);
                 } else {
-                    self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
+                    self.codegen
+                        .add_instruction(crate::bytecode::Instruction::Duplicate);
                     let success_jump = self.codegen.emit_jump_if_not_nil_placeholder();
                     end_jumps.push(success_jump);
                 }
@@ -79,7 +89,8 @@ impl<'a> ExpressionCompiler<'a> {
 
         let end_addr = self.codegen.instructions.len();
 
-        self.codegen.add_instruction(crate::bytecode::Instruction::Exit);
+        self.codegen
+            .add_instruction(crate::bytecode::Instruction::Exit);
         self.scopes.pop();
 
         for (jump_addr, next_branch_idx) in next_branch_jumps {
@@ -108,7 +119,10 @@ impl<'a> ExpressionCompiler<'a> {
 
         for (i, term) in expression.terms.iter().enumerate() {
             last_type = Some(match term {
-                ast::Term::Assignment { pattern: _, value: _ } => {
+                ast::Term::Assignment {
+                    pattern: _,
+                    value: _,
+                } => {
                     // This would need proper assignment compilation
                     Type::Resolved(crate::types::Type::Integer) // Placeholder
                 }
@@ -124,10 +138,12 @@ impl<'a> ExpressionCompiler<'a> {
             }
 
             if i < expression.terms.len() - 1 {
-                self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Duplicate);
                 let end_jump = self.codegen.emit_jump_if_nil_placeholder();
                 end_jumps.push(end_jump);
-                self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Pop);
             }
         }
 

@@ -1,9 +1,13 @@
-use crate::{ast, bytecode::{Constant, TypeId}, types, vm};
+use crate::{
+    ast,
+    bytecode::{Constant, TypeId},
+    types, vm,
+};
 
 use super::{
+    Error,
     codegen::InstructionBuilder,
-    type_system::{Type, TypeContext}, 
-    Error
+    typing::{Type, TypeContext},
 };
 
 pub struct PatternCompiler<'a> {
@@ -58,34 +62,41 @@ impl<'a> PatternCompiler<'a> {
         fail_addr: usize,
     ) -> Result<Option<Vec<(String, Type)>>, Error> {
         // Duplicate the value for comparison
-        self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
+        self.codegen
+            .add_instruction(crate::bytecode::Instruction::Duplicate);
 
         // Push the literal onto the stack
         match literal {
             ast::Literal::Integer(int_val) => {
                 let index = self.vm.register_constant(Constant::Integer(*int_val));
-                self.codegen.add_instruction(crate::bytecode::Instruction::Constant(index));
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Constant(index));
             }
             ast::Literal::Binary(bytes) => {
                 let index = self.vm.register_constant(Constant::Binary(bytes.clone()));
-                self.codegen.add_instruction(crate::bytecode::Instruction::Constant(index));
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Constant(index));
             }
             ast::Literal::String(string) => {
                 let bytes = string.as_bytes().to_vec();
                 let index = self.vm.register_constant(Constant::Binary(bytes));
-                self.codegen.add_instruction(crate::bytecode::Instruction::Constant(index));
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Constant(index));
             }
         }
 
         // Compare using Equal
-        self.codegen.add_instruction(crate::bytecode::Instruction::Equal(2));
+        self.codegen
+            .add_instruction(crate::bytecode::Instruction::Equal(2));
 
         // If comparison fails (result is NIL), jump to fail address
-        self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
+        self.codegen
+            .add_instruction(crate::bytecode::Instruction::Duplicate);
         self.codegen.emit_jump_if_nil_to_addr(fail_addr);
 
         // Pop comparison result
-        self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
+        self.codegen
+            .add_instruction(crate::bytecode::Instruction::Pop);
 
         Ok(Some(vec![]))
     }
@@ -147,7 +158,8 @@ impl<'a> PatternCompiler<'a> {
                     let mut all_assignments = Vec::new();
 
                     // Extract all field values from tuple
-                    self.codegen.emit_extract_tuple_fields(tuple_pattern.fields.len());
+                    self.codegen
+                        .emit_extract_tuple_fields(tuple_pattern.fields.len());
                     // Final stack: [tuple, valueN-1, ..., value1, value0] (value0 on top)
 
                     // Now create pending assignments for each field
@@ -185,7 +197,9 @@ impl<'a> PatternCompiler<'a> {
                     let mut matching_type_id = None;
                     for tuple_type in types {
                         if let types::Type::Tuple(type_id) = tuple_type {
-                            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                            if let Some(tuple_info) =
+                                self.type_context.type_registry.lookup_type(type_id)
+                            {
                                 if tuple_info.0.as_ref() == Some(tuple_name) {
                                     matching_type_id = Some(*type_id);
                                     break;
@@ -196,18 +210,24 @@ impl<'a> PatternCompiler<'a> {
 
                     if let Some(expected_type_id) = matching_type_id {
                         // Emit runtime type check
-                        self.codegen.emit_runtime_tuple_type_check(expected_type_id, fail_addr);
+                        self.codegen
+                            .emit_runtime_tuple_type_check(expected_type_id, fail_addr);
 
                         // Now get the tuple info for field matching
-                        if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&expected_type_id)
+                        if let Some(tuple_info) = self
+                            .type_context
+                            .type_registry
+                            .lookup_type(&expected_type_id)
                         {
                             // Check field count matches
                             if tuple_pattern.fields.len() != tuple_info.1.len() {
                                 // Length mismatch, jump to fail
                                 let jump_addr = self.codegen.instructions.len();
-                                self.codegen.add_instruction(crate::bytecode::Instruction::Jump(0));
+                                self.codegen
+                                    .add_instruction(crate::bytecode::Instruction::Jump(0));
                                 let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-                                self.codegen.instructions[jump_addr] = crate::bytecode::Instruction::Jump(offset);
+                                self.codegen.instructions[jump_addr] =
+                                    crate::bytecode::Instruction::Jump(offset);
 
                                 // Field count mismatch with runtime check - still need to generate code but mark as might match
                                 return Ok(Some(self.extract_bindings_from_pattern(
@@ -227,7 +247,8 @@ impl<'a> PatternCompiler<'a> {
                             let mut all_assignments = Vec::new();
 
                             // Extract all field values from tuple
-                            self.codegen.emit_extract_tuple_fields(tuple_pattern.fields.len());
+                            self.codegen
+                                .emit_extract_tuple_fields(tuple_pattern.fields.len());
 
                             // Now create assignments for each field in forward order
                             for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
@@ -261,7 +282,8 @@ impl<'a> PatternCompiler<'a> {
 
                 // For anonymous tuple patterns or when type not found - might match at runtime
                 let jump_addr = self.codegen.instructions.len();
-                self.codegen.add_instruction(crate::bytecode::Instruction::Jump(0));
+                self.codegen
+                    .add_instruction(crate::bytecode::Instruction::Jump(0));
                 let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
                 self.codegen.instructions[jump_addr] = crate::bytecode::Instruction::Jump(offset);
                 Ok(Some(vec![]))
@@ -323,7 +345,9 @@ impl<'a> PatternCompiler<'a> {
                 // Find all tuple types that have all the requested fields
                 for tuple_type in types {
                     if let types::Type::Tuple(type_id) = tuple_type {
-                        if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                        if let Some(tuple_info) =
+                            self.type_context.type_registry.lookup_type(type_id)
+                        {
                             let has_all_fields = field_names.iter().all(|field_name| {
                                 tuple_info.1.iter().any(|(field_name_opt, _)| {
                                     field_name_opt.as_deref() == Some(field_name)
@@ -350,14 +374,18 @@ impl<'a> PatternCompiler<'a> {
 
                     if !is_last {
                         // Duplicate value for type check with placeholder for next check
-                        self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
-                        self.codegen.add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::Duplicate);
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
                         let next_check_jump = self.codegen.emit_jump_if_nil_placeholder();
                         next_check_jumps.push(next_check_jump);
-                        self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::Pop);
                     } else {
                         // Last option - emit runtime type check with direct fail
-                        self.codegen.emit_runtime_tuple_type_check(*type_id, fail_addr);
+                        self.codegen
+                            .emit_runtime_tuple_type_check(*type_id, fail_addr);
                     }
 
                     // Extract fields for this tuple type
@@ -379,7 +407,8 @@ impl<'a> PatternCompiler<'a> {
                         }
 
                         // Extract specific fields from tuple
-                        let field_indices: Vec<usize> = field_data.iter().map(|(_, idx, _)| *idx).collect();
+                        let field_indices: Vec<usize> =
+                            field_data.iter().map(|(_, idx, _)| *idx).collect();
                         self.codegen.emit_extract_specific_fields(&field_indices);
 
                         // Jump to success (will be patched later)
@@ -390,7 +419,8 @@ impl<'a> PatternCompiler<'a> {
                         if i > 0 {
                             let next_check_addr = self.codegen.instructions.len();
                             let prev_jump_addr = next_check_jumps[i - 1];
-                            self.codegen.patch_jump_to_addr(prev_jump_addr, next_check_addr);
+                            self.codegen
+                                .patch_jump_to_addr(prev_jump_addr, next_check_addr);
                         }
                     }
                 }
@@ -403,7 +433,9 @@ impl<'a> PatternCompiler<'a> {
                 // Create assignments based on the first matching type (they should all have the same field structure for the requested fields)
                 let first_type_id = possible_matches[0];
                 let mut assignments = Vec::new();
-                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&first_type_id) {
+                if let Some(tuple_info) =
+                    self.type_context.type_registry.lookup_type(&first_type_id)
+                {
                     for field_name in field_names.iter().rev() {
                         if let Some((_, (_, field_type))) = tuple_info
                             .1
@@ -446,7 +478,8 @@ impl<'a> PatternCompiler<'a> {
                 }
 
                 // Extract all named fields with correct stack management
-                let field_indices: Vec<usize> = named_fields.iter().map(|(_, idx, _)| *idx).collect();
+                let field_indices: Vec<usize> =
+                    named_fields.iter().map(|(_, idx, _)| *idx).collect();
                 self.codegen.emit_extract_specific_fields(&field_indices);
 
                 // Create assignments for extracted fields (fields will be processed in forward order)
@@ -466,7 +499,12 @@ impl<'a> PatternCompiler<'a> {
                 // Find all tuple types (star pattern extracts all named fields from any tuple)
                 for tuple_type in types {
                     if let types::Type::Tuple(type_id) = tuple_type {
-                        if self.type_context.type_registry.lookup_type(type_id).is_some() {
+                        if self
+                            .type_context
+                            .type_registry
+                            .lookup_type(type_id)
+                            .is_some()
+                        {
                             possible_matches.push(*type_id);
                         }
                     }
@@ -486,14 +524,18 @@ impl<'a> PatternCompiler<'a> {
 
                     if !is_last {
                         // Duplicate value for type check with placeholder for next check
-                        self.codegen.add_instruction(crate::bytecode::Instruction::Duplicate);
-                        self.codegen.add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::Duplicate);
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
                         let next_check_jump = self.codegen.emit_jump_if_nil_placeholder();
                         next_check_jumps.push(next_check_jump);
-                        self.codegen.add_instruction(crate::bytecode::Instruction::Pop);
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::Pop);
                     } else {
                         // Last option - emit runtime type check with direct fail
-                        self.codegen.emit_runtime_tuple_type_check(*type_id, fail_addr);
+                        self.codegen
+                            .emit_runtime_tuple_type_check(*type_id, fail_addr);
                     }
 
                     // Extract all named fields for this tuple type
@@ -508,7 +550,8 @@ impl<'a> PatternCompiler<'a> {
                         }
 
                         // Extract named fields from tuple
-                        let field_indices: Vec<usize> = named_fields.iter().map(|(_, idx, _)| *idx).collect();
+                        let field_indices: Vec<usize> =
+                            named_fields.iter().map(|(_, idx, _)| *idx).collect();
                         self.codegen.emit_extract_specific_fields(&field_indices);
 
                         // Jump to success (will be patched later)
@@ -519,7 +562,8 @@ impl<'a> PatternCompiler<'a> {
                         if i > 0 {
                             let next_check_addr = self.codegen.instructions.len();
                             let prev_jump_addr = next_check_jumps[i - 1];
-                            self.codegen.patch_jump_to_addr(prev_jump_addr, next_check_addr);
+                            self.codegen
+                                .patch_jump_to_addr(prev_jump_addr, next_check_addr);
                         }
                     }
                 }
@@ -533,7 +577,9 @@ impl<'a> PatternCompiler<'a> {
                 // For star patterns, we need to collect all named fields from whichever type matches
                 let first_type_id = possible_matches[0];
                 let mut assignments = Vec::new();
-                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&first_type_id) {
+                if let Some(tuple_info) =
+                    self.type_context.type_registry.lookup_type(&first_type_id)
+                {
                     for (_, (field_name, field_type)) in tuple_info.1.iter().enumerate().rev() {
                         if let Some(name) = field_name {
                             assignments.push((name.clone(), Type::Resolved(field_type.clone())));
@@ -567,7 +613,8 @@ impl<'a> PatternCompiler<'a> {
                 // Try to get field types from expected tuple type
                 let field_types =
                     if let Some(Type::Resolved(types::Type::Tuple(type_id))) = expected_type {
-                        self.type_context.type_registry
+                        self.type_context
+                            .type_registry
                             .lookup_type(type_id)
                             .map(|info| {
                                 info.1
