@@ -448,6 +448,7 @@ impl<'a> PatternCompiler<'a> {
                         }
                     }
                 }
+                assignments.reverse();
                 Ok(Some(assignments))
             }
             _ => {

@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use quiver::vm::Value;
 
 #[test]
 fn test_simple_assignment() {
@@ -99,23 +100,28 @@ fn test_union_match_with_tuples() {
         .expect_int(4)
 }
 
-// #[test]
-// fn test_failed_union_match() {
-//     quiver()
-//         .evaluate(
-//             r#"
-//             C[3] ~> {
-//               | A[x] = $ => [x, 1] ~> +
-//               | B[x] = $ => [x, 2] ~> +
-//             }
-//             "#,
-//         )
-//         .expect_nil()
-// }
+#[test]
+fn test_union_type_partial_destructuring() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #[a: int, b: int] {
+              (a, b) = $ => [a, b]
+            },
+            [a: 1, b: 2] ~> f
+            "#,
+        )
+        .expect_tuple(vec![Value::Integer(1), Value::Integer(2)]);
 
-// #[test]
-// fn test_variable_not_assigned_if_no_match() {
-//     quiver()
-//         .evaluate("A[a: [x, 3]] = A[a: [1, 2]], x")
-//         .expect_nil();
-// }
+    quiver()
+        .evaluate(
+            r#"
+            type union = [a: int, b: int] | [x: int];
+            f = #union {
+              (a, b) = $ => [a, b]
+            },
+            [a: 1, b: 2] ~> f
+            "#,
+        )
+        .expect_tuple(vec![Value::Integer(1), Value::Integer(2)]);
+}
