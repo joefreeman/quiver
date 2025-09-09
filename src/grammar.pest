@@ -13,8 +13,7 @@ tuple_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
 // Function types
 function_type = { "#" ~ function_input_type ~ sp ~ "->" ~ sp ~ type_definition }
 function_input_type = {
-    "(" ~ ws? ~ function_type ~ ws? ~ ")" |
-    union_type |
+    "(" ~ ws? ~ type_definition ~ ws? ~ ")" |
     tuple_type |
     primitive_type |
     identifier
@@ -32,8 +31,7 @@ field_type = { (identifier ~ ":" ~ sp)? ~ type_definition }
 // Types
 primitive_type = { "int" | "bin" }
 base_type = { function_type | tuple_type | primitive_type | identifier }
-union_type = { "(" ~ ws? ~ base_type ~ (ws? ~ "," ~ ws ~ base_type)+ ~ ws? ~ ")" }
-type_definition = { union_type | base_type }
+type_definition = { base_type ~ (ws ~ "|" ~ ws ~ base_type)* }
 
 // Literals
 integer_literal = @{ "-"? ~ ASCII_DIGIT+ }
@@ -78,7 +76,7 @@ operation_tuple = {
 }
 
 // Function definitions (#Type { ... }, #[Type, ...] { ... }, #{ ... })
-function_definition = { "#" ~ (type_definition? ~ sp)? ~ block }
+function_definition = { "#" ~ (function_input_type? ~ sp)? ~ block }
 
 // Blocks
 branch = { expression ~ (sp ~ "=>" ~ ws ~ expression)? }

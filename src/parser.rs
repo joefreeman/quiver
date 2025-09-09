@@ -398,7 +398,7 @@ fn parse_function_definition(
 
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::type_definition => parameter_type = Some(parse_type_definition(part)?),
+            Rule::function_input_type => parameter_type = Some(parse_function_input_type(part)?),
             Rule::block => body = Some(parse_block(part)?),
             _ => {}
         }
@@ -528,15 +528,20 @@ fn parse_partial_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Vec<String
 }
 
 fn parse_type_definition(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
+    let mut inner = pair.into_inner();
+    let first_type = parse_base_type(inner.next().unwrap())?;
 
-    match inner_pair.as_rule() {
-        Rule::union_type => parse_union_type(inner_pair),
-        Rule::base_type => parse_base_type(inner_pair),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "type definition".to_string(),
-        }),
+    let mut types = vec![first_type];
+
+    // Check if there are more types separated by "|"
+    for pair in inner {
+        types.push(parse_base_type(pair)?);
+    }
+
+    if types.len() == 1 {
+        Ok(types.into_iter().next().unwrap())
+    } else {
+        Ok(Type::Union(UnionType { types }))
     }
 }
 
@@ -616,7 +621,7 @@ fn parse_function_input_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, 
 
     match inner_pair.as_rule() {
         Rule::function_type => Ok(Type::Function(parse_function_type(inner_pair)?)),
-        Rule::union_type => parse_union_type(inner_pair),
+        Rule::type_definition => parse_type_definition(inner_pair),
         Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(inner_pair)?)),
         Rule::primitive_type => parse_primitive_type(inner_pair),
         Rule::identifier => Ok(Type::Identifier(inner_pair.as_str().to_string())),
@@ -625,10 +630,4 @@ fn parse_function_input_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, 
             context: "function input type".to_string(),
         }),
     }
-}
-
-fn parse_union_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    let types: Result<Vec<_>, _> = pair.into_inner().map(parse_base_type).collect();
-
-    Ok(Type::Union(UnionType { types: types? }))
 }
