@@ -16,6 +16,7 @@ pub use typing::{TupleAccessor, Type, narrow_types};
 
 use crate::{
     ast,
+    builtins::BUILTIN_REGISTRY,
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
     types, vm,
@@ -660,10 +661,28 @@ impl<'a> Compiler<'a> {
                     ))
                 }
             }
+            vm::Value::Builtin { module, function } => {
+                let builtin_index = self.vm.register_builtin(module.clone(), function.clone());
+                self.codegen
+                    .add_instruction(Instruction::Builtin(builtin_index));
+                // Get the actual builtin function type
+                let (param_type, result_type) = self.get_builtin_signature(module, function);
+                Ok(Type::Resolved(types::Type::Function(Box::new(
+                    types::FunctionType {
+                        parameter: param_type,
+                        result: result_type,
+                    },
+                ))))
+            }
         }
     }
 
     fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
+        // Check if this is a stdlib module import (doesn't start with ./ or ../)
+        if !module_path.starts_with("./") && !module_path.starts_with("../") {
+            return self.compile_stdlib_import(module_path);
+        }
+
         // Check for circular imports
         if self
             .module_cache
@@ -686,6 +705,65 @@ impl<'a> Compiler<'a> {
         self.module_cache.import_stack.pop();
 
         result
+    }
+
+    fn compile_stdlib_import(&mut self, module_name: &str) -> Result<Type, Error> {
+        // Check if module exists and get its functions
+        let functions = BUILTIN_REGISTRY
+            .get_module_functions(module_name)
+            .ok_or_else(|| {
+                Error::FeatureUnsupported(format!("Unknown stdlib module: {}", module_name))
+            })?;
+
+        // Create tuples with builtin values
+        let mut tuple_fields = Vec::new();
+        let function_count = functions.len();
+        for function_name in &functions {
+            // Register the builtin with module and function names
+            let builtin_index = self
+                .vm
+                .register_builtin(module_name.to_string(), function_name.to_string());
+            self.codegen
+                .add_instruction(Instruction::Builtin(builtin_index));
+
+            // Get the function type signature
+            let (param_types, result_types) =
+                self.get_builtin_signature(module_name, function_name);
+            let function_type = types::Type::Function(Box::new(types::FunctionType {
+                parameter: param_types,
+                result: result_types,
+            }));
+
+            tuple_fields.push((Some(function_name.to_string()), function_type));
+        }
+
+        // Register the tuple type
+        let type_id = self
+            .type_context
+            .type_registry
+            .register_type(None, tuple_fields);
+
+        // Create the tuple instruction
+        self.codegen
+            .add_instruction(Instruction::Tuple(type_id, function_count));
+
+        Ok(Type::Resolved(types::Type::Tuple(type_id)))
+    }
+
+    fn get_builtin_signature(
+        &self,
+        module: &str,
+        function: &str,
+    ) -> (Vec<types::Type>, Vec<types::Type>) {
+        BUILTIN_REGISTRY
+            .get_signature(module, function)
+            .unwrap_or_else(|| {
+                // Fallback for unknown builtins
+                (
+                    vec![types::Type::Tuple(TypeId::NIL)],
+                    vec![types::Type::Tuple(TypeId::NIL)],
+                )
+            })
     }
 
     fn import_module_internal(&mut self, module_path: &str) -> Result<Type, Error> {
@@ -1127,6 +1205,13 @@ impl<'a> Compiler<'a> {
             vm::Value::Tuple(type_id, _) => Type::Resolved(types::Type::Tuple(*type_id)),
             vm::Value::Function { function, .. } => {
                 Type::Resolved(self.function_to_type(*function))
+            }
+            vm::Value::Builtin { module, function } => {
+                let (param_type, result_type) = self.get_builtin_signature(module, function);
+                Type::Resolved(types::Type::Function(Box::new(types::FunctionType {
+                    parameter: param_type,
+                    result: result_type,
+                })))
             }
         }
     }

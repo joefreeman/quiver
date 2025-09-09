@@ -22,6 +22,7 @@ pub struct Function {
 pub struct Bytecode {
     pub constants: Vec<Constant>,
     pub functions: Vec<Function>,
+    pub builtins: Vec<(String, String)>,
     pub entry: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tuples: Option<HashMap<TypeId, types::TupleTypeInfo>>,
@@ -48,6 +49,7 @@ impl Bytecode {
                     function_type: None,
                 })
                 .collect(),
+            builtins: self.builtins.clone(),
             entry: self.entry,
             tuples: None,
         }
@@ -90,4 +92,5 @@ pub enum Instruction {
     Enter,
     Exit,
     Reset,
+    Builtin(usize),
 }

@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
 pub mod modules;
@@ -106,6 +107,7 @@ impl Quiver {
         let bytecode = bytecode::Bytecode {
             constants: self.vm.get_constants().clone(),
             functions: self.vm.get_functions().clone(),
+            builtins: self.vm.get_builtins().clone(),
             entry,
             tuples: Some(self.type_registry.get_types().clone()),
         };
@@ -120,6 +122,9 @@ impl Quiver {
 
         for function in bytecode.functions {
             self.vm.register_function(function);
+        }
+        for (module, function) in bytecode.builtins {
+            self.vm.register_builtin(module, function);
         }
 
         if let Some(entry) = bytecode.entry {

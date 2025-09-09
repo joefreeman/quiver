@@ -1,7 +1,12 @@
+use crate::builtins::{BUILTIN_REGISTRY, BuiltinFn};
 use crate::bytecode::{Constant, Function, Instruction, TypeId};
 use crate::types::TypeRegistry;
 use std::collections::HashMap;
 use std::fmt;
+
+pub fn get_builtin(module: &str, function: &str) -> Option<BuiltinFn> {
+    BUILTIN_REGISTRY.get_implementation(module, function)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -13,6 +18,10 @@ pub enum Value {
         function: usize,
         captures: Vec<Value>,
     },
+    Builtin {
+        module: String,
+        function: String,
+    },
 }
 
 impl Value {
@@ -22,6 +31,7 @@ impl Value {
             Value::Binary(_) => "binary",
             Value::Tuple(_, _) => "tuple",
             Value::Function { .. } => "function",
+            Value::Builtin { .. } => "builtin",
         }
     }
 
@@ -30,6 +40,7 @@ impl Value {
             Value::Integer(i) => i.to_string(),
             Value::Binary(_) => "<binary>".to_string(),
             Value::Function { .. } => "<function>".to_string(),
+            Value::Builtin { module, function } => format!("<builtin:{}:{}>", module, function),
             Value::Tuple(type_id, elements) => {
                 if *type_id == TypeId::NIL {
                     return "[]".to_string();
@@ -116,6 +127,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::Function { .. } => write!(f, "<function>"),
+            Value::Builtin { module, function } => write!(f, "<builtin:{}:{}>", module, function),
         }
     }
 }
@@ -128,6 +140,7 @@ pub enum Error {
     // Function and call errors
     CallInvalid,
     FunctionUndefined(usize),
+    BuiltinUndefined(usize),
     FrameUnderflow,
 
     // Variable and constant access errors
@@ -139,6 +152,8 @@ pub enum Error {
 
     // Type system errors
     TypeMismatch { expected: String, found: String },
+    ArityMismatch { expected: usize, found: usize },
+    InvalidArgument(String),
 
     // Tuple and structure errors
     TupleEmpty,
@@ -186,6 +201,7 @@ impl Frame {
 pub struct VM {
     constants: Vec<Constant>,
     functions: Vec<Function>,
+    builtins: Vec<(String, String)>,
     stack: Vec<Value>,
     scopes: Vec<Scope>,
     frames: Vec<Frame>,
@@ -202,6 +218,7 @@ impl VM {
         Self {
             constants: Vec::new(),
             functions: Vec::new(),
+            builtins: Vec::new(),
             stack: Vec::new(),
             scopes: vec![Scope::new(Value::Tuple(TypeId::NIL, vec![]))],
             frames: Vec::new(),
@@ -232,6 +249,20 @@ impl VM {
 
     pub fn get_functions(&self) -> &Vec<Function> {
         &self.functions
+    }
+
+    pub fn register_builtin(&mut self, module: String, function: String) -> usize {
+        let builtin_tuple = (module, function);
+        if let Some(index) = self.builtins.iter().position(|b| b == &builtin_tuple) {
+            index
+        } else {
+            self.builtins.push(builtin_tuple);
+            self.builtins.len() - 1
+        }
+    }
+
+    pub fn get_builtins(&self) -> &Vec<(String, String)> {
+        &self.builtins
     }
 
     pub fn execute_instructions(
@@ -318,6 +349,7 @@ impl VM {
                 Instruction::Enter => self.handle_enter()?,
                 Instruction::Exit => self.handle_exit()?,
                 Instruction::Reset => self.handle_reset()?,
+                Instruction::Builtin(index) => self.handle_builtin(index)?,
             }
             if !matches!(instruction, Instruction::Call | Instruction::TailCall(_)) {
                 if let Some(frame) = self.frames.last_mut() {
@@ -466,6 +498,16 @@ impl VM {
                         .zip(cap_b.iter())
                         .all(|(x, y)| self.values_equal(x, y))
             }
+            (
+                Value::Builtin {
+                    module: a_mod,
+                    function: a_fn,
+                },
+                Value::Builtin {
+                    module: b_mod,
+                    function: b_fn,
+                },
+            ) => a_mod == b_mod && a_fn == b_fn,
             _ => false,
         }
     }
@@ -605,6 +647,21 @@ impl VM {
                 self.frames.push(Frame::new(instructions, capture_map));
                 Ok(())
             }
+            Value::Builtin { module, function } => {
+                let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
+
+                if let Some(builtin_fn) = get_builtin(&module, &function) {
+                    let result = builtin_fn(&argument, &self.constants)?;
+                    self.stack.push(result);
+                    // Advance the instruction counter for builtin calls
+                    if let Some(frame) = self.frames.last_mut() {
+                        frame.counter += 1;
+                    }
+                    Ok(())
+                } else {
+                    Err(Error::BuiltinUndefined(0)) // We don't have the index here, so use 0
+                }
+            }
             _ => Err(Error::CallInvalid),
         }
     }
@@ -642,6 +699,21 @@ impl VM {
                     *self.frames.last_mut().unwrap() = Frame::new(instructions, capture_map);
                     Ok(())
                 }
+                Value::Builtin { module, function } => {
+                    let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
+
+                    if let Some(builtin_fn) = get_builtin(&module, &function) {
+                        let result = builtin_fn(&argument, &self.constants)?;
+                        self.stack.push(result);
+                        // Advance the instruction counter for builtin calls
+                        if let Some(frame) = self.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+                        Ok(())
+                    } else {
+                        Err(Error::BuiltinUndefined(0))
+                    }
+                }
                 _ => Err(Error::CallInvalid),
             }
         }
@@ -671,6 +743,17 @@ impl VM {
             function: index,
             captures,
         });
+        Ok(())
+    }
+
+    fn handle_builtin(&mut self, index: usize) -> Result<(), Error> {
+        let (module, function) = self
+            .builtins
+            .get(index)
+            .ok_or(Error::BuiltinUndefined(index))?
+            .clone();
+
+        self.stack.push(Value::Builtin { module, function });
         Ok(())
     }
 
