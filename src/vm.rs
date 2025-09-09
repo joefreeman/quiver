@@ -191,6 +191,12 @@ pub struct VM {
     frames: Vec<Frame>,
 }
 
+impl Default for VM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VM {
     pub fn new() -> Self {
         Self {
@@ -663,7 +669,7 @@ impl VM {
             .collect::<Result<Vec<_>, _>>()?;
         self.stack.push(Value::Function {
             function: index,
-            captures: captures,
+            captures,
         });
         Ok(())
     }

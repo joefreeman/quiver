@@ -184,10 +184,10 @@ impl<'a> PatternCompiler<'a> {
                             }
                         }
                     }
-                    return Ok(Some(all_assignments));
+                    Ok(Some(all_assignments))
                 } else {
                     // Tuple type not found in registry - treat as compile-time failure
-                    return Ok(None);
+                    Ok(None)
                 }
             }
             Type::Unresolved(types) => {

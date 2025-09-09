@@ -40,7 +40,7 @@ pub fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
         0 => Err(Error::TypeUnresolved(
             "No valid types found in narrowing".to_string(),
         )),
-        1 => Ok(Type::Resolved(flattened.get(0).unwrap().clone())),
+        1 => Ok(Type::Resolved(flattened.first().unwrap().clone())),
         _ => Ok(Type::Unresolved(flattened)),
     }
 }

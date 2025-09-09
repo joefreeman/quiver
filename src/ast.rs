@@ -213,8 +213,8 @@ impl Parameter {
     pub fn from_string(s: &str) -> Option<Self> {
         if s == "$" {
             Some(Parameter::Self_)
-        } else if s.starts_with('$') {
-            s[1..].parse().ok().map(Parameter::Indexed)
+        } else if let Some(stripped) = s.strip_prefix('$') {
+            stripped.parse().ok().map(Parameter::Indexed)
         } else {
             None
         }

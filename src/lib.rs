@@ -37,7 +37,7 @@ impl Quiver {
         source: &str,
         module_path: Option<std::path::PathBuf>,
     ) -> Result<Option<Value>, Error> {
-        let program = parser::parse(source).map_err(Error::ParseError)?;
+        let program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
         let instructions = Compiler::compile(
             program,
@@ -79,7 +79,7 @@ impl Quiver {
         source: &str,
         module_path: Option<std::path::PathBuf>,
     ) -> Result<bytecode::Bytecode, Error> {
-        let program = parser::parse(source).map_err(Error::ParseError)?;
+        let program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
         let instructions = Compiler::compile(
             program,
@@ -129,10 +129,7 @@ impl Quiver {
         }
     }
 
-    pub fn get_type_info(
-        &self,
-        type_id: &bytecode::TypeId,
-    ) -> Option<&(Option<String>, Vec<(Option<String>, types::Type)>)> {
+    pub fn get_type_info(&self, type_id: &bytecode::TypeId) -> Option<&types::TupleTypeInfo> {
         self.type_registry.lookup_type(type_id)
     }
 
@@ -160,7 +157,7 @@ impl Quiver {
 
 #[derive(Debug)]
 pub enum Error {
-    ParseError(parser::Error),
+    ParseError(Box<parser::Error>),
     RuntimeError(vm::Error),
     CompileError(compiler::Error),
 }

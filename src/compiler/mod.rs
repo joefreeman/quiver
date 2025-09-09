@@ -23,6 +23,12 @@ use crate::{
 
 use typing::TypeContext;
 
+#[derive(Debug, Clone, Copy)]
+enum OperatorResultType {
+    Integer,
+    Comparison,
+}
+
 #[derive(Debug)]
 pub enum Error {
     // Variable & scope errors
@@ -332,8 +338,8 @@ impl<'a> Compiler<'a> {
         self.codegen.instructions = Vec::new();
 
         for capture_name in &captures {
-            if let Some(var_type) = self.lookup_variable_in_scopes(&saved_scopes, &capture_name) {
-                self.define_variable(&capture_name, var_type);
+            if let Some(var_type) = self.lookup_variable_in_scopes(&saved_scopes, capture_name) {
+                self.define_variable(capture_name, var_type);
             }
         }
 
@@ -851,6 +857,7 @@ impl<'a> Compiler<'a> {
 
                 // TODO: check all tuple items are integers
 
+                // Emit tuple field extraction instructions
                 for i in 0..tuple_size {
                     if i < tuple_size - 1 {
                         self.codegen.add_instruction(Instruction::Duplicate);
@@ -861,83 +868,86 @@ impl<'a> Compiler<'a> {
                     }
                 }
 
-                match operator {
-                    crate::ast::Operator::Add => {
-                        self.codegen.add_instruction(Instruction::Add(tuple_size));
-                        Ok(Type::Resolved(types::Type::Integer))
-                    }
-                    crate::ast::Operator::Subtract => {
-                        self.codegen
-                            .add_instruction(Instruction::Subtract(tuple_size));
-                        Ok(Type::Resolved(types::Type::Integer))
-                    }
-                    crate::ast::Operator::Multiply => {
-                        self.codegen
-                            .add_instruction(Instruction::Multiply(tuple_size));
-                        Ok(Type::Resolved(types::Type::Integer))
-                    }
-                    crate::ast::Operator::Divide => {
-                        self.codegen
-                            .add_instruction(Instruction::Divide(tuple_size));
-                        Ok(Type::Resolved(types::Type::Integer))
-                    }
-                    crate::ast::Operator::Modulo => {
-                        self.codegen
-                            .add_instruction(Instruction::Modulo(tuple_size));
-                        Ok(Type::Resolved(types::Type::Integer))
-                    }
-                    crate::ast::Operator::Equal => {
-                        self.codegen.add_instruction(Instruction::Equal(tuple_size));
-                        Ok(Type::Unresolved(vec![
-                            types::Type::Tuple(TypeId::NIL),
-                            types::Type::Integer,
-                        ]))
-                    }
-                    crate::ast::Operator::NotEqual => {
-                        self.codegen
-                            .add_instruction(Instruction::NotEqual(tuple_size));
-                        Ok(Type::Unresolved(vec![
-                            types::Type::Tuple(TypeId::NIL),
-                            types::Type::Integer,
-                        ]))
-                    }
-                    crate::ast::Operator::LessThan => {
-                        self.codegen.add_instruction(Instruction::Less(tuple_size));
-                        Ok(Type::Unresolved(vec![
-                            types::Type::Tuple(TypeId::NIL),
-                            types::Type::Integer,
-                        ]))
-                    }
-                    crate::ast::Operator::LessThanOrEqual => {
-                        self.codegen
-                            .add_instruction(Instruction::LessEqual(tuple_size));
-                        Ok(Type::Unresolved(vec![
-                            types::Type::Tuple(TypeId::NIL),
-                            types::Type::Integer,
-                        ]))
-                    }
-                    crate::ast::Operator::GreaterThan => {
-                        self.codegen
-                            .add_instruction(Instruction::Greater(tuple_size));
-                        Ok(Type::Unresolved(vec![
-                            types::Type::Tuple(TypeId::NIL),
-                            types::Type::Integer,
-                        ]))
-                    }
-                    crate::ast::Operator::GreaterThanOrEqual => {
-                        self.codegen
-                            .add_instruction(Instruction::GreaterEqual(tuple_size));
-                        Ok(Type::Unresolved(vec![
-                            types::Type::Tuple(TypeId::NIL),
-                            types::Type::Integer,
-                        ]))
-                    }
-                }
+                // Emit the appropriate operator instruction and return the result type
+                self.emit_operator_instruction_and_type(operator, tuple_size)
             }
             _ => Err(Error::OperatorOnNonTuple {
                 operator: format!("{:?}", operator),
             }),
         }
+    }
+
+    fn emit_operator_instruction_and_type(
+        &mut self,
+        operator: ast::Operator,
+        tuple_size: usize,
+    ) -> Result<Type, Error> {
+        use crate::ast::Operator;
+
+        let result_type = match operator {
+            // Arithmetic operators - emit instruction and return Integer type
+            Operator::Add => {
+                self.codegen.add_instruction(Instruction::Add(tuple_size));
+                OperatorResultType::Integer
+            }
+            Operator::Subtract => {
+                self.codegen
+                    .add_instruction(Instruction::Subtract(tuple_size));
+                OperatorResultType::Integer
+            }
+            Operator::Multiply => {
+                self.codegen
+                    .add_instruction(Instruction::Multiply(tuple_size));
+                OperatorResultType::Integer
+            }
+            Operator::Divide => {
+                self.codegen
+                    .add_instruction(Instruction::Divide(tuple_size));
+                OperatorResultType::Integer
+            }
+            Operator::Modulo => {
+                self.codegen
+                    .add_instruction(Instruction::Modulo(tuple_size));
+                OperatorResultType::Integer
+            }
+
+            // Comparison operators - emit instruction and return NIL or Integer
+            Operator::Equal => {
+                self.codegen.add_instruction(Instruction::Equal(tuple_size));
+                OperatorResultType::Comparison
+            }
+            Operator::NotEqual => {
+                self.codegen
+                    .add_instruction(Instruction::NotEqual(tuple_size));
+                OperatorResultType::Comparison
+            }
+            Operator::LessThan => {
+                self.codegen.add_instruction(Instruction::Less(tuple_size));
+                OperatorResultType::Comparison
+            }
+            Operator::LessThanOrEqual => {
+                self.codegen
+                    .add_instruction(Instruction::LessEqual(tuple_size));
+                OperatorResultType::Comparison
+            }
+            Operator::GreaterThan => {
+                self.codegen
+                    .add_instruction(Instruction::Greater(tuple_size));
+                OperatorResultType::Comparison
+            }
+            Operator::GreaterThanOrEqual => {
+                self.codegen
+                    .add_instruction(Instruction::GreaterEqual(tuple_size));
+                OperatorResultType::Comparison
+            }
+        };
+
+        Ok(match result_type {
+            OperatorResultType::Integer => Type::Resolved(types::Type::Integer),
+            OperatorResultType::Comparison => {
+                Type::Unresolved(vec![types::Type::Tuple(TypeId::NIL), types::Type::Integer])
+            }
+        })
     }
 
     fn compile_target_access(&mut self, target: &str) -> Result<Type, Error> {

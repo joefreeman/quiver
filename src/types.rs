@@ -3,6 +3,12 @@ use std::collections::HashMap;
 
 use crate::bytecode::TypeId;
 
+/// Type alias for tuple field information: (optional name, field type)
+pub type TupleField = (Option<String>, Type);
+
+/// Type alias for tuple type information: (optional tuple name, field definitions)
+pub type TupleTypeInfo = (Option<String>, Vec<TupleField>);
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct FunctionType {
     pub parameter: Vec<Type>,
@@ -23,8 +29,14 @@ pub enum Type {
 
 #[derive(Debug, Clone)]
 pub struct TypeRegistry {
-    types: HashMap<TypeId, (Option<String>, Vec<(Option<String>, Type)>)>,
+    types: HashMap<TypeId, TupleTypeInfo>,
     next_id: usize,
+}
+
+impl Default for TypeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TypeRegistry {
@@ -61,14 +73,11 @@ impl TypeRegistry {
         type_id
     }
 
-    pub fn lookup_type(
-        &self,
-        type_id: &TypeId,
-    ) -> Option<&(Option<String>, Vec<(Option<String>, Type)>)> {
+    pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
         self.types.get(type_id)
     }
 
-    pub fn get_types(&self) -> &HashMap<TypeId, (Option<String>, Vec<(Option<String>, Type)>)> {
+    pub fn get_types(&self) -> &HashMap<TypeId, TupleTypeInfo> {
         &self.types
     }
 

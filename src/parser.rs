@@ -9,7 +9,7 @@ pub struct Grammar;
 #[derive(Debug, Clone)]
 pub enum Error {
     // Grammar parsing errors
-    SyntaxError(pest::error::Error<Rule>),
+    SyntaxError(Box<pest::error::Error<Rule>>),
 
     // Literal parsing errors
     IntegerMalformed(String),
@@ -45,7 +45,8 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn parse(source: &str) -> Result<Program, Error> {
-    let pairs = Grammar::parse(Rule::program, source).map_err(Error::SyntaxError)?;
+    let pairs =
+        Grammar::parse(Rule::program, source).map_err(|e| Error::SyntaxError(Box::new(e)))?;
 
     let program_pair = pairs.into_iter().next().unwrap();
     parse_program(program_pair)
@@ -251,7 +252,7 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
                 .into_inner()
                 .next()
                 .map(|p| p.as_str().to_string())
-                .unwrap_or_else(|| "".to_string());
+                .unwrap_or_default();
             Ok(Operation::TailCall(name))
         }
         rule => Err(Error::RuleUnexpected {

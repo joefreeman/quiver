@@ -24,7 +24,7 @@ pub struct Bytecode {
     pub functions: Vec<Function>,
     pub entry: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tuples: Option<HashMap<TypeId, (Option<String>, Vec<(Option<String>, types::Type)>)>>,
+    pub tuples: Option<HashMap<TypeId, types::TupleTypeInfo>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
