@@ -119,4 +119,27 @@ impl InstructionBuilder {
         self.add_instruction(Instruction::Pop); // Remove duplicated value
         self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
     }
+
+    /// Emits common pattern: Duplicate -> JumpIfNil (returns jump address for patching) -> Pop
+    /// Used for early termination when value is nil
+    pub fn emit_duplicate_jump_if_nil_pop(&mut self) -> usize {
+        self.add_instruction(Instruction::Duplicate);
+        let jump_addr = self.emit_jump_if_nil_placeholder();
+        self.add_instruction(Instruction::Pop);
+        jump_addr
+    }
+
+    /// Emits common pattern: Duplicate -> JumpIfNotNil (returns jump address for patching)
+    /// Used for success conditions
+    pub fn emit_duplicate_jump_if_not_nil(&mut self) -> usize {
+        self.add_instruction(Instruction::Duplicate);
+        self.emit_jump_if_not_nil_placeholder()
+    }
+
+    /// Emits common pattern: Duplicate -> JumpIfNil (returns jump address for patching)
+    /// Used for conditional branching
+    pub fn emit_duplicate_jump_if_nil(&mut self) -> usize {
+        self.add_instruction(Instruction::Duplicate);
+        self.emit_jump_if_nil_placeholder()
+    }
 }

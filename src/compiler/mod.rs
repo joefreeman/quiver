@@ -4,14 +4,12 @@ use std::{
 };
 
 mod codegen;
-mod expression;
 mod modules;
 mod pattern;
 mod typing;
 mod variables;
 
 pub use codegen::InstructionBuilder;
-pub use expression::ExpressionCompiler;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::PatternCompiler;
 pub use typing::{TupleAccessor, Type, narrow_types};
@@ -227,14 +225,10 @@ impl<'a> Compiler<'a> {
         fields: Vec<ast::ValueTupleField>,
         parameter_type: Type,
     ) -> Result<Type, Error> {
+        Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
+
         let mut field_types = Vec::new();
-        let mut seen_names = HashSet::new();
         for field in &fields {
-            if let Some(ref field_name) = field.name {
-                if !seen_names.insert(field_name.clone()) {
-                    return Err(Error::FieldDuplicated(field_name.clone()));
-                }
-            }
             let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
             if let Type::Resolved(resolved_type) = field_type {
                 field_types.push((field.name.clone(), resolved_type));
@@ -272,14 +266,10 @@ impl<'a> Compiler<'a> {
         self.codegen
             .add_instruction(Instruction::Store("~".to_string()));
 
+        Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
+
         let mut field_types = Vec::new();
-        let mut seen_names = HashSet::new();
         for field in &fields {
-            if let Some(ref name) = field.name {
-                if !seen_names.insert(name.clone()) {
-                    return Err(Error::FieldDuplicated(name.clone()));
-                }
-            }
             let field_type = match &field.value {
                 ast::OperationTupleFieldValue::Ripple => {
                     // TODO: avoid using variable?
@@ -498,10 +488,8 @@ impl<'a> Compiler<'a> {
 
             if branch.consequence.is_some() {
                 // Branch has a consequence - compile it
-                self.codegen.add_instruction(Instruction::Duplicate);
-                let next_branch_jump = self.codegen.emit_jump_if_nil_placeholder();
+                let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 next_branch_jumps.push((next_branch_jump, i + 1));
-                self.codegen.add_instruction(Instruction::Pop);
 
                 let consequence_type = self.compile_expression(
                     branch.consequence.clone().unwrap(),
@@ -518,8 +506,7 @@ impl<'a> Compiler<'a> {
                     let end_jump = self.codegen.emit_jump_placeholder();
                     end_jumps.push(end_jump);
                 } else {
-                    self.codegen.add_instruction(Instruction::Duplicate);
-                    let success_jump = self.codegen.emit_jump_if_not_nil_placeholder();
+                    let success_jump = self.codegen.emit_duplicate_jump_if_not_nil();
                     end_jumps.push(success_jump);
                 }
             }
@@ -570,10 +557,8 @@ impl<'a> Compiler<'a> {
             }
 
             if i < expression.terms.len() - 1 {
-                self.codegen.add_instruction(Instruction::Duplicate);
-                let end_jump = self.codegen.emit_jump_if_nil_placeholder();
+                let end_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 end_jumps.push(end_jump);
-                self.codegen.add_instruction(Instruction::Pop);
             }
         }
 
@@ -599,24 +584,7 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Parameter);
                 self.codegen.add_instruction(Instruction::Get(index));
 
-                match parameter_type {
-                    Type::Resolved(types::Type::Tuple(type_id)) => {
-                        if let Some(type_info) =
-                            self.type_context.type_registry.lookup_type(&type_id)
-                        {
-                            if let Some(field) = type_info.1.get(index) {
-                                Ok(Type::Resolved(field.1.clone()))
-                            } else {
-                                Err(Error::ParameterIndexOutOfBounds { index })
-                            }
-                        } else {
-                            Err(Error::ParameterTypeNotInRegistry {
-                                type_id: format!("{:?}", type_id),
-                            })
-                        }
-                    }
-                    _ => Err(Error::ParameterAccessOnNonTuple { index }),
-                }
+                self.validate_tuple_field_access_single(&parameter_type, index)
             }
         }
     }
@@ -858,36 +826,7 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Parameter);
                 self.codegen.add_instruction(Instruction::Get(index));
 
-                let param_types = parameter_type.to_type_vec();
-                let mut field_type_results = Vec::new();
-
-                for param_type in param_types {
-                    match param_type {
-                        types::Type::Tuple(type_id) => {
-                            if let Some(type_info) =
-                                self.type_context.type_registry.lookup_type(&type_id)
-                            {
-                                if let Some(field) = type_info.1.get(index) {
-                                    field_type_results.push(Type::Resolved(field.1.clone()));
-                                } else {
-                                    return Err(Error::ParameterIndexOutOfBounds { index });
-                                }
-                            } else {
-                                return Err(Error::ParameterTypeNotInRegistry {
-                                    type_id: format!("{:?}", type_id),
-                                });
-                            }
-                        }
-                        _ => return Err(Error::ParameterAccessOnNonTuple { index }),
-                    }
-                }
-
-                if field_type_results.is_empty() {
-                    return Err(Error::ParameterIndexOutOfBounds { index });
-                }
-
-                // Use narrow_types to properly combine the field types
-                narrow_types(field_type_results)?
+                self.validate_tuple_field_access_multiple(&parameter_type, index)?
             }
         };
 
@@ -1199,51 +1138,75 @@ impl<'a> Compiler<'a> {
         None
     }
 
-    // Extract bindings from patterns recursively, with type information when available
-    #[allow(dead_code)]
-    fn extract_bindings_from_pattern(
+    fn validate_tuple_field_access_single(
         &self,
-        pattern: &ast::Pattern,
-        expected_type: Option<&Type>,
-    ) -> Vec<(String, Type)> {
-        let mut bindings = Vec::new();
-        match pattern {
-            ast::Pattern::Identifier(name) => {
-                let var_type = expected_type.cloned().unwrap_or(Type::Unresolved(vec![]));
-                bindings.push((name.clone(), var_type));
-            }
-            ast::Pattern::Literal(_) => {}  // No variables
-            ast::Pattern::Placeholder => {} // No variables
-            ast::Pattern::Tuple(tuple_pattern) => {
-                // Try to get field types from expected tuple type
-                let field_types =
-                    if let Some(Type::Resolved(types::Type::Tuple(type_id))) = expected_type {
-                        self.type_context
-                            .type_registry
-                            .lookup_type(type_id)
-                            .map(|info| {
-                                info.1
-                                    .iter()
-                                    .map(|(_, t)| Type::Resolved(t.clone()))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default()
+        tuple_type: &Type,
+        index: usize,
+    ) -> Result<Type, Error> {
+        match tuple_type {
+            Type::Resolved(types::Type::Tuple(type_id)) => {
+                if let Some(type_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    if let Some(field) = type_info.1.get(index) {
+                        Ok(Type::Resolved(field.1.clone()))
                     } else {
-                        vec![]
-                    };
-
-                for (i, field) in tuple_pattern.fields.iter().enumerate() {
-                    let field_type = field_types.get(i);
-                    bindings.extend(self.extract_bindings_from_pattern(&field.pattern, field_type));
+                        Err(Error::ParameterIndexOutOfBounds { index })
+                    }
+                } else {
+                    Err(Error::ParameterTypeNotInRegistry {
+                        type_id: format!("{:?}", type_id),
+                    })
                 }
             }
-            ast::Pattern::Partial(field_names) => {
-                for name in field_names {
-                    bindings.push((name.clone(), Type::Unresolved(vec![])));
-                }
-            }
-            ast::Pattern::Star => {} // No variables in star pattern itself
+            _ => Err(Error::ParameterAccessOnNonTuple { index }),
         }
-        bindings
+    }
+
+    fn validate_tuple_field_access_multiple(
+        &self,
+        parameter_type: &Type,
+        index: usize,
+    ) -> Result<Type, Error> {
+        let param_types = parameter_type.to_type_vec();
+        let mut field_type_results = Vec::new();
+
+        for param_type in param_types {
+            match param_type {
+                types::Type::Tuple(type_id) => {
+                    if let Some(type_info) = self.type_context.type_registry.lookup_type(&type_id) {
+                        if let Some(field) = type_info.1.get(index) {
+                            field_type_results.push(Type::Resolved(field.1.clone()));
+                        } else {
+                            return Err(Error::ParameterIndexOutOfBounds { index });
+                        }
+                    } else {
+                        return Err(Error::ParameterTypeNotInRegistry {
+                            type_id: format!("{:?}", type_id),
+                        });
+                    }
+                }
+                _ => return Err(Error::ParameterAccessOnNonTuple { index }),
+            }
+        }
+
+        if field_type_results.is_empty() {
+            return Err(Error::ParameterIndexOutOfBounds { index });
+        }
+
+        narrow_types(field_type_results)
+    }
+
+    fn check_field_name_duplicates<T>(
+        fields: &[T],
+        get_name: impl Fn(&T) -> Option<&String>,
+    ) -> Result<(), Error> {
+        let mut seen_names = HashSet::new();
+        for field in fields {
+            if let Some(field_name) = get_name(field) {
+                if !seen_names.insert(field_name.clone()) {
+                    return Err(Error::FieldDuplicated(field_name.clone()));
+                }
+            }
+        }
+        Ok(())
     }
 }
