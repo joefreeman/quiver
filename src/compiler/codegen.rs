@@ -55,17 +55,10 @@ impl InstructionBuilder {
         addr
     }
 
-    /// Emits a conditional jump placeholder and returns the address to patch later
-    pub fn emit_jump_if_nil_placeholder(&mut self) -> usize {
+    /// Emits a conditional jump placeholder and returns the address to patch later (jumps on truthy)
+    pub fn emit_jump_if_placeholder(&mut self) -> usize {
         let addr = self.instructions.len();
-        self.add_instruction(Instruction::JumpIfNil(0));
-        addr
-    }
-
-    /// Emits a conditional jump placeholder and returns the address to patch later
-    pub fn emit_jump_if_not_nil_placeholder(&mut self) -> usize {
-        let addr = self.instructions.len();
-        self.add_instruction(Instruction::JumpIfNotNil(0));
+        self.add_instruction(Instruction::JumpIf(0));
         addr
     }
 
@@ -75,8 +68,7 @@ impl InstructionBuilder {
         let offset = (target_addr as isize) - (jump_addr as isize) - 1;
         self.instructions[jump_addr] = match &self.instructions[jump_addr] {
             Instruction::Jump(_) => Instruction::Jump(offset),
-            Instruction::JumpIfNil(_) => Instruction::JumpIfNil(offset),
-            Instruction::JumpIfNotNil(_) => Instruction::JumpIfNotNil(offset),
+            Instruction::JumpIf(_) => Instruction::JumpIf(offset),
             _ => panic!("Cannot patch non-jump instruction"),
         };
     }
@@ -86,25 +78,25 @@ impl InstructionBuilder {
         let offset = (target_addr as isize) - (jump_addr as isize) - 1;
         self.instructions[jump_addr] = match &self.instructions[jump_addr] {
             Instruction::Jump(_) => Instruction::Jump(offset),
-            Instruction::JumpIfNil(_) => Instruction::JumpIfNil(offset),
-            Instruction::JumpIfNotNil(_) => Instruction::JumpIfNotNil(offset),
+            Instruction::JumpIf(_) => Instruction::JumpIf(offset),
             _ => panic!("Cannot patch non-jump instruction"),
         };
     }
 
-    /// Emits a conditional jump that immediately targets the fail address
-    pub fn emit_jump_if_nil_to_addr(&mut self, fail_addr: usize) {
+    /// Emits a conditional jump that immediately targets the fail address (using Not + JumpIf)
+    pub fn emit_not_jump_if_to_addr(&mut self, fail_addr: usize) {
+        self.add_instruction(Instruction::Not);
         let jump_addr = self.instructions.len();
-        self.add_instruction(Instruction::JumpIfNil(0));
+        self.add_instruction(Instruction::JumpIf(0));
         let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-        self.instructions[jump_addr] = Instruction::JumpIfNil(offset);
+        self.instructions[jump_addr] = Instruction::JumpIf(offset);
     }
 
     /// Emits runtime type check for tuple type
     pub fn emit_runtime_tuple_type_check(&mut self, type_id: TypeId, fail_addr: usize) {
         self.add_instruction(Instruction::Duplicate);
         self.add_instruction(Instruction::IsTuple(type_id));
-        self.emit_jump_if_nil_to_addr(fail_addr);
+        self.emit_not_jump_if_to_addr(fail_addr);
         self.add_instruction(Instruction::Pop);
     }
 
@@ -126,26 +118,14 @@ impl InstructionBuilder {
         self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
     }
 
-    /// Emits common pattern: Duplicate -> JumpIfNil (returns jump address for patching) -> Pop
+    /// Emits common pattern: Duplicate -> Not -> JumpIf (returns jump address for patching) -> Pop
     /// Used for early termination when value is nil
     pub fn emit_duplicate_jump_if_nil_pop(&mut self) -> usize {
         self.add_instruction(Instruction::Duplicate);
-        let jump_addr = self.emit_jump_if_nil_placeholder();
+        self.add_instruction(Instruction::Not);
+        let jump_addr = self.emit_jump_if_placeholder();
         self.add_instruction(Instruction::Pop);
         jump_addr
     }
 
-    /// Emits common pattern: Duplicate -> JumpIfNotNil (returns jump address for patching)
-    /// Used for success conditions
-    pub fn emit_duplicate_jump_if_not_nil(&mut self) -> usize {
-        self.add_instruction(Instruction::Duplicate);
-        self.emit_jump_if_not_nil_placeholder()
-    }
-
-    /// Emits common pattern: Duplicate -> JumpIfNil (returns jump address for patching)
-    /// Used for conditional branching
-    pub fn emit_duplicate_jump_if_nil(&mut self) -> usize {
-        self.add_instruction(Instruction::Duplicate);
-        self.emit_jump_if_nil_placeholder()
-    }
 }

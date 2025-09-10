@@ -92,7 +92,7 @@ impl<'a> PatternCompiler<'a> {
         // If comparison fails (result is NIL), jump to fail address
         self.codegen
             .add_instruction(crate::bytecode::Instruction::Duplicate);
-        self.codegen.emit_jump_if_nil_to_addr(fail_addr);
+        self.codegen.emit_not_jump_if_to_addr(fail_addr);
 
         // Pop comparison result
         self.codegen
@@ -378,7 +378,9 @@ impl<'a> PatternCompiler<'a> {
                             .add_instruction(crate::bytecode::Instruction::Duplicate);
                         self.codegen
                             .add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
-                        let next_check_jump = self.codegen.emit_jump_if_nil_placeholder();
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::Not);
+                        let next_check_jump = self.codegen.emit_jump_if_placeholder();
                         next_check_jumps.push(next_check_jump);
                         self.codegen
                             .add_instruction(crate::bytecode::Instruction::Pop);
@@ -529,7 +531,9 @@ impl<'a> PatternCompiler<'a> {
                             .add_instruction(crate::bytecode::Instruction::Duplicate);
                         self.codegen
                             .add_instruction(crate::bytecode::Instruction::IsTuple(*type_id));
-                        let next_check_jump = self.codegen.emit_jump_if_nil_placeholder();
+                        self.codegen
+                            .add_instruction(crate::bytecode::Instruction::Not);
+                        let next_check_jump = self.codegen.emit_jump_if_placeholder();
                         next_check_jumps.push(next_check_jump);
                         self.codegen
                             .add_instruction(crate::bytecode::Instruction::Pop);

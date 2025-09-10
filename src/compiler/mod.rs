@@ -510,7 +510,8 @@ impl<'a> Compiler<'a> {
                     let end_jump = self.codegen.emit_jump_placeholder();
                     end_jumps.push(end_jump);
                 } else {
-                    let success_jump = self.codegen.emit_duplicate_jump_if_not_nil();
+                    self.codegen.add_instruction(Instruction::Duplicate);
+                    let success_jump = self.codegen.emit_jump_if_placeholder();
                     end_jumps.push(success_jump);
                 }
             }

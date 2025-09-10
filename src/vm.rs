@@ -300,8 +300,7 @@ impl VM {
                 Instruction::IsBinary => self.handle_is_binary()?,
                 Instruction::IsTuple(type_id) => self.handle_is_tuple(type_id)?,
                 Instruction::Jump(offset) => self.handle_jump(offset)?,
-                Instruction::JumpIfNil(offset) => self.handle_jump_if_nil(offset)?,
-                Instruction::JumpIfNotNil(offset) => self.handle_jump_if_not_nil(offset)?,
+                Instruction::JumpIf(offset) => self.handle_jump_if(offset)?,
                 Instruction::Call => self.handle_call()?,
                 Instruction::TailCall(recurse) => self.handle_tail_call(recurse)?,
                 Instruction::Return => self.handle_return()?,
@@ -447,16 +446,9 @@ impl VM {
         Ok(())
     }
 
-    fn handle_jump_if_nil(&mut self, offset: isize) -> Result<(), Error> {
+    fn handle_jump_if(&mut self, offset: isize) -> Result<(), Error> {
         let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
-        if matches!(value, Value::Tuple(TypeId::NIL, _)) {
-            self.jump(offset);
-        }
-        Ok(())
-    }
-
-    fn handle_jump_if_not_nil(&mut self, offset: isize) -> Result<(), Error> {
-        let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
+        // Jump if value is truthy (NOT NIL)
         if !matches!(value, Value::Tuple(TypeId::NIL, _)) {
             self.jump(offset);
         }
