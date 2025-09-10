@@ -71,6 +71,7 @@ pub enum Operation {
     FieldAccess(String),
     PositionalAccess(usize),
     TailCall(String),
+    Builtin(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

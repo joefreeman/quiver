@@ -123,8 +123,8 @@ impl Quiver {
         for function in bytecode.functions {
             self.vm.register_function(function);
         }
-        for (module, function) in bytecode.builtins {
-            self.vm.register_builtin(module, function);
+        for function in bytecode.builtins {
+            self.vm.register_builtin(function);
         }
 
         if let Some(entry) = bytecode.entry {

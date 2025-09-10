@@ -255,6 +255,10 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
                 .unwrap_or_default();
             Ok(Operation::TailCall(name))
         }
+        Rule::builtin => {
+            let name = pair.into_inner().next().unwrap().as_str().to_string();
+            Ok(Operation::Builtin(name))
+        }
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "operation".to_string(),

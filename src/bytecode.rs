@@ -22,7 +22,7 @@ pub struct Function {
 pub struct Bytecode {
     pub constants: Vec<Constant>,
     pub functions: Vec<Function>,
-    pub builtins: Vec<(String, String)>,
+    pub builtins: Vec<String>,
     pub entry: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tuples: Option<HashMap<TypeId, types::TupleTypeInfo>>,

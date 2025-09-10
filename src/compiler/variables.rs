@@ -99,6 +99,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Operation::TailCall(identifier) => {
                 self.visit_identifier(identifier);
             }
+            ast::Operation::Builtin(_) => {}
         }
     }
 
