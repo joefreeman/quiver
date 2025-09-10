@@ -4,13 +4,15 @@ use quiver::vm::Value;
 
 #[test]
 fn test_simple_assignment() {
-    quiver().evaluate("x = 1, y = 2, [x, y] ~> +").expect_int(3);
+    quiver()
+        .evaluate("x = 1, y = 2, [x, y] ~> <add>")
+        .expect_int(3);
 }
 
 #[test]
 fn test_tuple_destructuring() {
     quiver()
-        .evaluate("[a, b] = [1, 2], [a, b] ~> +")
+        .evaluate("[a, b] = [1, 2], [a, b] ~> <add>")
         .expect_int(3);
 }
 
@@ -29,14 +31,14 @@ fn test_nested_field_assignment() {
 #[test]
 fn test_partial_tuple_assignment() {
     quiver()
-        .evaluate("(x, y) = [x: 1, y: 2, z: 3], [x, y] ~> +")
+        .evaluate("(x, y) = [x: 1, y: 2, z: 3], [x, y] ~> <add>")
         .expect_int(3);
 }
 
 #[test]
 fn test_star_assignment() {
     quiver()
-        .evaluate("* = [a: 1, b: 2], [a, b] ~> +")
+        .evaluate("* = [a: 1, b: 2], [a, b] ~> <add>")
         .expect_int(3);
 }
 
@@ -92,8 +94,8 @@ fn test_union_match_with_tuples() {
         .evaluate(
             r#"
             A[3] ~> {
-              | A[x] = $ => [x, 1] ~> +
-              | B[x] = $ => [x, 2] ~> +
+              | A[x] = $ => [x, 1] ~> <add>
+              | B[x] = $ => [x, 2] ~> <add>
             }
             "#,
         )

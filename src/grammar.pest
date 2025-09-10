@@ -92,14 +92,16 @@ member_access = @{ identifier ~ ("." ~ (identifier | ASCII_DIGIT+))* }
 field_access = @{ "." ~ identifier }
 positional_access = @{ "." ~ ASCII_DIGIT+ }
 
-// Operators
-operator = { "==" | "!=" | "<=" | ">=" | "+" | "-" | "*" | "/" | "%" | "<" | ">" }
-
 // Tail-call
 tail_call = { "&" ~ identifier? }
 
 // Builtin references (<identifier>)
 builtin = { "<" ~ identifier ~ ">" }
+
+// Operators
+operator = { equality | not }
+equality = { "==" }
+not = { "!" }
 
 // Import (%"path")
 import = { "%" ~ string_literal }

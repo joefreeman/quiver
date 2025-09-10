@@ -3,25 +3,35 @@ use common::*;
 
 #[test]
 fn test_less_than_true() {
-    quiver().evaluate("[1, 5, 7] ~> <").expect_ok();
+    quiver()
+        .evaluate("[1, 5] ~> <compare> ~> { -1 = $ => $ }")
+        .expect_int(-1);
 }
 
 #[test]
 fn test_less_than_false() {
-    quiver().evaluate("[3, 2, 1] ~> <").expect_nil();
+    quiver()
+        .evaluate("[3, 2] ~> <compare> ~> { -1 = $ => $ }")
+        .expect_nil();
 }
 
 #[test]
 fn test_greater_than() {
-    quiver().evaluate("[7, 2, 1] ~> >").expect_ok();
+    quiver()
+        .evaluate("[7, 2] ~> <compare> ~> { 1 = $ => $ }")
+        .expect_int(1);
 }
 
 #[test]
 fn test_less_than_or_equal() {
-    quiver().evaluate("[1, 2, 2] ~> <=").expect_ok();
+    quiver()
+        .evaluate("[1, 2] ~> <compare> ~> { -1 = $ => $ | 0 = $ => $ }")
+        .expect_int(-1);
 }
 
 #[test]
 fn test_greater_than_or_equal() {
-    quiver().evaluate("[4, 3, 3] ~> >=").expect_ok();
+    quiver()
+        .evaluate("[4, 3] ~> <compare> ~> { 0 = $ => $ | 1 = $ => $ }")
+        .expect_int(1);
 }

@@ -60,6 +60,16 @@ fn create_builtin_registry() -> BuiltinRegistry {
     register_builtin!(functions, "sin", math::builtin_math_sin, [Type::Integer] -> [Type::Integer]);
     register_builtin!(functions, "cos", math::builtin_math_cos, [Type::Integer] -> [Type::Integer]);
 
+    // Arithmetic operations - operate on [int, int] tuples
+    register_builtin!(functions, "add", math::builtin_add, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "subtract", math::builtin_subtract, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "multiply", math::builtin_multiply, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "divide", math::builtin_divide, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "modulo", math::builtin_modulo, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+
+    // Comparison operations - operate on [int, int] tuples
+    register_builtin!(functions, "compare", math::builtin_compare, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+
     // IO functions
     register_builtin!(functions, "print", io::builtin_io_print, [Type::Integer, Type::Binary] -> [Type::Tuple(TypeId::OK)]);
     register_builtin!(functions, "println", io::builtin_io_println, [Type::Integer, Type::Binary] -> [Type::Tuple(TypeId::OK)]);

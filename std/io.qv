@@ -1,8 +1,7 @@
 // Standard library I/O module
 // Provides convenient wrappers around the print and println builtins
 
-print = #(int | bin) { $ ~> <print> }
-println = #(int | bin) { $ ~> <println> }
-
-// Export both functions in a tuple with named fields  
-[print: print, println: println]
+[
+  print: #(int | bin) { $ ~> <print> },
+  println: #(int | bin) { $ ~> <println> }
+]

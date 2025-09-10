@@ -85,7 +85,7 @@ impl<'a> PatternCompiler<'a> {
             }
         }
 
-        // Compare using Equal
+        // Compare the two values using Equal instruction
         self.codegen
             .add_instruction(crate::bytecode::Instruction::Equal(2));
 

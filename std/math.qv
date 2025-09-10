@@ -1,0 +1,21 @@
+// Math standard library
+// Provides user-friendly function names for arithmetic operations
+
+[
+  // Basic arithmetic operations on [int, int] tuples
+  add: #[int, int] { $ ~> <add> },
+  sub: #[int, int] { $ ~> <subtract> },
+  mul: #[int, int] { $ ~> <multiply> },
+  div: #[int, int] { $ ~> <divide> },
+  mod: #[int, int] { $ ~> <modulo> },
+
+  // Comparison operations on [int, int] tuples
+  lt: #[int, int] { $ ~> <compare> ~> { -1 = $ => $ } },
+  le: #[int, int] { $ ~> <compare> ~> { -1 = $ => $ | 0 = $ => $ } },
+  gt: #[int, int] { $ ~> <compare> ~> { 1 = $ => $ } },
+  ge: #[int, int] { $ ~> <compare> ~> { 0 = $ => $ | 1 = $ => $ } },
+
+  // Single-argument math functions
+  abs: #int { $ ~> <abs> },
+  sqrt: #int { $ ~> <sqrt> }
+]

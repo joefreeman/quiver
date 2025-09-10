@@ -24,12 +24,6 @@ use crate::{
 
 use typing::TypeContext;
 
-#[derive(Debug, Clone, Copy)]
-enum OperatorResultType {
-    Integer,
-    Comparison,
-}
-
 #[derive(Debug)]
 pub enum Error {
     // Variable & scope errors
@@ -745,7 +739,6 @@ impl<'a> Compiler<'a> {
         parameter_type: Type,
     ) -> Result<Type, Error> {
         match operation {
-            ast::Operation::Operator(operator) => self.compile_operator(operator, value_type),
             ast::Operation::Tuple(tuple) => {
                 self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type)
             }
@@ -766,6 +759,8 @@ impl<'a> Compiler<'a> {
                 self.compile_operation_parameter(parameter, value_type, parameter_type)
             }
             ast::Operation::Builtin(name) => self.compile_operation_builtin(&name, value_type),
+            ast::Operation::Equality => self.compile_operation_equality(value_type),
+            ast::Operation::Not => self.compile_operation_not(value_type),
         }
     }
 
@@ -843,6 +838,77 @@ impl<'a> Compiler<'a> {
         )
     }
 
+    fn compile_operation_equality(&mut self, value_type: Type) -> Result<Type, Error> {
+        // The == operator works with a tuple on the stack
+        // We need to extract the tuple elements and call Equal(count)
+        match value_type {
+            Type::Resolved(types::Type::Tuple(type_id)) => {
+                // Get the number of fields in this tuple type
+                if let Some((_, fields)) = self.type_context.type_registry.lookup_type(&type_id) {
+                    let field_count = fields.len();
+
+                    if field_count == 0 {
+                        return Err(Error::TypeMismatch {
+                            expected: "non-empty tuple".to_string(),
+                            found: "empty tuple".to_string(),
+                        });
+                    }
+
+                    // Extract tuple fields and push them individually to the stack
+                    // Following the established pattern from compile_operator
+                    for i in 0..field_count {
+                        if i < field_count - 1 {
+                            self.codegen.add_instruction(Instruction::Duplicate);
+                        }
+                        self.codegen.add_instruction(Instruction::Get(i));
+                        if i < field_count - 1 {
+                            self.codegen.add_instruction(Instruction::Swap);
+                        }
+                    }
+
+                    // Now compare the field_count individual values on the stack
+                    self.codegen
+                        .add_instruction(Instruction::Equal(field_count));
+
+                    // Return type is union of field type and NIL
+                    if let Some((_, first_field_type)) = fields.get(0) {
+                        Ok(Type::Unresolved(vec![
+                            first_field_type.clone(),
+                            types::Type::Tuple(TypeId::NIL),
+                        ]))
+                    } else {
+                        Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)))
+                    }
+                } else {
+                    Err(Error::TypeUnresolved(format!(
+                        "Type {:?} not found in registry",
+                        type_id
+                    )))
+                }
+            }
+            Type::Unresolved(_) | Type::Resolved(_) => {
+                // For unresolved types or non-tuple types, we can't know the field count at compile time
+                // This would require runtime inspection - for now, return an error
+                Err(Error::TypeMismatch {
+                    expected: "tuple".to_string(),
+                    found: "unknown".to_string(),
+                })
+            }
+        }
+    }
+
+    fn compile_operation_not(&mut self, _value_type: Type) -> Result<Type, Error> {
+        // The ! operator works with any value on the stack
+        // It converts [] to Ok and everything else to []
+        self.codegen.add_instruction(Instruction::Not);
+
+        // The Not instruction returns either Ok or NIL
+        Ok(Type::Unresolved(vec![
+            types::Type::Tuple(TypeId::OK),
+            types::Type::Tuple(TypeId::NIL),
+        ]))
+    }
+
     fn compile_operation_parameter(
         &mut self,
         parameter: ast::Parameter,
@@ -865,116 +931,6 @@ impl<'a> Compiler<'a> {
 
         // Use the unified function call handler
         self.compile_function_call(function_type, value_type)
-    }
-
-    fn compile_operator(
-        &mut self,
-        operator: ast::Operator,
-        value_type: Type,
-    ) -> Result<Type, Error> {
-        match value_type {
-            Type::Resolved(types::Type::Tuple(type_id)) => {
-                let type_registry = &self.type_context.type_registry;
-                let tuple_type = type_registry.lookup_type(&type_id).ok_or(
-                    Error::OperatorTypeNotInRegistry {
-                        type_id: format!("{:?}", type_id),
-                    },
-                )?;
-                let tuple_size = tuple_type.1.len();
-
-                // TODO: check all tuple items are integers
-
-                // Emit tuple field extraction instructions
-                for i in 0..tuple_size {
-                    if i < tuple_size - 1 {
-                        self.codegen.add_instruction(Instruction::Duplicate);
-                    }
-                    self.codegen.add_instruction(Instruction::Get(i));
-                    if i < tuple_size - 1 {
-                        self.codegen.add_instruction(Instruction::Swap);
-                    }
-                }
-
-                // Emit the appropriate operator instruction and return the result type
-                self.emit_operator_instruction_and_type(operator, tuple_size)
-            }
-            _ => Err(Error::OperatorOnNonTuple {
-                operator: format!("{:?}", operator),
-            }),
-        }
-    }
-
-    fn emit_operator_instruction_and_type(
-        &mut self,
-        operator: ast::Operator,
-        tuple_size: usize,
-    ) -> Result<Type, Error> {
-        use crate::ast::Operator;
-
-        let result_type = match operator {
-            // Arithmetic operators - emit instruction and return Integer type
-            Operator::Add => {
-                self.codegen.add_instruction(Instruction::Add(tuple_size));
-                OperatorResultType::Integer
-            }
-            Operator::Subtract => {
-                self.codegen
-                    .add_instruction(Instruction::Subtract(tuple_size));
-                OperatorResultType::Integer
-            }
-            Operator::Multiply => {
-                self.codegen
-                    .add_instruction(Instruction::Multiply(tuple_size));
-                OperatorResultType::Integer
-            }
-            Operator::Divide => {
-                self.codegen
-                    .add_instruction(Instruction::Divide(tuple_size));
-                OperatorResultType::Integer
-            }
-            Operator::Modulo => {
-                self.codegen
-                    .add_instruction(Instruction::Modulo(tuple_size));
-                OperatorResultType::Integer
-            }
-
-            // Comparison operators - emit instruction and return NIL or Integer
-            Operator::Equal => {
-                self.codegen.add_instruction(Instruction::Equal(tuple_size));
-                OperatorResultType::Comparison
-            }
-            Operator::NotEqual => {
-                self.codegen
-                    .add_instruction(Instruction::NotEqual(tuple_size));
-                OperatorResultType::Comparison
-            }
-            Operator::LessThan => {
-                self.codegen.add_instruction(Instruction::Less(tuple_size));
-                OperatorResultType::Comparison
-            }
-            Operator::LessThanOrEqual => {
-                self.codegen
-                    .add_instruction(Instruction::LessEqual(tuple_size));
-                OperatorResultType::Comparison
-            }
-            Operator::GreaterThan => {
-                self.codegen
-                    .add_instruction(Instruction::Greater(tuple_size));
-                OperatorResultType::Comparison
-            }
-            Operator::GreaterThanOrEqual => {
-                self.codegen
-                    .add_instruction(Instruction::GreaterEqual(tuple_size));
-                OperatorResultType::Comparison
-            }
-        };
-
-        Ok(match result_type {
-            OperatorResultType::Integer => Type::Resolved(types::Type::Integer),
-            OperatorResultType::Comparison => {
-                Type::Unresolved(vec![types::Type::Tuple(TypeId::NIL), types::Type::Integer])
-            }
-        })
     }
 
     fn compile_target_access(&mut self, target: &str) -> Result<Type, Error> {

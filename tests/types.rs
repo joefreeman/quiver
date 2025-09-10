@@ -22,12 +22,12 @@ fn test_function_with_type_pattern() {
             r#"
             type shape = Circle[r: int] | Rectangle[w: int, h: int];
             area = #shape {
-              | Circle[r: r] = $ => [r, r] ~> *
-              | Rectangle[w: w, h: h] = $ => [w, h] ~> *
+              | Circle[r: r] = $ => [r, r] ~> <multiply>
+              | Rectangle[w: w, h: h] = $ => [w, h] ~> <multiply>
             },
             a1 = Circle[r: 5] ~> area,
             a2 = Rectangle[w: 4, h: 3] ~> area,
-            [a1, a2] ~> +
+            [a1, a2] ~> <add>
             "#,
         )
         .expect_int(37);

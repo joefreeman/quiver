@@ -79,7 +79,6 @@ impl<'a> FreeVariableCollector<'a> {
 
     fn visit_operation(&mut self, operation: &ast::Operation) {
         match operation {
-            ast::Operation::Operator(_) => {}
             ast::Operation::Tuple(tuple) => {
                 for field in &tuple.fields {
                     if let ast::OperationTupleFieldValue::Chain(chain) = &field.value {
@@ -100,6 +99,8 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_identifier(identifier);
             }
             ast::Operation::Builtin(_) => {}
+            ast::Operation::Equality => {}
+            ast::Operation::Not => {}
         }
     }
 

@@ -14,7 +14,7 @@ fn test_block_evaluation() {
 #[test]
 fn test_block_with_closure() {
     quiver()
-        .evaluate("x = 1, { y = 2, [x, y] ~> + }")
+        .evaluate("x = 1, { y = 2, [x, y] ~> <add> }")
         .expect_int(3);
 }
 
@@ -25,7 +25,7 @@ fn test_block_with_parameter() {
 
 #[test]
 fn test_block_with_repeated_parameter() {
-    quiver().evaluate("3 ~> { [$, $] ~> + }").expect_int(6);
+    quiver().evaluate("3 ~> { [$, $] ~> <add> }").expect_int(6);
 }
 
 #[test]

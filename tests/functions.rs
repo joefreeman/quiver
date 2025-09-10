@@ -9,7 +9,7 @@ fn test_simple_function() {
 #[test]
 fn test_function_with_parameter() {
     quiver()
-        .evaluate("inc = #int { [$, 1] ~> + }, 3 ~> inc")
+        .evaluate("inc = #int { [$, 1] ~> <add> }, 3 ~> inc")
         .expect_int(4);
 }
 
@@ -23,7 +23,7 @@ fn test_function_closure() {
 #[test]
 fn test_function_with_tuple_parameter() {
     quiver()
-        .evaluate("f = #Point[x: int, y: int] { [x, y] ~> + }, Point[x: 1, y: 2] ~> f")
+        .evaluate("f = #Point[x: int, y: int] { [x, y] ~> <add> }, Point[x: 1, y: 2] ~> f")
         .expect_int(3);
 }
 
@@ -40,7 +40,7 @@ fn test_higher_order_function() {
         .evaluate(
             r#"
             apply = #[#int -> int, int] { $1 ~> $0 };
-            double = #int { [$, 2] ~> * };
+            double = #int { [$, 2] ~> <multiply> };
             [double, 5] ~> apply
             "#,
         )
@@ -54,7 +54,7 @@ fn test_nested_function_return() {
             r#"
             f = #int {
               x = $,
-              #int { [$, x] ~> + }
+              #int { [$, x] ~> <add> }
             },
             g = 3 ~> f,
             5 ~> g

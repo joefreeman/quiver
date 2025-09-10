@@ -292,33 +292,6 @@ impl VM {
                 Instruction::Duplicate => self.handle_duplicate()?,
                 Instruction::Copy(depth) => self.handle_copy(depth)?,
                 Instruction::Swap => self.handle_swap()?,
-                Instruction::Add(tuple_size) => self.handle_arithmetic(tuple_size, |a, b| a + b)?,
-                Instruction::Subtract(tuple_size) => {
-                    self.handle_arithmetic(tuple_size, |a, b| a - b)?
-                }
-                Instruction::Multiply(tuple_size) => {
-                    self.handle_arithmetic(tuple_size, |a, b| a * b)?
-                }
-                Instruction::Divide(tuple_size) => {
-                    self.handle_arithmetic(tuple_size, |a, b| a / b)?
-                }
-                Instruction::Modulo(tuple_size) => {
-                    self.handle_arithmetic(tuple_size, |a, b| a % b)?
-                }
-                Instruction::Equal(tuple_size) => self.handle_equality(tuple_size, false)?,
-                Instruction::NotEqual(tuple_size) => self.handle_equality(tuple_size, true)?,
-                Instruction::Less(tuple_size) => {
-                    self.handle_comparison(tuple_size, |a, b| a < b)?
-                }
-                Instruction::LessEqual(tuple_size) => {
-                    self.handle_comparison(tuple_size, |a, b| a <= b)?
-                }
-                Instruction::Greater(tuple_size) => {
-                    self.handle_comparison(tuple_size, |a, b| a > b)?
-                }
-                Instruction::GreaterEqual(tuple_size) => {
-                    self.handle_comparison(tuple_size, |a, b| a >= b)?
-                }
                 Instruction::Load(ref name) => self.handle_load(name)?,
                 Instruction::Store(ref name) => self.handle_store(name)?,
                 Instruction::Tuple(type_id, size) => self.handle_tuple(type_id, size)?,
@@ -338,6 +311,8 @@ impl VM {
                 Instruction::Exit => self.handle_exit()?,
                 Instruction::Reset => self.handle_reset()?,
                 Instruction::Builtin(index) => self.handle_builtin(index)?,
+                Instruction::Equal(count) => self.handle_equal(count)?,
+                Instruction::Not => self.handle_not()?,
             }
             if !matches!(instruction, Instruction::Call | Instruction::TailCall(_)) {
                 if let Some(frame) = self.frames.last_mut() {
@@ -395,126 +370,6 @@ impl VM {
         let b = self.stack.pop().ok_or(Error::StackUnderflow)?;
         self.stack.push(a);
         self.stack.push(b);
-        Ok(())
-    }
-
-    fn handle_arithmetic<F>(&mut self, tuple_size: usize, op: F) -> Result<(), Error>
-    where
-        F: Fn(i64, i64) -> i64,
-    {
-        if tuple_size == 0 {
-            return Err(Error::TupleEmpty);
-        }
-        let mut values = vec![0; tuple_size];
-        for i in (0..tuple_size).rev() {
-            match self.stack.pop().ok_or(Error::StackUnderflow)? {
-                Value::Integer(v) => values[i] = v,
-                other => {
-                    return Err(Error::TypeMismatch {
-                        expected: "integer".to_string(),
-                        found: other.type_name().to_string(),
-                    });
-                }
-            }
-        }
-        let result = values.into_iter().reduce(op).unwrap();
-        self.stack.push(Value::Integer(result));
-        Ok(())
-    }
-
-    fn handle_equality(&mut self, tuple_size: usize, invert: bool) -> Result<(), Error> {
-        if tuple_size == 0 {
-            return Err(Error::TupleEmpty);
-        }
-
-        let mut values = Vec::new();
-        for _ in 0..tuple_size {
-            let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
-            values.push(value);
-        }
-        values.reverse();
-
-        let all_equal = if values.is_empty() {
-            true
-        } else {
-            let first = &values[0];
-            values.iter().all(|v| self.values_equal(first, v))
-        };
-
-        let success = if invert { !all_equal } else { all_equal };
-
-        if success {
-            self.stack.push(
-                values
-                    .into_iter()
-                    .next()
-                    .unwrap_or(Value::Tuple(TypeId::NIL, vec![])),
-            );
-        } else {
-            self.stack.push(Value::Tuple(TypeId::NIL, vec![]));
-        }
-
-        Ok(())
-    }
-
-    fn values_equal(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Integer(a), Value::Integer(b)) => a == b,
-            (Value::Binary(a), Value::Binary(b)) => a == b,
-            (Value::Tuple(type_a, elems_a), Value::Tuple(type_b, elems_b)) => {
-                type_a == type_b
-                    && elems_a.len() == elems_b.len()
-                    && elems_a
-                        .iter()
-                        .zip(elems_b.iter())
-                        .all(|(x, y)| self.values_equal(x, y))
-            }
-            (
-                Value::Function {
-                    function: a,
-                    captures: cap_a,
-                },
-                Value::Function {
-                    function: b,
-                    captures: cap_b,
-                },
-            ) => {
-                a == b
-                    && cap_a.len() == cap_b.len()
-                    && cap_a
-                        .iter()
-                        .zip(cap_b.iter())
-                        .all(|(x, y)| self.values_equal(x, y))
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_comparison<F>(&mut self, tuple_size: usize, test: F) -> Result<(), Error>
-    where
-        F: Fn(i64, i64) -> bool,
-    {
-        if tuple_size == 0 {
-            return Err(Error::TupleEmpty);
-        }
-        let mut values = vec![0; tuple_size];
-        for i in (0..tuple_size).rev() {
-            match self.stack.pop().ok_or(Error::StackUnderflow)? {
-                Value::Integer(v) => values[i] = v,
-                other => {
-                    return Err(Error::TypeMismatch {
-                        expected: "integer".to_string(),
-                        found: other.type_name().to_string(),
-                    });
-                }
-            }
-        }
-        let result = values.windows(2).all(|w| test(w[0], w[1]));
-        self.stack.push(if result {
-            Value::Tuple(TypeId::OK, vec![])
-        } else {
-            Value::Tuple(TypeId::NIL, vec![])
-        });
         Ok(())
     }
 
@@ -708,8 +563,57 @@ impl VM {
         let builtin_fn = BUILTIN_REGISTRY
             .get_implementation(&function_name)
             .ok_or(Error::BuiltinUndefined(index))?;
-        
+
         let result = builtin_fn(&argument, &self.constants)?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_equal(&mut self, count: usize) -> Result<(), Error> {
+        if count == 0 {
+            return Err(Error::InvalidArgument(
+                "Cannot compare zero values".to_string(),
+            ));
+        }
+
+        // Pop the specified number of values from the stack
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(self.stack.pop().ok_or(Error::StackUnderflow)?);
+        }
+
+        // Reverse to get them in the original order (since we popped in reverse)
+        values.reverse();
+
+        // Check if all elements are equal to the first element
+        let first = &values[0];
+        let all_equal = values.iter().all(|value| values_equal(first, value));
+
+        let result = if all_equal {
+            first.clone() // Return the first value if all are equal
+        } else {
+            Value::Tuple(TypeId::NIL, vec![]) // Return NIL if not all equal
+        };
+
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_not(&mut self) -> Result<(), Error> {
+        let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let result = match value {
+            Value::Tuple(type_id, fields) => {
+                // Check if it's NIL (empty tuple with TypeId::NIL)
+                if type_id == TypeId::NIL && fields.is_empty() {
+                    Value::Tuple(TypeId::OK, vec![]) // Return Ok
+                } else {
+                    Value::Tuple(TypeId::NIL, vec![]) // Return NIL
+                }
+            }
+            _ => Value::Tuple(TypeId::NIL, vec![]), // Any non-tuple becomes NIL
+        };
+
         self.stack.push(result);
         Ok(())
     }
@@ -795,5 +699,39 @@ impl VM {
 
         variables.sort_by(|a, b| a.0.cmp(&b.0));
         variables
+    }
+}
+
+/// Helper function to compare values for equality
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Integer(a), Value::Integer(b)) => a == b,
+        (Value::Binary(a), Value::Binary(b)) => a == b,
+        (Value::Tuple(type_a, elems_a), Value::Tuple(type_b, elems_b)) => {
+            type_a == type_b
+                && elems_a.len() == elems_b.len()
+                && elems_a
+                    .iter()
+                    .zip(elems_b.iter())
+                    .all(|(x, y)| values_equal(x, y))
+        }
+        (
+            Value::Function {
+                function: a,
+                captures: cap_a,
+            },
+            Value::Function {
+                function: b,
+                captures: cap_b,
+            },
+        ) => {
+            a == b
+                && cap_a.len() == cap_b.len()
+                && cap_a
+                    .iter()
+                    .zip(cap_b.iter())
+                    .all(|(x, y)| values_equal(x, y))
+        }
+        _ => false,
     }
 }

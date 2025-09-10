@@ -230,7 +230,6 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
             let inner_pair = pair.into_inner().next().unwrap();
             parse_operation(inner_pair)
         }
-        Rule::operator => Ok(Operation::Operator(parse_operator(pair)?)),
         Rule::operation_tuple => Ok(Operation::Tuple(parse_operation_tuple(pair)?)),
         Rule::block => Ok(Operation::Block(parse_block(pair)?)),
         Rule::parameter => Ok(Operation::Parameter(parse_parameter(pair)?)),
@@ -259,9 +258,23 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
             let name = pair.into_inner().next().unwrap().as_str().to_string();
             Ok(Operation::Builtin(name))
         }
+        Rule::operator => parse_operator(pair),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "operation".to_string(),
+        }),
+    }
+}
+
+fn parse_operator(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error> {
+    let inner_pair = pair.into_inner().next().unwrap();
+
+    match inner_pair.as_rule() {
+        Rule::equality => Ok(Operation::Equality),
+        Rule::not => Ok(Operation::Not),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "operator".to_string(),
         }),
     }
 }
@@ -438,23 +451,6 @@ fn parse_member_access(pair: pest::iterators::Pair<Rule>) -> Result<MemberAccess
     }
 
     Ok(MemberAccess { target, accessors })
-}
-
-fn parse_operator(pair: pest::iterators::Pair<Rule>) -> Result<Operator, Error> {
-    match pair.as_str() {
-        "+" => Ok(Operator::Add),
-        "-" => Ok(Operator::Subtract),
-        "*" => Ok(Operator::Multiply),
-        "/" => Ok(Operator::Divide),
-        "%" => Ok(Operator::Modulo),
-        "==" => Ok(Operator::Equal),
-        "!=" => Ok(Operator::NotEqual),
-        "<" => Ok(Operator::LessThan),
-        "<=" => Ok(Operator::LessThanOrEqual),
-        ">" => Ok(Operator::GreaterThan),
-        ">=" => Ok(Operator::GreaterThanOrEqual),
-        op => Err(Error::OperatorUnknown(op.to_string())),
-    }
 }
 
 fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Pattern, Error> {

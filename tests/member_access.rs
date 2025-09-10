@@ -13,7 +13,7 @@ fn test_nested_member_access_as_operation() {
     quiver()
         .evaluate(
             r#"
-            inc = #int { [$, 1] ~> + },
+            inc = #int { [$, 1] ~> <add> },
             x = [0, [f: inc]],
             4 ~> x.1.f
             "#,

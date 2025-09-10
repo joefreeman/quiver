@@ -63,7 +63,6 @@ pub enum Value {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
-    Operator(Operator),
     Tuple(OperationTuple),
     Block(Block),
     Parameter(Parameter),
@@ -72,6 +71,8 @@ pub enum Operation {
     PositionalAccess(usize),
     TailCall(String),
     Builtin(String),
+    Equality,
+    Not,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,21 +134,6 @@ pub struct MemberAccess {
 pub enum AccessPath {
     Field(String),
     Index(usize),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Operator {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Modulo,
-    Equal,
-    NotEqual,
-    LessThan,
-    LessThanOrEqual,
-    GreaterThan,
-    GreaterThanOrEqual,
 }
 
 #[derive(Debug, Clone, PartialEq)]
