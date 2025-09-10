@@ -12,14 +12,15 @@ mod variables;
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::PatternCompiler;
-pub use typing::{TupleAccessor, Type, narrow_types};
+pub use typing::{TupleAccessor, TypeSet, narrow_types};
 
 use crate::{
     ast,
     builtins::BUILTIN_REGISTRY,
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
-    types, vm,
+    types::{FunctionType, Type, TypeRegistry},
+    vm::{VM, Value},
 };
 
 use typing::TypeContext;
@@ -115,21 +116,21 @@ pub struct Compiler<'a> {
     module_cache: ModuleCache,
 
     // State management
-    scopes: Vec<HashMap<String, Type>>,
-    vm: &'a mut vm::VM,
+    scopes: Vec<HashMap<String, TypeSet>>,
+    vm: &'a mut VM,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
 
     // Parameter field tracking for nested function definitions
-    parameter_fields_stack: Vec<HashMap<String, (usize, Type)>>,
+    parameter_fields_stack: Vec<HashMap<String, (usize, TypeSet)>>,
 }
 
 impl<'a> Compiler<'a> {
     pub fn compile(
         program: ast::Program,
-        type_registry: &'a mut types::TypeRegistry,
+        type_registry: &'a mut TypeRegistry,
         module_loader: &'a dyn ModuleLoader,
-        vm: &'a mut vm::VM,
+        vm: &'a mut VM,
         module_path: Option<PathBuf>,
     ) -> Result<Vec<Instruction>, Error> {
         // Initialize compiler scope with existing VM variables
@@ -169,10 +170,7 @@ impl<'a> Compiler<'a> {
                 module_path,
             } => self.compile_type_import(pattern, &module_path),
             ast::Statement::Expression(expression) => {
-                self.compile_expression(
-                    expression,
-                    Type::Resolved(types::Type::Tuple(TypeId::NIL)),
-                )?;
+                self.compile_expression(expression, TypeSet::resolved(Type::Tuple(TypeId::NIL)))?;
                 Ok(())
             }
         }
@@ -201,24 +199,24 @@ impl<'a> Compiler<'a> {
         )
     }
 
-    fn compile_literal(&mut self, literal: ast::Literal) -> Result<Type, Error> {
+    fn compile_literal(&mut self, literal: ast::Literal) -> Result<TypeSet, Error> {
         match literal {
             ast::Literal::Integer(integer) => {
                 let index = self.vm.register_constant(Constant::Integer(integer));
                 self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Resolved(types::Type::Integer))
+                Ok(TypeSet::resolved(Type::Integer))
             }
             ast::Literal::Binary(bytes) => {
                 // TODO: is clone bad?
                 let index = self.vm.register_constant(Constant::Binary(bytes.clone()));
                 self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Resolved(types::Type::Binary))
+                Ok(TypeSet::resolved(Type::Binary))
             }
             ast::Literal::String(string) => {
                 let bytes = string.as_bytes().to_vec();
                 let index = self.vm.register_constant(Constant::Binary(bytes));
                 self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Resolved(types::Type::Binary))
+                Ok(TypeSet::resolved(Type::Binary))
             }
         }
     }
@@ -227,15 +225,15 @@ impl<'a> Compiler<'a> {
         &mut self,
         tuple_name: Option<String>,
         fields: Vec<ast::ValueTupleField>,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
         let mut field_types = Vec::new();
         for field in &fields {
             let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
-            if let Type::Resolved(resolved_type) = field_type {
-                field_types.push((field.name.clone(), resolved_type));
+            if let Some(resolved_type) = field_type.single() {
+                field_types.push((field.name.clone(), resolved_type.clone()));
             } else {
                 return Err(Error::TupleFieldTypeUnresolved {
                     field_index: field_types.len(),
@@ -249,16 +247,16 @@ impl<'a> Compiler<'a> {
             .register_type(tuple_name, field_types);
         self.codegen
             .add_instruction(Instruction::Tuple(type_id, fields.len()));
-        Ok(Type::Resolved(types::Type::Tuple(type_id)))
+        Ok(TypeSet::resolved(Type::Tuple(type_id)))
     }
 
     fn compile_operation_tuple(
         &mut self,
         name: Option<String>,
         fields: Vec<ast::OperationTupleField>,
-        value_type: Type,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+        value_type: TypeSet,
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         let has_ripple = fields
             .iter()
             .any(|field| matches!(field.value, ast::OperationTupleFieldValue::Ripple));
@@ -286,8 +284,8 @@ impl<'a> Compiler<'a> {
                 }
             };
 
-            if let Type::Resolved(resolved_type) = field_type {
-                field_types.push((field.name.clone(), resolved_type));
+            if let Some(resolved_type) = field_type.single() {
+                field_types.push((field.name.clone(), resolved_type.clone()));
             } else {
                 return Err(Error::TupleFieldTypeUnresolved {
                     field_index: field_types.len(),
@@ -301,13 +299,13 @@ impl<'a> Compiler<'a> {
             .register_type(name, field_types);
         self.codegen
             .add_instruction(Instruction::Tuple(type_id, fields.len()));
-        Ok(Type::Resolved(types::Type::Tuple(type_id)))
+        Ok(TypeSet::resolved(Type::Tuple(type_id)))
     }
 
     fn compile_function_definition(
         &mut self,
         function_definition: ast::FunctionDefinition,
-    ) -> Result<Type, Error> {
+    ) -> Result<TypeSet, Error> {
         let mut function_params: HashSet<String> = HashSet::new();
 
         if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
@@ -326,7 +324,7 @@ impl<'a> Compiler<'a> {
 
         let parameter_type = match &function_definition.parameter_type {
             Some(t) => self.type_context.resolve_ast_type(t.clone())?,
-            None => Type::Resolved(types::Type::Tuple(TypeId::NIL)),
+            None => TypeSet::resolved(Type::Tuple(TypeId::NIL)),
         };
 
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
@@ -357,8 +355,8 @@ impl<'a> Compiler<'a> {
 
         self.parameter_fields_stack.pop();
 
-        let param_types = parameter_type.to_type_vec();
-        let result_types = body_type.to_type_vec();
+        let param_types = parameter_type.to_vec();
+        let result_types = body_type.to_vec();
 
         if param_types.is_empty() {
             return Err(Error::TypeUnresolved(
@@ -371,7 +369,7 @@ impl<'a> Compiler<'a> {
             ));
         }
 
-        let func_type = types::FunctionType {
+        let func_type = FunctionType {
             parameter: param_types,
             result: result_types,
         };
@@ -389,17 +387,17 @@ impl<'a> Compiler<'a> {
         self.codegen
             .add_instruction(Instruction::Function(function_index));
 
-        let function_type = types::Type::Function(Box::new(func_type));
+        let function_type = Type::Function(Box::new(func_type));
 
-        Ok(Type::Resolved(function_type))
+        Ok(TypeSet::resolved(function_type))
     }
 
     fn compile_assigment(
         &mut self,
         pattern: ast::Pattern,
         value: ast::Chain,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         let value_type = self.compile_chain(value, parameter_type)?;
 
         // Duplicate the value on the stack for pattern matching
@@ -419,7 +417,7 @@ impl<'a> Compiler<'a> {
             None => {
                 // Pattern definitely won't match - cleanup directly
                 self.codegen.emit_pattern_match_cleanup(0);
-                return Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)));
+                return Ok(TypeSet::resolved(Type::Tuple(TypeId::NIL)));
             }
             Some(pending_assignments) => {
                 // Pattern can match - generate normal assignment code
@@ -444,24 +442,28 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        Ok(Type::Unresolved(vec![
-            types::Type::Tuple(TypeId::OK),
-            types::Type::Tuple(TypeId::NIL),
+        Ok(TypeSet(vec![
+            Type::Tuple(TypeId::OK),
+            Type::Tuple(TypeId::NIL),
         ]))
     }
 
     fn compile_pattern_match(
         &mut self,
         pattern: &ast::Pattern,
-        value_type: &Type,
+        value_type: &TypeSet,
         fail_addr: usize,
-    ) -> Result<Option<Vec<(String, Type)>>, Error> {
+    ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
         let mut pattern_compiler =
             PatternCompiler::new(&mut self.codegen, &mut self.type_context, self.vm);
         pattern_compiler.compile_pattern_match(pattern, value_type, fail_addr)
     }
 
-    fn compile_block(&mut self, block: ast::Block, parameter_type: Type) -> Result<Type, Error> {
+    fn compile_block(
+        &mut self,
+        block: ast::Block,
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -485,7 +487,7 @@ impl<'a> Compiler<'a> {
                 self.compile_expression(branch.condition.clone(), parameter_type.clone())?;
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
-            if condition_type == Type::Resolved(types::Type::Tuple(TypeId::NIL)) {
+            if condition_type.single() == Some(&Type::Tuple(TypeId::NIL)) {
                 // Don't add to branch_types, continue to next branch
                 continue;
             }
@@ -541,8 +543,8 @@ impl<'a> Compiler<'a> {
     fn compile_expression(
         &mut self,
         expression: ast::Expression,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
 
@@ -557,8 +559,10 @@ impl<'a> Compiler<'a> {
             }?);
 
             // If last_type is NIL, subsequent terms are unreachable - break early
-            if let Some(Type::Resolved(types::Type::Tuple(TypeId::NIL))) = last_type {
-                break;
+            if let Some(ref last_type) = last_type {
+                if last_type.single() == Some(&Type::Tuple(TypeId::NIL)) {
+                    break;
+                }
             }
 
             if i < expression.terms.len() - 1 {
@@ -578,8 +582,8 @@ impl<'a> Compiler<'a> {
     fn compile_parameter(
         &mut self,
         parameter: ast::Parameter,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         match parameter {
             ast::Parameter::Self_ => {
                 self.codegen.add_instruction(Instruction::Parameter);
@@ -594,7 +598,11 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
+    fn compile_chain(
+        &mut self,
+        chain: ast::Chain,
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         let mut value_type = match chain.value {
             ast::Value::Literal(literal) => self.compile_literal(literal),
             ast::Value::Tuple(tuple) => {
@@ -606,7 +614,7 @@ impl<'a> Compiler<'a> {
             ast::Value::Block(block) => {
                 self.codegen
                     .add_instruction(Instruction::Tuple(TypeId::NIL, 0));
-                self.compile_block(block, Type::Resolved(types::Type::Tuple(TypeId::NIL)))
+                self.compile_block(block, TypeSet::resolved(Type::Tuple(TypeId::NIL)))
             }
             ast::Value::Parameter(parameter) => {
                 self.compile_parameter(parameter, parameter_type.clone())
@@ -624,27 +632,27 @@ impl<'a> Compiler<'a> {
         Ok(value_type)
     }
 
-    fn value_to_instructions(&mut self, value: &vm::Value) -> Result<Type, Error> {
+    fn value_to_instructions(&mut self, value: &Value) -> Result<TypeSet, Error> {
         match value {
-            vm::Value::Integer(int_value) => {
+            Value::Integer(int_value) => {
                 let index = self.vm.register_constant(Constant::Integer(*int_value));
                 self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Resolved(types::Type::Integer))
+                Ok(TypeSet::resolved(Type::Integer))
             }
-            vm::Value::Binary(const_index) => {
+            Value::Binary(const_index) => {
                 self.codegen
                     .add_instruction(Instruction::Constant(*const_index));
-                Ok(Type::Resolved(types::Type::Binary))
+                Ok(TypeSet::resolved(Type::Binary))
             }
-            vm::Value::Tuple(type_id, fields) => {
+            Value::Tuple(type_id, fields) => {
                 for field in fields {
                     self.value_to_instructions(field)?;
                 }
                 self.codegen
                     .add_instruction(Instruction::Tuple(*type_id, fields.len()));
-                Ok(Type::Resolved(types::Type::Tuple(*type_id)))
+                Ok(TypeSet::resolved(Type::Tuple(*type_id)))
             }
-            vm::Value::Function { function, captures } => {
+            Value::Function { function, captures } => {
                 for capture in captures {
                     self.value_to_instructions(capture)?;
                 }
@@ -652,7 +660,7 @@ impl<'a> Compiler<'a> {
                     let func_index = self.vm.register_function(func_def);
                     self.codegen
                         .add_instruction(Instruction::Function(func_index));
-                    Ok(Type::Resolved(self.function_to_type(func_index)))
+                    Ok(TypeSet::resolved(self.function_to_type(func_index)))
                 } else {
                     Err(Error::FeatureUnsupported(
                         "Invalid function reference".to_string(),
@@ -662,7 +670,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
+    fn compile_value_import(&mut self, module_path: &str) -> Result<TypeSet, Error> {
         // Check for circular imports
         if self
             .module_cache
@@ -687,7 +695,7 @@ impl<'a> Compiler<'a> {
         result
     }
 
-    fn import_module_internal(&mut self, module_path: &str) -> Result<Type, Error> {
+    fn import_module_internal(&mut self, module_path: &str) -> Result<TypeSet, Error> {
         // Parse the module
         let parsed = self.module_cache.load_and_cache_ast(
             module_path,
@@ -722,7 +730,7 @@ impl<'a> Compiler<'a> {
             .vm
             .execute_instructions(module_instructions)
             .map_err(|_e| Error::FeatureUnsupported("Module execution failed".to_string()))?
-            .unwrap_or(vm::Value::Tuple(TypeId::NIL, vec![]));
+            .unwrap_or(Value::Tuple(TypeId::NIL, vec![]));
 
         // Cache the evaluated module
         self.module_cache
@@ -736,9 +744,9 @@ impl<'a> Compiler<'a> {
     fn compile_operation(
         &mut self,
         operation: ast::Operation,
-        value_type: Type,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+        value_type: TypeSet,
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         match operation {
             ast::Operation::Tuple(tuple) => {
                 self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type)
@@ -768,43 +776,36 @@ impl<'a> Compiler<'a> {
     fn compile_tuple_element_access(
         &mut self,
         accessor: TupleAccessor,
-        value_type: Type,
-    ) -> Result<Type, Error> {
-        match value_type {
-            Type::Resolved(types::Type::Tuple(type_id)) => {
-                let (index, result_type) = match accessor {
-                    TupleAccessor::Field(field_name) => self
+        value_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
+        if let Some(Type::Tuple(type_id)) = value_type.single() {
+            let (index, result_type) = match accessor {
+                TupleAccessor::Field(field_name) => self
+                    .type_context
+                    .get_tuple_field_type_by_name(&type_id, &field_name)?,
+                TupleAccessor::Position(position) => {
+                    let field_type = self
                         .type_context
-                        .get_tuple_field_type_by_name(&type_id, &field_name)?,
-                    TupleAccessor::Position(position) => {
-                        let field_type = self
-                            .type_context
-                            .get_tuple_field_type_by_position(&type_id, position)?;
-                        (position, field_type)
-                    }
-                };
-                self.codegen.add_instruction(Instruction::Get(index));
-                Ok(Type::Resolved(result_type))
+                        .get_tuple_field_type_by_position(&type_id, position)?;
+                    (position, field_type)
+                }
+            };
+            self.codegen.add_instruction(Instruction::Get(index));
+            Ok(TypeSet::resolved(result_type))
+        } else {
+            match accessor {
+                TupleAccessor::Field(field_name) => {
+                    Err(Error::FieldAccessOnNonTuple { field_name })
+                }
+                TupleAccessor::Position(index) => Err(Error::PositionalAccessOnNonTuple { index }),
             }
-            Type::Resolved(_) => match accessor {
-                TupleAccessor::Field(field_name) => {
-                    Err(Error::FieldAccessOnNonTuple { field_name })
-                }
-                TupleAccessor::Position(index) => Err(Error::PositionalAccessOnNonTuple { index }),
-            },
-            Type::Unresolved(_) => match accessor {
-                TupleAccessor::Field(field_name) => {
-                    Err(Error::FieldAccessOnNonTuple { field_name })
-                }
-                TupleAccessor::Position(index) => Err(Error::PositionalAccessOnNonTuple { index }),
-            },
         }
     }
 
-    fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<Type, Error> {
+    fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<TypeSet, Error> {
         if identifier.is_empty() {
             self.codegen.add_instruction(Instruction::TailCall(true));
-            Ok(Type::Unresolved(vec![]))
+            Ok(TypeSet(vec![]))
         } else {
             self.codegen
                 .add_instruction(Instruction::Load(identifier.to_string()));
@@ -817,7 +818,11 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_builtin(&mut self, name: &str, _value_type: Type) -> Result<Type, Error> {
+    fn compile_operation_builtin(
+        &mut self,
+        name: &str,
+        _value_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         // Check if the builtin function exists by getting its signature
         let (_, result_types) = BUILTIN_REGISTRY
             .get_signature(name)
@@ -834,88 +839,85 @@ impl<'a> Compiler<'a> {
         narrow_types(
             result_types
                 .into_iter()
-                .map(|t| Type::Resolved(t))
+                .map(|t| TypeSet::resolved(t))
                 .collect(),
         )
     }
 
-    fn compile_operation_equality(&mut self, value_type: Type) -> Result<Type, Error> {
+    fn compile_operation_equality(&mut self, value_type: TypeSet) -> Result<TypeSet, Error> {
         // The == operator works with a tuple on the stack
         // We need to extract the tuple elements and call Equal(count)
-        match value_type {
-            Type::Resolved(types::Type::Tuple(type_id)) => {
-                // Get the number of fields in this tuple type
-                if let Some((_, fields)) = self.type_context.type_registry.lookup_type(&type_id) {
-                    let field_count = fields.len();
+        if let Some(Type::Tuple(type_id)) = value_type.single() {
+            // Get the number of fields in this tuple type
+            if let Some((_, fields)) = self.type_context.type_registry.lookup_type(&type_id) {
+                let field_count = fields.len();
 
-                    if field_count == 0 {
-                        return Err(Error::TypeMismatch {
-                            expected: "non-empty tuple".to_string(),
-                            found: "empty tuple".to_string(),
-                        });
-                    }
-
-                    // Extract tuple fields and push them individually to the stack
-                    // Following the established pattern from compile_operator
-                    for i in 0..field_count {
-                        if i < field_count - 1 {
-                            self.codegen.add_instruction(Instruction::Duplicate);
-                        }
-                        self.codegen.add_instruction(Instruction::Get(i));
-                        if i < field_count - 1 {
-                            self.codegen.add_instruction(Instruction::Swap);
-                        }
-                    }
-
-                    // Now compare the field_count individual values on the stack
-                    self.codegen
-                        .add_instruction(Instruction::Equal(field_count));
-
-                    // Return type is union of field type and NIL
-                    if let Some((_, first_field_type)) = fields.get(0) {
-                        Ok(Type::Unresolved(vec![
-                            first_field_type.clone(),
-                            types::Type::Tuple(TypeId::NIL),
-                        ]))
-                    } else {
-                        Ok(Type::Resolved(types::Type::Tuple(TypeId::NIL)))
-                    }
-                } else {
-                    Err(Error::TypeUnresolved(format!(
-                        "Type {:?} not found in registry",
-                        type_id
-                    )))
+                if field_count == 0 {
+                    return Err(Error::TypeMismatch {
+                        expected: "non-empty tuple".to_string(),
+                        found: "empty tuple".to_string(),
+                    });
                 }
+
+                // Extract tuple fields and push them individually to the stack
+                // Following the established pattern from compile_operator
+                for i in 0..field_count {
+                    if i < field_count - 1 {
+                        self.codegen.add_instruction(Instruction::Duplicate);
+                    }
+                    self.codegen.add_instruction(Instruction::Get(i));
+                    if i < field_count - 1 {
+                        self.codegen.add_instruction(Instruction::Swap);
+                    }
+                }
+
+                // Now compare the field_count individual values on the stack
+                self.codegen
+                    .add_instruction(Instruction::Equal(field_count));
+
+                // Return type is union of field type and NIL
+                if let Some((_, first_field_type)) = fields.get(0) {
+                    Ok(TypeSet(vec![
+                        first_field_type.clone(),
+                        Type::Tuple(TypeId::NIL),
+                    ]))
+                } else {
+                    Ok(TypeSet::resolved(Type::Tuple(TypeId::NIL)))
+                }
+            } else {
+                Err(Error::TypeUnresolved(format!(
+                    "Type {:?} not found in registry",
+                    type_id
+                )))
             }
-            Type::Unresolved(_) | Type::Resolved(_) => {
-                // For unresolved types or non-tuple types, we can't know the field count at compile time
-                // This would require runtime inspection - for now, return an error
-                Err(Error::TypeMismatch {
-                    expected: "tuple".to_string(),
-                    found: "unknown".to_string(),
-                })
-            }
+        } else {
+            // For unresolved types or non-tuple types, we can't know the field count at compile time
+            // This would require runtime inspection - for now, return an error
+            Err(Error::TypeMismatch {
+                expected: "tuple".to_string(),
+                found: "unknown".to_string(),
+            })
         }
     }
 
-    fn compile_operation_not(&mut self, _value_type: Type) -> Result<Type, Error> {
+    fn compile_operation_not(&mut self, _value_type: TypeSet) -> Result<TypeSet, Error> {
         // The ! operator works with any value on the stack
         // It converts [] to Ok and everything else to []
         self.codegen.add_instruction(Instruction::Not);
 
         // The Not instruction returns either Ok or NIL
-        Ok(Type::Unresolved(vec![
-            types::Type::Tuple(TypeId::OK),
-            types::Type::Tuple(TypeId::NIL),
+        Ok(TypeSet(vec![
+            Type::Tuple(TypeId::OK),
+            Type::Tuple(TypeId::NIL),
         ]))
     }
 
     fn compile_operation_parameter(
         &mut self,
         parameter: ast::Parameter,
-        value_type: Type,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
+        value_type: TypeSet,
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         // Get the operation type from the parameter (could be function or other callable)
         let function_type = match parameter {
             ast::Parameter::Self_ => {
@@ -934,7 +936,7 @@ impl<'a> Compiler<'a> {
         self.compile_function_call(function_type, value_type)
     }
 
-    fn compile_target_access(&mut self, target: &str) -> Result<Type, Error> {
+    fn compile_target_access(&mut self, target: &str) -> Result<TypeSet, Error> {
         if let Some(var_type) = self.lookup_variable(target) {
             self.codegen
                 .add_instruction(Instruction::Load(target.to_string()));
@@ -944,7 +946,7 @@ impl<'a> Compiler<'a> {
         if let Some(parameter_fields) = self.parameter_fields_stack.last() {
             if let Some(&(field_index, ref field_type)) = parameter_fields.get(target) {
                 let field_index_copy = field_index;
-                let field_type_copy = field_type.clone();
+                let field_type_copy: TypeSet = field_type.clone();
                 self.codegen.add_instruction(Instruction::Parameter);
                 self.codegen
                     .add_instruction(Instruction::Get(field_index_copy));
@@ -960,7 +962,7 @@ impl<'a> Compiler<'a> {
         target: &str,
         accessors: Vec<ast::AccessPath>,
         emit_load: bool,
-    ) -> Result<Type, Error> {
+    ) -> Result<TypeSet, Error> {
         let mut last_type = if emit_load {
             self.codegen
                 .add_instruction(Instruction::Load(target.to_string()));
@@ -971,34 +973,31 @@ impl<'a> Compiler<'a> {
         };
 
         for accessor in accessors {
-            match last_type {
-                Type::Resolved(types::Type::Tuple(type_id)) => {
-                    let (index, result_type) = match accessor {
-                        ast::AccessPath::Field(field_name) => self
+            if let Some(Type::Tuple(type_id)) = last_type.single() {
+                let (index, result_type) = match accessor {
+                    ast::AccessPath::Field(field_name) => self
+                        .type_context
+                        .get_tuple_field_type_by_name(&type_id, &field_name)
+                        .map_err(|_| Error::MemberFieldNotFound {
+                            field_name: field_name.clone(),
+                            target: target.to_string(),
+                        })?,
+                    ast::AccessPath::Index(index) => {
+                        let field_type = self
                             .type_context
-                            .get_tuple_field_type_by_name(&type_id, &field_name)
-                            .map_err(|_| Error::MemberFieldNotFound {
-                                field_name: field_name.clone(),
+                            .get_tuple_field_type_by_position(&type_id, index)
+                            .map_err(|_| Error::MemberAccessOnNonTuple {
                                 target: target.to_string(),
-                            })?,
-                        ast::AccessPath::Index(index) => {
-                            let field_type = self
-                                .type_context
-                                .get_tuple_field_type_by_position(&type_id, index)
-                                .map_err(|_| Error::MemberAccessOnNonTuple {
-                                    target: target.to_string(),
-                                })?;
-                            (index, field_type)
-                        }
-                    };
-                    self.codegen.add_instruction(Instruction::Get(index));
-                    last_type = Type::Resolved(result_type);
-                }
-                _ => {
-                    return Err(Error::MemberAccessOnNonTuple {
-                        target: target.to_string(),
-                    });
-                }
+                            })?;
+                        (index, field_type)
+                    }
+                };
+                self.codegen.add_instruction(Instruction::Get(index));
+                last_type = TypeSet::resolved(result_type);
+            } else {
+                return Err(Error::MemberAccessOnNonTuple {
+                    target: target.to_string(),
+                });
             }
         }
 
@@ -1009,7 +1008,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
-    ) -> Result<Type, Error> {
+    ) -> Result<TypeSet, Error> {
         self.compile_member_access_chain(target, accessors, false)
     }
 
@@ -1017,8 +1016,8 @@ impl<'a> Compiler<'a> {
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
-        value_type: Type,
-    ) -> Result<Type, Error> {
+        value_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
         let function_type = self.compile_member_access_chain(target, accessors, true)?;
         // Use the unified function call handler
         self.compile_function_call(function_type, value_type)
@@ -1026,11 +1025,11 @@ impl<'a> Compiler<'a> {
 
     fn compile_function_call(
         &mut self,
-        operation_type: Type,
-        value_type: Type,
-    ) -> Result<Type, Error> {
-        let operation_types = operation_type.to_type_vec();
-        let value_types = value_type.to_type_vec();
+        operation_type: TypeSet,
+        value_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
+        let operation_types = operation_type.to_vec();
+        let value_types = value_type.to_vec();
 
         // Separate function types from non-function types
         let mut function_variants = Vec::new();
@@ -1038,7 +1037,7 @@ impl<'a> Compiler<'a> {
 
         for op_type in &operation_types {
             match op_type {
-                types::Type::Function(func_type) => function_variants.push(func_type),
+                Type::Function(func_type) => function_variants.push(func_type),
                 _ => non_function_types.push(op_type),
             }
         }
@@ -1072,7 +1071,12 @@ impl<'a> Compiler<'a> {
             }
 
             // Collect return types from this compatible function
-            all_return_types.extend(func_type.result.iter().map(|t| Type::Resolved(t.clone())));
+            all_return_types.extend(
+                func_type
+                    .result
+                    .iter()
+                    .map(|t| TypeSet::resolved(t.clone())),
+            );
         }
 
         // Generate the call instruction
@@ -1082,48 +1086,46 @@ impl<'a> Compiler<'a> {
         narrow_types(all_return_types)
     }
 
-    fn define_variable(&mut self, name: &str, var_type: Type) {
+    fn define_variable(&mut self, name: &str, var_type: TypeSet) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), var_type);
         }
     }
 
-    fn function_to_type(&self, function_index: usize) -> types::Type {
+    fn function_to_type(&self, function_index: usize) -> Type {
         if let Some(func_def) = self.vm.get_functions().get(function_index) {
             if let Some(func_type) = &func_def.function_type {
-                types::Type::Function(Box::new(func_type.clone()))
+                Type::Function(Box::new(func_type.clone()))
             } else {
                 // Fallback if no type information is available
-                types::Type::Function(Box::new(types::FunctionType {
-                    parameter: vec![types::Type::Tuple(TypeId::NIL)],
-                    result: vec![types::Type::Tuple(TypeId::NIL)],
+                Type::Function(Box::new(FunctionType {
+                    parameter: vec![Type::Tuple(TypeId::NIL)],
+                    result: vec![Type::Tuple(TypeId::NIL)],
                 }))
             }
         } else {
-            types::Type::Tuple(TypeId::NIL)
+            Type::Tuple(TypeId::NIL)
         }
     }
 
-    fn value_to_type(&self, value: &vm::Value) -> Type {
+    fn value_to_type(&self, value: &Value) -> TypeSet {
         match value {
-            vm::Value::Integer(_) => Type::Resolved(types::Type::Integer),
-            vm::Value::Binary(_) => Type::Resolved(types::Type::Binary),
-            vm::Value::Tuple(type_id, _) => Type::Resolved(types::Type::Tuple(*type_id)),
-            vm::Value::Function { function, .. } => {
-                Type::Resolved(self.function_to_type(*function))
-            }
+            Value::Integer(_) => TypeSet::resolved(Type::Integer),
+            Value::Binary(_) => TypeSet::resolved(Type::Binary),
+            Value::Tuple(type_id, _) => TypeSet::resolved(Type::Tuple(*type_id)),
+            Value::Function { function, .. } => TypeSet::resolved(self.function_to_type(*function)),
         }
     }
 
-    fn lookup_variable(&self, name: &str) -> Option<Type> {
+    fn lookup_variable(&self, name: &str) -> Option<TypeSet> {
         self.lookup_variable_in_scopes(&self.scopes, name)
     }
 
     fn lookup_variable_in_scopes(
         &self,
-        scopes: &[HashMap<String, Type>],
+        scopes: &[HashMap<String, TypeSet>],
         name: &str,
-    ) -> Option<Type> {
+    ) -> Option<TypeSet> {
         for scope in scopes.iter().rev() {
             if let Some(variable_type) = scope.get(name) {
                 return Some(variable_type.clone());
@@ -1134,41 +1136,40 @@ impl<'a> Compiler<'a> {
 
     fn validate_tuple_field_access_single(
         &self,
-        tuple_type: &Type,
+        tuple_type: &TypeSet,
         index: usize,
-    ) -> Result<Type, Error> {
-        match tuple_type {
-            Type::Resolved(types::Type::Tuple(type_id)) => {
-                if let Some(type_info) = self.type_context.type_registry.lookup_type(type_id) {
-                    if let Some(field) = type_info.1.get(index) {
-                        Ok(Type::Resolved(field.1.clone()))
-                    } else {
-                        Err(Error::ParameterIndexOutOfBounds { index })
-                    }
+    ) -> Result<TypeSet, Error> {
+        if let Some(Type::Tuple(type_id)) = tuple_type.single() {
+            if let Some(type_info) = self.type_context.type_registry.lookup_type(type_id) {
+                if let Some(field) = type_info.1.get(index) {
+                    Ok(TypeSet::resolved(field.1.clone()))
                 } else {
-                    Err(Error::ParameterTypeNotInRegistry {
-                        type_id: format!("{:?}", type_id),
-                    })
+                    Err(Error::ParameterIndexOutOfBounds { index })
                 }
+            } else {
+                Err(Error::ParameterTypeNotInRegistry {
+                    type_id: format!("{:?}", type_id),
+                })
             }
-            _ => Err(Error::ParameterAccessOnNonTuple { index }),
+        } else {
+            Err(Error::ParameterAccessOnNonTuple { index })
         }
     }
 
     fn validate_tuple_field_access_multiple(
         &self,
-        parameter_type: &Type,
+        parameter_type: &TypeSet,
         index: usize,
-    ) -> Result<Type, Error> {
-        let param_types = parameter_type.to_type_vec();
+    ) -> Result<TypeSet, Error> {
+        let param_types = parameter_type.to_vec();
         let mut field_type_results = Vec::new();
 
         for param_type in param_types {
             match param_type {
-                types::Type::Tuple(type_id) => {
+                Type::Tuple(type_id) => {
                     if let Some(type_info) = self.type_context.type_registry.lookup_type(&type_id) {
                         if let Some(field) = type_info.1.get(index) {
-                            field_type_results.push(Type::Resolved(field.1.clone()));
+                            field_type_results.push(TypeSet::resolved(field.1.clone()));
                         } else {
                             return Err(Error::ParameterIndexOutOfBounds { index });
                         }

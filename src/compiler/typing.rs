@@ -1,13 +1,60 @@
 use std::collections::HashMap;
 
-use crate::{ast, bytecode::TypeId, types};
+use crate::{
+    ast,
+    bytecode::TypeId,
+    types::{FunctionType, Type, TypeRegistry},
+};
 
 use super::Error;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Type {
-    Resolved(types::Type),
-    Unresolved(Vec<types::Type>),
+pub struct TypeSet(pub Vec<Type>);
+
+impl TypeSet {
+    pub fn new(types: Vec<Type>) -> Result<Self, Error> {
+        if types.is_empty() {
+            Err(Error::TypeUnresolved("Empty type set".to_string()))
+        } else {
+            Ok(TypeSet(types))
+        }
+    }
+
+    pub fn resolved(t: Type) -> Self {
+        TypeSet(vec![t])
+    }
+
+    pub fn unresolved(types: Vec<Type>) -> Result<Self, Error> {
+        if types.is_empty() {
+            Err(Error::TypeUnresolved("Empty type set".to_string()))
+        } else {
+            Ok(TypeSet(types))
+        }
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        self.0.len() == 1
+    }
+
+    pub fn single(&self) -> Option<&Type> {
+        if self.0.len() == 1 {
+            Some(&self.0[0])
+        } else {
+            None
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<Type> {
+        self.0.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<Type> {
+        self.0.iter()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -16,72 +63,47 @@ pub enum TupleAccessor {
     Position(usize),
 }
 
-impl Type {
-    pub fn to_type_vec(&self) -> Vec<types::Type> {
-        match self {
-            Type::Resolved(t) => vec![t.clone()],
-            Type::Unresolved(types) => types.clone(),
-        }
-    }
-}
-
-pub fn narrow_types(types: Vec<Type>) -> Result<Type, Error> {
+pub fn narrow_types(types: Vec<TypeSet>) -> Result<TypeSet, Error> {
     let mut flattened = Vec::new();
-    for t in types {
-        match t {
-            Type::Unresolved(ts) => flattened.extend(ts),
-            Type::Resolved(t) => flattened.push(t),
-        }
+    for type_set in types {
+        flattened.extend(type_set.to_vec());
     }
 
     flattened.dedup();
 
-    match flattened.len() {
-        0 => Err(Error::TypeUnresolved(
+    if flattened.is_empty() {
+        Err(Error::TypeUnresolved(
             "No valid types found in narrowing".to_string(),
-        )),
-        1 => Ok(Type::Resolved(flattened.first().unwrap().clone())),
-        _ => Ok(Type::Unresolved(flattened)),
+        ))
+    } else {
+        Ok(TypeSet(flattened))
     }
 }
 
 pub struct TypeContext<'a> {
-    pub type_aliases: HashMap<String, Type>,
-    pub type_registry: &'a mut types::TypeRegistry,
+    pub type_aliases: HashMap<String, TypeSet>,
+    pub type_registry: &'a mut TypeRegistry,
 }
 
 impl<'a> TypeContext<'a> {
-    pub fn new(type_registry: &'a mut types::TypeRegistry) -> Self {
+    pub fn new(type_registry: &'a mut TypeRegistry) -> Self {
         Self {
             type_aliases: HashMap::new(),
             type_registry,
         }
     }
 
-    pub fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Result<Type, Error> {
+    pub fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Result<TypeSet, Error> {
         match ast_type {
-            ast::Type::Primitive(ast::PrimitiveType::Int) => {
-                Ok(Type::Resolved(types::Type::Integer))
-            }
-            ast::Type::Primitive(ast::PrimitiveType::Bin) => {
-                Ok(Type::Resolved(types::Type::Binary))
-            }
+            ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(TypeSet::resolved(Type::Integer)),
+            ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(TypeSet::resolved(Type::Binary)),
             ast::Type::Tuple(tuple) => {
                 // Collect all possible types for each field
-                let mut field_variants: Vec<(Option<String>, Vec<types::Type>)> = Vec::new();
+                let mut field_variants: Vec<(Option<String>, Vec<Type>)> = Vec::new();
 
                 for field in tuple.fields {
-                    let field_possibilities = match self.resolve_ast_type(field.type_def)? {
-                        Type::Resolved(t) => vec![t],
-                        Type::Unresolved(ts) => {
-                            if ts.is_empty() {
-                                return Err(Error::TypeUnresolved(
-                                    "Empty field type possibilities".to_string(),
-                                ));
-                            }
-                            ts
-                        }
-                    };
+                    let field_type_set = self.resolve_ast_type(field.type_def)?;
+                    let field_possibilities = field_type_set.to_vec();
                     field_variants.push((field.name, field_possibilities));
                 }
 
@@ -89,46 +111,26 @@ impl<'a> TypeContext<'a> {
                 let tuple_variants =
                     self.cartesian_product_tuple_types(&tuple.name, field_variants);
 
-                Ok(match tuple_variants.len() {
-                    0 => {
-                        return Err(Error::TypeUnresolved(
-                            "No valid tuple type variants found".to_string(),
-                        ));
-                    }
-                    1 => Type::Resolved(tuple_variants.into_iter().next().unwrap()),
-                    _ => Type::Unresolved(tuple_variants),
-                })
+                if tuple_variants.is_empty() {
+                    return Err(Error::TypeUnresolved(
+                        "No valid tuple type variants found".to_string(),
+                    ));
+                }
+                Ok(TypeSet(tuple_variants))
             }
             ast::Type::Function(function) => {
-                let input_possibilities = match self.resolve_ast_type(*function.input)? {
-                    Type::Resolved(t) => vec![t],
-                    Type::Unresolved(ts) => {
-                        if ts.is_empty() {
-                            return Err(Error::TypeUnresolved(
-                                "Empty function input type possibilities".to_string(),
-                            ));
-                        }
-                        ts
-                    }
-                };
-                let output_possibilities = match self.resolve_ast_type(*function.output)? {
-                    Type::Resolved(t) => vec![t],
-                    Type::Unresolved(ts) => {
-                        if ts.is_empty() {
-                            return Err(Error::TypeUnresolved(
-                                "Empty function output type possibilities".to_string(),
-                            ));
-                        }
-                        ts
-                    }
-                };
+                let input_type_set = self.resolve_ast_type(*function.input)?;
+                let input_possibilities = input_type_set.to_vec();
+
+                let output_type_set = self.resolve_ast_type(*function.output)?;
+                let output_possibilities = output_type_set.to_vec();
 
                 // Generate cartesian product of input × output types
-                let function_variants: Vec<types::Type> = input_possibilities
+                let function_variants: Vec<Type> = input_possibilities
                     .into_iter()
                     .flat_map(|input_type| {
                         output_possibilities.iter().map(move |output_type| {
-                            types::Type::Function(Box::new(types::FunctionType {
+                            Type::Function(Box::new(FunctionType {
                                 parameter: vec![input_type.clone()],
                                 result: vec![output_type.clone()],
                             }))
@@ -136,38 +138,26 @@ impl<'a> TypeContext<'a> {
                     })
                     .collect();
 
-                Ok(match function_variants.len() {
-                    0 => {
-                        return Err(Error::TypeUnresolved(
-                            "No valid function type variants found".to_string(),
-                        ));
-                    }
-                    1 => Type::Resolved(function_variants.into_iter().next().unwrap()),
-                    _ => Type::Unresolved(function_variants),
-                })
+                if function_variants.is_empty() {
+                    return Err(Error::TypeUnresolved(
+                        "No valid function type variants found".to_string(),
+                    ));
+                }
+                Ok(TypeSet(function_variants))
             }
             ast::Type::Union(union) => {
                 // Resolve all union member types
                 let mut resolved_types = Vec::new();
                 for member_type in union.types {
-                    match self.resolve_ast_type(member_type)? {
-                        Type::Resolved(t) => resolved_types.push(t),
-                        Type::Unresolved(ts) => {
-                            if ts.is_empty() {
-                                return Err(Error::TypeUnresolved(
-                                    "Empty union member type".to_string(),
-                                ));
-                            }
-                            resolved_types.extend(ts);
-                        }
-                    }
+                    let member_type_set = self.resolve_ast_type(member_type)?;
+                    resolved_types.extend(member_type_set.to_vec());
                 }
 
                 // Return as unresolved union type
                 if resolved_types.is_empty() {
                     return Err(Error::TypeUnresolved("Empty union type".to_string()));
                 }
-                Ok(Type::Unresolved(resolved_types))
+                Ok(TypeSet(resolved_types))
             }
             ast::Type::Identifier(alias) => {
                 // Look up type alias
@@ -184,7 +174,7 @@ impl<'a> TypeContext<'a> {
         &self,
         type_id: &TypeId,
         field_name: &str,
-    ) -> Result<(usize, types::Type), Error> {
+    ) -> Result<(usize, Type), Error> {
         let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
         let (index, (_, field_type)) = tuple_type
             .1
@@ -202,7 +192,7 @@ impl<'a> TypeContext<'a> {
         &self,
         type_id: &TypeId,
         position: usize,
-    ) -> Result<types::Type, Error> {
+    ) -> Result<Type, Error> {
         let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
         if position >= tuple_type.1.len() {
             return Err(Error::PositionalAccessOnNonTuple { index: position });
@@ -213,12 +203,12 @@ impl<'a> TypeContext<'a> {
     pub fn cartesian_product_tuple_types(
         &mut self,
         tuple_name: &Option<String>,
-        field_variants: Vec<(Option<String>, Vec<types::Type>)>,
-    ) -> Vec<types::Type> {
+        field_variants: Vec<(Option<String>, Vec<Type>)>,
+    ) -> Vec<Type> {
         // Handle empty fields case
         if field_variants.is_empty() {
             let type_id = self.type_registry.register_type(tuple_name.clone(), vec![]);
-            return vec![types::Type::Tuple(type_id)];
+            return vec![Type::Tuple(type_id)];
         }
 
         // Generate all combinations using recursive cartesian product
@@ -231,17 +221,17 @@ impl<'a> TypeContext<'a> {
                 let type_id = self
                     .type_registry
                     .register_type(tuple_name.clone(), field_types);
-                types::Type::Tuple(type_id)
+                Type::Tuple(type_id)
             })
             .collect()
     }
 
     fn cartesian_product_recursive(
         &self,
-        field_variants: &[(Option<String>, Vec<types::Type>)],
+        field_variants: &[(Option<String>, Vec<Type>)],
         index: usize,
-        current: Vec<(Option<String>, types::Type)>,
-    ) -> Vec<Vec<(Option<String>, types::Type)>> {
+        current: Vec<(Option<String>, Type)>,
+    ) -> Vec<Vec<(Option<String>, Type)>> {
         if index >= field_variants.len() {
             return vec![current];
         }

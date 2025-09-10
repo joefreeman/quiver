@@ -1,12 +1,12 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::{ast, modules::ModuleLoader, parser, vm};
+use crate::{ast, modules::ModuleLoader, parser, vm::Value};
 
 use super::{Error, typing::TypeContext};
 
 pub struct ModuleCache {
     pub ast_cache: HashMap<String, ast::Program>,
-    pub evaluation_cache: HashMap<String, vm::Value>,
+    pub evaluation_cache: HashMap<String, Value>,
     pub import_stack: Vec<String>,
 }
 
