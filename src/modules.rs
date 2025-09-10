@@ -24,8 +24,9 @@ impl InMemoryModuleLoader {
 
 impl ModuleLoader for InMemoryModuleLoader {
     fn load(&self, path: &str, from_dir: Option<&Path>) -> Result<String, ModuleError> {
-        let normalised = if path.starts_with("./") || path.starts_with("../") {
-            if let Some(base_dir) = from_dir {
+        if path.starts_with("./") || path.starts_with("../") {
+            // Relative import - use in-memory modules
+            let normalised = if let Some(base_dir) = from_dir {
                 base_dir
                     .join(path)
                     .components()
@@ -34,18 +35,17 @@ impl ModuleLoader for InMemoryModuleLoader {
                     .to_string()
             } else {
                 path.to_string()
-            }
-        } else {
-            return Err(ModuleError::NotFound(format!(
-                "Module path must be relative (start with ./ or ../): {}",
-                path
-            )));
-        };
+            };
 
-        self.modules
-            .get(&normalised)
-            .cloned()
-            .ok_or_else(|| ModuleError::NotFound(path.to_string()))
+            self.modules
+                .get(&normalised)
+                .cloned()
+                .ok_or_else(|| ModuleError::NotFound(path.to_string()))
+        } else {
+            // Standard library import - fall back to filesystem
+            let filesystem_loader = FileSystemModuleLoader::new();
+            filesystem_loader.load(path, from_dir)
+        }
     }
 }
 
@@ -66,6 +66,7 @@ impl FileSystemModuleLoader {
 impl ModuleLoader for FileSystemModuleLoader {
     fn load(&self, path: &str, from_dir: Option<&Path>) -> Result<String, ModuleError> {
         let resolved = if path.starts_with("./") || path.starts_with("../") {
+            // Relative import - resolve relative to from_dir
             let full_path = from_dir.unwrap_or(Path::new(".")).join(path);
             if full_path.exists() {
                 full_path
@@ -73,10 +74,20 @@ impl ModuleLoader for FileSystemModuleLoader {
                 return Err(ModuleError::NotFound(path.to_string()));
             }
         } else {
-            return Err(ModuleError::NotFound(format!(
-                "Module path must be relative (start with ./ or ../): {}",
-                path
-            )));
+            // Standard library import - look in std/ directory
+            let mut stdlib_path = PathBuf::from("std").join(path);
+            // Add .qv extension if not present
+            if stdlib_path.extension().is_none() {
+                stdlib_path.set_extension("qv");
+            }
+            if stdlib_path.exists() {
+                stdlib_path
+            } else {
+                return Err(ModuleError::NotFound(format!(
+                    "Standard library module not found: {}",
+                    path
+                )));
+            }
         };
 
         std::fs::read_to_string(&resolved).map_err(|e| ModuleError::IoError(e.to_string()))

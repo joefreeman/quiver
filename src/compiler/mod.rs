@@ -668,13 +668,6 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
-        // Check if this is a stdlib module import (doesn't start with ./ or ../)
-        if !module_path.starts_with("./") && !module_path.starts_with("../") {
-            return Err(Error::FeatureUnsupported(
-                "Stdlib module imports not supported".to_string(),
-            ));
-        }
-
         // Check for circular imports
         if self
             .module_cache
