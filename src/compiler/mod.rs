@@ -639,9 +639,27 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Constant(index));
                 Ok(TypeSet::resolved(Type::Integer))
             }
-            Value::Binary(const_index) => {
-                self.codegen
-                    .add_instruction(Instruction::Constant(*const_index));
+            Value::Binary(binary_ref) => {
+                match binary_ref {
+                    crate::vm::BinaryRef::Constant(const_index) => {
+                        self.codegen
+                            .add_instruction(Instruction::Constant(*const_index));
+                    }
+                    crate::vm::BinaryRef::Heap(_) => {
+                        // Heap binaries need to be handled differently
+                        // For now, we'll create a constant from the heap binary
+                        if let Ok(bytes) = self.vm.get_binary_bytes(binary_ref) {
+                            let constant = crate::bytecode::Constant::Binary(bytes.to_vec());
+                            let index = self.vm.register_constant(constant);
+                            self.codegen.add_instruction(Instruction::Constant(index));
+                        } else {
+                            return Err(Error::TypeMismatch {
+                                expected: "valid binary".to_string(),
+                                found: "invalid binary reference".to_string(),
+                            });
+                        }
+                    }
+                }
                 Ok(TypeSet::resolved(Type::Binary))
             }
             Value::Tuple(type_id, fields) => {

@@ -4,6 +4,7 @@ use crate::types::Type;
 use crate::vm::{Error, Value};
 use std::collections::HashMap;
 
+pub mod binary;
 pub mod io;
 pub mod math;
 
@@ -69,6 +70,45 @@ fn create_builtin_registry() -> BuiltinRegistry {
 
     // Comparison operations - operate on [int, int] tuples
     register_builtin!(functions, "compare", math::builtin_compare, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+
+    // Binary functions
+    register_builtin!(functions, "binary_new", binary::builtin_binary_new, [Type::Integer] -> [Type::Binary]);
+    register_builtin!(functions, "binary_length", binary::builtin_binary_length, [Type::Binary] -> [Type::Integer]);
+    register_builtin!(functions, "binary_get_byte", binary::builtin_binary_get_byte, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "binary_concat", binary::builtin_binary_concat, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+
+    // Bitwise operations
+    register_builtin!(functions, "binary_and", binary::builtin_binary_and, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_or", binary::builtin_binary_or, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_xor", binary::builtin_binary_xor, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_not", binary::builtin_binary_not, [Type::Binary] -> [Type::Binary]);
+
+    // Shift operations
+    register_builtin!(functions, "binary_shift_left", binary::builtin_binary_shift_left, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_shift_right", binary::builtin_binary_shift_right, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+
+    // Bit-level operations
+    register_builtin!(functions, "binary_get_bit_pos", binary::builtin_binary_get_bit_pos, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "binary_set_bit", binary::builtin_binary_set_bit, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_popcount", binary::builtin_binary_popcount, [Type::Binary] -> [Type::Integer]);
+
+    // Multi-byte operations
+    register_builtin!(functions, "binary_get_u32", binary::builtin_binary_get_u32, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "binary_set_u32", binary::builtin_binary_set_u32, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_get_u64", binary::builtin_binary_get_u64, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
+    register_builtin!(functions, "binary_set_u64", binary::builtin_binary_set_u64, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+
+    // Slicing operations
+    register_builtin!(functions, "binary_slice", binary::builtin_binary_slice, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_take", binary::builtin_binary_take, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_drop", binary::builtin_binary_drop, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+    register_builtin!(functions, "binary_pad", binary::builtin_binary_pad, [Type::Tuple(TypeId::NIL)] -> [Type::Binary]);
+
+    // Hashing operations
+    register_builtin!(functions, "binary_hash32", binary::builtin_binary_hash32, [Type::Binary] -> [Type::Integer]);
+    register_builtin!(functions, "binary_hash64", binary::builtin_binary_hash64, [Type::Binary] -> [Type::Integer]);
+    register_builtin!(functions, "string_hash", binary::builtin_string_hash, [Type::Binary] -> [Type::Integer]);
+    register_builtin!(functions, "hash_chunk", binary::builtin_hash_chunk, [Type::Tuple(TypeId::NIL)] -> [Type::Integer]);
 
     // IO functions
     register_builtin!(functions, "print", io::builtin_io_print, [Type::Integer, Type::Binary] -> [Type::Tuple(TypeId::OK)]);

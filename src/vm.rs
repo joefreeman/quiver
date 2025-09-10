@@ -3,12 +3,23 @@ use crate::bytecode::{Constant, Function, Instruction, TypeId};
 use crate::types::TypeRegistry;
 use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
+
+/// Maximum binary size in bytes (16MB)
+pub const MAX_BINARY_SIZE: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinaryRef {
+    /// Reference to a binary stored in the constants table
+    Constant(usize),
+    /// Reference-counted heap-allocated binary
+    Heap(Rc<Vec<u8>>),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Integer(i64),
-    Binary(usize),
-    // TODO: support binaries on heap?
+    Binary(BinaryRef),
     Tuple(TypeId, Vec<Value>),
     Function {
         function: usize,
@@ -17,7 +28,7 @@ pub enum Value {
 }
 
 impl Value {
-    fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match self {
             Value::Integer(_) => "integer",
             Value::Binary(_) => "binary",
@@ -227,6 +238,54 @@ impl VM {
         &self.constants
     }
 
+    /// Get the actual bytes of a binary value
+    pub fn get_binary_bytes<'a>(&'a self, binary_ref: &'a BinaryRef) -> Result<&'a [u8], Error> {
+        match binary_ref {
+            BinaryRef::Constant(index) => match self.constants.get(*index) {
+                Some(Constant::Binary(bytes)) => Ok(bytes),
+                Some(_) => Err(Error::TypeMismatch {
+                    expected: "binary constant".to_string(),
+                    found: "non-binary constant".to_string(),
+                }),
+                None => Err(Error::ConstantUndefined(*index)),
+            },
+            BinaryRef::Heap(rc_bytes) => Ok(rc_bytes),
+        }
+    }
+
+    /// Create a new heap-allocated binary
+    pub fn create_heap_binary(&mut self, bytes: Vec<u8>) -> Result<BinaryRef, Error> {
+        if bytes.len() > MAX_BINARY_SIZE {
+            return Err(Error::InvalidArgument(format!(
+                "Binary size {} exceeds maximum {}",
+                bytes.len(),
+                MAX_BINARY_SIZE
+            )));
+        }
+        Ok(BinaryRef::Heap(Rc::new(bytes)))
+    }
+
+    /// Clone a binary reference (cheap operation)
+    pub fn clone_binary(&self, binary_ref: &BinaryRef) -> BinaryRef {
+        binary_ref.clone()
+    }
+
+    /// Format a binary value showing its actual content
+    pub fn format_binary(&self, binary_ref: &BinaryRef) -> String {
+        match self.get_binary_bytes(binary_ref) {
+            Ok(bytes) => {
+                if bytes.len() <= 8 {
+                    // Show short binaries in full
+                    format!("'{}'", hex::encode(bytes))
+                } else {
+                    // Show truncated for long binaries
+                    format!("'{}...'", hex::encode(&bytes[..8]))
+                }
+            }
+            Err(_) => "<invalid binary>".to_string(),
+        }
+    }
+
     pub fn register_function(&mut self, function: Function) -> usize {
         if let Some(index) = self.functions.iter().position(|f| f == &function) {
             index
@@ -337,7 +396,7 @@ impl VM {
             .ok_or(Error::ConstantUndefined(index))?;
         let value = match constant {
             Constant::Integer(integer) => Value::Integer(*integer),
-            Constant::Binary(_) => Value::Binary(index),
+            Constant::Binary(_) => Value::Binary(BinaryRef::Constant(index)),
         };
         self.stack.push(value);
         Ok(())
@@ -579,7 +638,7 @@ impl VM {
 
         // Check if all elements are equal to the first element
         let first = &values[0];
-        let all_equal = values.iter().all(|value| values_equal(first, value));
+        let all_equal = values.iter().all(|value| values_equal(first, value, self));
 
         let result = if all_equal {
             first.clone() // Return the first value if all are equal
@@ -695,17 +754,22 @@ impl VM {
 }
 
 /// Helper function to compare values for equality
-fn values_equal(a: &Value, b: &Value) -> bool {
+fn values_equal(a: &Value, b: &Value, vm: &VM) -> bool {
     match (a, b) {
         (Value::Integer(a), Value::Integer(b)) => a == b,
-        (Value::Binary(a), Value::Binary(b)) => a == b,
+        (Value::Binary(a), Value::Binary(b)) => {
+            match (vm.get_binary_bytes(a), vm.get_binary_bytes(b)) {
+                (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
+                _ => false, // If we can't access bytes, consider unequal
+            }
+        }
         (Value::Tuple(type_a, elems_a), Value::Tuple(type_b, elems_b)) => {
             type_a == type_b
                 && elems_a.len() == elems_b.len()
                 && elems_a
                     .iter()
                     .zip(elems_b.iter())
-                    .all(|(x, y)| values_equal(x, y))
+                    .all(|(x, y)| values_equal(x, y, vm))
         }
         (
             Value::Function {
@@ -722,7 +786,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
                 && cap_a
                     .iter()
                     .zip(cap_b.iter())
-                    .all(|(x, y)| values_equal(x, y))
+                    .all(|(x, y)| values_equal(x, y, vm))
         }
         _ => false,
     }
