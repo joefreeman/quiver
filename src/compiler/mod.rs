@@ -129,6 +129,7 @@ impl<'a> Compiler<'a> {
     pub fn compile(
         program: ast::Program,
         type_registry: &'a mut TypeRegistry,
+        type_aliases: &'a mut HashMap<String, Vec<Type>>,
         module_loader: &'a dyn ModuleLoader,
         vm: &'a mut VM,
         module_path: Option<PathBuf>,
@@ -138,7 +139,7 @@ impl<'a> Compiler<'a> {
 
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
-            type_context: TypeContext::new(type_registry),
+            type_context: TypeContext::new(type_registry, type_aliases),
             module_cache: ModuleCache::new(),
             scopes: vec![HashMap::new()],
             vm,
@@ -154,6 +155,11 @@ impl<'a> Compiler<'a> {
 
         for statement in program.statements {
             compiler.compile_statement(statement)?;
+        }
+
+        // Save type aliases back to the provided HashMap
+        for (name, type_set) in compiler.type_context.type_aliases.iter() {
+            type_aliases.insert(name.clone(), type_set.to_vec());
         }
 
         Ok(compiler.codegen.instructions)

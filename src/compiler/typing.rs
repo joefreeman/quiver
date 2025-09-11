@@ -86,9 +86,18 @@ pub struct TypeContext<'a> {
 }
 
 impl<'a> TypeContext<'a> {
-    pub fn new(type_registry: &'a mut TypeRegistry) -> Self {
+    pub fn new(
+        type_registry: &'a mut TypeRegistry,
+        existing_aliases: &HashMap<String, Vec<Type>>,
+    ) -> Self {
+        let mut type_aliases = HashMap::new();
+        for (name, types) in existing_aliases.iter() {
+            if !types.is_empty() {
+                type_aliases.insert(name.clone(), TypeSet(types.clone()));
+            }
+        }
         Self {
-            type_aliases: HashMap::new(),
+            type_aliases,
             type_registry,
         }
     }
