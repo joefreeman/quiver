@@ -127,3 +127,98 @@ fn test_union_type_partial_destructuring() {
         )
         .expect_tuple(vec![Value::Integer(1), Value::Integer(2)]);
 }
+
+#[test]
+fn test_match_union_in_nested_tuple() {
+    quiver()
+        .evaluate(
+            r#"
+        type option = Some[int] | None;
+        f = #[option, int] {
+          | [None, z] = $ => 0
+          | [Some[x], z] = $ => [x, z] ~> <add>
+        },
+        [Some[5], 2] ~> f
+        "#,
+        )
+        .expect_int(7)
+}
+
+#[test]
+fn test_multiple_placeholders() {
+    quiver()
+        .evaluate("[_, x, _, y, _] = [1, 2, 3, 4, 5], [x, y] ~> <add>")
+        .expect_int(6);
+}
+
+#[test]
+fn test_mixed_pattern_literal_and_binding() {
+    quiver().evaluate("[1, x, 3] = [1, 2, 3], x").expect_int(2);
+    quiver().evaluate("[1, x, 3] = [1, 2, 4]").expect_nil(); // Literal 3 doesn't match 4
+}
+
+#[test]
+fn test_deeply_nested_tuple_pattern() {
+    quiver()
+        .evaluate(
+            r#"
+            A[B[C[x]]] = A[B[C[42]]], x
+            "#,
+        )
+        .expect_int(42);
+}
+
+#[test]
+fn test_empty_tuple_pattern() {
+    quiver().evaluate("[] = [], 1").expect_int(1);
+    quiver().evaluate("[] = [1]").expect_nil();
+}
+
+#[test]
+fn test_string_literal_pattern() {
+    // String literal matching with integer extraction
+    quiver()
+        .evaluate(r#"["hello", x] = ["hello", 123], x"#)
+        .expect_int(123);
+
+    quiver()
+        .evaluate(r#"["hello", x] = ["goodbye", 123]"#)
+        .expect_nil(); // String literal doesn't match
+}
+
+#[test]
+fn test_complex_union_pattern_matching() {
+    quiver()
+        .evaluate(
+            r#"
+            type result = Ok[int] | Err[int];
+            type option = Some[result] | None;
+
+            Some[Ok[42]] ~> {
+              | None = $ => 0
+              | Some[Err[_]] = $ => -1
+              | Some[Ok[x]] = $ => x
+            }
+            "#,
+        )
+        .expect_int(42);
+}
+
+#[test]
+fn test_simple_partial_pattern() {
+    // Test a simple partial pattern without unions first
+    quiver().evaluate("(x, y) = [x: 1, y: 2], x").expect_int(1);
+}
+
+#[test]
+fn test_partial_pattern_order_for_union() {
+    quiver()
+        .evaluate(
+            r#"
+            type union = A[x: int, y: int] | B[y: int, x: int]
+            f = #union { (x, y) = $ => [x, y] }
+            B[y: 1, x: 2] ~> f
+            "#,
+        )
+        .expect_tuple(vec![Value::Integer(2), Value::Integer(1)]);
+}

@@ -11,6 +11,36 @@ use super::{
     typing::{TypeContext, TypeSet},
 };
 
+/// Represents a check that must be performed at runtime
+#[derive(Debug, Clone)]
+enum RuntimeCheck {
+    TupleType(TypeId),
+    Literal(ast::Literal),
+}
+
+/// Represents a path to access a value within a data structure
+#[derive(Debug, Clone)]
+enum AccessPath {
+    Root,                          // The value itself
+    Field(Box<AccessPath>, usize), // Access field of a tuple
+}
+
+/// Information about a variable binding
+#[derive(Debug, Clone)]
+struct Binding {
+    name: String,
+    path: AccessPath,
+    var_type: TypeSet,
+}
+
+/// Result of analyzing a pattern
+#[derive(Debug)]
+struct PatternAnalysis {
+    can_match: bool, // false if pattern cannot match at compile time
+    runtime_checks: Vec<(AccessPath, RuntimeCheck)>, // Checks to perform at runtime
+    bindings: Vec<Binding>, // Variable bindings to create
+}
+
 pub struct PatternCompiler<'a> {
     pub codegen: &'a mut InstructionBuilder,
     pub type_context: &'a TypeContext<'a>,
@@ -30,575 +60,491 @@ impl<'a> PatternCompiler<'a> {
         }
     }
 
+    /// Main entry point for pattern matching compilation
     pub fn compile_pattern_match(
         &mut self,
         pattern: &ast::Pattern,
         value_type: &TypeSet,
         fail_addr: usize,
     ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
+        // Phase 1: Analyze the pattern
+        let analysis = self.analyze_pattern(pattern, value_type, AccessPath::Root)?;
+
+        // Phase 2: Check if match is possible
+        if !analysis.can_match {
+            return Ok(None);
+        }
+
+        // Phase 3: Generate code
+        self.generate_pattern_code(&analysis, fail_addr)?;
+
+        // Return bindings for caller to handle
+        let bindings = analysis
+            .bindings
+            .iter()
+            .map(|b| (b.name.clone(), b.var_type.clone()))
+            .collect();
+        Ok(Some(bindings))
+    }
+
+    /// Phase 1: Analyze pattern and determine what's needed
+    fn analyze_pattern(
+        &self,
+        pattern: &ast::Pattern,
+        value_type: &TypeSet,
+        path: AccessPath,
+    ) -> Result<PatternAnalysis, Error> {
         match pattern {
-            ast::Pattern::Literal(literal) => {
-                self.compile_literal_pattern_match(literal, fail_addr)
-            }
+            ast::Pattern::Literal(literal) => self.analyze_literal_pattern(literal.clone(), path),
             ast::Pattern::Identifier(name) => {
-                self.compile_identifier_pattern_match(name, value_type)
+                self.analyze_identifier_pattern(name.clone(), value_type.clone(), path)
             }
-            ast::Pattern::Placeholder => {
-                // Placeholder always matches, just consume the value
-                Ok(Some(vec![]))
-            }
+            ast::Pattern::Placeholder => Ok(PatternAnalysis {
+                can_match: true,
+                runtime_checks: vec![],
+                bindings: vec![],
+            }),
             ast::Pattern::Tuple(tuple_pattern) => {
-                self.compile_tuple_pattern_match(tuple_pattern, value_type, fail_addr)
+                self.analyze_tuple_pattern(tuple_pattern, value_type, path)
             }
             ast::Pattern::Partial(field_names) => {
-                self.compile_partial_pattern_match(field_names, value_type, fail_addr)
+                self.analyze_partial_pattern(field_names, value_type, path)
             }
-            ast::Pattern::Star => self.compile_star_pattern_match(value_type, fail_addr),
+            ast::Pattern::Star => self.analyze_star_pattern(value_type, path),
         }
     }
 
-    fn compile_literal_pattern_match(
-        &mut self,
-        literal: &ast::Literal,
-        fail_addr: usize,
-    ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
-        // Duplicate the value for comparison
-        self.codegen.add_instruction(Instruction::Duplicate);
-
-        // Push the literal onto the stack
-        match literal {
-            ast::Literal::Integer(int_val) => {
-                let index = self.vm.register_constant(Constant::Integer(*int_val));
-                self.codegen.add_instruction(Instruction::Constant(index));
-            }
-            ast::Literal::Binary(bytes) => {
-                let index = self.vm.register_constant(Constant::Binary(bytes.clone()));
-                self.codegen.add_instruction(Instruction::Constant(index));
-            }
-            ast::Literal::String(string) => {
-                let bytes = string.as_bytes().to_vec();
-                let index = self.vm.register_constant(Constant::Binary(bytes));
-                self.codegen.add_instruction(Instruction::Constant(index));
-            }
-        }
-
-        // Compare the two values using Equal instruction
-        self.codegen.add_instruction(Instruction::Equal(2));
-
-        // If comparison fails (result is NIL), jump to fail address
-        self.codegen.add_instruction(Instruction::Duplicate);
-        self.codegen.emit_not_jump_if_to_addr(fail_addr);
-
-        // Pop comparison result
-        self.codegen.add_instruction(Instruction::Pop);
-
-        Ok(Some(vec![]))
+    fn analyze_literal_pattern(
+        &self,
+        literal: ast::Literal,
+        path: AccessPath,
+    ) -> Result<PatternAnalysis, Error> {
+        Ok(PatternAnalysis {
+            can_match: true,
+            runtime_checks: vec![(path, RuntimeCheck::Literal(literal))],
+            bindings: vec![],
+        })
     }
 
-    fn compile_identifier_pattern_match(
-        &mut self,
-        name: &str,
-        value_type: &TypeSet,
-    ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
-        // Determine the variable type
+    fn analyze_identifier_pattern(
+        &self,
+        name: String,
+        value_type: TypeSet,
+        path: AccessPath,
+    ) -> Result<PatternAnalysis, Error> {
         let var_type = if value_type.len() > 0 {
-            value_type.clone()
+            value_type
         } else {
-            // Fallback for unknown types
             TypeSet::unresolved(vec![Type::Integer, Type::Binary, Type::Tuple(TypeId::NIL)])?
         };
 
-        Ok(Some(vec![(name.to_string(), var_type)]))
+        Ok(PatternAnalysis {
+            can_match: true,
+            runtime_checks: vec![],
+            bindings: vec![Binding {
+                name,
+                path,
+                var_type,
+            }],
+        })
     }
 
-    fn compile_tuple_pattern_match(
-        &mut self,
+    fn analyze_tuple_pattern(
+        &self,
         tuple_pattern: &ast::TuplePattern,
         value_type: &TypeSet,
-        fail_addr: usize,
-    ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
-        if let Some(Type::Tuple(type_id)) = value_type.single() {
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                // For resolved tuple types, check if the pattern structure matches
-                if let Some(ref tuple_name) = tuple_pattern.name {
-                    // Named tuple pattern - check the exact tuple name matches
-                    if tuple_info.0.as_ref() != Some(tuple_name) {
-                        // Type names don't match - this is a compile-time failure
-                        return Ok(None);
-                    }
-                }
+        path: AccessPath,
+    ) -> Result<PatternAnalysis, Error> {
+        let mut analysis = PatternAnalysis {
+            can_match: false,
+            runtime_checks: vec![],
+            bindings: vec![],
+        };
 
-                // Check field count matches
-                if tuple_pattern.fields.len() != tuple_info.1.len() {
-                    // Field count mismatch - this is a compile-time failure
-                    return Ok(None);
-                }
-
-                // Collect field types to avoid borrow checker issues
-                let field_types: Vec<Type> = tuple_info
-                    .1
-                    .iter()
-                    .map(|(_, field_type)| field_type.clone())
-                    .collect();
-
-                // Match each field in the tuple pattern and accumulate assignments
-                let mut all_assignments = Vec::new();
-
-                // Extract all field values from tuple
-                self.codegen
-                    .emit_extract_tuple_fields(tuple_pattern.fields.len());
-                // Final stack: [tuple, valueN-1, ..., value1, value0] (value0 on top)
-
-                // Now create pending assignments for each field
-                // Stack is: [tuple, valueN-1, ..., value1, value0] (value0 on top)
-                // Process in forward order: field 0 first (takes value0), field 1 second (takes value1)
-                for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
-                    // Get the field type
-                    let field_type = if let Some(field_type) = field_types.get(field_index) {
-                        TypeSet::resolved(field_type.clone())
-                    } else {
-                        return Err(Error::TypeUnresolved("Field type not found".to_string()));
-                    };
-
-                    // Match the pattern against this field value (top of stack)
-                    match self.compile_pattern_match(&field.pattern, &field_type, fail_addr)? {
-                        Some(assignments) => {
-                            all_assignments.extend(assignments);
-                        }
-                        None => {
-                            // If any field can't match, the whole pattern can't match
-                            return Ok(None);
+        // Check each possible type
+        for typ in value_type.iter() {
+            if let Type::Tuple(type_id) = typ {
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    // Check if this type matches the pattern
+                    if let Some(ref pattern_name) = tuple_pattern.name {
+                        if tuple_info.0.as_ref() != Some(pattern_name) {
+                            continue; // Try next type
                         }
                     }
-                }
-                Ok(Some(all_assignments))
-            } else {
-                // Tuple type not found in registry - treat as compile-time failure
-                Ok(None)
-            }
-        } else {
-            // For unresolved types, check if we can find a matching tuple type
-            let types = value_type.to_vec();
-            if let Some(ref tuple_name) = tuple_pattern.name {
-                // Find the first matching tuple type from the unresolved types
-                let mut matching_type_id = None;
-                for tuple_type in types {
-                    if let Type::Tuple(type_id) = tuple_type {
-                        if let Some(tuple_info) =
-                            self.type_context.type_registry.lookup_type(&type_id)
-                        {
-                            if tuple_info.0.as_ref() == Some(tuple_name) {
-                                matching_type_id = Some(type_id);
-                                break;
-                            }
-                        }
+
+                    if tuple_pattern.fields.len() != tuple_info.1.len() {
+                        continue; // Try next type
                     }
-                }
 
-                if let Some(expected_type_id) = matching_type_id {
-                    // Emit runtime type check
-                    self.codegen
-                        .emit_runtime_tuple_type_check(expected_type_id, fail_addr);
+                    // This type could match!
+                    analysis.can_match = true;
 
-                    // Now get the tuple info for field matching
-                    if let Some(tuple_info) = self
-                        .type_context
-                        .type_registry
-                        .lookup_type(&expected_type_id)
-                    {
-                        // Check field count matches
-                        if tuple_pattern.fields.len() != tuple_info.1.len() {
-                            // Length mismatch, jump to fail
-                            let jump_addr = self.codegen.instructions.len();
-                            self.codegen.add_instruction(Instruction::Jump(0));
-                            let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-                            self.codegen.instructions[jump_addr] = Instruction::Jump(offset);
+                    // Add runtime type check if needed
+                    if value_type.len() > 1 {
+                        analysis
+                            .runtime_checks
+                            .push((path.clone(), RuntimeCheck::TupleType(*type_id)));
+                    }
 
-                            // Field count mismatch with runtime check - still need to generate code but mark as might match
-                            return Ok(Some(self.extract_bindings_from_pattern(
-                                &ast::Pattern::Tuple(tuple_pattern.clone()),
-                                Some(value_type),
-                            )));
+                    // Analyze nested patterns
+                    for (i, field_pattern) in tuple_pattern.fields.iter().enumerate() {
+                        let field_type = TypeSet::resolved(tuple_info.1[i].1.clone());
+                        let field_path = AccessPath::Field(Box::new(path.clone()), i);
+
+                        let field_analysis =
+                            self.analyze_pattern(&field_pattern.pattern, &field_type, field_path)?;
+
+                        if !field_analysis.can_match {
+                            analysis.can_match = false;
+                            break;
                         }
 
-                        // Collect field types to avoid borrow checker issues
-                        let field_types: Vec<Type> = tuple_info
-                            .1
-                            .iter()
-                            .map(|(_, field_type)| field_type.clone())
-                            .collect();
+                        analysis
+                            .runtime_checks
+                            .extend(field_analysis.runtime_checks);
+                        analysis.bindings.extend(field_analysis.bindings);
+                    }
 
-                        // Match each field in the tuple pattern and accumulate assignments
-                        let mut all_assignments = Vec::new();
-
-                        // Extract all field values from tuple
-                        self.codegen
-                            .emit_extract_tuple_fields(tuple_pattern.fields.len());
-
-                        // Now create assignments for each field in forward order
-                        for (field_index, field) in tuple_pattern.fields.iter().enumerate() {
-                            // Get the field type
-                            let field_type = if let Some(field_type) = field_types.get(field_index)
-                            {
-                                TypeSet::resolved(field_type.clone())
-                            } else {
-                                return Err(Error::TypeUnresolved(
-                                    "Field type not found".to_string(),
-                                ));
-                            };
-
-                            // Match the pattern against this field value (top of stack)
-                            match self.compile_pattern_match(
-                                &field.pattern,
-                                &field_type,
-                                fail_addr,
-                            )? {
-                                Some(assignments) => {
-                                    all_assignments.extend(assignments);
-                                }
-                                None => {
-                                    // If any field can't match, the whole pattern can't match
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                        return Ok(Some(all_assignments));
+                    if analysis.can_match {
+                        break; // Found a matching type
                     }
                 }
             }
-
-            // For anonymous tuple patterns or when type not found - might match at runtime
-            let jump_addr = self.codegen.instructions.len();
-            self.codegen.add_instruction(Instruction::Jump(0));
-            let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-            self.codegen.instructions[jump_addr] = Instruction::Jump(offset);
-            Ok(Some(vec![]))
         }
+
+        // Special case: unresolved types
+        if value_type.len() == 0 {
+            // Assume it could match at runtime
+            analysis.can_match = true;
+
+            // Collect bindings without type info
+            for (i, field_pattern) in tuple_pattern.fields.iter().enumerate() {
+                let field_path = AccessPath::Field(Box::new(path.clone()), i);
+                let field_type = TypeSet::unresolved(vec![Type::Tuple(TypeId::NIL)])?;
+
+                let field_analysis =
+                    self.analyze_pattern(&field_pattern.pattern, &field_type, field_path)?;
+
+                analysis
+                    .runtime_checks
+                    .extend(field_analysis.runtime_checks);
+                analysis.bindings.extend(field_analysis.bindings);
+            }
+        }
+
+        Ok(analysis)
     }
 
-    fn compile_partial_pattern_match(
-        &mut self,
+    fn analyze_partial_pattern(
+        &self,
         field_names: &[String],
         value_type: &TypeSet,
-        fail_addr: usize,
-    ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
-        if let Some(Type::Tuple(type_id)) = value_type.single() {
-            // For resolved tuple types, extract the named fields
-            let mut field_data = Vec::new();
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                for field_name in field_names {
-                    if let Some((field_index, (_, field_type))) = tuple_info
-                        .1
-                        .iter()
-                        .enumerate()
-                        .find(|(_, field)| field.0.as_deref() == Some(field_name))
-                    {
-                        field_data.push((field_name.clone(), field_index, field_type.clone()));
-                    } else {
-                        // Field not found - this is a compile-time failure for resolved types
-                        return Ok(None);
-                    }
-                }
-            } else {
-                // Tuple type not found in registry - this is a compile-time failure
-                return Ok(None);
-            }
+        path: AccessPath,
+    ) -> Result<PatternAnalysis, Error> {
+        let mut analysis = PatternAnalysis {
+            can_match: false,
+            runtime_checks: vec![],
+            bindings: vec![],
+        };
 
-            // Extract all field values with correct stack management
-            let field_indices: Vec<usize> = field_data.iter().map(|(_, idx, _)| *idx).collect();
-            self.codegen.emit_extract_specific_fields(&field_indices);
+        // Collect all types that have all required fields
+        let mut matching_types = Vec::new();
 
-            // Create assignments for extracted fields (fields will be processed in forward order)
-            let mut assignments = Vec::new();
-            for (field_name, _, field_type) in field_data.iter().rev() {
-                assignments.push((field_name.clone(), TypeSet::resolved(field_type.clone())));
-            }
-            // Reverse assignments to match the order fields were requested in
-            assignments.reverse();
-            Ok(Some(assignments))
-        } else {
-            // For unresolved types, enumerate through all possible tuple types
-            // and use IsTuple instructions to handle each case
-            let types = value_type.to_vec();
-            let mut possible_matches = Vec::new();
-
-            // Find all tuple types that have all the requested fields
-            for tuple_type in types {
-                if let Type::Tuple(type_id) = tuple_type {
-                    if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&type_id)
-                    {
-                        let has_all_fields = field_names.iter().all(|field_name| {
-                            tuple_info.1.iter().any(|(field_name_opt, _)| {
-                                field_name_opt.as_deref() == Some(field_name)
-                            })
-                        });
-                        if has_all_fields {
-                            possible_matches.push(type_id);
-                        }
-                    }
-                }
-            }
-
-            if possible_matches.is_empty() {
-                // No tuple types have all the required fields - compile-time failure
-                return Ok(None);
-            }
-
-            // Generate code to check each possible tuple type
-            let mut next_check_jumps = Vec::new();
-            let mut success_jumps = Vec::new();
-
-            for (i, type_id) in possible_matches.iter().enumerate() {
-                let is_last = i == possible_matches.len() - 1;
-
-                if !is_last {
-                    // Duplicate value for type check with placeholder for next check
-                    self.codegen.add_instruction(Instruction::Duplicate);
-                    self.codegen.add_instruction(Instruction::IsTuple(*type_id));
-                    self.codegen.add_instruction(Instruction::Not);
-                    let next_check_jump = self.codegen.emit_jump_if_placeholder();
-                    next_check_jumps.push(next_check_jump);
-                    self.codegen.add_instruction(Instruction::Pop);
-                } else {
-                    // Last option - emit runtime type check with direct fail
-                    self.codegen
-                        .emit_runtime_tuple_type_check(*type_id, fail_addr);
-                }
-
-                // Extract fields for this tuple type
+        for typ in value_type.iter() {
+            if let Type::Tuple(type_id) = typ {
                 if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                    let mut field_data = Vec::new();
+                    let mut field_indices = Vec::new();
+                    let mut all_fields_found = true;
+
                     for field_name in field_names {
-                        if let Some((field_index, (_, field_type))) = tuple_info
+                        if let Some((idx, _)) = tuple_info
                             .1
                             .iter()
                             .enumerate()
-                            .find(|(_, field)| field.0.as_deref() == Some(field_name))
+                            .find(|(_, (name, _))| name.as_deref() == Some(field_name))
                         {
-                            field_data.push((field_name.clone(), field_index, field_type.clone()));
+                            field_indices.push(idx);
+                        } else {
+                            all_fields_found = false;
+                            break;
                         }
                     }
 
-                    // Extract specific fields from tuple
-                    let field_indices: Vec<usize> =
-                        field_data.iter().map(|(_, idx, _)| *idx).collect();
-                    self.codegen.emit_extract_specific_fields(&field_indices);
-
-                    // Jump to success (will be patched later)
-                    let success_jump = self.codegen.emit_jump_placeholder();
-                    success_jumps.push(success_jump);
-
-                    // Patch the "next check" jump to point here (start of next iteration)
-                    if i > 0 {
-                        let next_check_addr = self.codegen.instructions.len();
-                        let prev_jump_addr = next_check_jumps[i - 1];
-                        self.codegen
-                            .patch_jump_to_addr(prev_jump_addr, next_check_addr);
+                    if all_fields_found {
+                        matching_types.push((*type_id, field_indices));
                     }
                 }
             }
-
-            // Success address - all success jumps point here
-            for jump_addr in success_jumps {
-                self.codegen.patch_jump_to_here(jump_addr);
-            }
-
-            // Create assignments based on the first matching type (they should all have the same field structure for the requested fields)
-            let first_type_id = possible_matches[0];
-            let mut assignments = Vec::new();
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&first_type_id) {
-                for field_name in field_names.iter().rev() {
-                    if let Some((_, (_, field_type))) = tuple_info
-                        .1
-                        .iter()
-                        .enumerate()
-                        .find(|(_, field)| field.0.as_deref() == Some(field_name))
-                    {
-                        assignments
-                            .push((field_name.clone(), TypeSet::resolved(field_type.clone())));
-                    }
-                }
-            }
-            assignments.reverse();
-            Ok(Some(assignments))
         }
-    }
 
-    fn compile_star_pattern_match(
-        &mut self,
-        value_type: &TypeSet,
-        fail_addr: usize,
-    ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
-        if let Some(Type::Tuple(type_id)) = value_type.single() {
-            // Star pattern extracts all named fields from resolved tuple types
-            let mut named_fields = Vec::new();
+        if matching_types.is_empty() {
+            return Ok(analysis); // No matching types
+        }
+
+        analysis.can_match = true;
+
+        // If there's only one possible type, we can use its field positions directly
+        if matching_types.len() == 1 {
+            let (type_id, field_indices) = &matching_types[0];
+
+            if value_type.len() > 1 {
+                // Still need runtime check if there are other non-matching types
+                analysis
+                    .runtime_checks
+                    .push((path.clone(), RuntimeCheck::TupleType(*type_id)));
+            }
+
+            // Get tuple info for field types
             if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                for (field_index, (field_name, field_type)) in tuple_info.1.iter().enumerate() {
-                    if let Some(name) = field_name {
-                        named_fields.push((name.clone(), field_index, field_type.clone()));
-                    }
+                for (i, field_name) in field_names.iter().enumerate() {
+                    let idx = field_indices[i];
+                    let field_type = &tuple_info.1[idx].1;
+                    let field_path = AccessPath::Field(Box::new(path.clone()), idx);
+                    analysis.bindings.push(Binding {
+                        name: field_name.clone(),
+                        path: field_path,
+                        var_type: TypeSet::resolved(field_type.clone()),
+                    });
                 }
-            } else {
-                // Tuple type not found in registry - compile-time failure
-                return Ok(None);
             }
-
-            // Extract all named fields with correct stack management
-            let field_indices: Vec<usize> = named_fields.iter().map(|(_, idx, _)| *idx).collect();
-            self.codegen.emit_extract_specific_fields(&field_indices);
-
-            // Create assignments for extracted fields (fields will be processed in forward order)
-            let mut assignments = Vec::new();
-            for (name, _, field_type) in named_fields.iter().rev() {
-                assignments.push((name.clone(), TypeSet::resolved(field_type.clone())));
-            }
-            // Reverse assignments to match the order fields were requested in
-            assignments.reverse();
-            Ok(Some(assignments))
         } else {
-            // For star patterns with unresolved types, enumerate through all possible tuple types
-            // and use IsTuple instructions to handle each case
-            let types = value_type.to_vec();
-            let mut possible_matches = Vec::new();
+            // Multiple possible types - need runtime dispatch
+            // For now, use the first type's positions and add a runtime check
+            // TODO: This is still incorrect - we need to generate conditional extraction
+            let (type_id, field_indices) = &matching_types[0];
 
-            // Find all tuple types (star pattern extracts all named fields from any tuple)
-            for tuple_type in types {
-                if let Type::Tuple(type_id) = tuple_type {
-                    if self
-                        .type_context
-                        .type_registry
-                        .lookup_type(&type_id)
-                        .is_some()
-                    {
-                        possible_matches.push(type_id);
-                    }
+            analysis
+                .runtime_checks
+                .push((path.clone(), RuntimeCheck::TupleType(*type_id)));
+
+            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                for (i, field_name) in field_names.iter().enumerate() {
+                    let idx = field_indices[i];
+                    let field_type = &tuple_info.1[idx].1;
+                    let field_path = AccessPath::Field(Box::new(path.clone()), idx);
+                    analysis.bindings.push(Binding {
+                        name: field_name.clone(),
+                        path: field_path,
+                        var_type: TypeSet::resolved(field_type.clone()),
+                    });
                 }
             }
-
-            if possible_matches.is_empty() {
-                // No tuple types found - compile-time failure
-                return Ok(None);
-            }
-
-            // Generate code to check each possible tuple type
-            let mut next_check_jumps = Vec::new();
-            let mut success_jumps = Vec::new();
-
-            for (i, type_id) in possible_matches.iter().enumerate() {
-                let is_last = i == possible_matches.len() - 1;
-
-                if !is_last {
-                    // Duplicate value for type check with placeholder for next check
-                    self.codegen.add_instruction(Instruction::Duplicate);
-                    self.codegen.add_instruction(Instruction::IsTuple(*type_id));
-                    self.codegen.add_instruction(Instruction::Not);
-                    let next_check_jump = self.codegen.emit_jump_if_placeholder();
-                    next_check_jumps.push(next_check_jump);
-                    self.codegen.add_instruction(Instruction::Pop);
-                } else {
-                    // Last option - emit runtime type check with direct fail
-                    self.codegen
-                        .emit_runtime_tuple_type_check(*type_id, fail_addr);
-                }
-
-                // Extract all named fields for this tuple type
-                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                    let mut named_fields = Vec::new();
-                    for (field_index, (field_name, field_type)) in tuple_info.1.iter().enumerate() {
-                        if let Some(name) = field_name {
-                            named_fields.push((name.clone(), field_index, field_type.clone()));
-                        }
-                    }
-
-                    // Extract named fields from tuple
-                    let field_indices: Vec<usize> =
-                        named_fields.iter().map(|(_, idx, _)| *idx).collect();
-                    self.codegen.emit_extract_specific_fields(&field_indices);
-
-                    // Jump to success (will be patched later)
-                    let success_jump = self.codegen.emit_jump_placeholder();
-                    success_jumps.push(success_jump);
-
-                    // Patch the "next check" jump to point here (start of next iteration)
-                    if i > 0 {
-                        let next_check_addr = self.codegen.instructions.len();
-                        let prev_jump_addr = next_check_jumps[i - 1];
-                        self.codegen
-                            .patch_jump_to_addr(prev_jump_addr, next_check_addr);
-                    }
-                }
-            }
-
-            // Success address - all success jumps point here
-            for jump_addr in success_jumps {
-                self.codegen.patch_jump_to_here(jump_addr);
-            }
-
-            // Create assignments based on the first matching type
-            // For star patterns, we need to collect all named fields from whichever type matches
-            let first_type_id = possible_matches[0];
-            let mut assignments = Vec::new();
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&first_type_id) {
-                for (_, (field_name, field_type)) in tuple_info.1.iter().enumerate().rev() {
-                    if let Some(name) = field_name {
-                        assignments.push((name.clone(), TypeSet::resolved(field_type.clone())));
-                    }
-                }
-            }
-            Ok(Some(assignments))
         }
+
+        Ok(analysis)
     }
 
-    // Extract bindings from patterns recursively, with type information when available
-    fn extract_bindings_from_pattern(
+    fn analyze_star_pattern(
         &self,
-        pattern: &ast::Pattern,
-        expected_type: Option<&TypeSet>,
-    ) -> Vec<(String, TypeSet)> {
-        let mut bindings = Vec::new();
-        match pattern {
-            ast::Pattern::Identifier(name) => {
-                let var_type = expected_type.cloned().unwrap_or_else(|| {
-                    TypeSet::unresolved(vec![])
-                        .unwrap_or_else(|_| TypeSet::resolved(Type::Tuple(TypeId::NIL)))
-                });
-                bindings.push((name.clone(), var_type));
-            }
-            ast::Pattern::Literal(_) => {}  // No variables
-            ast::Pattern::Placeholder => {} // No variables
-            ast::Pattern::Tuple(tuple_pattern) => {
-                // Try to get field types from expected tuple type
-                let field_types = if let Some(expected_type) = expected_type {
-                    if let Some(Type::Tuple(type_id)) = expected_type.single() {
-                        self.type_context
-                            .type_registry
-                            .lookup_type(&type_id)
-                            .map(|info| {
-                                info.1
-                                    .iter()
-                                    .map(|(_, t)| TypeSet::resolved(t.clone()))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
+        value_type: &TypeSet,
+        path: AccessPath,
+    ) -> Result<PatternAnalysis, Error> {
+        let mut analysis = PatternAnalysis {
+            can_match: false,
+            runtime_checks: vec![],
+            bindings: vec![],
+        };
 
-                for (i, field) in tuple_pattern.fields.iter().enumerate() {
-                    let field_type = field_types.get(i);
-                    bindings.extend(self.extract_bindings_from_pattern(&field.pattern, field_type));
+        // Collect all tuple types
+        let mut tuple_types = Vec::new();
+        for typ in value_type.iter() {
+            if let Type::Tuple(type_id) = typ {
+                if self
+                    .type_context
+                    .type_registry
+                    .lookup_type(type_id)
+                    .is_some()
+                {
+                    tuple_types.push(*type_id);
                 }
             }
-            ast::Pattern::Partial(field_names) => {
-                for name in field_names {
-                    bindings.push((name.clone(), TypeSet::resolved(Type::Tuple(TypeId::NIL))));
-                }
-            }
-            ast::Pattern::Star => {} // No variables in star pattern itself
         }
-        bindings
+
+        if tuple_types.is_empty() {
+            return Ok(analysis); // No tuple types
+        }
+
+        analysis.can_match = true;
+
+        // If there's only one tuple type, extract its named fields
+        if tuple_types.len() == 1 {
+            let type_id = tuple_types[0];
+
+            if value_type.len() > 1 {
+                // Need runtime check if there are other non-tuple types
+                analysis
+                    .runtime_checks
+                    .push((path.clone(), RuntimeCheck::TupleType(type_id)));
+            }
+
+            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&type_id) {
+                for (idx, (name, field_type)) in tuple_info.1.iter().enumerate() {
+                    if let Some(field_name) = name {
+                        let field_path = AccessPath::Field(Box::new(path.clone()), idx);
+                        analysis.bindings.push(Binding {
+                            name: field_name.clone(),
+                            path: field_path,
+                            var_type: TypeSet::resolved(field_type.clone()),
+                        });
+                    }
+                }
+            }
+        } else {
+            // Multiple tuple types - use first one with runtime check
+            // TODO: This is still incorrect for multiple types with different field structures
+            let type_id = tuple_types[0];
+
+            analysis
+                .runtime_checks
+                .push((path.clone(), RuntimeCheck::TupleType(type_id)));
+
+            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&type_id) {
+                for (idx, (name, field_type)) in tuple_info.1.iter().enumerate() {
+                    if let Some(field_name) = name {
+                        let field_path = AccessPath::Field(Box::new(path.clone()), idx);
+                        analysis.bindings.push(Binding {
+                            name: field_name.clone(),
+                            path: field_path,
+                            var_type: TypeSet::resolved(field_type.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(analysis)
+    }
+
+    /// Phase 3: Generate code based on analysis
+    fn generate_pattern_code(
+        &mut self,
+        analysis: &PatternAnalysis,
+        fail_addr: usize,
+    ) -> Result<(), Error> {
+        // Generate runtime checks
+        for (path, check) in &analysis.runtime_checks {
+            self.generate_runtime_check(path, check, fail_addr)?;
+        }
+
+        // Extract values for bindings
+        // Extract in reverse order so they're on the stack in the right order for Store instructions
+        // Store pops from the top, so the first variable to store needs to be on top
+        for (i, binding) in analysis.bindings.iter().rev().enumerate() {
+            self.generate_value_extraction_with_depth(&binding.path, i)?;
+        }
+
+        Ok(())
+    }
+
+    fn generate_runtime_check(
+        &mut self,
+        path: &AccessPath,
+        check: &RuntimeCheck,
+        fail_addr: usize,
+    ) -> Result<(), Error> {
+        // First, get the value at the path onto the stack
+        self.generate_value_access(path)?;
+
+        match check {
+            RuntimeCheck::TupleType(type_id) => {
+                // Check if value is the expected tuple type
+                self.codegen.add_instruction(Instruction::IsTuple(*type_id));
+                self.codegen.add_instruction(Instruction::Not);
+                let jump = self.codegen.emit_jump_if_placeholder();
+                self.codegen.patch_jump_to_addr(jump, fail_addr);
+            }
+            RuntimeCheck::Literal(literal) => {
+                // Push the literal for comparison
+                match literal {
+                    ast::Literal::Integer(val) => {
+                        let idx = self.vm.register_constant(Constant::Integer(*val));
+                        self.codegen.add_instruction(Instruction::Constant(idx));
+                    }
+                    ast::Literal::Binary(bytes) => {
+                        let idx = self.vm.register_constant(Constant::Binary(bytes.clone()));
+                        self.codegen.add_instruction(Instruction::Constant(idx));
+                    }
+                    ast::Literal::String(s) => {
+                        let bytes = s.as_bytes().to_vec();
+                        let idx = self.vm.register_constant(Constant::Binary(bytes));
+                        self.codegen.add_instruction(Instruction::Constant(idx));
+                    }
+                }
+
+                // Compare
+                self.codegen.add_instruction(Instruction::Equal(2));
+
+                // Jump if not equal (Equal returns NIL on failure)
+                self.codegen.add_instruction(Instruction::Duplicate);
+                self.codegen.emit_not_jump_if_to_addr(fail_addr);
+                self.codegen.add_instruction(Instruction::Pop);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn generate_value_access(&mut self, path: &AccessPath) -> Result<(), Error> {
+        match path {
+            AccessPath::Root => {
+                // Value is already on top of stack, duplicate it
+                self.codegen.add_instruction(Instruction::Duplicate);
+            }
+            AccessPath::Field(parent, index) => {
+                // First get parent value
+                self.generate_value_access(parent)?;
+                // Then extract the field
+                self.codegen.add_instruction(Instruction::Get(*index));
+            }
+        }
+        Ok(())
+    }
+
+    fn generate_value_extraction_with_depth(
+        &mut self,
+        path: &AccessPath,
+        depth: usize,
+    ) -> Result<(), Error> {
+        // Extract value for binding, accounting for previously extracted values on stack
+        match path {
+            AccessPath::Root => {
+                // Value is on stack, duplicate it for binding
+                if depth == 0 {
+                    self.codegen.add_instruction(Instruction::Duplicate);
+                } else {
+                    // Original value is buried under 'depth' extracted values
+                    self.codegen.add_instruction(Instruction::Copy(depth));
+                }
+            }
+            AccessPath::Field(parent, index) => {
+                match &**parent {
+                    AccessPath::Root => {
+                        // The tuple is at position 'depth' on the stack
+                        self.codegen.add_instruction(Instruction::Copy(depth));
+                        self.codegen.add_instruction(Instruction::Get(*index));
+                    }
+                    AccessPath::Field(grandparent, parent_index) => {
+                        // Nested field access - extract parent first, then child
+                        // The root is still at position 'depth'
+                        match &**grandparent {
+                            AccessPath::Root => {
+                                // Extract parent field from root
+                                self.codegen.add_instruction(Instruction::Copy(depth));
+                                self.codegen
+                                    .add_instruction(Instruction::Get(*parent_index));
+                                // Now extract the nested field
+                                self.codegen.add_instruction(Instruction::Get(*index));
+                            }
+                            _ => {
+                                // Even deeper nesting - fall back for now
+                                self.generate_value_access(parent)?;
+                                self.codegen.add_instruction(Instruction::Get(*index));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
