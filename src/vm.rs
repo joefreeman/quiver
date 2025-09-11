@@ -339,6 +339,8 @@ impl VM {
             .get(entry)
             .ok_or(Error::FunctionUndefined(entry))?;
         let instructions = function.instructions.clone();
+
+        self.stack.push(Value::Tuple(TypeId::NIL, vec![]));
         self.frames.push(Frame::new(instructions, HashMap::new()));
         self.run()
     }
