@@ -31,7 +31,7 @@ fn test_function_with_tuple_parameter() {
 fn test_function_with_enumerated_type_parameter() {
     quiver()
         .evaluate("f = #(int | bin) { $ }, \"hello\" ~> f")
-        .expect_binary(0);
+        .expect_binary(b"hello");
 }
 
 #[test]

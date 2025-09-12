@@ -162,6 +162,13 @@ impl Quiver {
         self.type_registry
             .format_type(&types::Type::Tuple(*type_id))
     }
+
+    pub fn get_binary_bytes(&self, binary_ref: &vm::BinaryRef) -> Result<Vec<u8>, Error> {
+        self.vm
+            .get_binary_bytes(binary_ref)
+            .map(|bytes| bytes.to_vec())
+            .map_err(Error::RuntimeError)
+    }
 }
 
 #[derive(Debug)]

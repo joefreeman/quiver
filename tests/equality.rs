@@ -16,5 +16,5 @@ fn test_unequal_integers() {
 fn test_equal_strings() {
     quiver()
         .evaluate("[\"abc\", \"abc\"] ~> ==")
-        .expect_binary(0);
+        .expect_binary(b"abc");
 }

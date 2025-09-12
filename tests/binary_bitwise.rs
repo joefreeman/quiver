@@ -3,95 +3,110 @@ use common::*;
 
 #[test]
 fn test_binary_and() {
-    // Test basic AND operation
+    // Test basic AND operation: 0xFF & 0xF0 = 0xF0
     quiver()
-        .evaluate("[\"AA\", \"CC\"] ~> <binary_and>")
-        .expect_any_binary();
+        .evaluate("['ff', 'f0'] ~> <binary_and>")
+        .expect_binary(&[0xf0]);
 
     // Test with known values: 0xAA & 0xCC = 0x88
-    // A = 1010, C = 1100, so A & C = 1000 = 8
-    // But we're working with strings, so 'A' (0x41) & 'C' (0x43) = 0x41 = 'A'
     quiver()
-        .evaluate(
-            r#"
-        a = "AC",
-        b = "CA",
-        result = [a, b] ~> <binary_and>,
-        result ~> <binary_length>
-    "#,
-        )
-        .expect_int(2);
+        .evaluate("['aa', 'cc'] ~> <binary_and>")
+        .expect_binary(&[0x88]);
+
+    // Test multi-byte AND
+    quiver()
+        .evaluate("['ff00', '0ff0'] ~> <binary_and>")
+        .expect_binary(&[0x0f, 0x00]);
 }
 
 #[test]
 fn test_binary_or() {
-    // Test basic OR operation
+    // Test basic OR operation: 0xF0 | 0x0F = 0xFF
     quiver()
-        .evaluate("[\"AB\", \"CD\"] ~> <binary_or>")
-        .expect_any_binary();
+        .evaluate("['f0', '0f'] ~> <binary_or>")
+        .expect_binary(&[0xff]);
 
-    // Test length preservation
+    // Test with known values: 0xAA | 0x55 = 0xFF
     quiver()
-        .evaluate("[\"test\", \"word\"] ~> <binary_or> ~> <binary_length>")
-        .expect_int(4);
+        .evaluate("['aa', '55'] ~> <binary_or>")
+        .expect_binary(&[0xff]);
+
+    // Test multi-byte OR
+    quiver()
+        .evaluate("['f000', '00f0'] ~> <binary_or>")
+        .expect_binary(&[0xf0, 0xf0]);
 }
 
 #[test]
 fn test_binary_xor() {
-    // Test basic XOR operation
+    // Test basic XOR operation: 0xFF ^ 0xF0 = 0x0F
     quiver()
-        .evaluate("[\"AB\", \"CD\"] ~> <binary_xor>")
-        .expect_any_binary();
+        .evaluate("['ff', 'f0'] ~> <binary_xor>")
+        .expect_binary(&[0x0f]);
 
-    // Test XOR with itself gives zeros (well, zero chars in this case)
+    // Test XOR with itself gives zeros
     quiver()
-        .evaluate(
-            r#"
-        text = "test",
-        result = [text, text] ~> <binary_xor>,
-        [result, 0] ~> <binary_get_byte>
-    "#,
-        )
-        .expect_int(0);
+        .evaluate("['aa', 'aa'] ~> <binary_xor>")
+        .expect_binary(&[0x00]);
+
+    // Test multi-byte XOR
+    quiver()
+        .evaluate("['ff00', '00ff'] ~> <binary_xor>")
+        .expect_binary(&[0xff, 0xff]);
 }
 
 #[test]
 fn test_binary_not() {
-    // Test NOT operation
+    // Test NOT operation: ~0x00 = 0xFF
     quiver()
-        .evaluate("\"A\" ~> <binary_not>")
-        .expect_any_binary();
+        .evaluate("'00' ~> <binary_not>")
+        .expect_binary(&[0xff]);
 
-    // NOT should preserve length
+    // Test NOT of 0xFF = 0x00
     quiver()
-        .evaluate("\"hello\" ~> <binary_not> ~> <binary_length>")
-        .expect_int(5);
+        .evaluate("'ff' ~> <binary_not>")
+        .expect_binary(&[0x00]);
+
+    // Test multi-byte NOT
+    quiver()
+        .evaluate("'f00f' ~> <binary_not>")
+        .expect_binary(&[0x0f, 0xf0]);
 }
 
 #[test]
 fn test_binary_shift_left() {
-    // Test left shift
+    // Test left shift by 1: 0x01 << 1 = 0x02
     quiver()
-        .evaluate("[\"A\", 1] ~> <binary_shift_left>")
-        .expect_any_binary();
+        .evaluate("['01', 1] ~> <binary_shift_left>")
+        .expect_binary(&[0x02]);
 
-    // Test shift by 8 bits (1 byte)
+    // Test left shift by 4: 0x0F << 4 = 0xF0
     quiver()
-        .evaluate("[\"AB\", 8] ~> <binary_shift_left> ~> <binary_length>")
-        .expect_int(2);
+        .evaluate("['0f', 4] ~> <binary_shift_left>")
+        .expect_binary(&[0xf0]);
+
+    // Test multi-byte shift: 0x0001 << 8 = 0x0100
+    quiver()
+        .evaluate("['0001', 8] ~> <binary_shift_left>")
+        .expect_binary(&[0x01, 0x00]);
 }
 
 #[test]
 fn test_binary_shift_right() {
-    // Test right shift
+    // Test right shift by 1: 0x02 >> 1 = 0x01
     quiver()
-        .evaluate("[\"A\", 1] ~> <binary_shift_right>")
-        .expect_any_binary();
+        .evaluate("['02', 1] ~> <binary_shift_right>")
+        .expect_binary(&[0x01]);
 
-    // Test shift preserves length
+    // Test right shift by 4: 0xF0 >> 4 = 0x0F
     quiver()
-        .evaluate("[\"test\", 4] ~> <binary_shift_right> ~> <binary_length>")
-        .expect_int(4);
+        .evaluate("['f0', 4] ~> <binary_shift_right>")
+        .expect_binary(&[0x0f]);
+
+    // Test multi-byte shift: 0x0100 >> 8 = 0x0001
+    quiver()
+        .evaluate("['0100', 8] ~> <binary_shift_right>")
+        .expect_binary(&[0x00, 0x01]);
 }
 
 #[test]
@@ -99,51 +114,61 @@ fn test_binary_popcount_critical() {
     // Test popcount - CRITICAL for HAMT operations
 
     // Empty binary should have 0 bits set
-    quiver().evaluate("\"\" ~> <binary_popcount>").expect_int(0);
+    quiver().evaluate("'' ~> <binary_popcount>").expect_int(0);
 
     // Single null byte should have 0 bits set
-    quiver()
-        .evaluate("1 ~> <binary_new> ~> <binary_popcount>")
-        .expect_int(0);
+    quiver().evaluate("'00' ~> <binary_popcount>").expect_int(0);
 
     // Test known popcount values
-    // For ASCII characters:
-    // 'A' = 0x41 = 01000001 has 2 bits set
-    // 'B' = 0x42 = 01000010 has 2 bits set
-    // So "AB" should have 4 bits set total
-    quiver()
-        .evaluate("\"AB\" ~> <binary_popcount>")
-        .expect_int(4);
+    // 0xFF has 8 bits set
+    quiver().evaluate("'ff' ~> <binary_popcount>").expect_int(8);
+
+    // 0x0F has 4 bits set
+    quiver().evaluate("'0f' ~> <binary_popcount>").expect_int(4);
+
+    // 0x55 = 01010101 has 4 bits set
+    quiver().evaluate("'55' ~> <binary_popcount>").expect_int(4);
 }
 
 #[test]
 fn test_binary_get_bit_pos() {
-    // Test getting specific bits
+    // Test getting specific bits from 0x80 = 10000000
     quiver()
-        .evaluate("[\"A\", 0] ~> <binary_get_bit_pos>")
-        .expect_int(0); // MSB of 'A' (0x41)
+        .evaluate("['80', 0] ~> <binary_get_bit_pos>")
+        .expect_int(1); // MSB is set
     quiver()
-        .evaluate("[\"A\", 1] ~> <binary_get_bit_pos>")
-        .expect_int(1); // Second bit of 'A'
+        .evaluate("['80', 7] ~> <binary_get_bit_pos>")
+        .expect_int(0); // LSB is not set
+
+    // Test with 0xFF = 11111111 (all bits set)
+    quiver()
+        .evaluate("['ff', 3] ~> <binary_get_bit_pos>")
+        .expect_int(1); // Bit 3 is set
 }
 
 #[test]
 fn test_binary_set_bit() {
-    // Test setting bits
+    // Test setting bit 0 in 0x00 to get 0x80
     quiver()
-        .evaluate("[\"A\", 0, 1] ~> <binary_set_bit>")
-        .expect_any_binary();
+        .evaluate("['00', 0, 1] ~> <binary_set_bit>")
+        .expect_binary(&[0x80]);
 
-    // Test setting and getting
+    // Test clearing bit 0 in 0xFF to get 0x7F
+    quiver()
+        .evaluate("['ff', 0, 0] ~> <binary_set_bit>")
+        .expect_binary(&[0x7f]);
+
+    // Test setting multiple bits
     quiver()
         .evaluate(
             r#"
-        original = "A",
-        modified = [original, 7, 1] ~> <binary_set_bit>,
-        [modified, 7] ~> <binary_get_bit_pos>
-    "#,
+            start = '00',
+            bit0_set = [start, 0, 1] ~> <binary_set_bit>,
+            bit7_set = [bit0_set, 7, 1] ~> <binary_set_bit>,
+            bit7_set
+            "#,
         )
-        .expect_int(1);
+        .expect_binary(&[0x81]); // 10000001
 }
 
 #[test]
@@ -154,13 +179,13 @@ fn test_binary_popcount_hamt_pattern() {
     quiver()
         .evaluate(
             r#"
-        // Create binary: set some bits to simulate HAMT bitmap
-        empty = 4 ~> <binary_new>,
-        with_bit0 = [empty, 0, 1] ~> <binary_set_bit>,
-        with_bit5 = [with_bit0, 5, 1] ~> <binary_set_bit>,
-        with_bit10 = [with_bit5, 10, 1] ~> <binary_set_bit>,
-        with_bit10 ~> <binary_popcount>
-    "#,
+            // Create binary: set some bits to simulate HAMT bitmap
+            empty = 4 ~> <binary_new>,
+            with_bit0 = [empty, 0, 1] ~> <binary_set_bit>,
+            with_bit5 = [with_bit0, 5, 1] ~> <binary_set_bit>,
+            with_bit10 = [with_bit5, 10, 1] ~> <binary_set_bit>,
+            with_bit10 ~> <binary_popcount>
+            "#,
         )
         .expect_int(3);
 }
@@ -171,13 +196,13 @@ fn test_shift_operations_boundary() {
 
     // Shift by 0 should be identity
     quiver()
-        .evaluate("[\"test\", 0] ~> <binary_shift_left>")
-        .expect_any_binary();
+        .evaluate("['ff', 0] ~> <binary_shift_left>")
+        .expect_binary(&[0xff]);
 
     // Large shift should result in zeros
     quiver()
-        .evaluate("[\"A\", 100] ~> <binary_shift_left> ~> <binary_popcount>")
-        .expect_int(0);
+        .evaluate("['ff', 100] ~> <binary_shift_left>")
+        .expect_binary(&[0x00]);
 }
 
 #[test]
@@ -186,32 +211,32 @@ fn test_bitwise_chaining() {
     quiver()
         .evaluate(
             r#"
-        a = "test",
-        b = "word",
-        // XOR then AND then popcount
-        xor_result = [a, b] ~> <binary_xor>,
-        and_result = [xor_result, a] ~> <binary_and>,
-        and_result ~> <binary_popcount>
-    "#,
+            a = 'aa',  // 10101010
+            b = '55',  // 01010101
+            // XOR then AND
+            xor_result = [a, b] ~> <binary_xor>,  // Should be 0xFF
+            and_result = [xor_result, a] ~> <binary_and>,  // 0xFF & 0xAA = 0xAA
+            and_result
+            "#,
         )
-        .expect_int(2); // "test" & ("test" ^ "word") should have 2 bits set
+        .expect_binary(&[0xaa]);
 }
 
 #[test]
 fn test_error_conditions() {
     // Test negative shift
     quiver()
-        .evaluate("[\"\", -1] ~> <binary_shift_left>")
+        .evaluate("['ff', -1] ~> <binary_shift_left>")
         .expect_error();
 
     // Test bit index out of bounds
     quiver()
-        .evaluate("[\"A\", 100] ~> <binary_get_bit_pos>")
+        .evaluate("['ff', 100] ~> <binary_get_bit_pos>")
         .expect_error();
 
     // Test invalid bit value for set_bit
     quiver()
-        .evaluate("[\"A\", 0, 2] ~> <binary_set_bit>")
+        .evaluate("['ff', 0, 2] ~> <binary_set_bit>")
         .expect_error();
 }
 
@@ -221,25 +246,25 @@ fn test_hamt_simulation() {
     quiver()
         .evaluate(
             r#"
-        // Simulate HAMT bitmap operations
-        bitmap = 8 ~> <binary_new>,  // 8-byte bitmap
+            // Simulate HAMT bitmap operations
+            bitmap = 8 ~> <binary_new>,  // 8-byte bitmap
 
-        // Set bits at positions that would represent hash collisions
-        step1 = [bitmap, 5, 1] ~> <binary_set_bit>,   // Set bit 5
-        step2 = [step1, 13, 1] ~> <binary_set_bit>,   // Set bit 13
-        step3 = [step2, 21, 1] ~> <binary_set_bit>,   // Set bit 21
+            // Set bits at positions that would represent hash collisions
+            step1 = [bitmap, 5, 1] ~> <binary_set_bit>,   // Set bit 5
+            step2 = [step1, 13, 1] ~> <binary_set_bit>,   // Set bit 13
+            step3 = [step2, 21, 1] ~> <binary_set_bit>,   // Set bit 21
 
-        // Count how many slots are occupied
-        occupied_count = step3 ~> <binary_popcount>,
+            // Count how many slots are occupied
+            occupied_count = step3 ~> <binary_popcount>,
 
-        // Extract a 5-bit chunk (like HAMT does for navigation)
-        shifted = [step3, 3] ~> <binary_shift_right>,  // Shift right by 3
-        mask = 4 ~> <binary_new>,  // Create mask binary
-        mask_with_bits = [mask, 0, 1] ~> <binary_set_bit>,  // Set LSB
-        chunk = [shifted, mask_with_bits] ~> <binary_and>,
+            // Extract a 5-bit chunk (like HAMT does for navigation)
+            shifted = [step3, 3] ~> <binary_shift_right>,  // Shift right by 3
+            mask = 4 ~> <binary_new>,  // Create mask binary
+            mask_with_bits = [mask, 0, 1] ~> <binary_set_bit>,  // Set LSB
+            chunk = [shifted, mask_with_bits] ~> <binary_and>,
 
-        occupied_count
-    "#,
+            occupied_count
+            "#,
         )
         .expect_int(3);
 }

@@ -4,14 +4,14 @@ use common::*;
 #[test]
 fn test_binary_literal_constant() {
     // Test that binary literals create constant references
-    quiver().evaluate("'00ff'").expect_binary(0);
-    quiver().evaluate("'abcd'").expect_binary(0);
+    quiver().evaluate("'00ff'").expect_binary(&[0x00, 0xff]);
+    quiver().evaluate("'abcd'").expect_binary(&[0xab, 0xcd]);
 }
 
 #[test]
 fn test_string_literal_constant() {
     // Test that string literals create constant references
-    quiver().evaluate("\"hello\"").expect_binary(0);
+    quiver().evaluate("\"hello\"").expect_binary(b"hello");
 }
 
 #[test]
@@ -19,8 +19,10 @@ fn test_binary_equality_content() {
     // Test that binaries with same content are equal even if different references
     quiver()
         .evaluate("[\"hello\", \"hello\"] ~> ==")
-        .expect_binary(0);
-    quiver().evaluate("['abcd', 'abcd'] ~> ==").expect_binary(0);
+        .expect_binary(b"hello");
+    quiver()
+        .evaluate("['abcd', 'abcd'] ~> ==")
+        .expect_binary(&[0xab, 0xcd]);
 }
 
 #[test]
@@ -35,8 +37,10 @@ fn test_binary_inequality_content() {
 #[test]
 fn test_binary_new_builtin() {
     // Test creating new zero-filled binaries
-    quiver().evaluate("10 ~> <binary_new>").expect_any_binary();
-    quiver().evaluate("0 ~> <binary_new>").expect_any_binary();
+    quiver()
+        .evaluate("10 ~> <binary_new>")
+        .expect_binary(&[0; 10]);
+    quiver().evaluate("0 ~> <binary_new>").expect_binary(&[]);
 }
 
 #[test]
@@ -91,10 +95,10 @@ fn test_binary_concat_builtin() {
     // Test concatenating binaries
     quiver()
         .evaluate("[\"hello\", \" world\"] ~> <binary_concat>")
-        .expect_any_binary();
+        .expect_binary(b"hello world");
     quiver()
         .evaluate("[\"ab\", \"cd\"] ~> <binary_concat>")
-        .expect_any_binary();
+        .expect_binary(b"abcd");
 }
 
 #[test]
@@ -114,11 +118,11 @@ fn test_binary_operations_chain() {
     quiver()
         .evaluate(
             r#"
-        hello = "hello",
-        world = " world",
-        combined = [hello, world] ~> <binary_concat>,
-        combined ~> <binary_length>
-    "#,
+            hello = "hello",
+            world = " world",
+            combined = [hello, world] ~> <binary_concat>,
+            combined ~> <binary_length>
+            "#,
         )
         .expect_int(11);
 }
@@ -145,10 +149,10 @@ fn test_heap_vs_constant_equality() {
     quiver()
         .evaluate(
             r#"
-        heap_bin = 5 ~> <binary_new>,
-        const_bin = 5 ~> <binary_new>,
-        [heap_bin, const_bin] ~> ==
-    "#,
+            heap_bin = 5 ~> <binary_new>,
+            const_bin = 5 ~> <binary_new>,
+            [heap_bin, const_bin] ~> ==
+            "#,
         )
-        .expect_any_binary();
+        .expect_binary(&[0; 5]);
 }
