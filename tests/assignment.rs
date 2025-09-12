@@ -234,3 +234,20 @@ fn test_partial_pattern_order_for_union() {
             vec![Value::Integer(2), Value::Integer(1)],
         );
 }
+
+#[test]
+fn test_star_pattern_order_for_union() {
+    quiver()
+        .evaluate(
+            r#"
+            type union = A[x: int, y: int] | B[y: int, x: int]
+            f = #union { * = $ => [x, y] }
+            B[y: 1, x: 2] ~> f
+            "#,
+        )
+        .expect_tuple(
+            None,
+            vec![None, None],
+            vec![Value::Integer(2), Value::Integer(1)],
+        );
+}

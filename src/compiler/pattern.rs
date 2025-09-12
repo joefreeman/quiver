@@ -33,12 +33,20 @@ struct Binding {
     var_type: TypeSet,
 }
 
+/// Represents conditional bindings based on runtime type
+#[derive(Debug, Clone)]
+struct ConditionalBindings {
+    type_id: TypeId,
+    bindings: Vec<Binding>,
+}
+
 /// Result of analyzing a pattern
 #[derive(Debug)]
 struct PatternAnalysis {
     can_match: bool, // false if pattern cannot match at compile time
     runtime_checks: Vec<(AccessPath, RuntimeCheck)>, // Checks to perform at runtime
-    bindings: Vec<Binding>, // Variable bindings to create
+    bindings: Vec<Binding>, // Variable bindings to create (unconditional)
+    conditional_bindings: Vec<ConditionalBindings>, // Bindings that depend on runtime type
 }
 
 pub struct PatternCompiler<'a> {
@@ -79,12 +87,28 @@ impl<'a> PatternCompiler<'a> {
         self.generate_pattern_code(&analysis, fail_addr)?;
 
         // Return bindings for caller to handle
-        let bindings = analysis
-            .bindings
-            .iter()
-            .map(|b| (b.name.clone(), b.var_type.clone()))
-            .collect();
-        Ok(Some(bindings))
+        // For conditional bindings, we need to collect all possible bindings
+        let mut all_bindings = Vec::new();
+
+        // Add unconditional bindings
+        for b in &analysis.bindings {
+            all_bindings.push((b.name.clone(), b.var_type.clone()));
+        }
+
+        // Add conditional bindings - collect unique variable names from all branches
+        // Since different types might have the same fields in different positions,
+        // we need to ensure all variables are defined
+        if !analysis.conditional_bindings.is_empty() {
+            // Use the first conditional binding set for variable names
+            // All branches should define the same variables
+            if let Some(first_cond) = analysis.conditional_bindings.first() {
+                for b in &first_cond.bindings {
+                    all_bindings.push((b.name.clone(), b.var_type.clone()));
+                }
+            }
+        }
+
+        Ok(Some(all_bindings))
     }
 
     /// Phase 1: Analyze pattern and determine what's needed
@@ -103,6 +127,7 @@ impl<'a> PatternCompiler<'a> {
                 can_match: true,
                 runtime_checks: vec![],
                 bindings: vec![],
+                conditional_bindings: vec![],
             }),
             ast::Pattern::Tuple(tuple_pattern) => {
                 self.analyze_tuple_pattern(tuple_pattern, value_type, path)
@@ -123,6 +148,7 @@ impl<'a> PatternCompiler<'a> {
             can_match: true,
             runtime_checks: vec![(path, RuntimeCheck::Literal(literal))],
             bindings: vec![],
+            conditional_bindings: vec![],
         })
     }
 
@@ -146,6 +172,7 @@ impl<'a> PatternCompiler<'a> {
                 path,
                 var_type,
             }],
+            conditional_bindings: vec![],
         })
     }
 
@@ -159,9 +186,12 @@ impl<'a> PatternCompiler<'a> {
             can_match: false,
             runtime_checks: vec![],
             bindings: vec![],
+            conditional_bindings: vec![],
         };
 
-        // Check each possible type
+        // Collect matching types with their field mappings
+        let mut matching_types = Vec::new();
+
         for typ in value_type.iter() {
             if let Type::Tuple(type_id) = typ {
                 if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
@@ -176,39 +206,103 @@ impl<'a> PatternCompiler<'a> {
                         continue; // Try next type
                     }
 
-                    // This type could match!
-                    analysis.can_match = true;
+                    // This type could match - collect field mappings
+                    let mut field_mappings = Vec::new();
 
-                    // Add runtime type check if needed
-                    if value_type.len() > 1 {
-                        analysis
-                            .runtime_checks
-                            .push((path.clone(), RuntimeCheck::TupleType(*type_id)));
-                    }
-
-                    // Analyze nested patterns
-                    for (i, field_pattern) in tuple_pattern.fields.iter().enumerate() {
-                        let field_type = TypeSet::resolved(tuple_info.1[i].1.clone());
-                        let field_path = AccessPath::Field(Box::new(path.clone()), i);
-
-                        let field_analysis =
-                            self.analyze_pattern(&field_pattern.pattern, &field_type, field_path)?;
-
-                        if !field_analysis.can_match {
-                            analysis.can_match = false;
-                            break;
+                    // For named patterns like (x, y), we need to match by field name
+                    for (pattern_idx, field_pattern) in tuple_pattern.fields.iter().enumerate() {
+                        if let ast::Pattern::Identifier(field_name) = &field_pattern.pattern {
+                            // Find the actual index of this field in the tuple type
+                            let actual_idx = tuple_info
+                                .1
+                                .iter()
+                                .position(|(name, _)| name.as_ref() == Some(field_name))
+                                .unwrap_or(pattern_idx); // Fall back to positional if no name match
+                            field_mappings.push((pattern_idx, actual_idx));
+                        } else {
+                            // For non-identifier patterns, use positional matching
+                            field_mappings.push((pattern_idx, pattern_idx));
                         }
-
-                        analysis
-                            .runtime_checks
-                            .extend(field_analysis.runtime_checks);
-                        analysis.bindings.extend(field_analysis.bindings);
                     }
 
-                    if analysis.can_match {
-                        break; // Found a matching type
+                    matching_types.push((*type_id, field_mappings));
+                }
+            }
+        }
+
+        if matching_types.is_empty() {
+            return Ok(analysis); // No matching types
+        }
+
+        analysis.can_match = true;
+
+        // If all matching types have the same field mapping, we can use unconditional bindings
+        let all_same_mapping = if matching_types.len() > 1 {
+            let first_mapping = &matching_types[0].1;
+            matching_types[1..]
+                .iter()
+                .all(|(_, mapping)| mapping == first_mapping)
+        } else {
+            true
+        };
+
+        if all_same_mapping {
+            // All types have the same field layout - use unconditional bindings
+            let (type_id, field_mappings) = &matching_types[0];
+
+            if value_type.len() > 1 {
+                // Still need runtime check if there are other non-matching types
+                analysis
+                    .runtime_checks
+                    .push((path.clone(), RuntimeCheck::TupleType(*type_id)));
+            }
+
+            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                for (pattern_idx, actual_idx) in field_mappings {
+                    let field_pattern = &tuple_pattern.fields[*pattern_idx].pattern;
+                    let field_type = TypeSet::resolved(tuple_info.1[*actual_idx].1.clone());
+                    let field_path = AccessPath::Field(Box::new(path.clone()), *actual_idx);
+
+                    let field_analysis =
+                        self.analyze_pattern(field_pattern, &field_type, field_path)?;
+
+                    if !field_analysis.can_match {
+                        analysis.can_match = false;
+                        break;
+                    }
+
+                    analysis
+                        .runtime_checks
+                        .extend(field_analysis.runtime_checks);
+                    analysis.bindings.extend(field_analysis.bindings);
+                }
+            }
+        } else {
+            // Different types have different field layouts - use conditional bindings
+            for (type_id, field_mappings) in &matching_types {
+                let mut type_bindings = Vec::new();
+
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    for (pattern_idx, actual_idx) in field_mappings {
+                        let field_pattern = &tuple_pattern.fields[*pattern_idx].pattern;
+
+                        if let ast::Pattern::Identifier(field_name) = field_pattern {
+                            let field_type = TypeSet::resolved(tuple_info.1[*actual_idx].1.clone());
+                            let field_path = AccessPath::Field(Box::new(path.clone()), *actual_idx);
+
+                            type_bindings.push(Binding {
+                                name: field_name.clone(),
+                                path: field_path,
+                                var_type: field_type,
+                            });
+                        }
                     }
                 }
+
+                analysis.conditional_bindings.push(ConditionalBindings {
+                    type_id: *type_id,
+                    bindings: type_bindings,
+                });
             }
         }
 
@@ -245,6 +339,7 @@ impl<'a> PatternCompiler<'a> {
             can_match: false,
             runtime_checks: vec![],
             bindings: vec![],
+            conditional_bindings: vec![],
         };
 
         // Collect all types that have all required fields
@@ -308,26 +403,27 @@ impl<'a> PatternCompiler<'a> {
                 }
             }
         } else {
-            // Multiple possible types - need runtime dispatch
-            // For now, use the first type's positions and add a runtime check
-            // TODO: This is still incorrect - we need to generate conditional extraction
-            let (type_id, field_indices) = &matching_types[0];
+            // Multiple possible types - need conditional extraction based on runtime type
+            for (type_id, field_indices) in &matching_types {
+                let mut type_bindings = Vec::new();
 
-            analysis
-                .runtime_checks
-                .push((path.clone(), RuntimeCheck::TupleType(*type_id)));
-
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                for (i, field_name) in field_names.iter().enumerate() {
-                    let idx = field_indices[i];
-                    let field_type = &tuple_info.1[idx].1;
-                    let field_path = AccessPath::Field(Box::new(path.clone()), idx);
-                    analysis.bindings.push(Binding {
-                        name: field_name.clone(),
-                        path: field_path,
-                        var_type: TypeSet::resolved(field_type.clone()),
-                    });
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    for (i, field_name) in field_names.iter().enumerate() {
+                        let idx = field_indices[i];
+                        let field_type = &tuple_info.1[idx].1;
+                        let field_path = AccessPath::Field(Box::new(path.clone()), idx);
+                        type_bindings.push(Binding {
+                            name: field_name.clone(),
+                            path: field_path,
+                            var_type: TypeSet::resolved(field_type.clone()),
+                        });
+                    }
                 }
+
+                analysis.conditional_bindings.push(ConditionalBindings {
+                    type_id: *type_id,
+                    bindings: type_bindings,
+                });
             }
         }
 
@@ -343,6 +439,7 @@ impl<'a> PatternCompiler<'a> {
             can_match: false,
             runtime_checks: vec![],
             bindings: vec![],
+            conditional_bindings: vec![],
         };
 
         // Collect all tuple types
@@ -390,25 +487,46 @@ impl<'a> PatternCompiler<'a> {
                 }
             }
         } else {
-            // Multiple tuple types - use first one with runtime check
-            // TODO: This is still incorrect for multiple types with different field structures
-            let type_id = tuple_types[0];
-
-            analysis
-                .runtime_checks
-                .push((path.clone(), RuntimeCheck::TupleType(type_id)));
-
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(&type_id) {
-                for (idx, (name, field_type)) in tuple_info.1.iter().enumerate() {
-                    if let Some(field_name) = name {
-                        let field_path = AccessPath::Field(Box::new(path.clone()), idx);
-                        analysis.bindings.push(Binding {
-                            name: field_name.clone(),
-                            path: field_path,
-                            var_type: TypeSet::resolved(field_type.clone()),
-                        });
+            // Multiple tuple types - need conditional extraction based on runtime type
+            // First, collect all unique field names from all types
+            let mut all_field_names = std::collections::BTreeSet::new();
+            for type_id in &tuple_types {
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    for (_, (name, _)) in tuple_info.1.iter().enumerate() {
+                        if let Some(field_name) = name {
+                            all_field_names.insert(field_name.clone());
+                        }
                     }
                 }
+            }
+
+            // Now create bindings for each type, extracting fields in alphabetical order
+            for type_id in &tuple_types {
+                let mut type_bindings = Vec::new();
+
+                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
+                    // For each field name in alphabetical order, find its index in this type
+                    for field_name in &all_field_names {
+                        if let Some((idx, (_, field_type))) = tuple_info
+                            .1
+                            .iter()
+                            .enumerate()
+                            .find(|(_, (name, _))| name.as_ref() == Some(field_name))
+                        {
+                            let field_path = AccessPath::Field(Box::new(path.clone()), idx);
+                            type_bindings.push(Binding {
+                                name: field_name.clone(),
+                                path: field_path,
+                                var_type: TypeSet::resolved(field_type.clone()),
+                            });
+                        }
+                    }
+                }
+
+                analysis.conditional_bindings.push(ConditionalBindings {
+                    type_id: *type_id,
+                    bindings: type_bindings,
+                });
             }
         }
 
@@ -426,11 +544,61 @@ impl<'a> PatternCompiler<'a> {
             self.generate_runtime_check(path, check, fail_addr)?;
         }
 
-        // Extract values for bindings
-        // Extract in reverse order so they're on the stack in the right order for Store instructions
-        // Store pops from the top, so the first variable to store needs to be on top
-        for (i, binding) in analysis.bindings.iter().rev().enumerate() {
-            self.generate_value_extraction_with_depth(&binding.path, i)?;
+        // Handle unconditional bindings
+        if !analysis.bindings.is_empty() {
+            // Extract in reverse order so they're on the stack in the right order for Store instructions
+            for (i, binding) in analysis.bindings.iter().rev().enumerate() {
+                self.generate_value_extraction_with_depth(&binding.path, i)?;
+            }
+        }
+
+        // Handle conditional bindings if present
+        if !analysis.conditional_bindings.is_empty() {
+            self.generate_conditional_bindings(&analysis.conditional_bindings)?;
+        }
+
+        Ok(())
+    }
+
+    fn generate_conditional_bindings(
+        &mut self,
+        conditional_bindings: &[ConditionalBindings],
+    ) -> Result<(), Error> {
+        // We need to check the runtime type and extract fields based on it
+        // The value is on top of the stack
+
+        let mut end_jumps = Vec::new();
+
+        for (i, cond_binding) in conditional_bindings.iter().enumerate() {
+            // Check if it's this type
+            self.codegen.add_instruction(Instruction::Duplicate);
+            self.codegen
+                .add_instruction(Instruction::IsTuple(cond_binding.type_id));
+
+            // Jump to next check if false
+            self.codegen.add_instruction(Instruction::Not);
+            let next_check = self.codegen.emit_jump_if_placeholder();
+
+            // Extract bindings for this type
+            // The bindings need to be extracted in reverse order for the stack
+            for (j, binding) in cond_binding.bindings.iter().rev().enumerate() {
+                self.generate_value_extraction_with_depth(&binding.path, j)?;
+            }
+
+            // Jump to end after extraction
+            let end_jump = self.codegen.emit_jump_placeholder();
+            end_jumps.push(end_jump);
+
+            // Patch the "next check" jump to here (for the next iteration)
+            self.codegen.patch_jump_to_here(next_check);
+        }
+
+        // If we get here, none of the types matched - this shouldn't happen
+        // but we need to handle it gracefully
+
+        // Patch all end jumps to here
+        for end_jump in end_jumps {
+            self.codegen.patch_jump_to_here(end_jump);
         }
 
         Ok(())
