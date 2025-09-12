@@ -224,8 +224,8 @@ fn test_partial_pattern_order_for_union() {
         .evaluate(
             r#"
             type union = A[x: int, y: int] | B[y: int, x: int]
-            f = #union { (x, y) = $ => [x, y] }
-            B[y: 1, x: 2] ~> f
+            f = #Wrapper[union] { Wrapper[(x, y)] = $ => [x, y] }
+            Wrapper[B[y: 1, x: 2]] ~> f
             "#,
         )
         .expect_tuple(
