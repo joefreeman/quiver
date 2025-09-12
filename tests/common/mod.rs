@@ -152,9 +152,70 @@ impl TestResult {
         }
     }
 
-    pub fn expect_tuple(self, expected_values: Vec<Value>) {
+    pub fn expect_tuple(
+        self,
+        expected_type_name: Option<&str>,
+        expected_field_names: Vec<Option<&str>>,
+        expected_values: Vec<Value>,
+    ) {
+        // First ensure field names and values have the same length
+        assert_eq!(
+            expected_field_names.len(),
+            expected_values.len(),
+            "Test error: expected_field_names length ({}) must match expected_values length ({})",
+            expected_field_names.len(),
+            expected_values.len()
+        );
+
         match self.result {
-            Ok(Some(Value::Tuple(_, actual_values))) => {
+            Ok(Some(Value::Tuple(type_id, actual_values))) => {
+                // Get type info once
+                let type_info = self.quiver.get_type_info(&type_id);
+
+                // Check type name matches expectation (including None)
+                match (type_info, expected_type_name) {
+                    (Some((Some(actual), _)), Some(expected)) => {
+                        assert_eq!(
+                            actual, expected,
+                            "Expected tuple type '{}', got '{}' for source: {}",
+                            expected, actual, self.source
+                        );
+                    }
+                    (Some((None, _)), Some(expected)) => {
+                        panic!(
+                            "Expected tuple type '{}', but tuple is unnamed for source: {}",
+                            expected, self.source
+                        );
+                    }
+                    (Some((Some(actual), _)), None) => {
+                        panic!(
+                            "Expected unnamed tuple, but got type '{}' for source: {}",
+                            actual, self.source
+                        );
+                    }
+                    (Some((None, _)), None) => {
+                        // Both unnamed, ok
+                    }
+                    (None, Some(expected)) => {
+                        panic!(
+                            "Expected tuple type '{}', but type {} not found in registry for source: {}",
+                            expected, type_id.0, self.source
+                        );
+                    }
+                    (None, None) => {
+                        // No type info and we expected unnamed - could be runtime-created tuple
+                        if !expected_field_names.is_empty()
+                            && expected_field_names.iter().any(|f| f.is_some())
+                        {
+                            panic!(
+                                "Expected field names but type {} has no field information for source: {}",
+                                type_id.0, self.source
+                            );
+                        }
+                    }
+                }
+
+                // Check number of values matches
                 assert_eq!(
                     actual_values.len(),
                     expected_values.len(),
@@ -163,14 +224,75 @@ impl TestResult {
                     actual_values.len(),
                     self.source
                 );
-                for (i, (actual, expected)) in
-                    actual_values.iter().zip(expected_values.iter()).enumerate()
-                {
+
+                // Check fields if we have type info
+                if let Some((_, fields)) = type_info {
                     assert_eq!(
-                        actual, expected,
-                        "Tuple element {} mismatch: expected {:?}, got {:?} for source: {}",
-                        i, expected, actual, self.source
+                        fields.len(),
+                        expected_field_names.len(),
+                        "Expected {} fields, got {} fields for source: {}",
+                        expected_field_names.len(),
+                        fields.len(),
+                        self.source
                     );
+
+                    // Check each field's name and value
+                    for (
+                        i,
+                        (
+                            ((actual_field_name, _), expected_field_name),
+                            (actual_value, expected_value),
+                        ),
+                    ) in fields
+                        .iter()
+                        .zip(expected_field_names.iter())
+                        .zip(actual_values.iter().zip(expected_values.iter()))
+                        .enumerate()
+                    {
+                        // Check field name
+                        match (actual_field_name, expected_field_name) {
+                            (Some(actual), Some(expected)) => {
+                                assert_eq!(
+                                    actual, expected,
+                                    "Field {} name mismatch: expected '{}', got '{}' for source: {}",
+                                    i, expected, actual, self.source
+                                );
+                            }
+                            (None, Some(expected)) => {
+                                panic!(
+                                    "Field {} expected to be named '{}', but was unnamed for source: {}",
+                                    i, expected, self.source
+                                );
+                            }
+                            (Some(actual), None) => {
+                                panic!(
+                                    "Field {} expected to be unnamed, but was named '{}' for source: {}",
+                                    i, actual, self.source
+                                );
+                            }
+                            (None, None) => {
+                                // Both unnamed, ok
+                            }
+                        }
+
+                        // Check field value
+                        assert_eq!(
+                            actual_value, expected_value,
+                            "Field {} value mismatch: expected {:?}, got {:?} for source: {}",
+                            i, expected_value, actual_value, self.source
+                        );
+                    }
+                } else {
+                    // No type info - just check values
+                    for (i, (actual, expected)) in
+                        actual_values.iter().zip(expected_values.iter()).enumerate()
+                    {
+                        assert_eq!(
+                            actual, expected,
+                            "Tuple element {} mismatch: expected {:?}, got {:?} for source: {}",
+                            i, expected, actual, self.source
+                        );
+                    }
                 }
             }
             Ok(Some(other)) => {
@@ -194,29 +316,6 @@ impl TestResult {
         }
     }
 
-    pub fn expect_function(self) {
-        match self.result {
-            Ok(Some(Value::Function { .. })) => {
-                // Success - we got a function
-            }
-            Ok(Some(other)) => {
-                panic!(
-                    "Expected function, got {:?} for source: {}",
-                    other, self.source
-                );
-            }
-            Ok(None) => {
-                panic!("Expected function, got None for source: {}", self.source);
-            }
-            Err(e) => {
-                panic!(
-                    "Expected function, got error: {} for source: {}",
-                    e, self.source
-                );
-            }
-        }
-    }
-
     pub fn expect_error(self) {
         match self.result {
             Ok(result) => {
@@ -227,30 +326,6 @@ impl TestResult {
             }
             Err(_) => {
                 // Success - we got an error as expected
-            }
-        }
-    }
-
-    pub fn expect_value(self, expected: Value) {
-        match self.result {
-            Ok(Some(actual)) => {
-                assert_eq!(
-                    actual, expected,
-                    "Expected {:?}, got {:?} for source: {}",
-                    expected, actual, self.source
-                );
-            }
-            Ok(None) => {
-                panic!(
-                    "Expected {:?}, got None for source: {}",
-                    expected, self.source
-                );
-            }
-            Err(e) => {
-                panic!(
-                    "Expected {:?}, got error: {} for source: {}",
-                    expected, e, self.source
-                );
             }
         }
     }

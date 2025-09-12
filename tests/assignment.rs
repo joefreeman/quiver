@@ -113,7 +113,11 @@ fn test_union_type_partial_destructuring() {
             [a: 1, b: 2] ~> f
             "#,
         )
-        .expect_tuple(vec![Value::Integer(1), Value::Integer(2)]);
+        .expect_tuple(
+            None,
+            vec![None, None],
+            vec![Value::Integer(1), Value::Integer(2)],
+        );
 
     quiver()
         .evaluate(
@@ -125,7 +129,11 @@ fn test_union_type_partial_destructuring() {
             [a: 1, b: 2] ~> f
             "#,
         )
-        .expect_tuple(vec![Value::Integer(1), Value::Integer(2)]);
+        .expect_tuple(
+            None,
+            vec![None, None],
+            vec![Value::Integer(1), Value::Integer(2)],
+        );
 }
 
 #[test]
@@ -220,5 +228,9 @@ fn test_partial_pattern_order_for_union() {
             B[y: 1, x: 2] ~> f
             "#,
         )
-        .expect_tuple(vec![Value::Integer(2), Value::Integer(1)]);
+        .expect_tuple(
+            None,
+            vec![None, None],
+            vec![Value::Integer(2), Value::Integer(1)],
+        );
 }
