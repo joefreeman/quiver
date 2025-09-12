@@ -171,7 +171,7 @@ impl Quiver {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     ParseError(Box<parser::Error>),
     RuntimeError(vm::Error),

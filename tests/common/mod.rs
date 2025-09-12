@@ -316,16 +316,75 @@ impl TestResult {
         }
     }
 
-    pub fn expect_error(self) {
+    pub fn expect_runtime_error(self, expected: quiver::vm::Error) {
         match self.result {
             Ok(result) => {
                 panic!(
-                    "Expected error, but evaluation succeeded with result: {:?} for source: {}",
-                    result, self.source
+                    "Expected runtime error {:?}, but evaluation succeeded with result: {:?} for source: {}",
+                    expected, result, self.source
                 );
             }
-            Err(_) => {
-                // Success - we got an error as expected
+            Err(quiver::Error::RuntimeError(actual)) => {
+                assert_eq!(
+                    actual, expected,
+                    "Expected runtime error {:?}, but got {:?} for source: {}",
+                    expected, actual, self.source
+                );
+            }
+            Err(e) => {
+                panic!(
+                    "Expected runtime error {:?}, but got {:?} for source: {}",
+                    expected, e, self.source
+                );
+            }
+        }
+    }
+
+    pub fn expect_compile_error(self, expected: quiver::compiler::Error) {
+        match self.result {
+            Ok(result) => {
+                panic!(
+                    "Expected compile error {:?}, but evaluation succeeded with result: {:?} for source: {}",
+                    expected, result, self.source
+                );
+            }
+            Err(quiver::Error::CompileError(actual)) => {
+                assert_eq!(
+                    actual, expected,
+                    "Expected compile error {:?}, but got {:?} for source: {}",
+                    expected, actual, self.source
+                );
+            }
+            Err(e) => {
+                panic!(
+                    "Expected compile error {:?}, but got {:?} for source: {}",
+                    expected, e, self.source
+                );
+            }
+        }
+    }
+
+    pub fn expect_parse_error(self, expected: quiver::parser::Error) {
+        match self.result {
+            Ok(result) => {
+                panic!(
+                    "Expected parse error {:?}, but evaluation succeeded with result: {:?} for source: {}",
+                    expected, result, self.source
+                );
+            }
+            Err(quiver::Error::ParseError(boxed_actual)) => {
+                let actual = *boxed_actual;
+                assert_eq!(
+                    actual, expected,
+                    "Expected parse error {:?}, but got {:?} for source: {}",
+                    expected, actual, self.source
+                );
+            }
+            Err(e) => {
+                panic!(
+                    "Expected parse error {:?}, but got {:?} for source: {}",
+                    expected, e, self.source
+                );
             }
         }
     }

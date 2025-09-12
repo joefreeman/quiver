@@ -132,7 +132,7 @@ impl fmt::Display for Value {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     // Stack operation errors
     StackUnderflow,

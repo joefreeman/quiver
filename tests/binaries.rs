@@ -46,7 +46,11 @@ fn test_binary_new_builtin() {
 #[test]
 fn test_binary_new_size_validation() {
     // Test negative size validation
-    quiver().evaluate("-1 ~> <binary_new>").expect_error();
+    quiver()
+        .evaluate("-1 ~> <binary_new>")
+        .expect_runtime_error(quiver::vm::Error::InvalidArgument(
+            "Size cannot be negative".to_string(),
+        ));
 }
 
 #[test]
@@ -84,10 +88,14 @@ fn test_binary_get_byte_bounds() {
     // Test bounds checking
     quiver()
         .evaluate("[\"hello\", 5] ~> <binary_get_byte>")
-        .expect_error();
+        .expect_runtime_error(quiver::vm::Error::InvalidArgument(
+            "Index 5 out of bounds for binary of length 5".to_string(),
+        ));
     quiver()
         .evaluate("[\"hello\", -1] ~> <binary_get_byte>")
-        .expect_error();
+        .expect_runtime_error(quiver::vm::Error::InvalidArgument(
+            "Index cannot be negative".to_string(),
+        ));
 }
 
 #[test]

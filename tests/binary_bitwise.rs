@@ -227,17 +227,23 @@ fn test_error_conditions() {
     // Test negative shift
     quiver()
         .evaluate("['ff', -1] ~> <binary_shift_left>")
-        .expect_error();
+        .expect_runtime_error(quiver::vm::Error::InvalidArgument(
+            "Shift amount cannot be negative".to_string(),
+        ));
 
     // Test bit index out of bounds
     quiver()
         .evaluate("['ff', 100] ~> <binary_get_bit_pos>")
-        .expect_error();
+        .expect_runtime_error(quiver::vm::Error::InvalidArgument(
+            "Bit index 100 out of bounds for binary with 8 bits".to_string(),
+        ));
 
     // Test invalid bit value for set_bit
     quiver()
         .evaluate("['ff', 0, 2] ~> <binary_set_bit>")
-        .expect_error();
+        .expect_runtime_error(quiver::vm::Error::InvalidArgument(
+            "Bit value must be 0 or 1".to_string(),
+        ));
 }
 
 #[test]

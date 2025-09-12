@@ -5,7 +5,7 @@ pub trait ModuleLoader {
     fn load(&self, path: &str, from_dir: Option<&Path>) -> Result<String, ModuleError>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ModuleError {
     NotFound(String),
     IoError(String),

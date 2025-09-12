@@ -25,7 +25,7 @@ use crate::{
 
 use typing::TypeContext;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     // Variable & scope errors
     VariableUndefined(String),

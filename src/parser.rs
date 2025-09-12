@@ -6,7 +6,7 @@ use pest_derive::Parser;
 #[grammar = "grammar.pest"]
 pub struct Grammar;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     // Grammar parsing errors
     SyntaxError(Box<pest::error::Error<Rule>>),
