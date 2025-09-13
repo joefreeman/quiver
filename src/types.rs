@@ -24,4 +24,6 @@ pub enum Type {
     Tuple(TypeId),
     #[serde(rename = "fn")]
     Function(Box<FunctionType>),
+    #[serde(rename = "cycle")]
+    Cycle(usize),
 }

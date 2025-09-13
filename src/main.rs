@@ -121,13 +121,19 @@ fn run_repl() -> Result<(), ReadlineError> {
                     }
 
                     "\\t" => {
-                        let types = quiver.list_types();
+                        let mut types = quiver.list_types();
                         if types.is_empty() {
                             println!("No types defined");
                         } else {
-                            println!("Type:");
+                            // Sort by TypeId
+                            types.sort_by_key(|(_, id)| id.0);
+                            println!("Types:");
                             for (_name, type_id) in types {
-                                println!("  {}", format_type(&quiver, &Type::Tuple(type_id)))
+                                println!(
+                                    "  {}: {}",
+                                    type_id.0,
+                                    format_type(&quiver, &Type::Tuple(type_id))
+                                )
                             }
                         }
                         continue;
@@ -373,6 +379,7 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
             };
             format!("#{} -> {}", param_str, result_str)
         }
+        Type::Cycle(depth) => format!("μ{}", depth),
     }
 }
 

@@ -163,6 +163,18 @@ impl<'a> Compiler<'a> {
             compiler.define_variable(&name, var_type);
         }
 
+        // Phase 1: Pre-register all type aliases as placeholders
+        for statement in &program.statements {
+            if let ast::Statement::TypeAlias { name, .. } = statement {
+                // Register placeholder for forward references
+                compiler.type_context.type_aliases.insert(
+                    name.clone(),
+                    TypeSet(vec![]), // Empty placeholder
+                );
+            }
+        }
+
+        // Phase 2: Compile all statements (now forward references work)
         for statement in program.statements {
             compiler.compile_statement(statement)?;
         }
@@ -193,7 +205,11 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
+        // Push the type name onto the resolution stack to detect cycles
+        self.type_context.resolution_stack.push(name.to_string());
         let resolved_type = self.type_context.resolve_ast_type(type_definition)?;
+        self.type_context.resolution_stack.pop();
+        
         self.type_context
             .type_aliases
             .insert(name.to_string(), resolved_type);

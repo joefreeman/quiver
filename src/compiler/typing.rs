@@ -83,6 +83,7 @@ pub fn narrow_types(types: Vec<TypeSet>) -> Result<TypeSet, Error> {
 pub struct TypeContext<'a> {
     pub type_aliases: HashMap<String, TypeSet>,
     pub type_registry: &'a mut TypeRegistry,
+    pub resolution_stack: Vec<String>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -99,6 +100,7 @@ impl<'a> TypeContext<'a> {
         Self {
             type_aliases,
             type_registry,
+            resolution_stack: Vec::new(),
         }
     }
 
@@ -169,9 +171,26 @@ impl<'a> TypeContext<'a> {
                 Ok(TypeSet(resolved_types))
             }
             ast::Type::Identifier(alias) => {
+                // Check if this creates a cycle
+                if let Some(depth) = self.resolution_stack.iter().rev().position(|x| x == &alias) {
+                    // Found a cycle! Return a Cycle type
+                    return Ok(TypeSet::resolved(Type::Cycle(depth + 1)));
+                }
+                
                 // Look up type alias
                 if let Some(aliased_type) = self.type_aliases.get(&alias) {
-                    Ok(aliased_type.clone())
+                    // If it's a placeholder (empty), we're in the middle of resolving it
+                    if aliased_type.0.is_empty() {
+                        // This is a forward reference to a type being defined
+                        // For now, return a cycle pointing to the current level
+                        return Ok(TypeSet::resolved(Type::Cycle(self.resolution_stack.len())));
+                    }
+                    
+                    // Push to stack for cycle detection
+                    self.resolution_stack.push(alias.clone());
+                    let result = Ok(aliased_type.clone());
+                    self.resolution_stack.pop();
+                    result
                 } else {
                     Err(Error::TypeAliasMissing(alias))
                 }
