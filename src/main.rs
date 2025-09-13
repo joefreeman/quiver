@@ -365,7 +365,7 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
                     .iter()
                     .map(|t| format_type(quiver, t))
                     .collect();
-                format!("({})", params.join(", "))
+                format!("({})", params.join(" | "))
             };
             let result_str = if func_type.result.len() == 1 {
                 format_type(quiver, &func_type.result[0])
@@ -375,7 +375,7 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
                     .iter()
                     .map(|t| format_type(quiver, t))
                     .collect();
-                format!("({})", results.join(", "))
+                format!("({})", results.join(" | "))
             };
             format!("#{} -> {}", param_str, result_str)
         }
