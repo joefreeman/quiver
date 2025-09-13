@@ -82,11 +82,8 @@ function_definition = { "#" ~ (function_input_type? ~ sp)? ~ block }
 branch = { expression ~ (sp ~ "=>" ~ ws ~ expression)? }
 block = { "{" ~ ws? ~ ("|" ~ ws)? ~ branch ~ (ws ~ "|" ~ ws ~ branch)* ~ ws? ~ "}" }
 
-// Parameter references ($, $0, $1, etc)
-parameter = @{ "$" ~ ASCII_DIGIT* }
-
-// Member access (identifier.foo.0.bar)
-member_access = @{ identifier ~ ("." ~ (identifier | ASCII_DIGIT+))* }
+// Member access (identifier.foo.0.bar or $.foo.0.bar or bare identifier or $)
+member_access = @{ (identifier | "$") ~ ("." ~ (identifier | ASCII_DIGIT+))* }
 
 // Field/positional access (.foo, .0, .1)
 field_access = @{ "." ~ identifier }
@@ -112,7 +109,6 @@ value = {
     value_tuple |
     function_definition |
     block |
-    parameter |
     member_access |
     import
 }
@@ -121,7 +117,6 @@ operation = {
     operator |
     operation_tuple |
     block |
-    parameter |
     member_access |
     field_access |
     positional_access |

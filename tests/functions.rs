@@ -39,7 +39,7 @@ fn test_higher_order_function() {
     quiver()
         .evaluate(
             r#"
-            apply = #[#int -> int, int] { $1 ~> $0 };
+            apply = #[#int -> int, int] { $.1 ~> $.0 };
             double = #int { [$, 2] ~> <multiply> };
             [double, 5] ~> apply
             "#,

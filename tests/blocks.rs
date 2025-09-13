@@ -30,5 +30,5 @@ fn test_block_with_repeated_parameter() {
 
 #[test]
 fn test_block_with_positional_parameter() {
-    quiver().evaluate("[1, 2] ~> { $0 }").expect_int(1);
+    quiver().evaluate("[1, 2] ~> { $.0 }").expect_int(1);
 }

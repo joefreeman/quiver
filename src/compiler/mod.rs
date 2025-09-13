@@ -634,21 +634,11 @@ impl<'a> Compiler<'a> {
 
     fn compile_parameter(
         &mut self,
-        parameter: ast::Parameter,
+        _parameter: ast::Parameter,
         parameter_type: TypeSet,
     ) -> Result<TypeSet, Error> {
-        match parameter {
-            ast::Parameter::Self_ => {
-                self.codegen.add_instruction(Instruction::Parameter);
-                Ok(parameter_type)
-            }
-            ast::Parameter::Indexed(index) => {
-                self.codegen.add_instruction(Instruction::Parameter);
-                self.codegen.add_instruction(Instruction::Get(index));
-
-                self.validate_tuple_field_access_single(&parameter_type, index)
-            }
-        }
+        self.codegen.add_instruction(Instruction::Parameter);
+        Ok(parameter_type)
     }
 
     fn compile_chain(
@@ -672,9 +662,11 @@ impl<'a> Compiler<'a> {
             ast::Value::Parameter(parameter) => {
                 self.compile_parameter(parameter, parameter_type.clone())
             }
-            ast::Value::MemberAccess(member_access) => {
-                self.compile_value_member_access(&member_access.target, member_access.accessors)
-            }
+            ast::Value::MemberAccess(member_access) => self.compile_value_member_access(
+                &member_access.target,
+                member_access.accessors,
+                parameter_type.clone(),
+            ),
             ast::Value::Import(path) => self.compile_value_import(&path),
         }?;
 
@@ -827,6 +819,7 @@ impl<'a> Compiler<'a> {
                 &member_access.target,
                 member_access.accessors,
                 value_type,
+                parameter_type,
             ),
             ast::Operation::FieldAccess(field) => {
                 self.compile_tuple_element_access(TupleAccessor::Field(field), value_type)
@@ -1030,23 +1023,13 @@ impl<'a> Compiler<'a> {
 
     fn compile_operation_parameter(
         &mut self,
-        parameter: ast::Parameter,
+        _parameter: ast::Parameter,
         value_type: TypeSet,
         parameter_type: TypeSet,
     ) -> Result<TypeSet, Error> {
         // Get the operation type from the parameter (could be function or other callable)
-        let function_type = match parameter {
-            ast::Parameter::Self_ => {
-                self.codegen.add_instruction(Instruction::Parameter);
-                parameter_type
-            }
-            ast::Parameter::Indexed(index) => {
-                self.codegen.add_instruction(Instruction::Parameter);
-                self.codegen.add_instruction(Instruction::Get(index));
-
-                self.validate_tuple_field_access_multiple(&parameter_type, index)?
-            }
-        };
+        self.codegen.add_instruction(Instruction::Parameter);
+        let function_type = parameter_type;
 
         // Use the unified function call handler
         self.compile_function_call(function_type, value_type)
@@ -1073,27 +1056,18 @@ impl<'a> Compiler<'a> {
         Err(Error::VariableUndefined(target.to_string()))
     }
 
-    fn compile_member_access_chain(
+    fn compile_accessor_chain(
         &mut self,
-        target: &str,
+        mut last_type: TypeSet,
         accessors: Vec<ast::AccessPath>,
-        emit_load: bool,
+        target_name: &str,
     ) -> Result<TypeSet, Error> {
-        let mut last_type = if emit_load {
-            self.codegen
-                .add_instruction(Instruction::Load(target.to_string()));
-            self.lookup_variable(target)
-                .ok_or(Error::VariableUndefined(target.to_string()))?
-        } else {
-            self.compile_target_access(target)?
-        };
-
         for accessor in accessors {
             let tuple_types = self.extract_tuple_types(&last_type);
 
             if tuple_types.is_empty() {
                 return Err(Error::MemberAccessOnNonTuple {
-                    target: target.to_string(),
+                    target: target_name.to_string(),
                 });
             }
 
@@ -1103,12 +1077,12 @@ impl<'a> Compiler<'a> {
                         .get_field_types_by_name(&tuple_types, &field_name)
                         .map_err(|_| Error::MemberFieldNotFound {
                             field_name: field_name.clone(),
-                            target: target.to_string(),
+                            target: target_name.to_string(),
                         })?;
                     if results.is_empty() {
                         return Err(Error::MemberFieldNotFound {
                             field_name,
-                            target: target.to_string(),
+                            target: target_name.to_string(),
                         });
                     }
                     let index = results[0].0;
@@ -1119,7 +1093,7 @@ impl<'a> Compiler<'a> {
                     let field_types = self
                         .get_field_types_at_position(&tuple_types, index)
                         .map_err(|_| Error::MemberAccessOnNonTuple {
-                            target: target.to_string(),
+                            target: target_name.to_string(),
                         })?;
                     (index, field_types)
                 }
@@ -1132,21 +1106,57 @@ impl<'a> Compiler<'a> {
         Ok(last_type)
     }
 
-    fn compile_value_member_access(
+    fn compile_member_access_chain(
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
+        emit_load: bool,
     ) -> Result<TypeSet, Error> {
-        self.compile_member_access_chain(target, accessors, false)
+        let last_type = if emit_load {
+            self.codegen
+                .add_instruction(Instruction::Load(target.to_string()));
+            self.lookup_variable(target)
+                .ok_or(Error::VariableUndefined(target.to_string()))?
+        } else {
+            self.compile_target_access(target)?
+        };
+
+        self.compile_accessor_chain(last_type, accessors, target)
+    }
+
+    fn compile_value_member_access(
+        &mut self,
+        target: &ast::MemberTarget,
+        accessors: Vec<ast::AccessPath>,
+        parameter_type: TypeSet,
+    ) -> Result<TypeSet, Error> {
+        match target {
+            ast::MemberTarget::Identifier(name) => {
+                self.compile_member_access_chain(name, accessors, false)
+            }
+            ast::MemberTarget::Parameter => {
+                self.codegen.add_instruction(Instruction::Parameter);
+                self.compile_accessor_chain(parameter_type, accessors, "$")
+            }
+        }
     }
 
     fn compile_operation_member_access(
         &mut self,
-        target: &str,
+        target: &ast::MemberTarget,
         accessors: Vec<ast::AccessPath>,
         value_type: TypeSet,
+        parameter_type: TypeSet,
     ) -> Result<TypeSet, Error> {
-        let function_type = self.compile_member_access_chain(target, accessors, true)?;
+        let function_type = match target {
+            ast::MemberTarget::Identifier(name) => {
+                self.compile_member_access_chain(name, accessors, true)?
+            }
+            ast::MemberTarget::Parameter => {
+                self.codegen.add_instruction(Instruction::Parameter);
+                self.compile_accessor_chain(parameter_type, accessors, "$")?
+            }
+        };
         // Use the unified function call handler
         self.compile_function_call(function_type, value_type)
     }
@@ -1267,54 +1277,6 @@ impl<'a> Compiler<'a> {
             }
         }
         None
-    }
-
-    fn validate_tuple_field_access_single(
-        &self,
-        tuple_type: &TypeSet,
-        index: usize,
-    ) -> Result<TypeSet, Error> {
-        let tuple_types = self.extract_tuple_types(tuple_type);
-
-        if tuple_types.is_empty() {
-            return Err(Error::ParameterAccessOnNonTuple { index });
-        }
-
-        let field_results = self.get_field_types_at_position(&tuple_types, index)?;
-        Ok(TypeSet(field_results))
-    }
-
-    fn validate_tuple_field_access_multiple(
-        &self,
-        parameter_type: &TypeSet,
-        index: usize,
-    ) -> Result<TypeSet, Error> {
-        let param_types = parameter_type.to_vec();
-        let mut field_type_results = Vec::new();
-
-        for param_type in param_types {
-            match param_type {
-                Type::Tuple(type_id) => {
-                    let type_info = self
-                        .vm
-                        .lookup_type(&type_id)
-                        .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
-
-                    if let Some(field) = type_info.1.get(index) {
-                        field_type_results.push(TypeSet::resolved(field.1.clone()));
-                    } else {
-                        return Err(Error::ParameterIndexOutOfBounds { index });
-                    }
-                }
-                _ => return Err(Error::ParameterAccessOnNonTuple { index }),
-            }
-        }
-
-        if field_type_results.is_empty() {
-            return Err(Error::ParameterIndexOutOfBounds { index });
-        }
-
-        narrow_types(field_type_results)
     }
 
     fn check_field_name_duplicates<T>(

@@ -71,7 +71,9 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Value::Parameter(_) => {}
             ast::Value::MemberAccess(member_access) => {
-                self.visit_identifier(&member_access.target);
+                if let ast::MemberTarget::Identifier(name) = &member_access.target {
+                    self.visit_identifier(name);
+                }
             }
             ast::Value::Import(_) => {}
         }
@@ -91,7 +93,9 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Operation::Parameter(_) => {}
             ast::Operation::MemberAccess(member_access) => {
-                self.visit_identifier(&member_access.target);
+                if let ast::MemberTarget::Identifier(name) = &member_access.target {
+                    self.visit_identifier(name);
+                }
             }
             ast::Operation::FieldAccess(_) => {}
             ast::Operation::PositionalAccess(_) => {}

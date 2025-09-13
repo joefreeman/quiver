@@ -119,15 +119,18 @@ pub struct FunctionDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Parameter {
-    Self_,
-    Indexed(usize),
-}
+pub struct Parameter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberAccess {
-    pub target: String,
+    pub target: MemberTarget,
     pub accessors: Vec<AccessPath>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemberTarget {
+    Identifier(String),
+    Parameter,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,16 +197,4 @@ pub struct FunctionType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnionType {
     pub types: Vec<Type>,
-}
-
-impl Parameter {
-    pub fn from_string(s: &str) -> Option<Self> {
-        if s == "$" {
-            Some(Parameter::Self_)
-        } else if let Some(stripped) = s.strip_prefix('$') {
-            stripped.parse().ok().map(Parameter::Indexed)
-        } else {
-            None
-        }
-    }
 }
