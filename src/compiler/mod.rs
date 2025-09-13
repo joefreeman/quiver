@@ -12,14 +12,14 @@ mod variables;
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::PatternCompiler;
-pub use typing::{TupleAccessor, TypeSet, narrow_types};
+pub use typing::{TupleAccessor, TypeRegistry, TypeSet, narrow_types};
 
 use crate::{
     ast,
     builtins::BUILTIN_REGISTRY,
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
-    types::{FunctionType, Type, TypeRegistry},
+    types::{FunctionType, Type},
     vm::{BinaryRef, VM, Value},
 };
 
