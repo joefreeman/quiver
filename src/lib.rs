@@ -9,10 +9,10 @@ pub mod vm;
 
 use std::collections::HashMap;
 
-use bytecode::Function;
+use bytecode::{Function, TypeId};
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
-use types::TypeRegistry;
+use types::{TupleTypeInfo, TypeRegistry};
 use vm::{VM, Value};
 
 pub struct Quiver {
@@ -139,12 +139,8 @@ impl Quiver {
         }
     }
 
-    pub fn get_type_info(&self, type_id: &bytecode::TypeId) -> Option<&types::TupleTypeInfo> {
+    pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
         self.type_registry.lookup_type(type_id)
-    }
-
-    pub fn type_registry(&self) -> &TypeRegistry {
-        &self.type_registry
     }
 
     pub fn get_function(&self, function: usize) -> Option<&Function> {

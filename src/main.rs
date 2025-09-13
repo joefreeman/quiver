@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use quiver::Quiver;
-use quiver::types::{Type, TypeRegistry};
+use quiver::bytecode::TypeId;
+use quiver::types::Type;
 use quiver::vm::Value;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
@@ -43,83 +44,6 @@ enum Commands {
     Inspect {
         input: Option<String>,
     },
-}
-
-fn format_type(type_registry: &TypeRegistry, type_def: &Type) -> String {
-    match type_def {
-        Type::Integer => "int".to_string(),
-        Type::Binary => "bin".to_string(),
-        Type::Tuple(type_id) => {
-            if let Some((name, fields)) = type_registry.lookup_type(type_id) {
-                if fields.is_empty() {
-                    name.as_deref().unwrap_or("[]").to_string()
-                } else {
-                    let field_strs: Vec<String> = fields
-                        .iter()
-                        .map(|(field_name, field_type)| {
-                            if let Some(field_name) = field_name {
-                                format!(
-                                    "{}: {}",
-                                    field_name,
-                                    format_type(type_registry, field_type)
-                                )
-                            } else {
-                                format_type(type_registry, field_type)
-                            }
-                        })
-                        .collect();
-
-                    if let Some(type_name) = name {
-                        format!("{}[{}]", type_name, field_strs.join(", "))
-                    } else {
-                        format!("[{}]", field_strs.join(", "))
-                    }
-                }
-            } else {
-                format!("Type{}", type_id.0)
-            }
-        }
-        Type::Function(func_type) => {
-            let param_str = if func_type.parameter.len() == 1 {
-                format_type(type_registry, &func_type.parameter[0])
-            } else {
-                let params: Vec<String> = func_type
-                    .parameter
-                    .iter()
-                    .map(|t| format_type(type_registry, t))
-                    .collect();
-                format!("({})", params.join(", "))
-            };
-            let result_str = if func_type.result.len() == 1 {
-                format_type(type_registry, &func_type.result[0])
-            } else {
-                let results: Vec<String> = func_type
-                    .result
-                    .iter()
-                    .map(|t| format_type(type_registry, t))
-                    .collect();
-                format!("({})", results.join(", "))
-            };
-            format!("#{} -> {}", param_str, result_str)
-        }
-    }
-}
-
-fn format_value(quiver: &Quiver, value: &Value) -> String {
-    match value {
-        Value::Function { function, .. } => {
-            if let Some(func_def) = quiver.get_function(*function) {
-                if let Some(func_type) = &func_def.function_type {
-                    return format_type(
-                        quiver.type_registry(),
-                        &Type::Function(Box::new(func_type.clone())),
-                    );
-                }
-            }
-            "<function>".to_string()
-        }
-        _ => value.format_with_types(quiver.type_registry()),
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -203,10 +127,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                         } else {
                             println!("Type:");
                             for (_name, type_id) in types {
-                                println!(
-                                    "  {}",
-                                    format_type(quiver.type_registry(), &Type::Tuple(type_id))
-                                )
+                                println!("  {}", format_type(&quiver, &Type::Tuple(type_id)))
                             }
                         }
                         continue;
@@ -397,4 +318,133 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
     }
 
     Ok(())
+}
+
+fn format_type(quiver: &Quiver, type_def: &Type) -> String {
+    match type_def {
+        Type::Integer => "int".to_string(),
+        Type::Binary => "bin".to_string(),
+        Type::Tuple(type_id) => {
+            if let Some((name, fields)) = quiver.lookup_type(type_id) {
+                if fields.is_empty() {
+                    name.as_deref().unwrap_or("[]").to_string()
+                } else {
+                    let field_strs: Vec<String> = fields
+                        .iter()
+                        .map(|(field_name, field_type)| {
+                            if let Some(field_name) = field_name {
+                                format!("{}: {}", field_name, format_type(quiver, field_type))
+                            } else {
+                                format_type(quiver, field_type)
+                            }
+                        })
+                        .collect();
+
+                    if let Some(type_name) = name {
+                        format!("{}[{}]", type_name, field_strs.join(", "))
+                    } else {
+                        format!("[{}]", field_strs.join(", "))
+                    }
+                }
+            } else {
+                format!("Type{}", type_id.0)
+            }
+        }
+        Type::Function(func_type) => {
+            let param_str = if func_type.parameter.len() == 1 {
+                format_type(quiver, &func_type.parameter[0])
+            } else {
+                let params: Vec<String> = func_type
+                    .parameter
+                    .iter()
+                    .map(|t| format_type(quiver, t))
+                    .collect();
+                format!("({})", params.join(", "))
+            };
+            let result_str = if func_type.result.len() == 1 {
+                format_type(quiver, &func_type.result[0])
+            } else {
+                let results: Vec<String> = func_type
+                    .result
+                    .iter()
+                    .map(|t| format_type(quiver, t))
+                    .collect();
+                format!("({})", results.join(", "))
+            };
+            format!("#{} -> {}", param_str, result_str)
+        }
+    }
+}
+
+fn format_value(quiver: &Quiver, value: &Value) -> String {
+    match value {
+        Value::Function { function, .. } => {
+            if let Some(func_def) = quiver.get_function(*function) {
+                if let Some(func_type) = &func_def.function_type {
+                    return format_type(quiver, &Type::Function(Box::new(func_type.clone())));
+                }
+            }
+            "<function>".to_string()
+        }
+        Value::Integer(i) => i.to_string(),
+        Value::Binary(_) => "<binary>".to_string(),
+        Value::Tuple(type_id, elements) => {
+            if *type_id == TypeId::NIL {
+                return "[]".to_string();
+            }
+            if *type_id == TypeId::OK {
+                return "Ok".to_string();
+            }
+
+            if let Some((name, fields)) = quiver.lookup_type(type_id) {
+                if elements.is_empty() {
+                    return name.as_deref().unwrap_or("[]").to_string();
+                }
+
+                let prefix = if let Some(type_name) = name {
+                    format!("{}[", type_name)
+                } else {
+                    "[".to_string()
+                };
+
+                let mut result = prefix;
+                for (i, element) in elements.iter().enumerate() {
+                    if i > 0 {
+                        result.push_str(", ");
+                    }
+
+                    if i < fields.len() {
+                        if let Some(field_name) = &fields[i].0 {
+                            result.push_str(&format!(
+                                "{}: {}",
+                                field_name,
+                                format_value(quiver, element)
+                            ));
+                        } else {
+                            result.push_str(&format_value(quiver, element));
+                        }
+                    } else {
+                        result.push_str(&format_value(quiver, element));
+                    }
+                }
+                result.push(']');
+                result
+            } else {
+                let type_name = format!("Type{}", type_id.0);
+                if elements.is_empty() {
+                    return type_name;
+                }
+
+                let mut result = format!("{}[", type_name);
+                for (i, element) in elements.iter().enumerate() {
+                    if i > 0 {
+                        result.push_str(", ");
+                    }
+                    result.push_str(&format_value(quiver, element));
+                }
+                result.push(']');
+                result
+            }
+        }
+    }
 }

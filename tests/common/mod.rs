@@ -170,7 +170,7 @@ impl TestResult {
         match self.result {
             Ok(Some(Value::Tuple(type_id, actual_values))) => {
                 // Get type info once
-                let type_info = self.quiver.get_type_info(&type_id);
+                let type_info = self.quiver.lookup_type(&type_id);
 
                 // Check type name matches expectation (including None)
                 match (type_info, expected_type_name) {

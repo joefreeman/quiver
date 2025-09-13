@@ -1,6 +1,5 @@
 use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{Constant, Function, Instruction, TypeId};
-use crate::types::TypeRegistry;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -34,72 +33,6 @@ impl Value {
             Value::Binary(_) => "binary",
             Value::Tuple(_, _) => "tuple",
             Value::Function { .. } => "function",
-        }
-    }
-
-    pub fn format_with_types(&self, type_registry: &TypeRegistry) -> String {
-        match self {
-            Value::Integer(i) => i.to_string(),
-            Value::Binary(_) => "<binary>".to_string(),
-            Value::Function { .. } => "<function>".to_string(),
-            Value::Tuple(type_id, elements) => {
-                if *type_id == TypeId::NIL {
-                    return "[]".to_string();
-                }
-                if *type_id == TypeId::OK {
-                    return "Ok".to_string();
-                }
-
-                if let Some((name, fields)) = type_registry.lookup_type(type_id) {
-                    if elements.is_empty() {
-                        return name.as_deref().unwrap_or("[]").to_string();
-                    }
-
-                    let prefix = if let Some(type_name) = name {
-                        format!("{}[", type_name)
-                    } else {
-                        "[".to_string()
-                    };
-
-                    let mut result = prefix;
-                    for (i, element) in elements.iter().enumerate() {
-                        if i > 0 {
-                            result.push_str(", ");
-                        }
-
-                        if i < fields.len() {
-                            if let Some(field_name) = &fields[i].0 {
-                                result.push_str(&format!(
-                                    "{}: {}",
-                                    field_name,
-                                    element.format_with_types(type_registry)
-                                ));
-                            } else {
-                                result.push_str(&element.format_with_types(type_registry));
-                            }
-                        } else {
-                            result.push_str(&element.format_with_types(type_registry));
-                        }
-                    }
-                    result.push(']');
-                    result
-                } else {
-                    let type_name = format!("Type{}", type_id.0);
-                    if elements.is_empty() {
-                        return type_name;
-                    }
-
-                    let mut result = format!("{}[", type_name);
-                    for (i, element) in elements.iter().enumerate() {
-                        if i > 0 {
-                            result.push_str(", ");
-                        }
-                        result.push_str(&element.format_with_types(type_registry));
-                    }
-                    result.push(']');
-                    result
-                }
-            }
         }
     }
 }
