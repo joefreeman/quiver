@@ -240,11 +240,17 @@ impl<'a> PatternCompiler<'a> {
         value_type: TypeSet,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
-        let var_type = if value_type.len() > 0 {
-            value_type
-        } else {
-            TypeSet::unresolved(vec![Type::Integer, Type::Binary, Type::Tuple(TypeId::NIL)])?
-        };
+        // Empty TypeSet should never happen - it indicates an internal error
+        if value_type.len() == 0 {
+            return Err(Error::InternalError {
+                message: format!(
+                    "analyze_identifier_pattern received empty TypeSet for identifier '{}'",
+                    name
+                ),
+            });
+        }
+
+        let var_type = value_type;
 
         Ok(vec![BindingSet {
             requirements: vec![],
@@ -334,38 +340,14 @@ impl<'a> PatternCompiler<'a> {
             binding_sets.extend(current_binding_sets);
         }
 
-        // Special case: unresolved types
-        if value_type.len() == 0 && binding_sets.is_empty() {
-            // Assume it could match at runtime
-
-            let mut current_binding_set = BindingSet {
-                requirements: vec![],
-                bindings: vec![],
-            };
-
-            // Collect bindings without type info
-            for (i, field_pattern) in tuple_pattern.fields.iter().enumerate() {
-                let mut field_path = path.clone();
-                field_path.push(i);
-                let field_type = TypeSet::unresolved(vec![Type::Tuple(TypeId::NIL)])?;
-
-                let field_binding_sets =
-                    self.analyze_pattern(&field_pattern.pattern, &field_type, field_path)?;
-
-                // Combine with field binding sets
-                if !field_binding_sets.is_empty() {
-                    // For simplicity, just take the first binding set
-                    let field_set = &field_binding_sets[0];
-                    current_binding_set
-                        .requirements
-                        .extend(field_set.requirements.clone());
-                    current_binding_set
-                        .bindings
-                        .extend(field_set.bindings.clone());
-                }
-            }
-
-            binding_sets.push(current_binding_set);
+        // Empty TypeSet should never happen - it indicates an internal error
+        if value_type.len() == 0 {
+            return Err(Error::InternalError {
+                message: format!(
+                    "analyze_tuple_pattern received empty TypeSet for pattern: {:?}",
+                    tuple_pattern
+                ),
+            });
         }
 
         Ok(binding_sets)

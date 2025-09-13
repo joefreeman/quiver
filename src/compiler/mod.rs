@@ -20,7 +20,7 @@ use crate::{
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
     types::{FunctionType, Type, TypeRegistry},
-    vm::{VM, Value},
+    vm::{BinaryRef, VM, Value},
 };
 
 use typing::TypeContext;
@@ -39,6 +39,9 @@ pub enum Error {
     TypeMismatch {
         expected: String,
         found: String,
+    },
+    TypeNotInRegistry {
+        type_id: TypeId,
     },
 
     // Structure errors
@@ -71,9 +74,6 @@ pub enum Error {
     // Parameter access
     ParameterIndexOutOfBounds {
         index: usize,
-    },
-    ParameterTypeNotInRegistry {
-        type_id: String,
     },
     ParameterAccessOnNonTuple {
         index: usize,
@@ -109,9 +109,6 @@ pub enum Error {
     },
 
     // Pattern matching errors
-    TypeNotInRegistry {
-        type_id: crate::bytecode::TypeId,
-    },
     PatternNoMatchingTypes {
         pattern: String,
     },
@@ -499,7 +496,12 @@ impl<'a> Compiler<'a> {
             if i > 0 {
                 self.codegen.add_instruction(Instruction::Pop);
                 self.codegen.add_instruction(Instruction::Reset);
-                self.scopes.last_mut().unwrap().clear();
+                self.scopes
+                    .last_mut()
+                    .ok_or_else(|| Error::InternalError {
+                        message: "No scope available when compiling block branch".to_string(),
+                    })?
+                    .clear();
             }
 
             let condition_type =
@@ -511,15 +513,13 @@ impl<'a> Compiler<'a> {
                 continue;
             }
 
-            if branch.consequence.is_some() {
+            if let Some(ref consequence) = branch.consequence {
                 // Branch has a consequence - compile it
                 let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 next_branch_jumps.push((next_branch_jump, i + 1));
 
-                let consequence_type = self.compile_expression(
-                    branch.consequence.clone().unwrap(),
-                    parameter_type.clone(),
-                )?;
+                let consequence_type =
+                    self.compile_expression(consequence.clone(), parameter_type.clone())?;
                 branch_types.push(consequence_type);
             } else {
                 // No consequence - use condition type
@@ -595,7 +595,9 @@ impl<'a> Compiler<'a> {
             self.codegen.patch_jump_to_addr(jump_addr, end_addr);
         }
 
-        Ok(last_type.unwrap())
+        last_type.ok_or_else(|| Error::InternalError {
+            message: "Expression compiled with no terms".to_string(),
+        })
     }
 
     fn compile_parameter(
@@ -660,11 +662,11 @@ impl<'a> Compiler<'a> {
             }
             Value::Binary(binary_ref) => {
                 match binary_ref {
-                    crate::vm::BinaryRef::Constant(const_index) => {
+                    BinaryRef::Constant(const_index) => {
                         self.codegen
                             .add_instruction(Instruction::Constant(*const_index));
                     }
-                    crate::vm::BinaryRef::Heap(_) => {
+                    BinaryRef::Heap(_) => {
                         // Heap binaries need to be handled differently
                         // For now, we'll create a constant from the heap binary
                         if let Ok(bytes) = self.vm.get_binary_bytes(binary_ref) {
@@ -763,6 +765,7 @@ impl<'a> Compiler<'a> {
         self.type_context.type_aliases = saved_type_aliases;
 
         // Execute the module instructions to get the runtime value
+        // If module returns None (no value), default to NIL tuple - this is intentional
         let value = self
             .vm
             .execute_instructions(module_instructions)
@@ -842,7 +845,10 @@ impl<'a> Compiler<'a> {
     fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<TypeSet, Error> {
         if identifier.is_empty() {
             self.codegen.add_instruction(Instruction::TailCall(true));
-            Ok(TypeSet(vec![]))
+            // Recursive tail call - the control flow doesn't return here, so the type is NIL
+            // TODO: Ideally we'd return the current function's return type, but that would
+            // require tracking more context during compilation
+            Ok(TypeSet::resolved(Type::Tuple(TypeId::NIL)))
         } else {
             self.codegen
                 .add_instruction(Instruction::Load(identifier.to_string()));
@@ -886,46 +892,45 @@ impl<'a> Compiler<'a> {
         // We need to extract the tuple elements and call Equal(count)
         if let Some(Type::Tuple(type_id)) = value_type.single() {
             // Get the number of fields in this tuple type
-            if let Some((_, fields)) = self.type_context.type_registry.lookup_type(&type_id) {
-                let field_count = fields.len();
+            let (_, fields) = self
+                .type_context
+                .type_registry
+                .lookup_type(&type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
-                if field_count == 0 {
-                    return Err(Error::TypeMismatch {
-                        expected: "non-empty tuple".to_string(),
-                        found: "empty tuple".to_string(),
-                    });
+            let field_count = fields.len();
+
+            if field_count == 0 {
+                return Err(Error::TypeMismatch {
+                    expected: "non-empty tuple".to_string(),
+                    found: "empty tuple".to_string(),
+                });
+            }
+
+            // Extract tuple fields and push them individually to the stack
+            // Following the established pattern from compile_operator
+            for i in 0..field_count {
+                if i < field_count - 1 {
+                    self.codegen.add_instruction(Instruction::Duplicate);
                 }
-
-                // Extract tuple fields and push them individually to the stack
-                // Following the established pattern from compile_operator
-                for i in 0..field_count {
-                    if i < field_count - 1 {
-                        self.codegen.add_instruction(Instruction::Duplicate);
-                    }
-                    self.codegen.add_instruction(Instruction::Get(i));
-                    if i < field_count - 1 {
-                        self.codegen.add_instruction(Instruction::Swap);
-                    }
+                self.codegen.add_instruction(Instruction::Get(i));
+                if i < field_count - 1 {
+                    self.codegen.add_instruction(Instruction::Swap);
                 }
+            }
 
-                // Now compare the field_count individual values on the stack
-                self.codegen
-                    .add_instruction(Instruction::Equal(field_count));
+            // Now compare the field_count individual values on the stack
+            self.codegen
+                .add_instruction(Instruction::Equal(field_count));
 
-                // Return type is union of field type and NIL
-                if let Some((_, first_field_type)) = fields.get(0) {
-                    Ok(TypeSet(vec![
-                        first_field_type.clone(),
-                        Type::Tuple(TypeId::NIL),
-                    ]))
-                } else {
-                    Ok(TypeSet::resolved(Type::Tuple(TypeId::NIL)))
-                }
+            // Return type is union of field type and NIL
+            if let Some((_, first_field_type)) = fields.get(0) {
+                Ok(TypeSet(vec![
+                    first_field_type.clone(),
+                    Type::Tuple(TypeId::NIL),
+                ]))
             } else {
-                Err(Error::TypeUnresolved(format!(
-                    "Type {:?} not found in registry",
-                    type_id
-                )))
+                Ok(TypeSet::resolved(Type::Tuple(TypeId::NIL)))
             }
         } else {
             // For unresolved types or non-tuple types, we can't know the field count at compile time
@@ -1177,16 +1182,16 @@ impl<'a> Compiler<'a> {
         index: usize,
     ) -> Result<TypeSet, Error> {
         if let Some(Type::Tuple(type_id)) = tuple_type.single() {
-            if let Some(type_info) = self.type_context.type_registry.lookup_type(type_id) {
-                if let Some(field) = type_info.1.get(index) {
-                    Ok(TypeSet::resolved(field.1.clone()))
-                } else {
-                    Err(Error::ParameterIndexOutOfBounds { index })
-                }
+            let type_info = self
+                .type_context
+                .type_registry
+                .lookup_type(type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+
+            if let Some(field) = type_info.1.get(index) {
+                Ok(TypeSet::resolved(field.1.clone()))
             } else {
-                Err(Error::ParameterTypeNotInRegistry {
-                    type_id: format!("{:?}", type_id),
-                })
+                Err(Error::ParameterIndexOutOfBounds { index })
             }
         } else {
             Err(Error::ParameterAccessOnNonTuple { index })
@@ -1204,16 +1209,16 @@ impl<'a> Compiler<'a> {
         for param_type in param_types {
             match param_type {
                 Type::Tuple(type_id) => {
-                    if let Some(type_info) = self.type_context.type_registry.lookup_type(&type_id) {
-                        if let Some(field) = type_info.1.get(index) {
-                            field_type_results.push(TypeSet::resolved(field.1.clone()));
-                        } else {
-                            return Err(Error::ParameterIndexOutOfBounds { index });
-                        }
+                    let type_info = self
+                        .type_context
+                        .type_registry
+                        .lookup_type(&type_id)
+                        .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
+
+                    if let Some(field) = type_info.1.get(index) {
+                        field_type_results.push(TypeSet::resolved(field.1.clone()));
                     } else {
-                        return Err(Error::ParameterTypeNotInRegistry {
-                            type_id: format!("{:?}", type_id),
-                        });
+                        return Err(Error::ParameterIndexOutOfBounds { index });
                     }
                 }
                 _ => return Err(Error::ParameterAccessOnNonTuple { index }),
