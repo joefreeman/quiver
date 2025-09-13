@@ -91,3 +91,16 @@ fn test_recursive_tree_type() {
         )
         .expect_int(3)
 }
+
+#[test]
+fn test_recursive_type_with_cycle() {
+    quiver()
+        .evaluate(
+            r#"
+            type list = Nil | Cons[int, list];
+            prepend = #list { Cons[10, $] },
+            Cons[20, Cons[30, Nil]] ~> prepend ~> .0
+        "#,
+        )
+        .expect_int(10);
+}

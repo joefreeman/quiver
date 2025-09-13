@@ -263,21 +263,31 @@ impl<'a> Compiler<'a> {
     ) -> Result<TypeSet, Error> {
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
-        let mut field_types = Vec::new();
+        // Collect all possible types for each field
+        let mut field_variants: Vec<(Option<String>, Vec<Type>)> = Vec::new();
         for field in &fields {
-            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
-            if let Some(resolved_type) = field_type.single() {
-                field_types.push((field.name.clone(), resolved_type.clone()));
-            } else {
-                return Err(Error::TupleFieldTypeUnresolved {
-                    field_index: field_types.len(),
-                });
-            }
+            let field_type_set = self.compile_chain(field.value.clone(), parameter_type.clone())?;
+            field_variants.push((field.name.clone(), field_type_set.to_vec()));
         }
 
-        let type_id = self.vm.register_type(tuple_name, field_types);
-        self.codegen.add_instruction(Instruction::Tuple(type_id));
-        Ok(TypeSet::resolved(Type::Tuple(type_id)))
+        // Generate all possible tuple type combinations
+        let tuple_variants =
+            self.type_context
+                .cartesian_product_tuple_types(&tuple_name, field_variants, self.vm);
+
+        if tuple_variants.is_empty() {
+            return Err(Error::TypeUnresolved(
+                "No valid tuple type variants found".to_string(),
+            ));
+        }
+
+        // For now, use the first variant for the instruction
+        // The VM will handle structural matching at runtime
+        if let Type::Tuple(type_id) = &tuple_variants[0] {
+            self.codegen.add_instruction(Instruction::Tuple(*type_id));
+        }
+
+        Ok(TypeSet(tuple_variants))
     }
 
     fn compile_operation_tuple(
@@ -300,9 +310,10 @@ impl<'a> Compiler<'a> {
 
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
-        let mut field_types = Vec::new();
+        // Collect all possible types for each field
+        let mut field_variants: Vec<(Option<String>, Vec<Type>)> = Vec::new();
         for field in &fields {
-            let field_type = match &field.value {
+            let field_type_set = match &field.value {
                 ast::OperationTupleFieldValue::Ripple => {
                     // TODO: avoid using variable?
                     self.codegen
@@ -314,18 +325,27 @@ impl<'a> Compiler<'a> {
                 }
             };
 
-            if let Some(resolved_type) = field_type.single() {
-                field_types.push((field.name.clone(), resolved_type.clone()));
-            } else {
-                return Err(Error::TupleFieldTypeUnresolved {
-                    field_index: field_types.len(),
-                });
-            }
+            field_variants.push((field.name.clone(), field_type_set.to_vec()));
         }
 
-        let type_id = self.vm.register_type(name, field_types);
-        self.codegen.add_instruction(Instruction::Tuple(type_id));
-        Ok(TypeSet::resolved(Type::Tuple(type_id)))
+        // Generate all possible tuple type combinations
+        let tuple_variants =
+            self.type_context
+                .cartesian_product_tuple_types(&name, field_variants, self.vm);
+
+        if tuple_variants.is_empty() {
+            return Err(Error::TypeUnresolved(
+                "No valid tuple type variants found".to_string(),
+            ));
+        }
+
+        // For now, use the first variant for the instruction
+        // The VM will handle structural matching at runtime
+        if let Type::Tuple(type_id) = &tuple_variants[0] {
+            self.codegen.add_instruction(Instruction::Tuple(*type_id));
+        }
+
+        Ok(TypeSet(tuple_variants))
     }
 
     fn compile_function_definition(
@@ -829,28 +849,39 @@ impl<'a> Compiler<'a> {
         accessor: TupleAccessor,
         value_type: TypeSet,
     ) -> Result<TypeSet, Error> {
-        if let Some(Type::Tuple(type_id)) = value_type.single() {
-            let (index, result_type) = match accessor {
-                TupleAccessor::Field(field_name) => self
-                    .type_context
-                    .get_tuple_field_type_by_name(&type_id, &field_name, self.vm)?,
-                TupleAccessor::Position(position) => {
-                    let field_type = self
-                        .type_context
-                        .get_tuple_field_type_by_position(&type_id, position, self.vm)?;
-                    (position, field_type)
-                }
-            };
-            self.codegen.add_instruction(Instruction::Get(index));
-            Ok(TypeSet::resolved(result_type))
-        } else {
+        let tuple_types = self.extract_tuple_types(&value_type);
+
+        if tuple_types.is_empty() {
             match accessor {
                 TupleAccessor::Field(field_name) => {
-                    Err(Error::FieldAccessOnNonTuple { field_name })
+                    return Err(Error::FieldAccessOnNonTuple { field_name });
                 }
-                TupleAccessor::Position(index) => Err(Error::PositionalAccessOnNonTuple { index }),
+                TupleAccessor::Position(index) => {
+                    return Err(Error::PositionalAccessOnNonTuple { index });
+                }
             }
         }
+
+        let (index, field_types) = match accessor {
+            TupleAccessor::Field(field_name) => {
+                let results = self.get_field_types_by_name(&tuple_types, &field_name)?;
+                if results.is_empty() {
+                    return Err(Error::FieldAccessOnNonTuple { field_name });
+                }
+                let index = results[0].0;
+                let field_types: Vec<Type> = results.into_iter().map(|(_, t)| t).collect();
+                (index, field_types)
+            }
+            TupleAccessor::Position(position) => {
+                let field_types = self
+                    .get_field_types_at_position(&tuple_types, position)
+                    .map_err(|_| Error::PositionalAccessOnNonTuple { index: position })?;
+                (position, field_types)
+            }
+        };
+
+        self.codegen.add_instruction(Instruction::Get(index));
+        Ok(TypeSet(field_types))
     }
 
     fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<TypeSet, Error> {
@@ -901,8 +932,29 @@ impl<'a> Compiler<'a> {
     fn compile_operation_equality(&mut self, value_type: TypeSet) -> Result<TypeSet, Error> {
         // The == operator works with a tuple on the stack
         // We need to extract the tuple elements and call Equal(count)
-        if let Some(Type::Tuple(type_id)) = value_type.single() {
-            // Get the number of fields in this tuple type
+
+        // Check if all types in the TypeSet are tuples
+        let tuple_types: Vec<_> = value_type
+            .to_vec()
+            .into_iter()
+            .filter_map(|t| match t {
+                Type::Tuple(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+
+        if tuple_types.is_empty() {
+            return Err(Error::TypeMismatch {
+                expected: "tuple".to_string(),
+                found: "unknown".to_string(),
+            });
+        }
+
+        // Verify all tuples have the same field count and collect field types
+        let mut common_field_count = None;
+        let mut first_field_types = Vec::new();
+
+        for type_id in &tuple_types {
             let (_, fields) = self
                 .vm
                 .lookup_type(&type_id)
@@ -917,6 +969,23 @@ impl<'a> Compiler<'a> {
                 });
             }
 
+            if let Some(prev_count) = common_field_count {
+                if prev_count != field_count {
+                    return Err(Error::TypeMismatch {
+                        expected: format!("tuple with {} fields", prev_count),
+                        found: format!("tuple with {} fields", field_count),
+                    });
+                }
+            } else {
+                common_field_count = Some(field_count);
+                // Collect first field types for return type
+                if let Some((_, first_field_type)) = fields.get(0) {
+                    first_field_types.push(first_field_type.clone());
+                }
+            }
+        }
+
+        if let Some(field_count) = common_field_count {
             // Extract tuple fields and push them individually to the stack
             // Following the established pattern from compile_operator
             for i in 0..field_count {
@@ -933,15 +1002,10 @@ impl<'a> Compiler<'a> {
             self.codegen
                 .add_instruction(Instruction::Equal(field_count));
 
-            // Return type is union of field type and NIL
-            if let Some((_, first_field_type)) = fields.get(0) {
-                Ok(TypeSet(vec![
-                    first_field_type.clone(),
-                    Type::Tuple(TypeId::NIL),
-                ]))
-            } else {
-                Ok(TypeSet::resolved(Type::Tuple(TypeId::NIL)))
-            }
+            // Return type is union of field types and NIL
+            let mut result_types = first_field_types;
+            result_types.push(Type::Tuple(TypeId::NIL));
+            Ok(TypeSet(result_types))
         } else {
             // For unresolved types or non-tuple types, we can't know the field count at compile time
             // This would require runtime inspection - for now, return an error
@@ -1025,32 +1089,44 @@ impl<'a> Compiler<'a> {
         };
 
         for accessor in accessors {
-            if let Some(Type::Tuple(type_id)) = last_type.single() {
-                let (index, result_type) = match accessor {
-                    ast::AccessPath::Field(field_name) => self
-                        .type_context
-                        .get_tuple_field_type_by_name(&type_id, &field_name, self.vm)
-                        .map_err(|_| Error::MemberFieldNotFound {
-                            field_name: field_name.clone(),
-                            target: target.to_string(),
-                        })?,
-                    ast::AccessPath::Index(index) => {
-                        let field_type = self
-                            .type_context
-                            .get_tuple_field_type_by_position(&type_id, index, self.vm)
-                            .map_err(|_| Error::MemberAccessOnNonTuple {
-                                target: target.to_string(),
-                            })?;
-                        (index, field_type)
-                    }
-                };
-                self.codegen.add_instruction(Instruction::Get(index));
-                last_type = TypeSet::resolved(result_type);
-            } else {
+            let tuple_types = self.extract_tuple_types(&last_type);
+
+            if tuple_types.is_empty() {
                 return Err(Error::MemberAccessOnNonTuple {
                     target: target.to_string(),
                 });
             }
+
+            let (index, field_types) = match accessor {
+                ast::AccessPath::Field(field_name) => {
+                    let results = self
+                        .get_field_types_by_name(&tuple_types, &field_name)
+                        .map_err(|_| Error::MemberFieldNotFound {
+                            field_name: field_name.clone(),
+                            target: target.to_string(),
+                        })?;
+                    if results.is_empty() {
+                        return Err(Error::MemberFieldNotFound {
+                            field_name,
+                            target: target.to_string(),
+                        });
+                    }
+                    let index = results[0].0;
+                    let field_types: Vec<Type> = results.into_iter().map(|(_, t)| t).collect();
+                    (index, field_types)
+                }
+                ast::AccessPath::Index(index) => {
+                    let field_types = self
+                        .get_field_types_at_position(&tuple_types, index)
+                        .map_err(|_| Error::MemberAccessOnNonTuple {
+                            target: target.to_string(),
+                        })?;
+                    (index, field_types)
+                }
+            };
+
+            self.codegen.add_instruction(Instruction::Get(index));
+            last_type = TypeSet(field_types);
         }
 
         Ok(last_type)
@@ -1198,20 +1274,14 @@ impl<'a> Compiler<'a> {
         tuple_type: &TypeSet,
         index: usize,
     ) -> Result<TypeSet, Error> {
-        if let Some(Type::Tuple(type_id)) = tuple_type.single() {
-            let type_info = self
-                .vm
-                .lookup_type(type_id)
-                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+        let tuple_types = self.extract_tuple_types(tuple_type);
 
-            if let Some(field) = type_info.1.get(index) {
-                Ok(TypeSet::resolved(field.1.clone()))
-            } else {
-                Err(Error::ParameterIndexOutOfBounds { index })
-            }
-        } else {
-            Err(Error::ParameterAccessOnNonTuple { index })
+        if tuple_types.is_empty() {
+            return Err(Error::ParameterAccessOnNonTuple { index });
         }
+
+        let field_results = self.get_field_types_at_position(&tuple_types, index)?;
+        Ok(TypeSet(field_results))
     }
 
     fn validate_tuple_field_access_multiple(
@@ -1260,5 +1330,75 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Extract tuple TypeIds from a TypeSet, filtering out non-tuple types
+    fn extract_tuple_types(&self, type_set: &TypeSet) -> Vec<TypeId> {
+        type_set
+            .to_vec()
+            .into_iter()
+            .filter_map(|t| match t {
+                Type::Tuple(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Get field type at the given position for all tuple types in the list
+    /// Returns error if any tuple doesn't have the field or if tuples have different structures
+    fn get_field_types_at_position(
+        &self,
+        tuple_types: &[TypeId],
+        position: usize,
+    ) -> Result<Vec<Type>, Error> {
+        let mut field_types = Vec::new();
+
+        for type_id in tuple_types {
+            let (_, fields) = self
+                .vm
+                .lookup_type(type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+
+            if let Some((_, field_type)) = fields.get(position) {
+                field_types.push(field_type.clone());
+            } else {
+                return Err(Error::ParameterIndexOutOfBounds { index: position });
+            }
+        }
+
+        Ok(field_types)
+    }
+
+    /// Get field type by name for all tuple types in the list
+    /// Returns error if any tuple doesn't have the field
+    fn get_field_types_by_name(
+        &self,
+        tuple_types: &[TypeId],
+        field_name: &str,
+    ) -> Result<Vec<(usize, Type)>, Error> {
+        let mut results = Vec::new();
+        let mut common_index = None;
+
+        for type_id in tuple_types {
+            let (index, field_type) = self
+                .type_context
+                .get_tuple_field_type_by_name(type_id, field_name, self.vm)?;
+
+            // Verify all tuples have the field at the same index
+            if let Some(prev_index) = common_index {
+                if prev_index != index {
+                    return Err(Error::MemberFieldNotFound {
+                        field_name: field_name.to_string(),
+                        target: "multiple tuple types".to_string(),
+                    });
+                }
+            } else {
+                common_index = Some(index);
+            }
+
+            results.push((index, field_type));
+        }
+
+        Ok(results)
     }
 }
