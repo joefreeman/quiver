@@ -9,6 +9,7 @@ pub mod vm;
 
 use std::collections::HashMap;
 
+use bytecode::Function;
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
 use types::TypeRegistry;
@@ -142,25 +143,12 @@ impl Quiver {
         self.type_registry.lookup_type(type_id)
     }
 
-    pub fn format_value(&self, value: &Value) -> String {
-        match value {
-            Value::Function { function, .. } => {
-                if let Some(func_def) = self.vm.get_functions().get(*function) {
-                    if let Some(func_type) = &func_def.function_type {
-                        return self
-                            .type_registry
-                            .format_type(&types::Type::Function(Box::new(func_type.clone())));
-                    }
-                }
-                "<function>".to_string()
-            }
-            _ => value.format_with_types(&self.type_registry),
-        }
+    pub fn type_registry(&self) -> &TypeRegistry {
+        &self.type_registry
     }
 
-    pub fn format_type(&self, type_id: &bytecode::TypeId) -> String {
-        self.type_registry
-            .format_type(&types::Type::Tuple(*type_id))
+    pub fn get_function(&self, function: usize) -> Option<&Function> {
+        self.vm.get_functions().get(function)
     }
 
     pub fn get_binary_bytes(&self, binary_ref: &vm::BinaryRef) -> Result<Vec<u8>, Error> {

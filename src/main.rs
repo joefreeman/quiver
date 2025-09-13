@@ -1,5 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use quiver::Quiver;
+use quiver::types::{Type, TypeRegistry};
+use quiver::vm::Value;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::fs;
@@ -41,6 +43,83 @@ enum Commands {
     Inspect {
         input: Option<String>,
     },
+}
+
+fn format_type(type_registry: &TypeRegistry, type_def: &Type) -> String {
+    match type_def {
+        Type::Integer => "int".to_string(),
+        Type::Binary => "bin".to_string(),
+        Type::Tuple(type_id) => {
+            if let Some((name, fields)) = type_registry.lookup_type(type_id) {
+                if fields.is_empty() {
+                    name.as_deref().unwrap_or("[]").to_string()
+                } else {
+                    let field_strs: Vec<String> = fields
+                        .iter()
+                        .map(|(field_name, field_type)| {
+                            if let Some(field_name) = field_name {
+                                format!(
+                                    "{}: {}",
+                                    field_name,
+                                    format_type(type_registry, field_type)
+                                )
+                            } else {
+                                format_type(type_registry, field_type)
+                            }
+                        })
+                        .collect();
+
+                    if let Some(type_name) = name {
+                        format!("{}[{}]", type_name, field_strs.join(", "))
+                    } else {
+                        format!("[{}]", field_strs.join(", "))
+                    }
+                }
+            } else {
+                format!("Type{}", type_id.0)
+            }
+        }
+        Type::Function(func_type) => {
+            let param_str = if func_type.parameter.len() == 1 {
+                format_type(type_registry, &func_type.parameter[0])
+            } else {
+                let params: Vec<String> = func_type
+                    .parameter
+                    .iter()
+                    .map(|t| format_type(type_registry, t))
+                    .collect();
+                format!("({})", params.join(", "))
+            };
+            let result_str = if func_type.result.len() == 1 {
+                format_type(type_registry, &func_type.result[0])
+            } else {
+                let results: Vec<String> = func_type
+                    .result
+                    .iter()
+                    .map(|t| format_type(type_registry, t))
+                    .collect();
+                format!("({})", results.join(", "))
+            };
+            format!("#{} -> {}", param_str, result_str)
+        }
+    }
+}
+
+fn format_value(quiver: &Quiver, value: &Value) -> String {
+    match value {
+        Value::Function { function, .. } => {
+            if let Some(func_def) = quiver.get_function(*function) {
+                if let Some(func_type) = &func_def.function_type {
+                    return format_type(
+                        quiver.type_registry(),
+                        &Type::Function(Box::new(func_type.clone())),
+                    );
+                }
+            }
+            "<function>".to_string()
+        }
+        _ => value.format_with_types(quiver.type_registry()),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -111,7 +190,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                         } else {
                             println!("Variables:");
                             for (name, value) in variables {
-                                println!("  {} = {}", name, quiver.format_value(&value));
+                                println!("  {} = {}", name, format_value(&quiver, &value));
                             }
                         }
                         continue;
@@ -124,7 +203,10 @@ fn run_repl() -> Result<(), ReadlineError> {
                         } else {
                             println!("Type:");
                             for (_name, type_id) in types {
-                                println!("  {}", quiver.format_type(&type_id));
+                                println!(
+                                    "  {}",
+                                    format_type(quiver.type_registry(), &Type::Tuple(type_id))
+                                )
                             }
                         }
                         continue;
@@ -133,7 +215,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                     _ => {
                         let module_path = std::env::current_dir().ok();
                         match quiver.evaluate(line, module_path) {
-                            Ok(Some(value)) => println!("{}", quiver.format_value(&value)),
+                            Ok(Some(value)) => println!("{}", format_value(&quiver, &value)),
                             Ok(None) => {}
                             Err(error) => eprintln!("{}", error),
                         }
@@ -208,7 +290,7 @@ fn compile_command(
 
 fn handle_result(result: Result<Option<quiver::vm::Value>, quiver::Error>, quiver: &Quiver) {
     match result {
-        Ok(Some(value)) => println!("{}", quiver.format_value(&value)),
+        Ok(Some(value)) => println!("{}", format_value(quiver, &value)),
         Ok(None) => {}
         Err(err) => {
             eprintln!("Error: {}", err);
