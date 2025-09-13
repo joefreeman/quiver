@@ -7,6 +7,11 @@ fn test_simple_function() {
 }
 
 #[test]
+fn test_nil_function() {
+    quiver().evaluate("f = #{ [] }, [] ~> f").expect_nil();
+}
+
+#[test]
 fn test_function_with_parameter() {
     quiver()
         .evaluate("inc = #int { [$, 1] ~> <add> }, 3 ~> inc")

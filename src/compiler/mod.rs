@@ -588,7 +588,13 @@ impl<'a> Compiler<'a> {
             self.codegen.patch_jump_to_addr(jump_addr, end_addr);
         }
 
-        narrow_types(branch_types)
+        if branch_types.is_empty() {
+            // If no branches produced types (e.g., all were compile-time NIL),
+            // return NIL as the block type
+            Ok(TypeSet::resolved(Type::Tuple(TypeId::NIL)))
+        } else {
+            narrow_types(branch_types)
+        }
     }
 
     fn compile_expression(
