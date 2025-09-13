@@ -1,6 +1,5 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use quiver::Quiver;
-use quiver::bytecode::TypeId;
 use quiver::types::Type;
 use quiver::vm::Value;
 use rustyline::Editor;
@@ -332,25 +331,21 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
         Type::Binary => "bin".to_string(),
         Type::Tuple(type_id) => {
             if let Some((name, fields)) = quiver.lookup_type(type_id) {
-                if fields.is_empty() {
-                    name.as_deref().unwrap_or("[]").to_string()
-                } else {
-                    let field_strs: Vec<String> = fields
-                        .iter()
-                        .map(|(field_name, field_type)| {
-                            if let Some(field_name) = field_name {
-                                format!("{}: {}", field_name, format_type(quiver, field_type))
-                            } else {
-                                format_type(quiver, field_type)
-                            }
-                        })
-                        .collect();
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(field_name, field_type)| {
+                        if let Some(field_name) = field_name {
+                            format!("{}: {}", field_name, format_type(quiver, field_type))
+                        } else {
+                            format_type(quiver, field_type)
+                        }
+                    })
+                    .collect();
 
-                    if let Some(type_name) = name {
-                        format!("{}[{}]", type_name, field_strs.join(", "))
-                    } else {
-                        format!("[{}]", field_strs.join(", "))
-                    }
+                if let Some(type_name) = name {
+                    format!("{}[{}]", type_name, field_strs.join(", "))
+                } else {
+                    format!("[{}]", field_strs.join(", "))
                 }
             } else {
                 format!("Type{}", type_id.0)
@@ -396,13 +391,6 @@ fn format_value(quiver: &Quiver, value: &Value) -> String {
         Value::Integer(i) => i.to_string(),
         Value::Binary(_) => "<binary>".to_string(),
         Value::Tuple(type_id, elements) => {
-            if *type_id == TypeId::NIL {
-                return "[]".to_string();
-            }
-            if *type_id == TypeId::OK {
-                return "Ok".to_string();
-            }
-
             if let Some((name, fields)) = quiver.lookup_type(type_id) {
                 if elements.is_empty() {
                     return name.as_deref().unwrap_or("[]").to_string();
