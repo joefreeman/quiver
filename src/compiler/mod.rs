@@ -107,6 +107,19 @@ pub enum Error {
         type_name: String,
         field_name: String,
     },
+
+    // Pattern matching errors
+    TypeNotInRegistry {
+        type_id: crate::bytecode::TypeId,
+    },
+    PatternNoMatchingTypes {
+        pattern: String,
+    },
+
+    // Internal consistency errors
+    InternalError {
+        message: String,
+    },
 }
 
 pub struct Compiler<'a> {

@@ -184,7 +184,10 @@ impl<'a> TypeContext<'a> {
         type_id: &TypeId,
         field_name: &str,
     ) -> Result<(usize, Type), Error> {
-        let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+        let tuple_type = self
+            .type_registry
+            .lookup_type(type_id)
+            .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
         let (index, (_, field_type)) = tuple_type
             .1
             .iter()
@@ -202,7 +205,10 @@ impl<'a> TypeContext<'a> {
         type_id: &TypeId,
         position: usize,
     ) -> Result<Type, Error> {
-        let tuple_type = self.type_registry.lookup_type(type_id).unwrap();
+        let tuple_type = self
+            .type_registry
+            .lookup_type(type_id)
+            .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
         if position >= tuple_type.1.len() {
             return Err(Error::PositionalAccessOnNonTuple { index: position });
         }

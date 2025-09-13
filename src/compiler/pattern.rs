@@ -76,17 +76,19 @@ impl<'a> PatternCompiler<'a> {
             > 1
     }
 
-    /// Extract all tuple type IDs from a TypeSet
-    fn extract_tuple_types(&self, value_type: &TypeSet) -> Vec<TypeId> {
-        value_type
-            .iter()
-            .filter_map(|t| match t {
-                Type::Tuple(id) if self.type_context.type_registry.lookup_type(id).is_some() => {
-                    Some(*id)
+    /// Extract all tuple type IDs from a TypeSet, ensuring all are in registry
+    fn extract_tuple_types(&self, value_type: &TypeSet) -> Result<Vec<TypeId>, Error> {
+        let mut tuple_types = Vec::new();
+        for t in value_type.iter() {
+            if let Type::Tuple(id) = t {
+                // Verify the type exists in the registry
+                if self.type_context.type_registry.lookup_type(id).is_none() {
+                    return Err(Error::TypeNotInRegistry { type_id: *id });
                 }
-                _ => None,
-            })
-            .collect()
+                tuple_types.push(*id);
+            }
+        }
+        Ok(tuple_types)
     }
 
     /// Find tuple types that match the given pattern
@@ -99,23 +101,27 @@ impl<'a> PatternCompiler<'a> {
 
         for typ in value_type.iter() {
             if let Type::Tuple(type_id) = typ {
-                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                    // Check name match if specified
-                    if let Some(ref pattern_name) = tuple_pattern.name {
-                        if tuple_info.0.as_ref() != Some(pattern_name) {
-                            continue;
-                        }
-                    }
+                let tuple_info = self
+                    .type_context
+                    .type_registry
+                    .lookup_type(type_id)
+                    .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
-                    // Check field count
-                    if tuple_pattern.fields.len() != tuple_info.1.len() {
+                // Check name match if specified
+                if let Some(ref pattern_name) = tuple_pattern.name {
+                    if tuple_info.0.as_ref() != Some(pattern_name) {
                         continue;
                     }
-
-                    // Build field mappings
-                    let field_mappings = self.build_field_mappings(tuple_pattern, &tuple_info.1);
-                    matching_types.push((*type_id, field_mappings));
                 }
+
+                // Check field count
+                if tuple_pattern.fields.len() != tuple_info.1.len() {
+                    continue;
+                }
+
+                // Build field mappings
+                let field_mappings = self.build_field_mappings(tuple_pattern, &tuple_info.1)?;
+                matching_types.push((*type_id, field_mappings));
             }
         }
 
@@ -127,25 +133,31 @@ impl<'a> PatternCompiler<'a> {
         &self,
         tuple_pattern: &ast::TuplePattern,
         tuple_fields: &[(Option<String>, Type)],
-    ) -> Vec<(usize, usize)> {
-        tuple_pattern
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(pattern_idx, field_pattern)| {
-                // For identifier patterns, try to match by field name
-                if let ast::Pattern::Identifier(field_name) = &field_pattern.pattern {
-                    tuple_fields
-                        .iter()
-                        .position(|(name, _)| name.as_ref() == Some(field_name))
-                        .map(|idx| (pattern_idx, idx))
-                        .unwrap_or((pattern_idx, pattern_idx))
-                } else {
-                    // For non-identifier patterns, use positional matching
-                    (pattern_idx, pattern_idx)
+    ) -> Result<Vec<(usize, usize)>, Error> {
+        let mut mappings = Vec::new();
+
+        for (pattern_idx, field_pattern) in tuple_pattern.fields.iter().enumerate() {
+            // For identifier patterns, try to match by field name
+            if let ast::Pattern::Identifier(field_name) = &field_pattern.pattern {
+                match tuple_fields
+                    .iter()
+                    .position(|(name, _)| name.as_ref() == Some(field_name))
+                {
+                    Some(idx) => mappings.push((pattern_idx, idx)),
+                    None => {
+                        // If we have a named field pattern but can't find it, use positional
+                        // This is actually valid for tuple patterns with identifier bindings
+                        // that aren't field names, so we fall back to positional matching
+                        mappings.push((pattern_idx, pattern_idx));
+                    }
                 }
-            })
-            .collect()
+            } else {
+                // For non-identifier patterns, use positional matching
+                mappings.push((pattern_idx, pattern_idx));
+            }
+        }
+
+        Ok(mappings)
     }
 
     /// Main entry point for pattern matching compilation
@@ -261,61 +273,65 @@ impl<'a> PatternCompiler<'a> {
 
         // For each matching type, create binding sets
         for (type_id, field_mappings) in &matching_types {
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                // Start with a binding set for this type
-                let mut base_requirements = vec![];
-                // Add type check if needed
-                if self.needs_runtime_type_check(value_type) {
-                    base_requirements.push(Requirement {
-                        path: path.clone(),
-                        check: RuntimeCheck::TupleType(*type_id),
-                    });
-                }
+            let tuple_info = self
+                .type_context
+                .type_registry
+                .lookup_type(type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
-                let mut current_binding_sets = vec![BindingSet {
-                    requirements: base_requirements,
-                    bindings: vec![],
-                }];
-
-                // Process each field pattern
-                for (pattern_idx, actual_idx) in field_mappings {
-                    let field_pattern = &tuple_pattern.fields[*pattern_idx].pattern;
-                    let field_type = TypeSet::resolved(tuple_info.1[*actual_idx].1.clone());
-                    let mut field_path = path.clone();
-                    field_path.push(*actual_idx);
-
-                    // Recursively analyze the field pattern
-                    let field_binding_sets =
-                        self.analyze_pattern(field_pattern, &field_type, field_path)?;
-
-                    if field_binding_sets.is_empty() {
-                        // This type variant can't match, skip it entirely
-                        current_binding_sets.clear();
-                        break;
-                    }
-
-                    // Combine field binding sets with current binding sets (cartesian product)
-                    let mut new_binding_sets = vec![];
-                    for current_set in &current_binding_sets {
-                        for field_set in &field_binding_sets {
-                            let mut combined_requirements = current_set.requirements.clone();
-                            combined_requirements.extend(field_set.requirements.clone());
-
-                            let mut combined_bindings = current_set.bindings.clone();
-                            combined_bindings.extend(field_set.bindings.clone());
-
-                            new_binding_sets.push(BindingSet {
-                                requirements: combined_requirements,
-                                bindings: combined_bindings,
-                            });
-                        }
-                    }
-                    current_binding_sets = new_binding_sets;
-                }
-
-                // Add all binding sets from this type to the result
-                binding_sets.extend(current_binding_sets);
+            // Start with a binding set for this type
+            let mut base_requirements = vec![];
+            // Add type check if needed
+            if self.needs_runtime_type_check(value_type) {
+                base_requirements.push(Requirement {
+                    path: path.clone(),
+                    check: RuntimeCheck::TupleType(*type_id),
+                });
             }
+
+            let mut current_binding_sets = vec![BindingSet {
+                requirements: base_requirements,
+                bindings: vec![],
+            }];
+
+            // Process each field pattern
+            for (pattern_idx, actual_idx) in field_mappings {
+                let field_pattern = &tuple_pattern.fields[*pattern_idx].pattern;
+                let field_type = TypeSet::resolved(tuple_info.1[*actual_idx].1.clone());
+                let mut field_path = path.clone();
+                field_path.push(*actual_idx);
+
+                // Recursively analyze the field pattern
+                let field_binding_sets =
+                    self.analyze_pattern(field_pattern, &field_type, field_path)?;
+
+                if field_binding_sets.is_empty() {
+                    // This type variant can't match, skip it entirely
+                    current_binding_sets.clear();
+                    break;
+                }
+
+                // Combine field binding sets with current binding sets (cartesian product)
+                let mut new_binding_sets = vec![];
+                for current_set in &current_binding_sets {
+                    for field_set in &field_binding_sets {
+                        let mut combined_requirements = current_set.requirements.clone();
+                        combined_requirements.extend(field_set.requirements.clone());
+
+                        let mut combined_bindings = current_set.bindings.clone();
+                        combined_bindings.extend(field_set.bindings.clone());
+
+                        new_binding_sets.push(BindingSet {
+                            requirements: combined_requirements,
+                            bindings: combined_bindings,
+                        });
+                    }
+                }
+                current_binding_sets = new_binding_sets;
+            }
+
+            // Add all binding sets from this type to the result
+            binding_sets.extend(current_binding_sets);
         }
 
         // Special case: unresolved types
@@ -364,7 +380,7 @@ impl<'a> PatternCompiler<'a> {
         let mut binding_sets = vec![];
 
         // Find types that have all required fields
-        let matching_types = self.find_types_with_fields(field_names, value_type);
+        let matching_types = self.find_types_with_fields(field_names, value_type)?;
 
         if matching_types.is_empty() {
             return Ok(binding_sets); // No matching types
@@ -384,18 +400,22 @@ impl<'a> PatternCompiler<'a> {
 
             let mut bindings = Vec::new();
 
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                for (i, field_name) in field_names.iter().enumerate() {
-                    let idx = field_indices[i];
-                    let field_type = &tuple_info.1[idx].1;
-                    let mut field_path = path.clone();
-                    field_path.push(idx);
-                    bindings.push(Binding {
-                        name: field_name.clone(),
-                        path: field_path,
-                        var_type: TypeSet::resolved(field_type.clone()),
-                    });
-                }
+            let tuple_info = self
+                .type_context
+                .type_registry
+                .lookup_type(type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+
+            for (i, field_name) in field_names.iter().enumerate() {
+                let idx = field_indices[i];
+                let field_type = &tuple_info.1[idx].1;
+                let mut field_path = path.clone();
+                field_path.push(idx);
+                bindings.push(Binding {
+                    name: field_name.clone(),
+                    path: field_path,
+                    var_type: TypeSet::resolved(field_type.clone()),
+                });
             }
 
             binding_sets.push(BindingSet {
@@ -415,7 +435,7 @@ impl<'a> PatternCompiler<'a> {
         let mut binding_sets = vec![];
 
         // Collect all tuple types
-        let tuple_types = self.extract_tuple_types(value_type);
+        let tuple_types = self.extract_tuple_types(value_type)?;
         if tuple_types.is_empty() {
             return Ok(binding_sets);
         }
@@ -424,11 +444,15 @@ impl<'a> PatternCompiler<'a> {
         // First, collect all unique field names from all types
         let mut all_field_names = std::collections::BTreeSet::new();
         for type_id in &tuple_types {
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                for (_, (name, _)) in tuple_info.1.iter().enumerate() {
-                    if let Some(field_name) = name {
-                        all_field_names.insert(field_name.clone());
-                    }
+            let tuple_info = self
+                .type_context
+                .type_registry
+                .lookup_type(type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+
+            for (_, (name, _)) in tuple_info.1.iter().enumerate() {
+                if let Some(field_name) = name {
+                    all_field_names.insert(field_name.clone());
                 }
             }
         }
@@ -447,24 +471,28 @@ impl<'a> PatternCompiler<'a> {
 
             let mut bindings = Vec::new();
 
-            if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                // Extract fields in alphabetical order (from all_field_names)
-                for field_name in &all_field_names {
-                    // Find this field in the current type
-                    if let Some((idx, (_, field_type))) = tuple_info
-                        .1
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (name, _))| name.as_ref() == Some(field_name))
-                    {
-                        let mut field_path = path.clone();
-                        field_path.push(idx);
-                        bindings.push(Binding {
-                            name: field_name.clone(),
-                            path: field_path,
-                            var_type: TypeSet::resolved(field_type.clone()),
-                        });
-                    }
+            let tuple_info = self
+                .type_context
+                .type_registry
+                .lookup_type(type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+
+            // Extract fields in alphabetical order (from all_field_names)
+            for field_name in &all_field_names {
+                // Find this field in the current type
+                if let Some((idx, (_, field_type))) = tuple_info
+                    .1
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (name, _))| name.as_ref() == Some(field_name))
+                {
+                    let mut field_path = path.clone();
+                    field_path.push(idx);
+                    bindings.push(Binding {
+                        name: field_name.clone(),
+                        path: field_path,
+                        var_type: TypeSet::resolved(field_type.clone()),
+                    });
                 }
             }
 
@@ -483,20 +511,6 @@ impl<'a> PatternCompiler<'a> {
         binding_sets: &[BindingSet],
         fail_addr: usize,
     ) -> Result<(), Error> {
-        // Generate code for binding sets
-        self.generate_binding_sets(binding_sets, fail_addr)?;
-        Ok(())
-    }
-
-    fn generate_binding_sets(
-        &mut self,
-        binding_sets: &[BindingSet],
-        fail_addr: usize,
-    ) -> Result<(), Error> {
-        if binding_sets.is_empty() {
-            return Ok(());
-        }
-
         if binding_sets.len() == 1 {
             // Simple case: only one binding set
             let binding_set = &binding_sets[0];
@@ -665,20 +679,24 @@ impl<'a> PatternCompiler<'a> {
         &self,
         field_names: &[String],
         value_type: &TypeSet,
-    ) -> Vec<(TypeId, Vec<usize>)> {
+    ) -> Result<Vec<(TypeId, Vec<usize>)>, Error> {
         let mut matching_types = Vec::new();
 
         for typ in value_type.iter() {
             if let Type::Tuple(type_id) = typ {
-                if let Some(tuple_info) = self.type_context.type_registry.lookup_type(type_id) {
-                    if let Some(indices) = self.find_field_indices(field_names, &tuple_info.1) {
-                        matching_types.push((*type_id, indices));
-                    }
+                let tuple_info = self
+                    .type_context
+                    .type_registry
+                    .lookup_type(type_id)
+                    .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+
+                if let Some(indices) = self.find_field_indices(field_names, &tuple_info.1) {
+                    matching_types.push((*type_id, indices));
                 }
             }
         }
 
-        matching_types
+        Ok(matching_types)
     }
 
     /// Find indices of specified fields in a tuple type
