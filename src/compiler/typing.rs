@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use crate::{
     ast,
     bytecode::TypeId,
-    types::{FunctionType, TupleTypeInfo, Type},
+    types::{FunctionType, Type},
+    vm::VM,
 };
 
 use super::Error;
@@ -80,17 +81,13 @@ pub fn narrow_types(types: Vec<TypeSet>) -> Result<TypeSet, Error> {
     }
 }
 
-pub struct TypeContext<'a> {
+pub struct TypeContext {
     pub type_aliases: HashMap<String, TypeSet>,
-    pub type_registry: &'a mut TypeRegistry,
     pub resolution_stack: Vec<String>,
 }
 
-impl<'a> TypeContext<'a> {
-    pub fn new(
-        type_registry: &'a mut TypeRegistry,
-        existing_aliases: &HashMap<String, Vec<Type>>,
-    ) -> Self {
+impl TypeContext {
+    pub fn new(existing_aliases: &HashMap<String, Vec<Type>>) -> Self {
         let mut type_aliases = HashMap::new();
         for (name, types) in existing_aliases.iter() {
             if !types.is_empty() {
@@ -99,12 +96,11 @@ impl<'a> TypeContext<'a> {
         }
         Self {
             type_aliases,
-            type_registry,
             resolution_stack: Vec::new(),
         }
     }
 
-    pub fn resolve_ast_type(&mut self, ast_type: ast::Type) -> Result<TypeSet, Error> {
+    pub fn resolve_ast_type(&mut self, ast_type: ast::Type, vm: &mut VM) -> Result<TypeSet, Error> {
         match ast_type {
             ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(TypeSet::resolved(Type::Integer)),
             ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(TypeSet::resolved(Type::Binary)),
@@ -113,14 +109,14 @@ impl<'a> TypeContext<'a> {
                 let mut field_variants: Vec<(Option<String>, Vec<Type>)> = Vec::new();
 
                 for field in tuple.fields {
-                    let field_type_set = self.resolve_ast_type(field.type_def)?;
+                    let field_type_set = self.resolve_ast_type(field.type_def, vm)?;
                     let field_possibilities = field_type_set.to_vec();
                     field_variants.push((field.name, field_possibilities));
                 }
 
                 // Generate cartesian product of all field type combinations
                 let tuple_variants =
-                    self.cartesian_product_tuple_types(&tuple.name, field_variants);
+                    self.cartesian_product_tuple_types(&tuple.name, field_variants, vm);
 
                 if tuple_variants.is_empty() {
                     return Err(Error::TypeUnresolved(
@@ -130,10 +126,10 @@ impl<'a> TypeContext<'a> {
                 Ok(TypeSet(tuple_variants))
             }
             ast::Type::Function(function) => {
-                let input_type_set = self.resolve_ast_type(*function.input)?;
+                let input_type_set = self.resolve_ast_type(*function.input, vm)?;
                 let input_possibilities = input_type_set.to_vec();
 
-                let output_type_set = self.resolve_ast_type(*function.output)?;
+                let output_type_set = self.resolve_ast_type(*function.output, vm)?;
                 let output_possibilities = output_type_set.to_vec();
 
                 // Generate cartesian product of input × output types
@@ -160,7 +156,7 @@ impl<'a> TypeContext<'a> {
                 // Resolve all union member types
                 let mut resolved_types = Vec::new();
                 for member_type in union.types {
-                    let member_type_set = self.resolve_ast_type(member_type)?;
+                    let member_type_set = self.resolve_ast_type(member_type, vm)?;
                     resolved_types.extend(member_type_set.to_vec());
                 }
 
@@ -176,7 +172,7 @@ impl<'a> TypeContext<'a> {
                     // Found a cycle! Return a Cycle type
                     return Ok(TypeSet::resolved(Type::Cycle(depth + 1)));
                 }
-                
+
                 // Look up type alias
                 if let Some(aliased_type) = self.type_aliases.get(&alias) {
                     // If it's a placeholder (empty), we're in the middle of resolving it
@@ -185,7 +181,7 @@ impl<'a> TypeContext<'a> {
                         // For now, return a cycle pointing to the current level
                         return Ok(TypeSet::resolved(Type::Cycle(self.resolution_stack.len())));
                     }
-                    
+
                     // Push to stack for cycle detection
                     self.resolution_stack.push(alias.clone());
                     let result = Ok(aliased_type.clone());
@@ -202,9 +198,9 @@ impl<'a> TypeContext<'a> {
         &self,
         type_id: &TypeId,
         field_name: &str,
+        vm: &VM,
     ) -> Result<(usize, Type), Error> {
-        let tuple_type = self
-            .type_registry
+        let tuple_type = vm
             .lookup_type(type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
         let (index, (_, field_type)) = tuple_type
@@ -223,9 +219,9 @@ impl<'a> TypeContext<'a> {
         &self,
         type_id: &TypeId,
         position: usize,
+        vm: &VM,
     ) -> Result<Type, Error> {
-        let tuple_type = self
-            .type_registry
+        let tuple_type = vm
             .lookup_type(type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
         if position >= tuple_type.1.len() {
@@ -238,10 +234,11 @@ impl<'a> TypeContext<'a> {
         &mut self,
         tuple_name: &Option<String>,
         field_variants: Vec<(Option<String>, Vec<Type>)>,
+        vm: &mut VM,
     ) -> Vec<Type> {
         // Handle empty fields case
         if field_variants.is_empty() {
-            let type_id = self.type_registry.register_type(tuple_name.clone(), vec![]);
+            let type_id = vm.register_type(tuple_name.clone(), vec![]);
             return vec![Type::Tuple(type_id)];
         }
 
@@ -252,9 +249,7 @@ impl<'a> TypeContext<'a> {
         combinations
             .into_iter()
             .map(|field_types| {
-                let type_id = self
-                    .type_registry
-                    .register_type(tuple_name.clone(), field_types);
+                let type_id = vm.register_type(tuple_name.clone(), field_types);
                 Type::Tuple(type_id)
             })
             .collect()
@@ -283,82 +278,5 @@ impl<'a> TypeContext<'a> {
         }
 
         results
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TypeRegistry {
-    types: HashMap<TypeId, TupleTypeInfo>,
-    next_id: usize,
-}
-
-impl Default for TypeRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TypeRegistry {
-    pub fn new() -> Self {
-        let mut registry = Self {
-            types: HashMap::new(),
-            next_id: 0,
-        };
-
-        let nil_type_id = registry.register_type(None, vec![]);
-        assert_eq!(nil_type_id, TypeId::NIL);
-
-        let nil_type_id = registry.register_type(Some("Ok".to_string()), vec![]);
-        assert_eq!(nil_type_id, TypeId::OK);
-
-        registry
-    }
-
-    pub fn register_type(
-        &mut self,
-        name: Option<String>,
-        fields: Vec<(Option<String>, Type)>,
-    ) -> TypeId {
-        for (&existing_id, existing_type) in &self.types {
-            if existing_type.0 == name && existing_type.1 == fields {
-                return existing_id;
-            }
-        }
-
-        let type_id = TypeId(self.next_id);
-        self.next_id += 1;
-
-        self.types.insert(type_id, (name, fields));
-        type_id
-    }
-
-    pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.types.get(type_id)
-    }
-
-    pub fn get_types(&self) -> &HashMap<TypeId, TupleTypeInfo> {
-        &self.types
-    }
-
-    pub fn find_type(
-        &self,
-        name: Option<String>,
-        fields: &[(Option<String>, Type)],
-    ) -> Option<TypeId> {
-        for (&existing_id, existing_type) in &self.types {
-            if existing_type.0 == name && existing_type.1 == fields {
-                return Some(existing_id);
-            }
-        }
-        None
-    }
-
-    pub fn get_tuple_name(&self, type_id: &TypeId) -> String {
-        if let Some((name, _)) = self.lookup_type(type_id) {
-            let default_name = format!("Type{}", type_id.0);
-            name.as_deref().unwrap_or(&default_name).to_string()
-        } else {
-            format!("Type{}", type_id.0)
-        }
     }
 }

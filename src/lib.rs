@@ -10,13 +10,12 @@ pub mod vm;
 use std::collections::HashMap;
 
 use bytecode::{Function, TypeId};
-use compiler::{Compiler, TypeRegistry};
+use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
 use types::TupleTypeInfo;
 use vm::{VM, Value};
 
 pub struct Quiver {
-    type_registry: TypeRegistry,
     type_aliases: HashMap<String, Vec<types::Type>>,
     module_loader: Box<dyn ModuleLoader>,
     vm: VM,
@@ -26,13 +25,12 @@ impl Quiver {
     pub fn new(modules: Option<HashMap<String, String>>) -> Self {
         Self {
             // TODO: constant/function pools?
-            type_registry: TypeRegistry::new(),
             type_aliases: HashMap::new(),
             module_loader: match modules {
                 Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
                 None => Box::new(FileSystemModuleLoader::new()),
             },
-            vm: VM::new(),
+            vm: VM::new(None),
         }
     }
 
@@ -45,7 +43,6 @@ impl Quiver {
 
         let instructions = Compiler::compile(
             program,
-            &mut self.type_registry,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
             &mut self.vm,
@@ -66,7 +63,7 @@ impl Quiver {
     }
 
     pub fn list_types(&self) -> Vec<(String, bytecode::TypeId)> {
-        self.type_registry
+        self.vm
             .get_types()
             .iter()
             .map(|(&type_id, (name, _fields))| {
@@ -88,7 +85,6 @@ impl Quiver {
 
         let instructions = Compiler::compile(
             program,
-            &mut self.type_registry,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
             &mut self.vm,
@@ -114,25 +110,21 @@ impl Quiver {
             functions: self.vm.get_functions().clone(),
             builtins: self.vm.get_builtins().clone(),
             entry,
-            tuples: Some(self.type_registry.get_types().clone()),
+            types: self.vm.get_types(),
         };
 
         Ok(bytecode)
     }
 
     pub fn execute(&mut self, bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
-        for constant in bytecode.constants {
-            self.vm.register_constant(constant);
-        }
+        // Get entry point before moving bytecode
+        let entry = bytecode.entry;
 
-        for function in bytecode.functions {
-            self.vm.register_function(function);
-        }
-        for function in bytecode.builtins {
-            self.vm.register_builtin(function);
-        }
+        // Replace VM with a fresh one loaded with bytecode
+        self.vm = VM::new(Some(bytecode));
 
-        if let Some(entry) = bytecode.entry {
+        // Execute entry point if present
+        if let Some(entry) = entry {
             self.vm.execute_function(entry).map_err(Error::RuntimeError)
         } else {
             Ok(None)
@@ -140,7 +132,7 @@ impl Quiver {
     }
 
     pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.type_registry.lookup_type(type_id)
+        self.vm.lookup_type(type_id)
     }
 
     pub fn get_function(&self, function: usize) -> Option<&Function> {

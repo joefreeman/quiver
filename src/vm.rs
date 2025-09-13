@@ -1,5 +1,6 @@
 use crate::builtins::BUILTIN_REGISTRY;
-use crate::bytecode::{Constant, Function, Instruction, TypeId};
+use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
+use crate::types::{TupleTypeInfo, Type, TypeRegistry};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -138,23 +139,41 @@ pub struct VM {
     stack: Vec<Value>,
     scopes: Vec<Scope>,
     frames: Vec<Frame>,
+    type_registry: TypeRegistry,
 }
 
 impl Default for VM {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
 impl VM {
-    pub fn new() -> Self {
-        Self {
-            constants: Vec::new(),
-            functions: Vec::new(),
-            builtins: Vec::new(),
-            stack: Vec::new(),
-            scopes: vec![Scope::new(Value::Tuple(TypeId::NIL, vec![]))],
-            frames: Vec::new(),
+    pub fn new(bytecode: Option<Bytecode>) -> Self {
+        match bytecode {
+            Some(bytecode) => {
+                let mut type_registry = TypeRegistry::new();
+                type_registry.load_types(bytecode.types);
+
+                Self {
+                    constants: bytecode.constants,
+                    functions: bytecode.functions,
+                    builtins: bytecode.builtins,
+                    stack: Vec::new(),
+                    scopes: vec![Scope::new(Value::Tuple(TypeId::NIL, vec![]))],
+                    frames: Vec::new(),
+                    type_registry,
+                }
+            }
+            None => Self {
+                constants: Vec::new(),
+                functions: Vec::new(),
+                builtins: Vec::new(),
+                stack: Vec::new(),
+                scopes: vec![Scope::new(Value::Tuple(TypeId::NIL, vec![]))],
+                frames: Vec::new(),
+                type_registry: TypeRegistry::new(),
+            },
         }
     }
 
@@ -245,6 +264,25 @@ impl VM {
         &self.builtins
     }
 
+    // Proxy method for registering types
+    pub fn register_type(
+        &mut self,
+        name: Option<String>,
+        fields: Vec<(Option<String>, Type)>,
+    ) -> TypeId {
+        self.type_registry.register_type(name, fields)
+    }
+
+    // Proxy method for looking up types
+    pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
+        self.type_registry.lookup_type(type_id)
+    }
+
+    // Get all types for serialization/transfer
+    pub fn get_types(&self) -> HashMap<TypeId, TupleTypeInfo> {
+        self.type_registry.get_types().clone()
+    }
+
     pub fn execute_instructions(
         &mut self,
         instructions: Vec<Instruction>,
@@ -288,7 +326,7 @@ impl VM {
                 Instruction::Swap => self.handle_swap()?,
                 Instruction::Load(ref name) => self.handle_load(name)?,
                 Instruction::Store(ref name) => self.handle_store(name)?,
-                Instruction::Tuple(type_id, size) => self.handle_tuple(type_id, size)?,
+                Instruction::Tuple(type_id) => self.handle_tuple(type_id)?,
                 Instruction::Get(index) => self.handle_get(index)?,
                 Instruction::IsInteger => self.handle_is_integer()?,
                 Instruction::IsBinary => self.handle_is_binary()?,
@@ -379,7 +417,17 @@ impl VM {
         Ok(())
     }
 
-    fn handle_tuple(&mut self, type_id: TypeId, size: usize) -> Result<(), Error> {
+    fn handle_tuple(&mut self, type_id: TypeId) -> Result<(), Error> {
+        // Look up the type to get the field count
+        let Some((_, fields)) = self.type_registry.lookup_type(&type_id) else {
+            return Err(Error::TypeMismatch {
+                expected: "known tuple type".to_string(),
+                found: format!("unknown TypeId({:?})", type_id),
+            });
+        };
+
+        let size = fields.len();
+
         let mut values = Vec::new();
         for _ in 0..size {
             let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
@@ -427,12 +475,94 @@ impl VM {
 
     fn handle_is_tuple(&mut self, expected_type_id: TypeId) -> Result<(), Error> {
         let value = self.stack.last().ok_or(Error::StackUnderflow)?;
-        let is_match = matches!(value, Value::Tuple(type_id, _) if (type_id == &expected_type_id));
+
+        let is_match = if let Value::Tuple(actual_type_id, _) = value {
+            if actual_type_id == &expected_type_id {
+                // Fast path: exact match
+                true
+            } else {
+                // Structural check for recursive types
+                self.types_structurally_compatible(*actual_type_id, expected_type_id)?
+            }
+        } else {
+            false
+        };
+
         self.stack.push(Value::Tuple(
             if is_match { TypeId::OK } else { TypeId::NIL },
             vec![],
         ));
         Ok(())
+    }
+
+    fn types_structurally_compatible(
+        &self,
+        actual: TypeId,
+        expected: TypeId,
+    ) -> Result<bool, Error> {
+        // Look up both types in the registry, returning error if not found
+        let (actual_name, actual_fields) =
+            self.type_registry
+                .lookup_type(&actual)
+                .ok_or_else(|| Error::TypeMismatch {
+                    expected: "known tuple type".to_string(),
+                    found: format!("unknown actual TypeId({:?})", actual),
+                })?;
+
+        let (expected_name, expected_fields) = self
+            .type_registry
+            .lookup_type(&expected)
+            .ok_or_else(|| Error::TypeMismatch {
+                expected: "known tuple type".to_string(),
+                found: format!("unknown expected TypeId({:?})", expected),
+            })?;
+
+        // Check tuple names match
+        if actual_name != expected_name {
+            return Ok(false);
+        }
+
+        // Check field count
+        if actual_fields.len() != expected_fields.len() {
+            return Ok(false);
+        }
+
+        // Check each field type recursively
+        for ((_, actual_type), (_, expected_type)) in
+            actual_fields.iter().zip(expected_fields.iter())
+        {
+            if !self.type_compatible(actual_type, expected_type)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn type_compatible(&self, actual: &Type, expected: &Type) -> Result<bool, Error> {
+        match (actual, expected) {
+            (Type::Integer, Type::Integer) => Ok(true),
+            (Type::Binary, Type::Binary) => Ok(true),
+            (Type::Tuple(a), Type::Tuple(e)) => {
+                if a == e {
+                    Ok(true)
+                } else {
+                    self.types_structurally_compatible(*a, *e)
+                }
+            }
+            // Key case: concrete type matching a cycle
+            (Type::Tuple(_), Type::Cycle(_)) => {
+                // A concrete tuple is compatible with a cycle
+                // This is what enables recursive type matching
+                Ok(true)
+            }
+            (Type::Cycle(_), Type::Cycle(_)) => {
+                // Cycles at the same depth are compatible
+                // For more sophisticated checking, we'd need to track depth
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn handle_jump(&mut self, offset: isize) -> Result<(), Error> {

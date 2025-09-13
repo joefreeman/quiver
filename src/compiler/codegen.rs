@@ -106,7 +106,7 @@ impl InstructionBuilder {
             self.add_instruction(Instruction::Pop);
         }
         self.add_instruction(Instruction::Pop); // Remove duplicated value
-        self.add_instruction(Instruction::Tuple(TypeId::NIL, 0));
+        self.add_instruction(Instruction::Tuple(TypeId::NIL));
     }
 
     /// Emits pattern match success sequence (store variables and return OK)
@@ -115,7 +115,7 @@ impl InstructionBuilder {
             self.add_instruction(Instruction::Store(variable_name.clone()));
         }
         self.add_instruction(Instruction::Pop); // Remove duplicated value
-        self.add_instruction(Instruction::Tuple(TypeId::OK, 0));
+        self.add_instruction(Instruction::Tuple(TypeId::OK));
     }
 
     /// Emits common pattern: Duplicate -> Not -> JumpIf (returns jump address for patching) -> Pop

@@ -12,7 +12,7 @@ mod variables;
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::PatternCompiler;
-pub use typing::{TupleAccessor, TypeRegistry, TypeSet, narrow_types};
+pub use typing::{TupleAccessor, TypeSet, narrow_types};
 
 use crate::{
     ast,
@@ -122,7 +122,7 @@ pub enum Error {
 pub struct Compiler<'a> {
     // Core components
     codegen: InstructionBuilder,
-    type_context: TypeContext<'a>,
+    type_context: TypeContext,
     module_cache: ModuleCache,
 
     // State management
@@ -138,7 +138,6 @@ pub struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     pub fn compile(
         program: ast::Program,
-        type_registry: &'a mut TypeRegistry,
         type_aliases: &'a mut HashMap<String, Vec<Type>>,
         module_loader: &'a dyn ModuleLoader,
         vm: &'a mut VM,
@@ -149,7 +148,7 @@ impl<'a> Compiler<'a> {
 
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
-            type_context: TypeContext::new(type_registry, type_aliases),
+            type_context: TypeContext::new(type_aliases),
             module_cache: ModuleCache::new(),
             scopes: vec![HashMap::new()],
             vm,
@@ -207,9 +206,11 @@ impl<'a> Compiler<'a> {
     fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
         // Push the type name onto the resolution stack to detect cycles
         self.type_context.resolution_stack.push(name.to_string());
-        let resolved_type = self.type_context.resolve_ast_type(type_definition)?;
+        let resolved_type = self
+            .type_context
+            .resolve_ast_type(type_definition, self.vm)?;
         self.type_context.resolution_stack.pop();
-        
+
         self.type_context
             .type_aliases
             .insert(name.to_string(), resolved_type);
@@ -228,6 +229,7 @@ impl<'a> Compiler<'a> {
             self.module_loader,
             self.module_path.as_ref(),
             &mut self.type_context,
+            self.vm,
         )
     }
 
@@ -273,12 +275,8 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let type_id = self
-            .type_context
-            .type_registry
-            .register_type(tuple_name, field_types);
-        self.codegen
-            .add_instruction(Instruction::Tuple(type_id, fields.len()));
+        let type_id = self.vm.register_type(tuple_name, field_types);
+        self.codegen.add_instruction(Instruction::Tuple(type_id));
         Ok(TypeSet::resolved(Type::Tuple(type_id)))
     }
 
@@ -325,12 +323,8 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let type_id = self
-            .type_context
-            .type_registry
-            .register_type(name, field_types);
-        self.codegen
-            .add_instruction(Instruction::Tuple(type_id, fields.len()));
+        let type_id = self.vm.register_type(name, field_types);
+        self.codegen.add_instruction(Instruction::Tuple(type_id));
         Ok(TypeSet::resolved(Type::Tuple(type_id)))
     }
 
@@ -355,7 +349,7 @@ impl<'a> Compiler<'a> {
         );
 
         let parameter_type = match &function_definition.parameter_type {
-            Some(t) => self.type_context.resolve_ast_type(t.clone())?,
+            Some(t) => self.type_context.resolve_ast_type(t.clone(), self.vm)?,
             None => TypeSet::resolved(Type::Tuple(TypeId::NIL)),
         };
 
@@ -375,7 +369,9 @@ impl<'a> Compiler<'a> {
         if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
                 if let Some(field_name) = &field.name {
-                    let field_type = self.type_context.resolve_ast_type(field.type_def.clone())?;
+                    let field_type = self
+                        .type_context
+                        .resolve_ast_type(field.type_def.clone(), self.vm)?;
                     parameter_fields.insert(field_name.clone(), (field_index, field_type));
                 }
             }
@@ -650,7 +646,7 @@ impl<'a> Compiler<'a> {
             }
             ast::Value::Block(block) => {
                 self.codegen
-                    .add_instruction(Instruction::Tuple(TypeId::NIL, 0));
+                    .add_instruction(Instruction::Tuple(TypeId::NIL));
                 self.compile_block(block, TypeSet::resolved(Type::Tuple(TypeId::NIL)))
             }
             ast::Value::Parameter(parameter) => {
@@ -703,8 +699,7 @@ impl<'a> Compiler<'a> {
                 for field in fields {
                     self.value_to_instructions(field)?;
                 }
-                self.codegen
-                    .add_instruction(Instruction::Tuple(*type_id, fields.len()));
+                self.codegen.add_instruction(Instruction::Tuple(*type_id));
                 Ok(TypeSet::resolved(Type::Tuple(*type_id)))
             }
             Value::Function { function, captures } => {
@@ -838,11 +833,11 @@ impl<'a> Compiler<'a> {
             let (index, result_type) = match accessor {
                 TupleAccessor::Field(field_name) => self
                     .type_context
-                    .get_tuple_field_type_by_name(&type_id, &field_name)?,
+                    .get_tuple_field_type_by_name(&type_id, &field_name, self.vm)?,
                 TupleAccessor::Position(position) => {
                     let field_type = self
                         .type_context
-                        .get_tuple_field_type_by_position(&type_id, position)?;
+                        .get_tuple_field_type_by_position(&type_id, position, self.vm)?;
                     (position, field_type)
                 }
             };
@@ -909,8 +904,7 @@ impl<'a> Compiler<'a> {
         if let Some(Type::Tuple(type_id)) = value_type.single() {
             // Get the number of fields in this tuple type
             let (_, fields) = self
-                .type_context
-                .type_registry
+                .vm
                 .lookup_type(&type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -1035,7 +1029,7 @@ impl<'a> Compiler<'a> {
                 let (index, result_type) = match accessor {
                     ast::AccessPath::Field(field_name) => self
                         .type_context
-                        .get_tuple_field_type_by_name(&type_id, &field_name)
+                        .get_tuple_field_type_by_name(&type_id, &field_name, self.vm)
                         .map_err(|_| Error::MemberFieldNotFound {
                             field_name: field_name.clone(),
                             target: target.to_string(),
@@ -1043,7 +1037,7 @@ impl<'a> Compiler<'a> {
                     ast::AccessPath::Index(index) => {
                         let field_type = self
                             .type_context
-                            .get_tuple_field_type_by_position(&type_id, index)
+                            .get_tuple_field_type_by_position(&type_id, index, self.vm)
                             .map_err(|_| Error::MemberAccessOnNonTuple {
                                 target: target.to_string(),
                             })?;
@@ -1116,9 +1110,16 @@ impl<'a> Compiler<'a> {
         for func_type in &function_variants {
             // Check if this function accepts any of the value types
             let is_compatible = func_type.parameter.iter().any(|func_param_type| {
-                value_types
-                    .iter()
-                    .any(|value_type| func_param_type == value_type)
+                value_types.iter().any(|value_type| {
+                    // Use coinductive compatibility checking for recursive types
+                    let mut assumptions = std::collections::HashSet::new();
+
+                    value_type.is_compatible_with(
+                        func_param_type,
+                        &|type_id| self.vm.lookup_type(type_id).cloned(),
+                        &mut assumptions,
+                    )
+                })
             });
 
             if !is_compatible {
@@ -1199,8 +1200,7 @@ impl<'a> Compiler<'a> {
     ) -> Result<TypeSet, Error> {
         if let Some(Type::Tuple(type_id)) = tuple_type.single() {
             let type_info = self
-                .type_context
-                .type_registry
+                .vm
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -1226,8 +1226,7 @@ impl<'a> Compiler<'a> {
             match param_type {
                 Type::Tuple(type_id) => {
                     let type_info = self
-                        .type_context
-                        .type_registry
+                        .vm
                         .lookup_type(&type_id)
                         .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
 

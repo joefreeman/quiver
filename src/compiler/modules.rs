@@ -1,6 +1,11 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::{ast, modules::ModuleLoader, parser, vm::Value};
+use crate::{
+    ast,
+    modules::ModuleLoader,
+    parser,
+    vm::{VM, Value},
+};
 
 use super::{Error, typing::TypeContext};
 
@@ -57,6 +62,7 @@ pub fn compile_type_import(
     module_loader: &dyn ModuleLoader,
     current_module_path: Option<&PathBuf>,
     type_context: &mut TypeContext,
+    vm: &mut VM,
 ) -> Result<(), Error> {
     let parsed =
         module_cache.load_and_cache_ast(module_path, module_loader, current_module_path)?;
@@ -76,7 +82,7 @@ pub fn compile_type_import(
     match &pattern {
         ast::TypeImportPattern::Star => {
             for (name, type_definition) in type_aliases {
-                let resolved_type = type_context.resolve_ast_type(type_definition.clone())?;
+                let resolved_type = type_context.resolve_ast_type(type_definition.clone(), vm)?;
                 type_context
                     .type_aliases
                     .insert(name.to_string(), resolved_type);
@@ -89,7 +95,7 @@ pub fn compile_type_import(
                     .find(|alias| alias.0.as_str() == *requested_name)
                 {
                     let resolved_type =
-                        type_context.resolve_ast_type((*type_definition).clone())?;
+                        type_context.resolve_ast_type((*type_definition).clone(), vm)?;
                     type_context
                         .type_aliases
                         .insert(name.to_string(), resolved_type);

@@ -50,14 +50,14 @@ struct BindingSet {
 
 pub struct PatternCompiler<'a> {
     pub codegen: &'a mut InstructionBuilder,
-    pub type_context: &'a TypeContext<'a>,
+    pub type_context: &'a TypeContext,
     pub vm: &'a mut VM,
 }
 
 impl<'a> PatternCompiler<'a> {
     pub fn new(
         codegen: &'a mut InstructionBuilder,
-        type_context: &'a TypeContext<'a>,
+        type_context: &'a TypeContext,
         vm: &'a mut VM,
     ) -> Self {
         Self {
@@ -82,7 +82,7 @@ impl<'a> PatternCompiler<'a> {
         for t in value_type.iter() {
             if let Type::Tuple(id) = t {
                 // Verify the type exists in the registry
-                if self.type_context.type_registry.lookup_type(id).is_none() {
+                if self.vm.lookup_type(id).is_none() {
                     return Err(Error::TypeNotInRegistry { type_id: *id });
                 }
                 tuple_types.push(*id);
@@ -102,8 +102,7 @@ impl<'a> PatternCompiler<'a> {
         for typ in value_type.iter() {
             if let Type::Tuple(type_id) = typ {
                 let tuple_info = self
-                    .type_context
-                    .type_registry
+                    .vm
                     .lookup_type(type_id)
                     .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -280,8 +279,7 @@ impl<'a> PatternCompiler<'a> {
         // For each matching type, create binding sets
         for (type_id, field_mappings) in &matching_types {
             let tuple_info = self
-                .type_context
-                .type_registry
+                .vm
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -383,8 +381,7 @@ impl<'a> PatternCompiler<'a> {
             let mut bindings = Vec::new();
 
             let tuple_info = self
-                .type_context
-                .type_registry
+                .vm
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -427,8 +424,7 @@ impl<'a> PatternCompiler<'a> {
         let mut all_field_names = std::collections::BTreeSet::new();
         for type_id in &tuple_types {
             let tuple_info = self
-                .type_context
-                .type_registry
+                .vm
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -454,8 +450,7 @@ impl<'a> PatternCompiler<'a> {
             let mut bindings = Vec::new();
 
             let tuple_info = self
-                .type_context
-                .type_registry
+                .vm
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -667,8 +662,7 @@ impl<'a> PatternCompiler<'a> {
         for typ in value_type.iter() {
             if let Type::Tuple(type_id) = typ {
                 let tuple_info = self
-                    .type_context
-                    .type_registry
+                    .vm
                     .lookup_type(type_id)
                     .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 

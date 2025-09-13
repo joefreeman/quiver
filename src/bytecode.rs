@@ -24,8 +24,7 @@ pub struct Bytecode {
     pub functions: Vec<Function>,
     pub builtins: Vec<String>,
     pub entry: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tuples: Option<HashMap<TypeId, types::TupleTypeInfo>>,
+    pub types: HashMap<TypeId, types::TupleTypeInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -51,7 +50,7 @@ impl Bytecode {
                 .collect(),
             builtins: self.builtins.clone(),
             entry: self.entry,
-            tuples: None,
+            types: self.types.clone(),
         }
     }
 }
@@ -65,7 +64,7 @@ pub enum Instruction {
     Swap,
     Load(String),
     Store(String),
-    Tuple(TypeId, usize),
+    Tuple(TypeId),
     Get(usize),
     IsInteger,
     IsBinary,
