@@ -720,19 +720,43 @@ impl<'a> Compiler<'a> {
                 Ok(TypeSet::resolved(Type::Tuple(*type_id)))
             }
             Value::Function { function, captures } => {
-                for capture in captures {
-                    self.value_to_instructions(capture)?;
-                }
-                if let Some(func_def) = self.vm.get_functions().get(*function).cloned() {
-                    let func_index = self.vm.register_function(func_def);
+                // Get the function definition
+                let func_def = self.vm.get_functions().get(*function).cloned().ok_or(
+                    Error::FeatureUnsupported("Invalid function reference".to_string()),
+                )?;
+
+                let func_index = self.vm.register_function(func_def.clone());
+
+                // If we have captures, create a temporary scope with them
+                if !captures.is_empty() && !func_def.captures.is_empty() {
+                    // Enter a new scope for the captures
+                    // Enter expects a parameter value on the stack, push NIL since we don't need it
+                    self.codegen
+                        .add_instruction(Instruction::Tuple(TypeId::NIL));
+                    self.codegen.add_instruction(Instruction::Enter);
+
+                    // Set up each capture in the scope
+                    for (name, value) in func_def.captures.iter().zip(captures.iter()) {
+                        // Recursively convert the captured value to instructions
+                        self.value_to_instructions(value)?;
+                        // Store it with the capture's name
+                        self.codegen
+                            .add_instruction(Instruction::Store(name.clone()));
+                    }
+
+                    // Emit the function (will capture from our scope)
                     self.codegen
                         .add_instruction(Instruction::Function(func_index));
-                    Ok(TypeSet::resolved(self.function_to_type(func_index)))
+
+                    // Exit the temporary scope
+                    self.codegen.add_instruction(Instruction::Exit);
                 } else {
-                    Err(Error::FeatureUnsupported(
-                        "Invalid function reference".to_string(),
-                    ))
+                    // No captures - use the simple approach
+                    self.codegen
+                        .add_instruction(Instruction::Function(func_index));
                 }
+
+                Ok(TypeSet::resolved(self.function_to_type(func_index)))
             }
         }
     }

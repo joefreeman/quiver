@@ -47,3 +47,77 @@ fn test_star_import() {
         .evaluate("* = %\"./math.qv\", [3, 4] ~> add")
         .expect_int(7);
 }
+
+#[test]
+fn test_import_function_with_capture() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "./capture.qv".to_string(),
+        "x = 42, #{ [x, 2] ~> <multiply> }".to_string(),
+    );
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("f = %\"./capture.qv\", [] ~> f")
+        .expect_int(84);
+}
+
+#[test]
+fn test_import_nested_function_captures() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "./nested.qv".to_string(),
+        r#"
+        x = 10
+        inner = #{ [x, 1] ~> <add> }
+        #{ [[] ~> inner, 2] ~> <multiply> }
+        "#
+        .to_string(),
+    );
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("f = %\"./nested.qv\", [] ~> f")
+        .expect_int(22);
+}
+
+#[test]
+fn test_import_tuple_with_captured_function() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "./tuple_capture.qv".to_string(),
+        "x = 5, y = 3, [x, #{ [x, y] ~> <add> }, y]".to_string(),
+    );
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("t = %\"./tuple_capture.qv\", f = t.1, [] ~> f")
+        .expect_int(8);
+}
+
+#[test]
+fn test_multi_level_import_with_captures() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "./level1.qv".to_string(),
+        "base = 100, #{ [base, 1] ~> <add> }".to_string(),
+    );
+    modules.insert(
+        "./level2.qv".to_string(),
+        "inc = %\"./level1.qv\", x = 3, #{ [[] ~> inc, x] ~> <multiply> }".to_string(),
+    );
+    modules.insert(
+        "./level3.qv".to_string(),
+        "f = %\"./level2.qv\", x = 5, [f, #{ [[] ~> f, x] ~> <add> }]".to_string(),
+    );
+
+    quiver()
+        .with_modules(modules.clone())
+        .evaluate("funcs = %\"./level3.qv\", f1 = funcs.0, [] ~> f1")
+        .expect_int(303); // (100 + 1) * 3 = 303
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("funcs = %\"./level3.qv\", f2 = funcs.1, [] ~> f2")
+        .expect_int(308); // ((100 + 1) * 3) + 5 = 308
+}
