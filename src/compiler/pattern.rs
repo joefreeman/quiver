@@ -278,10 +278,14 @@ impl<'a> PatternCompiler<'a> {
 
         // For each matching type, create binding sets
         for (type_id, field_mappings) in &matching_types {
-            let tuple_info = self
-                .vm
-                .lookup_type(type_id)
-                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+            // Get tuple info and extract field types upfront to avoid borrow issues
+            let tuple_fields: Vec<Type> = {
+                let tuple_info = self
+                    .vm
+                    .lookup_type(type_id)
+                    .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+                tuple_info.1.iter().map(|(_, t)| t.clone()).collect()
+            };
 
             // Start with a binding set for this type
             let mut base_requirements = vec![];
@@ -301,7 +305,17 @@ impl<'a> PatternCompiler<'a> {
             // Process each field pattern
             for (pattern_idx, actual_idx) in field_mappings {
                 let field_pattern = &tuple_pattern.fields[*pattern_idx].pattern;
-                let field_type = TypeSet::resolved(tuple_info.1[*actual_idx].1.clone());
+                let raw_field_type = &tuple_fields[*actual_idx];
+
+                // Resolve Type::Cycle references to the actual type
+                let field_type = if let Type::Cycle(_) = raw_field_type {
+                    // Type::Cycle in a recursive type refers back to the original type
+                    // In the context of pattern matching, this should be the union of all variants
+                    value_type.clone()
+                } else {
+                    TypeSet::resolved(raw_field_type.clone())
+                };
+
                 let mut field_path = path.clone();
                 field_path.push(*actual_idx);
 
@@ -582,11 +596,29 @@ impl<'a> PatternCompiler<'a> {
 
         match check {
             RuntimeCheck::TupleType(type_id) => {
+                // After generate_value_access:
+                // Stack: [root, value_at_path]
+
                 // Check if value is the expected tuple type
                 self.codegen.add_instruction(Instruction::IsTuple(*type_id));
+                // IsTuple peeks at top value and pushes bool result
+                // Stack: [root, value_at_path, bool]
+
                 self.codegen.add_instruction(Instruction::Not);
+                // Stack: [root, value_at_path, !bool]
+
+                // Swap to get boolean below the value we're checking
+                self.codegen.add_instruction(Instruction::Swap);
+                // Stack: [root, !bool, value_at_path]
+
+                // Pop the value we checked
+                self.codegen.add_instruction(Instruction::Pop);
+                // Stack: [root, !bool]
+
                 let jump = self.codegen.emit_jump_if_placeholder();
                 self.codegen.patch_jump_to_addr(jump, fail_addr);
+                // JumpIf consumes the boolean
+                // Stack: [root]
             }
             RuntimeCheck::Literal(literal) => {
                 // Push the literal for comparison
