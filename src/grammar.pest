@@ -7,7 +7,7 @@ sp = _{ (" " | "\t")+ }
 nl = _{ "\n" | "\r\n" | "\r" }
 
 // Identifiers
-identifier = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* }
+identifier = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* ~ "!"? ~ "?"? ~ "'"* }
 tuple_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Function types
