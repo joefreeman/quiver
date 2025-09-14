@@ -751,19 +751,29 @@ impl<'a> Compiler<'a> {
         }
 
         // Check if we already have the evaluated module cached
-        if let Some(cached_value) = self.module_cache.evaluation_cache.get(module_path).cloned() {
-            return self.value_to_instructions(&cached_value);
-        }
+        let value = if let Some(cached_value) =
+            self.module_cache.evaluation_cache.get(module_path).cloned()
+        {
+            cached_value
+        } else {
+            // Add to import stack to track circular imports
+            self.module_cache.import_stack.push(module_path.to_string());
+            let value = self.import_module_internal(module_path)?;
+            self.module_cache.import_stack.pop();
 
-        // Add to import stack to track circular imports
-        self.module_cache.import_stack.push(module_path.to_string());
-        let result = self.import_module_internal(module_path);
-        self.module_cache.import_stack.pop();
+            // Cache the evaluated module
+            self.module_cache
+                .evaluation_cache
+                .insert(module_path.to_string(), value.clone());
 
-        result
+            value
+        };
+
+        // Convert the runtime value back to instructions
+        self.value_to_instructions(&value)
     }
 
-    fn import_module_internal(&mut self, module_path: &str) -> Result<TypeSet, Error> {
+    fn import_module_internal(&mut self, module_path: &str) -> Result<Value, Error> {
         // Parse the module
         let parsed = self.module_cache.load_and_cache_ast(
             module_path,
@@ -801,13 +811,7 @@ impl<'a> Compiler<'a> {
             .map_err(|_e| Error::FeatureUnsupported("Module execution failed".to_string()))?
             .unwrap_or(Value::Tuple(TypeId::NIL, vec![]));
 
-        // Cache the evaluated module
-        self.module_cache
-            .evaluation_cache
-            .insert(module_path.to_string(), value.clone());
-
-        // Convert the runtime value back to instructions
-        self.value_to_instructions(&value)
+        Ok(value)
     }
 
     fn compile_operation(
