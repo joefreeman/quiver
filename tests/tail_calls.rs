@@ -11,7 +11,7 @@ fn test_tail_call() {
             1 ~> f
             "#,
         )
-        .expect_int(4)
+        .expect("4")
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn test_countdown() {
             5 ~> countdown
             "#,
         )
-        .expect_int(0);
+        .expect("0");
 }
 
 #[test]
@@ -42,5 +42,5 @@ fn test_factorial() {
             5 ~> fact
             "#,
         )
-        .expect_int(120);
+        .expect("120");
 }

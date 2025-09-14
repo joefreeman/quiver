@@ -5,14 +5,14 @@ use common::*;
 fn test_simple_type_definition() {
     quiver()
         .evaluate("type circle = Circle[r: int]")
-        .expect_nil();
+        .expect("[]");
 }
 
 #[test]
 fn test_union_type_definition() {
     quiver()
         .evaluate("type shape = Circle[r: int] | Rectangle[w: int, h: int]")
-        .expect_nil();
+        .expect("[]");
 }
 
 #[test]
@@ -30,7 +30,7 @@ fn test_function_with_type_pattern() {
             [a1, a2] ~> <add>
             "#,
         )
-        .expect_int(37);
+        .expect("37");
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn test_recursive_list_type() {
             [xs.1.0, xs.1.1.0] ~> <add>;
             "#,
         )
-        .expect_int(5)
+        .expect("5")
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn test_recursive_type_as_function_parameter() {
             xs ~> get_head;
             "#,
         )
-        .expect_int(1)
+        .expect("1")
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn test_recursive_tree_type() {
             value
             "#,
         )
-        .expect_int(3)
+        .expect("3")
 }
 
 #[test]
@@ -102,5 +102,5 @@ fn test_recursive_type_with_cycle() {
             Cons[20, Cons[30, Nil]] ~> prepend ~> .0
         "#,
         )
-        .expect_int(10);
+        .expect("10");
 }

@@ -1,4 +1,4 @@
-use quiver::{Quiver, bytecode::TypeId, vm::Value};
+use quiver::{Quiver, vm::Value};
 use std::collections::HashMap;
 
 #[allow(dead_code)]
@@ -37,280 +37,30 @@ pub struct TestResult {
 
 #[allow(dead_code)]
 impl TestResult {
-    pub fn expect_int(self, expected: i64) {
+    /// Expect a value matching the given Quiver syntax string representation
+    pub fn expect(self, expected: &str) {
         match self.result {
-            Ok(Some(Value::Integer(actual))) => {
+            Ok(Some(ref value)) => {
+                let actual = self.format_value(value);
                 assert_eq!(
                     actual, expected,
-                    "Expected {}, got {} for source: {}",
+                    "Expected '{}', got '{}' for source: {}",
                     expected, actual, self.source
                 );
             }
-            Ok(Some(other)) => {
-                panic!(
-                    "Expected integer {}, got {:?} for source: {}",
-                    expected, other, self.source
-                );
-            }
             Ok(None) => {
-                panic!(
-                    "Expected integer {}, got None for source: {}",
-                    expected, self.source
+                // None is treated as nil/empty tuple
+                let actual = "[]";
+                assert_eq!(
+                    actual, expected,
+                    "Expected '{}', got None (displayed as '{}') for source: {}",
+                    expected, actual, self.source
                 );
             }
             Err(e) => {
                 panic!(
-                    "Expected integer {}, got error: {} for source: {}",
+                    "Expected value '{}', got error: {} for source: {}",
                     expected, e, self.source
-                );
-            }
-        }
-    }
-
-    pub fn expect_nil(self) {
-        match self.result {
-            Ok(Some(Value::Tuple(TypeId::NIL, elements))) => {
-                assert!(
-                    elements.is_empty(),
-                    "Expected empty tuple (nil), got tuple with {} elements for source: {}",
-                    elements.len(),
-                    self.source
-                );
-            }
-            Ok(Some(other)) => {
-                panic!(
-                    "Expected nil ([]), got {:?} for source: {}",
-                    other, self.source
-                );
-            }
-            Ok(None) => {
-                // None is also considered nil for our purposes
-            }
-            Err(e) => {
-                panic!("Expected nil, got error: {} for source: {}", e, self.source);
-            }
-        }
-    }
-
-    pub fn expect_ok(self) {
-        match self.result {
-            Ok(Some(Value::Tuple(TypeId::OK, elements))) => {
-                assert!(
-                    elements.is_empty(),
-                    "Expected Ok tuple with no elements, got tuple with {} elements for source: {}",
-                    elements.len(),
-                    self.source
-                );
-            }
-            Ok(Some(other)) => {
-                panic!("Expected Ok, got {:?} for source: {}", other, self.source);
-            }
-            Ok(None) => {
-                panic!("Expected Ok, got None for source: {}", self.source);
-            }
-            Err(e) => {
-                panic!("Expected Ok, got error: {} for source: {}", e, self.source);
-            }
-        }
-    }
-
-    /// Expect a binary value with specific content
-    pub fn expect_binary(self, expected_bytes: &[u8]) {
-        match self.result {
-            Ok(Some(Value::Binary(ref binary_ref))) => {
-                let actual_bytes = self
-                    .quiver
-                    .get_binary_bytes(binary_ref)
-                    .expect("Failed to get binary bytes");
-                assert_eq!(
-                    actual_bytes.as_slice(),
-                    expected_bytes,
-                    "Expected binary content {:?}, got {:?} for source: {}",
-                    expected_bytes,
-                    actual_bytes,
-                    self.source
-                );
-            }
-            Ok(Some(other)) => {
-                panic!(
-                    "Expected binary with content {:?}, got {:?} for source: {}",
-                    expected_bytes, other, self.source
-                );
-            }
-            Ok(None) => {
-                panic!(
-                    "Expected binary with content {:?}, got None for source: {}",
-                    expected_bytes, self.source
-                );
-            }
-            Err(e) => {
-                panic!(
-                    "Expected binary, got error: {} for source: {}",
-                    e, self.source
-                );
-            }
-        }
-    }
-
-    pub fn expect_tuple(
-        self,
-        expected_type_name: Option<&str>,
-        expected_field_names: Vec<Option<&str>>,
-        expected_values: Vec<Value>,
-    ) {
-        // First ensure field names and values have the same length
-        assert_eq!(
-            expected_field_names.len(),
-            expected_values.len(),
-            "Test error: expected_field_names length ({}) must match expected_values length ({})",
-            expected_field_names.len(),
-            expected_values.len()
-        );
-
-        match self.result {
-            Ok(Some(Value::Tuple(type_id, actual_values))) => {
-                // Get type info once
-                let type_info = self.quiver.lookup_type(&type_id);
-
-                // Check type name matches expectation (including None)
-                match (type_info, expected_type_name) {
-                    (Some((Some(actual), _)), Some(expected)) => {
-                        assert_eq!(
-                            actual, expected,
-                            "Expected tuple type '{}', got '{}' for source: {}",
-                            expected, actual, self.source
-                        );
-                    }
-                    (Some((None, _)), Some(expected)) => {
-                        panic!(
-                            "Expected tuple type '{}', but tuple is unnamed for source: {}",
-                            expected, self.source
-                        );
-                    }
-                    (Some((Some(actual), _)), None) => {
-                        panic!(
-                            "Expected unnamed tuple, but got type '{}' for source: {}",
-                            actual, self.source
-                        );
-                    }
-                    (Some((None, _)), None) => {
-                        // Both unnamed, ok
-                    }
-                    (None, Some(expected)) => {
-                        panic!(
-                            "Expected tuple type '{}', but type {} not found in registry for source: {}",
-                            expected, type_id.0, self.source
-                        );
-                    }
-                    (None, None) => {
-                        // No type info and we expected unnamed - could be runtime-created tuple
-                        if !expected_field_names.is_empty()
-                            && expected_field_names.iter().any(|f| f.is_some())
-                        {
-                            panic!(
-                                "Expected field names but type {} has no field information for source: {}",
-                                type_id.0, self.source
-                            );
-                        }
-                    }
-                }
-
-                // Check number of values matches
-                assert_eq!(
-                    actual_values.len(),
-                    expected_values.len(),
-                    "Expected tuple with {} elements, got {} elements for source: {}",
-                    expected_values.len(),
-                    actual_values.len(),
-                    self.source
-                );
-
-                // Check fields if we have type info
-                if let Some((_, fields)) = type_info {
-                    assert_eq!(
-                        fields.len(),
-                        expected_field_names.len(),
-                        "Expected {} fields, got {} fields for source: {}",
-                        expected_field_names.len(),
-                        fields.len(),
-                        self.source
-                    );
-
-                    // Check each field's name and value
-                    for (
-                        i,
-                        (
-                            ((actual_field_name, _), expected_field_name),
-                            (actual_value, expected_value),
-                        ),
-                    ) in fields
-                        .iter()
-                        .zip(expected_field_names.iter())
-                        .zip(actual_values.iter().zip(expected_values.iter()))
-                        .enumerate()
-                    {
-                        // Check field name
-                        match (actual_field_name, expected_field_name) {
-                            (Some(actual), Some(expected)) => {
-                                assert_eq!(
-                                    actual, expected,
-                                    "Field {} name mismatch: expected '{}', got '{}' for source: {}",
-                                    i, expected, actual, self.source
-                                );
-                            }
-                            (None, Some(expected)) => {
-                                panic!(
-                                    "Field {} expected to be named '{}', but was unnamed for source: {}",
-                                    i, expected, self.source
-                                );
-                            }
-                            (Some(actual), None) => {
-                                panic!(
-                                    "Field {} expected to be unnamed, but was named '{}' for source: {}",
-                                    i, actual, self.source
-                                );
-                            }
-                            (None, None) => {
-                                // Both unnamed, ok
-                            }
-                        }
-
-                        // Check field value
-                        assert_eq!(
-                            actual_value, expected_value,
-                            "Field {} value mismatch: expected {:?}, got {:?} for source: {}",
-                            i, expected_value, actual_value, self.source
-                        );
-                    }
-                } else {
-                    // No type info - just check values
-                    for (i, (actual, expected)) in
-                        actual_values.iter().zip(expected_values.iter()).enumerate()
-                    {
-                        assert_eq!(
-                            actual, expected,
-                            "Tuple element {} mismatch: expected {:?}, got {:?} for source: {}",
-                            i, expected, actual, self.source
-                        );
-                    }
-                }
-            }
-            Ok(Some(other)) => {
-                panic!(
-                    "Expected tuple {:?}, got {:?} for source: {}",
-                    expected_values, other, self.source
-                );
-            }
-            Ok(None) => {
-                panic!(
-                    "Expected tuple {:?}, got None for source: {}",
-                    expected_values, self.source
-                );
-            }
-            Err(e) => {
-                panic!(
-                    "Expected tuple, got error: {} for source: {}",
-                    e, self.source
                 );
             }
         }
@@ -385,6 +135,54 @@ impl TestResult {
                     "Expected parse error {:?}, but got {:?} for source: {}",
                     expected, e, self.source
                 );
+            }
+        }
+    }
+
+    fn format_value(&self, value: &Value) -> String {
+        match value {
+            Value::Integer(i) => i.to_string(),
+            Value::Binary(br) => {
+                let bytes = self.quiver.get_binary_bytes(br).unwrap();
+                // Format as single-quoted hex string
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                format!("'{}'", hex)
+            }
+            Value::Function { .. } => "<function>".to_string(),
+            Value::Tuple(type_id, elements) => {
+                // Get type info if available
+                let (type_name, fields) = self
+                    .quiver
+                    .lookup_type(type_id)
+                    .map(|(name, fields)| (name.as_deref(), Some(fields)))
+                    .unwrap_or((None, None));
+
+                // Format elements - with field names if available
+                let formatted_elements: Vec<String> = if let Some(fields) = fields {
+                    // We have field info - check if any fields are named
+                    elements
+                        .iter()
+                        .zip(fields.iter())
+                        .map(|(val, (field_name, _))| {
+                            let val_str = self.format_value(val);
+                            if let Some(field) = field_name {
+                                format!("{}: {}", field, val_str)
+                            } else {
+                                val_str
+                            }
+                        })
+                        .collect()
+                } else {
+                    // No field info - just format values
+                    elements.iter().map(|v| self.format_value(v)).collect()
+                };
+
+                // Build the final string
+                match (type_name, elements.is_empty()) {
+                    (Some(name), true) => name.to_string(), // Named empty tuple (e.g., "Ok")
+                    (Some(name), false) => format!("{}[{}]", name, formatted_elements.join(", ")), // Named tuple with elements
+                    (None, _) => format!("[{}]", formatted_elements.join(", ")), // Anonymous tuple
+                }
             }
         }
     }

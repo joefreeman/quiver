@@ -3,40 +3,40 @@ use common::*;
 
 #[test]
 fn test_simple_function() {
-    quiver().evaluate("f = #{ 42 }, [] ~> f").expect_int(42);
+    quiver().evaluate("f = #{ 42 }, [] ~> f").expect("42");
 }
 
 #[test]
 fn test_nil_function() {
-    quiver().evaluate("f = #{ [] }, [] ~> f").expect_nil();
+    quiver().evaluate("f = #{ [] }, [] ~> f").expect("[]");
 }
 
 #[test]
 fn test_function_with_parameter() {
     quiver()
         .evaluate("inc = #int { [$, 1] ~> <add> }, 3 ~> inc")
-        .expect_int(4);
+        .expect("4");
 }
 
 #[test]
 fn test_function_closure() {
     quiver()
         .evaluate("x = 1, f = #{ x }, x = 2, [] ~> f")
-        .expect_int(1);
+        .expect("1");
 }
 
 #[test]
 fn test_function_with_tuple_parameter() {
     quiver()
         .evaluate("f = #Point[x: int, y: int] { [x, y] ~> <add> }, Point[x: 1, y: 2] ~> f")
-        .expect_int(3);
+        .expect("3");
 }
 
 #[test]
 fn test_function_with_enumerated_type_parameter() {
     quiver()
         .evaluate("f = #(int | bin) { $ }, \"hello\" ~> f")
-        .expect_binary(b"hello");
+        .expect("'68656c6c6f'");
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn test_higher_order_function() {
             [double, 5] ~> apply
             "#,
         )
-        .expect_int(10);
+        .expect("10");
 }
 
 #[test]
@@ -65,5 +65,5 @@ fn test_nested_function_return() {
             5 ~> g
             "#,
         )
-        .expect_int(8);
+        .expect("8");
 }

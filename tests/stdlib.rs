@@ -11,5 +11,5 @@ fn test_stdlib_io_import() {
             "Hello, world!" ~> io.println
         "#,
         )
-        .expect_ok();
+        .expect("Ok");
 }

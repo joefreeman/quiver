@@ -13,7 +13,7 @@ fn test_module_import() {
     quiver()
         .with_modules(modules)
         .evaluate("math = %\"./math.qv\", [1, 2] ~> math.add")
-        .expect_int(3);
+        .expect("3");
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn test_destructured_import() {
     quiver()
         .with_modules(modules)
         .evaluate("(add, sub) = %\"./math.qv\", [3, 4] ~> add ~> [~, 2] ~> sub")
-        .expect_int(5);
+        .expect("5");
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn test_star_import() {
     quiver()
         .with_modules(modules)
         .evaluate("* = %\"./math.qv\", [3, 4] ~> add")
-        .expect_int(7);
+        .expect("7");
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn test_import_function_with_capture() {
     quiver()
         .with_modules(modules)
         .evaluate("f = %\"./capture.qv\", [] ~> f")
-        .expect_int(84);
+        .expect("84");
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn test_import_nested_function_captures() {
     quiver()
         .with_modules(modules)
         .evaluate("f = %\"./nested.qv\", [] ~> f")
-        .expect_int(22);
+        .expect("22");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn test_import_tuple_with_captured_function() {
     quiver()
         .with_modules(modules)
         .evaluate("t = %\"./tuple_capture.qv\", f = t.1, [] ~> f")
-        .expect_int(8);
+        .expect("8");
 }
 
 #[test]
@@ -114,10 +114,10 @@ fn test_multi_level_import_with_captures() {
     quiver()
         .with_modules(modules.clone())
         .evaluate("funcs = %\"./level3.qv\", f1 = funcs.0, [] ~> f1")
-        .expect_int(303); // (100 + 1) * 3 = 303
+        .expect("303"); // (100 + 1) * 3 = 303
 
     quiver()
         .with_modules(modules)
         .evaluate("funcs = %\"./level3.qv\", f2 = funcs.1, [] ~> f2")
-        .expect_int(308); // ((100 + 1) * 3) + 5 = 308
+        .expect("308"); // ((100 + 1) * 3) + 5 = 308
 }

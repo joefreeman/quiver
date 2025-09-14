@@ -3,32 +3,32 @@ use common::*;
 
 #[test]
 fn test_block_scope() {
-    quiver().evaluate("x = 1, { x = 2 }, x").expect_int(1);
+    quiver().evaluate("x = 1, { x = 2 }, x").expect("1");
 }
 
 #[test]
 fn test_block_evaluation() {
-    quiver().evaluate("x = { 1, 2, 3 }, x").expect_int(3);
+    quiver().evaluate("x = { 1, 2, 3 }, x").expect("3");
 }
 
 #[test]
 fn test_block_with_closure() {
     quiver()
         .evaluate("x = 1, { y = 2, [x, y] ~> <add> }")
-        .expect_int(3);
+        .expect("3");
 }
 
 #[test]
 fn test_block_with_parameter() {
-    quiver().evaluate("1 ~> { $ }").expect_int(1);
+    quiver().evaluate("1 ~> { $ }").expect("1");
 }
 
 #[test]
 fn test_block_with_repeated_parameter() {
-    quiver().evaluate("3 ~> { [$, $] ~> <add> }").expect_int(6);
+    quiver().evaluate("3 ~> { [$, $] ~> <add> }").expect("6");
 }
 
 #[test]
 fn test_block_with_positional_parameter() {
-    quiver().evaluate("[1, 2] ~> { $.0 }").expect_int(1);
+    quiver().evaluate("[1, 2] ~> { $.0 }").expect("1");
 }

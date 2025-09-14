@@ -3,5 +3,5 @@ use common::*;
 
 #[test]
 fn test_builtin() {
-    quiver().evaluate("-5 ~> <abs>").expect_int(5)
+    quiver().evaluate("-5 ~> <abs>").expect("5")
 }

@@ -5,7 +5,7 @@ use common::*;
 fn test_nested_member_access_as_value() {
     quiver()
         .evaluate("x = A[a: [10, B[b: 20]]], x.a.1.b")
-        .expect_int(20);
+        .expect("20");
 }
 
 #[test]
@@ -18,5 +18,5 @@ fn test_nested_member_access_as_operation() {
             4 ~> x.1.f
             "#,
         )
-        .expect_int(5);
+        .expect("5");
 }
