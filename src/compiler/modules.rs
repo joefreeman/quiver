@@ -44,8 +44,9 @@ impl ModuleCache {
             .load(module_path, current_module_path.map(|p| p.as_path()))
             .map_err(Error::ModuleLoad)?;
 
-        let parsed = parser::parse(&content).map_err(|_e| {
-            Error::ModuleParse(format!("Failed to parse imported module: {}", module_path))
+        let parsed = parser::parse(&content).map_err(|e| Error::ModuleParse {
+            module_path: module_path.to_string(),
+            error: e,
         })?;
 
         self.ast_cache

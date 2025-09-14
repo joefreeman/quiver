@@ -89,7 +89,14 @@ pub enum Error {
 
     // Module errors
     ModuleLoad(ModuleError),
-    ModuleParse(String),
+    ModuleParse {
+        module_path: String,
+        error: crate::parser::Error,
+    },
+    ModuleExecution {
+        module_path: String,
+        error: crate::vm::Error,
+    },
     ModuleTypeMissing {
         type_name: String,
         module_path: String,
@@ -808,7 +815,10 @@ impl<'a> Compiler<'a> {
         let value = self
             .vm
             .execute_instructions(module_instructions)
-            .map_err(|_e| Error::FeatureUnsupported("Module execution failed".to_string()))?
+            .map_err(|e| Error::ModuleExecution {
+                module_path: module_path.to_string(),
+                error: e,
+            })?
             .unwrap_or(Value::Tuple(TypeId::NIL, vec![]));
 
         Ok(value)
