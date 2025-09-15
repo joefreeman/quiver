@@ -502,94 +502,73 @@ impl<'a> PatternCompiler<'a> {
         binding_sets: &[BindingSet],
         fail_addr: usize,
     ) -> Result<(), Error> {
-        if binding_sets.len() == 1 {
-            // Simple case: only one binding set
-            let binding_set = &binding_sets[0];
+        let mut end_jumps = Vec::new();
+        let mut next_set_jumps = Vec::new();
 
-            // Check all requirements
+        for (i, binding_set) in binding_sets.iter().enumerate() {
+            // Patch jumps from previous iteration that should skip to this binding set
+            for jump in next_set_jumps.drain(..) {
+                self.codegen.patch_jump_to_here(jump);
+            }
+
+            let is_last = i == binding_sets.len() - 1;
+
+            // Check all requirements for this binding set
             for requirement in &binding_set.requirements {
-                self.generate_runtime_check(&requirement.path, &requirement.check, fail_addr)?;
-            }
+                match &requirement.check {
+                    RuntimeCheck::TupleType(type_id) if !is_last => {
+                        // Special handling for non-last tuple type checks:
+                        // we want to try the next binding set if this check fails
 
-            // Extract all bindings in reverse order for the stack
-            for (i, binding) in binding_set.bindings.iter().rev().enumerate() {
-                self.generate_value_extraction_with_depth(&binding.path, i)?;
-            }
-        } else {
-            // Multiple binding sets - try each one until one succeeds
-            let mut end_jumps = Vec::new();
-            let mut next_set_jumps = Vec::new();
+                        // Generate value access duplicates the root and accesses the path
+                        self.generate_value_access(&requirement.path)?;
+                        // Stack: [root, value_at_path]
 
-            for (i, binding_set) in binding_sets.iter().enumerate() {
-                // Patch jumps from previous iteration that should skip to this binding set
-                for jump in next_set_jumps.drain(..) {
-                    self.codegen.patch_jump_to_here(jump);
-                }
+                        self.codegen.add_instruction(Instruction::IsTuple(*type_id));
+                        // IsTuple consumes value and pushes boolean result
+                        // Stack: [root, is_match]
 
-                let is_last = i == binding_sets.len() - 1;
+                        self.codegen.add_instruction(Instruction::Not);
+                        // Stack: [root, !is_match]
 
-                // Check all requirements for this binding set
-                for requirement in &binding_set.requirements {
-                    match &requirement.check {
-                        RuntimeCheck::TupleType(type_id) => {
-                            // Generate value access duplicates the root and accesses the path
-                            self.generate_value_access(&requirement.path)?;
-                            // Stack: [root, value_at_path]
-
-                            self.codegen.add_instruction(Instruction::IsTuple(*type_id));
-                            // IsTuple consumes value and pushes boolean result
-                            // Stack: [root, is_match]
-
-                            self.codegen.add_instruction(Instruction::Not);
-                            // Stack: [root, !is_match]
-
-                            if !is_last {
-                                // If not this type, try next binding set
-                                let skip = self.codegen.emit_jump_if_placeholder();
-                                next_set_jumps.push(skip);
-                                // If we jump, stack is [root] (JumpIf consumes the boolean)
-                                // If we don't jump, stack is also [root]
-                            } else {
-                                // Last set - if check fails, fail the whole pattern
-                                let fail_jump = self.codegen.emit_jump_if_placeholder();
-                                self.codegen.patch_jump_to_addr(fail_jump, fail_addr);
-                                // If we jump to fail, stack state doesn't matter
-                                // If we don't jump, stack is [root]
-                            }
-                        }
-                        RuntimeCheck::Literal(_) => {
-                            // For literal checks, use the standard runtime check
-                            // which will jump to fail_addr if the check fails
-                            self.generate_runtime_check(
-                                &requirement.path,
-                                &requirement.check,
-                                fail_addr,
-                            )?;
-                        }
+                        // If not this type, try next binding set
+                        let skip = self.codegen.emit_jump_if_placeholder();
+                        next_set_jumps.push(skip);
+                        // If we jump, stack is [root] (JumpIf consumes the boolean)
+                        // If we don't jump, stack is also [root]
+                    }
+                    _ => {
+                        // For all other cases (literals and last tuple type check),
+                        // use the standard runtime check which jumps to fail_addr
+                        self.generate_runtime_check(
+                            &requirement.path,
+                            &requirement.check,
+                            fail_addr,
+                        )?;
                     }
                 }
-
-                // If we get here, all checks passed - extract bindings
-                for (j, binding) in binding_set.bindings.iter().rev().enumerate() {
-                    self.generate_value_extraction_with_depth(&binding.path, j)?;
-                }
-
-                // Jump to end (unless this is the last set)
-                if !is_last {
-                    let end_jump = self.codegen.emit_jump_placeholder();
-                    end_jumps.push(end_jump);
-                }
             }
 
-            // Patch any remaining next_set_jumps to fail
-            for jump in next_set_jumps {
-                self.codegen.patch_jump_to_addr(jump, fail_addr);
+            // If we get here, all checks passed - extract bindings
+            for (j, binding) in binding_set.bindings.iter().rev().enumerate() {
+                self.generate_value_extraction_with_depth(&binding.path, j)?;
             }
 
-            // Patch all end jumps to here
-            for end_jump in end_jumps {
-                self.codegen.patch_jump_to_here(end_jump);
+            // Jump to end (unless this is the last set)
+            if !is_last {
+                let end_jump = self.codegen.emit_jump_placeholder();
+                end_jumps.push(end_jump);
             }
+        }
+
+        // Patch any remaining next_set_jumps to fail
+        for jump in next_set_jumps {
+            self.codegen.patch_jump_to_addr(jump, fail_addr);
+        }
+
+        // Patch all end jumps to here
+        for end_jump in end_jumps {
+            self.codegen.patch_jump_to_here(end_jump);
         }
 
         Ok(())
@@ -645,7 +624,8 @@ impl<'a> PatternCompiler<'a> {
 
                 // Jump if not equal (Equal returns NIL on failure)
                 self.codegen.add_instruction(Instruction::Duplicate);
-                self.codegen.emit_not_jump_if_to_addr(fail_addr);
+                self.codegen.add_instruction(Instruction::Not);
+                self.codegen.emit_jump_if_to_addr(fail_addr);
                 self.codegen.add_instruction(Instruction::Pop);
             }
         }

@@ -83,13 +83,11 @@ impl InstructionBuilder {
         };
     }
 
-    /// Emits a conditional jump that immediately targets the fail address (using Not + JumpIf)
-    pub fn emit_not_jump_if_to_addr(&mut self, fail_addr: usize) {
-        self.add_instruction(Instruction::Not);
-        let jump_addr = self.instructions.len();
-        self.add_instruction(Instruction::JumpIf(0));
-        let offset = (fail_addr as isize) - (jump_addr as isize) - 1;
-        self.instructions[jump_addr] = Instruction::JumpIf(offset);
+    /// Emits a conditional jump that immediately targets the given address
+    pub fn emit_jump_if_to_addr(&mut self, addr: usize) {
+        let current_addr = self.instructions.len();
+        let offset = (addr as isize) - (current_addr as isize) - 1;
+        self.add_instruction(Instruction::JumpIf(offset));
     }
 
     /// Emits a sequence of instructions for cleanup pattern (pop values and return NIL)
