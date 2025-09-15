@@ -481,8 +481,15 @@ impl VM {
                 // Fast path: exact match
                 true
             } else {
-                // Structural check for recursive types
-                self.types_structurally_compatible(*actual_type_id, expected_type_id)?
+                // Use Type::is_compatible_with for structural checking
+                let actual_type = Type::Tuple(*actual_type_id);
+                let expected_type = Type::Tuple(expected_type_id);
+                let mut assumptions = std::collections::HashSet::new();
+                actual_type.is_compatible_with(
+                    &expected_type,
+                    &|type_id| self.type_registry.lookup_type(type_id).cloned(),
+                    &mut assumptions,
+                )
             }
         } else {
             false
@@ -493,76 +500,6 @@ impl VM {
             vec![],
         ));
         Ok(())
-    }
-
-    fn types_structurally_compatible(
-        &self,
-        actual: TypeId,
-        expected: TypeId,
-    ) -> Result<bool, Error> {
-        // Look up both types in the registry, returning error if not found
-        let (actual_name, actual_fields) =
-            self.type_registry
-                .lookup_type(&actual)
-                .ok_or_else(|| Error::TypeMismatch {
-                    expected: "known tuple type".to_string(),
-                    found: format!("unknown actual TypeId({:?})", actual),
-                })?;
-
-        let (expected_name, expected_fields) = self
-            .type_registry
-            .lookup_type(&expected)
-            .ok_or_else(|| Error::TypeMismatch {
-                expected: "known tuple type".to_string(),
-                found: format!("unknown expected TypeId({:?})", expected),
-            })?;
-
-        // Check tuple names match
-        if actual_name != expected_name {
-            return Ok(false);
-        }
-
-        // Check field count
-        if actual_fields.len() != expected_fields.len() {
-            return Ok(false);
-        }
-
-        // Check each field type recursively
-        for ((_, actual_type), (_, expected_type)) in
-            actual_fields.iter().zip(expected_fields.iter())
-        {
-            if !self.type_compatible(actual_type, expected_type)? {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
-    fn type_compatible(&self, actual: &Type, expected: &Type) -> Result<bool, Error> {
-        match (actual, expected) {
-            (Type::Integer, Type::Integer) => Ok(true),
-            (Type::Binary, Type::Binary) => Ok(true),
-            (Type::Tuple(a), Type::Tuple(e)) => {
-                if a == e {
-                    Ok(true)
-                } else {
-                    self.types_structurally_compatible(*a, *e)
-                }
-            }
-            // Key case: concrete type matching a cycle
-            (Type::Tuple(_), Type::Cycle(_)) => {
-                // A concrete tuple is compatible with a cycle
-                // This is what enables recursive type matching
-                Ok(true)
-            }
-            (Type::Cycle(_), Type::Cycle(_)) => {
-                // Cycles at the same depth are compatible
-                // For more sophisticated checking, we'd need to track depth
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
     }
 
     fn handle_jump(&mut self, offset: isize) -> Result<(), Error> {
