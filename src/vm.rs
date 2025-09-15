@@ -454,7 +454,7 @@ impl VM {
     }
 
     fn handle_is_integer(&mut self) -> Result<(), Error> {
-        let value = self.stack.last().ok_or(Error::StackUnderflow)?;
+        let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
         let is_match = matches!(value, Value::Integer(_));
         self.stack.push(Value::Tuple(
             if is_match { TypeId::OK } else { TypeId::NIL },
@@ -464,7 +464,7 @@ impl VM {
     }
 
     fn handle_is_binary(&mut self) -> Result<(), Error> {
-        let value = self.stack.last().ok_or(Error::StackUnderflow)?;
+        let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
         let is_match = matches!(value, Value::Binary(_));
         self.stack.push(Value::Tuple(
             if is_match { TypeId::OK } else { TypeId::NIL },
@@ -474,9 +474,9 @@ impl VM {
     }
 
     fn handle_is_tuple(&mut self, expected_type_id: TypeId) -> Result<(), Error> {
-        let value = self.stack.last().ok_or(Error::StackUnderflow)?;
+        let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        let is_match = if let Value::Tuple(actual_type_id, _) = value {
+        let is_match = if let Value::Tuple(actual_type_id, _) = &value {
             if actual_type_id == &expected_type_id {
                 // Fast path: exact match
                 true

@@ -92,14 +92,6 @@ impl InstructionBuilder {
         self.instructions[jump_addr] = Instruction::JumpIf(offset);
     }
 
-    /// Emits runtime type check for tuple type
-    pub fn emit_runtime_tuple_type_check(&mut self, type_id: TypeId, fail_addr: usize) {
-        self.add_instruction(Instruction::Duplicate);
-        self.add_instruction(Instruction::IsTuple(type_id));
-        self.emit_not_jump_if_to_addr(fail_addr);
-        self.add_instruction(Instruction::Pop);
-    }
-
     /// Emits a sequence of instructions for cleanup pattern (pop values and return NIL)
     pub fn emit_pattern_match_cleanup(&mut self, num_values_to_pop: usize) {
         for _ in 0..num_values_to_pop {

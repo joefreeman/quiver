@@ -532,19 +532,29 @@ impl<'a> PatternCompiler<'a> {
                 for requirement in &binding_set.requirements {
                     match &requirement.check {
                         RuntimeCheck::TupleType(type_id) => {
+                            // Generate value access duplicates the root and accesses the path
                             self.generate_value_access(&requirement.path)?;
+                            // Stack: [root, value_at_path]
+
                             self.codegen.add_instruction(Instruction::IsTuple(*type_id));
+                            // IsTuple consumes value and pushes boolean result
+                            // Stack: [root, is_match]
+
+                            self.codegen.add_instruction(Instruction::Not);
+                            // Stack: [root, !is_match]
 
                             if !is_last {
                                 // If not this type, try next binding set
-                                self.codegen.add_instruction(Instruction::Not);
                                 let skip = self.codegen.emit_jump_if_placeholder();
                                 next_set_jumps.push(skip);
+                                // If we jump, stack is [root] (JumpIf consumes the boolean)
+                                // If we don't jump, stack is also [root]
                             } else {
                                 // Last set - if check fails, fail the whole pattern
-                                self.codegen.add_instruction(Instruction::Not);
                                 let fail_jump = self.codegen.emit_jump_if_placeholder();
                                 self.codegen.patch_jump_to_addr(fail_jump, fail_addr);
+                                // If we jump to fail, stack state doesn't matter
+                                // If we don't jump, stack is [root]
                             }
                         }
                         RuntimeCheck::Literal(_) => {
@@ -601,18 +611,10 @@ impl<'a> PatternCompiler<'a> {
 
                 // Check if value is the expected tuple type
                 self.codegen.add_instruction(Instruction::IsTuple(*type_id));
-                // IsTuple peeks at top value and pushes bool result
-                // Stack: [root, value_at_path, bool]
+                // IsTuple consumes value and pushes bool result
+                // Stack: [root, bool]
 
                 self.codegen.add_instruction(Instruction::Not);
-                // Stack: [root, value_at_path, !bool]
-
-                // Swap to get boolean below the value we're checking
-                self.codegen.add_instruction(Instruction::Swap);
-                // Stack: [root, !bool, value_at_path]
-
-                // Pop the value we checked
-                self.codegen.add_instruction(Instruction::Pop);
                 // Stack: [root, !bool]
 
                 let jump = self.codegen.emit_jump_if_placeholder();
