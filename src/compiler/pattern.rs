@@ -5,11 +5,7 @@ use crate::{
     vm::VM,
 };
 
-use super::{
-    Error,
-    codegen::InstructionBuilder,
-    typing::{TypeContext, TypeSet},
-};
+use super::{Error, codegen::InstructionBuilder, typing::TypeContext};
 
 /// Represents a check that must be performed at runtime
 #[derive(Debug, Clone)]
@@ -34,7 +30,7 @@ type AccessPath = Vec<usize>;
 struct Binding {
     name: String,
     path: AccessPath,
-    var_type: TypeSet,
+    var_type: Type,
 }
 
 /// A set of bindings that can be created if certain requirements are met
@@ -68,18 +64,19 @@ impl<'a> PatternCompiler<'a> {
     }
 
     /// Check if we need a runtime type check for the given value type
-    fn needs_runtime_type_check(&self, value_type: &TypeSet) -> bool {
+    fn needs_runtime_type_check(&self, value_type: &Type) -> bool {
         value_type
+            .to_vec()
             .iter()
             .filter(|t| matches!(t, Type::Tuple(_)))
             .count()
             > 1
     }
 
-    /// Extract all tuple type IDs from a TypeSet, ensuring all are in registry
-    fn extract_tuple_types(&self, value_type: &TypeSet) -> Result<Vec<TypeId>, Error> {
+    /// Extract all tuple type IDs from a Type, ensuring all are in registry
+    fn extract_tuple_types(&self, value_type: &Type) -> Result<Vec<TypeId>, Error> {
         let mut tuple_types = Vec::new();
-        for t in value_type.iter() {
+        for t in value_type.to_vec().iter() {
             if let Type::Tuple(id) = t {
                 // Verify the type exists in the registry
                 if self.vm.lookup_type(id).is_none() {
@@ -95,11 +92,11 @@ impl<'a> PatternCompiler<'a> {
     fn find_matching_tuple_types(
         &self,
         tuple_pattern: &ast::TuplePattern,
-        value_type: &TypeSet,
+        value_type: &Type,
     ) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
         let mut matching_types = Vec::new();
 
-        for typ in value_type.iter() {
+        for typ in value_type.to_vec().iter() {
             if let Type::Tuple(type_id) = typ {
                 let tuple_info = self
                     .vm
@@ -163,9 +160,9 @@ impl<'a> PatternCompiler<'a> {
     pub fn compile_pattern_match(
         &mut self,
         pattern: &ast::Pattern,
-        value_type: &TypeSet,
+        value_type: &Type,
         fail_addr: usize,
-    ) -> Result<Option<Vec<(String, TypeSet)>>, Error> {
+    ) -> Result<Option<Vec<(String, Type)>>, Error> {
         // Phase 1: Analyze the pattern
         let binding_sets = self.analyze_pattern(pattern, value_type, vec![])?;
 
@@ -197,7 +194,7 @@ impl<'a> PatternCompiler<'a> {
     fn analyze_pattern(
         &self,
         pattern: &ast::Pattern,
-        value_type: &TypeSet,
+        value_type: &Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
         match pattern {
@@ -236,14 +233,14 @@ impl<'a> PatternCompiler<'a> {
     fn analyze_identifier_pattern(
         &self,
         name: String,
-        value_type: TypeSet,
+        value_type: Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
-        // Empty TypeSet should never happen - it indicates an internal error
-        if value_type.len() == 0 {
+        // Empty Type should never happen - it indicates an internal error
+        if value_type.to_vec().is_empty() {
             return Err(Error::InternalError {
                 message: format!(
-                    "analyze_identifier_pattern received empty TypeSet for identifier '{}'",
+                    "analyze_identifier_pattern received empty Type for identifier '{}'",
                     name
                 ),
             });
@@ -264,7 +261,7 @@ impl<'a> PatternCompiler<'a> {
     fn analyze_tuple_pattern(
         &self,
         tuple_pattern: &ast::TuplePattern,
-        value_type: &TypeSet,
+        value_type: &Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
         let mut binding_sets = vec![];
@@ -313,7 +310,7 @@ impl<'a> PatternCompiler<'a> {
                     // In the context of pattern matching, this should be the union of all variants
                     value_type.clone()
                 } else {
-                    TypeSet::resolved(raw_field_type.clone())
+                    raw_field_type.clone()
                 };
 
                 let mut field_path = path.clone();
@@ -352,11 +349,11 @@ impl<'a> PatternCompiler<'a> {
             binding_sets.extend(current_binding_sets);
         }
 
-        // Empty TypeSet should never happen - it indicates an internal error
-        if value_type.len() == 0 {
+        // Empty Type should never happen - it indicates an internal error
+        if value_type.to_vec().is_empty() {
             return Err(Error::InternalError {
                 message: format!(
-                    "analyze_tuple_pattern received empty TypeSet for pattern: {:?}",
+                    "analyze_tuple_pattern received empty Type for pattern: {:?}",
                     tuple_pattern
                 ),
             });
@@ -368,7 +365,7 @@ impl<'a> PatternCompiler<'a> {
     fn analyze_partial_pattern(
         &self,
         field_names: &[String],
-        value_type: &TypeSet,
+        value_type: &Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
         let mut binding_sets = vec![];
@@ -407,7 +404,7 @@ impl<'a> PatternCompiler<'a> {
                 bindings.push(Binding {
                     name: field_name.clone(),
                     path: field_path,
-                    var_type: TypeSet::resolved(field_type.clone()),
+                    var_type: field_type.clone(),
                 });
             }
 
@@ -422,7 +419,7 @@ impl<'a> PatternCompiler<'a> {
 
     fn analyze_star_pattern(
         &self,
-        value_type: &TypeSet,
+        value_type: &Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
         let mut binding_sets = vec![];
@@ -482,7 +479,7 @@ impl<'a> PatternCompiler<'a> {
                     bindings.push(Binding {
                         name: field_name.clone(),
                         path: field_path,
-                        var_type: TypeSet::resolved(field_type.clone()),
+                        var_type: field_type.clone(),
                     });
                 }
             }
@@ -669,11 +666,11 @@ impl<'a> PatternCompiler<'a> {
     fn find_types_with_fields(
         &self,
         field_names: &[String],
-        value_type: &TypeSet,
+        value_type: &Type,
     ) -> Result<Vec<(TypeId, Vec<usize>)>, Error> {
         let mut matching_types = Vec::new();
 
-        for typ in value_type.iter() {
+        for typ in value_type.to_vec().iter() {
             if let Type::Tuple(type_id) = typ {
                 let tuple_info = self
                     .vm

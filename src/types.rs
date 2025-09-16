@@ -27,9 +27,51 @@ pub enum Type {
     Function(Box<FunctionType>),
     #[serde(rename = "cycle")]
     Cycle(usize),
+    #[serde(rename = "union")]
+    Union(Vec<Type>),
 }
 
 impl Type {
+    /// Check if this type is concrete (not a union or cycle)
+    pub fn is_concrete(&self) -> bool {
+        !matches!(self, Type::Union(_) | Type::Cycle(_))
+    }
+
+    /// Get the concrete type if this is not a union
+    pub fn as_concrete(&self) -> Option<&Type> {
+        match self {
+            Type::Union(types) if types.len() == 1 => types.first(),
+            Type::Union(_) => None,
+            t => Some(t),
+        }
+    }
+
+    /// Create a Type from a vector of types
+    /// Returns a single type if the vector has one element, otherwise a Union
+    pub fn from_types(mut types: Vec<Type>) -> Type {
+        // Remove duplicates
+        types.sort_by_key(|t| format!("{:?}", t));
+        types.dedup();
+
+        if types.is_empty() {
+            // This shouldn't happen in normal operation, but return NIL as a safe default
+            Type::Tuple(TypeId::NIL)
+        } else if types.len() == 1 {
+            types.into_iter().next().unwrap()
+        } else {
+            Type::Union(types)
+        }
+    }
+
+    /// Get the type variants as a vector
+    /// For non-union types, returns a vector with a single element
+    pub fn to_vec(&self) -> Vec<Type> {
+        match self {
+            Type::Union(types) => types.clone(),
+            t => vec![t.clone()],
+        }
+    }
+
     /// Check if a concrete type is compatible with a type that may contain cycles.
     /// This uses coinductive reasoning to handle recursive types.
     pub fn is_compatible_with<F>(
@@ -98,6 +140,18 @@ impl Type {
                 // For functions, parameters are contravariant and results are covariant
                 // But for simplicity, we'll just check exact match for now
                 f1 == f2
+            }
+
+            // Union types - check if any variant is compatible
+            (t, Type::Union(variants)) | (Type::Union(variants), t) => {
+                variants.iter().any(|variant| {
+                    let mut new_assumptions = assumptions.clone();
+                    if t == variant {
+                        true
+                    } else {
+                        t.is_compatible_with(variant, lookup_type, &mut new_assumptions)
+                    }
+                })
             }
 
             _ => false,

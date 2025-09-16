@@ -9,80 +9,32 @@ use crate::{
 
 use super::Error;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct TypeSet(pub Vec<Type>);
-
-impl TypeSet {
-    pub fn new(types: Vec<Type>) -> Result<Self, Error> {
-        if types.is_empty() {
-            Err(Error::TypeUnresolved("Empty type set".to_string()))
-        } else {
-            Ok(TypeSet(types))
-        }
-    }
-
-    pub fn resolved(t: Type) -> Self {
-        TypeSet(vec![t])
-    }
-
-    pub fn unresolved(types: Vec<Type>) -> Result<Self, Error> {
-        if types.is_empty() {
-            Err(Error::TypeUnresolved("Empty type set".to_string()))
-        } else {
-            Ok(TypeSet(types))
-        }
-    }
-
-    pub fn is_resolved(&self) -> bool {
-        self.0.len() == 1
-    }
-
-    pub fn single(&self) -> Option<&Type> {
-        if self.0.len() == 1 {
-            Some(&self.0[0])
-        } else {
-            None
-        }
-    }
-
-    pub fn to_vec(&self) -> Vec<Type> {
-        self.0.clone()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<Type> {
-        self.0.iter()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum TupleAccessor {
     Field(String),
     Position(usize),
 }
 
-pub fn narrow_types(types: Vec<TypeSet>) -> Result<TypeSet, Error> {
+pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
     let mut flattened = Vec::new();
-    for type_set in types {
-        flattened.extend(type_set.to_vec());
+    for typ in types {
+        match typ {
+            Type::Union(variants) => flattened.extend(variants),
+            t => flattened.push(t),
+        }
     }
-
-    flattened.dedup();
 
     if flattened.is_empty() {
         Err(Error::TypeUnresolved(
-            "No valid types found in narrowing".to_string(),
+            "No valid types found in union".to_string(),
         ))
     } else {
-        Ok(TypeSet(flattened))
+        Ok(Type::from_types(flattened))
     }
 }
 
 pub struct TypeContext {
-    pub type_aliases: HashMap<String, TypeSet>,
+    pub type_aliases: HashMap<String, Type>,
     pub resolution_stack: Vec<String>,
 }
 
@@ -91,7 +43,7 @@ impl TypeContext {
         let mut type_aliases = HashMap::new();
         for (name, types) in existing_aliases.iter() {
             if !types.is_empty() {
-                type_aliases.insert(name.clone(), TypeSet(types.clone()));
+                type_aliases.insert(name.clone(), Type::from_types(types.clone()));
             }
         }
         Self {
@@ -100,86 +52,66 @@ impl TypeContext {
         }
     }
 
-    pub fn resolve_ast_type(&mut self, ast_type: ast::Type, vm: &mut VM) -> Result<TypeSet, Error> {
+    pub fn resolve_ast_type(&mut self, ast_type: ast::Type, vm: &mut VM) -> Result<Type, Error> {
         match ast_type {
-            ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(TypeSet::resolved(Type::Integer)),
-            ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(TypeSet::resolved(Type::Binary)),
+            ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(Type::Integer),
+            ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(Type::Binary),
             ast::Type::Tuple(tuple) => {
-                // Collect all possible types for each field
-                let mut field_variants: Vec<(Option<String>, Vec<Type>)> = Vec::new();
+                // Resolve field types without distributing unions
+                let mut fields = Vec::new();
 
                 for field in tuple.fields {
-                    let field_type_set = self.resolve_ast_type(field.type_def, vm)?;
-                    let field_possibilities = field_type_set.to_vec();
-                    field_variants.push((field.name, field_possibilities));
+                    let field_type = self.resolve_ast_type(field.type_def, vm)?;
+                    fields.push((field.name, field_type));
                 }
 
-                // Generate cartesian product of all field type combinations
-                let tuple_variants =
-                    self.cartesian_product_tuple_types(&tuple.name, field_variants, vm);
-
-                if tuple_variants.is_empty() {
-                    return Err(Error::TypeUnresolved(
-                        "No valid tuple type variants found".to_string(),
-                    ));
-                }
-                Ok(TypeSet(tuple_variants))
+                // Register the tuple type with potentially union field types
+                let type_id = vm.register_type(tuple.name, fields);
+                Ok(Type::Tuple(type_id))
             }
             ast::Type::Function(function) => {
-                let input_type_set = self.resolve_ast_type(*function.input, vm)?;
-                let input_possibilities = input_type_set.to_vec();
+                let input_type = self.resolve_ast_type(*function.input, vm)?;
+                let output_type = self.resolve_ast_type(*function.output, vm)?;
 
-                let output_type_set = self.resolve_ast_type(*function.output, vm)?;
-                let output_possibilities = output_type_set.to_vec();
-
-                // Generate cartesian product of input × output types
-                let function_variants: Vec<Type> = input_possibilities
-                    .into_iter()
-                    .flat_map(|input_type| {
-                        output_possibilities.iter().map(move |output_type| {
-                            Type::Function(Box::new(FunctionType {
-                                parameter: vec![input_type.clone()],
-                                result: vec![output_type.clone()],
-                            }))
-                        })
-                    })
-                    .collect();
-
-                if function_variants.is_empty() {
-                    return Err(Error::TypeUnresolved(
-                        "No valid function type variants found".to_string(),
-                    ));
-                }
-                Ok(TypeSet(function_variants))
+                // Create function type without distributing unions
+                Ok(Type::Function(Box::new(FunctionType {
+                    parameter: vec![input_type],
+                    result: vec![output_type],
+                })))
             }
             ast::Type::Union(union) => {
                 // Resolve all union member types
                 let mut resolved_types = Vec::new();
                 for member_type in union.types {
-                    let member_type_set = self.resolve_ast_type(member_type, vm)?;
-                    resolved_types.extend(member_type_set.to_vec());
+                    let member_type = self.resolve_ast_type(member_type, vm)?;
+                    match member_type {
+                        Type::Union(variants) => resolved_types.extend(variants),
+                        t => resolved_types.push(t),
+                    }
                 }
 
-                // Return as unresolved union type
+                // Return as union type
                 if resolved_types.is_empty() {
                     return Err(Error::TypeUnresolved("Empty union type".to_string()));
                 }
-                Ok(TypeSet(resolved_types))
+                Ok(Type::from_types(resolved_types))
             }
             ast::Type::Identifier(alias) => {
                 // Check if this creates a cycle
                 if let Some(depth) = self.resolution_stack.iter().rev().position(|x| x == &alias) {
                     // Found a cycle! Return a Cycle type
-                    return Ok(TypeSet::resolved(Type::Cycle(depth + 1)));
+                    return Ok(Type::Cycle(depth + 1));
                 }
 
                 // Look up type alias
                 if let Some(aliased_type) = self.type_aliases.get(&alias) {
-                    // If it's a placeholder (empty), we're in the middle of resolving it
-                    if aliased_type.0.is_empty() {
-                        // This is a forward reference to a type being defined
-                        // For now, return a cycle pointing to the current level
-                        return Ok(TypeSet::resolved(Type::Cycle(self.resolution_stack.len())));
+                    // Check if it's a placeholder (Union with empty vec)
+                    if let Type::Union(types) = aliased_type {
+                        if types.is_empty() {
+                            // This is a forward reference to a type being defined
+                            // For now, return a cycle pointing to the current level
+                            return Ok(Type::Cycle(self.resolution_stack.len()));
+                        }
                     }
 
                     // Push to stack for cycle detection
@@ -228,55 +160,5 @@ impl TypeContext {
             return Err(Error::PositionalAccessOnNonTuple { index: position });
         }
         Ok(tuple_type.1[position].1.clone())
-    }
-
-    pub fn cartesian_product_tuple_types(
-        &mut self,
-        tuple_name: &Option<String>,
-        field_variants: Vec<(Option<String>, Vec<Type>)>,
-        vm: &mut VM,
-    ) -> Vec<Type> {
-        // Handle empty fields case
-        if field_variants.is_empty() {
-            let type_id = vm.register_type(tuple_name.clone(), vec![]);
-            return vec![Type::Tuple(type_id)];
-        }
-
-        // Generate all combinations using recursive cartesian product
-        let combinations = self.cartesian_product_recursive(&field_variants, 0, vec![]);
-
-        // Register each combination as a tuple type
-        combinations
-            .into_iter()
-            .map(|field_types| {
-                let type_id = vm.register_type(tuple_name.clone(), field_types);
-                Type::Tuple(type_id)
-            })
-            .collect()
-    }
-
-    fn cartesian_product_recursive(
-        &self,
-        field_variants: &[(Option<String>, Vec<Type>)],
-        index: usize,
-        current: Vec<(Option<String>, Type)>,
-    ) -> Vec<Vec<(Option<String>, Type)>> {
-        if index >= field_variants.len() {
-            return vec![current];
-        }
-
-        let (field_name, type_options) = &field_variants[index];
-        let mut results = Vec::new();
-
-        for type_option in type_options {
-            let mut new_current = current.clone();
-            new_current.push((field_name.clone(), type_option.clone()));
-
-            let sub_results =
-                self.cartesian_product_recursive(field_variants, index + 1, new_current);
-            results.extend(sub_results);
-        }
-
-        results
     }
 }

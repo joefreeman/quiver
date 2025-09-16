@@ -1,6 +1,6 @@
 use crate::bytecode::{Instruction, TypeId};
 
-use super::typing::TypeSet;
+use crate::types::Type;
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {
@@ -100,7 +100,7 @@ impl InstructionBuilder {
     }
 
     /// Emits pattern match success sequence (store variables and return OK)
-    pub fn emit_pattern_match_success(&mut self, assignments: &[(String, TypeSet)]) {
+    pub fn emit_pattern_match_success(&mut self, assignments: &[(String, Type)]) {
         for (variable_name, _variable_type) in assignments {
             self.add_instruction(Instruction::Store(variable_name.clone()));
         }

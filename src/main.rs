@@ -375,6 +375,10 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
             format!("#{} -> {}", param_str, result_str)
         }
         Type::Cycle(depth) => format!("μ{}", depth),
+        Type::Union(types) => {
+            let type_strs: Vec<String> = types.iter().map(|t| format_type(quiver, t)).collect();
+            format!("({})", type_strs.join(" | "))
+        }
     }
 }
 
