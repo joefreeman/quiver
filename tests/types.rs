@@ -204,3 +204,125 @@ fn test_recursive_type_with_cycle() {
         )
         .expect("10");
 }
+
+#[test]
+fn test_recursive_type_pattern_matching_bug() {
+    // Regression test for the bug where pattern matching on recursive types
+    // would generate field access instructions before type checks
+    // This caused FieldAccessInvalid errors when trying to access fields
+    // of the wrong variant
+
+    quiver()
+        .evaluate(
+            r#"
+            type t = Empty | Full[t];
+
+            // This function matches on a tuple where the first element is a recursive type
+            // The bug would occur when the pattern compiler tried to access field 0 of Empty
+            // (which has no fields) when matching the pattern [Full[rest], n]
+            match_recursive = #[t, int] {
+                [Empty, n] = $ => n |
+                [Full[rest], n] = $ => [n, 100] ~> <add>
+            };
+
+            // Test with Empty - should return n
+            r1 = [Empty, 42] ~> match_recursive;
+
+            // Test with Full[Empty] - should return n + 100
+            r2 = [Full[Empty], 42] ~> match_recursive;
+
+            // Test with Full[Full[Empty]] - should return n + 100
+            r3 = [Full[Full[Empty]], 42] ~> match_recursive;
+
+            [r1, r2, r3]
+            "#,
+        )
+        .expect("[42, 142, 142]");
+
+    // Test with a more complex recursive type
+    quiver()
+        .evaluate(
+            r#"
+            type tree = Leaf[int] | Node[tree, tree];
+
+            // Function that matches on first element of tuple
+            match_first = #[tree, int] {
+                [Leaf[x], n] = $ => [x, n] ~> <add> |
+                [Node[l, r], n] = $ => n
+            };
+
+            t1 = [Leaf[42], 10] ~> match_first;
+            t2 = [Node[Leaf[1], Leaf[2]], 20] ~> match_first;
+
+            [t1, t2]
+            "#,
+        )
+        .expect("[52, 20]");
+
+    // Test the exact original bug case scenario
+    quiver()
+        .evaluate(
+            r#"
+            type list = Nil | Cons[int, list];
+
+            // Pattern matching that would trigger the bug
+            process_list = #[list, int] {
+                [Nil, x] = $ => x |
+                [Cons[head, tail], x] = $ => [head, x] ~> <add>
+            };
+
+            // These should all work without FieldAccessInvalid errors
+            r1 = [Nil, 10] ~> process_list;
+            r2 = [Cons[5, Nil], 10] ~> process_list;
+            r3 = [Cons[5, Cons[3, Nil]], 10] ~> process_list;
+
+            [r1, r2, r3]
+            "#,
+        )
+        .expect("[10, 15, 15]");
+}
+
+#[test]
+fn test_union_pattern() {
+    quiver()
+        .evaluate(
+            r#"
+            type t = Empty | Full[t];
+            f = #[t, int] {
+              | [Empty, _] = $ => 100
+              | [Full[rest], n] = $ => 200
+            };
+            [Empty, 1] ~> f
+            "#,
+        )
+        .expect("100");
+
+    quiver()
+        .evaluate(
+            r#"
+            type t = Empty | Full[t];
+            f = #[t, int] {
+              | [Empty, _] = $ => 100
+              | [Full[rest], n] = $ => 200
+            };
+            [Full[Empty], 1] ~> f
+            "#,
+        )
+        .expect("200");
+}
+
+#[test]
+fn test_recursive_union_pattern() {
+    quiver()
+        .evaluate(
+            r#"
+            type t = Empty | Full[t];
+            f = #[t, int] {
+              | [Empty, _] = $ => 100
+              | [Full[rest], n] = $ => [rest, 0] ~> &
+            };
+            [Full[Empty], 1] ~> f
+            "#,
+        )
+        .expect("100");
+}
