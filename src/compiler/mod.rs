@@ -129,7 +129,7 @@ pub enum Error {
 pub struct Compiler<'a> {
     // Core components
     codegen: InstructionBuilder,
-    type_context: TypeContext,
+    type_context: TypeContext<'a>,
     module_cache: ModuleCache,
 
     // State management
@@ -145,7 +145,7 @@ pub struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     pub fn compile(
         program: ast::Program,
-        type_aliases: &'a mut HashMap<String, Vec<Type>>,
+        type_aliases: &'a mut HashMap<String, Type>,
         module_loader: &'a dyn ModuleLoader,
         vm: &'a mut VM,
         module_path: Option<PathBuf>,
@@ -185,11 +185,6 @@ impl<'a> Compiler<'a> {
             compiler.compile_statement(statement)?;
         }
 
-        // Save type aliases back to the provided HashMap
-        for (name, type_set) in compiler.type_context.type_aliases.iter() {
-            type_aliases.insert(name.clone(), type_set.to_vec());
-        }
-
         Ok(compiler.codegen.instructions)
     }
 
@@ -204,7 +199,7 @@ impl<'a> Compiler<'a> {
                 module_path,
             } => self.compile_type_import(pattern, &module_path),
             ast::Statement::Expression(expression) => {
-                self.compile_expression(expression, Type::Tuple(TypeId::NIL))?;
+                self.compile_expression(expression, Type::nil())?;
                 Ok(())
             }
         }
@@ -351,7 +346,7 @@ impl<'a> Compiler<'a> {
 
         let parameter_type = match &function_definition.parameter_type {
             Some(t) => self.type_context.resolve_ast_type(t.clone(), self.vm)?,
-            None => Type::Tuple(TypeId::NIL),
+            None => Type::nil(),
         };
 
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
@@ -384,23 +379,9 @@ impl<'a> Compiler<'a> {
 
         self.parameter_fields_stack.pop();
 
-        let param_types = parameter_type.to_vec();
-        let result_types = body_type.to_vec();
-
-        if param_types.is_empty() {
-            return Err(Error::TypeUnresolved(
-                "Function parameter type cannot be resolved".to_string(),
-            ));
-        }
-        if result_types.is_empty() {
-            return Err(Error::TypeUnresolved(
-                "Function body type cannot be resolved".to_string(),
-            ));
-        }
-
         let func_type = FunctionType {
-            parameter: param_types,
-            result: result_types,
+            parameter: parameter_type,
+            result: body_type,
         };
 
         let function_instructions = std::mem::take(&mut self.codegen.instructions);
@@ -446,7 +427,7 @@ impl<'a> Compiler<'a> {
             None => {
                 // Pattern definitely won't match - cleanup directly
                 self.codegen.emit_pattern_match_cleanup(0);
-                return Ok(Type::Tuple(TypeId::NIL));
+                return Ok(Type::nil());
             }
             Some(pending_assignments) => {
                 // Pattern can match - generate normal assignment code
@@ -471,10 +452,7 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        Ok(Type::from_types(vec![
-            Type::Tuple(TypeId::OK),
-            Type::Tuple(TypeId::NIL),
-        ]))
+        Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
     }
 
     fn compile_pattern_match(
@@ -517,7 +495,7 @@ impl<'a> Compiler<'a> {
                 self.compile_expression(branch.condition.clone(), parameter_type.clone())?;
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
-            if condition_type.as_concrete() == Some(&Type::Tuple(TypeId::NIL)) {
+            if condition_type.as_concrete() == Some(&Type::nil()) {
                 // Don't add to branch_types, continue to next branch
                 continue;
             }
@@ -568,7 +546,7 @@ impl<'a> Compiler<'a> {
         if branch_types.is_empty() {
             // If no branches produced types (e.g., all were compile-time NIL),
             // return NIL as the block type
-            Ok(Type::Tuple(TypeId::NIL))
+            Ok(Type::nil())
         } else {
             union_types(branch_types)
         }
@@ -594,7 +572,7 @@ impl<'a> Compiler<'a> {
 
             // If last_type is NIL, subsequent terms are unreachable - break early
             if let Some(ref last_type) = last_type {
-                if last_type.as_concrete() == Some(&Type::Tuple(TypeId::NIL)) {
+                if last_type.as_concrete() == Some(&Type::nil()) {
                     break;
                 }
             }
@@ -636,7 +614,7 @@ impl<'a> Compiler<'a> {
             ast::Value::Block(block) => {
                 self.codegen
                     .add_instruction(Instruction::Tuple(TypeId::NIL));
-                self.compile_block(block, Type::Tuple(TypeId::NIL))
+                self.compile_block(block, Type::nil())
             }
             ast::Value::Parameter(parameter) => {
                 self.compile_parameter(parameter, parameter_type.clone())
@@ -773,11 +751,11 @@ impl<'a> Compiler<'a> {
         // Save current compiler state
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
-        let saved_type_aliases = std::mem::take(&mut self.type_context.type_aliases);
+        let saved_type_aliases = self.type_context.type_aliases.clone();
 
         // Reset to clean state for module compilation
         self.scopes = vec![HashMap::new()];
-        self.type_context.type_aliases = HashMap::new();
+        self.type_context.type_aliases.clear();
 
         // Compile the module
         for statement in parsed.statements {
@@ -790,7 +768,7 @@ impl<'a> Compiler<'a> {
         // Restore original compiler state
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
-        self.type_context.type_aliases = saved_type_aliases;
+        *self.type_context.type_aliases = saved_type_aliases;
 
         // Execute the module instructions to get the runtime value
         // If module returns None (no value), default to NIL tuple - this is intentional
@@ -801,7 +779,7 @@ impl<'a> Compiler<'a> {
                 module_path: module_path.to_string(),
                 error: e,
             })?
-            .unwrap_or(Value::Tuple(TypeId::NIL, vec![]));
+            .unwrap_or(Value::nil());
 
         Ok(value)
     }
@@ -844,7 +822,7 @@ impl<'a> Compiler<'a> {
         accessor: TupleAccessor,
         value_type: Type,
     ) -> Result<Type, Error> {
-        let tuple_types = self.extract_tuple_types(&value_type);
+        let tuple_types = value_type.extract_tuple_types();
 
         if tuple_types.is_empty() {
             match accessor {
@@ -885,7 +863,7 @@ impl<'a> Compiler<'a> {
             // Recursive tail call - the control flow doesn't return here, so the type is NIL
             // TODO: Ideally we'd return the current function's return type, but that would
             // require tracking more context during compilation
-            Ok(Type::Tuple(TypeId::NIL))
+            Ok(Type::nil())
         } else {
             self.codegen
                 .add_instruction(Instruction::Load(identifier.to_string()));
@@ -919,15 +897,8 @@ impl<'a> Compiler<'a> {
         // The == operator works with a tuple on the stack
         // We need to extract the tuple elements and call Equal(count)
 
-        // Check if all types in the Type are tuples
-        let tuple_types: Vec<_> = value_type
-            .to_vec()
-            .into_iter()
-            .filter_map(|t| match t {
-                Type::Tuple(id) => Some(id),
-                _ => None,
-            })
-            .collect();
+        // Extract tuple type IDs from the value type
+        let tuple_types = value_type.extract_tuple_types();
 
         if tuple_types.is_empty() {
             return Err(Error::TypeMismatch {
@@ -990,7 +961,7 @@ impl<'a> Compiler<'a> {
 
             // Return type is union of field types and NIL
             let mut result_types = first_field_types;
-            result_types.push(Type::Tuple(TypeId::NIL));
+            result_types.push(Type::nil());
             Ok(Type::from_types(result_types))
         } else {
             // For unresolved types or non-tuple types, we can't know the field count at compile time
@@ -1008,10 +979,7 @@ impl<'a> Compiler<'a> {
         self.codegen.add_instruction(Instruction::Not);
 
         // The Not instruction returns either Ok or NIL
-        Ok(Type::from_types(vec![
-            Type::Tuple(TypeId::OK),
-            Type::Tuple(TypeId::NIL),
-        ]))
+        Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
     }
 
     fn compile_operation_parameter(
@@ -1056,7 +1024,7 @@ impl<'a> Compiler<'a> {
         target_name: &str,
     ) -> Result<Type, Error> {
         for accessor in accessors {
-            let tuple_types = self.extract_tuple_types(&last_type);
+            let tuple_types = last_type.extract_tuple_types();
 
             if tuple_types.is_empty() {
                 return Err(Error::MemberAccessOnNonTuple {
@@ -1159,8 +1127,14 @@ impl<'a> Compiler<'a> {
         operation_type: Type,
         value_type: Type,
     ) -> Result<Type, Error> {
-        let operation_types = operation_type.to_vec();
-        let value_types = value_type.to_vec();
+        let operation_types = match operation_type {
+            Type::Union(types) => types,
+            t => vec![t],
+        };
+        let value_types = match value_type {
+            Type::Union(types) => types,
+            t => vec![t],
+        };
 
         // Separate function types from non-function types
         let mut function_variants = Vec::new();
@@ -1188,17 +1162,15 @@ impl<'a> Compiler<'a> {
 
         for func_type in &function_variants {
             // Check if this function accepts any of the value types
-            let is_compatible = func_type.parameter.iter().any(|func_param_type| {
-                value_types.iter().any(|value_type| {
-                    // Use coinductive compatibility checking for recursive types
-                    let mut assumptions = std::collections::HashSet::new();
+            let is_compatible = value_types.iter().any(|value_type| {
+                // Use coinductive compatibility checking for recursive types
+                let mut assumptions = std::collections::HashSet::new();
 
-                    value_type.is_compatible_with(
-                        func_param_type,
-                        &|type_id| self.vm.lookup_type(type_id).cloned(),
-                        &mut assumptions,
-                    )
-                })
+                value_type.is_compatible_with(
+                    &func_type.parameter,
+                    &|type_id| self.vm.lookup_type(type_id).cloned(),
+                    &mut assumptions,
+                )
             });
 
             if !is_compatible {
@@ -1208,8 +1180,8 @@ impl<'a> Compiler<'a> {
                 });
             }
 
-            // Collect return types from this compatible function
-            all_return_types.extend(func_type.result.iter().map(|t| t.clone()));
+            // Collect return type from this compatible function
+            all_return_types.push(func_type.result.clone());
         }
 
         // Generate the call instruction
@@ -1232,8 +1204,8 @@ impl<'a> Compiler<'a> {
             } else {
                 // Fallback if no type information is available
                 Type::Function(Box::new(FunctionType {
-                    parameter: vec![Type::Tuple(TypeId::NIL)],
-                    result: vec![Type::Tuple(TypeId::NIL)],
+                    parameter: Type::nil(),
+                    result: Type::nil(),
                 }))
             }
         } else {
@@ -1280,18 +1252,6 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
-    }
-
-    /// Extract tuple TypeIds from a Type, filtering out non-tuple types
-    fn extract_tuple_types(&self, type_set: &Type) -> Vec<TypeId> {
-        type_set
-            .to_vec()
-            .into_iter()
-            .filter_map(|t| match t {
-                Type::Tuple(id) => Some(id),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Get field type at the given position for all tuple types in the list

@@ -12,11 +12,11 @@ use std::collections::HashMap;
 use bytecode::{Function, TypeId};
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
-use types::TupleTypeInfo;
+use types::{TupleTypeInfo, Type};
 use vm::{VM, Value};
 
 pub struct Quiver {
-    type_aliases: HashMap<String, Vec<types::Type>>,
+    type_aliases: HashMap<String, Type>,
     module_loader: Box<dyn ModuleLoader>,
     vm: VM,
 }

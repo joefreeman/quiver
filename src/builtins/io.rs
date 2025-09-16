@@ -1,7 +1,6 @@
 //! IO builtin function implementations
 
 use crate::bytecode::Constant;
-use crate::bytecode::TypeId;
 use crate::vm::{BinaryRef, Error, Value};
 
 /// Helper function to get bytes from a BinaryRef using the constants array
@@ -25,7 +24,7 @@ pub fn builtin_io_print(arg: &Value, constants: &[Constant]) -> Result<Value, Er
     match arg {
         Value::Integer(n) => {
             print!("{}", n);
-            Ok(Value::Tuple(TypeId::OK, vec![]))
+            Ok(Value::ok())
         }
         Value::Binary(binary_ref) => {
             if let Some(data) = get_binary_bytes_from_ref(binary_ref, constants) {
@@ -36,11 +35,11 @@ pub fn builtin_io_print(arg: &Value, constants: &[Constant]) -> Result<Value, Er
             } else {
                 print!("<invalid binary reference>");
             }
-            Ok(Value::Tuple(TypeId::OK, vec![]))
+            Ok(Value::ok())
         }
         other => {
             print!("{}", other);
-            Ok(Value::Tuple(TypeId::OK, vec![]))
+            Ok(Value::ok())
         }
     }
 }
@@ -52,7 +51,7 @@ pub fn builtin_io_println(arg: &Value, constants: &[Constant]) -> Result<Value, 
     match arg {
         Value::Integer(n) => {
             println!("{}", n);
-            Ok(Value::Tuple(TypeId::OK, vec![]))
+            Ok(Value::ok())
         }
         Value::Binary(binary_ref) => {
             if let Some(data) = get_binary_bytes_from_ref(binary_ref, constants) {
@@ -63,11 +62,11 @@ pub fn builtin_io_println(arg: &Value, constants: &[Constant]) -> Result<Value, 
             } else {
                 println!("<invalid binary reference>");
             }
-            Ok(Value::Tuple(TypeId::OK, vec![]))
+            Ok(Value::ok())
         }
         other => {
             println!("{}", other);
-            Ok(Value::Tuple(TypeId::OK, vec![]))
+            Ok(Value::ok())
         }
     }
 }

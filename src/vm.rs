@@ -28,6 +28,16 @@ pub enum Value {
 }
 
 impl Value {
+    /// Create a NIL tuple value
+    pub fn nil() -> Self {
+        Value::Tuple(TypeId::NIL, vec![])
+    }
+
+    /// Create an OK tuple value
+    pub fn ok() -> Self {
+        Value::Tuple(TypeId::OK, vec![])
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Integer(_) => "integer",
@@ -160,7 +170,7 @@ impl VM {
                     functions: bytecode.functions,
                     builtins: bytecode.builtins,
                     stack: Vec::new(),
-                    scopes: vec![Scope::new(Value::Tuple(TypeId::NIL, vec![]))],
+                    scopes: vec![Scope::new(Value::nil())],
                     frames: Vec::new(),
                     type_registry,
                 }
@@ -170,7 +180,7 @@ impl VM {
                 functions: Vec::new(),
                 builtins: Vec::new(),
                 stack: Vec::new(),
-                scopes: vec![Scope::new(Value::Tuple(TypeId::NIL, vec![]))],
+                scopes: vec![Scope::new(Value::nil())],
                 frames: Vec::new(),
                 type_registry: TypeRegistry::new(),
             },
@@ -311,7 +321,7 @@ impl VM {
             .ok_or(Error::FunctionUndefined(entry))?;
         let instructions = function.instructions.clone();
 
-        self.stack.push(Value::Tuple(TypeId::NIL, vec![]));
+        self.stack.push(Value::nil());
         self.frames.push(Frame::new(instructions, HashMap::new()));
         self.run()
     }
@@ -645,7 +655,7 @@ impl VM {
         let result = if all_equal {
             first.clone() // Return the first value if all are equal
         } else {
-            Value::Tuple(TypeId::NIL, vec![]) // Return NIL if not all equal
+            Value::nil() // Return NIL if not all equal
         };
 
         self.stack.push(result);
@@ -659,12 +669,12 @@ impl VM {
             Value::Tuple(type_id, fields) => {
                 // Check if it's NIL (empty tuple with TypeId::NIL)
                 if type_id == TypeId::NIL && fields.is_empty() {
-                    Value::Tuple(TypeId::OK, vec![]) // Return Ok
+                    Value::ok() // Return Ok
                 } else {
-                    Value::Tuple(TypeId::NIL, vec![]) // Return NIL
+                    Value::nil() // Return NIL
                 }
             }
-            _ => Value::Tuple(TypeId::NIL, vec![]), // Any non-tuple becomes NIL
+            _ => Value::nil(), // Any non-tuple becomes NIL
         };
 
         self.stack.push(result);

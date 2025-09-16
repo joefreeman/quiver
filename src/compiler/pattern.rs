@@ -46,14 +46,14 @@ struct BindingSet {
 
 pub struct PatternCompiler<'a> {
     pub codegen: &'a mut InstructionBuilder,
-    pub type_context: &'a TypeContext,
+    pub type_context: &'a TypeContext<'a>,
     pub vm: &'a mut VM,
 }
 
 impl<'a> PatternCompiler<'a> {
     pub fn new(
         codegen: &'a mut InstructionBuilder,
-        type_context: &'a TypeContext,
+        type_context: &'a TypeContext<'a>,
         vm: &'a mut VM,
     ) -> Self {
         Self {
@@ -65,27 +65,8 @@ impl<'a> PatternCompiler<'a> {
 
     /// Check if we need a runtime type check for the given value type
     fn needs_runtime_type_check(&self, value_type: &Type) -> bool {
-        value_type
-            .to_vec()
-            .iter()
-            .filter(|t| matches!(t, Type::Tuple(_)))
-            .count()
-            > 1
-    }
-
-    /// Extract all tuple type IDs from a Type, ensuring all are in registry
-    fn extract_tuple_types(&self, value_type: &Type) -> Result<Vec<TypeId>, Error> {
-        let mut tuple_types = Vec::new();
-        for t in value_type.to_vec().iter() {
-            if let Type::Tuple(id) = t {
-                // Verify the type exists in the registry
-                if self.vm.lookup_type(id).is_none() {
-                    return Err(Error::TypeNotInRegistry { type_id: *id });
-                }
-                tuple_types.push(*id);
-            }
-        }
-        Ok(tuple_types)
+        let tuple_types = value_type.extract_tuple_types();
+        tuple_types.len() > 1
     }
 
     /// Find tuple types that match the given pattern
@@ -96,7 +77,12 @@ impl<'a> PatternCompiler<'a> {
     ) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
         let mut matching_types = Vec::new();
 
-        for typ in value_type.to_vec().iter() {
+        let types_to_check = match value_type {
+            Type::Union(types) => types.as_slice(),
+            single => std::slice::from_ref(single),
+        };
+
+        for typ in types_to_check {
             if let Type::Tuple(type_id) = typ {
                 let tuple_info = self
                     .vm
@@ -237,7 +223,7 @@ impl<'a> PatternCompiler<'a> {
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
         // Empty Type should never happen - it indicates an internal error
-        if value_type.to_vec().is_empty() {
+        if matches!(&value_type, Type::Union(types) if types.is_empty()) {
             return Err(Error::InternalError {
                 message: format!(
                     "analyze_identifier_pattern received empty Type for identifier '{}'",
@@ -350,7 +336,7 @@ impl<'a> PatternCompiler<'a> {
         }
 
         // Empty Type should never happen - it indicates an internal error
-        if value_type.to_vec().is_empty() {
+        if matches!(&value_type, Type::Union(types) if types.is_empty()) {
             return Err(Error::InternalError {
                 message: format!(
                     "analyze_tuple_pattern received empty Type for pattern: {:?}",
@@ -425,7 +411,7 @@ impl<'a> PatternCompiler<'a> {
         let mut binding_sets = vec![];
 
         // Collect all tuple types
-        let tuple_types = self.extract_tuple_types(value_type)?;
+        let tuple_types = value_type.extract_tuple_types();
         if tuple_types.is_empty() {
             return Ok(binding_sets);
         }
@@ -670,7 +656,12 @@ impl<'a> PatternCompiler<'a> {
     ) -> Result<Vec<(TypeId, Vec<usize>)>, Error> {
         let mut matching_types = Vec::new();
 
-        for typ in value_type.to_vec().iter() {
+        let types_to_check = match value_type {
+            Type::Union(types) => types.as_slice(),
+            single => std::slice::from_ref(single),
+        };
+
+        for typ in types_to_check {
             if let Type::Tuple(type_id) = typ {
                 let tuple_info = self
                     .vm

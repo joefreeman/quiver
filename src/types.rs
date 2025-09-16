@@ -11,8 +11,8 @@ pub type TupleTypeInfo = (Option<String>, Vec<TupleField>);
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct FunctionType {
-    pub parameter: Vec<Type>,
-    pub result: Vec<Type>,
+    pub parameter: Type,
+    pub result: Type,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
@@ -32,6 +32,16 @@ pub enum Type {
 }
 
 impl Type {
+    /// Create a NIL tuple type
+    pub fn nil() -> Self {
+        Type::Tuple(TypeId::NIL)
+    }
+
+    /// Create an OK tuple type
+    pub fn ok() -> Self {
+        Type::Tuple(TypeId::OK)
+    }
+
     /// Check if this type is concrete (not a union or cycle)
     pub fn is_concrete(&self) -> bool {
         !matches!(self, Type::Union(_) | Type::Cycle(_))
@@ -55,7 +65,7 @@ impl Type {
 
         if types.is_empty() {
             // This shouldn't happen in normal operation, but return NIL as a safe default
-            Type::Tuple(TypeId::NIL)
+            Type::nil()
         } else if types.len() == 1 {
             types.into_iter().next().unwrap()
         } else {
@@ -63,12 +73,18 @@ impl Type {
         }
     }
 
-    /// Get the type variants as a vector
-    /// For non-union types, returns a vector with a single element
-    pub fn to_vec(&self) -> Vec<Type> {
+    /// Extract all tuple TypeIds from this Type, filtering out non-tuple types
+    pub fn extract_tuple_types(&self) -> Vec<TypeId> {
         match self {
-            Type::Union(types) => types.clone(),
-            t => vec![t.clone()],
+            Type::Union(types) => types
+                .iter()
+                .filter_map(|t| match t {
+                    Type::Tuple(id) => Some(*id),
+                    _ => None,
+                })
+                .collect(),
+            Type::Tuple(id) => vec![*id],
+            _ => vec![],
         }
     }
 

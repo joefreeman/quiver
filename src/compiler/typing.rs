@@ -33,19 +33,13 @@ pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
     }
 }
 
-pub struct TypeContext {
-    pub type_aliases: HashMap<String, Type>,
+pub struct TypeContext<'a> {
+    pub type_aliases: &'a mut HashMap<String, Type>,
     pub resolution_stack: Vec<String>,
 }
 
-impl TypeContext {
-    pub fn new(existing_aliases: &HashMap<String, Vec<Type>>) -> Self {
-        let mut type_aliases = HashMap::new();
-        for (name, types) in existing_aliases.iter() {
-            if !types.is_empty() {
-                type_aliases.insert(name.clone(), Type::from_types(types.clone()));
-            }
-        }
+impl<'a> TypeContext<'a> {
+    pub fn new(type_aliases: &'a mut HashMap<String, Type>) -> Self {
         Self {
             type_aliases,
             resolution_stack: Vec::new(),
@@ -75,8 +69,8 @@ impl TypeContext {
 
                 // Create function type without distributing unions
                 Ok(Type::Function(Box::new(FunctionType {
-                    parameter: vec![input_type],
-                    result: vec![output_type],
+                    parameter: input_type,
+                    result: output_type,
                 })))
             }
             ast::Type::Union(union) => {

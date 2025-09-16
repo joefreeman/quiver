@@ -352,26 +352,8 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
             }
         }
         Type::Function(func_type) => {
-            let param_str = if func_type.parameter.len() == 1 {
-                format_type(quiver, &func_type.parameter[0])
-            } else {
-                let params: Vec<String> = func_type
-                    .parameter
-                    .iter()
-                    .map(|t| format_type(quiver, t))
-                    .collect();
-                format!("({})", params.join(" | "))
-            };
-            let result_str = if func_type.result.len() == 1 {
-                format_type(quiver, &func_type.result[0])
-            } else {
-                let results: Vec<String> = func_type
-                    .result
-                    .iter()
-                    .map(|t| format_type(quiver, t))
-                    .collect();
-                format!("({})", results.join(" | "))
-            };
+            let param_str = format_type(quiver, &func_type.parameter);
+            let result_str = format_type(quiver, &func_type.result);
             format!("#{} -> {}", param_str, result_str)
         }
         Type::Cycle(depth) => format!("μ{}", depth),
