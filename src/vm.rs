@@ -297,6 +297,10 @@ impl VM {
         &mut self,
         instructions: Vec<Instruction>,
     ) -> Result<Option<Value>, Error> {
+        if instructions.is_empty() {
+            return Ok(None);
+        }
+
         let mut frame = Frame::new(instructions.clone(), HashMap::new());
         frame.scopes += 1;
         self.frames.push(frame);
