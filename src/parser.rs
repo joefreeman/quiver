@@ -210,16 +210,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error> {
             inner_pair,
         )?)),
         Rule::block => Ok(Value::Block(parse_block(inner_pair)?)),
-        Rule::member_access => {
-            let member_access = parse_member_access(inner_pair)?;
-            // Check if it's a bare $ (no accessors)
-            if member_access.target == MemberTarget::Parameter && member_access.accessors.is_empty()
-            {
-                Ok(Value::Parameter(Parameter))
-            } else {
-                Ok(Value::MemberAccess(member_access))
-            }
-        }
+        Rule::member_access => Ok(Value::MemberAccess(parse_member_access(inner_pair)?)),
         Rule::import => {
             let path = parse_string_literal(inner_pair.into_inner().next().unwrap().as_str())?;
             Ok(Value::Import(path))
@@ -240,16 +231,7 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
         }
         Rule::operation_tuple => Ok(Operation::Tuple(parse_operation_tuple(pair)?)),
         Rule::block => Ok(Operation::Block(parse_block(pair)?)),
-        Rule::member_access => {
-            let member_access = parse_member_access(pair)?;
-            // Check if it's a bare $ (no accessors)
-            if member_access.target == MemberTarget::Parameter && member_access.accessors.is_empty()
-            {
-                Ok(Operation::Parameter(Parameter))
-            } else {
-                Ok(Operation::MemberAccess(member_access))
-            }
-        }
+        Rule::member_access => Ok(Operation::MemberAccess(parse_member_access(pair)?)),
         // Rule::identifier => Ok(Operation::Identifier(pair.as_str().to_string())),
         Rule::field_access => {
             let field_name = pair.as_str()[1..].to_string(); // Remove leading '.'

@@ -593,15 +593,6 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn compile_parameter(
-        &mut self,
-        _parameter: ast::Parameter,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
-        self.codegen.add_instruction(Instruction::Parameter);
-        Ok(parameter_type)
-    }
-
     fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
         let mut value_type = match chain.value {
             ast::Value::Literal(literal) => self.compile_literal(literal),
@@ -615,9 +606,6 @@ impl<'a> Compiler<'a> {
                 self.codegen
                     .add_instruction(Instruction::Tuple(TypeId::NIL));
                 self.compile_block(block, Type::nil())
-            }
-            ast::Value::Parameter(parameter) => {
-                self.compile_parameter(parameter, parameter_type.clone())
             }
             ast::Value::MemberAccess(member_access) => self.compile_value_member_access(
                 &member_access.target,
@@ -808,9 +796,6 @@ impl<'a> Compiler<'a> {
                 self.compile_tuple_element_access(TupleAccessor::Position(position), value_type)
             }
             ast::Operation::TailCall(identifier) => self.compile_operation_tail_call(&identifier),
-            ast::Operation::Parameter(parameter) => {
-                self.compile_operation_parameter(parameter, value_type, parameter_type)
-            }
             ast::Operation::Builtin(name) => self.compile_operation_builtin(&name, value_type),
             ast::Operation::Equality => self.compile_operation_equality(value_type),
             ast::Operation::Not => self.compile_operation_not(value_type),
@@ -980,20 +965,6 @@ impl<'a> Compiler<'a> {
 
         // The Not instruction returns either Ok or NIL
         Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
-    }
-
-    fn compile_operation_parameter(
-        &mut self,
-        _parameter: ast::Parameter,
-        value_type: Type,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
-        // Get the operation type from the parameter (could be function or other callable)
-        self.codegen.add_instruction(Instruction::Parameter);
-        let function_type = parameter_type;
-
-        // Use the unified function call handler
-        self.compile_function_call(function_type, value_type)
     }
 
     fn compile_target_access(&mut self, target: &str) -> Result<Type, Error> {

@@ -56,7 +56,6 @@ pub enum Value {
     Tuple(ValueTuple),
     FunctionDefinition(FunctionDefinition),
     Block(Block),
-    Parameter(Parameter),
     MemberAccess(MemberAccess),
     Import(String),
 }
@@ -65,7 +64,6 @@ pub enum Value {
 pub enum Operation {
     Tuple(OperationTuple),
     Block(Block),
-    Parameter(Parameter),
     MemberAccess(MemberAccess),
     FieldAccess(String),
     PositionalAccess(usize),
@@ -117,9 +115,6 @@ pub struct FunctionDefinition {
     pub parameter_type: Option<Type>,
     pub body: Block,
 }
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Parameter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberAccess {

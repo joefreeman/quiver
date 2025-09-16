@@ -69,7 +69,6 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Value::Block(block) => {
                 self.visit_block(&block);
             }
-            ast::Value::Parameter(_) => {}
             ast::Value::MemberAccess(member_access) => {
                 if let ast::MemberTarget::Identifier(name) = &member_access.target {
                     self.visit_identifier(name);
@@ -91,7 +90,6 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Operation::Block(block) => {
                 self.visit_block(&block);
             }
-            ast::Operation::Parameter(_) => {}
             ast::Operation::MemberAccess(member_access) => {
                 if let ast::MemberTarget::Identifier(name) = &member_access.target {
                     self.visit_identifier(name);
