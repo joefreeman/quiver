@@ -845,10 +845,7 @@ impl<'a> Compiler<'a> {
     fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<Type, Error> {
         if identifier.is_empty() {
             self.codegen.add_instruction(Instruction::TailCall(true));
-            // Recursive tail call - the control flow doesn't return here, so the type is NIL
-            // TODO: Ideally we'd return the current function's return type, but that would
-            // require tracking more context during compilation
-            Ok(Type::nil())
+            Ok(Type::Union(vec![]))
         } else {
             self.codegen
                 .add_instruction(Instruction::Load(identifier.to_string()));
@@ -1098,68 +1095,29 @@ impl<'a> Compiler<'a> {
         operation_type: Type,
         value_type: Type,
     ) -> Result<Type, Error> {
-        let operation_types = match operation_type {
-            Type::Union(types) => types,
-            t => vec![t],
-        };
-        let value_types = match value_type {
-            Type::Union(types) => types,
-            t => vec![t],
-        };
-
-        // Separate function types from non-function types
-        let mut function_variants = Vec::new();
-        let mut non_function_types = Vec::new();
-
-        for op_type in &operation_types {
-            match op_type {
-                Type::Function(func_type) => function_variants.push(func_type),
-                _ => non_function_types.push(op_type),
-            }
-        }
-
-        // Error if we have any non-function types in what should be callable
-        if !non_function_types.is_empty() {
-            return Err(Error::ChainValueUnused);
-        }
-
-        // Error if we have no function types at all
-        if function_variants.is_empty() {
-            return Err(Error::ChainValueUnused);
-        }
-
-        // Check compatibility and collect return types
-        let mut all_return_types = Vec::new();
-
-        for func_type in &function_variants {
-            // Check if this function accepts any of the value types
-            let is_compatible = value_types.iter().any(|value_type| {
-                // Use coinductive compatibility checking for recursive types
-                let mut assumptions = std::collections::HashSet::new();
-
-                value_type.is_compatible_with(
-                    &func_type.parameter,
-                    &|type_id| self.vm.lookup_type(type_id).cloned(),
-                    &mut assumptions,
-                )
-            });
-
-            if !is_compatible {
+        let func_type = match operation_type {
+            Type::Function(func_type) => func_type,
+            _ => {
                 return Err(Error::TypeMismatch {
-                    expected: format!("function parameter compatible with {:?}", value_types),
-                    found: format!("function parameter {:?}", func_type.parameter),
+                    expected: "function".to_string(),
+                    found: format!("{:?}", operation_type),
                 });
             }
+        };
 
-            // Collect return type from this compatible function
-            all_return_types.push(func_type.result.clone());
+        if !value_type.is_compatible(&func_type.parameter, self.vm.type_registry()) {
+            return Err(Error::TypeMismatch {
+                expected: format!(
+                    "function parameter compatible with {:?}",
+                    func_type.parameter
+                ),
+                found: format!("{:?}", value_type),
+            });
         }
 
-        // Generate the call instruction
         self.codegen.add_instruction(Instruction::Call);
 
-        // Combine return types using union_types
-        union_types(all_return_types)
+        Ok(func_type.result)
     }
 
     fn define_variable(&mut self, name: &str, var_type: Type) {

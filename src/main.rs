@@ -343,7 +343,11 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
                     .collect();
 
                 if let Some(type_name) = name {
-                    format!("{}[{}]", type_name, field_strs.join(", "))
+                    if field_strs.is_empty() {
+                        format!("{}", type_name)
+                    } else {
+                        format!("{}[{}]", type_name, field_strs.join(", "))
+                    }
                 } else {
                     format!("[{}]", field_strs.join(", "))
                 }

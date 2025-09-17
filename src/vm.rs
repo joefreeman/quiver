@@ -293,6 +293,11 @@ impl VM {
         self.type_registry.get_types().clone()
     }
 
+    // Get a reference to the type registry
+    pub fn type_registry(&self) -> &TypeRegistry {
+        &self.type_registry
+    }
+
     pub fn execute_instructions(
         &mut self,
         instructions: Vec<Instruction>,
@@ -495,15 +500,10 @@ impl VM {
                 // Fast path: exact match
                 true
             } else {
-                // Use Type::is_compatible_with for structural checking
+                // Use Type::is_compatible for structural checking
                 let actual_type = Type::Tuple(*actual_type_id);
                 let expected_type = Type::Tuple(expected_type_id);
-                let mut assumptions = std::collections::HashSet::new();
-                actual_type.is_compatible_with(
-                    &expected_type,
-                    &|type_id| self.type_registry.lookup_type(type_id).cloned(),
-                    &mut assumptions,
-                )
+                actual_type.is_compatible(&expected_type, &self.type_registry)
             }
         } else {
             false
