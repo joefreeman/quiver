@@ -7,6 +7,17 @@ use crate::{
 
 use super::{Error, codegen::InstructionBuilder, typing::TypeContext};
 
+/// Represents the certainty of a pattern match
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchCertainty {
+    /// Pattern cannot possibly match the value type
+    WontMatch,
+    /// Pattern might match, requires runtime checks
+    MightMatch,
+    /// Pattern will definitely match, no runtime checks needed
+    WillMatch,
+}
+
 /// Represents a check that must be performed at runtime
 #[derive(Debug, Clone)]
 enum RuntimeCheck {
@@ -148,16 +159,27 @@ impl<'a> PatternCompiler<'a> {
         pattern: &ast::Pattern,
         value_type: &Type,
         fail_addr: usize,
-    ) -> Result<Option<Vec<(String, Type)>>, Error> {
+    ) -> Result<(MatchCertainty, Vec<(String, Type)>), Error> {
         // Phase 1: Analyze the pattern
         let binding_sets = self.analyze_pattern(pattern, value_type, vec![])?;
 
-        // Phase 2: Check if match is possible
-        if binding_sets.is_empty() {
-            return Ok(None);
+        // Phase 2: Determine match certainty
+        let certainty = if binding_sets.is_empty() {
+            MatchCertainty::WontMatch
+        } else if binding_sets.iter().any(|bs| bs.requirements.is_empty()) {
+            // Any binding set with no requirements means at least one path will definitely match
+            MatchCertainty::WillMatch
+        } else {
+            // All binding sets have requirements - might match
+            MatchCertainty::MightMatch
+        };
+
+        // Phase 3: If match is impossible, return early
+        if certainty == MatchCertainty::WontMatch {
+            return Ok((MatchCertainty::WontMatch, Vec::new()));
         }
 
-        // Phase 3: Generate code
+        // Phase 4: Generate code
         self.generate_pattern_code(&binding_sets, fail_addr)?;
 
         // Return bindings for caller to handle
@@ -173,7 +195,7 @@ impl<'a> PatternCompiler<'a> {
             Vec::new()
         };
 
-        Ok(Some(all_bindings))
+        Ok((certainty, all_bindings))
     }
 
     /// Phase 1: Analyze pattern and determine what's needed

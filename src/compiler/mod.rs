@@ -11,7 +11,7 @@ mod variables;
 
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
-pub use pattern::PatternCompiler;
+pub use pattern::{MatchCertainty, PatternCompiler};
 pub use typing::{TupleAccessor, union_types};
 
 use crate::{
@@ -423,19 +423,21 @@ impl<'a> Compiler<'a> {
         self.codegen.patch_jump_to_here(match_success_addr);
 
         // Attempt pattern matching
-        match self.compile_pattern_match(&pattern, &value_type, cleanup_jump_addr)? {
-            None => {
+        let (certainty, bindings) =
+            self.compile_pattern_match(&pattern, &value_type, cleanup_jump_addr)?;
+
+        match certainty {
+            MatchCertainty::WontMatch => {
                 // Pattern definitely won't match - cleanup directly
                 self.codegen.emit_pattern_match_cleanup(0);
-                return Ok(Type::nil());
+                Ok(Type::nil())
             }
-            Some(pending_assignments) => {
-                // Pattern can match - generate normal assignment code
+            MatchCertainty::WillMatch | MatchCertainty::MightMatch => {
+                // Pattern can or will match - generate assignment code
 
                 // Pattern matched successfully - commit all variable assignments
-                self.codegen
-                    .emit_pattern_match_success(&pending_assignments);
-                for (name, var_type) in &pending_assignments {
+                self.codegen.emit_pattern_match_success(&bindings);
+                for (name, var_type) in &bindings {
                     self.define_variable(name, var_type.clone());
                 }
 
@@ -444,15 +446,21 @@ impl<'a> Compiler<'a> {
 
                 // Cleanup section - if pattern matching failed, we come here
                 self.codegen.patch_jump_to_here(cleanup_jump_addr);
-                self.codegen
-                    .emit_pattern_match_cleanup(pending_assignments.len());
+                self.codegen.emit_pattern_match_cleanup(bindings.len());
 
                 // End of assignment
                 self.codegen.patch_jump_to_here(success_end_jump_addr);
+
+                // Return type based on match certainty
+                match certainty {
+                    MatchCertainty::WillMatch => Ok(Type::ok()),
+                    MatchCertainty::MightMatch => {
+                        Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
+                    }
+                    MatchCertainty::WontMatch => unreachable!(), // Already handled above
+                }
             }
         }
-
-        Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
     }
 
     fn compile_pattern_match(
@@ -460,7 +468,7 @@ impl<'a> Compiler<'a> {
         pattern: &ast::Pattern,
         value_type: &Type,
         fail_addr: usize,
-    ) -> Result<Option<Vec<(String, Type)>>, Error> {
+    ) -> Result<(MatchCertainty, Vec<(String, Type)>), Error> {
         let mut pattern_compiler =
             PatternCompiler::new(&mut self.codegen, &mut self.type_context, self.vm);
         pattern_compiler.compile_pattern_match(pattern, value_type, fail_addr)
@@ -508,6 +516,20 @@ impl<'a> Compiler<'a> {
                 let consequence_type =
                     self.compile_expression(consequence.clone(), parameter_type.clone())?;
                 branch_types.push(consequence_type);
+
+                // If this is the last branch and the condition can be nil,
+                // the block can also return nil (when condition fails)
+                if is_last_branch {
+                    let condition_can_be_nil = match &condition_type {
+                        Type::Union(types) => types.iter().any(|t| t == &Type::nil()),
+                        Type::Tuple(id) if *id == TypeId::NIL => true,
+                        _ => false,
+                    };
+
+                    if condition_can_be_nil {
+                        branch_types.push(Type::nil());
+                    }
+                }
             } else {
                 // No consequence - use condition type
                 branch_types.push(condition_type);
@@ -561,14 +583,36 @@ impl<'a> Compiler<'a> {
         let mut end_jumps = Vec::new();
 
         for (i, term) in expression.terms.iter().enumerate() {
-            last_type = Some(match term {
+            let term_type = match term {
                 ast::Term::Assignment { pattern, value } => {
                     self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone())
                 }
                 ast::Term::Chain(chain) => {
                     self.compile_chain(chain.clone(), parameter_type.clone())
                 }
-            }?);
+            }?;
+
+            // Check if the previous type contained nil and we're not on the first term
+            let should_propagate_nil = if i > 0 {
+                if let Some(ref prev_type) = last_type {
+                    match prev_type {
+                        Type::Union(types) => types.iter().any(|t| t == &Type::nil()),
+                        Type::Tuple(id) if *id == TypeId::NIL => true,
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            // If previous type could be nil and we're past the first term, propagate nil possibility
+            last_type = Some(if should_propagate_nil {
+                Type::from_types(vec![term_type, Type::nil()])
+            } else {
+                term_type
+            });
 
             // If last_type is NIL, subsequent terms are unreachable - break early
             if let Some(ref last_type) = last_type {
