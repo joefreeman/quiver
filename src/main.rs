@@ -356,13 +356,28 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
             }
         }
         Type::Function(func_type) => {
-            let param_str = format_type(quiver, &func_type.parameter);
+            // Add parentheses around parameter if it's a function type
+            let param_str = match &func_type.parameter {
+                Type::Function(_) => format!("({})", format_type(quiver, &func_type.parameter)),
+                _ => format_type(quiver, &func_type.parameter),
+            };
+
+            // Result type already has parentheses if it's a union
             let result_str = format_type(quiver, &func_type.result);
             format!("#{} -> {}", param_str, result_str)
         }
         Type::Cycle(depth) => format!("μ{}", depth),
         Type::Union(types) => {
-            let type_strs: Vec<String> = types.iter().map(|t| format_type(quiver, t)).collect();
+            let type_strs: Vec<String> = types
+                .iter()
+                .map(|t| {
+                    match t {
+                        // Add parentheses around function types in unions for clarity
+                        Type::Function(_) => format!("({})", format_type(quiver, t)),
+                        _ => format_type(quiver, t),
+                    }
+                })
+                .collect();
             format!("({})", type_strs.join(" | "))
         }
     }

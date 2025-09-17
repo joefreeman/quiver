@@ -529,8 +529,16 @@ fn parse_partial_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Vec<String
 
 fn parse_type_definition(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
     let mut inner = pair.into_inner();
-    let first_type = parse_base_type(inner.next().unwrap())?;
+    let first_pair = inner.next().unwrap();
 
+    // Check if this is a function type
+    if first_pair.as_rule() == Rule::function_type {
+        // This is a standalone function type
+        return Ok(Type::Function(parse_function_type(first_pair)?));
+    }
+
+    // Otherwise, it's a base_type possibly followed by union alternatives
+    let first_type = parse_base_type(first_pair)?;
     let mut types = vec![first_type];
 
     // Check if there are more types separated by "|"
@@ -546,13 +554,17 @@ fn parse_type_definition(pair: pest::iterators::Pair<Rule>) -> Result<Type, Erro
 }
 
 fn parse_base_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
+    let mut inner = pair.into_inner();
+    let first_pair = inner.next().unwrap();
 
-    match inner_pair.as_rule() {
-        Rule::primitive_type => parse_primitive_type(inner_pair),
-        Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(inner_pair)?)),
-        Rule::function_type => Ok(Type::Function(parse_function_type(inner_pair)?)),
-        Rule::identifier => Ok(Type::Identifier(inner_pair.as_str().to_string())),
+    match first_pair.as_rule() {
+        Rule::primitive_type => parse_primitive_type(first_pair),
+        Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(first_pair)?)),
+        Rule::type_definition => {
+            // This is a parenthesized type definition
+            parse_type_definition(first_pair)
+        }
+        Rule::identifier => Ok(Type::Identifier(first_pair.as_str().to_string())),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "base type".to_string(),
@@ -611,9 +623,24 @@ fn parse_field_type(pair: pest::iterators::Pair<Rule>) -> Result<FieldType, Erro
 fn parse_function_type(pair: pest::iterators::Pair<Rule>) -> Result<FunctionType, Error> {
     let mut inner = pair.into_inner();
     let input = Box::new(parse_function_input_type(inner.next().unwrap())?);
-    let output = Box::new(parse_type_definition(inner.next().unwrap())?);
+    let output = Box::new(parse_function_output_type(inner.next().unwrap())?);
 
     Ok(FunctionType { input, output })
+}
+
+fn parse_function_output_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
+    let inner_pair = pair.into_inner().next().unwrap();
+
+    match inner_pair.as_rule() {
+        Rule::type_definition => parse_type_definition(inner_pair),
+        Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(inner_pair)?)),
+        Rule::primitive_type => parse_primitive_type(inner_pair),
+        Rule::identifier => Ok(Type::Identifier(inner_pair.as_str().to_string())),
+        rule => Err(Error::RuleUnexpected {
+            found: rule,
+            context: "function output type".to_string(),
+        }),
+    }
 }
 
 fn parse_function_input_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
