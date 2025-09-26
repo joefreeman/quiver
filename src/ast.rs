@@ -35,7 +35,7 @@ pub struct Branch {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expression {
-    pub terms: Vec<Chain>,
+    pub chains: Vec<Chain>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

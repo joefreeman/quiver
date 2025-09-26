@@ -268,7 +268,7 @@ impl<'a> Compiler<'a> {
         // Compile field values and collect their types
         let mut field_types = Vec::new();
         for field in &fields {
-            let field_type = self.compile_term(field.value.clone(), parameter_type.clone())?;
+            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
             field_types.push((field.name.clone(), field_type));
         }
 
@@ -310,7 +310,7 @@ impl<'a> Compiler<'a> {
                     value_type.clone()
                 }
                 ast::OperationTupleFieldValue::Chain(chain) => {
-                    self.compile_term(chain.clone(), parameter_type.clone())?
+                    self.compile_chain(chain.clone(), parameter_type.clone())?
                 }
             };
 
@@ -575,10 +575,10 @@ impl<'a> Compiler<'a> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
 
-        for (i, chain) in expression.terms.iter().enumerate() {
-            let term_type = self.compile_term(chain.clone(), parameter_type.clone())?;
+        for (i, chain) in expression.chains.iter().enumerate() {
+            let chain_type = self.compile_chain(chain.clone(), parameter_type.clone())?;
 
-            // Check if the previous type contained nil and we're not on the first term
+            // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil = if i > 0 {
                 if let Some(ref prev_type) = last_type {
                     match prev_type {
@@ -593,21 +593,21 @@ impl<'a> Compiler<'a> {
                 false
             };
 
-            // If previous type could be nil and we're past the first term, propagate nil possibility
+            // If previous type could be nil and we're past the first chain, propagate nil possibility
             last_type = Some(if should_propagate_nil {
-                Type::from_types(vec![term_type, Type::nil()])
+                Type::from_types(vec![chain_type, Type::nil()])
             } else {
-                term_type
+                chain_type
             });
 
-            // If last_type is NIL, subsequent terms are unreachable - break early
+            // If last_type is NIL, subsequent chains are unreachable - break early
             if let Some(ref last_type) = last_type {
                 if last_type.as_concrete() == Some(&Type::nil()) {
                     break;
                 }
             }
 
-            if i < expression.terms.len() - 1 {
+            if i < expression.chains.len() - 1 {
                 let end_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 end_jumps.push(end_jump);
             }
@@ -619,12 +619,12 @@ impl<'a> Compiler<'a> {
         }
 
         last_type.ok_or_else(|| Error::InternalError {
-            message: "Expression compiled with no terms".to_string(),
+            message: "Expression compiled with no chains".to_string(),
         })
     }
 
-    fn compile_term(&mut self, term: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
-        let mut value_type = match term.value {
+    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
+        let mut value_type = match chain.value {
             ast::Value::Literal(literal) => self.compile_literal(literal),
             ast::Value::Tuple(tuple) => {
                 self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone())
@@ -650,7 +650,7 @@ impl<'a> Compiler<'a> {
             }
         }?;
 
-        for operation in term.operations {
+        for operation in chain.operations {
             value_type = self.compile_operation(operation, value_type, parameter_type.clone())?;
         }
 

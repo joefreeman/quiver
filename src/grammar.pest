@@ -72,7 +72,7 @@ pattern = { partial_pattern | tuple_pattern | literal | star | placeholder | ide
 ripple = { "~" }
 
 // Value tuple construction (Name[field: value, value, ...], [value, ...], Name)
-value_tuple_field = { (identifier ~ ":" ~ sp)? ~ term }
+value_tuple_field = { (identifier ~ ":" ~ sp)? ~ chain }
 value_tuple_field_list = { value_tuple_field ~ (sp? ~ "," ~ ws ~ value_tuple_field)* ~ (sp? ~ ",")? }
 value_tuple = {
     tuple_name ~ "[" ~ ws? ~ value_tuple_field_list? ~ ws? ~ "]" |
@@ -81,7 +81,7 @@ value_tuple = {
 }
 
 // Operation tuple construction (supports ripple)
-operation_tuple_field = { (identifier ~ ":" ~ sp)? ~ (ripple | term) }
+operation_tuple_field = { (identifier ~ ":" ~ sp)? ~ (ripple | chain) }
 operation_tuple_field_list = { operation_tuple_field ~ (sp? ~ "," ~ ws ~ operation_tuple_field)* ~ (sp? ~ ",")? }
 operation_tuple = {
     tuple_name ~ "[" ~ ws? ~ operation_tuple_field_list? ~ ws? ~ "]" |
@@ -143,8 +143,8 @@ operation = {
 }
 
 // Expressions
-term = { value ~ (ws ~ "~>" ~ sp ~ operation)* }
-expression = { term ~ (ws? ~ "," ~ ws ~ term)* }
+chain = { value ~ (ws ~ "~>" ~ sp ~ operation)* }
+expression = { chain ~ (ws? ~ "," ~ ws ~ chain)* }
 
 // Type aliases/imports
 type_alias = { "type" ~ sp ~ !primitive_type ~ identifier ~ sp ~ "=" ~ sp ~ type_definition }

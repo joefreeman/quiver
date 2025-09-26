@@ -32,14 +32,14 @@ impl<'a> FreeVariableCollector<'a> {
     }
 
     fn visit_expression(&mut self, expression: &ast::Expression) {
-        for term in &expression.terms {
-            self.visit_term(term);
+        for chain in &expression.chains {
+            self.visit_chain(chain);
         }
     }
 
-    fn visit_term(&mut self, term: &ast::Chain) {
-        self.visit_value(&term.value);
-        for operation in &term.operations {
+    fn visit_chain(&mut self, chain: &ast::Chain) {
+        self.visit_value(&chain.value);
+        for operation in &chain.operations {
             self.visit_operation(operation);
         }
     }
@@ -49,7 +49,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Value::Literal(_) => {}
             ast::Value::Tuple(tuple) => {
                 for field in &tuple.fields {
-                    self.visit_term(&field.value);
+                    self.visit_chain(&field.value);
                 }
             }
             ast::Value::FunctionDefinition(func) => {
@@ -73,7 +73,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Operation::Tuple(tuple) => {
                 for field in &tuple.fields {
                     if let ast::OperationTupleFieldValue::Chain(chain) = &field.value {
-                        self.visit_term(chain);
+                        self.visit_chain(chain);
                     }
                 }
             }

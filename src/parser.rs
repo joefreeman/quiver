@@ -155,19 +155,19 @@ fn parse_branch(pair: pest::iterators::Pair<Rule>) -> Result<Branch, Error> {
 }
 
 fn parse_expression(pair: pest::iterators::Pair<Rule>) -> Result<Expression, Error> {
-    let mut terms = Vec::new();
+    let mut chains = Vec::new();
 
     for inner_pair in pair.into_inner() {
         match inner_pair.as_rule() {
-            Rule::term => terms.push(parse_term(inner_pair)?),
+            Rule::chain => chains.push(parse_chain(inner_pair)?),
             _ => {}
         }
     }
 
-    Ok(Expression { terms })
+    Ok(Expression { chains })
 }
 
-fn parse_term(pair: pest::iterators::Pair<Rule>) -> Result<Chain, Error> {
+fn parse_chain(pair: pest::iterators::Pair<Rule>) -> Result<Chain, Error> {
     let mut inner = pair.into_inner();
     let value = parse_value(inner.next().unwrap())?;
     let mut operations = Vec::new();
@@ -336,7 +336,7 @@ fn parse_value_tuple_field(pair: pest::iterators::Pair<Rule>) -> Result<ValueTup
     for field_part in pair.into_inner() {
         match field_part.as_rule() {
             Rule::identifier => name = Some(field_part.as_str().to_string()),
-            Rule::term => value = Some(parse_term(field_part)?),
+            Rule::chain => value = Some(parse_chain(field_part)?),
             _ => {}
         }
     }
@@ -376,7 +376,7 @@ fn parse_operation_tuple_field(
         match field_part.as_rule() {
             Rule::identifier => name = Some(field_part.as_str().to_string()),
             Rule::ripple => value = Some(OperationTupleFieldValue::Ripple),
-            Rule::term => value = Some(OperationTupleFieldValue::Chain(parse_term(field_part)?)),
+            Rule::chain => value = Some(OperationTupleFieldValue::Chain(parse_chain(field_part)?)),
             _ => {}
         }
     }
