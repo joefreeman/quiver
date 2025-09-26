@@ -124,9 +124,9 @@ fn test_binary_operations_chain() {
     quiver()
         .evaluate(
             r#"
-            hello = "hello",
-            world = " world",
-            combined = [hello, world] ~> <binary_concat>,
+            "hello" ~> ^hello,
+            " world" ~> ^world,
+            [hello, world] ~> <binary_concat> ~> ^combined,
             combined ~> <binary_length>
             "#,
         )
@@ -155,8 +155,8 @@ fn test_heap_vs_constant_equality() {
     quiver()
         .evaluate(
             r#"
-            heap_bin = 5 ~> <binary_new>,
-            const_bin = 5 ~> <binary_new>,
+            5 ~> <binary_new> ~> ^heap_bin,
+            5 ~> <binary_new> ~> ^const_bin,
             [heap_bin, const_bin] ~> ==
             "#,
         )

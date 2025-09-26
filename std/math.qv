@@ -10,10 +10,10 @@
   mod: #[int, int] { $ ~> <modulo> },
 
   // Comparison operations on [int, int] tuples
-  lt: #[int, int] { $ ~> <compare> ~> { -1 = $ => Ok } },
-  le: #[int, int] { $ ~> <compare> ~> { -1 = $ => Ok | 0 = $ => Ok } },
-  gt: #[int, int] { $ ~> <compare> ~> { 1 = $ => Ok } },
-  ge: #[int, int] { $ ~> <compare> ~> { 0 = $ => Ok | 1 = $ => Ok } },
+  lt: #[int, int] { $ ~> <compare> ~> { ^-1 => Ok } },
+  le: #[int, int] { $ ~> <compare> ~> { ^-1 => Ok | ^0 => Ok } },
+  gt: #[int, int] { $ ~> <compare> ~> { ^1 => Ok } },
+  ge: #[int, int] { $ ~> <compare> ~> { ^0 => Ok | ^1 => Ok } },
 
   // Single-argument math functions
   abs: #int { $ ~> <abs> },

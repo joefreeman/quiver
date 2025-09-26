@@ -72,7 +72,7 @@ pattern = { partial_pattern | tuple_pattern | literal | star | placeholder | ide
 ripple = { "~" }
 
 // Value tuple construction (Name[field: value, value, ...], [value, ...], Name)
-value_tuple_field = { (identifier ~ ":" ~ sp)? ~ chain }
+value_tuple_field = { (identifier ~ ":" ~ sp)? ~ term }
 value_tuple_field_list = { value_tuple_field ~ (sp? ~ "," ~ ws ~ value_tuple_field)* ~ (sp? ~ ",")? }
 value_tuple = {
     tuple_name ~ "[" ~ ws? ~ value_tuple_field_list? ~ ws? ~ "]" |
@@ -81,7 +81,7 @@ value_tuple = {
 }
 
 // Operation tuple construction (supports ripple)
-operation_tuple_field = { (identifier ~ ":" ~ sp)? ~ (ripple | chain) }
+operation_tuple_field = { (identifier ~ ":" ~ sp)? ~ (ripple | term) }
 operation_tuple_field_list = { operation_tuple_field ~ (sp? ~ "," ~ ws ~ operation_tuple_field)* ~ (sp? ~ ",")? }
 operation_tuple = {
     tuple_name ~ "[" ~ ws? ~ operation_tuple_field_list? ~ ws? ~ "]" |
@@ -117,6 +117,9 @@ not = { "!" }
 // Import (%"path")
 import = { "%" ~ string_literal }
 
+// Match pattern (^pattern)
+match_pattern = { "^" ~ pattern }
+
 // Chain
 value = {
     literal |
@@ -124,7 +127,8 @@ value = {
     function_definition |
     block |
     member_access |
-    import
+    import |
+    match_pattern
 }
 operation = {
     builtin |
@@ -134,15 +138,12 @@ operation = {
     member_access |
     field_access |
     positional_access |
-    tail_call
+    tail_call |
+    match_pattern
 }
-chain = { value ~ (ws ~ "~>" ~ sp ~ operation)* }
-
-// Assignment (pattern = chain)
-assignment = { pattern ~ sp ~ "=" ~ sp ~ chain }
 
 // Expressions
-term = { assignment | chain }
+term = { value ~ (ws ~ "~>" ~ sp ~ operation)* }
 expression = { term ~ (ws? ~ "," ~ ws ~ term)* }
 
 // Type aliases/imports

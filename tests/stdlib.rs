@@ -6,7 +6,7 @@ fn test_stdlib_io_import() {
     quiver()
         .evaluate(
             r#"
-            io = %"io",
+            %"io" ~> ^io,
             42 ~> io.println,
             "Hello, world!" ~> io.println
         "#,

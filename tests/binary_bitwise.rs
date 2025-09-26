@@ -156,9 +156,9 @@ fn test_binary_set_bit() {
     quiver()
         .evaluate(
             r#"
-            start = '00',
-            bit0_set = [start, 0, 1] ~> <binary_set_bit>,
-            bit7_set = [bit0_set, 7, 1] ~> <binary_set_bit>,
+            '00' ~> ^start,
+            [start, 0, 1] ~> <binary_set_bit> ~> ^bit0_set,
+            [bit0_set, 7, 1] ~> <binary_set_bit> ~> ^bit7_set,
             bit7_set
             "#,
         )
@@ -174,10 +174,10 @@ fn test_binary_popcount_hamt_pattern() {
         .evaluate(
             r#"
             // Create binary: set some bits to simulate HAMT bitmap
-            empty = 4 ~> <binary_new>,
-            with_bit0 = [empty, 0, 1] ~> <binary_set_bit>,
-            with_bit5 = [with_bit0, 5, 1] ~> <binary_set_bit>,
-            with_bit10 = [with_bit5, 10, 1] ~> <binary_set_bit>,
+            4 ~> <binary_new> ~> ^empty,
+            [empty, 0, 1] ~> <binary_set_bit> ~> ^with_bit0,
+            [with_bit0, 5, 1] ~> <binary_set_bit> ~> ^with_bit5,
+            [with_bit5, 10, 1] ~> <binary_set_bit> ~> ^with_bit10,
             with_bit10 ~> <binary_popcount>
             "#,
         )
@@ -205,11 +205,11 @@ fn test_bitwise_chaining() {
     quiver()
         .evaluate(
             r#"
-            a = 'aa',  // 10101010
-            b = '55',  // 01010101
+            'aa' ~> ^a,  // 10101010
+            '55' ~> ^b,  // 01010101
             // XOR then AND
-            xor_result = [a, b] ~> <binary_xor>,  // Should be 0xFF
-            and_result = [xor_result, a] ~> <binary_and>,  // 0xFF & 0xAA = 0xAA
+            [a, b] ~> <binary_xor> ~> ^xor_result,  // Should be 0xFF
+            [xor_result, a] ~> <binary_and> ~> ^and_result,  // 0xFF & 0xAA = 0xAA
             and_result
             "#,
         )
@@ -247,21 +247,21 @@ fn test_hamt_simulation() {
         .evaluate(
             r#"
             // Simulate HAMT bitmap operations
-            bitmap = 8 ~> <binary_new>,  // 8-byte bitmap
+            8 ~> <binary_new> ~> ^bitmap,  // 8-byte bitmap
 
             // Set bits at positions that would represent hash collisions
-            step1 = [bitmap, 5, 1] ~> <binary_set_bit>,   // Set bit 5
-            step2 = [step1, 13, 1] ~> <binary_set_bit>,   // Set bit 13
-            step3 = [step2, 21, 1] ~> <binary_set_bit>,   // Set bit 21
+            [bitmap, 5, 1] ~> <binary_set_bit> ~> ^step1,   // Set bit 5
+            [step1, 13, 1] ~> <binary_set_bit> ~> ^step2,   // Set bit 13
+            [step2, 21, 1] ~> <binary_set_bit> ~> ^step3,   // Set bit 21
 
             // Count how many slots are occupied
-            occupied_count = step3 ~> <binary_popcount>,
+            step3 ~> <binary_popcount> ~> ^occupied_count,
 
             // Extract a 5-bit chunk (like HAMT does for navigation)
-            shifted = [step3, 3] ~> <binary_shift_right>,  // Shift right by 3
-            mask = 4 ~> <binary_new>,  // Create mask binary
-            mask_with_bits = [mask, 0, 1] ~> <binary_set_bit>,  // Set LSB
-            chunk = [shifted, mask_with_bits] ~> <binary_and>,
+            [step3, 3] ~> <binary_shift_right> ~> ^shifted,  // Shift right by 3
+            4 ~> <binary_new> ~> ^mask,  // Create mask binary
+            [mask, 0, 1] ~> <binary_set_bit> ~> ^mask_with_bits,  // Set LSB
+            [shifted, mask_with_bits] ~> <binary_and> ~> ^chunk,
 
             occupied_count
             "#,

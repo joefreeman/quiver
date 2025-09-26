@@ -37,20 +37,9 @@ impl<'a> FreeVariableCollector<'a> {
         }
     }
 
-    fn visit_term(&mut self, term: &ast::Term) {
-        match term {
-            ast::Term::Assignment { pattern: _, value } => {
-                self.visit_chain(value);
-            }
-            ast::Term::Chain(chain) => {
-                self.visit_chain(chain);
-            }
-        }
-    }
-
-    fn visit_chain(&mut self, chain: &ast::Chain) {
-        self.visit_value(&chain.value);
-        for operation in &chain.operations {
+    fn visit_term(&mut self, term: &ast::Chain) {
+        self.visit_value(&term.value);
+        for operation in &term.operations {
             self.visit_operation(operation);
         }
     }
@@ -60,7 +49,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Value::Literal(_) => {}
             ast::Value::Tuple(tuple) => {
                 for field in &tuple.fields {
-                    self.visit_chain(&field.value);
+                    self.visit_term(&field.value);
                 }
             }
             ast::Value::FunctionDefinition(func) => {
@@ -75,6 +64,7 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Value::Import(_) => {}
+            ast::Value::Match(_) => {}
         }
     }
 
@@ -83,7 +73,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Operation::Tuple(tuple) => {
                 for field in &tuple.fields {
                     if let ast::OperationTupleFieldValue::Chain(chain) = &field.value {
-                        self.visit_chain(chain);
+                        self.visit_term(chain);
                     }
                 }
             }
@@ -103,6 +93,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Operation::Builtin(_) => {}
             ast::Operation::Equality => {}
             ast::Operation::Not => {}
+            ast::Operation::Match(_) => {}
         }
     }
 

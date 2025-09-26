@@ -35,13 +35,7 @@ pub struct Branch {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expression {
-    pub terms: Vec<Term>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Term {
-    Assignment { pattern: Pattern, value: Chain },
-    Chain(Chain),
+    pub terms: Vec<Chain>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +52,7 @@ pub enum Value {
     Block(Block),
     MemberAccess(MemberAccess),
     Import(String),
+    Match(Pattern),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +66,7 @@ pub enum Operation {
     Builtin(String),
     Equality,
     Not,
+    Match(Pattern),
 }
 
 #[derive(Debug, Clone, PartialEq)]

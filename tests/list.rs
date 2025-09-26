@@ -6,7 +6,7 @@ fn test_new() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [] ~> list.new
             "#,
         )
@@ -18,7 +18,7 @@ fn test_prepend() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -35,7 +35,7 @@ fn test_head() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [] ~> list.new ~> list.head
             "#,
         )
@@ -44,7 +44,7 @@ fn test_head() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -62,7 +62,7 @@ fn test_tail() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -77,7 +77,7 @@ fn test_tail() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -90,7 +90,7 @@ fn test_tail() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> list.tail
@@ -104,7 +104,7 @@ fn test_is_empty() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [] ~> list.new ~> list.empty?
             "#,
         )
@@ -113,7 +113,7 @@ fn test_is_empty() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [] ~> list.new ~> [~, 10] ~> list.prepend ~> list.empty?
             "#,
         )
@@ -125,7 +125,7 @@ fn test_length() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [] ~> list.new ~> list.length
             "#,
         )
@@ -134,7 +134,7 @@ fn test_length() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [] ~> list.new ~> [~, 10] ~> list.prepend ~> list.length
             "#,
         )
@@ -143,7 +143,7 @@ fn test_length() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -161,7 +161,7 @@ fn test_append() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -173,7 +173,7 @@ fn test_append() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -187,7 +187,7 @@ fn test_append() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -204,7 +204,7 @@ fn test_reverse() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> list.reverse
@@ -215,7 +215,7 @@ fn test_reverse() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -228,7 +228,7 @@ fn test_reverse() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -243,7 +243,7 @@ fn test_reverse() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             []
             ~> list.new
             ~> [~, 10]
@@ -263,7 +263,7 @@ fn test_concat() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [[] ~> list.new, [] ~> list.new]
             ~> list.concat
             "#,
@@ -273,14 +273,15 @@ fn test_concat() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            first = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend,
-            second = [] ~> list.new,
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> ^first,
+            [] ~> list.new ~> ^second,
             [first, second] ~> list.concat
             "#,
         )
@@ -289,14 +290,15 @@ fn test_concat() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            first = [] ~> list.new,
-            second = []
-                ~> list.new
-                ~> [~, 30]
-                ~> list.prepend
-                ~> [~, 40]
-                ~> list.prepend,
+            %"list" ~> ^list,
+            [] ~> list.new ~> ^first,
+            []
+            ~> list.new
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 40]
+            ~> list.prepend
+            ~> ^second,
             [first, second] ~> list.concat
             "#,
         )
@@ -305,19 +307,21 @@ fn test_concat() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            first = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend,
-            second = []
-                ~> list.new
-                ~> [~, 30]
-                ~> list.prepend
-                ~> [~, 40]
-                ~> list.prepend,
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> ^first,
+            []
+            ~> list.new
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 40]
+            ~> list.prepend
+            ~> ^second,
             [first, second] ~> list.concat
             "#,
         )
@@ -330,7 +334,7 @@ fn test_at() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [[] ~> list.new, 0] ~> list.at
             "#,
         )
@@ -340,16 +344,17 @@ fn test_at() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 0] ~> list.at
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 0]
+            ~> list.at
             "#,
         )
         .expect("30");
@@ -358,16 +363,17 @@ fn test_at() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 1] ~> list.at
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 1]
+            ~> list.at
             "#,
         )
         .expect("20");
@@ -376,16 +382,17 @@ fn test_at() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 2] ~> list.at
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.at
             "#,
         )
         .expect("10");
@@ -393,14 +400,15 @@ fn test_at() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend,
-            [mylist, 5] ~> list.at
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 5]
+            ~> list.at
             "#,
         )
         .expect("[]");
@@ -411,9 +419,9 @@ fn test_map_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            double = #int { [$, 2] ~> math.mul },
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mul } ~> ^double,
             [[] ~> list.new, double] ~> list.map
             "#,
         )
@@ -425,11 +433,15 @@ fn test_map_single_element() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            double = #int { [$, 2] ~> math.mul },
-            mylist = [] ~> list.new ~> [~, 5] ~> list.prepend,
-            [mylist, double] ~> list.map
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mul } ~> ^double,
+            []
+            ~> list.new
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, double]
+            ~> list.map
             "#,
         )
         .expect("Cons[10, Nil]");
@@ -440,18 +452,19 @@ fn test_map_multiple_elements() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            double = #int { [$, 2] ~> math.mul },
-            mylist = []
-                ~> list.new
-                ~> [~, 1]
-                ~> list.prepend
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend,
-            [mylist, double] ~> list.map
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mul } ~> ^double,
+            []
+            ~> list.new
+            ~> [~, 1]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, double]
+            ~> list.map
             "#,
         )
         .expect("Cons[6, Cons[4, Cons[2, Nil]]]");
@@ -462,18 +475,19 @@ fn test_map_increment() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            inc = #int { [$, 1] ~> math.add },
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, inc] ~> list.map
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 1] ~> math.add } ~> ^inc,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, inc]
+            ~> list.map
             "#,
         )
         .expect("Cons[31, Cons[21, Cons[11, Nil]]]");
@@ -484,17 +498,18 @@ fn test_map_identity() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            id = #int { $ },
-            mylist = []
-                ~> list.new
-                ~> [~, 5]
-                ~> list.prepend
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 15]
-                ~> list.prepend,
-            [mylist, id] ~> list.map
+            %"list" ~> ^list,
+            #int { $ } ~> ^id,
+            []
+            ~> list.new
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 15]
+            ~> list.prepend
+            ~> [~, id]
+            ~> list.map
             "#,
         )
         .expect("Cons[15, Cons[10, Cons[5, Nil]]]");
@@ -505,18 +520,19 @@ fn test_map_square() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            square = #int { [$, $] ~> math.mul },
-            mylist = []
-                ~> list.new
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend
-                ~> [~, 4]
-                ~> list.prepend,
-            [mylist, square] ~> list.map
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, $] ~> math.mul } ~> ^square,
+            []
+            ~> list.new
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, 4]
+            ~> list.prepend
+            ~> [~, square]
+            ~> list.map
             "#,
         )
         .expect("Cons[16, Cons[9, Cons[4, Nil]]]");
@@ -527,9 +543,9 @@ fn test_filter_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_even = #int { 0 = [$, 2] ~> math.mod },
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mod ~> ^0 } ~> ^is_even,
             [[] ~> list.new, is_even] ~> list.filter
             "#,
         )
@@ -541,18 +557,19 @@ fn test_filter_no_matches() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_negative = #int { [$, 0] ~> math.lt },
-            mylist = []
-                ~> list.new
-                ~> [~, 1]
-                ~> list.prepend
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend,
-            [mylist, is_negative] ~> list.filter
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.lt } ~> ^is_negative,
+            []
+            ~> list.new
+            ~> [~, 1]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, is_negative]
+            ~> list.filter
             "#,
         )
         .expect("Nil");
@@ -563,18 +580,19 @@ fn test_filter_all_match() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = []
-                ~> list.new
-                ~> [~, 1]
-                ~> list.prepend
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend,
-            [mylist, is_positive] ~> list.filter
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, 1]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.filter
             "#,
         )
         .expect("Cons[3, Cons[2, Cons[1, Nil]]]");
@@ -585,24 +603,25 @@ fn test_filter_even_numbers() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_even = #int { 0 = [$, 2] ~> math.mod },
-            mylist = []
-                ~> list.new
-                ~> [~, 1]
-                ~> list.prepend
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend
-                ~> [~, 4]
-                ~> list.prepend
-                ~> [~, 5]
-                ~> list.prepend
-                ~> [~, 6]
-                ~> list.prepend,
-            [mylist, is_even] ~> list.filter
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mod ~> ^0 } ~> ^is_even,
+            []
+            ~> list.new
+            ~> [~, 1]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, 4]
+            ~> list.prepend
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, 6]
+            ~> list.prepend
+            ~> [~, is_even]
+            ~> list.filter
             "#,
         )
         .expect("Cons[6, Cons[4, Cons[2, Nil]]]");
@@ -613,22 +632,23 @@ fn test_filter_greater_than() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            gt_10 = #int { [$, 10] ~> math.gt },
-            mylist = []
-                ~> list.new
-                ~> [~, 5]
-                ~> list.prepend
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 15]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend,
-            [mylist, gt_10] ~> list.filter
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 10] ~> math.gt } ~> ^gt_10,
+            []
+            ~> list.new
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 15]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, gt_10]
+            ~> list.filter
             "#,
         )
         .expect("Cons[20, Cons[15, Nil]]");
@@ -639,17 +659,18 @@ fn test_filter_single_match() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            equals_5 = #int { [$, 5] ~> == => Ok },
-            mylist = []
-                ~> list.new
-                ~> [~, 1]
-                ~> list.prepend
-                ~> [~, 5]
-                ~> list.prepend
-                ~> [~, 10]
-                ~> list.prepend,
-            [mylist, equals_5] ~> list.filter
+            %"list" ~> ^list,
+            #int { [$, 5] ~> == => Ok } ~> ^equals_5,
+            []
+            ~> list.new
+            ~> [~, 1]
+            ~> list.prepend
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, equals_5]
+            ~> list.filter
             "#,
         )
         .expect("Cons[5, Nil]");
@@ -660,7 +681,7 @@ fn test_drop_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [[] ~> list.new, 0] ~> list.drop
             "#,
         )
@@ -669,7 +690,7 @@ fn test_drop_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [[] ~> list.new, 5] ~> list.drop
             "#,
         )
@@ -681,16 +702,17 @@ fn test_drop_zero() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 0] ~> list.drop
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 0]
+            ~> list.drop
             "#,
         )
         .expect("Cons[30, Cons[20, Cons[10, Nil]]]");
@@ -701,20 +723,21 @@ fn test_drop_some_elements() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend
-                ~> [~, 40]
-                ~> list.prepend
-                ~> [~, 50]
-                ~> list.prepend,
-            [mylist, 2] ~> list.drop
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 40]
+            ~> list.prepend
+            ~> [~, 50]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.drop
             "#,
         )
         .expect("Cons[30, Cons[20, Cons[10, Nil]]]");
@@ -725,16 +748,17 @@ fn test_drop_all_elements() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 3] ~> list.drop
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.drop
             "#,
         )
         .expect("Nil");
@@ -745,14 +769,15 @@ fn test_drop_more_than_length() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend,
-            [mylist, 10] ~> list.drop
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 10]
+            ~> list.drop
             "#,
         )
         .expect("Nil");
@@ -763,7 +788,7 @@ fn test_take_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [[] ~> list.new, 0] ~> list.take
             "#,
         )
@@ -772,7 +797,7 @@ fn test_take_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [[] ~> list.new, 5] ~> list.take
             "#,
         )
@@ -784,16 +809,17 @@ fn test_take_zero() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 0] ~> list.take
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 0]
+            ~> list.take
             "#,
         )
         .expect("Nil");
@@ -804,20 +830,21 @@ fn test_take_some_elements() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend
-                ~> [~, 40]
-                ~> list.prepend
-                ~> [~, 50]
-                ~> list.prepend,
-            [mylist, 2] ~> list.take
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 40]
+            ~> list.prepend
+            ~> [~, 50]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.take
             "#,
         )
         .expect("Cons[50, Cons[40, Nil]]");
@@ -828,16 +855,17 @@ fn test_take_all_elements() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 3] ~> list.take
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.take
             "#,
         )
         .expect("Cons[30, Cons[20, Cons[10, Nil]]]");
@@ -848,14 +876,15 @@ fn test_take_more_than_length() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend,
-            [mylist, 10] ~> list.take
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 10]
+            ~> list.take
             "#,
         )
         .expect("Cons[20, Cons[10, Nil]]");
@@ -866,7 +895,7 @@ fn test_contains_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
+            %"list" ~> ^list,
             [[] ~> list.new, 5] ~> list.contains?
             "#,
         )
@@ -878,9 +907,13 @@ fn test_contains_single_element_found() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = [] ~> list.new ~> [~, 10] ~> list.prepend,
-            [mylist, 10] ~> list.contains?
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 10]
+            ~> list.contains?
             "#,
         )
         .expect("Ok");
@@ -891,9 +924,13 @@ fn test_contains_single_element_not_found() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = [] ~> list.new ~> [~, 10] ~> list.prepend,
-            [mylist, 20] ~> list.contains?
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.contains?
             "#,
         )
         .expect("[]");
@@ -904,16 +941,17 @@ fn test_contains_multiple_elements_first() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 30] ~> list.contains?
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.contains?
             "#,
         )
         .expect("Ok");
@@ -924,16 +962,17 @@ fn test_contains_multiple_elements_middle() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 20] ~> list.contains?
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.contains?
             "#,
         )
         .expect("Ok");
@@ -944,16 +983,17 @@ fn test_contains_multiple_elements_last() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 10] ~> list.contains?
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 10]
+            ~> list.contains?
             "#,
         )
         .expect("Ok");
@@ -964,16 +1004,17 @@ fn test_contains_not_found() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            mylist = []
-                ~> list.new
-                ~> [~, 10]
-                ~> list.prepend
-                ~> [~, 20]
-                ~> list.prepend
-                ~> [~, 30]
-                ~> list.prepend,
-            [mylist, 40] ~> list.contains?
+            %"list" ~> ^list,
+            []
+            ~> list.new
+            ~> [~, 10]
+            ~> list.prepend
+            ~> [~, 20]
+            ~> list.prepend
+            ~> [~, 30]
+            ~> list.prepend
+            ~> [~, 40]
+            ~> list.contains?
             "#,
         )
         .expect("[]");
@@ -984,9 +1025,9 @@ fn test_all_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
             [[] ~> list.new, is_positive] ~> list.all?
             "#,
         )
@@ -998,11 +1039,15 @@ fn test_all_single_true() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = [] ~> list.new ~> [~, 5] ~> list.prepend,
-            [mylist, is_positive] ~> list.all?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.all?
             "#,
         )
         .expect("Ok");
@@ -1013,11 +1058,15 @@ fn test_all_single_false() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = [] ~> list.new ~> [~, -5] ~> list.prepend,
-            [mylist, is_positive] ~> list.all?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, -5]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.all?
             "#,
         )
         .expect("[]");
@@ -1028,18 +1077,19 @@ fn test_all_multiple_all_true() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = []
-                ~> list.new
-                ~> [~, 1]
-                ~> list.prepend
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend,
-            [mylist, is_positive] ~> list.all?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, 1]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.all?
             "#,
         )
         .expect("Ok");
@@ -1050,18 +1100,19 @@ fn test_all_multiple_some_false() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = []
-                ~> list.new
-                ~> [~, 1]
-                ~> list.prepend
-                ~> [~, -2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend,
-            [mylist, is_positive] ~> list.all?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, 1]
+            ~> list.prepend
+            ~> [~, -2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.all?
             "#,
         )
         .expect("[]");
@@ -1072,18 +1123,19 @@ fn test_all_even_numbers() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_even = #int { 0 = [$, 2] ~> math.mod },
-            mylist = []
-                ~> list.new
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 4]
-                ~> list.prepend
-                ~> [~, 6]
-                ~> list.prepend,
-            [mylist, is_even] ~> list.all?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mod ~> ^0 } ~> ^is_even,
+            []
+            ~> list.new
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 4]
+            ~> list.prepend
+            ~> [~, 6]
+            ~> list.prepend
+            ~> [~, is_even]
+            ~> list.all?
             "#,
         )
         .expect("Ok");
@@ -1091,18 +1143,19 @@ fn test_all_even_numbers() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_even = #int { 0 = [$, 2] ~> math.mod },
-            mylist = []
-                ~> list.new
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend
-                ~> [~, 4]
-                ~> list.prepend,
-            [mylist, is_even] ~> list.all?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mod ~> ^0 } ~> ^is_even,
+            []
+            ~> list.new
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, 4]
+            ~> list.prepend
+            ~> [~, is_even]
+            ~> list.all?
             "#,
         )
         .expect("[]");
@@ -1113,9 +1166,9 @@ fn test_any_empty_list() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
             [[] ~> list.new, is_positive] ~> list.any?
             "#,
         )
@@ -1127,11 +1180,15 @@ fn test_any_single_true() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = [] ~> list.new ~> [~, 5] ~> list.prepend,
-            [mylist, is_positive] ~> list.any?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.any?
             "#,
         )
         .expect("Ok");
@@ -1142,11 +1199,15 @@ fn test_any_single_false() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = [] ~> list.new ~> [~, -5] ~> list.prepend,
-            [mylist, is_positive] ~> list.any?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, -5]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.any?
             "#,
         )
         .expect("[]");
@@ -1157,18 +1218,19 @@ fn test_any_multiple_all_false() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = []
-                ~> list.new
-                ~> [~, -1]
-                ~> list.prepend
-                ~> [~, -2]
-                ~> list.prepend
-                ~> [~, -3]
-                ~> list.prepend,
-            [mylist, is_positive] ~> list.any?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, -1]
+            ~> list.prepend
+            ~> [~, -2]
+            ~> list.prepend
+            ~> [~, -3]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.any?
             "#,
         )
         .expect("[]");
@@ -1179,18 +1241,19 @@ fn test_any_multiple_some_true() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_positive = #int { [$, 0] ~> math.gt },
-            mylist = []
-                ~> list.new
-                ~> [~, -1]
-                ~> list.prepend
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, -3]
-                ~> list.prepend,
-            [mylist, is_positive] ~> list.any?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 0] ~> math.gt } ~> ^is_positive,
+            []
+            ~> list.new
+            ~> [~, -1]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, -3]
+            ~> list.prepend
+            ~> [~, is_positive]
+            ~> list.any?
             "#,
         )
         .expect("Ok");
@@ -1201,18 +1264,19 @@ fn test_any_first_matches() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_even = #int { 0 = [$, 2] ~> math.mod },
-            mylist = []
-                ~> list.new
-                ~> [~, 3]
-                ~> list.prepend
-                ~> [~, 5]
-                ~> list.prepend
-                ~> [~, 2]
-                ~> list.prepend,
-            [mylist, is_even] ~> list.any?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mod ~> ^0 } ~> ^is_even,
+            []
+            ~> list.new
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, is_even]
+            ~> list.any?
             "#,
         )
         .expect("Ok");
@@ -1223,18 +1287,19 @@ fn test_any_last_matches() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            math = %"math",
-            is_even = #int { 0 = [$, 2] ~> math.mod },
-            mylist = []
-                ~> list.new
-                ~> [~, 2]
-                ~> list.prepend
-                ~> [~, 3]
-                ~> list.prepend
-                ~> [~, 5]
-                ~> list.prepend,
-            [mylist, is_even] ~> list.any?
+            %"list" ~> ^list,
+            %"math" ~> ^math,
+            #int { [$, 2] ~> math.mod ~> ^0 } ~> ^is_even,
+            []
+            ~> list.new
+            ~> [~, 2]
+            ~> list.prepend
+            ~> [~, 3]
+            ~> list.prepend
+            ~> [~, 5]
+            ~> list.prepend
+            ~> [~, is_even]
+            ~> list.any?
             "#,
         )
         .expect("Ok");

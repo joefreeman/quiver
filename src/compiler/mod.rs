@@ -268,7 +268,7 @@ impl<'a> Compiler<'a> {
         // Compile field values and collect their types
         let mut field_types = Vec::new();
         for field in &fields {
-            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
+            let field_type = self.compile_term(field.value.clone(), parameter_type.clone())?;
             field_types.push((field.name.clone(), field_type));
         }
 
@@ -310,7 +310,7 @@ impl<'a> Compiler<'a> {
                     value_type.clone()
                 }
                 ast::OperationTupleFieldValue::Chain(chain) => {
-                    self.compile_chain(chain.clone(), parameter_type.clone())?
+                    self.compile_term(chain.clone(), parameter_type.clone())?
                 }
             };
 
@@ -402,14 +402,7 @@ impl<'a> Compiler<'a> {
         Ok(function_type)
     }
 
-    fn compile_assigment(
-        &mut self,
-        pattern: ast::Pattern,
-        value: ast::Chain,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
-        let value_type = self.compile_chain(value, parameter_type)?;
-
+    fn compile_match(&mut self, pattern: ast::Pattern, value_type: Type) -> Result<Type, Error> {
         // Duplicate the value on the stack for pattern matching
         self.codegen.add_instruction(Instruction::Duplicate);
 
@@ -582,15 +575,8 @@ impl<'a> Compiler<'a> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
 
-        for (i, term) in expression.terms.iter().enumerate() {
-            let term_type = match term {
-                ast::Term::Assignment { pattern, value } => {
-                    self.compile_assigment(pattern.clone(), value.clone(), parameter_type.clone())
-                }
-                ast::Term::Chain(chain) => {
-                    self.compile_chain(chain.clone(), parameter_type.clone())
-                }
-            }?;
+        for (i, chain) in expression.terms.iter().enumerate() {
+            let term_type = self.compile_term(chain.clone(), parameter_type.clone())?;
 
             // Check if the previous type contained nil and we're not on the first term
             let should_propagate_nil = if i > 0 {
@@ -637,8 +623,8 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
-        let mut value_type = match chain.value {
+    fn compile_term(&mut self, term: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
+        let mut value_type = match term.value {
             ast::Value::Literal(literal) => self.compile_literal(literal),
             ast::Value::Tuple(tuple) => {
                 self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone())
@@ -657,9 +643,14 @@ impl<'a> Compiler<'a> {
                 parameter_type.clone(),
             ),
             ast::Value::Import(path) => self.compile_value_import(&path),
+            ast::Value::Match(pattern) => {
+                // When match appears at the value position, it matches the block parameter
+                self.codegen.add_instruction(Instruction::Parameter);
+                self.compile_match(pattern, parameter_type.clone())
+            }
         }?;
 
-        for operation in chain.operations {
+        for operation in term.operations {
             value_type = self.compile_operation(operation, value_type, parameter_type.clone())?;
         }
 
@@ -843,6 +834,10 @@ impl<'a> Compiler<'a> {
             ast::Operation::Builtin(name) => self.compile_operation_builtin(&name, value_type),
             ast::Operation::Equality => self.compile_operation_equality(value_type),
             ast::Operation::Not => self.compile_operation_not(value_type),
+            ast::Operation::Match(pattern) => {
+                // When match appears as an operation, it matches the piped value
+                self.compile_match(pattern, value_type)
+            }
         }
     }
 

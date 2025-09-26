@@ -167,28 +167,7 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> Result<Expression, Err
     Ok(Expression { terms })
 }
 
-fn parse_term(pair: pest::iterators::Pair<Rule>) -> Result<Term, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-
-    match inner_pair.as_rule() {
-        Rule::assignment => parse_assignment(inner_pair),
-        Rule::chain => Ok(Term::Chain(parse_chain(inner_pair)?)),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "term".to_string(),
-        }),
-    }
-}
-
-fn parse_assignment(pair: pest::iterators::Pair<Rule>) -> Result<Term, Error> {
-    let mut inner = pair.into_inner();
-    let pattern = parse_pattern(inner.next().unwrap())?;
-    let value = parse_chain(inner.next().unwrap())?;
-
-    Ok(Term::Assignment { pattern, value })
-}
-
-fn parse_chain(pair: pest::iterators::Pair<Rule>) -> Result<Chain, Error> {
+fn parse_term(pair: pest::iterators::Pair<Rule>) -> Result<Chain, Error> {
     let mut inner = pair.into_inner();
     let value = parse_value(inner.next().unwrap())?;
     let mut operations = Vec::new();
@@ -215,6 +194,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error> {
             let path = parse_string_literal(inner_pair.into_inner().next().unwrap().as_str())?;
             Ok(Value::Import(path))
         }
+        Rule::match_pattern => Ok(Value::Match(parse_match_pattern(inner_pair)?)),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "value".to_string(),
@@ -257,6 +237,7 @@ fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error
             Ok(Operation::Builtin(name))
         }
         Rule::operator => parse_operator(pair),
+        Rule::match_pattern => Ok(Operation::Match(parse_match_pattern(pair)?)),
         rule => Err(Error::RuleUnexpected {
             found: rule,
             context: "operation".to_string(),
@@ -355,7 +336,7 @@ fn parse_value_tuple_field(pair: pest::iterators::Pair<Rule>) -> Result<ValueTup
     for field_part in pair.into_inner() {
         match field_part.as_rule() {
             Rule::identifier => name = Some(field_part.as_str().to_string()),
-            Rule::chain => value = Some(parse_chain(field_part)?),
+            Rule::term => value = Some(parse_term(field_part)?),
             _ => {}
         }
     }
@@ -395,7 +376,7 @@ fn parse_operation_tuple_field(
         match field_part.as_rule() {
             Rule::identifier => name = Some(field_part.as_str().to_string()),
             Rule::ripple => value = Some(OperationTupleFieldValue::Ripple),
-            Rule::chain => value = Some(OperationTupleFieldValue::Chain(parse_chain(field_part)?)),
+            Rule::term => value = Some(OperationTupleFieldValue::Chain(parse_term(field_part)?)),
             _ => {}
         }
     }
@@ -450,6 +431,11 @@ fn parse_member_access(pair: pest::iterators::Pair<Rule>) -> Result<MemberAccess
     }
 
     Ok(MemberAccess { target, accessors })
+}
+
+fn parse_match_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Pattern, Error> {
+    let inner_pair = pair.into_inner().next().unwrap();
+    parse_pattern(inner_pair)
 }
 
 fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Pattern, Error> {
