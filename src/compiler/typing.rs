@@ -25,9 +25,7 @@ pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
     }
 
     if flattened.is_empty() {
-        Err(Error::TypeUnresolved(
-            "No valid types found in union".to_string(),
-        ))
+        Ok(Type::Union(vec![]))
     } else {
         Ok(Type::from_types(flattened))
     }

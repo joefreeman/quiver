@@ -9,7 +9,7 @@ type list = Nil | Cons[int, list];
 
 #[list, list] {
   | ^[Nil, xs] => xs
-  | ^[Cons[head, tail], xs] =>  [tail, Cons[head, xs]] ~> &
+  | ^[Cons[head, tail], xs] => [tail, Cons[head, xs]] ~> &
 } ~> ^reverse',
 
 #[list, list, list] {
@@ -32,11 +32,9 @@ type list = Nil | Cons[int, list];
 #[list, int, list] {
   | ^[Nil, _, acc] => [acc, Nil] ~> reverse'
   | ^[_, 0, acc] => [acc, Nil] ~> reverse'
-  | ^[Cons[head, tail], n, acc] =>
-    [n, 1]
-    ~> math.sub
-    ~> [tail, ~, Cons[head, acc]]
-    ~> &
+  | ^[Cons[head, tail], n, acc] => {
+    [n, 1] ~> math.sub ~> [tail, ~, Cons[head, acc]] ~> &
+  }
 } ~> ^take',
 
 [
