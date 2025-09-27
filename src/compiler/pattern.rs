@@ -655,12 +655,9 @@ impl<'a> PatternCompiler<'a> {
         path: &AccessPath,
         depth: usize,
     ) -> Result<(), Error> {
-        // Start by copying the root value from the stack
-        self.codegen.add_instruction(if depth == 0 {
-            Instruction::Duplicate
-        } else {
-            Instruction::Copy(depth)
-        });
+        if depth > 0 {
+            self.codegen.add_instruction(Instruction::Copy(depth));
+        }
 
         // Apply field accesses in order
         for &index in path {

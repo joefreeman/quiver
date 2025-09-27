@@ -104,7 +104,7 @@ impl InstructionBuilder {
         for (variable_name, _variable_type) in assignments {
             self.add_instruction(Instruction::Store(variable_name.clone()));
         }
-        self.add_instruction(Instruction::Pop); // Remove duplicated value
+        self.add_instruction(Instruction::Pop);
         self.add_instruction(Instruction::Tuple(TypeId::OK));
     }
 

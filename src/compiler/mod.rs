@@ -181,8 +181,17 @@ impl<'a> Compiler<'a> {
         }
 
         // Phase 2: Compile all statements (now forward references work)
-        for statement in program.statements {
+        let num_statements = program.statements.len();
+        for (i, statement) in program.statements.into_iter().enumerate() {
+            let is_last = i == num_statements - 1;
+            let is_expression = matches!(&statement, ast::Statement::Expression(_));
+
             compiler.compile_statement(statement)?;
+
+            // Pop intermediate expression results, keeping only the last one
+            if !is_last && is_expression {
+                compiler.codegen.add_instruction(Instruction::Pop);
+            }
         }
 
         Ok(compiler.codegen.instructions)
