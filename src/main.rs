@@ -141,8 +141,19 @@ fn run_repl() -> Result<(), ReadlineError> {
                     _ => {
                         let module_path = std::env::current_dir().ok();
                         match quiver.evaluate(line, module_path) {
-                            Ok(Some(value)) => println!("{}", format_value(&quiver, &value)),
-                            Ok(None) => {}
+                            Ok(result) => {
+                                if let Some(value) = result {
+                                    println!("{}", format_value(&quiver, &value));
+                                }
+
+                                let remaining_stack = quiver.get_stack();
+                                if !remaining_stack.is_empty() {
+                                    println!("Remaining items on stack:");
+                                    for (i, value) in remaining_stack.iter().enumerate() {
+                                        println!("  {}: {}", i, format_value(&quiver, &value));
+                                    }
+                                }
+                            }
                             Err(error) => eprintln!("{}", error),
                         }
                     }

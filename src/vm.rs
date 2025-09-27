@@ -740,6 +740,10 @@ impl VM {
         frame.counter = frame.counter.wrapping_add_signed(offset);
     }
 
+    pub fn get_stack(&self) -> Vec<Value> {
+        self.stack.clone()
+    }
+
     pub fn list_variables(&self) -> Vec<(String, Value)> {
         let mut variables = Vec::new();
 

@@ -58,6 +58,10 @@ impl Quiver {
         Ok(result)
     }
 
+    pub fn get_stack(&self) -> Vec<Value> {
+        self.vm.get_stack()
+    }
+
     pub fn list_variables(&self) -> Vec<(String, Value)> {
         self.vm.list_variables()
     }
