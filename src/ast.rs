@@ -40,7 +40,7 @@ pub struct Expression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
-    pub value: Value,
+    pub value: Option<Value>, // None means use block parameter
     pub operations: Vec<Operation>,
 }
 

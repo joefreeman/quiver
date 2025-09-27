@@ -625,28 +625,33 @@ impl<'a> Compiler<'a> {
 
     fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
         let mut value_type = match chain.value {
-            ast::Value::Literal(literal) => self.compile_literal(literal),
-            ast::Value::Tuple(tuple) => {
+            Some(ast::Value::Literal(literal)) => self.compile_literal(literal),
+            Some(ast::Value::Tuple(tuple)) => {
                 self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone())
             }
-            ast::Value::FunctionDefinition(function_definition) => {
+            Some(ast::Value::FunctionDefinition(function_definition)) => {
                 self.compile_function_definition(function_definition)
             }
-            ast::Value::Block(block) => {
+            Some(ast::Value::Block(block)) => {
                 self.codegen
                     .add_instruction(Instruction::Tuple(TypeId::NIL));
                 self.compile_block(block, Type::nil())
             }
-            ast::Value::MemberAccess(member_access) => self.compile_value_member_access(
+            Some(ast::Value::MemberAccess(member_access)) => self.compile_value_member_access(
                 &member_access.target,
                 member_access.accessors,
                 parameter_type.clone(),
             ),
-            ast::Value::Import(path) => self.compile_value_import(&path),
-            ast::Value::Match(pattern) => {
+            Some(ast::Value::Import(path)) => self.compile_value_import(&path),
+            Some(ast::Value::Match(pattern)) => {
                 // When match appears at the value position, it matches the block parameter
                 self.codegen.add_instruction(Instruction::Parameter);
                 self.compile_match(pattern, parameter_type.clone())
+            }
+            None => {
+                // No value means use the block parameter
+                self.codegen.add_instruction(Instruction::Parameter);
+                Ok(parameter_type.clone())
             }
         }?;
 

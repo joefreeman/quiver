@@ -1,12 +1,12 @@
 use crate::ast::*;
 use nom::{
+    IResult,
     branch::alt,
     bytes::complete::{tag, take_while},
     character::complete::{char, digit1, multispace0, multispace1, satisfy},
     combinator::{map, map_res, opt, recognize, value as nom_value},
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    IResult,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,19 +59,13 @@ fn ws1(input: &str) -> IResult<&str, ()> {
 }
 
 fn comment(input: &str) -> IResult<&str, &str> {
-    preceded(
-        tag("//"),
-        take_while(|c| c != '\n' && c != '\r'),
-    )(input)
+    preceded(tag("//"), take_while(|c| c != '\n' && c != '\r'))(input)
 }
 
 fn ws_with_comments(input: &str) -> IResult<&str, ()> {
     nom_value(
         (),
-        many0(alt((
-            nom_value((), multispace1),
-            nom_value((), comment),
-        ))),
+        many0(alt((nom_value((), multispace1), nom_value((), comment)))),
     )(input)
 }
 
@@ -94,7 +88,6 @@ fn identifier(input: &str) -> IResult<&str, String> {
         recognize(tuple((
             satisfy(|c: char| c.is_ascii_lowercase()),
             take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
-            opt(char('!')),
             opt(char('?')),
             take_while(|c: char| c == '\''),
         ))),
@@ -115,10 +108,9 @@ fn tuple_name(input: &str) -> IResult<&str, String> {
 // Literal parsers
 
 fn integer_literal(input: &str) -> IResult<&str, Literal> {
-    map_res(
-        recognize(pair(opt(char('-')), digit1)),
-        |s: &str| s.parse::<i64>().map(Literal::Integer),
-    )(input)
+    map_res(recognize(pair(opt(char('-')), digit1)), |s: &str| {
+        s.parse::<i64>().map(Literal::Integer)
+    })(input)
 }
 
 fn binary_literal(input: &str) -> IResult<&str, Literal> {
@@ -136,10 +128,7 @@ fn string_literal(input: &str) -> IResult<&str, Literal> {
     map(
         delimited(
             char('"'),
-            map_res(
-                take_while(|c| c != '"'),
-                |s: &str| parse_string_content(s),
-            ),
+            map_res(take_while(|c| c != '"'), |s: &str| parse_string_content(s)),
             char('"'),
         ),
         Literal::String,
@@ -170,11 +159,7 @@ fn parse_string_content(s: &str) -> Result<String, Error> {
 }
 
 fn literal(input: &str) -> IResult<&str, Literal> {
-    alt((
-        integer_literal,
-        binary_literal,
-        string_literal,
-    ))(input)
+    alt((integer_literal, binary_literal, string_literal))(input)
 }
 
 // Pattern parsers
@@ -199,10 +184,7 @@ fn partial_pattern(input: &str) -> IResult<&str, Pattern> {
     map(
         delimited(
             pair(char('('), ws0),
-            separated_list1(
-                tuple((ws0, char(','), ws0)),
-                identifier,
-            ),
+            separated_list1(tuple((ws0, char(','), ws1)), identifier),
             pair(ws0, char(')')),
         ),
         Pattern::Partial,
@@ -212,11 +194,7 @@ fn partial_pattern(input: &str) -> IResult<&str, Pattern> {
 fn pattern_field(input: &str) -> IResult<&str, PatternField> {
     alt((
         map(
-            separated_pair(
-                identifier,
-                tuple((char(':'), ws0)),
-                pattern,
-            ),
+            separated_pair(identifier, tuple((char(':'), ws1)), pattern),
             |(name, pattern)| PatternField {
                 name: Some(name),
                 pattern,
@@ -231,10 +209,7 @@ fn pattern_field(input: &str) -> IResult<&str, PatternField> {
 
 fn pattern_field_list(input: &str) -> IResult<&str, Vec<PatternField>> {
     terminated(
-        separated_list0(
-            tuple((wsc, char(','), wsc)),
-            pattern_field,
-        ),
+        separated_list0(tuple((wsc, char(','), wsc)), pattern_field),
         opt(pair(wsc, char(','))),
     )(input)
 }
@@ -262,10 +237,7 @@ fn tuple_pattern(input: &str) -> IResult<&str, Pattern> {
                     pattern_field_list,
                     pair(wsc, char(']')),
                 ),
-                |fields| TuplePattern {
-                    name: None,
-                    fields,
-                },
+                |fields| TuplePattern { name: None, fields },
             ),
             map(tuple_name, |name| TuplePattern {
                 name: Some(name),
@@ -287,10 +259,6 @@ fn pattern(input: &str) -> IResult<&str, Pattern> {
     ))(input)
 }
 
-fn match_pattern(input: &str) -> IResult<&str, Pattern> {
-    preceded(char('^'), pattern)(input)
-}
-
 // Type parsers
 
 fn primitive_type(input: &str) -> IResult<&str, Type> {
@@ -303,11 +271,7 @@ fn primitive_type(input: &str) -> IResult<&str, Type> {
 fn field_type(input: &str) -> IResult<&str, FieldType> {
     alt((
         map(
-            separated_pair(
-                identifier,
-                tuple((char(':'), ws0)),
-                type_definition,
-            ),
+            separated_pair(identifier, tuple((char(':'), ws1)), type_definition),
             |(name, type_def)| FieldType {
                 name: Some(name),
                 type_def,
@@ -322,10 +286,7 @@ fn field_type(input: &str) -> IResult<&str, FieldType> {
 
 fn field_type_list(input: &str) -> IResult<&str, Vec<FieldType>> {
     terminated(
-        separated_list0(
-            tuple((wsc, char(','), wsc)),
-            field_type,
-        ),
+        separated_list0(tuple((wsc, char(','), wsc)), field_type),
         opt(pair(wsc, char(','))),
     )(input)
 }
@@ -336,11 +297,7 @@ fn tuple_type(input: &str) -> IResult<&str, Type> {
             map(
                 tuple((
                     tuple_name,
-                    delimited(
-                        pair(char('['), wsc),
-                        field_type_list,
-                        pair(wsc, char(']')),
-                    ),
+                    delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
                 )),
                 |(name, fields)| TupleType {
                     name: Some(name),
@@ -348,15 +305,8 @@ fn tuple_type(input: &str) -> IResult<&str, Type> {
                 },
             ),
             map(
-                delimited(
-                    pair(char('['), wsc),
-                    field_type_list,
-                    pair(wsc, char(']')),
-                ),
-                |fields| TupleType {
-                    name: None,
-                    fields,
-                },
+                delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
+                |fields| TupleType { name: None, fields },
             ),
             map(tuple_name, |name| TupleType {
                 name: Some(name),
@@ -377,24 +327,22 @@ fn function_type(input: &str) -> IResult<&str, Type> {
             char('#'),
             separated_pair(
                 function_input_type,
-                tuple((ws0, tag("->"), ws0)),
+                tuple((ws1, tag("->"), ws1)),
                 function_output_type,
             ),
         ),
-        |(input, output)| Type::Function(FunctionType {
-            input: Box::new(input),
-            output: Box::new(output),
-        }),
+        |(input, output)| {
+            Type::Function(FunctionType {
+                input: Box::new(input),
+                output: Box::new(output),
+            })
+        },
     )(input)
 }
 
 fn function_input_type(input: &str) -> IResult<&str, Type> {
     alt((
-        delimited(
-            pair(char('('), ws0),
-            type_definition,
-            pair(ws0, char(')')),
-        ),
+        delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
         type_identifier,
@@ -403,11 +351,7 @@ fn function_input_type(input: &str) -> IResult<&str, Type> {
 
 fn function_output_type(input: &str) -> IResult<&str, Type> {
     alt((
-        delimited(
-            pair(char('('), ws0),
-            type_definition,
-            pair(ws0, char(')')),
-        ),
+        delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
         type_identifier,
@@ -418,11 +362,7 @@ fn base_type(input: &str) -> IResult<&str, Type> {
     alt((
         tuple_type,
         primitive_type,
-        delimited(
-            pair(char('('), ws0),
-            type_definition,
-            pair(ws0, char(')')),
-        ),
+        delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         type_identifier,
     ))(input)
 }
@@ -431,10 +371,7 @@ fn type_definition(input: &str) -> IResult<&str, Type> {
     alt((
         function_type,
         map(
-            separated_list1(
-                tuple((ws0, char('|'), ws0)),
-                base_type,
-            ),
+            separated_list1(tuple((ws1, char('|'), ws1)), base_type),
             |types| {
                 if types.len() == 1 {
                     types.into_iter().next().unwrap()
@@ -448,6 +385,8 @@ fn type_definition(input: &str) -> IResult<&str, Type> {
 
 // Value and Operation parsers
 
+// Parse member access patterns (for assignment) - no '!' at the end
+// Examples: f, f.x, $.0, etc.
 fn member_access(input: &str) -> IResult<&str, MemberAccess> {
     map(
         pair(
@@ -467,15 +406,74 @@ fn member_access(input: &str) -> IResult<&str, MemberAccess> {
     )(input)
 }
 
+// Parse function calls - must end with '!'
+// Examples: f!, f.x!, $.0!, etc.
+fn function_call(input: &str) -> IResult<&str, MemberAccess> {
+    let (input, target) = alt((
+        nom_value(MemberTarget::Parameter, char('$')),
+        map(identifier, MemberTarget::Identifier),
+    ))(input)?;
+
+    // Check if there's a ! immediately after the identifier
+    if let Ok((remaining, _)) = char::<&str, nom::error::Error<&str>>('!')(input) {
+        return Ok((
+            remaining,
+            MemberAccess {
+                target,
+                accessors: vec![],
+            },
+        ));
+    }
+
+    // Otherwise, parse field accesses
+    let mut accessors = vec![];
+    let mut current_input = input;
+
+    while let Ok((input_after_dot, _)) = char::<&str, nom::error::Error<&str>>('.')(current_input) {
+        // Try to parse an index or field
+        if let Ok((remaining, index_str)) = digit1::<&str, nom::error::Error<&str>>(input_after_dot)
+        {
+            accessors.push(AccessPath::Index(index_str.parse().unwrap()));
+            current_input = remaining;
+
+            // Check for ! after this accessor
+            if let Ok((remaining, _)) = char::<&str, nom::error::Error<&str>>('!')(current_input) {
+                return Ok((remaining, MemberAccess { target, accessors }));
+            }
+        } else {
+            // Try to parse a field, but it might end with !
+            // First try regular identifier
+            if let Ok((remaining, field)) = identifier(input_after_dot) {
+                accessors.push(AccessPath::Field(field.clone()));
+
+                // Check if there's a ! immediately after this field
+                if let Ok((remaining_after_excl, _)) =
+                    char::<&str, nom::error::Error<&str>>('!')(remaining)
+                {
+                    return Ok((remaining_after_excl, MemberAccess { target, accessors }));
+                }
+
+                current_input = remaining;
+            } else {
+                // No valid field found
+                break;
+            }
+        }
+    }
+
+    // If we get here, we didn't find a !, so this isn't a function call
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Tag,
+    )))
+}
+
 fn import(input: &str) -> IResult<&str, String> {
     preceded(
         char('%'),
         delimited(
             char('"'),
-            map_res(
-                take_while(|c| c != '"'),
-                |s: &str| parse_string_content(s),
-            ),
+            map_res(take_while(|c| c != '"'), |s: &str| parse_string_content(s)),
             char('"'),
         ),
     )(input)
@@ -484,29 +482,19 @@ fn import(input: &str) -> IResult<&str, String> {
 fn value_tuple_field(input: &str) -> IResult<&str, ValueTupleField> {
     alt((
         map(
-            separated_pair(
-                identifier,
-                tuple((char(':'), ws0)),
-                chain,
-            ),
+            separated_pair(identifier, tuple((char(':'), ws1)), chain),
             |(name, value)| ValueTupleField {
                 name: Some(name),
                 value,
             },
         ),
-        map(chain, |value| ValueTupleField {
-            name: None,
-            value,
-        }),
+        map(chain, |value| ValueTupleField { name: None, value }),
     ))(input)
 }
 
 fn value_tuple_field_list(input: &str) -> IResult<&str, Vec<ValueTupleField>> {
     terminated(
-        separated_list0(
-            tuple((wsc, char(','), wsc)),
-            value_tuple_field,
-        ),
+        separated_list0(tuple((wsc, char(','), wsc)), value_tuple_field),
         opt(pair(wsc, char(','))),
     )(input)
 }
@@ -533,10 +521,7 @@ fn value_tuple(input: &str) -> IResult<&str, ValueTuple> {
                 value_tuple_field_list,
                 pair(wsc, char(']')),
             ),
-            |fields| ValueTuple {
-                name: None,
-                fields,
-            },
+            |fields| ValueTuple { name: None, fields },
         ),
         map(tuple_name, |name| ValueTuple {
             name: Some(name),
@@ -550,7 +535,7 @@ fn operation_tuple_field(input: &str) -> IResult<&str, OperationTupleField> {
         map(
             separated_pair(
                 identifier,
-                tuple((char(':'), ws0)),
+                tuple((char(':'), ws1)),
                 alt((
                     nom_value(OperationTupleFieldValue::Ripple, char('~')),
                     map(chain, OperationTupleFieldValue::Chain),
@@ -566,20 +551,14 @@ fn operation_tuple_field(input: &str) -> IResult<&str, OperationTupleField> {
                 nom_value(OperationTupleFieldValue::Ripple, char('~')),
                 map(chain, OperationTupleFieldValue::Chain),
             )),
-            |value| OperationTupleField {
-                name: None,
-                value,
-            },
+            |value| OperationTupleField { name: None, value },
         ),
     ))(input)
 }
 
 fn operation_tuple_field_list(input: &str) -> IResult<&str, Vec<OperationTupleField>> {
     terminated(
-        separated_list0(
-            tuple((wsc, char(','), wsc)),
-            operation_tuple_field,
-        ),
+        separated_list0(tuple((wsc, char(','), wsc)), operation_tuple_field),
         opt(pair(wsc, char(','))),
     )(input)
 }
@@ -606,10 +585,7 @@ fn operation_tuple(input: &str) -> IResult<&str, OperationTuple> {
                 operation_tuple_field_list,
                 pair(wsc, char(']')),
             ),
-            |fields| OperationTuple {
-                name: None,
-                fields,
-            },
+            |fields| OperationTuple { name: None, fields },
         ),
         map(tuple_name, |name| OperationTuple {
             name: Some(name),
@@ -622,10 +598,21 @@ fn branch(input: &str) -> IResult<&str, Branch> {
     map(
         pair(
             expression,
-            opt(preceded(
-                tuple((ws0, tag("=>"), ws0)),
-                expression,
-            )),
+            opt(preceded(tuple((ws1, tag("=>"), ws1)), expression)),
+        ),
+        |(condition, consequence)| Branch {
+            condition,
+            consequence,
+        },
+    )(input)
+}
+
+// Branch for operation blocks - condition uses operation_expression
+fn operation_branch(input: &str) -> IResult<&str, Branch> {
+    map(
+        pair(
+            operation_expression,
+            opt(preceded(tuple((ws1, tag("=>"), ws1)), expression)),
         ),
         |(condition, consequence)| Branch {
             condition,
@@ -637,15 +624,27 @@ fn branch(input: &str) -> IResult<&str, Branch> {
 fn block(input: &str) -> IResult<&str, Block> {
     map(
         delimited(
-            pair(char('{'), ws0),
+            pair(char('{'), ws1),
             preceded(
-                opt(pair(char('|'), ws0)),
-                separated_list1(
-                    tuple((ws0, char('|'), ws0)),
-                    branch,
-                ),
+                opt(pair(char('|'), ws1)),
+                separated_list1(tuple((ws1, char('|'), ws1)), branch),
             ),
-            pair(ws0, char('}')),
+            pair(ws1, char('}')),
+        ),
+        |branches| Block { branches },
+    )(input)
+}
+
+// Block for operations (parametrized blocks)
+fn operation_block(input: &str) -> IResult<&str, Block> {
+    map(
+        delimited(
+            pair(char('{'), ws1),
+            preceded(
+                opt(pair(char('|'), ws1)),
+                separated_list1(tuple((ws1, char('|'), ws1)), operation_branch),
+            ),
+            pair(ws1, char('}')),
         ),
         |branches| Block { branches },
     )(input)
@@ -656,8 +655,8 @@ fn function_definition(input: &str) -> IResult<&str, FunctionDefinition> {
         preceded(
             char('#'),
             pair(
-                opt(terminated(function_input_type, ws0)),
-                block,
+                opt(terminated(function_input_type, ws1)),
+                operation_block, // Functions are parametrized blocks
             ),
         ),
         |(parameter_type, body)| FunctionDefinition {
@@ -672,17 +671,11 @@ fn field_access(input: &str) -> IResult<&str, String> {
 }
 
 fn positional_access(input: &str) -> IResult<&str, usize> {
-    map_res(
-        preceded(char('.'), digit1),
-        |s: &str| s.parse(),
-    )(input)
+    map_res(preceded(char('.'), digit1), |s: &str| s.parse())(input)
 }
 
 fn tail_call(input: &str) -> IResult<&str, String> {
-    preceded(
-        char('&'),
-        map(opt(identifier), |i| i.unwrap_or_default()),
-    )(input)
+    preceded(char('&'), map(opt(identifier), |i| i.unwrap_or_default()))(input)
 }
 
 fn builtin(input: &str) -> IResult<&str, String> {
@@ -704,7 +697,6 @@ fn value(input: &str) -> IResult<&str, Value> {
         map(block, Value::Block),
         map(member_access, Value::MemberAccess),
         map(import, Value::Import),
-        map(match_pattern, Value::Match),
     ))(input)
 }
 
@@ -712,37 +704,102 @@ fn operation(input: &str) -> IResult<&str, Operation> {
     alt((
         map(builtin, Operation::Builtin),
         operator,
-        map(operation_tuple, Operation::Tuple),
-        map(block, Operation::Block),
-        map(member_access, Operation::MemberAccess),
+        map(operation_block, Operation::Block), // Use operation_block for parametrized blocks
+        // Function calls (must end with !)
+        map(function_call, Operation::MemberAccess),
+        // Parse tuples specially - check if they contain ripple (~)
+        tuple_or_pattern,
+        // Simple patterns (identifiers, literals, etc - non-tuples)
+        map(
+            alt((
+                partial_pattern,
+                pattern_literal,
+                pattern_star,
+                pattern_placeholder,
+                pattern_identifier,
+            )),
+            Operation::Match,
+        ),
         map(field_access, Operation::FieldAccess),
         map(positional_access, Operation::PositionalAccess),
         map(tail_call, Operation::TailCall),
-        map(match_pattern, Operation::Match),
     ))(input)
+}
+
+// Parse a tuple and determine if it's an operation (contains ~) or pattern (no ~)
+fn tuple_or_pattern(input: &str) -> IResult<&str, Operation> {
+    // First check if this looks like a tuple at all
+    let start = input;
+
+    // Try to parse as an operation tuple first (which can contain ~)
+    if let Ok((remaining, op_tuple)) = operation_tuple(start) {
+        // Check if any field is a ripple
+        let has_ripple = op_tuple
+            .fields
+            .iter()
+            .any(|f| matches!(f.value, OperationTupleFieldValue::Ripple));
+
+        if has_ripple {
+            // It has ripple, so it's definitely an operation tuple
+            return Ok((remaining, Operation::Tuple(op_tuple)));
+        }
+        // No ripple - fall through to try as pattern
+    }
+
+    // Try to parse as a tuple pattern
+    map(tuple_pattern, Operation::Match)(input)
 }
 
 fn chain(input: &str) -> IResult<&str, Chain> {
     map(
         pair(
             value,
-            many0(preceded(
-                tuple((ws0, tag("~>"), ws0)),
-                operation,
-            )),
+            many0(preceded(tuple((ws1, tag("~>"), ws1)), operation)),
         ),
-        |(value, operations)| Chain { value, operations },
+        |(value, operations)| Chain {
+            value: Some(value),
+            operations,
+        },
+    )(input)
+}
+
+// Chain that starts with operations (no initial value) - used in parametrized blocks
+fn operation_chain(input: &str) -> IResult<&str, Chain> {
+    map(
+        separated_list1(tuple((ws1, tag("~>"), ws1)), operation),
+        |operations| Chain {
+            value: None,
+            operations,
+        },
     )(input)
 }
 
 fn expression(input: &str) -> IResult<&str, Expression> {
     map(
-        separated_list1(
-            tuple((ws0, char(','), wsc)),
-            chain,
-        ),
+        separated_list1(tuple((ws0, char(','), wsc)), chain),
         |chains| Expression { chains },
     )(input)
+}
+
+// Expression for parametrized blocks - first chain has no initial value
+fn operation_expression(input: &str) -> IResult<&str, Expression> {
+    alt((
+        map(
+            separated_pair(
+                operation_chain,
+                tuple((ws0, char(','), wsc)),
+                separated_list0(tuple((ws0, char(','), wsc)), chain),
+            ),
+            |(first_chain, mut rest_chains)| {
+                let mut chains = vec![first_chain];
+                chains.append(&mut rest_chains);
+                Expression { chains }
+            },
+        ),
+        map(operation_chain, |chain| Expression {
+            chains: vec![chain],
+        }),
+    ))(input)
 }
 
 // Statement parsers
@@ -751,7 +808,7 @@ fn type_alias(input: &str) -> IResult<&str, Statement> {
     map(
         tuple((
             preceded(pair(tag("type"), ws1), identifier),
-            preceded(tuple((ws0, char('='), ws0)), type_definition),
+            preceded(tuple((ws1, char('='), ws1)), type_definition),
         )),
         |(name, type_definition)| Statement::TypeAlias {
             name,
@@ -766,10 +823,7 @@ fn type_import_pattern(input: &str) -> IResult<&str, TypeImportPattern> {
         map(
             delimited(
                 pair(char('('), ws0),
-                separated_list1(
-                    tuple((ws0, char(','), ws0)),
-                    identifier,
-                ),
+                separated_list1(tuple((ws0, char(','), ws1)), identifier),
                 pair(ws0, char(')')),
             ),
             TypeImportPattern::Partial,
@@ -781,7 +835,7 @@ fn type_import(input: &str) -> IResult<&str, Statement> {
     map(
         tuple((
             preceded(pair(tag("type"), ws1), type_import_pattern),
-            preceded(tuple((ws0, char('='), ws0)), import),
+            preceded(tuple((ws1, char('='), ws1)), import),
         )),
         |(pattern, module_path)| Statement::TypeImport {
             pattern,
@@ -797,11 +851,7 @@ fn statement_expression(input: &str) -> IResult<&str, Statement> {
 fn statement(input: &str) -> IResult<&str, Statement> {
     preceded(
         ws_with_comments,
-        alt((
-            type_import,
-            type_alias,
-            statement_expression,
-        )),
+        alt((type_import, type_alias, statement_expression)),
     )(input)
 }
 

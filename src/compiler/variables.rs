@@ -38,7 +38,9 @@ impl<'a> FreeVariableCollector<'a> {
     }
 
     fn visit_chain(&mut self, chain: &ast::Chain) {
-        self.visit_value(&chain.value);
+        if let Some(value) = &chain.value {
+            self.visit_value(value);
+        }
         for operation in &chain.operations {
             self.visit_operation(operation);
         }
