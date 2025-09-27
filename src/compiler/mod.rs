@@ -896,7 +896,11 @@ impl<'a> Compiler<'a> {
             self.codegen.add_instruction(Instruction::TailCall(false));
 
             match self.lookup_variable(identifier) {
-                Some(function_type) => Ok(function_type),
+                Some(Type::Function(func_type)) => Ok(func_type.result),
+                Some(other_type) => Err(Error::TypeMismatch {
+                    expected: "function".to_string(),
+                    found: format!("{:?}", other_type),
+                }),
                 None => Err(Error::VariableUndefined(identifier.to_string())),
             }
         }
