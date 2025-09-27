@@ -243,7 +243,7 @@ fn test_recursive_type_pattern_matching_bug() {
             #[tree, int] {
               | [Leaf[x], n] => [x, n] ~> <add>
               | [Node[l, r], n] => n
-            } ~> match_first;
+            } ~> match_first,
 
             [Leaf[42], 10] ~> match_first! ~> t1,
             [Node[Leaf[1], Leaf[2]], 20] ~> match_first! ~> t2,

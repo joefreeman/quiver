@@ -660,7 +660,7 @@ fn test_filter_single_match() {
         .evaluate(
             r#"
             %"list" ~> list,
-            #int { x => [x, 5] ~> == } ~> equals_5,
+            #int { x, [x, 5] ~> == => Ok } ~> equals_5,
             []
             ~> list.new!
             ~> [~, 1]
@@ -1207,7 +1207,7 @@ fn test_any_single_false() {
             ~> [~, -5]
             ~> list.prepend!
             ~> [~, is_positive]
-            ~> list.any!
+            ~> list.any?!
             "#,
         )
         .expect("[]");
