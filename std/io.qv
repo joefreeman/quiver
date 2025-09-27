@@ -2,6 +2,6 @@
 // Provides convenient wrappers around the print and println builtins
 
 [
-  print: #(int | bin) { $ ~> <print> },
-  println: #(int | bin) { $ ~> <println> }
+  print: #(int | bin) { x => x ~> <print> },
+  println: #(int | bin) { x => x ~> <println> }
 ]

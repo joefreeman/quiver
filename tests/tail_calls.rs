@@ -6,9 +6,9 @@ fn test_tail_call() {
     quiver()
         .evaluate(
             r#"
-            #int { [$, 2] ~> <multiply> } ~> ^g,
-            #int { [$, 1] ~> <add> ~> &g } ~> ^f,
-            1 ~> f
+            #int { x => [x, 2] ~> <multiply> } ~> g,
+            #int { x => [x, 1] ~> <add> ~> &g } ~> f,
+            1 ~> f!
             "#,
         )
         .expect("4")
@@ -20,10 +20,10 @@ fn test_countdown() {
         .evaluate(
             r#"
             #int {
-              | ^0 => 0
-              | [$, 1] ~> <subtract> ~> &
-            } ~> ^countdown,
-            5 ~> countdown
+              | 0 => 0
+              | x => [x, 1] ~> <subtract> ~> &
+            } ~> countdown,
+            5 ~> countdown!
             "#,
         )
         .expect("0");
@@ -35,11 +35,11 @@ fn test_factorial() {
         .evaluate(
             r#"
             #[int, int] {
-              | [$.0, 1] ~> <compare> ~> { ^-1 => $ | ^0 => $ } => $.1
-              | [[$.0, 1] ~> <subtract>, [$.0, $.1] ~> <multiply>] ~> &
-            } ~> ^f,
-            #int { [$, 1] ~> f } ~> ^fact,
-            5 ~> fact
+              | [x, y] => [x, 1] ~> <compare> ~> { -1 => Ok | 0 => Ok } => y
+              | [x, y] => [[x, 1] ~> <subtract>, [x, y] ~> <multiply>] ~> &
+            } ~> f,
+            #int { x => [x, 1] ~> f! } ~> fact,
+            5 ~> fact!
             "#,
         )
         .expect("120");
