@@ -13,7 +13,7 @@ All values in Quiver are immutable. The language supports:
 ### Postfix Flow
 Quiver uses postfix notation where data flows left-to-right through transformations:
 ```
-5 ~> double ~> increment  // 5 → double → increment
+5 ~> double! ~> increment!
 ```
 
 The `~` operator (ripple) carries results forward in the pipeline.
@@ -42,7 +42,7 @@ type adder = #int -> int
 ### Type Imports
 Import types from modules using patterns:
 ```
-type (Circle, Rectangle) = %"shapes"  // Import specific types
+type (circle, rectangle) = %"shapes"  // Import specific types
 type * = %"geometry"                  // Import all types
 ```
 
@@ -55,8 +55,8 @@ type shape = Circle[radius: int] | Rectangle[width: int, height: int]
 
 Variables are declared through assignment using the `~>` operator:
 ```
-42 ~> ^x                    // Assign 42 to new variable x
-Point[x: 10, y: 20] ~> ^p   // Assign tuple to variable p
+42 ~> x                    // Assign 42 to new variable x
+Point[x: 10, y: 20] ~> p   // Assign tuple to variable p
 ```
 
 ### Naming Conventions
@@ -64,7 +64,6 @@ Identifiers support suffix conventions for clarity:
 ```
 is_empty?     // ? suffix for predicates/boolean functions
 helper'       // ' suffix for variants or helper functions
-print!        // ! suffix for functions with side effects
 valid'?       // Multiple suffixes can be combined
 ```
 
@@ -72,13 +71,13 @@ valid'?       // Multiple suffixes can be combined
 Extract values from tuples during assignment:
 ```
 // Full destructuring
-Point[x: 10, y: 20] ~> ^Point[x: a, y: b]
+Point[x: 10, y: 20] ~> Point[x: a, y: b]
 
 // Partial destructuring (extract specific fields)
-Person[name: "Alice", age: 30, city: "NYC"] ~> ^(name, age)
+Person[name: "Alice", age: 30, city: "NYC"] ~> (name, age)
 
 // Star destructuring (extract all named fields)
-Config[host: "localhost", port: 8080, debug: true] ~> ^*
+Config[host: "localhost", port: 8080, debug: True] ~> *
 ```
 
 ## Functions
@@ -86,38 +85,38 @@ Config[host: "localhost", port: 8080, debug: true] ~> ^*
 Functions are defined with `#Type { pattern => expression }` syntax:
 ```
 // Single parameter function
-#int { x => [x, 2] ~> math.mul } ~> ^double
+#int { x => [x, 2] ~> math.mul! } ~> double
 
 // Pattern matching function
 #int {
   | 0 => "zero"
   | 1 => "one"
   | n => "other"
-} ~> ^classify
+} ~> classify
 
 // Multiple parameter function (takes tuple)
-#[int, int] { p => [p.0, p.1] ~> math.add } ~> ^add
+#[int, int] { p => [p.0, p.1] ~> math.add! } ~> add
 ```
 
 ### Function Application
 Functions use postfix application:
 ```
-5 ~> double             // Apply double to 5
-[3, 4] ~> add           // Apply add to tuple [3, 4]
+5 ~> double!             // Apply double to 5
+[3, 4] ~> add!           // Apply add to tuple [3, 4]
 ```
 
 ### Tail Recursion
 Use `&` for tail-recursive calls:
 ```
 #[int, int] {
-  | p, [p.0, 1] ~> math.le => p.1
-  | p => [[p.0, 1] ~> math.sub, [p.0, p.1] ~> math.mul] ~> &
-} ~> ^factorial_helper
+  | p, [p.0, 1] ~> math.le! => p.1
+  | p => [[p.0, 1] ~> math.sub!, [p.0, p.1] ~> math.mul!] ~> &
+} ~> factorial_helper
 ```
 
 Named tail calls to other functions:
 ```
-#int { x => [x, 1] ~> &factorial_helper } ~> ^factorial
+#int { x => [x, 1] ~> &factorial_helper } ~> factorial
 ```
 
 ## Pattern Matching
@@ -126,14 +125,14 @@ Blocks use `{ pattern => expression }` syntax with multiple branches:
 ```
 value ~> {
   | 0 => "zero"
-  | n, [n, 0] ~> math.gt => "positive"
+  | n, [n, 0] ~> math.gt! => "positive"
   | _ => "negative"
 }
 ```
 
 Guards can be added with comma-separated conditions:
 ```
-{ x, [x, 10] ~> math.gt => "large" | x => "small" }
+{ x, [x, 10] ~> math.gt! => "large" | x => "small" }
 ```
 
 ## Field Access
@@ -147,8 +146,8 @@ nested.outer.inner   // Chained access
 
 Field access can also be used as postfix operations:
 ```
-data ~> .name ~> ^extracted_name     // Extract field in pipeline
-coords ~> .0 ~> ^x_coord             // Positional access in pipeline
+data ~> .name ~> extracted_name     // Extract field in pipeline
+coords ~> .0 ~> x_coord             // Positional access in pipeline
 ```
 
 ## Operators
@@ -164,26 +163,26 @@ coords ~> .0 ~> ^x_coord             // Positional access in pipeline
 ### Ripple Operator
 The `~` carries the previous result forward:
 ```
-5 ~> double ~> Point[x: ~, y: ~]  // Point[x: 10, y: 10]
+5 ~> double! ~> Point[x: ~, y: ~]  // Point[x: 10, y: 10]
 ```
 
 ## Modules
 
 Import modules using `%"path"` syntax:
 ```
-%"math" ~> ^math                   // Import standard library
-%"./utils.qv" ~> ^utils            // Import local file
-%"math" ~> ^(add, mul)             // Import specific functions
-%"config" ~> ^*                    // Import all named exports
+%"math" ~> math                   // Import standard library
+%"./utils.qv" ~> utils            // Import local file
+%"math" ~> (add, mul)             // Import specific functions
+%"config" ~> *                    // Import all named exports
 ```
 
 ## Built-in Functions
 
 Access built-in operations using angle brackets:
 ```
-[3, 4] ~> <add> ~> ^sum              // Built-in addition
-"Hello" ~> <println> ~> ^output      // Built-in print with newline
-[x, 2] ~> <mul> ~> ^doubled         // Built-in multiplication
+[3, 4] ~> <add> ~> sum              // Built-in addition
+"Hello" ~> <println> ~> output      // Built-in print with newline
+[x, 2] ~> <mul> ~> doubled         // Built-in multiplication
 ```
 
 ## Control Flow
@@ -204,30 +203,30 @@ expr1; expr2; expr3    // Semicolons can also separate statements
 ### Basic Usage
 ```
 // Import math functions
-%"math" ~> ^(add, mul, sub),
+%"math" ~> (add, mul, sub),
 
 // Create and manipulate values
-10 ~> ^x,
-20 ~> ^y,
-[x, y] ~> add ~> ^sum,
-[sum, 2] ~> mul ~> ^result
+10 ~> x,
+20 ~> y,
+[x, y] ~> add! ~> sum,
+[sum, 2] ~> mul! ~> result
 ```
 
 ### Working with Tuples
 ```
 // Define a point type
-Point[x: 10, y: 20] ~> ^p1,
-Point[x: 5, y: 15] ~> ^p2,
+Point[x: 10, y: 20] ~> p1,
+Point[x: 5, y: 15] ~> p2,
 
 // Function to add points
 #[Point[x: int, y: int], Point[x: int, y: int]] {
   [a, b] => Point[
-    x: [a.x, b.x] ~> add,
-    y: [a.y, b.y] ~> add
+    x: [a.x, b.x] ~> add!,
+    y: [a.y, b.y] ~> add!
   ]
-} ~> ^add_points,
+} ~> add_points,
 
-[p1, p2] ~> add_points ~> ^result
+[p1, p2] ~> add_points! ~> result
 ```
 
 ### Pattern Matching
@@ -235,26 +234,26 @@ Point[x: 5, y: 15] ~> ^p2,
 // Classification function
 #int {
   | 0 => "zero"
-  | n, [n, 0] ~> math.gt => "positive"
+  | n, [n, 0] ~> math.gt! => "positive"
   | _ => "negative"
-} ~> ^classify,
+} ~> classify,
 
-5 ~> classify,    // "positive"
--3 ~> classify,   // "negative"
-0 ~> classify     // "zero"
+5 ~> classify!,    // "positive"
+-3 ~> classify!,   // "negative"
+0 ~> classify!     // "zero"
 ```
 
 ### Conditional Logic
 ```
 // Sign function using guards
 #int {
-  | x, [x, 0] ~> math.gt => 1
-  | x, [x, 0] ~> math.lt => -1
+  | x, [x, 0] ~> math.gt! => 1
+  | x, [x, 0] ~> math.lt! => -1
   | _ => 0
-} ~> ^sign,
+} ~> sign,
 
 // Using with pipeline
--42 ~> sign ~> ^result  // -1
+-42 ~> sign! ~> result  // -1
 ```
 
 ### Module Organization
@@ -267,21 +266,21 @@ Point[x: 5, y: 15] ~> ^p2,
 ]
 
 // main.qv
-%"math" ~> ^(add, abs);
--5 ~> abs ~> ^positive;  // 5
-[3, 4] ~> add ~> ^sum    // 7
+%"math" ~> (add, abs);
+-5 ~> abs! ~> positive;  // 5
+[3, 4] ~> add! ~> sum    // 7
 ```
 
 ### Using Built-ins and Field Access
 ```
 // Extract and process data
-Person[name: "Alice", details: [age: 30, city: "NYC"]] ~> ^person;
-person ~> .name ~> ^name;                    // Extract name field
-person ~> .details ~> .age ~> ^age;          // Chain field access
+Person[name: "Alice", details: [age: 30, city: "NYC"]] ~> person,
+person ~> .name ~> name,                    // Extract name field
+person ~> .details ~> .age ~> age          // Chain field access
 
 // Built-in operations
-[age, 1] ~> <add> ~> ^next_year_age;         // Use built-in add
-name ~> <println>;                           // Print to console
+[age, 1] ~> <add> ~> next_year_age,         // Use built-in add
+name ~> <println>                           // Print to console
 ```
 
 This specification provides a foundation for understanding Quiver's key concepts while maintaining the language's functional, pipeline-oriented philosophy.
