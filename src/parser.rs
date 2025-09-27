@@ -1,16 +1,16 @@
 use crate::ast::*;
-use pest::Parser;
-use pest_derive::Parser;
-
-#[derive(Parser)]
-#[grammar = "grammar.pest"]
-pub struct Grammar;
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_while},
+    character::complete::{char, digit1, multispace0, multispace1, satisfy},
+    combinator::{map, map_res, opt, recognize, value as nom_value},
+    multi::{many0, separated_list0, separated_list1},
+    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
+    IResult,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
-    // Grammar parsing errors
-    SyntaxError(Box<pest::error::Error<Rule>>),
-
     // Literal parsing errors
     IntegerMalformed(String),
     HexMalformed(String),
@@ -21,23 +21,20 @@ pub enum Error {
     ParameterInvalid(String),
     OperatorUnknown(String),
 
-    // Structure errors
-    RuleUnexpected { found: Rule, context: String },
+    // Parser errors
+    ParseError(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::SyntaxError(err) => write!(f, "Syntax error: {}", err),
             Error::IntegerMalformed(lit) => write!(f, "Malformed integer: {}", lit),
             Error::HexMalformed(lit) => write!(f, "Malformed hex literal: {}", lit),
             Error::StringEscapeInvalid(esc) => write!(f, "Invalid string escape: {}", esc),
             Error::IndexMalformed(idx) => write!(f, "Malformed index: {}", idx),
             Error::ParameterInvalid(param) => write!(f, "Invalid parameter: {}", param),
             Error::OperatorUnknown(op) => write!(f, "Unknown operator: {}", op),
-            Error::RuleUnexpected { found, context } => {
-                write!(f, "Unexpected {:?} in {}", found, context)
-            }
+            Error::ParseError(msg) => write!(f, "Parse error: {}", msg),
         }
     }
 }
@@ -45,251 +42,113 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn parse(source: &str) -> Result<Program, Error> {
-    let pairs =
-        Grammar::parse(Rule::program, source).map_err(|e| Error::SyntaxError(Box::new(e)))?;
-
-    let program_pair = pairs.into_iter().next().unwrap();
-    parse_program(program_pair)
-}
-
-fn parse_program(pair: pest::iterators::Pair<Rule>) -> Result<Program, Error> {
-    let mut statements = Vec::new();
-
-    for inner_pair in pair.into_inner() {
-        match inner_pair.as_rule() {
-            Rule::statements => {
-                for stmt_pair in inner_pair.into_inner() {
-                    statements.push(parse_statement(stmt_pair)?);
-                }
-            }
-            Rule::EOI => break,
-            _ => {}
-        }
-    }
-
-    Ok(Program { statements })
-}
-
-fn parse_statement(pair: pest::iterators::Pair<Rule>) -> Result<Statement, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-
-    match inner_pair.as_rule() {
-        Rule::type_alias => parse_type_alias(inner_pair),
-        Rule::type_import => parse_type_import(inner_pair),
-        Rule::expression => Ok(Statement::Expression(parse_expression(inner_pair)?)),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "statement".to_string(),
-        }),
+    match program(source) {
+        Ok((_, prog)) => Ok(prog),
+        Err(e) => Err(Error::ParseError(format!("{:?}", e))),
     }
 }
 
-fn parse_type_alias(pair: pest::iterators::Pair<Rule>) -> Result<Statement, Error> {
-    let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
-    let type_definition = parse_type_definition(inner.next().unwrap())?;
+// Utility parsers
 
-    Ok(Statement::TypeAlias {
-        name,
-        type_definition,
-    })
+fn ws0(input: &str) -> IResult<&str, ()> {
+    nom_value((), multispace0)(input)
 }
 
-fn parse_type_import(pair: pest::iterators::Pair<Rule>) -> Result<Statement, Error> {
-    let mut inner = pair.into_inner();
-    let pattern_pair = inner.next().unwrap();
-    let import_pair = inner.next().unwrap();
-
-    let pattern = parse_type_import_pattern(pattern_pair)?;
-    let module_path = parse_string_literal(import_pair.into_inner().next().unwrap().as_str())?;
-
-    Ok(Statement::TypeImport {
-        pattern,
-        module_path,
-    })
+fn ws1(input: &str) -> IResult<&str, ()> {
+    nom_value((), multispace1)(input)
 }
 
-fn parse_type_import_pattern(
-    pair: pest::iterators::Pair<Rule>,
-) -> Result<TypeImportPattern, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-
-    match inner_pair.as_rule() {
-        Rule::type_star_pattern => Ok(TypeImportPattern::Star),
-        Rule::type_partial_pattern => {
-            let identifiers: Vec<String> = inner_pair
-                .into_inner()
-                .map(|p| p.as_str().to_string())
-                .collect();
-            Ok(TypeImportPattern::Partial(identifiers))
-        }
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "type import pattern".to_string(),
-        }),
-    }
+fn comment(input: &str) -> IResult<&str, &str> {
+    preceded(
+        tag("//"),
+        take_while(|c| c != '\n' && c != '\r'),
+    )(input)
 }
 
-fn parse_block(pair: pest::iterators::Pair<Rule>) -> Result<Block, Error> {
-    let mut branches = Vec::new();
-
-    for inner_pair in pair.into_inner() {
-        match inner_pair.as_rule() {
-            Rule::branch => branches.push(parse_branch(inner_pair)?),
-            _ => {}
-        }
-    }
-
-    Ok(Block { branches })
+fn ws_with_comments(input: &str) -> IResult<&str, ()> {
+    nom_value(
+        (),
+        many0(alt((
+            nom_value((), multispace1),
+            nom_value((), comment),
+        ))),
+    )(input)
 }
 
-fn parse_branch(pair: pest::iterators::Pair<Rule>) -> Result<Branch, Error> {
-    let mut inner = pair.into_inner();
-    let condition = parse_expression(inner.next().unwrap())?;
-    let consequence = inner.next().map(parse_expression).transpose()?;
-
-    Ok(Branch {
-        condition,
-        consequence,
-    })
+// Whitespace and/or comments (including inline comments after commas)
+fn wsc(input: &str) -> IResult<&str, ()> {
+    nom_value(
+        (),
+        many0(alt((
+            nom_value((), multispace1),
+            nom_value((), comment),
+            nom_value((), preceded(multispace0, comment)),
+        ))),
+    )(input)
 }
 
-fn parse_expression(pair: pest::iterators::Pair<Rule>) -> Result<Expression, Error> {
-    let mut chains = Vec::new();
+// Identifier parsers
 
-    for inner_pair in pair.into_inner() {
-        match inner_pair.as_rule() {
-            Rule::chain => chains.push(parse_chain(inner_pair)?),
-            _ => {}
-        }
-    }
-
-    Ok(Expression { chains })
+fn identifier(input: &str) -> IResult<&str, String> {
+    map(
+        recognize(tuple((
+            satisfy(|c: char| c.is_ascii_lowercase()),
+            take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
+            opt(char('!')),
+            opt(char('?')),
+            take_while(|c: char| c == '\''),
+        ))),
+        String::from,
+    )(input)
 }
 
-fn parse_chain(pair: pest::iterators::Pair<Rule>) -> Result<Chain, Error> {
-    let mut inner = pair.into_inner();
-    let value = parse_value(inner.next().unwrap())?;
-    let mut operations = Vec::new();
-
-    for op_pair in inner {
-        operations.push(parse_operation(op_pair)?);
-    }
-
-    Ok(Chain { value, operations })
+fn tuple_name(input: &str) -> IResult<&str, String> {
+    map(
+        recognize(pair(
+            satisfy(|c: char| c.is_ascii_uppercase()),
+            take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
+        )),
+        String::from,
+    )(input)
 }
 
-fn parse_value(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
+// Literal parsers
 
-    match inner_pair.as_rule() {
-        Rule::literal => Ok(Value::Literal(parse_literal(inner_pair)?)),
-        Rule::value_tuple => Ok(Value::Tuple(parse_value_tuple(inner_pair)?)),
-        Rule::function_definition => Ok(Value::FunctionDefinition(parse_function_definition(
-            inner_pair,
-        )?)),
-        Rule::block => Ok(Value::Block(parse_block(inner_pair)?)),
-        Rule::member_access => Ok(Value::MemberAccess(parse_member_access(inner_pair)?)),
-        Rule::import => {
-            let path = parse_string_literal(inner_pair.into_inner().next().unwrap().as_str())?;
-            Ok(Value::Import(path))
-        }
-        Rule::match_pattern => Ok(Value::Match(parse_match_pattern(inner_pair)?)),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "value".to_string(),
-        }),
-    }
+fn integer_literal(input: &str) -> IResult<&str, Literal> {
+    map_res(
+        recognize(pair(opt(char('-')), digit1)),
+        |s: &str| s.parse::<i64>().map(Literal::Integer),
+    )(input)
 }
 
-fn parse_operation(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error> {
-    match pair.as_rule() {
-        Rule::operation => {
-            // Operation is a wrapper, get the inner rule
-            let inner_pair = pair.into_inner().next().unwrap();
-            parse_operation(inner_pair)
-        }
-        Rule::operation_tuple => Ok(Operation::Tuple(parse_operation_tuple(pair)?)),
-        Rule::block => Ok(Operation::Block(parse_block(pair)?)),
-        Rule::member_access => Ok(Operation::MemberAccess(parse_member_access(pair)?)),
-        // Rule::identifier => Ok(Operation::Identifier(pair.as_str().to_string())),
-        Rule::field_access => {
-            let field_name = pair.as_str()[1..].to_string(); // Remove leading '.'
-            Ok(Operation::FieldAccess(field_name))
-        }
-        Rule::positional_access => {
-            let index_str = &pair.as_str()[1..]; // Remove leading '.'
-            let index = index_str
-                .parse()
-                .map_err(|_| Error::IndexMalformed(index_str.to_string()))?;
-            Ok(Operation::PositionalAccess(index))
-        }
-        Rule::tail_call => {
-            let name = pair
-                .into_inner()
-                .next()
-                .map(|p| p.as_str().to_string())
-                .unwrap_or_default();
-            Ok(Operation::TailCall(name))
-        }
-        Rule::builtin => {
-            let name = pair.into_inner().next().unwrap().as_str().to_string();
-            Ok(Operation::Builtin(name))
-        }
-        Rule::operator => parse_operator(pair),
-        Rule::match_pattern => Ok(Operation::Match(parse_match_pattern(pair)?)),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "operation".to_string(),
-        }),
-    }
+fn binary_literal(input: &str) -> IResult<&str, Literal> {
+    map_res(
+        delimited(
+            char('\''),
+            take_while(|c: char| c.is_ascii_hexdigit()),
+            char('\''),
+        ),
+        |s: &str| hex::decode(s).map(Literal::Binary),
+    )(input)
 }
 
-fn parse_operator(pair: pest::iterators::Pair<Rule>) -> Result<Operation, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-
-    match inner_pair.as_rule() {
-        Rule::equality => Ok(Operation::Equality),
-        Rule::not => Ok(Operation::Not),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "operator".to_string(),
-        }),
-    }
+fn string_literal(input: &str) -> IResult<&str, Literal> {
+    map(
+        delimited(
+            char('"'),
+            map_res(
+                take_while(|c| c != '"'),
+                |s: &str| parse_string_content(s),
+            ),
+            char('"'),
+        ),
+        Literal::String,
+    )(input)
 }
 
-fn parse_literal(pair: pest::iterators::Pair<Rule>) -> Result<Literal, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-
-    match inner_pair.as_rule() {
-        Rule::integer_literal => {
-            let value = inner_pair
-                .as_str()
-                .parse()
-                .map_err(|_| Error::IntegerMalformed(inner_pair.as_str().to_string()))?;
-            Ok(Literal::Integer(value))
-        }
-        Rule::binary_literal => {
-            let hex_str = &inner_pair.as_str()[1..inner_pair.as_str().len() - 1]; // Remove quotes
-            let bytes = hex::decode(hex_str)
-                .map_err(|_| Error::HexMalformed(inner_pair.as_str().to_string()))?;
-            Ok(Literal::Binary(bytes))
-        }
-        Rule::string_literal => {
-            let string_value = parse_string_literal(inner_pair.as_str())?;
-            Ok(Literal::String(string_value))
-        }
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "literal".to_string(),
-        }),
-    }
-}
-
-fn parse_string_literal(s: &str) -> Result<String, Error> {
-    let content = &s[1..s.len() - 1]; // Remove quotes
+fn parse_string_content(s: &str) -> Result<String, Error> {
     let mut result = String::new();
-    let mut chars = content.chars();
+    let mut chars = s.chars();
 
     while let Some(ch) = chars.next() {
         if ch == '\\' {
@@ -310,337 +169,662 @@ fn parse_string_literal(s: &str) -> Result<String, Error> {
     Ok(result)
 }
 
-fn parse_value_tuple(pair: pest::iterators::Pair<Rule>) -> Result<ValueTuple, Error> {
-    let mut name = None;
-    let mut fields = Vec::new();
-
-    for field_pair in pair.into_inner() {
-        match field_pair.as_rule() {
-            Rule::tuple_name => name = Some(field_pair.as_str().to_string()),
-            Rule::value_tuple_field_list => {
-                for tuple_field_pair in field_pair.into_inner() {
-                    fields.push(parse_value_tuple_field(tuple_field_pair)?);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(ValueTuple { name, fields })
+fn literal(input: &str) -> IResult<&str, Literal> {
+    alt((
+        integer_literal,
+        binary_literal,
+        string_literal,
+    ))(input)
 }
 
-fn parse_value_tuple_field(pair: pest::iterators::Pair<Rule>) -> Result<ValueTupleField, Error> {
-    let mut name = None;
-    let mut value = None;
+// Pattern parsers
 
-    for field_part in pair.into_inner() {
-        match field_part.as_rule() {
-            Rule::identifier => name = Some(field_part.as_str().to_string()),
-            Rule::chain => value = Some(parse_chain(field_part)?),
-            _ => {}
-        }
-    }
-
-    Ok(ValueTupleField {
-        name,
-        value: value.unwrap(),
-    })
+fn pattern_literal(input: &str) -> IResult<&str, Pattern> {
+    map(literal, Pattern::Literal)(input)
 }
 
-fn parse_operation_tuple(pair: pest::iterators::Pair<Rule>) -> Result<OperationTuple, Error> {
-    let mut name = None;
-    let mut fields = Vec::new();
-
-    for field_pair in pair.into_inner() {
-        match field_pair.as_rule() {
-            Rule::tuple_name => name = Some(field_pair.as_str().to_string()),
-            Rule::operation_tuple_field_list => {
-                for tuple_field_pair in field_pair.into_inner() {
-                    fields.push(parse_operation_tuple_field(tuple_field_pair)?);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(OperationTuple { name, fields })
+fn pattern_identifier(input: &str) -> IResult<&str, Pattern> {
+    map(identifier, Pattern::Identifier)(input)
 }
 
-fn parse_operation_tuple_field(
-    pair: pest::iterators::Pair<Rule>,
-) -> Result<OperationTupleField, Error> {
-    let mut name = None;
-    let mut value = None;
-
-    for field_part in pair.into_inner() {
-        match field_part.as_rule() {
-            Rule::identifier => name = Some(field_part.as_str().to_string()),
-            Rule::ripple => value = Some(OperationTupleFieldValue::Ripple),
-            Rule::chain => value = Some(OperationTupleFieldValue::Chain(parse_chain(field_part)?)),
-            _ => {}
-        }
-    }
-
-    Ok(OperationTupleField {
-        name,
-        value: value.unwrap(),
-    })
+fn pattern_star(input: &str) -> IResult<&str, Pattern> {
+    nom_value(Pattern::Star, char('*'))(input)
 }
 
-fn parse_function_definition(
-    pair: pest::iterators::Pair<Rule>,
-) -> Result<FunctionDefinition, Error> {
-    let mut parameter_type = None;
-    let mut body = None;
-
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::function_input_type => parameter_type = Some(parse_function_input_type(part)?),
-            Rule::block => body = Some(parse_block(part)?),
-            _ => {}
-        }
-    }
-
-    Ok(FunctionDefinition {
-        parameter_type,
-        body: body.unwrap(),
-    })
+fn pattern_placeholder(input: &str) -> IResult<&str, Pattern> {
+    nom_value(Pattern::Placeholder, char('_'))(input)
 }
 
-fn parse_member_access(pair: pest::iterators::Pair<Rule>) -> Result<MemberAccess, Error> {
-    let access_str = pair.as_str();
-    let parts: Vec<&str> = access_str.split('.').collect();
-
-    let target = if parts[0] == "$" {
-        MemberTarget::Parameter
-    } else {
-        MemberTarget::Identifier(parts[0].to_string())
-    };
-
-    let mut accessors = Vec::new();
-
-    for part in &parts[1..] {
-        if part.chars().all(|c| c.is_ascii_digit()) {
-            let index = part
-                .parse()
-                .map_err(|_| Error::IndexMalformed(part.to_string()))?;
-            accessors.push(AccessPath::Index(index));
-        } else {
-            accessors.push(AccessPath::Field(part.to_string()));
-        }
-    }
-
-    Ok(MemberAccess { target, accessors })
+fn partial_pattern(input: &str) -> IResult<&str, Pattern> {
+    map(
+        delimited(
+            pair(char('('), ws0),
+            separated_list1(
+                tuple((ws0, char(','), ws0)),
+                identifier,
+            ),
+            pair(ws0, char(')')),
+        ),
+        Pattern::Partial,
+    )(input)
 }
 
-fn parse_match_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Pattern, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-    parse_pattern(inner_pair)
-}
-
-fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Pattern, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-
-    match inner_pair.as_rule() {
-        Rule::literal => Ok(Pattern::Literal(parse_literal(inner_pair)?)),
-        Rule::identifier => Ok(Pattern::Identifier(inner_pair.as_str().to_string())),
-        Rule::tuple_pattern => Ok(Pattern::Tuple(parse_tuple_pattern(inner_pair)?)),
-        Rule::partial_pattern => Ok(Pattern::Partial(parse_partial_pattern(inner_pair)?)),
-        Rule::star => Ok(Pattern::Star),
-        Rule::placeholder => Ok(Pattern::Placeholder),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "pattern".to_string(),
+fn pattern_field(input: &str) -> IResult<&str, PatternField> {
+    alt((
+        map(
+            separated_pair(
+                identifier,
+                tuple((char(':'), ws0)),
+                pattern,
+            ),
+            |(name, pattern)| PatternField {
+                name: Some(name),
+                pattern,
+            },
+        ),
+        map(pattern, |p| PatternField {
+            name: None,
+            pattern: p,
         }),
-    }
+    ))(input)
 }
 
-fn parse_tuple_pattern(pair: pest::iterators::Pair<Rule>) -> Result<TuplePattern, Error> {
-    let mut name = None;
-    let mut fields = Vec::new();
-
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::tuple_name => name = Some(part.as_str().to_string()),
-            Rule::pattern_field_list => {
-                for field_pair in part.into_inner() {
-                    fields.push(parse_pattern_field(field_pair)?);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(TuplePattern { name, fields })
+fn pattern_field_list(input: &str) -> IResult<&str, Vec<PatternField>> {
+    terminated(
+        separated_list0(
+            tuple((wsc, char(','), wsc)),
+            pattern_field,
+        ),
+        opt(pair(wsc, char(','))),
+    )(input)
 }
 
-fn parse_pattern_field(pair: pest::iterators::Pair<Rule>) -> Result<PatternField, Error> {
-    let mut name = None;
-    let mut pattern = None;
+fn tuple_pattern(input: &str) -> IResult<&str, Pattern> {
+    map(
+        alt((
+            map(
+                tuple((
+                    tuple_name,
+                    delimited(
+                        pair(char('['), wsc),
+                        pattern_field_list,
+                        pair(wsc, char(']')),
+                    ),
+                )),
+                |(name, fields)| TuplePattern {
+                    name: Some(name),
+                    fields,
+                },
+            ),
+            map(
+                delimited(
+                    pair(char('['), wsc),
+                    pattern_field_list,
+                    pair(wsc, char(']')),
+                ),
+                |fields| TuplePattern {
+                    name: None,
+                    fields,
+                },
+            ),
+            map(tuple_name, |name| TuplePattern {
+                name: Some(name),
+                fields: vec![],
+            }),
+        )),
+        Pattern::Tuple,
+    )(input)
+}
 
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::identifier => {
-                if name.is_none() {
-                    name = Some(part.as_str().to_string());
+fn pattern(input: &str) -> IResult<&str, Pattern> {
+    alt((
+        partial_pattern,
+        tuple_pattern,
+        pattern_literal,
+        pattern_star,
+        pattern_placeholder,
+        pattern_identifier,
+    ))(input)
+}
+
+fn match_pattern(input: &str) -> IResult<&str, Pattern> {
+    preceded(char('^'), pattern)(input)
+}
+
+// Type parsers
+
+fn primitive_type(input: &str) -> IResult<&str, Type> {
+    alt((
+        nom_value(Type::Primitive(PrimitiveType::Int), tag("int")),
+        nom_value(Type::Primitive(PrimitiveType::Bin), tag("bin")),
+    ))(input)
+}
+
+fn field_type(input: &str) -> IResult<&str, FieldType> {
+    alt((
+        map(
+            separated_pair(
+                identifier,
+                tuple((char(':'), ws0)),
+                type_definition,
+            ),
+            |(name, type_def)| FieldType {
+                name: Some(name),
+                type_def,
+            },
+        ),
+        map(type_definition, |type_def| FieldType {
+            name: None,
+            type_def,
+        }),
+    ))(input)
+}
+
+fn field_type_list(input: &str) -> IResult<&str, Vec<FieldType>> {
+    terminated(
+        separated_list0(
+            tuple((wsc, char(','), wsc)),
+            field_type,
+        ),
+        opt(pair(wsc, char(','))),
+    )(input)
+}
+
+fn tuple_type(input: &str) -> IResult<&str, Type> {
+    map(
+        alt((
+            map(
+                tuple((
+                    tuple_name,
+                    delimited(
+                        pair(char('['), wsc),
+                        field_type_list,
+                        pair(wsc, char(']')),
+                    ),
+                )),
+                |(name, fields)| TupleType {
+                    name: Some(name),
+                    fields,
+                },
+            ),
+            map(
+                delimited(
+                    pair(char('['), wsc),
+                    field_type_list,
+                    pair(wsc, char(']')),
+                ),
+                |fields| TupleType {
+                    name: None,
+                    fields,
+                },
+            ),
+            map(tuple_name, |name| TupleType {
+                name: Some(name),
+                fields: vec![],
+            }),
+        )),
+        Type::Tuple,
+    )(input)
+}
+
+fn type_identifier(input: &str) -> IResult<&str, Type> {
+    map(identifier, Type::Identifier)(input)
+}
+
+fn function_type(input: &str) -> IResult<&str, Type> {
+    map(
+        preceded(
+            char('#'),
+            separated_pair(
+                function_input_type,
+                tuple((ws0, tag("->"), ws0)),
+                function_output_type,
+            ),
+        ),
+        |(input, output)| Type::Function(FunctionType {
+            input: Box::new(input),
+            output: Box::new(output),
+        }),
+    )(input)
+}
+
+fn function_input_type(input: &str) -> IResult<&str, Type> {
+    alt((
+        delimited(
+            pair(char('('), ws0),
+            type_definition,
+            pair(ws0, char(')')),
+        ),
+        tuple_type,
+        primitive_type,
+        type_identifier,
+    ))(input)
+}
+
+fn function_output_type(input: &str) -> IResult<&str, Type> {
+    alt((
+        delimited(
+            pair(char('('), ws0),
+            type_definition,
+            pair(ws0, char(')')),
+        ),
+        tuple_type,
+        primitive_type,
+        type_identifier,
+    ))(input)
+}
+
+fn base_type(input: &str) -> IResult<&str, Type> {
+    alt((
+        tuple_type,
+        primitive_type,
+        delimited(
+            pair(char('('), ws0),
+            type_definition,
+            pair(ws0, char(')')),
+        ),
+        type_identifier,
+    ))(input)
+}
+
+fn type_definition(input: &str) -> IResult<&str, Type> {
+    alt((
+        function_type,
+        map(
+            separated_list1(
+                tuple((ws0, char('|'), ws0)),
+                base_type,
+            ),
+            |types| {
+                if types.len() == 1 {
+                    types.into_iter().next().unwrap()
                 } else {
-                    pattern = Some(Pattern::Identifier(part.as_str().to_string()));
+                    Type::Union(UnionType { types })
                 }
-            }
-            Rule::pattern => pattern = Some(parse_pattern(part)?),
-            _ => {}
-        }
-    }
-
-    // If we only have one identifier, it's the pattern, not the name
-    if pattern.is_none() && name.is_some() {
-        pattern = Some(Pattern::Identifier(name.take().unwrap()));
-    }
-
-    Ok(PatternField {
-        name,
-        pattern: pattern.unwrap(),
-    })
+            },
+        ),
+    ))(input)
 }
 
-fn parse_partial_pattern(pair: pest::iterators::Pair<Rule>) -> Result<Vec<String>, Error> {
-    Ok(pair
-        .into_inner()
-        .next()
-        .unwrap()
-        .into_inner()
-        .map(|p| p.as_str().to_string())
-        .collect())
+// Value and Operation parsers
+
+fn member_access(input: &str) -> IResult<&str, MemberAccess> {
+    map(
+        pair(
+            alt((
+                nom_value(MemberTarget::Parameter, char('$')),
+                map(identifier, MemberTarget::Identifier),
+            )),
+            many0(preceded(
+                char('.'),
+                alt((
+                    map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
+                    map(identifier, AccessPath::Field),
+                )),
+            )),
+        ),
+        |(target, accessors)| MemberAccess { target, accessors },
+    )(input)
 }
 
-fn parse_type_definition(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    let mut inner = pair.into_inner();
-    let first_pair = inner.next().unwrap();
-
-    // Check if this is a function type
-    if first_pair.as_rule() == Rule::function_type {
-        // This is a standalone function type
-        return Ok(Type::Function(parse_function_type(first_pair)?));
-    }
-
-    // Otherwise, it's a base_type possibly followed by union alternatives
-    let first_type = parse_base_type(first_pair)?;
-    let mut types = vec![first_type];
-
-    // Check if there are more types separated by "|"
-    for pair in inner {
-        types.push(parse_base_type(pair)?);
-    }
-
-    if types.len() == 1 {
-        Ok(types.into_iter().next().unwrap())
-    } else {
-        Ok(Type::Union(UnionType { types }))
-    }
+fn import(input: &str) -> IResult<&str, String> {
+    preceded(
+        char('%'),
+        delimited(
+            char('"'),
+            map_res(
+                take_while(|c| c != '"'),
+                |s: &str| parse_string_content(s),
+            ),
+            char('"'),
+        ),
+    )(input)
 }
 
-fn parse_base_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    let mut inner = pair.into_inner();
-    let first_pair = inner.next().unwrap();
-
-    match first_pair.as_rule() {
-        Rule::primitive_type => parse_primitive_type(first_pair),
-        Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(first_pair)?)),
-        Rule::type_definition => {
-            // This is a parenthesized type definition
-            parse_type_definition(first_pair)
-        }
-        Rule::identifier => Ok(Type::Identifier(first_pair.as_str().to_string())),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "base type".to_string(),
+fn value_tuple_field(input: &str) -> IResult<&str, ValueTupleField> {
+    alt((
+        map(
+            separated_pair(
+                identifier,
+                tuple((char(':'), ws0)),
+                chain,
+            ),
+            |(name, value)| ValueTupleField {
+                name: Some(name),
+                value,
+            },
+        ),
+        map(chain, |value| ValueTupleField {
+            name: None,
+            value,
         }),
-    }
+    ))(input)
 }
 
-fn parse_primitive_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    match pair.as_str() {
-        "int" => Ok(Type::Primitive(PrimitiveType::Int)),
-        "bin" => Ok(Type::Primitive(PrimitiveType::Bin)),
-        _ => Err(Error::RuleUnexpected {
-            found: Rule::primitive_type,
-            context: "primitive type".to_string(),
+fn value_tuple_field_list(input: &str) -> IResult<&str, Vec<ValueTupleField>> {
+    terminated(
+        separated_list0(
+            tuple((wsc, char(','), wsc)),
+            value_tuple_field,
+        ),
+        opt(pair(wsc, char(','))),
+    )(input)
+}
+
+fn value_tuple(input: &str) -> IResult<&str, ValueTuple> {
+    alt((
+        map(
+            tuple((
+                tuple_name,
+                delimited(
+                    pair(char('['), wsc),
+                    value_tuple_field_list,
+                    pair(wsc, char(']')),
+                ),
+            )),
+            |(name, fields)| ValueTuple {
+                name: Some(name),
+                fields,
+            },
+        ),
+        map(
+            delimited(
+                pair(char('['), wsc),
+                value_tuple_field_list,
+                pair(wsc, char(']')),
+            ),
+            |fields| ValueTuple {
+                name: None,
+                fields,
+            },
+        ),
+        map(tuple_name, |name| ValueTuple {
+            name: Some(name),
+            fields: vec![],
         }),
-    }
+    ))(input)
 }
 
-fn parse_tuple_type(pair: pest::iterators::Pair<Rule>) -> Result<TupleType, Error> {
-    let mut name = None;
-    let mut fields = Vec::new();
-
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::tuple_name => name = Some(part.as_str().to_string()),
-            Rule::field_type_list => {
-                for field_pair in part.into_inner() {
-                    fields.push(parse_field_type(field_pair)?);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(TupleType { name, fields })
+fn operation_tuple_field(input: &str) -> IResult<&str, OperationTupleField> {
+    alt((
+        map(
+            separated_pair(
+                identifier,
+                tuple((char(':'), ws0)),
+                alt((
+                    nom_value(OperationTupleFieldValue::Ripple, char('~')),
+                    map(chain, OperationTupleFieldValue::Chain),
+                )),
+            ),
+            |(name, value)| OperationTupleField {
+                name: Some(name),
+                value,
+            },
+        ),
+        map(
+            alt((
+                nom_value(OperationTupleFieldValue::Ripple, char('~')),
+                map(chain, OperationTupleFieldValue::Chain),
+            )),
+            |value| OperationTupleField {
+                name: None,
+                value,
+            },
+        ),
+    ))(input)
 }
 
-fn parse_field_type(pair: pest::iterators::Pair<Rule>) -> Result<FieldType, Error> {
-    let mut name = None;
-    let mut type_def = None;
-
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::identifier => name = Some(part.as_str().to_string()),
-            Rule::type_definition => type_def = Some(parse_type_definition(part)?),
-            _ => {}
-        }
-    }
-
-    Ok(FieldType {
-        name,
-        type_def: type_def.unwrap(),
-    })
+fn operation_tuple_field_list(input: &str) -> IResult<&str, Vec<OperationTupleField>> {
+    terminated(
+        separated_list0(
+            tuple((wsc, char(','), wsc)),
+            operation_tuple_field,
+        ),
+        opt(pair(wsc, char(','))),
+    )(input)
 }
 
-fn parse_function_type(pair: pest::iterators::Pair<Rule>) -> Result<FunctionType, Error> {
-    let mut inner = pair.into_inner();
-    let input = Box::new(parse_function_input_type(inner.next().unwrap())?);
-    let output = Box::new(parse_function_output_type(inner.next().unwrap())?);
-
-    Ok(FunctionType { input, output })
-}
-
-fn parse_function_output_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
-
-    match inner_pair.as_rule() {
-        Rule::type_definition => parse_type_definition(inner_pair),
-        Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(inner_pair)?)),
-        Rule::primitive_type => parse_primitive_type(inner_pair),
-        Rule::identifier => Ok(Type::Identifier(inner_pair.as_str().to_string())),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "function output type".to_string(),
+fn operation_tuple(input: &str) -> IResult<&str, OperationTuple> {
+    alt((
+        map(
+            tuple((
+                tuple_name,
+                delimited(
+                    pair(char('['), wsc),
+                    operation_tuple_field_list,
+                    pair(wsc, char(']')),
+                ),
+            )),
+            |(name, fields)| OperationTuple {
+                name: Some(name),
+                fields,
+            },
+        ),
+        map(
+            delimited(
+                pair(char('['), wsc),
+                operation_tuple_field_list,
+                pair(wsc, char(']')),
+            ),
+            |fields| OperationTuple {
+                name: None,
+                fields,
+            },
+        ),
+        map(tuple_name, |name| OperationTuple {
+            name: Some(name),
+            fields: vec![],
         }),
-    }
+    ))(input)
 }
 
-fn parse_function_input_type(pair: pest::iterators::Pair<Rule>) -> Result<Type, Error> {
-    let inner_pair = pair.into_inner().next().unwrap();
+fn branch(input: &str) -> IResult<&str, Branch> {
+    map(
+        pair(
+            expression,
+            opt(preceded(
+                tuple((ws0, tag("=>"), ws0)),
+                expression,
+            )),
+        ),
+        |(condition, consequence)| Branch {
+            condition,
+            consequence,
+        },
+    )(input)
+}
 
-    match inner_pair.as_rule() {
-        Rule::function_type => Ok(Type::Function(parse_function_type(inner_pair)?)),
-        Rule::type_definition => parse_type_definition(inner_pair),
-        Rule::tuple_type => Ok(Type::Tuple(parse_tuple_type(inner_pair)?)),
-        Rule::primitive_type => parse_primitive_type(inner_pair),
-        Rule::identifier => Ok(Type::Identifier(inner_pair.as_str().to_string())),
-        rule => Err(Error::RuleUnexpected {
-            found: rule,
-            context: "function input type".to_string(),
-        }),
-    }
+fn block(input: &str) -> IResult<&str, Block> {
+    map(
+        delimited(
+            pair(char('{'), ws0),
+            preceded(
+                opt(pair(char('|'), ws0)),
+                separated_list1(
+                    tuple((ws0, char('|'), ws0)),
+                    branch,
+                ),
+            ),
+            pair(ws0, char('}')),
+        ),
+        |branches| Block { branches },
+    )(input)
+}
+
+fn function_definition(input: &str) -> IResult<&str, FunctionDefinition> {
+    map(
+        preceded(
+            char('#'),
+            pair(
+                opt(terminated(function_input_type, ws0)),
+                block,
+            ),
+        ),
+        |(parameter_type, body)| FunctionDefinition {
+            parameter_type,
+            body,
+        },
+    )(input)
+}
+
+fn field_access(input: &str) -> IResult<&str, String> {
+    preceded(char('.'), identifier)(input)
+}
+
+fn positional_access(input: &str) -> IResult<&str, usize> {
+    map_res(
+        preceded(char('.'), digit1),
+        |s: &str| s.parse(),
+    )(input)
+}
+
+fn tail_call(input: &str) -> IResult<&str, String> {
+    preceded(
+        char('&'),
+        map(opt(identifier), |i| i.unwrap_or_default()),
+    )(input)
+}
+
+fn builtin(input: &str) -> IResult<&str, String> {
+    delimited(char('<'), identifier, char('>'))(input)
+}
+
+fn operator(input: &str) -> IResult<&str, Operation> {
+    alt((
+        nom_value(Operation::Equality, tag("==")),
+        nom_value(Operation::Not, char('!')),
+    ))(input)
+}
+
+fn value(input: &str) -> IResult<&str, Value> {
+    alt((
+        map(literal, Value::Literal),
+        map(value_tuple, Value::Tuple),
+        map(function_definition, Value::FunctionDefinition),
+        map(block, Value::Block),
+        map(member_access, Value::MemberAccess),
+        map(import, Value::Import),
+        map(match_pattern, Value::Match),
+    ))(input)
+}
+
+fn operation(input: &str) -> IResult<&str, Operation> {
+    alt((
+        map(builtin, Operation::Builtin),
+        operator,
+        map(operation_tuple, Operation::Tuple),
+        map(block, Operation::Block),
+        map(member_access, Operation::MemberAccess),
+        map(field_access, Operation::FieldAccess),
+        map(positional_access, Operation::PositionalAccess),
+        map(tail_call, Operation::TailCall),
+        map(match_pattern, Operation::Match),
+    ))(input)
+}
+
+fn chain(input: &str) -> IResult<&str, Chain> {
+    map(
+        pair(
+            value,
+            many0(preceded(
+                tuple((ws0, tag("~>"), ws0)),
+                operation,
+            )),
+        ),
+        |(value, operations)| Chain { value, operations },
+    )(input)
+}
+
+fn expression(input: &str) -> IResult<&str, Expression> {
+    map(
+        separated_list1(
+            tuple((ws0, char(','), wsc)),
+            chain,
+        ),
+        |chains| Expression { chains },
+    )(input)
+}
+
+// Statement parsers
+
+fn type_alias(input: &str) -> IResult<&str, Statement> {
+    map(
+        tuple((
+            preceded(pair(tag("type"), ws1), identifier),
+            preceded(tuple((ws0, char('='), ws0)), type_definition),
+        )),
+        |(name, type_definition)| Statement::TypeAlias {
+            name,
+            type_definition,
+        },
+    )(input)
+}
+
+fn type_import_pattern(input: &str) -> IResult<&str, TypeImportPattern> {
+    alt((
+        nom_value(TypeImportPattern::Star, char('*')),
+        map(
+            delimited(
+                pair(char('('), ws0),
+                separated_list1(
+                    tuple((ws0, char(','), ws0)),
+                    identifier,
+                ),
+                pair(ws0, char(')')),
+            ),
+            TypeImportPattern::Partial,
+        ),
+    ))(input)
+}
+
+fn type_import(input: &str) -> IResult<&str, Statement> {
+    map(
+        tuple((
+            preceded(pair(tag("type"), ws1), type_import_pattern),
+            preceded(tuple((ws0, char('='), ws0)), import),
+        )),
+        |(pattern, module_path)| Statement::TypeImport {
+            pattern,
+            module_path,
+        },
+    )(input)
+}
+
+fn statement_expression(input: &str) -> IResult<&str, Statement> {
+    map(expression, Statement::Expression)(input)
+}
+
+fn statement(input: &str) -> IResult<&str, Statement> {
+    preceded(
+        ws_with_comments,
+        alt((
+            type_import,
+            type_alias,
+            statement_expression,
+        )),
+    )(input)
+}
+
+fn statements(input: &str) -> IResult<&str, Vec<Statement>> {
+    terminated(
+        separated_list0(
+            alt((
+                nom_value((), tuple((ws0, alt((char('\n'), char(';'))), ws0))),
+                nom_value((), ws1),
+            )),
+            statement,
+        ),
+        opt(pair(ws0, char(';'))),
+    )(input)
+}
+
+fn program(input: &str) -> IResult<&str, Program> {
+    map(
+        delimited(
+            ws_with_comments,
+            statements,
+            pair(ws_with_comments, nom::combinator::eof),
+        ),
+        |statements| Program { statements },
+    )(input)
 }
