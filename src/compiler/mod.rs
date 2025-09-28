@@ -295,13 +295,8 @@ impl<'a> Compiler<'a> {
         value_type: Type,
         parameter_type: Type,
     ) -> Result<Type, Error> {
-        let has_ripple = fields
-            .iter()
-            .any(|field| matches!(field.value, ast::OperationTupleFieldValue::Ripple));
-
-        if !has_ripple {
-            return Err(Error::ChainValueUnused);
-        }
+        // The parser ensures only tuples with ripples are parsed as Operation::Tuple
+        // so we don't need to check for ripples here
 
         self.codegen
             .add_instruction(Instruction::Store("~".to_string()));
@@ -319,7 +314,13 @@ impl<'a> Compiler<'a> {
                     value_type.clone()
                 }
                 ast::OperationTupleFieldValue::Chain(chain) => {
-                    self.compile_chain(chain.clone(), parameter_type.clone())?
+                    // Pass the ripple value so nested tuples can access it
+                    // If the chain starts with Ripple, it needs the ripple value
+                    let input_type = match &chain.input {
+                        ast::ChainInput::Ripple => value_type.clone(),
+                        _ => parameter_type.clone(),
+                    };
+                    self.compile_chain(chain.clone(), input_type)?
                 }
             };
 
@@ -609,35 +610,41 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
-        let mut value_type = match chain.value {
-            Some(ast::Value::Literal(literal)) => self.compile_literal(literal),
-            Some(ast::Value::Tuple(tuple)) => {
-                self.compile_value_tuple(tuple.name, tuple.fields, parameter_type.clone())
+    fn compile_chain(&mut self, chain: ast::Chain, input_type: Type) -> Result<Type, Error> {
+        let mut value_type = match chain.input {
+            ast::ChainInput::Value(ast::Value::Literal(literal)) => self.compile_literal(literal),
+            ast::ChainInput::Value(ast::Value::Tuple(tuple)) => {
+                self.compile_value_tuple(tuple.name, tuple.fields, input_type.clone())
             }
-            Some(ast::Value::FunctionDefinition(function_definition)) => {
+            ast::ChainInput::Value(ast::Value::FunctionDefinition(function_definition)) => {
                 self.compile_function_definition(function_definition)
             }
-            Some(ast::Value::Block(block)) => {
+            ast::ChainInput::Value(ast::Value::Block(block)) => {
                 self.codegen
                     .add_instruction(Instruction::Tuple(TypeId::NIL));
                 self.compile_block(block, Type::nil())
             }
-            Some(ast::Value::MemberAccess(member_access)) => self.compile_value_member_access(
-                &member_access.target,
-                member_access.accessors,
-                parameter_type.clone(),
-            ),
-            Some(ast::Value::Import(path)) => self.compile_value_import(&path),
-            None => {
-                // No value means use the block parameter
+            ast::ChainInput::Value(ast::Value::MemberAccess(member_access)) => self
+                .compile_value_member_access(
+                    &member_access.target,
+                    member_access.accessors,
+                    input_type.clone(),
+                ),
+            ast::ChainInput::Value(ast::Value::Import(path)) => self.compile_value_import(&path),
+            ast::ChainInput::Parameter => {
                 self.codegen.add_instruction(Instruction::Parameter);
-                Ok(parameter_type.clone())
+                Ok(input_type.clone())
+            }
+            ast::ChainInput::Ripple => {
+                // Use the ripple value from the enclosing context
+                self.codegen
+                    .add_instruction(Instruction::Load("~".to_string()));
+                Ok(input_type.clone())
             }
         }?;
 
         for operation in chain.operations {
-            value_type = self.compile_operation(operation, value_type, parameter_type.clone())?;
+            value_type = self.compile_operation(operation, value_type, input_type.clone())?;
         }
 
         Ok(value_type)

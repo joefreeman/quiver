@@ -1,4 +1,4 @@
-use crate::ast::*;
+use crate::ast::{ChainInput, *};
 use nom::{
     IResult,
     branch::alt,
@@ -538,7 +538,7 @@ fn operation_tuple_field(input: &str) -> IResult<&str, OperationTupleField> {
                 tuple((char(':'), ws1)),
                 alt((
                     nom_value(OperationTupleFieldValue::Ripple, char('~')),
-                    map(chain, OperationTupleFieldValue::Chain),
+                    map(operation_field_chain, OperationTupleFieldValue::Chain),
                 )),
             ),
             |(name, value)| OperationTupleField {
@@ -549,10 +549,24 @@ fn operation_tuple_field(input: &str) -> IResult<&str, OperationTupleField> {
         map(
             alt((
                 nom_value(OperationTupleFieldValue::Ripple, char('~')),
-                map(chain, OperationTupleFieldValue::Chain),
+                map(operation_field_chain, OperationTupleFieldValue::Chain),
             )),
             |value| OperationTupleField { name: None, value },
         ),
+    ))(input)
+}
+
+// Parse a chain in the context of an operation tuple field
+// This handles cases like B[~] where a tuple construction appears directly
+fn operation_field_chain(input: &str) -> IResult<&str, Chain> {
+    alt((
+        // Try to parse a tuple construction directly (like B[~])
+        map(operation_tuple, |tuple| Chain {
+            input: ChainInput::Ripple,
+            operations: vec![Operation::Tuple(tuple)],
+        }),
+        // Otherwise parse a regular chain
+        chain,
     ))(input)
 }
 
@@ -705,49 +719,61 @@ fn operation(input: &str) -> IResult<&str, Operation> {
         map(builtin, Operation::Builtin),
         operator,
         map(operation_block, Operation::Block), // Use operation_block for parametrized blocks
-        // Function calls (must end with !)
         map(function_call, Operation::FunctionCall),
-        // Parse tuples specially - check if they contain ripple (~)
-        tuple_or_pattern,
-        // Simple patterns (identifiers, literals, etc - non-tuples)
-        map(
-            alt((
-                partial_pattern,
-                pattern_literal,
-                pattern_star,
-                pattern_placeholder,
-                pattern_identifier,
-            )),
-            Operation::Match,
-        ),
+        tuple_construction, // Only succeeds if tuple contains ripple (~)
+        pattern_operation,  // All pattern matching
         map(field_access, Operation::FieldAccess),
         map(positional_access, Operation::PositionalAccess),
         map(tail_call, Operation::TailCall),
     ))(input)
 }
 
-// Parse a tuple and determine if it's an operation (contains ~) or pattern (no ~)
-fn tuple_or_pattern(input: &str) -> IResult<&str, Operation> {
-    // First check if this looks like a tuple at all
-    let start = input;
+// Parse all patterns and wrap them as Operation::Match
+fn pattern_operation(input: &str) -> IResult<&str, Operation> {
+    map(
+        alt((
+            tuple_pattern,
+            partial_pattern,
+            pattern_literal,
+            pattern_star,
+            pattern_placeholder,
+            pattern_identifier,
+        )),
+        Operation::Match,
+    )(input)
+}
 
-    // Try to parse as an operation tuple first (which can contain ~)
-    if let Ok((remaining, op_tuple)) = operation_tuple(start) {
-        // Check if any field is a ripple
-        let has_ripple = op_tuple
-            .fields
-            .iter()
-            .any(|f| matches!(f.value, OperationTupleFieldValue::Ripple));
-
-        if has_ripple {
-            // It has ripple, so it's definitely an operation tuple
-            return Ok((remaining, Operation::Tuple(op_tuple)));
+// Check if a tuple contains ripple at any level (including nested tuples)
+fn tuple_contains_ripple(tuple: &OperationTuple) -> bool {
+    tuple.fields.iter().any(|field| match &field.value {
+        OperationTupleFieldValue::Ripple => true,
+        OperationTupleFieldValue::Chain(chain) => {
+            // Check if the chain contains any tuple operations with ripples
+            chain.operations.iter().any(|op| {
+                if let Operation::Tuple(nested_tuple) = op {
+                    tuple_contains_ripple(nested_tuple)
+                } else {
+                    false
+                }
+            })
         }
-        // No ripple - fall through to try as pattern
-    }
+    })
+}
 
-    // Try to parse as a tuple pattern
-    map(tuple_pattern, Operation::Match)(input)
+// Parse tuple construction - only succeeds if it contains ripple (~)
+fn tuple_construction(input: &str) -> IResult<&str, Operation> {
+    let (remaining, op_tuple) = operation_tuple(input)?;
+
+    // Recursively check if any field (including nested) contains a ripple
+    if tuple_contains_ripple(&op_tuple) {
+        Ok((remaining, Operation::Tuple(op_tuple)))
+    } else {
+        // Not a tuple construction (no ripple), let pattern matcher handle it
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )))
+    }
 }
 
 fn chain(input: &str) -> IResult<&str, Chain> {
@@ -757,7 +783,7 @@ fn chain(input: &str) -> IResult<&str, Chain> {
             many0(preceded(tuple((ws1, tag("~>"), ws1)), operation)),
         ),
         |(value, operations)| Chain {
-            value: Some(value),
+            input: ChainInput::Value(value),
             operations,
         },
     )(input)
@@ -768,7 +794,7 @@ fn operation_chain(input: &str) -> IResult<&str, Chain> {
     map(
         separated_list1(tuple((ws1, tag("~>"), ws1)), operation),
         |operations| Chain {
-            value: None,
+            input: ChainInput::Parameter,
             operations,
         },
     )(input)

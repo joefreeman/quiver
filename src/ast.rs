@@ -39,8 +39,15 @@ pub struct Expression {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ChainInput {
+    Ripple,
+    Parameter,
+    Value(Value),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
-    pub value: Option<Value>, // None means use block parameter
+    pub input: ChainInput,
     pub operations: Vec<Operation>,
 }
 
