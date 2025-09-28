@@ -313,7 +313,7 @@ impl VM {
         frame.scopes += 1;
         self.frames.push(frame);
 
-        let value = self.run()?;
+        let result = self.run();
 
         let frame = self.frames.pop().ok_or(Error::FrameUnderflow)?;
         if frame.scopes != 1 {
@@ -323,7 +323,7 @@ impl VM {
             });
         }
 
-        Ok(value)
+        result
     }
 
     pub fn execute_function(&mut self, entry: usize) -> Result<Option<Value>, Error> {
@@ -753,6 +753,14 @@ impl VM {
 
     pub fn get_stack(&self) -> Vec<Value> {
         self.stack.clone()
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn scope_count(&self) -> usize {
+        self.scopes.len()
     }
 
     pub fn list_variables(&self) -> Vec<(String, Value)> {

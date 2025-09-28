@@ -20,6 +20,23 @@ impl TestBuilder {
     pub fn evaluate(self, source: &str) -> TestResult {
         let mut quiver = Quiver::new(self.modules);
         let result = quiver.evaluate(source, None);
+
+        assert!(
+            quiver.get_stack().is_empty(),
+            "Stack should be empty after evaluation. Contains: {:?}",
+            quiver.get_stack()
+        );
+        assert_eq!(
+            quiver.frame_count(),
+            0,
+            "Should have no frames after evaluation"
+        );
+        assert_eq!(
+            quiver.scope_count(),
+            1,
+            "Should have a single scope after evaluation"
+        );
+
         TestResult {
             result,
             source: source.to_string(),

@@ -62,6 +62,14 @@ impl Quiver {
         self.vm.get_stack()
     }
 
+    pub fn frame_count(&self) -> usize {
+        self.vm.frame_count()
+    }
+
+    pub fn scope_count(&self) -> usize {
+        self.vm.scope_count()
+    }
+
     pub fn list_variables(&self) -> Vec<(String, Value)> {
         self.vm.list_variables()
     }
