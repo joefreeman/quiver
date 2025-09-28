@@ -1,9 +1,11 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use quiver::Quiver;
-use quiver::types::Type;
+use quiver::bytecode::TypeId;
+use quiver::types::{TupleTypeInfo, Type};
 use quiver::vm::Value;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
@@ -131,7 +133,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                                 println!(
                                     "  {}: {}",
                                     type_id.0,
-                                    format_type(&quiver, &Type::Tuple(type_id))
+                                    format_type(quiver.get_types(), &Type::Tuple(type_id))
                                 )
                             }
                         }
@@ -310,45 +312,81 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
 
     let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
 
-    println!("Bytecode Inspection:");
-    println!("==================");
-    println!("Constants: {}", bytecode.constants.len());
+    println!("Constants:");
     for (i, constant) in bytecode.constants.iter().enumerate() {
-        println!("  {}: {:?}", i, constant);
+        let formatted = match constant {
+            quiver::bytecode::Constant::Integer(n) => n.to_string(),
+            quiver::bytecode::Constant::Binary(bytes) => format_binary(bytes),
+        };
+        println!("  {}: {}", i, formatted);
     }
 
-    println!("\nFunctions: {}", bytecode.functions.len());
-    for (i, function) in bytecode.functions.iter().enumerate() {
-        println!("  Function {}:", i);
-        println!("    Captures: {:?}", function.captures);
-        println!("    Instructions: {}", function.instructions.len());
-        for (j, instruction) in function.instructions.iter().enumerate() {
-            println!("      {}: {:?}", j, instruction);
+    if !bytecode.types.is_empty() {
+        println!("\nTypes:");
+        let mut types: Vec<_> = bytecode.types.iter().collect();
+        types.sort_by_key(|(id, _)| id.0);
+        for (type_id, _type_info) in types {
+            println!(
+                "  {}: {}",
+                type_id.0,
+                format_type(&bytecode.types, &Type::Tuple(*type_id))
+            );
         }
     }
 
-    if let Some(entry) = bytecode.entry {
-        println!("\nEntry point: Function {}", entry);
-    } else {
-        println!("\nNo entry point defined");
+    for (i, function) in bytecode.functions.iter().enumerate() {
+        let mut header = format!("\nFunction{}", i);
+
+        if bytecode.entry == Some(i) {
+            header.push('*');
+        }
+
+        if !function.captures.is_empty() {
+            let captures_str: Vec<String> =
+                function.captures.iter().map(|c| c.to_string()).collect();
+            header.push_str(&format!(" [{}]", captures_str.join(", ")));
+        }
+
+        header.push(':');
+        println!("{}", header);
+
+        let max_width = if function.instructions.is_empty() {
+            1
+        } else {
+            format!("{:x}", function.instructions.len() - 1).len()
+        };
+
+        for (j, instruction) in function.instructions.iter().enumerate() {
+            println!("  {:0width$x}: {:?}", j, instruction, width = max_width);
+        }
     }
 
     Ok(())
 }
 
-fn format_type(quiver: &Quiver, type_def: &Type) -> String {
+fn format_binary(bytes: &[u8]) -> String {
+    if bytes.len() <= 8 {
+        let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        format!("'{}'", hex)
+    } else {
+        let hex: String = bytes[..8].iter().map(|b| format!("{:02x}", b)).collect();
+        format!("'{}...'", hex)
+    }
+}
+
+fn format_type(types: &HashMap<TypeId, TupleTypeInfo>, type_def: &Type) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
         Type::Tuple(type_id) => {
-            if let Some((name, fields)) = quiver.lookup_type(type_id) {
+            if let Some((name, fields)) = types.get(type_id) {
                 let field_strs: Vec<String> = fields
                     .iter()
                     .map(|(field_name, field_type)| {
                         if let Some(field_name) = field_name {
-                            format!("{}: {}", field_name, format_type(quiver, field_type))
+                            format!("{}: {}", field_name, format_type(types, field_type))
                         } else {
-                            format_type(quiver, field_type)
+                            format_type(types, field_type)
                         }
                     })
                     .collect();
@@ -369,23 +407,23 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
         Type::Callable(func_type) => {
             // Add parentheses around parameter if it's a function type
             let param_str = match &func_type.parameter {
-                Type::Callable(_) => format!("({})", format_type(quiver, &func_type.parameter)),
-                _ => format_type(quiver, &func_type.parameter),
+                Type::Callable(_) => format!("({})", format_type(types, &func_type.parameter)),
+                _ => format_type(types, &func_type.parameter),
             };
 
             // Result type already has parentheses if it's a union
-            let result_str = format_type(quiver, &func_type.result);
+            let result_str = format_type(types, &func_type.result);
             format!("#{} -> {}", param_str, result_str)
         }
         Type::Cycle(depth) => format!("μ{}", depth),
-        Type::Union(types) => {
-            let type_strs: Vec<String> = types
+        Type::Union(types_list) => {
+            let type_strs: Vec<String> = types_list
                 .iter()
                 .map(|t| {
                     match t {
                         // Add parentheses around function types in unions for clarity
-                        Type::Callable(_) => format!("({})", format_type(quiver, t)),
-                        _ => format_type(quiver, t),
+                        Type::Callable(_) => format!("({})", format_type(types, t)),
+                        _ => format_type(types, t),
                     }
                 })
                 .collect();
@@ -399,14 +437,23 @@ fn format_value(quiver: &Quiver, value: &Value) -> String {
         Value::Function { function, .. } => {
             if let Some(func_def) = quiver.get_function(*function) {
                 if let Some(func_type) = &func_def.function_type {
-                    return format_type(quiver, &Type::Callable(Box::new(func_type.clone())));
+                    return format_type(
+                        quiver.get_types(),
+                        &Type::Callable(Box::new(func_type.clone())),
+                    );
                 }
             }
             "(function)".to_string()
         }
         Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
-        Value::Binary(_) => "'...'".to_string(),
+        Value::Binary(binary_ref) => {
+            // Get the actual bytes from the binary reference
+            match quiver.get_binary_bytes(binary_ref) {
+                Ok(bytes) => format_binary(&bytes),
+                Err(_) => "'<error>'".to_string(),
+            }
+        }
         Value::Tuple(type_id, elements) => {
             if let Some((name, fields)) = quiver.lookup_type(type_id) {
                 if elements.is_empty() {
