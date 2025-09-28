@@ -886,7 +886,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_operation_builtin(&mut self, name: &str, _value_type: Type) -> Result<Type, Error> {
         // Check if the builtin function exists by getting its signature
-        let (_, result_types) = BUILTIN_REGISTRY
+        let (_, result_type) = BUILTIN_REGISTRY
             .get_signature(name)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
 
@@ -898,7 +898,7 @@ impl<'a> Compiler<'a> {
             .add_instruction(Instruction::Builtin(builtin_index));
 
         // Return the result type
-        union_types(result_types.into_iter().map(|t| t).collect())
+        Ok(result_type)
     }
 
     fn compile_operation_equality(&mut self, value_type: Type) -> Result<Type, Error> {
