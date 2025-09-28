@@ -25,6 +25,7 @@ pub enum Value {
         function: usize,
         captures: Vec<Value>,
     },
+    Builtin(String),
 }
 
 impl Value {
@@ -44,6 +45,7 @@ impl Value {
             Value::Binary(_) => "binary",
             Value::Tuple(_, _) => "tuple",
             Value::Function { .. } => "function",
+            Value::Builtin(_) => "builtin",
         }
     }
 }
@@ -72,6 +74,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::Function { .. } => write!(f, "<function>"),
+            Value::Builtin(name) => write!(f, "<builtin:{}>", name),
         }
     }
 }
@@ -547,6 +550,24 @@ impl VM {
                 self.frames.push(Frame::new(instructions, capture_map));
                 Ok(())
             }
+            Value::Builtin(name) => {
+                let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
+                let builtin_fn =
+                    BUILTIN_REGISTRY
+                        .get_implementation(&name)
+                        .ok_or(Error::InvalidArgument(format!(
+                            "Unrecognised builtin: {}",
+                            name
+                        )))?;
+                let result = builtin_fn(&argument, &self.constants)?;
+                self.stack.push(result);
+                // Unlike regular calls, builtins don't create a new frame
+                // So we need to manually increment the counter
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.counter += 1;
+                }
+                Ok(())
+            }
             _ => Err(Error::CallInvalid),
         }
     }
@@ -622,17 +643,7 @@ impl VM {
             .get(index)
             .ok_or(Error::BuiltinUndefined(index))?
             .clone();
-
-        // Pop the argument from the stack
-        let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
-
-        // Get the builtin function implementation
-        let builtin_fn = BUILTIN_REGISTRY
-            .get_implementation(&function_name)
-            .ok_or(Error::BuiltinUndefined(index))?;
-
-        let result = builtin_fn(&argument, &self.constants)?;
-        self.stack.push(result);
+        self.stack.push(Value::Builtin(function_name));
         Ok(())
     }
 

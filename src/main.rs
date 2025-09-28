@@ -366,10 +366,10 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
                 format!("Type{}", type_id.0)
             }
         }
-        Type::Function(func_type) => {
+        Type::Callable(func_type) => {
             // Add parentheses around parameter if it's a function type
             let param_str = match &func_type.parameter {
-                Type::Function(_) => format!("({})", format_type(quiver, &func_type.parameter)),
+                Type::Callable(_) => format!("({})", format_type(quiver, &func_type.parameter)),
                 _ => format_type(quiver, &func_type.parameter),
             };
 
@@ -384,7 +384,7 @@ fn format_type(quiver: &Quiver, type_def: &Type) -> String {
                 .map(|t| {
                     match t {
                         // Add parentheses around function types in unions for clarity
-                        Type::Function(_) => format!("({})", format_type(quiver, t)),
+                        Type::Callable(_) => format!("({})", format_type(quiver, t)),
                         _ => format_type(quiver, t),
                     }
                 })
@@ -399,13 +399,14 @@ fn format_value(quiver: &Quiver, value: &Value) -> String {
         Value::Function { function, .. } => {
             if let Some(func_def) = quiver.get_function(*function) {
                 if let Some(func_type) = &func_def.function_type {
-                    return format_type(quiver, &Type::Function(Box::new(func_type.clone())));
+                    return format_type(quiver, &Type::Callable(Box::new(func_type.clone())));
                 }
             }
-            "<function>".to_string()
+            "(function)".to_string()
         }
+        Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
-        Value::Binary(_) => "<binary>".to_string(),
+        Value::Binary(_) => "'...'".to_string(),
         Value::Tuple(type_id, elements) => {
             if let Some((name, fields)) = quiver.lookup_type(type_id) {
                 if elements.is_empty() {

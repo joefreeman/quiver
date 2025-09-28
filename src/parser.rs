@@ -438,6 +438,7 @@ fn member_access(input: &str) -> IResult<&str, MemberAccess> {
 fn function_call(input: &str) -> IResult<&str, MemberAccess> {
     let (input, target) = alt((
         nom_value(MemberTarget::Parameter, char('$')),
+        map(builtin, MemberTarget::Builtin),
         map(identifier, MemberTarget::Identifier),
     ))(input)?;
 
@@ -759,12 +760,12 @@ fn value(input: &str) -> IResult<&str, Value> {
         map(block, Value::Block),
         map(member_access, Value::MemberAccess),
         map(import, Value::Import),
+        map(builtin, Value::Builtin),
     ))(input)
 }
 
 fn operation(input: &str) -> IResult<&str, Operation> {
     alt((
-        map(builtin, Operation::Builtin),
         operator,
         map(operation_block, Operation::Block), // Use operation_block for parametrized blocks
         map(function_call, Operation::FunctionCall),

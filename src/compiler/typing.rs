@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::{
     ast,
     bytecode::TypeId,
-    types::{FunctionType, Type},
+    types::{CallableType, Type},
     vm::VM,
 };
 
@@ -66,7 +66,7 @@ impl<'a> TypeContext<'a> {
                 let output_type = self.resolve_ast_type(*function.output, vm)?;
 
                 // Create function type without distributing unions
-                Ok(Type::Function(Box::new(FunctionType {
+                Ok(Type::Callable(Box::new(CallableType {
                     parameter: input_type,
                     result: output_type,
                 })))

@@ -7,7 +7,7 @@ fn test_module_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./math.qv".to_string(),
-        "[add: #[int, int] { [x, y] => [x, y] ~> <add> }]".to_string(),
+        "[add: #[int, int] { [x, y] => [x, y] ~> <add>! }]".to_string(),
     );
 
     quiver()
@@ -22,8 +22,8 @@ fn test_destructured_import() {
     modules.insert(
         "./math.qv".to_string(),
         r#"[
-          add: #[int, int] { [x, y] => [x, y] ~> <add> },
-          sub: #[int, int] { [x, y] => [x, y] ~> <subtract> }
+          add: #[int, int] { [x, y] => [x, y] ~> <add>! },
+          sub: #[int, int] { [x, y] => [x, y] ~> <subtract>! }
         ]"#
         .to_string(),
     );
@@ -39,7 +39,7 @@ fn test_star_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./math.qv".to_string(),
-        "[add: #[int, int] { [x, y] => [x, y] ~> <add> }]".to_string(),
+        "[add: #[int, int] { [x, y] => [x, y] ~> <add>! }]".to_string(),
     );
 
     quiver()
@@ -53,7 +53,7 @@ fn test_import_function_with_capture() {
     let mut modules = HashMap::new();
     modules.insert(
         "./capture.qv".to_string(),
-        "42 ~> x, #{ [] => [x, 2] ~> <multiply> }".to_string(),
+        "42 ~> x, #{ [] => [x, 2] ~> <multiply>! }".to_string(),
     );
 
     quiver()
@@ -69,8 +69,8 @@ fn test_import_nested_function_captures() {
         "./nested.qv".to_string(),
         r#"
         10 ~> x,
-        #{ [] => [x, 1] ~> <add> } ~> inner,
-        #{ [] => [] ~> inner! ~> [~, 2] ~> <multiply> }
+        #{ [] => [x, 1] ~> <add>! } ~> inner,
+        #{ [] => [] ~> inner! ~> [~, 2] ~> <multiply>! }
         "#
         .to_string(),
     );
@@ -86,7 +86,7 @@ fn test_import_tuple_with_captured_function() {
     let mut modules = HashMap::new();
     modules.insert(
         "./tuple_capture.qv".to_string(),
-        "5 ~> x, 3 ~> y, [x, #{ [] => [x, y] ~> <add> }, y]".to_string(),
+        "5 ~> x, 3 ~> y, [x, #{ [] => [x, y] ~> <add>! }, y]".to_string(),
     );
 
     quiver()
@@ -100,15 +100,15 @@ fn test_multi_level_import_with_captures() {
     let mut modules = HashMap::new();
     modules.insert(
         "./level1.qv".to_string(),
-        "100 ~> base, #{ [] => [base, 1] ~> <add> }".to_string(),
+        "100 ~> base, #{ [] => [base, 1] ~> <add>! }".to_string(),
     );
     modules.insert(
         "./level2.qv".to_string(),
-        "%\"./level1.qv\" ~> f, 3 ~> x, #{ [] => [] ~> f! ~> [~, x] ~> <multiply> }".to_string(),
+        "%\"./level1.qv\" ~> f, 3 ~> x, #{ [] => [] ~> f! ~> [~, x] ~> <multiply>! }".to_string(),
     );
     modules.insert(
         "./level3.qv".to_string(),
-        "%\"./level2.qv\" ~> g, 5 ~> x, [g, #{ [] => [] ~> g! ~> [~, x] ~> <add> }]".to_string(),
+        "%\"./level2.qv\" ~> g, 5 ~> x, [g, #{ [] => [] ~> g! ~> [~, x] ~> <add>! }]".to_string(),
     );
 
     quiver()

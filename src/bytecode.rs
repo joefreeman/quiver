@@ -15,7 +15,7 @@ pub struct Function {
     pub captures: Vec<String>,
     pub instructions: Vec<Instruction>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub function_type: Option<types::FunctionType>,
+    pub function_type: Option<types::CallableType>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

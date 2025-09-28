@@ -6,8 +6,8 @@ fn test_tail_call() {
     quiver()
         .evaluate(
             r#"
-            #int { x => [x, 2] ~> <multiply> } ~> g,
-            #int { x => [x, 1] ~> <add> ~> &g } ~> f,
+            #int { x => [x, 2] ~> <multiply>! } ~> g,
+            #int { x => [x, 1] ~> <add>! ~> &g } ~> f,
             1 ~> f!
             "#,
         )
@@ -21,7 +21,7 @@ fn test_countdown() {
             r#"
             #int {
               | 0 => 0
-              | x => [x, 1] ~> <subtract> ~> &
+              | x => [x, 1] ~> <subtract>! ~> &
             } ~> countdown,
             5 ~> countdown!
             "#,
@@ -36,7 +36,7 @@ fn test_factorial() {
             r#"
             #[int, int] {
               | [1, y] => y
-              | [x, y] => [[x, 1] ~> <subtract>, [x, y] ~> <multiply>] ~> &
+              | [x, y] => [[x, 1] ~> <subtract>!, [x, y] ~> <multiply>!] ~> &
             } ~> f,
             #int { x => [x, 1] ~> f! } ~> fact,
             5 ~> fact!

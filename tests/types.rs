@@ -22,12 +22,12 @@ fn test_function_with_type_pattern() {
             r#"
             type shape = Circle[r: int] | Rectangle[w: int, h: int];
             #shape {
-              | Circle[r: r] => [r, r] ~> <multiply>
-              | Rectangle[w: w, h: h] => [w, h] ~> <multiply>
+              | Circle[r: r] => [r, r] ~> <multiply>!
+              | Rectangle[w: w, h: h] => [w, h] ~> <multiply>!
             } ~> area,
             Circle[r: 5] ~> area! ~> a1,
             Rectangle[w: 4, h: 3] ~> area! ~> a2,
-            [a1, a2] ~> <add>
+            [a1, a2] ~> <add>!
             "#,
         )
         .expect("37");
@@ -40,7 +40,7 @@ fn test_recursive_list_type() {
             r#"
             type list = Nil | Cons[int, list];
             Cons[1, Cons[2, Cons[3, Nil]]] ~> xs,
-            [xs.1.0, xs.1.1.0] ~> <add>;
+            [xs.1.0, xs.1.1.0] ~> <add>!
             "#,
         )
         .expect("5")
@@ -216,7 +216,7 @@ fn test_recursive_type_pattern_matching_bug() {
             // (which has no fields) when matching the pattern [Full[rest], n]
             #[t, int] {
               | [Empty, n] => n
-              | [Full[rest], n] => [n, 100] ~> <add>
+              | [Full[rest], n] => [n, 100] ~> <add>!
             } ~> match_recursive,
 
             // Test with Empty - should return n
@@ -241,7 +241,7 @@ fn test_recursive_type_pattern_matching_bug() {
 
             // Function that matches on first element of tuple
             #[tree, int] {
-              | [Leaf[x], n] => [x, n] ~> <add>
+              | [Leaf[x], n] => [x, n] ~> <add>!
               | [Node[l, r], n] => n
             } ~> match_first,
 
@@ -262,7 +262,7 @@ fn test_recursive_type_pattern_matching_bug() {
             // Pattern matching that would trigger the bug
             #[list, int] {
               | [Nil, x] => x
-              | [Cons[head, tail], x] => [head, x] ~> <add>
+              | [Cons[head, tail], x] => [head, x] ~> <add>!
             } ~> process_list,
 
             // These should all work without FieldAccessInvalid errors

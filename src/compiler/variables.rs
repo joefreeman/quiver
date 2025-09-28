@@ -67,6 +67,7 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Value::Import(_) => {}
+            ast::Value::Builtin(_) => {}
         }
     }
 
@@ -90,7 +91,6 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Operation::TailCall(identifier) => {
                 self.visit_identifier(identifier);
             }
-            ast::Operation::Builtin(_) => {}
             ast::Operation::Equality => {}
             ast::Operation::Not => {}
             ast::Operation::Match(_) => {}

@@ -3,19 +3,19 @@
 
 [
   // Basic arithmetic operations on [int, int] tuples
-  add: #[int, int] { [a, b] => [a, b] ~> <add> },
-  sub: #[int, int] { [a, b] => [a, b] ~> <subtract> },
-  mul: #[int, int] { [a, b] => [a, b] ~> <multiply> },
-  div: #[int, int] { [a, b] => [a, b] ~> <divide> },
-  mod: #[int, int] { [a, b] => [a, b] ~> <modulo> },
+  add: <add>,
+  sub: <subtract>,
+  mul: <multiply>,
+  div: <divide>,
+  mod: <modulo>,
 
   // Comparison operations on [int, int] tuples
-  lt: #[int, int] { [a, b] => [a, b] ~> <compare> ~> { -1 => Ok } },
-  le: #[int, int] { [a, b] => [a, b] ~> <compare> ~> { -1 => Ok | 0 => Ok } },
-  gt: #[int, int] { [a, b] => [a, b] ~> <compare> ~> { 1 => Ok } },
-  ge: #[int, int] { [a, b] => [a, b] ~> <compare> ~> { 0 => Ok | 1 => Ok } },
+  lt: #[int, int] { [a, b] => [a, b] ~> <compare>! ~> { -1 => Ok } },
+  le: #[int, int] { [a, b] => [a, b] ~> <compare>! ~> { -1 => Ok | 0 => Ok } },
+  gt: #[int, int] { [a, b] => [a, b] ~> <compare>! ~> { 1 => Ok } },
+  ge: #[int, int] { [a, b] => [a, b] ~> <compare>! ~> { 0 => Ok | 1 => Ok } },
 
   // Single-argument math functions
-  abs: #int { x => x ~> <abs> },
-  sqrt: #int { x => x ~> <sqrt> }
+  abs: <abs>,
+  sqrt: <sqrt>
 ]

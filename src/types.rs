@@ -10,7 +10,7 @@ pub type TupleField = (Option<String>, Type);
 pub type TupleTypeInfo = (Option<String>, Vec<TupleField>);
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
-pub struct FunctionType {
+pub struct CallableType {
     pub parameter: Type,
     pub result: Type,
 }
@@ -24,7 +24,7 @@ pub enum Type {
     #[serde(rename = "tuple")]
     Tuple(TypeId),
     #[serde(rename = "fn")]
-    Function(Box<FunctionType>),
+    Callable(Box<CallableType>),
     #[serde(rename = "cycle")]
     Cycle(usize),
     #[serde(rename = "union")]
@@ -181,7 +181,7 @@ impl Type {
             }
 
             // Function types
-            (Type::Function(f1), Type::Function(f2)) => {
+            (Type::Callable(f1), Type::Callable(f2)) => {
                 // For functions, parameters are contravariant and results are covariant
                 // But for simplicity, we'll just check exact match for now
                 f1 == f2

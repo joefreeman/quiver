@@ -19,7 +19,7 @@ use crate::{
     builtins::BUILTIN_REGISTRY,
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
-    types::{FunctionType, Type},
+    types::{CallableType, Type},
     vm::{BinaryRef, VM, Value},
 };
 
@@ -27,11 +27,10 @@ use typing::TypeContext;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
-    // Variable & scope errors
+    // Undefined errors
     VariableUndefined(String),
-
-    // Builtin errors
     BuiltinUndefined(String),
+    FunctionUndefined(usize),
 
     // Type system errors
     TypeUnresolved(String),
@@ -165,7 +164,7 @@ impl<'a> Compiler<'a> {
         };
 
         for (name, value) in existing_variables {
-            let var_type = compiler.value_to_type(&value);
+            let var_type = compiler.value_to_type(&value)?;
             compiler.define_variable(&name, var_type);
         }
 
@@ -379,7 +378,7 @@ impl<'a> Compiler<'a> {
 
         self.parameter_fields_stack.pop();
 
-        let func_type = FunctionType {
+        let func_type = CallableType {
             parameter: parameter_type,
             result: body_type,
         };
@@ -397,7 +396,7 @@ impl<'a> Compiler<'a> {
         self.codegen
             .add_instruction(Instruction::Function(function_index));
 
-        let function_type = Type::Function(Box::new(func_type));
+        let function_type = Type::Callable(Box::new(func_type));
 
         Ok(function_type)
     }
@@ -621,6 +620,7 @@ impl<'a> Compiler<'a> {
                     input_type.clone(),
                 ),
             ast::ChainInput::Value(ast::Value::Import(path)) => self.compile_value_import(&path),
+            ast::ChainInput::Value(ast::Value::Builtin(name)) => self.compile_value_builtin(&name),
             ast::ChainInput::Parameter => {
                 self.codegen.add_instruction(Instruction::Parameter);
                 Ok(input_type.clone())
@@ -706,7 +706,23 @@ impl<'a> Compiler<'a> {
                         .add_instruction(Instruction::Function(func_index));
                 }
 
-                Ok(self.function_to_type(func_index))
+                self.function_to_type(func_index)
+            }
+            Value::Builtin(name) => {
+                let builtin_index = self.vm.register_builtin(name.to_string());
+                self.codegen
+                    .add_instruction(Instruction::Builtin(builtin_index));
+
+                if let Some((param_type, result_type)) =
+                    BUILTIN_REGISTRY.resolve_signature(name, self.vm)
+                {
+                    Ok(Type::Callable(Box::new(CallableType {
+                        parameter: param_type,
+                        result: result_type,
+                    })))
+                } else {
+                    Err(Error::BuiltinUndefined(name.to_string()))
+                }
             }
         }
     }
@@ -814,7 +830,6 @@ impl<'a> Compiler<'a> {
                 self.compile_tuple_element_access(TupleAccessor::Position(position), value_type)
             }
             ast::Operation::TailCall(identifier) => self.compile_operation_tail_call(&identifier),
-            ast::Operation::Builtin(name) => self.compile_operation_builtin(&name, value_type),
             ast::Operation::Equality => self.compile_operation_equality(value_type),
             ast::Operation::Not => self.compile_operation_not(value_type),
             ast::Operation::Match(pattern) => {
@@ -874,7 +889,7 @@ impl<'a> Compiler<'a> {
             self.codegen.add_instruction(Instruction::TailCall(false));
 
             match self.lookup_variable(identifier) {
-                Some(Type::Function(func_type)) => Ok(func_type.result),
+                Some(Type::Callable(func_type)) => Ok(func_type.result),
                 Some(other_type) => Err(Error::TypeMismatch {
                     expected: "function".to_string(),
                     found: format!("{:?}", other_type),
@@ -884,29 +899,20 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_builtin(&mut self, name: &str, value_type: Type) -> Result<Type, Error> {
-        // Check if the builtin function exists by resolving its signature
+    fn compile_value_builtin(&mut self, name: &str) -> Result<Type, Error> {
         let (param_type, result_type) = BUILTIN_REGISTRY
             .resolve_signature(name, self.vm)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
 
-        // Type-check the parameter
-        if !value_type.is_compatible(&param_type, self.vm.type_registry()) {
-            return Err(Error::TypeMismatch {
-                expected: format!("{:?}", param_type),
-                found: format!("{:?}", value_type),
-            });
-        }
-
-        // Register the builtin in the bytecode
         let builtin_index = self.vm.register_builtin(name.to_string());
 
-        // Generate the builtin instruction (which will execute immediately)
         self.codegen
             .add_instruction(Instruction::Builtin(builtin_index));
 
-        // Return the result type
-        Ok(result_type)
+        Ok(Type::Callable(Box::new(crate::types::CallableType {
+            parameter: param_type,
+            result: result_type,
+        })))
     }
 
     fn compile_operation_equality(&mut self, value_type: Type) -> Result<Type, Error> {
@@ -1101,6 +1107,13 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Parameter);
                 self.compile_accessor_chain(parameter_type, accessors, "$")
             }
+            ast::MemberTarget::Builtin(name) => {
+                // Builtins can't be accessed via member access (only called)
+                return Err(Error::FeatureUnsupported(format!(
+                    "Builtin '{}' cannot be used in member access context",
+                    name
+                )));
+            }
         }
     }
 
@@ -1119,10 +1132,21 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Parameter);
                 self.compile_accessor_chain(parameter_type, accessors, "$")?
             }
+            ast::MemberTarget::Builtin(name) => {
+                // Compile the builtin as a value (which returns its function type)
+                let builtin_type = self.compile_value_builtin(name)?;
+                // Builtins don't support accessor chains
+                if !accessors.is_empty() {
+                    return Err(Error::FeatureUnsupported(
+                        "Accessor chains on builtins are not supported".to_string(),
+                    ));
+                }
+                builtin_type
+            }
         };
 
         let func_type = match function_type {
-            Type::Function(func_type) => func_type,
+            Type::Callable(func_type) => func_type,
             _ => {
                 return Err(Error::TypeMismatch {
                     expected: "function".to_string(),
@@ -1152,28 +1176,36 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn function_to_type(&self, function_index: usize) -> Type {
+    fn function_to_type(&self, function_index: usize) -> Result<Type, Error> {
         if let Some(func_def) = self.vm.get_functions().get(function_index) {
             if let Some(func_type) = &func_def.function_type {
-                Type::Function(Box::new(func_type.clone()))
+                Ok(Type::Callable(Box::new(func_type.clone())))
             } else {
-                // Fallback if no type information is available
-                Type::Function(Box::new(FunctionType {
-                    parameter: Type::nil(),
-                    result: Type::nil(),
-                }))
+                Err(Error::FunctionUndefined(function_index))
             }
         } else {
-            Type::Tuple(TypeId::NIL)
+            Err(Error::FunctionUndefined(function_index))
         }
     }
 
-    fn value_to_type(&self, value: &Value) -> Type {
+    fn value_to_type(&mut self, value: &Value) -> Result<Type, Error> {
         match value {
-            Value::Integer(_) => Type::Integer,
-            Value::Binary(_) => Type::Binary,
-            Value::Tuple(type_id, _) => Type::Tuple(*type_id),
+            Value::Integer(_) => Ok(Type::Integer),
+            Value::Binary(_) => Ok(Type::Binary),
+            Value::Tuple(type_id, _) => Ok(Type::Tuple(*type_id)),
             Value::Function { function, .. } => self.function_to_type(*function),
+            Value::Builtin(name) => {
+                if let Some((param_type, result_type)) =
+                    BUILTIN_REGISTRY.resolve_signature(name, self.vm)
+                {
+                    Ok(Type::Callable(Box::new(CallableType {
+                        parameter: param_type,
+                        result: result_type,
+                    })))
+                } else {
+                    Err(Error::BuiltinUndefined(name.clone()))
+                }
+            }
         }
     }
 

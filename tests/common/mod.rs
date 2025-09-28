@@ -149,6 +149,7 @@ impl TestResult {
                 format!("'{}'", hex)
             }
             Value::Function { .. } => "<function>".to_string(),
+            Value::Builtin(name) => format!("<builtin:{}>", name),
             Value::Tuple(type_id, elements) => {
                 // Get type info if available
                 let (type_name, fields) = self

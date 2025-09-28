@@ -59,6 +59,7 @@ pub enum Value {
     Block(Block),
     MemberAccess(MemberAccess),
     Import(String),
+    Builtin(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,7 +70,6 @@ pub enum Operation {
     FieldAccess(String),
     PositionalAccess(usize),
     TailCall(String),
-    Builtin(String),
     Equality,
     Not,
     Match(Pattern),
@@ -110,6 +110,7 @@ pub struct MemberAccess {
 pub enum MemberTarget {
     Identifier(String),
     Parameter,
+    Builtin(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
