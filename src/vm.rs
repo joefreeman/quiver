@@ -54,7 +54,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Integer(i) => write!(f, "{}", i),
-            Value::Binary(_) => write!(f, "<binary>"), // TODO: show actual binary content
+            Value::Binary(_) => write!(f, "'...'"), // TODO: show actual binary content
             Value::Tuple(type_id, elements) => {
                 if *type_id == TypeId::NIL {
                     write!(f, "[]")
@@ -73,8 +73,8 @@ impl fmt::Display for Value {
                     write!(f, "]")
                 }
             }
-            Value::Function { .. } => write!(f, "<function>"),
-            Value::Builtin(name) => write!(f, "<builtin:{}>", name),
+            Value::Function { .. } => write!(f, "(function)"),
+            Value::Builtin(name) => write!(f, "<{}>", name),
         }
     }
 }
