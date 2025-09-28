@@ -884,11 +884,19 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_builtin(&mut self, name: &str, _value_type: Type) -> Result<Type, Error> {
-        // Check if the builtin function exists by getting its signature
-        let (_, result_type) = BUILTIN_REGISTRY
-            .get_signature(name)
+    fn compile_operation_builtin(&mut self, name: &str, value_type: Type) -> Result<Type, Error> {
+        // Check if the builtin function exists by resolving its signature
+        let (param_type, result_type) = BUILTIN_REGISTRY
+            .resolve_signature(name, self.vm)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
+
+        // Type-check the parameter
+        if !value_type.is_compatible(&param_type, self.vm.type_registry()) {
+            return Err(Error::TypeMismatch {
+                expected: format!("{:?}", param_type),
+                found: format!("{:?}", value_type),
+            });
+        }
 
         // Register the builtin in the bytecode
         let builtin_index = self.vm.register_builtin(name.to_string());
