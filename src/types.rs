@@ -3,6 +3,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::bytecode::TypeId;
 
+/// Trait for types that can look up type information
+pub trait TypeLookup {
+    fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo>;
+}
+
 /// Type alias for tuple field information: (optional name, field type)
 pub type TupleField = (Option<String>, Type);
 
@@ -88,19 +93,19 @@ impl Type {
         }
     }
 
-    /// Simple compatibility check with a type registry
-    pub fn is_compatible(&self, pattern: &Type, registry: &TypeRegistry) -> bool {
+    /// Simple compatibility check using a type lookup provider
+    pub fn is_compatible<T: TypeLookup>(&self, pattern: &Type, type_lookup: &T) -> bool {
         let mut assumptions = HashSet::new();
         let mut type_stack = Vec::new();
-        self.is_compatible_with_impl(pattern, registry, &mut assumptions, &mut type_stack)
+        self.is_compatible_with_impl(pattern, type_lookup, &mut assumptions, &mut type_stack)
     }
 
     /// Internal implementation of type compatibility checking.
     /// This uses coinductive reasoning to handle recursive types.
-    fn is_compatible_with_impl(
+    fn is_compatible_with_impl<T: TypeLookup>(
         &self,
         pattern: &Type,
-        registry: &TypeRegistry,
+        type_lookup: &T,
         assumptions: &mut HashSet<(Type, Type)>,
         type_stack: &mut Vec<(Type, Type)>,
     ) -> bool {
@@ -128,8 +133,8 @@ impl Type {
                 }
 
                 // Look up both tuple types
-                let tuple1 = registry.lookup_type(id1);
-                let tuple2 = registry.lookup_type(id2);
+                let tuple1 = type_lookup.lookup_type(id1);
+                let tuple2 = type_lookup.lookup_type(id2);
 
                 match (tuple1, tuple2) {
                     (Some((name1, fields1)), Some((name2, fields2))) => {
@@ -149,7 +154,7 @@ impl Type {
                                 fname1 == fname2
                                     && ftype1.is_compatible_with_impl(
                                         ftype2,
-                                        registry,
+                                        type_lookup,
                                         assumptions,
                                         type_stack,
                                     )
@@ -170,7 +175,7 @@ impl Type {
                     let mut new_assumptions = assumptions.clone();
                     self.is_compatible_with_impl(
                         &pattern_type,
-                        registry,
+                        type_lookup,
                         &mut new_assumptions,
                         type_stack,
                     )
@@ -195,7 +200,7 @@ impl Type {
                 } else {
                     concrete_type.is_compatible_with_impl(
                         variant,
-                        registry,
+                        type_lookup,
                         &mut new_assumptions,
                         type_stack,
                     )
@@ -210,7 +215,7 @@ impl Type {
                 } else {
                     variant.is_compatible_with_impl(
                         pattern_type,
-                        registry,
+                        type_lookup,
                         &mut new_assumptions,
                         type_stack,
                     )
@@ -234,6 +239,12 @@ pub struct TypeRegistry {
 impl Default for TypeRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl TypeLookup for TypeRegistry {
+    fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
+        self.types.get(type_id)
     }
 }
 
@@ -269,10 +280,6 @@ impl TypeRegistry {
 
         self.types.insert(type_id, (name, fields));
         type_id
-    }
-
-    pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.types.get(type_id)
     }
 
     pub fn get_types(&self) -> &HashMap<TypeId, TupleTypeInfo> {

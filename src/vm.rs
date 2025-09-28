@@ -1,6 +1,6 @@
 use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
-use crate::types::{TupleTypeInfo, Type, TypeRegistry};
+use crate::types::{TupleTypeInfo, Type, TypeLookup, TypeRegistry};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -161,6 +161,12 @@ impl Default for VM {
     }
 }
 
+impl TypeLookup for VM {
+    fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
+        self.type_registry.lookup_type(type_id)
+    }
+}
+
 impl VM {
     pub fn new(bytecode: Option<Bytecode>) -> Self {
         match bytecode {
@@ -294,11 +300,6 @@ impl VM {
     // Get all types for serialization/transfer
     pub fn get_types(&self) -> HashMap<TypeId, TupleTypeInfo> {
         self.type_registry.get_types().clone()
-    }
-
-    // Get a reference to the type registry
-    pub fn type_registry(&self) -> &TypeRegistry {
-        &self.type_registry
     }
 
     pub fn execute_instructions(
@@ -506,7 +507,7 @@ impl VM {
                 // Use Type::is_compatible for structural checking
                 let actual_type = Type::Tuple(*actual_type_id);
                 let expected_type = Type::Tuple(expected_type_id);
-                actual_type.is_compatible(&expected_type, &self.type_registry)
+                actual_type.is_compatible(&expected_type, self)
             }
         } else {
             false

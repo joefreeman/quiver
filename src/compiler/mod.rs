@@ -1167,7 +1167,7 @@ impl<'a> Compiler<'a> {
             }
         };
 
-        if !value_type.is_compatible(&func_type.parameter, self.vm.type_registry()) {
+        if !value_type.is_compatible(&func_type.parameter, self.vm) {
             return Err(Error::TypeMismatch {
                 expected: format!(
                     "function parameter compatible with {:?}",

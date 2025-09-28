@@ -147,8 +147,8 @@ impl Quiver {
         self.vm.lookup_type(type_id)
     }
 
-    pub fn get_types(&self) -> &HashMap<TypeId, TupleTypeInfo> {
-        self.vm.type_registry().get_types()
+    pub fn get_types(&self) -> HashMap<TypeId, TupleTypeInfo> {
+        self.vm.get_types()
     }
 
     pub fn get_function(&self, function: usize) -> Option<&Function> {

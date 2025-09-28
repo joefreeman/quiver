@@ -133,7 +133,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                                 println!(
                                     "  {}: {}",
                                     type_id.0,
-                                    format_type(quiver.get_types(), &Type::Tuple(type_id))
+                                    format_type(&quiver.get_types(), &Type::Tuple(type_id))
                                 )
                             }
                         }
@@ -438,7 +438,7 @@ fn format_value(quiver: &Quiver, value: &Value) -> String {
             if let Some(func_def) = quiver.get_function(*function) {
                 if let Some(func_type) = &func_def.function_type {
                     return format_type(
-                        quiver.get_types(),
+                        &quiver.get_types(),
                         &Type::Callable(Box::new(func_type.clone())),
                     );
                 }
