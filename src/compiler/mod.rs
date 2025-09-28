@@ -211,7 +211,7 @@ impl<'a> Compiler<'a> {
                 module_path,
             } => self.compile_type_import(pattern, &module_path),
             ast::Statement::Expression(expression) => {
-                self.compile_expression(expression, Type::nil())?;
+                self.compile_expression(expression, None, Type::nil())?;
                 Ok(())
             }
         }
@@ -269,7 +269,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_value_tuple(
+    fn compile_create_tuple(
         &mut self,
         tuple_name: Option<String>,
         fields: Vec<ast::TupleField>,
@@ -280,7 +280,30 @@ impl<'a> Compiler<'a> {
         // Compile field values and collect their types
         let mut field_types = Vec::new();
         for field in &fields {
-            let field_type = self.compile_chain(field.value.clone(), parameter_type.clone())?;
+            let field_type = match &field.value {
+                ast::FieldValue::Chain(chain) => {
+                    // Value tuples don't have a value context, so pass None
+                    self.compile_chain(chain.clone(), None, parameter_type.clone())?
+                }
+                ast::FieldValue::Ripple => {
+                    // Ripple is only valid if we're inside an operation context
+                    if self.ripple_depth == 0 {
+                        return Err(Error::FeatureUnsupported(
+                            "Ripple cannot be used outside of an operation context".to_string(),
+                        ));
+                    }
+                    // Use the stored ripple value from the enclosing operation
+                    let ripple_var_name = format!("~{}", self.ripple_depth - 1);
+                    self.codegen
+                        .add_instruction(Instruction::Load(ripple_var_name));
+                    // We need to get the type of the ripple value
+                    // Since we're in a nested context, we should look it up
+                    self.lookup_variable(&format!("~{}", self.ripple_depth - 1))
+                        .ok_or_else(|| Error::InternalError {
+                            message: "Ripple value type not found in scope".to_string(),
+                        })?
+                }
+            };
             field_types.push((field.name.clone(), field_type));
         }
 
@@ -291,7 +314,26 @@ impl<'a> Compiler<'a> {
         Ok(Type::Tuple(type_id))
     }
 
-    fn compile_operation_tuple(
+    // Helper function to check if a tuple contains ripple operations
+    fn tuple_contains_ripple(tuple: &ast::Tuple) -> bool {
+        tuple.fields.iter().any(|field| {
+            match &field.value {
+                ast::FieldValue::Ripple => true,
+                ast::FieldValue::Chain(chain) => {
+                    // Check for nested tuples that contain ripples
+                    chain.terms.iter().any(|term| {
+                        if let ast::Term::Tuple(nested_tuple) = term {
+                            Self::tuple_contains_ripple(nested_tuple)
+                        } else {
+                            false
+                        }
+                    })
+                }
+            }
+        })
+    }
+
+    fn compile_wrap_tupple(
         &mut self,
         name: Option<String>,
         fields: Vec<ast::TupleField>,
@@ -306,19 +348,26 @@ impl<'a> Compiler<'a> {
         self.ripple_depth += 1;
         self.codegen
             .add_instruction(Instruction::Store(ripple_var_name.clone()));
+        self.define_variable(&ripple_var_name, value_type.clone());
 
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
         // Compile field values and collect their types
         let mut field_types = Vec::new();
         for field in &fields {
-            // Pass the ripple value so nested tuples can access it
-            // If the chain starts with Ripple, it needs the ripple value
-            let input_type = match &field.value.input {
-                ast::ChainInput::Ripple => value_type.clone(),
-                _ => parameter_type.clone(),
+            let field_type = match &field.value {
+                ast::FieldValue::Ripple => {
+                    // Use the stored ripple value
+                    let ripple_var_name = format!("~{}", self.ripple_depth - 1);
+                    self.codegen
+                        .add_instruction(Instruction::Load(ripple_var_name));
+                    value_type.clone()
+                }
+                ast::FieldValue::Chain(chain) => {
+                    // Regular chain compilation
+                    self.compile_chain(chain.clone(), None, parameter_type.clone())?
+                }
             };
-            let field_type = self.compile_chain(field.value.clone(), input_type)?;
 
             field_types.push((field.name.clone(), field_type));
         }
@@ -383,7 +432,8 @@ impl<'a> Compiler<'a> {
         }
         self.parameter_fields_stack.push(parameter_fields);
 
-        let body_type = self.compile_block(function_definition.body, parameter_type.clone())?;
+        let body_type =
+            self.compile_block(function_definition.body, Some(parameter_type.clone()))?;
         self.codegen.add_instruction(Instruction::Return);
 
         self.parameter_fields_stack.pop();
@@ -411,7 +461,7 @@ impl<'a> Compiler<'a> {
         Ok(function_type)
     }
 
-    fn compile_match(&mut self, pattern: ast::Pattern, value_type: Type) -> Result<Type, Error> {
+    fn compile_destructure(&mut self, term: ast::Term, value_type: Type) -> Result<Type, Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
 
@@ -420,7 +470,7 @@ impl<'a> Compiler<'a> {
         let mut pattern_compiler =
             PatternCompiler::new(&mut self.codegen, &mut self.type_context, self.vm);
         let (certainty, bindings) =
-            pattern_compiler.compile_pattern_match(&pattern, &value_type, fail_jump_addr)?;
+            pattern_compiler.compile_pattern_match(&term, &value_type, fail_jump_addr)?;
 
         match certainty {
             MatchCertainty::WontMatch => {
@@ -453,7 +503,11 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_block(&mut self, block: ast::Block, parameter_type: Type) -> Result<Type, Error> {
+    fn compile_block(
+        &mut self,
+        block: ast::Block,
+        value_type: Option<Type>,
+    ) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -461,6 +515,12 @@ impl<'a> Compiler<'a> {
 
         self.codegen.add_instruction(Instruction::Enter);
         self.scopes.push(HashMap::new());
+
+        // If we have a value_type, the value was consumed by Enter
+        // but we need it for pattern matching, so restore it with Parameter
+        if value_type.is_some() {
+            self.codegen.add_instruction(Instruction::Parameter);
+        }
 
         for (i, branch) in block.branches.iter().enumerate() {
             let is_last_branch = i == block.branches.len() - 1;
@@ -476,10 +536,16 @@ impl<'a> Compiler<'a> {
                         message: "No scope available when compiling block branch".to_string(),
                     })?
                     .clear();
+
+                // If we have a value_type, restore it for the next branch's pattern matching
+                if value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Parameter);
+                }
             }
 
+            // Pass the value_type to the condition expression
             let condition_type =
-                self.compile_expression(branch.condition.clone(), parameter_type.clone())?;
+                self.compile_expression(branch.condition.clone(), value_type.clone(), Type::nil())?;
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
             if condition_type.as_concrete() == Some(&Type::nil()) {
@@ -492,8 +558,9 @@ impl<'a> Compiler<'a> {
                 let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 next_branch_jumps.push((next_branch_jump, i + 1));
 
+                // Consequence gets None as value_type
                 let consequence_type =
-                    self.compile_expression(consequence.clone(), parameter_type.clone())?;
+                    self.compile_expression(consequence.clone(), None, Type::nil())?;
                 branch_types.push(consequence_type);
 
                 // If this is the last branch and the condition can be nil,
@@ -556,13 +623,17 @@ impl<'a> Compiler<'a> {
     fn compile_expression(
         &mut self,
         expression: ast::Expression,
+        value_type: Option<Type>,
         parameter_type: Type,
     ) -> Result<Type, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            let chain_type = self.compile_chain(chain.clone(), parameter_type.clone())?;
+            // First chain gets the value_type, subsequent chains get None
+            let chain_value_type = if i == 0 { value_type.clone() } else { None };
+            let chain_type =
+                self.compile_chain(chain.clone(), chain_value_type, parameter_type.clone())?;
 
             // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil = if i > 0 {
@@ -609,47 +680,21 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn compile_chain(&mut self, chain: ast::Chain, input_type: Type) -> Result<Type, Error> {
-        let mut value_type = match chain.input {
-            ast::ChainInput::Value(ast::Value::Literal(literal)) => self.compile_literal(literal),
-            ast::ChainInput::Value(ast::Value::Tuple(tuple)) => {
-                self.compile_value_tuple(tuple.name, tuple.fields, input_type.clone())
-            }
-            ast::ChainInput::Value(ast::Value::FunctionDefinition(function_definition)) => {
-                self.compile_function_definition(function_definition)
-            }
-            ast::ChainInput::Value(ast::Value::Block(block)) => {
-                self.codegen
-                    .add_instruction(Instruction::Tuple(TypeId::NIL));
-                self.compile_block(block, Type::nil())
-            }
-            ast::ChainInput::Value(ast::Value::MemberAccess(member_access)) => self
-                .compile_value_member_access(
-                    &member_access.target,
-                    member_access.accessors,
-                    input_type.clone(),
-                ),
-            ast::ChainInput::Value(ast::Value::Import(path)) => self.compile_value_import(&path),
-            ast::ChainInput::Value(ast::Value::Builtin(name)) => self.compile_value_builtin(&name),
-            ast::ChainInput::Parameter => {
-                self.codegen.add_instruction(Instruction::Parameter);
-                Ok(input_type.clone())
-            }
-            ast::ChainInput::Ripple => {
-                // Use the ripple value from the enclosing context
-                // ripple_depth - 1 because we incremented it when storing
-                let ripple_var_name = format!("~{}", self.ripple_depth - 1);
-                self.codegen
-                    .add_instruction(Instruction::Load(ripple_var_name));
-                Ok(input_type.clone())
-            }
-        }?;
+    fn compile_chain(
+        &mut self,
+        chain: ast::Chain,
+        value_type: Option<Type>,
+        parameter_type: Type,
+    ) -> Result<Type, Error> {
+        let mut current_type = value_type;
 
-        for operation in chain.operations {
-            value_type = self.compile_operation(operation, value_type, input_type.clone())?;
+        for term in chain.terms {
+            current_type = Some(self.compile_term(term, current_type, parameter_type.clone())?);
         }
 
-        Ok(value_type)
+        current_type.ok_or_else(|| Error::InternalError {
+            message: "Chain compiled with no terms".to_string(),
+        })
     }
 
     fn value_to_instructions(&mut self, value: &Value) -> Result<Type, Error> {
@@ -818,77 +863,192 @@ impl<'a> Compiler<'a> {
         Ok(value)
     }
 
-    fn compile_operation(
+    fn compile_term(
         &mut self,
-        operation: ast::Operation,
-        value_type: Type,
+        term: ast::Term,
+        value_type: Option<Type>,
         parameter_type: Type,
     ) -> Result<Type, Error> {
-        match operation {
-            ast::Operation::Tuple(tuple) => {
-                self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type)
+        match term {
+            ast::Term::Literal(literal) => {
+                if let Some(val_type) = value_type {
+                    // Treat as pattern match when value is present
+                    self.compile_destructure(ast::Term::Literal(literal), val_type)
+                } else {
+                    // Compile as value when no value present
+                    self.compile_literal(literal)
+                }
             }
-            ast::Operation::Block(block) => self.compile_block(block, value_type),
-            ast::Operation::FunctionCall(member_access) => self.compile_function_call(
-                &member_access.target,
-                member_access.accessors,
-                value_type,
-                parameter_type,
-            ),
-            ast::Operation::FieldAccess(field) => {
-                self.compile_tuple_element_access(TupleAccessor::Field(field), value_type)
+            ast::Term::Identifier(name) => {
+                if let Some(val_type) = value_type {
+                    // Treat as pattern match/destructuring when value is present
+                    self.compile_destructure(ast::Term::Identifier(name), val_type)
+                } else {
+                    // Load the variable when no value present
+                    let var_type = self
+                        .lookup_variable(&name)
+                        .ok_or_else(|| Error::VariableUndefined(name.clone()))?;
+                    self.codegen.add_instruction(Instruction::Load(name));
+                    Ok(var_type)
+                }
             }
-            ast::Operation::PositionalAccess(position) => {
-                self.compile_tuple_element_access(TupleAccessor::Position(position), value_type)
+            ast::Term::Tuple(tuple) => {
+                if let Some(val_type) = value_type {
+                    // If tuple contains ripples, it's an operation; otherwise pattern match
+                    if Self::tuple_contains_ripple(&tuple) {
+                        self.compile_wrap_tupple(tuple.name, tuple.fields, val_type, parameter_type)
+                    } else {
+                        // Treat as pattern match
+                        self.compile_destructure(ast::Term::Tuple(tuple), val_type)
+                    }
+                } else {
+                    // Compile as value tuple when no value present
+                    self.compile_create_tuple(tuple.name, tuple.fields, parameter_type)
+                }
             }
-            ast::Operation::TailCall(identifier) => self.compile_operation_tail_call(&identifier),
-            ast::Operation::Equality => self.compile_operation_equality(value_type),
-            ast::Operation::Not => self.compile_operation_not(value_type),
-            ast::Operation::Match(pattern) => {
-                // When match appears as an operation, it matches the piped value
-                self.compile_match(pattern, value_type)
+            ast::Term::Block(block) => {
+                if value_type.is_none() {
+                    // Blocks without a value need NIL on stack
+                    self.codegen
+                        .add_instruction(Instruction::Tuple(TypeId::NIL));
+                }
+                self.compile_block(block, value_type)
+            }
+            ast::Term::FunctionDefinition(func_def) => {
+                if value_type.is_some() {
+                    return Err(Error::FeatureUnsupported(
+                        "Function definition cannot be applied to value".to_string(),
+                    ));
+                }
+                self.compile_function_definition(func_def)
+            }
+            ast::Term::FunctionCall(target) => self.compile_function_call(target, value_type),
+            ast::Term::MemberAccess(member_access) => {
+                match &member_access.target {
+                    ast::MemberTarget::None => {
+                        // Field/positional access (.x, .0) requires a value
+                        if let Some(val_type) = value_type {
+                            // Access on the piped value
+                            self.compile_accessor_chain(val_type, member_access.accessors, "value")
+                        } else {
+                            return Err(Error::FeatureUnsupported(
+                                "Field/positional access requires a value".to_string(),
+                            ));
+                        }
+                    }
+                    ast::MemberTarget::Identifier(name) => {
+                        if value_type.is_some() {
+                            return Err(Error::FeatureUnsupported(
+                                "Member access cannot be applied to value".to_string(),
+                            ));
+                        }
+                        // Load variable or access its members
+                        let target_type = self.compile_target_access(name)?;
+                        self.compile_accessor_chain(target_type, member_access.accessors, name)
+                    }
+                    ast::MemberTarget::Parameter => {
+                        if value_type.is_some() {
+                            return Err(Error::FeatureUnsupported(
+                                "Parameter access cannot be applied to value".to_string(),
+                            ));
+                        }
+                        // Access parameter
+                        self.codegen.add_instruction(Instruction::Parameter);
+                        self.compile_accessor_chain(parameter_type, member_access.accessors, "$")
+                    }
+                }
+            }
+            ast::Term::Import(path) => {
+                if value_type.is_some() {
+                    return Err(Error::FeatureUnsupported(
+                        "Import cannot be applied to value".to_string(),
+                    ));
+                }
+                self.compile_value_import(&path)
+            }
+            ast::Term::Builtin(name) => {
+                if value_type.is_some() {
+                    return Err(Error::FeatureUnsupported(
+                        "Builtin cannot be applied to value".to_string(),
+                    ));
+                }
+                self.compile_value_builtin(&name)
+            }
+            ast::Term::TailCall(identifier) => {
+                if value_type.is_none() {
+                    return Err(Error::FeatureUnsupported(
+                        "Tail call requires a value".to_string(),
+                    ));
+                }
+                self.compile_operation_tail_call(&identifier)
+            }
+            ast::Term::Equality => {
+                let val_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported("Equality operator requires a value".to_string())
+                })?;
+                self.compile_operation_equality(val_type)
+            }
+            ast::Term::Not => {
+                let val_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported("Not operator requires a value".to_string())
+                })?;
+                self.compile_operation_not(val_type)
+            }
+            ast::Term::Partial(_) | ast::Term::Star | ast::Term::Placeholder => {
+                // These are always patterns
+                let val_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported("Pattern matching requires a value".to_string())
+                })?;
+                self.compile_destructure(term, val_type)
             }
         }
     }
 
-    fn compile_tuple_element_access(
+    fn compile_function_call(
         &mut self,
-        accessor: TupleAccessor,
-        value_type: Type,
+        target: ast::FunctionCallTarget,
+        value_type: Option<Type>,
     ) -> Result<Type, Error> {
-        let tuple_types = value_type.extract_tuple_types();
+        // Use nil as value if value_type is None
+        let val_type = value_type.unwrap_or_else(|| {
+            self.codegen
+                .add_instruction(Instruction::Tuple(TypeId::NIL));
+            Type::nil()
+        });
 
-        if tuple_types.is_empty() {
-            match accessor {
-                TupleAccessor::Field(field_name) => {
-                    return Err(Error::FieldAccessOnNonTuple { field_name });
-                }
-                TupleAccessor::Position(index) => {
-                    return Err(Error::PositionalAccessOnNonTuple { index });
-                }
-            }
-        }
-
-        let (index, field_types) = match accessor {
-            TupleAccessor::Field(field_name) => {
-                let results = self.get_field_types_by_name(&tuple_types, &field_name)?;
-                if results.is_empty() {
-                    return Err(Error::FieldAccessOnNonTuple { field_name });
-                }
-                let index = results[0].0;
-                let field_types: Vec<Type> = results.into_iter().map(|(_, t)| t).collect();
-                (index, field_types)
-            }
-            TupleAccessor::Position(position) => {
-                let field_types = self
-                    .get_field_types_at_position(&tuple_types, position)
-                    .map_err(|_| Error::PositionalAccessOnNonTuple { index: position })?;
-                (position, field_types)
+        // Get the function type based on the target
+        let function_type = match target {
+            ast::FunctionCallTarget::Builtin(name) => self.compile_value_builtin(&name)?,
+            ast::FunctionCallTarget::Identifier { name, accessors } => {
+                self.compile_member_access_chain(&name, accessors)?
             }
         };
 
-        self.codegen.add_instruction(Instruction::Get(index));
-        Ok(Type::from_types(field_types))
+        // Extract callable type and verify it's a function
+        let func_type = match function_type {
+            Type::Callable(func_type) => func_type,
+            _ => {
+                return Err(Error::TypeMismatch {
+                    expected: "function".to_string(),
+                    found: format!("{:?}", function_type),
+                });
+            }
+        };
+
+        // Check parameter compatibility
+        if !val_type.is_compatible(&func_type.parameter, self.vm) {
+            return Err(Error::TypeMismatch {
+                expected: format!(
+                    "function parameter compatible with {:?}",
+                    func_type.parameter
+                ),
+                found: format!("{:?}", val_type),
+            });
+        }
+
+        // Execute the call
+        self.codegen.add_instruction(Instruction::Call);
+        Ok(func_type.result)
     }
 
     fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<Type, Error> {
@@ -1091,95 +1251,14 @@ impl<'a> Compiler<'a> {
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
-        emit_load: bool,
     ) -> Result<Type, Error> {
-        let last_type = if emit_load {
-            self.codegen
-                .add_instruction(Instruction::Load(target.to_string()));
-            self.lookup_variable(target)
-                .ok_or(Error::VariableUndefined(target.to_string()))?
-        } else {
-            self.compile_target_access(target)?
-        };
+        self.codegen
+            .add_instruction(Instruction::Load(target.to_string()));
+        let last_type = self
+            .lookup_variable(target)
+            .ok_or(Error::VariableUndefined(target.to_string()))?;
 
         self.compile_accessor_chain(last_type, accessors, target)
-    }
-
-    fn compile_value_member_access(
-        &mut self,
-        target: &ast::MemberTarget,
-        accessors: Vec<ast::AccessPath>,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
-        match target {
-            ast::MemberTarget::Identifier(name) => {
-                self.compile_member_access_chain(name, accessors, false)
-            }
-            ast::MemberTarget::Parameter => {
-                self.codegen.add_instruction(Instruction::Parameter);
-                self.compile_accessor_chain(parameter_type, accessors, "$")
-            }
-            ast::MemberTarget::Builtin(name) => {
-                // Builtins can't be accessed via member access (only called)
-                return Err(Error::FeatureUnsupported(format!(
-                    "Builtin '{}' cannot be used in member access context",
-                    name
-                )));
-            }
-        }
-    }
-
-    fn compile_function_call(
-        &mut self,
-        target: &ast::MemberTarget,
-        accessors: Vec<ast::AccessPath>,
-        value_type: Type,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
-        let function_type = match target {
-            ast::MemberTarget::Identifier(name) => {
-                self.compile_member_access_chain(name, accessors, true)?
-            }
-            ast::MemberTarget::Parameter => {
-                self.codegen.add_instruction(Instruction::Parameter);
-                self.compile_accessor_chain(parameter_type, accessors, "$")?
-            }
-            ast::MemberTarget::Builtin(name) => {
-                // Compile the builtin as a value (which returns its function type)
-                let builtin_type = self.compile_value_builtin(name)?;
-                // Builtins don't support accessor chains
-                if !accessors.is_empty() {
-                    return Err(Error::FeatureUnsupported(
-                        "Accessor chains on builtins are not supported".to_string(),
-                    ));
-                }
-                builtin_type
-            }
-        };
-
-        let func_type = match function_type {
-            Type::Callable(func_type) => func_type,
-            _ => {
-                return Err(Error::TypeMismatch {
-                    expected: "function".to_string(),
-                    found: format!("{:?}", function_type),
-                });
-            }
-        };
-
-        if !value_type.is_compatible(&func_type.parameter, self.vm) {
-            return Err(Error::TypeMismatch {
-                expected: format!(
-                    "function parameter compatible with {:?}",
-                    func_type.parameter
-                ),
-                found: format!("{:?}", value_type),
-            });
-        }
-
-        self.codegen.add_instruction(Instruction::Call);
-
-        Ok(func_type.result)
     }
 
     fn define_variable(&mut self, name: &str, var_type: Type) {

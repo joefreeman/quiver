@@ -1,11 +1,11 @@
-use crate::ast::{ChainInput, *};
+use crate::ast::*;
 use nom::{
     IResult,
     branch::alt,
     bytes::complete::{tag, take_while},
     character::complete::{char, digit1, multispace0, multispace1, satisfy},
     combinator::{map, map_res, not, opt, peek, recognize, value as nom_value},
-    multi::{many0, separated_list0, separated_list1},
+    multi::{many0, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
 };
 
@@ -162,25 +162,17 @@ fn literal(input: &str) -> IResult<&str, Literal> {
     alt((integer_literal, binary_literal, string_literal))(input)
 }
 
-// Pattern parsers
+// Pattern parsers for terms
 
-fn pattern_literal(input: &str) -> IResult<&str, Pattern> {
-    map(literal, Pattern::Literal)(input)
+fn pattern_star(input: &str) -> IResult<&str, Term> {
+    nom_value(Term::Star, char('*'))(input)
 }
 
-fn pattern_identifier(input: &str) -> IResult<&str, Pattern> {
-    map(identifier, Pattern::Identifier)(input)
+fn pattern_placeholder(input: &str) -> IResult<&str, Term> {
+    nom_value(Term::Placeholder, char('_'))(input)
 }
 
-fn pattern_star(input: &str) -> IResult<&str, Pattern> {
-    nom_value(Pattern::Star, char('*'))(input)
-}
-
-fn pattern_placeholder(input: &str) -> IResult<&str, Pattern> {
-    nom_value(Pattern::Placeholder, char('_'))(input)
-}
-
-fn partial_pattern(input: &str) -> IResult<&str, Pattern> {
+fn partial_pattern(input: &str) -> IResult<&str, Term> {
     alt((
         // Named partial pattern: TupleName(field1, field2, ...)
         map(
@@ -193,7 +185,7 @@ fn partial_pattern(input: &str) -> IResult<&str, Pattern> {
                 ),
             )),
             |(name, fields)| {
-                Pattern::Partial(PartialPattern {
+                Term::Partial(PartialPattern {
                     name: Some(name),
                     fields,
                 })
@@ -206,83 +198,8 @@ fn partial_pattern(input: &str) -> IResult<&str, Pattern> {
                 separated_list1(tuple((ws0, char(','), ws1)), identifier),
                 pair(ws0, char(')')),
             ),
-            |fields| Pattern::Partial(PartialPattern { name: None, fields }),
+            |fields| Term::Partial(PartialPattern { name: None, fields }),
         ),
-    ))(input)
-}
-
-fn pattern_field(input: &str) -> IResult<&str, PatternField> {
-    alt((
-        map(
-            separated_pair(identifier, tuple((char(':'), ws1)), pattern),
-            |(name, pattern)| PatternField {
-                name: Some(name),
-                pattern,
-            },
-        ),
-        map(pattern, |p| PatternField {
-            name: None,
-            pattern: p,
-        }),
-    ))(input)
-}
-
-fn pattern_field_list(input: &str) -> IResult<&str, Vec<PatternField>> {
-    terminated(
-        separated_list0(tuple((wsc, char(','), wsc)), pattern_field),
-        opt(pair(wsc, char(','))),
-    )(input)
-}
-
-fn tuple_pattern(input: &str) -> IResult<&str, Pattern> {
-    map(
-        alt((
-            map(
-                tuple((
-                    tuple_name,
-                    delimited(
-                        pair(char('['), wsc),
-                        pattern_field_list,
-                        pair(wsc, char(']')),
-                    ),
-                )),
-                |(name, fields)| TuplePattern {
-                    name: Some(name),
-                    fields,
-                },
-            ),
-            map(
-                delimited(
-                    pair(char('['), wsc),
-                    pattern_field_list,
-                    pair(wsc, char(']')),
-                ),
-                |fields| TuplePattern { name: None, fields },
-            ),
-            // Only parse bare tuple name if not followed by '(' (which would indicate a partial pattern)
-            map(
-                tuple((
-                    tuple_name,
-                    peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
-                )),
-                |(name, _)| TuplePattern {
-                    name: Some(name),
-                    fields: vec![],
-                },
-            ),
-        )),
-        Pattern::Tuple,
-    )(input)
-}
-
-fn pattern(input: &str) -> IResult<&str, Pattern> {
-    alt((
-        partial_pattern,
-        tuple_pattern,
-        pattern_literal,
-        pattern_star,
-        pattern_placeholder,
-        pattern_identifier,
     ))(input)
 }
 
@@ -410,90 +327,92 @@ fn type_definition(input: &str) -> IResult<&str, Type> {
     ))(input)
 }
 
-// Value and Operation parsers
+// Term parsers
 
-// Parse member access patterns (for assignment) - no '!' at the end
-// Examples: f, f.x, $.0, etc.
+// Parse member access patterns - no '!' at the end
+// Examples: f.x, $.0, .x, .0, etc.
 fn member_access(input: &str) -> IResult<&str, MemberAccess> {
-    map(
-        pair(
-            alt((
+    alt((
+        // Parameter access: $ or $.field
+        map(
+            pair(
                 nom_value(MemberTarget::Parameter, char('$')),
+                many0(preceded(
+                    char('.'),
+                    alt((
+                        map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
+                        map(identifier, AccessPath::Field),
+                    )),
+                )),
+            ),
+            |(target, accessors)| MemberAccess { target, accessors },
+        ),
+        // Member access with identifier and accessors: foo.bar, foo.0
+        map(
+            pair(
                 map(identifier, MemberTarget::Identifier),
-            )),
-            many0(preceded(
+                many1(preceded(
+                    // Changed to many1 - requires at least one accessor
+                    char('.'),
+                    alt((
+                        map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
+                        map(identifier, AccessPath::Field),
+                    )),
+                )),
+            ),
+            |(target, accessors)| MemberAccess { target, accessors },
+        ),
+        // Field/positional access without target (.x, .0, .x.0)
+        map(
+            many1(preceded(
                 char('.'),
                 alt((
                     map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
                     map(identifier, AccessPath::Field),
                 )),
             )),
+            |accessors| MemberAccess {
+                target: MemberTarget::None,
+                accessors,
+            },
         ),
-        |(target, accessors)| MemberAccess { target, accessors },
-    )(input)
+    ))(input)
 }
 
 // Parse function calls - must end with '!'
-// Examples: f!, f.x!, $.0!, etc.
-fn function_call(input: &str) -> IResult<&str, MemberAccess> {
-    let (input, target) = alt((
-        nom_value(MemberTarget::Parameter, char('$')),
-        map(builtin, MemberTarget::Builtin),
-        map(identifier, MemberTarget::Identifier),
-    ))(input)?;
-
-    // Check if there's a ! immediately after the identifier
-    if let Ok((remaining, _)) = char::<&str, nom::error::Error<&str>>('!')(input) {
-        return Ok((
-            remaining,
-            MemberAccess {
-                target,
-                accessors: vec![],
+// Examples: f!, f.x!, <add>!, etc.
+fn function_call(input: &str) -> IResult<&str, FunctionCallTarget> {
+    alt((
+        // Builtin function call: <builtin>!
+        map(terminated(builtin, char('!')), FunctionCallTarget::Builtin),
+        // Identifier function call with optional accessors: f!, f.x!, f.0!
+        map(
+            pair(
+                identifier,
+                many0(preceded(
+                    char('.'),
+                    alt((
+                        map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
+                        map(identifier, AccessPath::Field),
+                    )),
+                )),
+            ),
+            |(name, accessors)| {
+                // Must consume the '!' at the end
+                FunctionCallTarget::Identifier { name, accessors }
             },
-        ));
-    }
-
-    // Otherwise, parse field accesses
-    let mut accessors = vec![];
-    let mut current_input = input;
-
-    while let Ok((input_after_dot, _)) = char::<&str, nom::error::Error<&str>>('.')(current_input) {
-        // Try to parse an index or field
-        if let Ok((remaining, index_str)) = digit1::<&str, nom::error::Error<&str>>(input_after_dot)
-        {
-            accessors.push(AccessPath::Index(index_str.parse().unwrap()));
-            current_input = remaining;
-
-            // Check for ! after this accessor
-            if let Ok((remaining, _)) = char::<&str, nom::error::Error<&str>>('!')(current_input) {
-                return Ok((remaining, MemberAccess { target, accessors }));
-            }
-        } else {
-            // Try to parse a field, but it might end with !
-            // First try regular identifier
-            if let Ok((remaining, field)) = identifier(input_after_dot) {
-                accessors.push(AccessPath::Field(field.clone()));
-
-                // Check if there's a ! immediately after this field
-                if let Ok((remaining_after_excl, _)) =
-                    char::<&str, nom::error::Error<&str>>('!')(remaining)
-                {
-                    return Ok((remaining_after_excl, MemberAccess { target, accessors }));
-                }
-
-                current_input = remaining;
-            } else {
-                // No valid field found
-                break;
+        ),
+    ))(input)
+    .and_then(|(remaining, target)| {
+        // For identifier calls, we need to ensure there's a '!' at the end
+        match &target {
+            FunctionCallTarget::Builtin(_) => Ok((remaining, target)), // Already consumed '!'
+            FunctionCallTarget::Identifier { .. } => {
+                let (remaining, _) = char('!')(remaining)?;
+                Ok((remaining, target))
             }
         }
-    }
-
-    // If we get here, we didn't find a !, so this isn't a function call
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Tag,
-    )))
+    })
 }
 
 fn import(input: &str) -> IResult<&str, String> {
@@ -509,14 +428,32 @@ fn import(input: &str) -> IResult<&str, String> {
 
 fn tuple_field(input: &str) -> IResult<&str, TupleField> {
     alt((
+        // Named field with ripple: name: ~
         map(
-            separated_pair(identifier, tuple((char(':'), ws1)), chain),
-            |(name, value)| TupleField {
+            separated_pair(identifier, tuple((char(':'), ws1)), char('~')),
+            |(name, _)| TupleField {
                 name: Some(name),
-                value,
+                value: FieldValue::Ripple,
             },
         ),
-        map(chain, |value| TupleField { name: None, value }),
+        // Named field with chain: name: chain
+        map(
+            separated_pair(identifier, tuple((char(':'), ws1)), chain),
+            |(name, chain_value)| TupleField {
+                name: Some(name),
+                value: FieldValue::Chain(chain_value),
+            },
+        ),
+        // Unnamed ripple: ~
+        map(char('~'), |_| TupleField {
+            name: None,
+            value: FieldValue::Ripple,
+        }),
+        // Unnamed chain: chain
+        map(chain, |chain_value| TupleField {
+            name: None,
+            value: FieldValue::Chain(chain_value),
+        }),
     ))(input)
 }
 
@@ -527,7 +464,7 @@ fn tuple_field_list(input: &str) -> IResult<&str, Vec<TupleField>> {
     )(input)
 }
 
-fn value_tuple(input: &str) -> IResult<&str, Tuple> {
+fn tuple_term(input: &str) -> IResult<&str, Tuple> {
     alt((
         map(
             tuple((
@@ -557,124 +494,10 @@ fn value_tuple(input: &str) -> IResult<&str, Tuple> {
     ))(input)
 }
 
-fn operation_tuple_field(input: &str) -> IResult<&str, TupleField> {
-    alt((
-        map(
-            separated_pair(
-                identifier,
-                tuple((char(':'), ws1)),
-                alt((
-                    // Parse ripple as a chain with no operations
-                    map(char('~'), |_| Chain {
-                        input: ChainInput::Ripple,
-                        operations: vec![],
-                    }),
-                    operation_field_chain,
-                )),
-            ),
-            |(name, value)| TupleField {
-                name: Some(name),
-                value,
-            },
-        ),
-        map(
-            alt((
-                // Parse ripple as a chain with no operations
-                map(char('~'), |_| Chain {
-                    input: ChainInput::Ripple,
-                    operations: vec![],
-                }),
-                operation_field_chain,
-            )),
-            |value| TupleField { name: None, value },
-        ),
-    ))(input)
-}
-
-// Parse a chain in the context of an operation tuple field
-// This handles cases like B[~] where a tuple construction appears directly
-fn operation_field_chain(input: &str) -> IResult<&str, Chain> {
-    alt((
-        // Try to parse a tuple construction directly (like B[~])
-        // Only accept if it contains ripples
-        map_res(operation_tuple, |tuple| {
-            if tuple_contains_ripple(&tuple) {
-                Ok(Chain {
-                    input: ChainInput::Ripple,
-                    operations: vec![Operation::Tuple(tuple)],
-                })
-            } else {
-                Err(())
-            }
-        }),
-        // Otherwise parse a regular chain
-        chain,
-    ))(input)
-}
-
-fn operation_tuple_field_list(input: &str) -> IResult<&str, Vec<TupleField>> {
-    terminated(
-        separated_list0(tuple((wsc, char(','), wsc)), operation_tuple_field),
-        opt(pair(wsc, char(','))),
-    )(input)
-}
-
-fn operation_tuple(input: &str) -> IResult<&str, Tuple> {
-    alt((
-        map(
-            tuple((
-                tuple_name,
-                delimited(
-                    pair(char('['), wsc),
-                    operation_tuple_field_list,
-                    pair(wsc, char(']')),
-                ),
-            )),
-            |(name, fields)| Tuple {
-                name: Some(name),
-                fields,
-            },
-        ),
-        map(
-            delimited(
-                pair(char('['), wsc),
-                operation_tuple_field_list,
-                pair(wsc, char(']')),
-            ),
-            |fields| Tuple { name: None, fields },
-        ),
-        // Only parse bare tuple name if not followed by '(' (which would indicate a partial pattern)
-        map(
-            tuple((
-                tuple_name,
-                peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
-            )),
-            |(name, _)| Tuple {
-                name: Some(name),
-                fields: vec![],
-            },
-        ),
-    ))(input)
-}
-
 fn branch(input: &str) -> IResult<&str, Branch> {
     map(
         pair(
             expression,
-            opt(preceded(tuple((ws1, tag("=>"), ws1)), expression)),
-        ),
-        |(condition, consequence)| Branch {
-            condition,
-            consequence,
-        },
-    )(input)
-}
-
-// Branch for operation blocks - condition uses operation_expression
-fn operation_branch(input: &str) -> IResult<&str, Branch> {
-    map(
-        pair(
-            operation_expression,
             opt(preceded(tuple((ws1, tag("=>"), ws1)), expression)),
         ),
         |(condition, consequence)| Branch {
@@ -698,43 +521,17 @@ fn block(input: &str) -> IResult<&str, Block> {
     )(input)
 }
 
-// Block for operations (parametrized blocks)
-fn operation_block(input: &str) -> IResult<&str, Block> {
-    map(
-        delimited(
-            pair(char('{'), ws1),
-            preceded(
-                opt(pair(char('|'), ws1)),
-                separated_list1(tuple((ws1, char('|'), ws1)), operation_branch),
-            ),
-            pair(ws1, char('}')),
-        ),
-        |branches| Block { branches },
-    )(input)
-}
-
 fn function_definition(input: &str) -> IResult<&str, FunctionDefinition> {
     map(
         preceded(
             char('#'),
-            pair(
-                opt(terminated(function_input_type, ws1)),
-                operation_block, // Functions are parametrized blocks
-            ),
+            pair(opt(terminated(function_input_type, ws1)), block),
         ),
         |(parameter_type, body)| FunctionDefinition {
             parameter_type,
             body,
         },
     )(input)
-}
-
-fn field_access(input: &str) -> IResult<&str, String> {
-    preceded(char('.'), identifier)(input)
-}
-
-fn positional_access(input: &str) -> IResult<&str, usize> {
-    map_res(preceded(char('.'), digit1), |s: &str| s.parse())(input)
 }
 
 fn tail_call(input: &str) -> IResult<&str, String> {
@@ -745,108 +542,47 @@ fn builtin(input: &str) -> IResult<&str, String> {
     delimited(char('<'), identifier, char('>'))(input)
 }
 
-fn operator(input: &str) -> IResult<&str, Operation> {
+fn equality(input: &str) -> IResult<&str, Term> {
+    nom_value(Term::Equality, tag("=="))(input)
+}
+
+fn not_term(input: &str) -> IResult<&str, Term> {
+    nom_value(Term::Not, char('!'))(input)
+}
+
+fn term(input: &str) -> IResult<&str, Term> {
     alt((
-        nom_value(Operation::Equality, tag("==")),
-        nom_value(Operation::Not, char('!')),
+        // Literals
+        map(literal, Term::Literal),
+        // Complex terms
+        map(tuple_term, Term::Tuple),
+        map(function_definition, Term::FunctionDefinition),
+        map(block, Term::Block),
+        // Import
+        map(import, Term::Import),
+        // Function calls must be tried before builtin and identifier
+        map(function_call, Term::FunctionCall),
+        // Builtins (without !)
+        map(builtin, Term::Builtin),
+        // Member access (includes field/positional access)
+        map(member_access, Term::MemberAccess),
+        // Identifier (must come after member_access and function_call)
+        map(identifier, Term::Identifier),
+        // Patterns
+        partial_pattern,
+        pattern_star,
+        pattern_placeholder,
+        // Operations
+        equality,
+        not_term,
+        map(tail_call, Term::TailCall),
     ))(input)
-}
-
-fn value(input: &str) -> IResult<&str, Value> {
-    alt((
-        map(literal, Value::Literal),
-        map(value_tuple, Value::Tuple),
-        map(function_definition, Value::FunctionDefinition),
-        map(block, Value::Block),
-        map(member_access, Value::MemberAccess),
-        map(import, Value::Import),
-        map(builtin, Value::Builtin),
-    ))(input)
-}
-
-fn operation(input: &str) -> IResult<&str, Operation> {
-    alt((
-        operator,
-        map(operation_block, Operation::Block), // Use operation_block for parametrized blocks
-        map(function_call, Operation::FunctionCall),
-        tuple_construction, // Only succeeds if tuple contains ripple (~)
-        pattern_operation,  // All pattern matching
-        map(field_access, Operation::FieldAccess),
-        map(positional_access, Operation::PositionalAccess),
-        map(tail_call, Operation::TailCall),
-    ))(input)
-}
-
-// Parse all patterns and wrap them as Operation::Match
-fn pattern_operation(input: &str) -> IResult<&str, Operation> {
-    map(
-        alt((
-            tuple_pattern,
-            partial_pattern,
-            pattern_literal,
-            pattern_star,
-            pattern_placeholder,
-            pattern_identifier,
-        )),
-        Operation::Match,
-    )(input)
-}
-
-// Check if a tuple contains ripple at any level (including nested tuples)
-fn tuple_contains_ripple(tuple: &Tuple) -> bool {
-    tuple.fields.iter().any(|field| {
-        // Check if this field's chain uses a ripple input
-        if matches!(field.value.input, ChainInput::Ripple) {
-            return true;
-        }
-        // Check if any operations in the chain are tuples with ripples
-        field.value.operations.iter().any(|op| {
-            if let Operation::Tuple(nested_tuple) = op {
-                tuple_contains_ripple(nested_tuple)
-            } else {
-                false
-            }
-        })
-    })
-}
-
-// Parse tuple construction - only succeeds if it contains ripple (~)
-fn tuple_construction(input: &str) -> IResult<&str, Operation> {
-    let (remaining, op_tuple) = operation_tuple(input)?;
-
-    // Recursively check if any field (including nested) contains a ripple
-    if tuple_contains_ripple(&op_tuple) {
-        Ok((remaining, Operation::Tuple(op_tuple)))
-    } else {
-        // Not a tuple construction (no ripple), let pattern matcher handle it
-        Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )))
-    }
 }
 
 fn chain(input: &str) -> IResult<&str, Chain> {
     map(
-        pair(
-            value,
-            many0(preceded(tuple((ws1, tag("~>"), ws1)), operation)),
-        ),
-        |(value, operations)| Chain {
-            input: ChainInput::Value(value),
-            operations,
-        },
-    )(input)
-}
-
-// Chain that starts with operations (no initial value) - used in parametrized blocks
-fn operation_chain(input: &str) -> IResult<&str, Chain> {
-    map(
-        separated_list1(tuple((ws1, tag("~>"), ws1)), operation),
-        |operations| Chain {
-            input: ChainInput::Parameter,
-            operations,
-        },
+        separated_list1(tuple((ws1, tag("~>"), ws1)), term),
+        |terms| Chain { terms },
     )(input)
 }
 
@@ -855,27 +591,6 @@ fn expression(input: &str) -> IResult<&str, Expression> {
         separated_list1(tuple((ws0, char(','), wsc)), chain),
         |chains| Expression { chains },
     )(input)
-}
-
-// Expression for parametrized blocks - first chain has no initial value
-fn operation_expression(input: &str) -> IResult<&str, Expression> {
-    alt((
-        map(
-            separated_pair(
-                operation_chain,
-                tuple((ws0, char(','), wsc)),
-                separated_list0(tuple((ws0, char(','), wsc)), chain),
-            ),
-            |(first_chain, mut rest_chains)| {
-                let mut chains = vec![first_chain];
-                chains.append(&mut rest_chains);
-                Expression { chains }
-            },
-        ),
-        map(operation_chain, |chain| Expression {
-            chains: vec![chain],
-        }),
-    ))(input)
 }
 
 // Statement parsers

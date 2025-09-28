@@ -39,40 +39,36 @@ pub struct Expression {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ChainInput {
-    Ripple,
-    Parameter,
-    Value(Value),
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
-    pub input: ChainInput,
-    pub operations: Vec<Operation>,
+    pub terms: Vec<Term>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Value {
+pub enum FunctionCallTarget {
+    Builtin(String),
+    Identifier {
+        name: String,
+        accessors: Vec<AccessPath>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Term {
     Literal(Literal),
+    Identifier(String),
     Tuple(Tuple),
-    FunctionDefinition(FunctionDefinition),
     Block(Block),
+    FunctionDefinition(FunctionDefinition),
+    FunctionCall(FunctionCallTarget),
     MemberAccess(MemberAccess),
     Import(String),
     Builtin(String),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Operation {
-    Tuple(Tuple),
-    Block(Block),
-    FunctionCall(MemberAccess),
-    FieldAccess(String),
-    PositionalAccess(usize),
     TailCall(String),
     Equality,
     Not,
-    Match(Pattern),
+    Partial(PartialPattern),
+    Star,
+    Placeholder,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,9 +85,15 @@ pub struct Tuple {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum FieldValue {
+    Chain(Chain),
+    Ripple,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TupleField {
     pub name: Option<String>,
-    pub value: Chain,
+    pub value: FieldValue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,9 +110,9 @@ pub struct MemberAccess {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemberTarget {
+    None,
     Identifier(String),
     Parameter,
-    Builtin(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,31 +122,9 @@ pub enum AccessPath {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Pattern {
-    Literal(Literal),
-    Identifier(String),
-    Tuple(TuplePattern),
-    Partial(PartialPattern),
-    Star,
-    Placeholder,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TuplePattern {
-    pub name: Option<String>,
-    pub fields: Vec<PatternField>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct PartialPattern {
     pub name: Option<String>,
     pub fields: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PatternField {
-    pub name: Option<String>,
-    pub pattern: Pattern,
 }
 
 #[derive(Debug, Clone, PartialEq)]

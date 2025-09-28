@@ -38,62 +38,52 @@ impl<'a> FreeVariableCollector<'a> {
     }
 
     fn visit_chain(&mut self, chain: &ast::Chain) {
-        match &chain.input {
-            ast::ChainInput::Value(value) => self.visit_value(value),
-            ast::ChainInput::Parameter | ast::ChainInput::Ripple => {}
-        }
-        for operation in &chain.operations {
-            self.visit_operation(operation);
+        for term in &chain.terms {
+            self.visit_term(term);
         }
     }
 
-    fn visit_value(&mut self, value: &ast::Value) {
-        match value {
-            ast::Value::Literal(_) => {}
-            ast::Value::Tuple(tuple) => {
+    fn visit_term(&mut self, term: &ast::Term) {
+        match term {
+            ast::Term::Literal(_) => {}
+            ast::Term::Identifier(name) => {
+                self.visit_identifier(name);
+            }
+            ast::Term::Tuple(tuple) => {
                 for field in &tuple.fields {
-                    self.visit_chain(&field.value);
+                    if let ast::FieldValue::Chain(chain) = &field.value {
+                        self.visit_chain(chain);
+                    }
+                    // Ripple doesn't introduce variables
                 }
             }
-            ast::Value::FunctionDefinition(func) => {
+            ast::Term::Block(block) => {
+                self.visit_block(&block);
+            }
+            ast::Term::FunctionDefinition(func) => {
                 self.visit_block(&func.body);
             }
-            ast::Value::Block(block) => {
-                self.visit_block(&block);
+            ast::Term::FunctionCall(target) => {
+                if let ast::FunctionCallTarget::Identifier { name, .. } = target {
+                    self.visit_identifier(name);
+                }
+                // Builtins don't reference variables
             }
-            ast::Value::MemberAccess(member_access) => {
+            ast::Term::MemberAccess(member_access) => {
                 if let ast::MemberTarget::Identifier(name) = &member_access.target {
                     self.visit_identifier(name);
                 }
             }
-            ast::Value::Import(_) => {}
-            ast::Value::Builtin(_) => {}
-        }
-    }
-
-    fn visit_operation(&mut self, operation: &ast::Operation) {
-        match operation {
-            ast::Operation::Tuple(tuple) => {
-                for field in &tuple.fields {
-                    self.visit_chain(&field.value);
-                }
-            }
-            ast::Operation::Block(block) => {
-                self.visit_block(&block);
-            }
-            ast::Operation::FunctionCall(member_access) => {
-                if let ast::MemberTarget::Identifier(name) = &member_access.target {
-                    self.visit_identifier(name);
-                }
-            }
-            ast::Operation::FieldAccess(_) => {}
-            ast::Operation::PositionalAccess(_) => {}
-            ast::Operation::TailCall(identifier) => {
+            ast::Term::Import(_) => {}
+            ast::Term::Builtin(_) => {}
+            ast::Term::TailCall(identifier) => {
                 self.visit_identifier(identifier);
             }
-            ast::Operation::Equality => {}
-            ast::Operation::Not => {}
-            ast::Operation::Match(_) => {}
+            ast::Term::Equality => {}
+            ast::Term::Not => {}
+            ast::Term::Partial(_) => {}
+            ast::Term::Star => {}
+            ast::Term::Placeholder => {}
         }
     }
 

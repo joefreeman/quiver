@@ -74,10 +74,10 @@ impl<'a> PatternCompiler<'a> {
         }
     }
 
-    /// Find tuple types that match the given pattern
+    /// Find tuple types that match the given tuple term
     fn find_matching_tuple_types(
         &self,
-        tuple_pattern: &ast::TuplePattern,
+        tuple: &ast::Tuple,
         value_type: &Type,
     ) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
         let mut matching_types = Vec::new();
@@ -89,7 +89,7 @@ impl<'a> PatternCompiler<'a> {
 
         for typ in types_to_check {
             if let Type::Tuple(type_id) = typ {
-                if let Some(field_mappings) = self.check_tuple_match(tuple_pattern, *type_id)? {
+                if let Some(field_mappings) = self.check_tuple_match(tuple, *type_id)? {
                     matching_types.push((*type_id, field_mappings));
                 }
             }
@@ -101,7 +101,7 @@ impl<'a> PatternCompiler<'a> {
     /// Check if a specific tuple type matches the pattern and return field mappings
     fn check_tuple_match(
         &self,
-        tuple_pattern: &ast::TuplePattern,
+        tuple: &ast::Tuple,
         type_id: TypeId,
     ) -> Result<Option<Vec<(usize, usize)>>, Error> {
         let tuple_info = self
@@ -109,16 +109,15 @@ impl<'a> PatternCompiler<'a> {
             .lookup_type(&type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
 
-        if tuple_pattern.name.as_ref() != tuple_info.0.as_ref()
-            || tuple_pattern.fields.len() != tuple_info.1.len()
+        if tuple.name.as_ref() != tuple_info.0.as_ref() || tuple.fields.len() != tuple_info.1.len()
         {
             return Ok(None);
         }
 
         let mut field_mappings = Vec::new();
-        for (pattern_idx, field_pattern) in tuple_pattern.fields.iter().enumerate() {
+        for (pattern_idx, field) in tuple.fields.iter().enumerate() {
             let tuple_field = &tuple_info.1[pattern_idx];
-            if field_pattern.name.as_ref() != tuple_field.0.as_ref() {
+            if field.name.as_ref() != tuple_field.0.as_ref() {
                 return Ok(None);
             }
 
@@ -133,11 +132,11 @@ impl<'a> PatternCompiler<'a> {
     /// Main entry point for pattern matching compilation
     pub fn compile_pattern_match(
         &mut self,
-        pattern: &ast::Pattern,
+        term: &ast::Term,
         value_type: &Type,
         fail_addr: usize,
     ) -> Result<(MatchCertainty, Vec<(String, Type)>), Error> {
-        let binding_sets = self.analyze_pattern(pattern, value_type, vec![])?;
+        let binding_sets = self.analyze_term(term, value_type, vec![])?;
 
         if binding_sets.is_empty() {
             return Ok((MatchCertainty::WontMatch, Vec::new()));
@@ -169,28 +168,30 @@ impl<'a> PatternCompiler<'a> {
         Ok((certainty, all_bindings))
     }
 
-    fn analyze_pattern(
+    fn analyze_term(
         &self,
-        pattern: &ast::Pattern,
+        term: &ast::Term,
         value_type: &Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
-        match pattern {
-            ast::Pattern::Literal(literal) => self.analyze_literal_pattern(literal.clone(), path),
-            ast::Pattern::Identifier(name) => {
+        match term {
+            ast::Term::Literal(literal) => self.analyze_literal_pattern(literal.clone(), path),
+            ast::Term::Identifier(name) => {
                 self.analyze_identifier_pattern(name.clone(), value_type.clone(), path)
             }
-            ast::Pattern::Placeholder => Ok(vec![BindingSet {
+            ast::Term::Placeholder => Ok(vec![BindingSet {
                 requirements: vec![],
                 bindings: vec![],
             }]),
-            ast::Pattern::Tuple(tuple_pattern) => {
-                self.analyze_tuple_pattern(tuple_pattern, value_type, path)
-            }
-            ast::Pattern::Partial(partial_pattern) => {
+            ast::Term::Tuple(tuple) => self.analyze_tuple_pattern(tuple, value_type, path),
+            ast::Term::Partial(partial_pattern) => {
                 self.analyze_partial_pattern(partial_pattern, value_type, path)
             }
-            ast::Pattern::Star => self.analyze_star_pattern(value_type, path),
+            ast::Term::Star => self.analyze_star_pattern(value_type, path),
+            _ => Err(Error::FeatureUnsupported(format!(
+                "Term cannot be used as pattern: {:?}",
+                term
+            ))),
         }
     }
 
@@ -238,14 +239,14 @@ impl<'a> PatternCompiler<'a> {
 
     fn analyze_tuple_pattern(
         &self,
-        tuple_pattern: &ast::TuplePattern,
+        tuple: &ast::Tuple,
         value_type: &Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
         let mut binding_sets = vec![];
 
         // Collect matching types with their field mappings
-        let matching_types = self.find_matching_tuple_types(tuple_pattern, value_type)?;
+        let matching_types = self.find_matching_tuple_types(tuple, value_type)?;
 
         // For each matching type, create binding sets
         for (type_id, field_mappings) in &matching_types {
@@ -275,7 +276,7 @@ impl<'a> PatternCompiler<'a> {
 
             // Process each field pattern
             for (pattern_idx, actual_idx) in field_mappings {
-                let field_pattern = &tuple_pattern.fields[*pattern_idx].pattern;
+                let field = &tuple.fields[*pattern_idx];
                 let raw_field_type = &tuple_fields[*actual_idx];
 
                 // Resolve Type::Cycle references to the actual type
@@ -290,9 +291,28 @@ impl<'a> PatternCompiler<'a> {
                 let mut field_path = path.clone();
                 field_path.push(*actual_idx);
 
+                // Extract the term from the field value
+                let field_term = match &field.value {
+                    ast::FieldValue::Ripple => {
+                        // Ripple in pattern doesn't make sense
+                        return Err(Error::FeatureUnsupported(
+                            "Ripple (~) cannot be used in pattern".to_string(),
+                        ));
+                    }
+                    ast::FieldValue::Chain(chain) => {
+                        // For patterns, we need a single term
+                        if chain.terms.len() == 1 {
+                            &chain.terms[0]
+                        } else {
+                            return Err(Error::FeatureUnsupported(
+                                "Multi-term chain in pattern".to_string(),
+                            ));
+                        }
+                    }
+                };
+
                 // Recursively analyze the field pattern
-                let field_binding_sets =
-                    self.analyze_pattern(field_pattern, &field_type, field_path)?;
+                let field_binding_sets = self.analyze_term(field_term, &field_type, field_path)?;
 
                 if field_binding_sets.is_empty() {
                     // This type variant can't match, skip it entirely
@@ -327,8 +347,8 @@ impl<'a> PatternCompiler<'a> {
         if matches!(&value_type, Type::Union(types) if types.is_empty()) {
             return Err(Error::InternalError {
                 message: format!(
-                    "analyze_tuple_pattern received empty Type for pattern: {:?}",
-                    tuple_pattern
+                    "analyze_tuple_pattern received empty Type for tuple: {:?}",
+                    tuple
                 ),
             });
         }
