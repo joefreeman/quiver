@@ -66,7 +66,6 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Value::Import(_) => {}
-            ast::Value::Match(_) => {}
         }
     }
 

@@ -291,7 +291,7 @@ fn test_concat() {
         .evaluate(
             r#"
             %"list" ~> list,
-            [] ~> list.new ~> first,
+            [] ~> list.new! ~> first,
             []
             ~> list.new!
             ~> [~, 30]

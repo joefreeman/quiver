@@ -412,68 +412,45 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_match(&mut self, pattern: ast::Pattern, value_type: Type) -> Result<Type, Error> {
-        // Duplicate the value on the stack for pattern matching
-        self.codegen.add_instruction(Instruction::Duplicate);
+        let start_jump_addr = self.codegen.emit_jump_placeholder();
+        let fail_jump_addr = self.codegen.emit_jump_placeholder();
 
-        // Try to match the pattern against the value
-        let match_success_addr = self.codegen.emit_jump_placeholder();
+        self.codegen.patch_jump_to_here(start_jump_addr);
 
-        // Pattern matching - if it fails, we jump here (to cleanup section)
-        let cleanup_jump_addr = self.codegen.emit_jump_placeholder();
-
-        // Pattern matching success - if it succeeds, we jump here
-        self.codegen.patch_jump_to_here(match_success_addr);
-
-        // Attempt pattern matching
+        let mut pattern_compiler =
+            PatternCompiler::new(&mut self.codegen, &mut self.type_context, self.vm);
         let (certainty, bindings) =
-            self.compile_pattern_match(&pattern, &value_type, cleanup_jump_addr)?;
+            pattern_compiler.compile_pattern_match(&pattern, &value_type, fail_jump_addr)?;
 
         match certainty {
             MatchCertainty::WontMatch => {
-                // Pattern definitely won't match - cleanup directly
-                self.codegen.emit_pattern_match_cleanup(0);
+                self.codegen.add_instruction(Instruction::Pop);
+                self.codegen
+                    .add_instruction(Instruction::Tuple(TypeId::NIL));
                 Ok(Type::nil())
             }
             MatchCertainty::WillMatch | MatchCertainty::MightMatch => {
-                // Pattern can or will match - generate assignment code
-
-                // Pattern matched successfully - commit all variable assignments
-                self.codegen.emit_pattern_match_success(&bindings);
-                for (name, var_type) in &bindings {
-                    self.define_variable(name, var_type.clone());
+                for (variable_name, variable_type) in &bindings {
+                    self.define_variable(&variable_name, variable_type.clone());
                 }
+                self.codegen.add_instruction(Instruction::Pop);
+                self.codegen.add_instruction(Instruction::Tuple(TypeId::OK));
+                let success_jump_addr = self.codegen.emit_jump_placeholder();
 
-                // Jump to end
-                let success_end_jump_addr = self.codegen.emit_jump_placeholder();
+                self.codegen.patch_jump_to_here(fail_jump_addr);
+                self.codegen.add_instruction(Instruction::Pop);
+                self.codegen
+                    .add_instruction(Instruction::Tuple(TypeId::NIL));
 
-                // Cleanup section - if pattern matching failed, we come here
-                self.codegen.patch_jump_to_here(cleanup_jump_addr);
-                self.codegen.emit_pattern_match_cleanup(bindings.len());
+                self.codegen.patch_jump_to_here(success_jump_addr);
 
-                // End of assignment
-                self.codegen.patch_jump_to_here(success_end_jump_addr);
-
-                // Return type based on match certainty
-                match certainty {
-                    MatchCertainty::WillMatch => Ok(Type::ok()),
-                    MatchCertainty::MightMatch => {
-                        Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
-                    }
-                    MatchCertainty::WontMatch => unreachable!(), // Already handled above
+                if certainty == MatchCertainty::WillMatch {
+                    Ok(Type::ok())
+                } else {
+                    Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
                 }
             }
         }
-    }
-
-    fn compile_pattern_match(
-        &mut self,
-        pattern: &ast::Pattern,
-        value_type: &Type,
-        fail_addr: usize,
-    ) -> Result<(MatchCertainty, Vec<(String, Type)>), Error> {
-        let mut pattern_compiler =
-            PatternCompiler::new(&mut self.codegen, &mut self.type_context, self.vm);
-        pattern_compiler.compile_pattern_match(pattern, value_type, fail_addr)
     }
 
     fn compile_block(&mut self, block: ast::Block, parameter_type: Type) -> Result<Type, Error> {
@@ -652,11 +629,6 @@ impl<'a> Compiler<'a> {
                 parameter_type.clone(),
             ),
             Some(ast::Value::Import(path)) => self.compile_value_import(&path),
-            Some(ast::Value::Match(pattern)) => {
-                // When match appears at the value position, it matches the block parameter
-                self.codegen.add_instruction(Instruction::Parameter);
-                self.compile_match(pattern, parameter_type.clone())
-            }
             None => {
                 // No value means use the block parameter
                 self.codegen.add_instruction(Instruction::Parameter);

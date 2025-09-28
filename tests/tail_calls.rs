@@ -35,7 +35,7 @@ fn test_factorial() {
         .evaluate(
             r#"
             #[int, int] {
-              | [x, y] => [x, 1] ~> <compare> ~> { -1 => Ok | 0 => Ok } => y
+              | [1, y] => y
               | [x, y] => [[x, 1] ~> <subtract>, [x, y] ~> <multiply>] ~> &
             } ~> f,
             #int { x => [x, 1] ~> f! } ~> fact,

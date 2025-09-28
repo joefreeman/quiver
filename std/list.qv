@@ -1,6 +1,7 @@
-%"math" ~> math;
 
 type list = Nil | Cons[int, list];
+
+%"math" ~> math,
 
 #[list, int] {
   | [Nil, x] => x
@@ -117,4 +118,4 @@ type list = Nil | Cons[int, list];
     | [Cons[head, tail], pred], head ~> pred! => Ok
     | [Cons[_, tail], pred] => [tail, pred] ~> &
   }
-];
+]

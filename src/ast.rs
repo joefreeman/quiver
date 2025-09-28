@@ -52,7 +52,6 @@ pub enum Value {
     Block(Block),
     MemberAccess(MemberAccess),
     Import(String),
-    Match(Pattern),
 }
 
 #[derive(Debug, Clone, PartialEq)]

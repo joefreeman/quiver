@@ -18,6 +18,12 @@ fn test_tuple_destructuring() {
 #[test]
 fn test_named_field_assignment() {
     quiver().evaluate("A[a: 1] ~> A[a: a], a").expect("1");
+    quiver().evaluate("A[a: 1] ~> [a: a], a").expect("[]");
+    quiver()
+        .evaluate("A[a: 1] ~> A[a: a, b: b], a")
+        .expect("[]");
+    quiver().evaluate("A[a: 1] ~> A[x: a], a").expect("[]");
+    quiver().evaluate("A[a: 1] ~> A[a], a").expect("[]");
 }
 
 #[test]
@@ -106,9 +112,7 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            #[a: int, b: int] {
-              (a, b) => [a, b]
-            } ~> f,
+            #[a: int, b: int] { (a, b) => [a, b] } ~> f,
             [a: 1, b: 2] ~> f!
             "#,
         )
@@ -118,13 +122,37 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             type union = [a: int, b: int] | [x: int];
-            #union {
-              (a, b) => [a, b]
-            } ~> f,
-            [a: 1, b: 2] ~> f!
+            #union { (a, b) => [a, b] } ~> f,
+            [a: 1, b: 2] ~> f! ~> b1,
+            [x: 3] ~> f! ~> b2,
+            [b1, b2]
             "#,
         )
-        .expect("[1, 2]");
+        .expect("[[1, 2], []]");
+
+    quiver()
+        .evaluate(
+            r#"
+            type union = [a: int, b: int] | [b: int, c: int];
+            #union { (b) => b } ~> f,
+            [a: 1, b: 2] ~> f! ~> b1,
+            [b: 3, c: 4] ~> f! ~> b2,
+            [b1, b2]
+            "#,
+        )
+        .expect("[2, 3]");
+
+    quiver()
+        .evaluate(
+            r#"
+            type union = [a: int, b: int] | [b: int, c: int];
+            #union { (a, b) => [a, b] } ~> f,
+            [a: 1, b: 2] ~> f! ~> b1,
+            [b: 3, c: 4] ~> f! ~> b2,
+            [b1, b2]
+            "#,
+        )
+        .expect("[[1, 2], []]");
 }
 
 #[test]
