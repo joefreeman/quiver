@@ -17,3 +17,10 @@ fn test_member_access_chaining() {
 fn test_nested_tupple_construction() {
     quiver().evaluate("42 ~> A[B[C[~]]]").expect("A[B[C[42]]]");
 }
+
+#[test]
+fn test_nested_ripple_contexts() {
+    quiver()
+        .evaluate("1 ~> [2 ~> [~, ~], ~]")
+        .expect("[[2, 2], 1]");
+}

@@ -139,6 +139,9 @@ pub struct Compiler<'a> {
 
     // Parameter field tracking for nested function definitions
     parameter_fields_stack: Vec<HashMap<String, (usize, Type)>>,
+
+    // Counter for nested ripple contexts in tuple construction
+    ripple_depth: usize,
 }
 
 impl<'a> Compiler<'a> {
@@ -161,6 +164,7 @@ impl<'a> Compiler<'a> {
             module_loader,
             module_path,
             parameter_fields_stack: Vec::new(),
+            ripple_depth: 0,
         };
 
         for (name, value) in existing_variables {
@@ -297,8 +301,11 @@ impl<'a> Compiler<'a> {
         // The parser ensures only tuples with ripples are parsed as Operation::Tuple
         // so we don't need to check for ripples here
 
+        // Use a unique variable name for each ripple context to avoid conflicts
+        let ripple_var_name = format!("~{}", self.ripple_depth);
+        self.ripple_depth += 1;
         self.codegen
-            .add_instruction(Instruction::Store("~".to_string()));
+            .add_instruction(Instruction::Store(ripple_var_name.clone()));
 
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
@@ -315,6 +322,9 @@ impl<'a> Compiler<'a> {
 
             field_types.push((field.name.clone(), field_type));
         }
+
+        // Pop the ripple context
+        self.ripple_depth -= 1;
 
         // Register the tuple type with potentially union field types
         let type_id = self.vm.register_type(name, field_types);
@@ -627,8 +637,10 @@ impl<'a> Compiler<'a> {
             }
             ast::ChainInput::Ripple => {
                 // Use the ripple value from the enclosing context
+                // ripple_depth - 1 because we incremented it when storing
+                let ripple_var_name = format!("~{}", self.ripple_depth - 1);
                 self.codegen
-                    .add_instruction(Instruction::Load("~".to_string()));
+                    .add_instruction(Instruction::Load(ripple_var_name));
                 Ok(input_type.clone())
             }
         }?;
