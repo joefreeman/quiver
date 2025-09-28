@@ -123,7 +123,7 @@ pub enum Pattern {
     Literal(Literal),
     Identifier(String),
     Tuple(TuplePattern),
-    Partial(Vec<String>),
+    Partial(PartialPattern),
     Star,
     Placeholder,
 }
@@ -132,6 +132,12 @@ pub enum Pattern {
 pub struct TuplePattern {
     pub name: Option<String>,
     pub fields: Vec<PatternField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartialPattern {
+    pub name: Option<String>,
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

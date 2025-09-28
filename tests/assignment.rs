@@ -41,6 +41,43 @@ fn test_partial_tuple_assignment() {
 }
 
 #[test]
+fn test_named_partial_pattern() {
+    quiver()
+        .evaluate("A[x: 1, y: 2, z: 3] ~> A(x, z), [x, z]")
+        .expect("[1, 3]");
+    quiver().evaluate("A[x: 1, y: 2] ~> B(x, y)").expect("[]");
+}
+
+#[test]
+fn test_named_partial_pattern_with_union() {
+    quiver()
+        .evaluate(
+            r#"
+            type union = A[x: int, y: int] | B[x: int, z: int];
+            #union { A(x) => x } ~> f,
+            A[x: 1, y: 2] ~> f! ~> a,
+            B[x: 3, z: 4] ~> f! ~> b,
+            [a, b]
+            "#,
+        )
+        .expect("[1, []]");
+}
+
+#[test]
+fn test_named_partial_pattern_in_block() {
+    quiver()
+        .evaluate(
+            r#"
+            A[x: 5, y: 10] ~> {
+              | B(x, y) => 0
+              | A(x, y) => [x, y] ~> <add>
+            }
+            "#,
+        )
+        .expect("15");
+}
+
+#[test]
 fn test_star_assignment() {
     quiver()
         .evaluate("[a: 1, b: 2] ~> *, [a, b] ~> <add>")

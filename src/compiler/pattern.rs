@@ -187,8 +187,8 @@ impl<'a> PatternCompiler<'a> {
             ast::Pattern::Tuple(tuple_pattern) => {
                 self.analyze_tuple_pattern(tuple_pattern, value_type, path)
             }
-            ast::Pattern::Partial(field_names) => {
-                self.analyze_partial_pattern(field_names, value_type, path)
+            ast::Pattern::Partial(partial_pattern) => {
+                self.analyze_partial_pattern(partial_pattern, value_type, path)
             }
             ast::Pattern::Star => self.analyze_star_pattern(value_type, path),
         }
@@ -338,14 +338,18 @@ impl<'a> PatternCompiler<'a> {
 
     fn analyze_partial_pattern(
         &self,
-        field_names: &[String],
+        partial_pattern: &ast::PartialPattern,
         value_type: &Type,
         path: AccessPath,
     ) -> Result<Vec<BindingSet>, Error> {
         let mut binding_sets = vec![];
 
-        // Find types that have all required fields
-        let matching_types = self.find_types_with_fields(field_names, value_type)?;
+        // Find types that have all required fields (and optionally matching tuple name)
+        let matching_types = self.find_types_with_fields_and_name(
+            &partial_pattern.fields,
+            partial_pattern.name.as_ref(),
+            value_type,
+        )?;
 
         // Create a binding set for each matching type
         for (type_id, field_indices) in &matching_types {
@@ -364,7 +368,7 @@ impl<'a> PatternCompiler<'a> {
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
             let mut bindings = Vec::new();
-            for (i, field_name) in field_names.iter().enumerate() {
+            for (i, field_name) in partial_pattern.fields.iter().enumerate() {
                 let idx = field_indices[i];
                 let field_type = &tuple_info.1[idx].1;
                 let mut field_path = path.clone();
@@ -526,10 +530,10 @@ impl<'a> PatternCompiler<'a> {
         Ok(())
     }
 
-    /// Find tuple types that contain all specified fields
-    fn find_types_with_fields(
+    fn find_types_with_fields_and_name(
         &self,
         field_names: &[String],
+        tuple_name: Option<&String>,
         value_type: &Type,
     ) -> Result<Vec<(TypeId, Vec<usize>)>, Error> {
         let mut matching_types = Vec::new();
@@ -545,6 +549,13 @@ impl<'a> PatternCompiler<'a> {
                     .vm
                     .lookup_type(type_id)
                     .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+
+                // Check if tuple name matches (if specified)
+                if let Some(expected_name) = tuple_name {
+                    if tuple_info.0.as_ref() != Some(expected_name) {
+                        continue; // Skip this type if name doesn't match
+                    }
+                }
 
                 if let Some(indices) = self.find_field_indices(field_names, &tuple_info.1) {
                     matching_types.push((*type_id, indices));

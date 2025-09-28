@@ -4,7 +4,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while},
     character::complete::{char, digit1, multispace0, multispace1, satisfy},
-    combinator::{map, map_res, opt, recognize, value as nom_value},
+    combinator::{map, map_res, not, opt, peek, recognize, value as nom_value},
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
 };
@@ -181,14 +181,34 @@ fn pattern_placeholder(input: &str) -> IResult<&str, Pattern> {
 }
 
 fn partial_pattern(input: &str) -> IResult<&str, Pattern> {
-    map(
-        delimited(
-            pair(char('('), ws0),
-            separated_list1(tuple((ws0, char(','), ws1)), identifier),
-            pair(ws0, char(')')),
+    alt((
+        // Named partial pattern: TupleName(field1, field2, ...)
+        map(
+            tuple((
+                tuple_name,
+                delimited(
+                    pair(char('('), ws0),
+                    separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                    pair(ws0, char(')')),
+                ),
+            )),
+            |(name, fields)| {
+                Pattern::Partial(PartialPattern {
+                    name: Some(name),
+                    fields,
+                })
+            },
         ),
-        Pattern::Partial,
-    )(input)
+        // Unnamed partial pattern: (field1, field2, ...)
+        map(
+            delimited(
+                pair(char('('), ws0),
+                separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                pair(ws0, char(')')),
+            ),
+            |fields| Pattern::Partial(PartialPattern { name: None, fields }),
+        ),
+    ))(input)
 }
 
 fn pattern_field(input: &str) -> IResult<&str, PatternField> {
@@ -239,10 +259,17 @@ fn tuple_pattern(input: &str) -> IResult<&str, Pattern> {
                 ),
                 |fields| TuplePattern { name: None, fields },
             ),
-            map(tuple_name, |name| TuplePattern {
-                name: Some(name),
-                fields: vec![],
-            }),
+            // Only parse bare tuple name if not followed by '(' (which would indicate a partial pattern)
+            map(
+                tuple((
+                    tuple_name,
+                    peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
+                )),
+                |(name, _)| TuplePattern {
+                    name: Some(name),
+                    fields: vec![],
+                },
+            ),
         )),
         Pattern::Tuple,
     )(input)
@@ -515,10 +542,17 @@ fn value_tuple(input: &str) -> IResult<&str, Tuple> {
             delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
             |fields| Tuple { name: None, fields },
         ),
-        map(tuple_name, |name| Tuple {
-            name: Some(name),
-            fields: vec![],
-        }),
+        // Only parse bare tuple name if not followed by '(' (which would indicate a partial pattern)
+        map(
+            tuple((
+                tuple_name,
+                peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
+            )),
+            |(name, _)| Tuple {
+                name: Some(name),
+                fields: vec![],
+            },
+        ),
     ))(input)
 }
 
@@ -608,10 +642,17 @@ fn operation_tuple(input: &str) -> IResult<&str, Tuple> {
             ),
             |fields| Tuple { name: None, fields },
         ),
-        map(tuple_name, |name| Tuple {
-            name: Some(name),
-            fields: vec![],
-        }),
+        // Only parse bare tuple name if not followed by '(' (which would indicate a partial pattern)
+        map(
+            tuple((
+                tuple_name,
+                peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
+            )),
+            |(name, _)| Tuple {
+                name: Some(name),
+                fields: vec![],
+            },
+        ),
     ))(input)
 }
 
