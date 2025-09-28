@@ -804,7 +804,7 @@ impl<'a> Compiler<'a> {
                 self.compile_operation_tuple(tuple.name, tuple.fields, value_type, parameter_type)
             }
             ast::Operation::Block(block) => self.compile_block(block, value_type),
-            ast::Operation::MemberAccess(member_access) => self.compile_operation_member_access(
+            ast::Operation::FunctionCall(member_access) => self.compile_function_call(
                 &member_access.target,
                 member_access.accessors,
                 value_type,
@@ -1099,7 +1099,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_member_access(
+    fn compile_function_call(
         &mut self,
         target: &ast::MemberTarget,
         accessors: Vec<ast::AccessPath>,
@@ -1115,21 +1115,13 @@ impl<'a> Compiler<'a> {
                 self.compile_accessor_chain(parameter_type, accessors, "$")?
             }
         };
-        // Use the unified function call handler
-        self.compile_function_call(function_type, value_type)
-    }
 
-    fn compile_function_call(
-        &mut self,
-        operation_type: Type,
-        value_type: Type,
-    ) -> Result<Type, Error> {
-        let func_type = match operation_type {
+        let func_type = match function_type {
             Type::Function(func_type) => func_type,
             _ => {
                 return Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: format!("{:?}", operation_type),
+                    found: format!("{:?}", function_type),
                 });
             }
         };

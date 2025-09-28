@@ -706,7 +706,7 @@ fn operation(input: &str) -> IResult<&str, Operation> {
         operator,
         map(operation_block, Operation::Block), // Use operation_block for parametrized blocks
         // Function calls (must end with !)
-        map(function_call, Operation::MemberAccess),
+        map(function_call, Operation::FunctionCall),
         // Parse tuples specially - check if they contain ripple (~)
         tuple_or_pattern,
         // Simple patterns (identifiers, literals, etc - non-tuples)

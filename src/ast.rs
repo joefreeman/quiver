@@ -58,7 +58,7 @@ pub enum Value {
 pub enum Operation {
     Tuple(OperationTuple),
     Block(Block),
-    MemberAccess(MemberAccess),
+    FunctionCall(MemberAccess),
     FieldAccess(String),
     PositionalAccess(usize),
     TailCall(String),
