@@ -54,7 +54,7 @@ pub struct Chain {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Literal(Literal),
-    Tuple(ValueTuple),
+    Tuple(Tuple),
     FunctionDefinition(FunctionDefinition),
     Block(Block),
     MemberAccess(MemberAccess),
@@ -63,7 +63,7 @@ pub enum Value {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
-    Tuple(OperationTuple),
+    Tuple(Tuple),
     Block(Block),
     FunctionCall(MemberAccess),
     FieldAccess(String),
@@ -83,33 +83,15 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValueTuple {
+pub struct Tuple {
     pub name: Option<String>,
-    pub fields: Vec<ValueTupleField>,
+    pub fields: Vec<TupleField>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValueTupleField {
+pub struct TupleField {
     pub name: Option<String>,
     pub value: Chain,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct OperationTuple {
-    pub name: Option<String>,
-    pub fields: Vec<OperationTupleField>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct OperationTupleField {
-    pub name: Option<String>,
-    pub value: OperationTupleFieldValue,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum OperationTupleFieldValue {
-    Ripple,
-    Chain(Chain),
 }
 
 #[derive(Debug, Clone, PartialEq)]

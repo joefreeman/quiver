@@ -269,7 +269,7 @@ impl<'a> Compiler<'a> {
     fn compile_value_tuple(
         &mut self,
         tuple_name: Option<String>,
-        fields: Vec<ast::ValueTupleField>,
+        fields: Vec<ast::TupleField>,
         parameter_type: Type,
     ) -> Result<Type, Error> {
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
@@ -291,7 +291,7 @@ impl<'a> Compiler<'a> {
     fn compile_operation_tuple(
         &mut self,
         name: Option<String>,
-        fields: Vec<ast::OperationTupleField>,
+        fields: Vec<ast::TupleField>,
         value_type: Type,
         parameter_type: Type,
     ) -> Result<Type, Error> {
@@ -306,23 +306,13 @@ impl<'a> Compiler<'a> {
         // Compile field values and collect their types
         let mut field_types = Vec::new();
         for field in &fields {
-            let field_type = match &field.value {
-                ast::OperationTupleFieldValue::Ripple => {
-                    // TODO: avoid using variable?
-                    self.codegen
-                        .add_instruction(Instruction::Load("~".to_string()));
-                    value_type.clone()
-                }
-                ast::OperationTupleFieldValue::Chain(chain) => {
-                    // Pass the ripple value so nested tuples can access it
-                    // If the chain starts with Ripple, it needs the ripple value
-                    let input_type = match &chain.input {
-                        ast::ChainInput::Ripple => value_type.clone(),
-                        _ => parameter_type.clone(),
-                    };
-                    self.compile_chain(chain.clone(), input_type)?
-                }
+            // Pass the ripple value so nested tuples can access it
+            // If the chain starts with Ripple, it needs the ripple value
+            let input_type = match &field.value.input {
+                ast::ChainInput::Ripple => value_type.clone(),
+                _ => parameter_type.clone(),
             };
+            let field_type = self.compile_chain(field.value.clone(), input_type)?;
 
             field_types.push((field.name.clone(), field_type));
         }

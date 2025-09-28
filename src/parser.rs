@@ -479,79 +479,79 @@ fn import(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
-fn value_tuple_field(input: &str) -> IResult<&str, ValueTupleField> {
+fn tuple_field(input: &str) -> IResult<&str, TupleField> {
     alt((
         map(
             separated_pair(identifier, tuple((char(':'), ws1)), chain),
-            |(name, value)| ValueTupleField {
+            |(name, value)| TupleField {
                 name: Some(name),
                 value,
             },
         ),
-        map(chain, |value| ValueTupleField { name: None, value }),
+        map(chain, |value| TupleField { name: None, value }),
     ))(input)
 }
 
-fn value_tuple_field_list(input: &str) -> IResult<&str, Vec<ValueTupleField>> {
+fn tuple_field_list(input: &str) -> IResult<&str, Vec<TupleField>> {
     terminated(
-        separated_list0(tuple((wsc, char(','), wsc)), value_tuple_field),
+        separated_list0(tuple((wsc, char(','), wsc)), tuple_field),
         opt(pair(wsc, char(','))),
     )(input)
 }
 
-fn value_tuple(input: &str) -> IResult<&str, ValueTuple> {
+fn value_tuple(input: &str) -> IResult<&str, Tuple> {
     alt((
         map(
             tuple((
                 tuple_name,
-                delimited(
-                    pair(char('['), wsc),
-                    value_tuple_field_list,
-                    pair(wsc, char(']')),
-                ),
+                delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
             )),
-            |(name, fields)| ValueTuple {
+            |(name, fields)| Tuple {
                 name: Some(name),
                 fields,
             },
         ),
         map(
-            delimited(
-                pair(char('['), wsc),
-                value_tuple_field_list,
-                pair(wsc, char(']')),
-            ),
-            |fields| ValueTuple { name: None, fields },
+            delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
+            |fields| Tuple { name: None, fields },
         ),
-        map(tuple_name, |name| ValueTuple {
+        map(tuple_name, |name| Tuple {
             name: Some(name),
             fields: vec![],
         }),
     ))(input)
 }
 
-fn operation_tuple_field(input: &str) -> IResult<&str, OperationTupleField> {
+fn operation_tuple_field(input: &str) -> IResult<&str, TupleField> {
     alt((
         map(
             separated_pair(
                 identifier,
                 tuple((char(':'), ws1)),
                 alt((
-                    nom_value(OperationTupleFieldValue::Ripple, char('~')),
-                    map(operation_field_chain, OperationTupleFieldValue::Chain),
+                    // Parse ripple as a chain with no operations
+                    map(char('~'), |_| Chain {
+                        input: ChainInput::Ripple,
+                        operations: vec![],
+                    }),
+                    operation_field_chain,
                 )),
             ),
-            |(name, value)| OperationTupleField {
+            |(name, value)| TupleField {
                 name: Some(name),
                 value,
             },
         ),
         map(
             alt((
-                nom_value(OperationTupleFieldValue::Ripple, char('~')),
-                map(operation_field_chain, OperationTupleFieldValue::Chain),
+                // Parse ripple as a chain with no operations
+                map(char('~'), |_| Chain {
+                    input: ChainInput::Ripple,
+                    operations: vec![],
+                }),
+                operation_field_chain,
             )),
-            |value| OperationTupleField { name: None, value },
+            |value| TupleField { name: None, value },
         ),
     ))(input)
 }
@@ -561,23 +561,30 @@ fn operation_tuple_field(input: &str) -> IResult<&str, OperationTupleField> {
 fn operation_field_chain(input: &str) -> IResult<&str, Chain> {
     alt((
         // Try to parse a tuple construction directly (like B[~])
-        map(operation_tuple, |tuple| Chain {
-            input: ChainInput::Ripple,
-            operations: vec![Operation::Tuple(tuple)],
+        // Only accept if it contains ripples
+        map_res(operation_tuple, |tuple| {
+            if tuple_contains_ripple(&tuple) {
+                Ok(Chain {
+                    input: ChainInput::Ripple,
+                    operations: vec![Operation::Tuple(tuple)],
+                })
+            } else {
+                Err(())
+            }
         }),
         // Otherwise parse a regular chain
         chain,
     ))(input)
 }
 
-fn operation_tuple_field_list(input: &str) -> IResult<&str, Vec<OperationTupleField>> {
+fn operation_tuple_field_list(input: &str) -> IResult<&str, Vec<TupleField>> {
     terminated(
         separated_list0(tuple((wsc, char(','), wsc)), operation_tuple_field),
         opt(pair(wsc, char(','))),
     )(input)
 }
 
-fn operation_tuple(input: &str) -> IResult<&str, OperationTuple> {
+fn operation_tuple(input: &str) -> IResult<&str, Tuple> {
     alt((
         map(
             tuple((
@@ -588,7 +595,7 @@ fn operation_tuple(input: &str) -> IResult<&str, OperationTuple> {
                     pair(wsc, char(']')),
                 ),
             )),
-            |(name, fields)| OperationTuple {
+            |(name, fields)| Tuple {
                 name: Some(name),
                 fields,
             },
@@ -599,9 +606,9 @@ fn operation_tuple(input: &str) -> IResult<&str, OperationTuple> {
                 operation_tuple_field_list,
                 pair(wsc, char(']')),
             ),
-            |fields| OperationTuple { name: None, fields },
+            |fields| Tuple { name: None, fields },
         ),
-        map(tuple_name, |name| OperationTuple {
+        map(tuple_name, |name| Tuple {
             name: Some(name),
             fields: vec![],
         }),
@@ -744,19 +751,20 @@ fn pattern_operation(input: &str) -> IResult<&str, Operation> {
 }
 
 // Check if a tuple contains ripple at any level (including nested tuples)
-fn tuple_contains_ripple(tuple: &OperationTuple) -> bool {
-    tuple.fields.iter().any(|field| match &field.value {
-        OperationTupleFieldValue::Ripple => true,
-        OperationTupleFieldValue::Chain(chain) => {
-            // Check if the chain contains any tuple operations with ripples
-            chain.operations.iter().any(|op| {
-                if let Operation::Tuple(nested_tuple) = op {
-                    tuple_contains_ripple(nested_tuple)
-                } else {
-                    false
-                }
-            })
+fn tuple_contains_ripple(tuple: &Tuple) -> bool {
+    tuple.fields.iter().any(|field| {
+        // Check if this field's chain uses a ripple input
+        if matches!(field.value.input, ChainInput::Ripple) {
+            return true;
         }
+        // Check if any operations in the chain are tuples with ripples
+        field.value.operations.iter().any(|op| {
+            if let Operation::Tuple(nested_tuple) = op {
+                tuple_contains_ripple(nested_tuple)
+            } else {
+                false
+            }
+        })
     })
 }
 

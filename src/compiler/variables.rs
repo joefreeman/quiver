@@ -74,9 +74,7 @@ impl<'a> FreeVariableCollector<'a> {
         match operation {
             ast::Operation::Tuple(tuple) => {
                 for field in &tuple.fields {
-                    if let ast::OperationTupleFieldValue::Chain(chain) = &field.value {
-                        self.visit_chain(chain);
-                    }
+                    self.visit_chain(&field.value);
                 }
             }
             ast::Operation::Block(block) => {
