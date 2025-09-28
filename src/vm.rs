@@ -315,13 +315,16 @@ impl VM {
         self.frames.push(frame);
 
         let result = self.run();
+        let frame = self.frames.pop();
 
-        let frame = self.frames.pop().ok_or(Error::FrameUnderflow)?;
-        if frame.scopes != 1 {
-            return Err(Error::ScopeCountInvalid {
-                expected: 1,
-                found: frame.scopes,
-            });
+        if result.is_ok() {
+            let frame = frame.ok_or(Error::FrameUnderflow)?;
+            if frame.scopes != 1 {
+                return Err(Error::ScopeCountInvalid {
+                    expected: 1,
+                    found: frame.scopes,
+                });
+            }
         }
 
         result
