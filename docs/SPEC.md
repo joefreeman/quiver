@@ -85,17 +85,17 @@ Config[host: "localhost", port: 8080, debug: True] ~> *
 Functions are defined with `#Type { pattern => expression }` syntax:
 ```
 // Single parameter function
-#int { x => [x, 2] ~> math.mul! } ~> double
+#int { ~> [~, 2] ~> math.mul! } ~> double
 
 // Pattern matching function
 #int {
-  | 0 => "zero"
-  | 1 => "one"
-  | n => "other"
+  | ~> 0 => "zero"
+  | ~> 1 => "one"
+  | ~> n => "other"
 } ~> classify
 
 // Multiple parameter function (takes tuple)
-#[int, int] { p => [p.0, p.1] ~> math.add! } ~> add
+#[int, int] { ~> [a, b] => [b, a] } ~> swap
 ```
 
 ### Function Application
@@ -109,30 +109,30 @@ Functions use postfix application:
 Use `&` for tail-recursive calls:
 ```
 #[int, int] {
-  | p, [p.0, 1] ~> math.le! => p.1
-  | p => [[p.0, 1] ~> math.sub!, [p.0, p.1] ~> math.mul!] ~> &
-} ~> factorial_helper
+  | ~> [1, y] => y
+  | ~> [x, y] => [[x, 1] ~> math.sub!, [x, y] ~> math.mul!] ~> &
+} ~> f
 ```
 
 Named tail calls to other functions:
 ```
-#int { x => [x, 1] ~> &factorial_helper } ~> factorial
+#int { ~> x => [x, 1] ~> &f } ~> fact
 ```
 
 ## Pattern Matching
 
-Blocks use `{ pattern => expression }` syntax with multiple branches:
+Blocks use `{ condition => consequence }` syntax with multiple branches:
 ```
 value ~> {
-  | 0 => "zero"
-  | n, [n, 0] ~> math.gt! => "positive"
-  | _ => "negative"
+  | ~> 0 => "zero"
+  | ~> [~, 0] ~> math.gt! => "positive"
+  | "negative"
 }
 ```
 
 Guards can be added with comma-separated conditions:
 ```
-{ x, [x, 10] ~> math.gt! => "large" | x => "small" }
+{ ~> x, [x, 10] ~> math.gt! => "large" | "small" }
 ```
 
 ## Field Access
@@ -220,7 +220,7 @@ Point[x: 5, y: 15] ~> p2,
 
 // Function to add points
 #[Point[x: int, y: int], Point[x: int, y: int]] {
-  [a, b] => Point[
+  ~> [a, b] => Point[
     x: [a.x, b.x] ~> add!,
     y: [a.y, b.y] ~> add!
   ]
@@ -233,9 +233,9 @@ Point[x: 5, y: 15] ~> p2,
 ```
 // Classification function
 #int {
-  | 0 => "zero"
-  | n, [n, 0] ~> math.gt! => "positive"
-  | _ => "negative"
+  | ~> 0 => "zero"
+  | ~> [~, 0] ~> math.gt! => "positive"
+  | "negative"
 } ~> classify,
 
 5 ~> classify!,    // "positive"
@@ -247,9 +247,9 @@ Point[x: 5, y: 15] ~> p2,
 ```
 // Sign function using guards
 #int {
-  | x, [x, 0] ~> math.gt! => 1
-  | x, [x, 0] ~> math.lt! => -1
-  | _ => 0
+  | ~> [~, 0] ~> math.gt! => 1
+  | ~> [~, 0] ~> math.lt! => -1
+  | 0
 } ~> sign,
 
 // Using with pipeline
@@ -260,9 +260,12 @@ Point[x: 5, y: 15] ~> p2,
 ```
 // math.qv
 [
-  add: #[int, int] { p => [p.0, p.1] ~> <add> },
-  mul: #[int, int] { p => [p.0, p.1] ~> <mul> },
-  abs: #int { x, [x, 0] ~> <lt> => [0, x] ~> <sub> | x => x }
+  add: #[int, int] { ~> p => [p.0, p.1] ~> <add> },
+  mul: #[int, int] { ~> p => [p.0, p.1] ~> <mul> },
+  abs: #int {
+    | ~> x, [x, 0] ~> <lt> => [0, x] ~> <sub>
+    | ~> x => x
+  }
 ]
 
 // main.qv
