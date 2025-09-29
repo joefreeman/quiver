@@ -381,7 +381,7 @@ impl<'a> Compiler<'a> {
         Ok(Type::Tuple(type_id))
     }
 
-    fn compile_function_definition(
+    fn compile_function(
         &mut self,
         function_definition: ast::FunctionDefinition,
     ) -> Result<Type, Error> {
@@ -764,7 +764,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_value_import(&mut self, module_path: &str) -> Result<Type, Error> {
+    fn compile_import(&mut self, module_path: &str) -> Result<Type, Error> {
         // Check for circular imports
         if self
             .module_cache
@@ -784,7 +784,7 @@ impl<'a> Compiler<'a> {
         } else {
             // Add to import stack to track circular imports
             self.module_cache.import_stack.push(module_path.to_string());
-            let value = self.import_module_internal(module_path)?;
+            let value = self.import_module(module_path)?;
             self.module_cache.import_stack.pop();
 
             // Cache the evaluated module
@@ -799,7 +799,7 @@ impl<'a> Compiler<'a> {
         self.value_to_instructions(&value)
     }
 
-    fn import_module_internal(&mut self, module_path: &str) -> Result<Value, Error> {
+    fn import_module(&mut self, module_path: &str) -> Result<Value, Error> {
         // Parse the module
         let parsed = self.module_cache.load_and_cache_ast(
             module_path,
@@ -901,16 +901,16 @@ impl<'a> Compiler<'a> {
                         "Function definition cannot be applied to value".to_string(),
                     ));
                 }
-                self.compile_function_definition(func_def)
+                self.compile_function(func_def)
             }
-            ast::Term::FunctionCall(target) => self.compile_function_call(target, value_type),
+            ast::Term::FunctionCall(target) => self.compile_call(target, value_type),
             ast::Term::MemberAccess(member_access) => {
                 match &member_access.identifier {
                     None => {
                         // Field/positional access (.x, .0) requires a value
                         if let Some(val_type) = value_type {
                             // Access on the piped value
-                            self.compile_accessor_chain(val_type, member_access.accessors, "value")
+                            self.compile_accessor(val_type, member_access.accessors, "value")
                         } else {
                             return Err(Error::FeatureUnsupported(
                                 "Field/positional access requires a value".to_string(),
@@ -925,7 +925,7 @@ impl<'a> Compiler<'a> {
                         }
                         // Load variable or access its members
                         let target_type = self.compile_target_access(name)?;
-                        self.compile_accessor_chain(target_type, member_access.accessors, name)
+                        self.compile_accessor(target_type, member_access.accessors, name)
                     }
                 }
             }
@@ -935,7 +935,7 @@ impl<'a> Compiler<'a> {
                         "Import cannot be applied to value".to_string(),
                     ));
                 }
-                self.compile_value_import(&path)
+                self.compile_import(&path)
             }
             ast::Term::Builtin(name) => {
                 if value_type.is_some() {
@@ -943,7 +943,7 @@ impl<'a> Compiler<'a> {
                         "Builtin cannot be applied to value".to_string(),
                     ));
                 }
-                self.compile_value_builtin(&name)
+                self.compile_builtin(&name)
             }
             ast::Term::TailCall(identifier) => {
                 if value_type.is_none() {
@@ -951,19 +951,19 @@ impl<'a> Compiler<'a> {
                         "Tail call requires a value".to_string(),
                     ));
                 }
-                self.compile_operation_tail_call(&identifier)
+                self.compile_tail_call(&identifier)
             }
             ast::Term::Equality => {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Equality operator requires a value".to_string())
                 })?;
-                self.compile_operation_equality(val_type)
+                self.compile_equality(val_type)
             }
             ast::Term::Not => {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Not operator requires a value".to_string())
                 })?;
-                self.compile_operation_not(val_type)
+                self.compile_not(val_type)
             }
             ast::Term::Partial(_) | ast::Term::Star | ast::Term::Placeholder => {
                 // These are always patterns
@@ -975,7 +975,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_function_call(
+    fn compile_call(
         &mut self,
         target: ast::FunctionCallTarget,
         value_type: Option<Type>,
@@ -989,9 +989,9 @@ impl<'a> Compiler<'a> {
 
         // Get the function type based on the target
         let function_type = match target {
-            ast::FunctionCallTarget::Builtin(name) => self.compile_value_builtin(&name)?,
+            ast::FunctionCallTarget::Builtin(name) => self.compile_builtin(&name)?,
             ast::FunctionCallTarget::Identifier { name, accessors } => {
-                self.compile_member_access_chain(&name, accessors)?
+                self.compile_member_access(&name, accessors)?
             }
         };
 
@@ -1022,7 +1022,7 @@ impl<'a> Compiler<'a> {
         Ok(func_type.result)
     }
 
-    fn compile_operation_tail_call(&mut self, identifier: &str) -> Result<Type, Error> {
+    fn compile_tail_call(&mut self, identifier: &str) -> Result<Type, Error> {
         if identifier.is_empty() {
             self.codegen.add_instruction(Instruction::TailCall(true));
             Ok(Type::Union(vec![]))
@@ -1042,7 +1042,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_value_builtin(&mut self, name: &str) -> Result<Type, Error> {
+    fn compile_builtin(&mut self, name: &str) -> Result<Type, Error> {
         let (param_type, result_type) = BUILTIN_REGISTRY
             .resolve_signature(name, self.vm)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
@@ -1058,7 +1058,7 @@ impl<'a> Compiler<'a> {
         })))
     }
 
-    fn compile_operation_equality(&mut self, value_type: Type) -> Result<Type, Error> {
+    fn compile_equality(&mut self, value_type: Type) -> Result<Type, Error> {
         // The == operator works with a tuple on the stack
         // We need to extract the tuple elements and call Equal(count)
 
@@ -1138,7 +1138,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_operation_not(&mut self, _value_type: Type) -> Result<Type, Error> {
+    fn compile_not(&mut self, _value_type: Type) -> Result<Type, Error> {
         // The ! operator works with any value on the stack
         // It converts [] to Ok and everything else to []
         self.codegen.add_instruction(Instruction::Not);
@@ -1168,7 +1168,7 @@ impl<'a> Compiler<'a> {
         Err(Error::VariableUndefined(target.to_string()))
     }
 
-    fn compile_accessor_chain(
+    fn compile_accessor(
         &mut self,
         mut last_type: Type,
         accessors: Vec<ast::AccessPath>,
@@ -1218,7 +1218,7 @@ impl<'a> Compiler<'a> {
         Ok(last_type)
     }
 
-    fn compile_member_access_chain(
+    fn compile_member_access(
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
@@ -1229,7 +1229,7 @@ impl<'a> Compiler<'a> {
             .lookup_variable(target)
             .ok_or(Error::VariableUndefined(target.to_string()))?;
 
-        self.compile_accessor_chain(last_type, accessors, target)
+        self.compile_accessor(last_type, accessors, target)
     }
 
     fn define_variable(&mut self, name: &str, var_type: Type) {
