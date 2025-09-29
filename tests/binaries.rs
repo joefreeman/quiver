@@ -23,7 +23,9 @@ fn test_binary_inequality_content() {
     quiver()
         .evaluate("['68656c6c6f', '776f726c64'] ~> ==")
         .expect("[]");
-    quiver().evaluate("['61626364', '65666768'] ~> ==").expect("[]");
+    quiver()
+        .evaluate("['61626364', '65666768'] ~> ==")
+        .expect("[]");
 }
 
 #[test]
@@ -133,13 +135,6 @@ fn test_empty_binary() {
         .evaluate("0 ~> <binary_new>! ~> <binary_length>!")
         .expect("0");
     quiver().evaluate("'' ~> <binary_length>!").expect("0");
-}
-
-#[test]
-fn test_binary_print() {
-    // Test that binaries can be printed (should work with existing IO)
-    quiver().evaluate("'68656c6c6f' ~> <print>!").expect("Ok");
-    quiver().evaluate("'776f726c64' ~> <println>!").expect("Ok");
 }
 
 #[test]

@@ -18,55 +18,67 @@ fn get_binary_bytes_from_ref<'a>(
 }
 
 /// Builtin function: io:print
-/// Prints a value to stdout without a trailing newline
-/// Supports both integers and binary values (interpreted as UTF-8 strings)
+/// Prints a Str[bin] tuple to stdout without a trailing newline
 pub fn builtin_io_print(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
     match arg {
-        Value::Integer(n) => {
-            print!("{}", n);
-            Ok(Value::ok())
-        }
-        Value::Binary(binary_ref) => {
-            if let Some(data) = get_binary_bytes_from_ref(binary_ref, constants) {
-                match std::str::from_utf8(data) {
-                    Ok(s) => print!("{}", s),
-                    Err(_) => print!("<invalid UTF-8 binary>"),
-                }
-            } else {
-                print!("<invalid binary reference>");
+        Value::Tuple(_, fields) => {
+            if fields.len() != 1 {
+                return Err(Error::InvalidArgument(
+                    "print requires a Str tuple with exactly one field".to_string(),
+                ));
             }
-            Ok(Value::ok())
+            match &fields[0] {
+                Value::Binary(binary_ref) => {
+                    if let Some(data) = get_binary_bytes_from_ref(binary_ref, constants) {
+                        match std::str::from_utf8(data) {
+                            Ok(s) => print!("{}", s),
+                            Err(_) => print!("<invalid UTF-8>"),
+                        }
+                    } else {
+                        print!("<invalid binary reference>");
+                    }
+                    Ok(Value::ok())
+                }
+                _ => Err(Error::InvalidArgument(
+                    "print requires a Str tuple containing a binary".to_string(),
+                )),
+            }
         }
-        other => {
-            print!("{}", other);
-            Ok(Value::ok())
-        }
+        _ => Err(Error::InvalidArgument(
+            "print requires a Str tuple".to_string(),
+        )),
     }
 }
 
 /// Builtin function: io:println
-/// Prints a value to stdout with a trailing newline
-/// Supports both integers and binary values (interpreted as UTF-8 strings)
+/// Prints a Str[bin] tuple to stdout with a trailing newline
 pub fn builtin_io_println(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
     match arg {
-        Value::Integer(n) => {
-            println!("{}", n);
-            Ok(Value::ok())
-        }
-        Value::Binary(binary_ref) => {
-            if let Some(data) = get_binary_bytes_from_ref(binary_ref, constants) {
-                match std::str::from_utf8(data) {
-                    Ok(s) => println!("{}", s),
-                    Err(_) => println!("<invalid UTF-8 binary>"),
-                }
-            } else {
-                println!("<invalid binary reference>");
+        Value::Tuple(_, fields) => {
+            if fields.len() != 1 {
+                return Err(Error::InvalidArgument(
+                    "println requires a Str tuple with exactly one field".to_string(),
+                ));
             }
-            Ok(Value::ok())
+            match &fields[0] {
+                Value::Binary(binary_ref) => {
+                    if let Some(data) = get_binary_bytes_from_ref(binary_ref, constants) {
+                        match std::str::from_utf8(data) {
+                            Ok(s) => println!("{}", s),
+                            Err(_) => println!("<invalid UTF-8>"),
+                        }
+                    } else {
+                        println!("<invalid binary reference>");
+                    }
+                    Ok(Value::ok())
+                }
+                _ => Err(Error::InvalidArgument(
+                    "println requires a Str tuple containing a binary".to_string(),
+                )),
+            }
         }
-        other => {
-            println!("{}", other);
-            Ok(Value::ok())
-        }
+        _ => Err(Error::InvalidArgument(
+            "println requires a Str tuple".to_string(),
+        )),
     }
 }
