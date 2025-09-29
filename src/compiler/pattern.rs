@@ -491,11 +491,6 @@ impl<'a> PatternCompiler<'a> {
                                     self.vm.register_constant(Constant::Binary(bytes.clone()));
                                 self.codegen.add_instruction(Instruction::Constant(idx));
                             }
-                            ast::Literal::String(s) => {
-                                let bytes = s.as_bytes().to_vec();
-                                let idx = self.vm.register_constant(Constant::Binary(bytes));
-                                self.codegen.add_instruction(Instruction::Constant(idx));
-                            }
                         }
 
                         self.codegen.add_instruction(Instruction::Equal(2));

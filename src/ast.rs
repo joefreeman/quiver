@@ -76,7 +76,6 @@ pub enum Term {
 pub enum Literal {
     Integer(i64),
     Binary(Vec<u8>),
-    String(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -124,14 +124,28 @@ fn binary_literal(input: &str) -> IResult<&str, Literal> {
     )(input)
 }
 
-fn string_literal(input: &str) -> IResult<&str, Literal> {
+fn string_term(input: &str) -> IResult<&str, Term> {
     map(
         delimited(
             char('"'),
             map_res(take_while(|c| c != '"'), |s: &str| parse_string_content(s)),
             char('"'),
         ),
-        Literal::String,
+        |s: String| {
+            // Convert string to binary bytes
+            let bytes = s.into_bytes();
+            // Create a Str tuple with the binary as its single field
+            Term::Tuple(Tuple {
+                name: Some("Str".to_string()),
+                fields: vec![TupleField {
+                    name: None,
+                    value: FieldValue::Chain(Chain {
+                        terms: vec![Term::Literal(Literal::Binary(bytes))],
+                        continuation: false,
+                    }),
+                }],
+            })
+        },
     )(input)
 }
 
@@ -159,7 +173,7 @@ fn parse_string_content(s: &str) -> Result<String, Error> {
 }
 
 fn literal(input: &str) -> IResult<&str, Literal> {
-    alt((integer_literal, binary_literal, string_literal))(input)
+    alt((integer_literal, binary_literal))(input)
 }
 
 // Pattern parsers for terms
@@ -541,6 +555,8 @@ fn not_term(input: &str) -> IResult<&str, Term> {
 
 fn term(input: &str) -> IResult<&str, Term> {
     alt((
+        // String terms (before literals to handle quotes)
+        string_term,
         // Literals
         map(literal, Term::Literal),
         // Complex terms

@@ -265,12 +265,6 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Constant(index));
                 Ok(Type::Binary)
             }
-            ast::Literal::String(string) => {
-                let bytes = string.as_bytes().to_vec();
-                let index = self.vm.register_constant(Constant::Binary(bytes));
-                self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Binary)
-            }
         }
     }
 

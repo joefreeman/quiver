@@ -434,6 +434,57 @@ fn format_type(types: &HashMap<TypeId, TupleTypeInfo>, type_def: &Type) -> Strin
     }
 }
 
+fn try_format_as_string(quiver: &Quiver, elements: &[Value]) -> Option<String> {
+    let [Value::Binary(binary_ref)] = elements else {
+        return None;
+    };
+
+    let bytes = quiver.get_binary_bytes(binary_ref).ok()?;
+    let s = String::from_utf8(bytes).ok()?;
+
+    if s.contains('\0')
+        || !s
+            .chars()
+            .any(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+    {
+        return None;
+    }
+
+    let escaped = s
+        .chars()
+        .map(|ch| match ch {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
+            c => c.to_string(),
+        })
+        .collect::<String>();
+
+    Some(format!("\"{}\"", escaped))
+}
+
+fn format_tuple_elements(
+    quiver: &Quiver,
+    elements: &[Value],
+    fields: &[(Option<String>, Type)],
+) -> String {
+    elements
+        .iter()
+        .enumerate()
+        .map(|(i, elem)| {
+            let formatted = format_value(quiver, elem);
+            match fields.get(i).and_then(|(name, _)| name.as_ref()) {
+                Some(name) => format!("{}: {}", name, formatted),
+                None => formatted,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn format_value(quiver: &Quiver, value: &Value) -> String {
     match value {
         Value::Function { function, .. } => {
@@ -449,47 +500,27 @@ fn format_value(quiver: &Quiver, value: &Value) -> String {
         }
         Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
-        Value::Binary(binary_ref) => {
-            // Get the actual bytes from the binary reference
-            match quiver.get_binary_bytes(binary_ref) {
-                Ok(bytes) => format_binary(&bytes),
-                Err(_) => "'<error>'".to_string(),
-            }
-        }
+        Value::Binary(binary_ref) => match quiver.get_binary_bytes(binary_ref) {
+            Ok(bytes) => format_binary(&bytes),
+            Err(_) => "'<error>'".to_string(),
+        },
         Value::Tuple(type_id, elements) => {
             if let Some((name, fields)) = quiver.lookup_type(type_id) {
-                if elements.is_empty() {
-                    return name.as_deref().unwrap_or("[]").to_string();
-                }
-
-                let prefix = if let Some(type_name) = name {
-                    format!("{}[", type_name)
-                } else {
-                    "[".to_string()
-                };
-
-                let mut result = prefix;
-                for (i, element) in elements.iter().enumerate() {
-                    if i > 0 {
-                        result.push_str(", ");
-                    }
-
-                    if i < fields.len() {
-                        if let Some(field_name) = &fields[i].0 {
-                            result.push_str(&format!(
-                                "{}: {}",
-                                field_name,
-                                format_value(quiver, element)
-                            ));
-                        } else {
-                            result.push_str(&format_value(quiver, element));
-                        }
-                    } else {
-                        result.push_str(&format_value(quiver, element));
+                if name.as_deref() == Some("Str") {
+                    if let Some(formatted) = try_format_as_string(quiver, elements) {
+                        return formatted;
                     }
                 }
-                result.push(']');
-                result
+
+                match (name.as_deref(), elements.is_empty()) {
+                    (_, true) => name.as_deref().unwrap_or("[]").to_string(),
+                    (Some(n), false) => {
+                        format!("{}[{}]", n, format_tuple_elements(quiver, elements, fields))
+                    }
+                    (None, false) => {
+                        format!("[{}]", format_tuple_elements(quiver, elements, fields))
+                    }
+                }
             } else {
                 let type_name = format!("Type{}", type_id.0);
                 if elements.is_empty() {
