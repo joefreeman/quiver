@@ -9,16 +9,10 @@ fn test_binary_literal_constant() {
 }
 
 #[test]
-fn test_string_literal_constant() {
-    // Test that string literals create constant references
-    quiver().evaluate("\"hello\"").expect("'68656c6c6f'");
-}
-
-#[test]
 fn test_binary_equality_content() {
     // Test that binaries with same content are equal even if different references
     quiver()
-        .evaluate("[\"hello\", \"hello\"] ~> ==")
+        .evaluate("['68656c6c6f', '68656c6c6f'] ~> ==")
         .expect("'68656c6c6f'");
     quiver().evaluate("['abcd', 'abcd'] ~> ==").expect("'abcd'");
 }
@@ -27,9 +21,9 @@ fn test_binary_equality_content() {
 fn test_binary_inequality_content() {
     // Test that binaries with different content are not equal
     quiver()
-        .evaluate("[\"hello\", \"world\"] ~> ==")
+        .evaluate("['68656c6c6f', '776f726c64'] ~> ==")
         .expect("[]");
-    quiver().evaluate("[\"abcd\", \"efgh\"] ~> ==").expect("[]");
+    quiver().evaluate("['61626364', '65666768'] ~> ==").expect("[]");
 }
 
 #[test]
@@ -55,9 +49,9 @@ fn test_binary_new_size_validation() {
 fn test_binary_length_builtin() {
     // Test getting length of binaries
     quiver()
-        .evaluate("\"hello\" ~> <binary_length>!")
+        .evaluate("'68656c6c6f' ~> <binary_length>!")
         .expect("5");
-    quiver().evaluate("\"AB\" ~> <binary_length>!").expect("2"); // 2 characters = 2 bytes
+    quiver().evaluate("'4142' ~> <binary_length>!").expect("2");
     quiver()
         .evaluate("10 ~> <binary_new>! ~> <binary_length>!")
         .expect("10");
@@ -67,30 +61,29 @@ fn test_binary_length_builtin() {
 fn test_binary_get_byte_builtin() {
     // Test getting bytes from binaries
     quiver()
-        .evaluate("[\"hello\", 0] ~> <binary_get_byte>!")
-        .expect("104"); // 'h' = 104
+        .evaluate("['68656c6c6f', 0] ~> <binary_get_byte>!")
+        .expect("104"); // 0x68 = 104
     quiver()
-        .evaluate("[\"hello\", 1] ~> <binary_get_byte>!")
-        .expect("101"); // 'e' = 101
-    // Use regular ASCII characters
+        .evaluate("['68656c6c6f', 1] ~> <binary_get_byte>!")
+        .expect("101"); // 0x65 = 101
     quiver()
-        .evaluate("[\"AB\", 0] ~> <binary_get_byte>!")
-        .expect("65"); // 'A' = 65
+        .evaluate("['4142', 0] ~> <binary_get_byte>!")
+        .expect("65"); // 0x41 = 65
     quiver()
-        .evaluate("[\"AB\", 1] ~> <binary_get_byte>!")
-        .expect("66"); // 'B' = 66
+        .evaluate("['4142', 1] ~> <binary_get_byte>!")
+        .expect("66"); // 0x42 = 66
 }
 
 #[test]
 fn test_binary_get_byte_bounds() {
     // Test bounds checking
     quiver()
-        .evaluate("[\"hello\", 5] ~> <binary_get_byte>!")
+        .evaluate("['68656c6c6f', 5] ~> <binary_get_byte>!")
         .expect_runtime_error(quiver::vm::Error::InvalidArgument(
             "Index 5 out of bounds for binary of length 5".to_string(),
         ));
     quiver()
-        .evaluate("[\"hello\", -1] ~> <binary_get_byte>!")
+        .evaluate("['68656c6c6f', -1] ~> <binary_get_byte>!")
         .expect_runtime_error(quiver::vm::Error::InvalidArgument(
             "Index cannot be negative".to_string(),
         ));
@@ -100,10 +93,10 @@ fn test_binary_get_byte_bounds() {
 fn test_binary_concat_builtin() {
     // Test concatenating binaries
     quiver()
-        .evaluate("[\"hello\", \" world\"] ~> <binary_concat>!")
+        .evaluate("['68656c6c6f', '20776f726c64'] ~> <binary_concat>!")
         .expect("'68656c6c6f20776f726c64'");
     quiver()
-        .evaluate("[\"ab\", \"cd\"] ~> <binary_concat>!")
+        .evaluate("['6162', '6364'] ~> <binary_concat>!")
         .expect("'61626364'");
 }
 
@@ -111,10 +104,10 @@ fn test_binary_concat_builtin() {
 fn test_binary_concat_then_length() {
     // Test that concatenation produces correct length
     quiver()
-        .evaluate("[\"hello\", \" world\"] ~> <binary_concat>! ~> <binary_length>!")
+        .evaluate("['68656c6c6f', '20776f726c64'] ~> <binary_concat>! ~> <binary_length>!")
         .expect("11");
     quiver()
-        .evaluate("[\"a\", \"b\"] ~> <binary_concat>! ~> <binary_length>!")
+        .evaluate("['61', '62'] ~> <binary_concat>! ~> <binary_length>!")
         .expect("2");
 }
 
@@ -124,8 +117,8 @@ fn test_binary_operations_chain() {
     quiver()
         .evaluate(
             r#"
-            "hello" ~> hello,
-            " world" ~> world,
+            '68656c6c6f' ~> hello,
+            '20776f726c64' ~> world,
             [hello, world] ~> <binary_concat>! ~> combined,
             combined ~> <binary_length>!
             "#,
@@ -139,14 +132,14 @@ fn test_empty_binary() {
     quiver()
         .evaluate("0 ~> <binary_new>! ~> <binary_length>!")
         .expect("0");
-    quiver().evaluate("\"\" ~> <binary_length>!").expect("0");
+    quiver().evaluate("'' ~> <binary_length>!").expect("0");
 }
 
 #[test]
 fn test_binary_print() {
     // Test that binaries can be printed (should work with existing IO)
-    quiver().evaluate("\"hello\" ~> <print>!").expect("Ok");
-    quiver().evaluate("\"world\" ~> <println>!").expect("Ok");
+    quiver().evaluate("'68656c6c6f' ~> <print>!").expect("Ok");
+    quiver().evaluate("'776f726c64' ~> <println>!").expect("Ok");
 }
 
 #[test]

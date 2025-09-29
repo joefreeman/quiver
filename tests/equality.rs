@@ -16,5 +16,5 @@ fn test_unequal_integers() {
 fn test_equal_strings() {
     quiver()
         .evaluate("[\"abc\", \"abc\"] ~> ==")
-        .expect("'616263'");
+        .expect("Str['616263']");
 }

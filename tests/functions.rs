@@ -42,8 +42,8 @@ fn test_function_with_tuple_parameter() {
 #[test]
 fn test_function_with_enumerated_type_parameter() {
     quiver()
-        .evaluate("#(int | bin) { ~> x => x } ~> f, \"hello\" ~> f!")
-        .expect("'68656c6c6f'");
+        .evaluate("#(int | bin) { ~> x => x } ~> f, '0a1b2c' ~> f!")
+        .expect("'0a1b2c'");
 }
 
 #[test]
