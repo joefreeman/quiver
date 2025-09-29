@@ -70,11 +70,8 @@ pub enum Error {
         target: String,
     },
 
-    // Parameter access
-    ParameterIndexOutOfBounds {
-        index: usize,
-    },
-    ParameterAccessOnNonTuple {
+    // Positional access
+    PositionalIndexOutOfBounds {
         index: usize,
     },
 
@@ -914,8 +911,8 @@ impl<'a> Compiler<'a> {
             }
             ast::Term::FunctionCall(target) => self.compile_function_call(target, value_type),
             ast::Term::MemberAccess(member_access) => {
-                match &member_access.target {
-                    ast::MemberTarget::None => {
+                match &member_access.identifier {
+                    None => {
                         // Field/positional access (.x, .0) requires a value
                         if let Some(val_type) = value_type {
                             // Access on the piped value
@@ -926,7 +923,7 @@ impl<'a> Compiler<'a> {
                             ));
                         }
                     }
-                    ast::MemberTarget::Identifier(name) => {
+                    Some(name) => {
                         if value_type.is_some() {
                             return Err(Error::FeatureUnsupported(
                                 "Member access cannot be applied to value".to_string(),
@@ -935,16 +932,6 @@ impl<'a> Compiler<'a> {
                         // Load variable or access its members
                         let target_type = self.compile_target_access(name)?;
                         self.compile_accessor_chain(target_type, member_access.accessors, name)
-                    }
-                    ast::MemberTarget::Parameter => {
-                        if value_type.is_some() {
-                            return Err(Error::FeatureUnsupported(
-                                "Parameter access cannot be applied to value".to_string(),
-                            ));
-                        }
-                        // Access parameter
-                        self.codegen.add_instruction(Instruction::Parameter);
-                        self.compile_accessor_chain(parameter_type, member_access.accessors, "$")
                     }
                 }
             }
@@ -1340,7 +1327,7 @@ impl<'a> Compiler<'a> {
             if let Some((_, field_type)) = fields.get(position) {
                 field_types.push(field_type.clone());
             } else {
-                return Err(Error::ParameterIndexOutOfBounds { index: position });
+                return Err(Error::PositionalIndexOutOfBounds { index: position });
             }
         }
 

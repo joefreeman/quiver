@@ -105,15 +105,8 @@ pub struct FunctionDefinition {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberAccess {
-    pub target: MemberTarget,
+    pub identifier: Option<String>,
     pub accessors: Vec<AccessPath>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MemberTarget {
-    None,
-    Identifier(String),
-    Parameter,
 }
 
 #[derive(Debug, Clone, PartialEq)]

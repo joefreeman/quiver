@@ -330,27 +330,13 @@ fn type_definition(input: &str) -> IResult<&str, Type> {
 // Term parsers
 
 // Parse member access patterns - no '!' at the end
-// Examples: f.x, $.0, .x, .0, etc.
+// Examples: f.x, .x, .0, etc.
 fn member_access(input: &str) -> IResult<&str, MemberAccess> {
     alt((
-        // Parameter access: $ or $.field
-        map(
-            pair(
-                nom_value(MemberTarget::Parameter, char('$')),
-                many0(preceded(
-                    char('.'),
-                    alt((
-                        map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
-                        map(identifier, AccessPath::Field),
-                    )),
-                )),
-            ),
-            |(target, accessors)| MemberAccess { target, accessors },
-        ),
         // Member access with identifier and accessors: foo.bar, foo.0
         map(
             pair(
-                map(identifier, MemberTarget::Identifier),
+                identifier,
                 many1(preceded(
                     // Changed to many1 - requires at least one accessor
                     char('.'),
@@ -360,9 +346,12 @@ fn member_access(input: &str) -> IResult<&str, MemberAccess> {
                     )),
                 )),
             ),
-            |(target, accessors)| MemberAccess { target, accessors },
+            |(identifier, accessors)| MemberAccess {
+                identifier: Some(identifier),
+                accessors,
+            },
         ),
-        // Field/positional access without target (.x, .0, .x.0)
+        // Field/positional access without identifier (.x, .0, .x.0)
         map(
             many1(preceded(
                 char('.'),
@@ -372,7 +361,7 @@ fn member_access(input: &str) -> IResult<&str, MemberAccess> {
                 )),
             )),
             |accessors| MemberAccess {
-                target: MemberTarget::None,
+                identifier: None,
                 accessors,
             },
         ),

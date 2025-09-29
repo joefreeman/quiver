@@ -70,7 +70,7 @@ impl<'a> FreeVariableCollector<'a> {
                 // Builtins don't reference variables
             }
             ast::Term::MemberAccess(member_access) => {
-                if let ast::MemberTarget::Identifier(name) = &member_access.target {
+                if let Some(name) = &member_access.identifier {
                     self.visit_identifier(name);
                 }
             }
