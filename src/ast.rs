@@ -41,6 +41,7 @@ pub struct Expression {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
     pub terms: Vec<Term>,
+    pub continuation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

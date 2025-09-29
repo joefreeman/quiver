@@ -211,7 +211,7 @@ impl<'a> Compiler<'a> {
                 module_path,
             } => self.compile_type_import(pattern, &module_path),
             ast::Statement::Expression(expression) => {
-                self.compile_expression(expression, None, Type::nil())?;
+                self.compile_expression(expression, Type::nil())?;
                 Ok(())
             }
         }
@@ -282,8 +282,8 @@ impl<'a> Compiler<'a> {
         for field in &fields {
             let field_type = match &field.value {
                 ast::FieldValue::Chain(chain) => {
-                    // Value tuples don't have a value context, so pass None
-                    self.compile_chain(chain.clone(), None, parameter_type.clone())?
+                    // Value tuples don't have a value context
+                    self.compile_chain(chain.clone(), parameter_type.clone())?
                 }
                 ast::FieldValue::Ripple => {
                     // Ripple is only valid if we're inside an operation context
@@ -365,7 +365,7 @@ impl<'a> Compiler<'a> {
                 }
                 ast::FieldValue::Chain(chain) => {
                     // Regular chain compilation
-                    self.compile_chain(chain.clone(), None, parameter_type.clone())?
+                    self.compile_chain(chain.clone(), parameter_type.clone())?
                 }
             };
 
@@ -432,8 +432,7 @@ impl<'a> Compiler<'a> {
         }
         self.parameter_fields_stack.push(parameter_fields);
 
-        let body_type =
-            self.compile_block(function_definition.body, Some(parameter_type.clone()))?;
+        let body_type = self.compile_block(function_definition.body, parameter_type.clone())?;
         self.codegen.add_instruction(Instruction::Return);
 
         self.parameter_fields_stack.pop();
@@ -503,11 +502,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_block(
-        &mut self,
-        block: ast::Block,
-        value_type: Option<Type>,
-    ) -> Result<Type, Error> {
+    fn compile_block(&mut self, block: ast::Block, parameter_type: Type) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -515,12 +510,6 @@ impl<'a> Compiler<'a> {
 
         self.codegen.add_instruction(Instruction::Enter);
         self.scopes.push(HashMap::new());
-
-        // If we have a value_type, the value was consumed by Enter
-        // but we need it for pattern matching, so restore it with Parameter
-        if value_type.is_some() {
-            self.codegen.add_instruction(Instruction::Parameter);
-        }
 
         for (i, branch) in block.branches.iter().enumerate() {
             let is_last_branch = i == block.branches.len() - 1;
@@ -536,16 +525,11 @@ impl<'a> Compiler<'a> {
                         message: "No scope available when compiling block branch".to_string(),
                     })?
                     .clear();
-
-                // If we have a value_type, restore it for the next branch's pattern matching
-                if value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::Parameter);
-                }
             }
 
-            // Pass the value_type to the condition expression
+            // Compile the condition expression - it can use ~> to access the parameter
             let condition_type =
-                self.compile_expression(branch.condition.clone(), value_type.clone(), Type::nil())?;
+                self.compile_expression(branch.condition.clone(), parameter_type.clone())?;
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
             if condition_type.as_concrete() == Some(&Type::nil()) {
@@ -558,9 +542,8 @@ impl<'a> Compiler<'a> {
                 let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 next_branch_jumps.push((next_branch_jump, i + 1));
 
-                // Consequence gets None as value_type
-                let consequence_type =
-                    self.compile_expression(consequence.clone(), None, Type::nil())?;
+                // Compile the consequence - parameter not available (nil type)
+                let consequence_type = self.compile_expression(consequence.clone(), Type::nil())?;
                 branch_types.push(consequence_type);
 
                 // If this is the last branch and the condition can be nil,
@@ -623,17 +606,13 @@ impl<'a> Compiler<'a> {
     fn compile_expression(
         &mut self,
         expression: ast::Expression,
-        value_type: Option<Type>,
         parameter_type: Type,
     ) -> Result<Type, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            // First chain gets the value_type, subsequent chains get None
-            let chain_value_type = if i == 0 { value_type.clone() } else { None };
-            let chain_type =
-                self.compile_chain(chain.clone(), chain_value_type, parameter_type.clone())?;
+            let chain_type = self.compile_chain(chain.clone(), parameter_type.clone())?;
 
             // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil = if i > 0 {
@@ -680,20 +659,22 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn compile_chain(
-        &mut self,
-        chain: ast::Chain,
-        value_type: Option<Type>,
-        parameter_type: Type,
-    ) -> Result<Type, Error> {
-        let mut current_type = value_type;
+    fn compile_chain(&mut self, chain: ast::Chain, parameter_type: Type) -> Result<Type, Error> {
+        // If this is a continuation chain (starts with ~>), load the parameter
+        let mut current_type = if chain.continuation {
+            // Continuation chains explicitly use the parameter
+            self.codegen.add_instruction(Instruction::Parameter);
+            Some(parameter_type.clone())
+        } else {
+            None
+        };
 
         for term in chain.terms {
             current_type = Some(self.compile_term(term, current_type, parameter_type.clone())?);
         }
 
         current_type.ok_or_else(|| Error::InternalError {
-            message: "Chain compiled with no terms".to_string(),
+            message: "Chain compiled with no terms and no continuation".to_string(),
         })
     }
 
@@ -907,12 +888,14 @@ impl<'a> Compiler<'a> {
                 }
             }
             ast::Term::Block(block) => {
+                // Blocks take their input as a parameter
+                let block_parameter = value_type.clone().unwrap_or_else(Type::nil);
                 if value_type.is_none() {
                     // Blocks without a value need NIL on stack
                     self.codegen
                         .add_instruction(Instruction::Tuple(TypeId::NIL));
                 }
-                self.compile_block(block, value_type)
+                self.compile_block(block, block_parameter)
             }
             ast::Term::FunctionDefinition(func_def) => {
                 if value_type.is_some() {

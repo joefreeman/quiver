@@ -54,7 +54,7 @@ fn test_named_partial_pattern_with_union() {
         .evaluate(
             r#"
             type union = A[x: int, y: int] | B[x: int, z: int];
-            #union { A(x) => x } ~> f,
+            #union { ~> A(x) => x } ~> f,
             A[x: 1, y: 2] ~> f! ~> a,
             B[x: 3, z: 4] ~> f! ~> b,
             [a, b]
@@ -69,8 +69,8 @@ fn test_named_partial_pattern_in_block() {
         .evaluate(
             r#"
             A[x: 5, y: 10] ~> {
-              | B(x, y) => 0
-              | A(x, y) => [x, y] ~> <add>!
+              | ~> B(x, y) => 0
+              | ~> A(x, y) => [x, y] ~> <add>!
             }
             "#,
         )
@@ -122,9 +122,9 @@ fn test_union_match_with_literals() {
         .evaluate(
             r#"
             2 ~> {
-              | 1 => 100
-              | 2 => 200
-              | 3 => 300
+              | ~> 1 => 100
+              | ~> 2 => 200
+              | ~> 3 => 300
             }
             "#,
         )
@@ -136,8 +136,8 @@ fn test_union_match_with_tuples() {
         .evaluate(
             r#"
             A[3] ~> {
-              | A[x] => [x, 1] ~> <add>!
-              | B[x] => [x, 2] ~> <add>!
+              | ~> A[x] => [x, 1] ~> <add>!
+              | ~> B[x] => [x, 2] ~> <add>!
             }
             "#,
         )
@@ -149,7 +149,7 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            #[a: int, b: int] { (a, b) => [a, b] } ~> f,
+            #[a: int, b: int] { ~> (a, b) => [a, b] } ~> f,
             [a: 1, b: 2] ~> f!
             "#,
         )
@@ -159,7 +159,7 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             type union = [a: int, b: int] | [x: int];
-            #union { (a, b) => [a, b] } ~> f,
+            #union { ~> (a, b) => [a, b] } ~> f,
             [a: 1, b: 2] ~> f! ~> b1,
             [x: 3] ~> f! ~> b2,
             [b1, b2]
@@ -171,7 +171,7 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             type union = [a: int, b: int] | [b: int, c: int];
-            #union { (b) => b } ~> f,
+            #union { ~> (b) => b } ~> f,
             [a: 1, b: 2] ~> f! ~> b1,
             [b: 3, c: 4] ~> f! ~> b2,
             [b1, b2]
@@ -183,7 +183,7 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             type union = [a: int, b: int] | [b: int, c: int];
-            #union { (a, b) => [a, b] } ~> f,
+            #union { ~> (a, b) => [a, b] } ~> f,
             [a: 1, b: 2] ~> f! ~> b1,
             [b: 3, c: 4] ~> f! ~> b2,
             [b1, b2]
@@ -199,8 +199,8 @@ fn test_match_union_in_nested_tuple() {
             r#"
             type option = Some[int] | None;
             #[option, int] {
-              | [None, z] => 0
-              | [Some[x], z] => [x, z] ~> <add>!
+              | ~> [None, z] => 0
+              | ~> [Some[x], z] => [x, z] ~> <add>!
             } ~> f,
             [Some[5], 2] ~> f!
             "#,
@@ -255,9 +255,9 @@ fn test_complex_union_pattern_matching() {
             type option = Some[result] | None;
 
             Some[Ok[42]] ~> {
-              | None => 0
-              | Some[Err[_]] => -1
-              | Some[Ok[x]] => x
+              | ~> None => 0
+              | ~> Some[Err[_]] => -1
+              | ~> Some[Ok[x]] => x
             }
             "#,
         )
@@ -276,7 +276,7 @@ fn test_partial_pattern_order_for_union() {
         .evaluate(
             r#"
             type union = A[x: int, y: int] | B[y: int, x: int]
-            #Wrapper[union] { Wrapper[(x, y)] => [x, y] } ~> f
+            #Wrapper[union] { ~> Wrapper[(x, y)] => [x, y] } ~> f
             Wrapper[B[y: 1, x: 2]] ~> f!
             "#,
         )
@@ -289,7 +289,7 @@ fn test_star_pattern_order_for_union() {
         .evaluate(
             r#"
             type union = A[x: int, y: int] | B[y: int, x: int]
-            #union { * => [x, y] } ~> f
+            #union { ~> * => [x, y] } ~> f
             B[y: 1, x: 2] ~> f!
             "#,
         )

@@ -20,17 +20,17 @@ fn test_block_with_closure() {
 
 #[test]
 fn test_block_with_parameter() {
-    quiver().evaluate("1 ~> { x => x }").expect("1");
+    quiver().evaluate("1 ~> { ~> x => x }").expect("1");
 }
 
 #[test]
 fn test_block_with_repeated_parameter() {
     quiver()
-        .evaluate("3 ~> { x => [x, x] ~> <add>! }")
+        .evaluate("3 ~> { ~> x => [x, x] ~> <add>! }")
         .expect("6");
 }
 
 #[test]
 fn test_block_with_positional_parameter() {
-    quiver().evaluate("[1, 2] ~> { x => x.0 }").expect("1");
+    quiver().evaluate("[1, 2] ~> { ~> x => x.0 }").expect("1");
 }

@@ -29,13 +29,13 @@ fn test_branch_with_failing_consequence() {
 #[test]
 fn test_branch_pattern_matching() {
     quiver()
-        .evaluate("B[42] ~> { A[a] => 1 | B[b] => 2 }")
+        .evaluate("B[42] ~> { ~> A[a] => 1 | ~> B[b] => 2 }")
         .expect("2");
 }
 
 #[test]
 fn test_string_match() {
     quiver()
-        .evaluate("\"bar\" ~> { \"foo\" => 1 | \"bar\" => 2 }")
+        .evaluate("\"bar\" ~> { ~> \"foo\" => 1 | \"bar\" => 2 }")
         .expect("2");
 }

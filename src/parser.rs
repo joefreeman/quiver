@@ -580,10 +580,18 @@ fn term(input: &str) -> IResult<&str, Term> {
 }
 
 fn chain(input: &str) -> IResult<&str, Chain> {
-    map(
-        separated_list1(tuple((ws1, tag("~>"), ws1)), term),
-        |terms| Chain { terms },
-    )(input)
+    let (input, continuation) = opt(tuple((tag("~>"), ws1)))(input)?;
+    let continuation = continuation.is_some();
+
+    if continuation {
+        // If we have a leading ~>, the terms list can be empty
+        let (input, terms) = separated_list0(tuple((ws1, tag("~>"), ws1)), term)(input)?;
+        Ok((input, Chain { terms, continuation }))
+    } else {
+        // Normal chain: must have at least one term
+        let (input, terms) = separated_list1(tuple((ws1, tag("~>"), ws1)), term)(input)?;
+        Ok((input, Chain { terms, continuation }))
+    }
 }
 
 fn expression(input: &str) -> IResult<&str, Expression> {
