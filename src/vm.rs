@@ -759,6 +759,19 @@ impl VM {
         self.stack.clone()
     }
 
+    pub fn set_parameter(&mut self, value: Value) {
+        if let Some(scope) = self.scopes.first_mut() {
+            scope.parameter = value;
+        }
+    }
+
+    pub fn get_parameter(&self) -> Value {
+        self.scopes
+            .first()
+            .map(|scope| scope.parameter.clone())
+            .unwrap_or_else(Value::nil)
+    }
+
     pub fn frame_count(&self) -> usize {
         self.frames.len()
     }

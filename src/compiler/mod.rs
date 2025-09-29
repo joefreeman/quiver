@@ -183,13 +183,17 @@ impl<'a> Compiler<'a> {
             }
         }
 
+        // Get the current parameter type from the VM for REPL continuation
+        let parameter_value = compiler.vm.get_parameter();
+        let parameter_type = compiler.value_to_type(&parameter_value)?;
+
         // Phase 2: Compile all statements (now forward references work)
         let num_statements = program.statements.len();
         for (i, statement) in program.statements.into_iter().enumerate() {
             let is_last = i == num_statements - 1;
             let is_expression = matches!(&statement, ast::Statement::Expression(_));
 
-            compiler.compile_statement(statement)?;
+            compiler.compile_statement(statement, parameter_type.clone())?;
 
             // Pop intermediate expression results, keeping only the last one
             if !is_last && is_expression {
@@ -200,7 +204,11 @@ impl<'a> Compiler<'a> {
         Ok(compiler.codegen.instructions)
     }
 
-    fn compile_statement(&mut self, statement: ast::Statement) -> Result<(), Error> {
+    fn compile_statement(
+        &mut self,
+        statement: ast::Statement,
+        parameter_type: Type,
+    ) -> Result<(), Error> {
         match statement {
             ast::Statement::TypeAlias {
                 name,
@@ -211,7 +219,7 @@ impl<'a> Compiler<'a> {
                 module_path,
             } => self.compile_type_import(pattern, &module_path),
             ast::Statement::Expression(expression) => {
-                self.compile_expression(expression, Type::nil())?;
+                self.compile_expression(expression, parameter_type)?;
                 Ok(())
             }
         }
@@ -817,9 +825,8 @@ impl<'a> Compiler<'a> {
         self.scopes = vec![HashMap::new()];
         self.type_context.type_aliases.clear();
 
-        // Compile the module
         for statement in parsed.statements {
-            self.compile_statement(statement)?;
+            self.compile_statement(statement, Type::nil())?;
         }
 
         // Get the compiled module instructions

@@ -144,8 +144,10 @@ fn run_repl() -> Result<(), ReadlineError> {
                         let module_path = std::env::current_dir().ok();
                         match quiver.evaluate(line, module_path) {
                             Ok(result) => {
-                                if let Some(value) = result {
+                                if let Some(value) = result.clone() {
                                     println!("{}", format_value(&quiver, &value));
+                                    // Set the parameter for REPL continuation
+                                    quiver.set_parameter(value);
                                 }
 
                                 let remaining_stack = quiver.get_stack();

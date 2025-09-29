@@ -62,6 +62,10 @@ impl Quiver {
         self.vm.get_stack()
     }
 
+    pub fn set_parameter(&mut self, value: Value) {
+        self.vm.set_parameter(value);
+    }
+
     pub fn frame_count(&self) -> usize {
         self.vm.frame_count()
     }
