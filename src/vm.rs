@@ -481,10 +481,8 @@ impl VM {
         // Check that local was reserved
         if locals_index >= self.locals.len() {
             return Err(Error::VariableUndefined(format!(
-                "local {} not reserved (locals.len = {}, locals_base = {})",
-                index,
-                self.locals.len(),
-                frame.locals_base
+                "local {} not allocated",
+                index
             )));
         }
 

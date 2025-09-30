@@ -9,7 +9,7 @@ pub mod vm;
 
 use std::collections::HashMap;
 
-use bytecode::{Function, TypeId};
+use bytecode::{Function, TypeId, tree_shake};
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
 use types::{TupleTypeInfo, Type};
@@ -134,6 +134,8 @@ impl Quiver {
             entry,
             types: self.vm.get_types(),
         };
+
+        let bytecode = tree_shake(bytecode);
 
         Ok((bytecode, variables))
     }

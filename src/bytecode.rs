@@ -1,3 +1,7 @@
+mod optimisation;
+
+pub use optimisation::tree_shake;
+
 use crate::types;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
