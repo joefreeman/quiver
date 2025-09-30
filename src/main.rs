@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser, Subcommand};
+use colored::Colorize;
 use quiver::Quiver;
 use quiver::bytecode::TypeId;
 use quiver::types::{TupleTypeInfo, Type};
@@ -79,7 +80,7 @@ fn run_repl() -> Result<(), ReadlineError> {
     let mut last_result: Option<Value> = None;
 
     loop {
-        let readline = rl.readline(">>- ");
+        let readline = rl.readline(&format!("{} ", ">>-".blue().bold()));
         match readline {
             Ok(line) => {
                 let line = line.trim();
@@ -91,12 +92,12 @@ fn run_repl() -> Result<(), ReadlineError> {
 
                 match line {
                     "\\?" => {
-                        println!("Available commands:");
-                        println!("  \\? - Show this help message");
-                        println!("  \\q - Exit the REPL");
-                        println!("  \\! - Reset the environment");
-                        println!("  \\v - List all variables");
-                        println!("  \\t - List all type aliases");
+                        println!("{}", "Available commands:".bright_black());
+                        println!("{}", "  \\? - Show this help message".bright_black());
+                        println!("{}", "  \\q - Exit the REPL".bright_black());
+                        println!("{}", "  \\! - Reset the environment".bright_black());
+                        println!("{}", "  \\v - List all variables".bright_black());
+                        println!("{}", "  \\t - List all type aliases".bright_black());
                     }
 
                     "\\q" => {
@@ -107,21 +108,25 @@ fn run_repl() -> Result<(), ReadlineError> {
                         quiver = Quiver::new(None);
                         variables.clear();
                         last_result = None;
-                        println!("Environment reset");
+                        println!("{}", "Environment reset".bright_black());
                     }
 
                     "\\v" => {
                         let vars = quiver.get_variables(&variables);
                         if vars.is_empty() {
-                            println!("No variables defined");
+                            println!("{}", "No variables defined".bright_black());
                         } else {
                             // Sort by index to maintain definition order
                             let mut sorted_vars: Vec<_> = vars.into_iter().collect();
                             sorted_vars.sort_by_key(|(name, _)| variables[name]);
 
-                            println!("Variables:");
+                            println!("{}", "Variables:".bright_black());
                             for (name, value) in sorted_vars {
-                                println!("  {} = {}", name, format_value(&quiver, &value));
+                                println!(
+                                    "{}",
+                                    format!("  {} = {}", name, format_value(&quiver, &value))
+                                        .bright_black()
+                                );
                             }
                         }
                     }
@@ -129,16 +134,20 @@ fn run_repl() -> Result<(), ReadlineError> {
                     "\\t" => {
                         let mut types = quiver.list_types();
                         if types.is_empty() {
-                            println!("No types defined");
+                            println!("{}", "No types defined".bright_black());
                         } else {
                             // Sort by TypeId
                             types.sort_by_key(|(_, id)| id.0);
-                            println!("Types:");
+                            println!("{}", "Types:".bright_black());
                             for (_name, type_id) in types {
                                 println!(
-                                    "  {}: {}",
-                                    type_id.0,
-                                    format_type(&quiver.get_types(), &Type::Tuple(type_id))
+                                    "{}",
+                                    format!(
+                                        "  {}: {}",
+                                        type_id.0,
+                                        format_type(&quiver.get_types(), &Type::Tuple(type_id))
+                                    )
+                                    .bright_black()
                                 )
                             }
                         }
@@ -160,24 +169,15 @@ fn run_repl() -> Result<(), ReadlineError> {
                                     println!("{}", format_value(&quiver, value));
                                 }
 
-                                // Store result for next evaluation
                                 last_result = result;
-
-                                let remaining_stack = quiver.get_stack();
-                                if !remaining_stack.is_empty() {
-                                    println!("Remaining items on stack:");
-                                    for (i, value) in remaining_stack.iter().enumerate() {
-                                        println!("  {}: {}", i, format_value(&quiver, &value));
-                                    }
-                                }
                             }
-                            Err(error) => eprintln!("{}", error),
+                            Err(error) => eprintln!("{}", error.to_string().red()),
                         }
                     }
                 }
             }
             Err(ReadlineError::Interrupted) => {
-                println!("(Use \\q to quit)");
+                println!("{}", "(Use \\q to quit)".bright_black());
             }
 
             Err(ReadlineError::Eof) => {
