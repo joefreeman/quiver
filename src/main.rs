@@ -494,7 +494,7 @@ fn format_tuple_elements(
 
 fn format_value(quiver: &Quiver, value: &Value) -> String {
     match value {
-        Value::Function { function, .. } => {
+        Value::Function(function, _) => {
             if let Some(func_def) = quiver.get_function(*function) {
                 if let Some(func_type) = &func_def.function_type {
                     return format_type(

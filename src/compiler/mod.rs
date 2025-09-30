@@ -938,7 +938,7 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Tuple(*type_id));
                 Ok(Type::Tuple(*type_id))
             }
-            Value::Function { function, captures } => {
+            Value::Function(function, captures) => {
                 // Get the function definition
                 let func_def = self.vm.get_functions().get(*function).cloned().ok_or(
                     Error::FeatureUnsupported("Invalid function reference".to_string()),
@@ -1493,7 +1493,7 @@ impl<'a> Compiler<'a> {
             Value::Integer(_) => Ok(Type::Integer),
             Value::Binary(_) => Ok(Type::Binary),
             Value::Tuple(type_id, _) => Ok(Type::Tuple(*type_id)),
-            Value::Function { function, .. } => self.function_to_type(*function),
+            Value::Function(function, _) => self.function_to_type(*function),
             Value::Builtin(name) => {
                 if let Some((param_type, result_type)) =
                     BUILTIN_REGISTRY.resolve_signature(name, self.vm)

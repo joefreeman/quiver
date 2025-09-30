@@ -21,10 +21,7 @@ pub enum Value {
     Integer(i64),
     Binary(BinaryRef),
     Tuple(TypeId, Vec<Value>),
-    Function {
-        function: usize,
-        captures: Vec<Value>,
-    },
+    Function(usize, Vec<Value>),
     Builtin(String),
 }
 
@@ -44,7 +41,7 @@ impl Value {
             Value::Integer(_) => "integer",
             Value::Binary(_) => "binary",
             Value::Tuple(_, _) => "tuple",
-            Value::Function { .. } => "function",
+            Value::Function(_, _) => "function",
             Value::Builtin(_) => "builtin",
         }
     }
@@ -73,7 +70,7 @@ impl fmt::Display for Value {
                     write!(f, "]")
                 }
             }
-            Value::Function { .. } => write!(f, "(function)"),
+            Value::Function(_, _) => write!(f, "(function)"),
             Value::Builtin(name) => write!(f, "<{}>", name),
         }
     }
@@ -292,7 +289,7 @@ impl VM {
                 let builtin_idx = self.register_builtin(name.clone());
                 vec![Instruction::Builtin(builtin_idx)]
             }
-            Value::Function { function, captures } => {
+            Value::Function(function, captures) => {
                 let mut instrs = Vec::new();
                 for cap in captures {
                     instrs.extend(self.value_to_instructions(cap));
@@ -591,7 +588,7 @@ impl VM {
 
     fn handle_call(&mut self) -> Result<(), Error> {
         match self.stack.pop().ok_or(Error::StackUnderflow)? {
-            Value::Function { function, captures } => {
+            Value::Function(function, captures) => {
                 let func = self
                     .functions
                     .get(function)
@@ -648,7 +645,7 @@ impl VM {
             Ok(())
         } else {
             match self.stack.pop().ok_or(Error::StackUnderflow)? {
-                Value::Function { function, captures } => {
+                Value::Function(function, captures) => {
                     let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
                     let func = self
                         .functions
@@ -704,10 +701,7 @@ impl VM {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        self.stack.push(Value::Function {
-            function: function_index,
-            captures,
-        });
+        self.stack.push(Value::Function(function_index, captures));
         Ok(())
     }
 
@@ -857,16 +851,7 @@ fn values_equal(a: &Value, b: &Value, vm: &VM) -> bool {
                     .zip(elems_b.iter())
                     .all(|(x, y)| values_equal(x, y, vm))
         }
-        (
-            Value::Function {
-                function: a,
-                captures: cap_a,
-            },
-            Value::Function {
-                function: b,
-                captures: cap_b,
-            },
-        ) => {
+        (Value::Function(a, cap_a), Value::Function(b, cap_b)) => {
             a == b
                 && cap_a.len() == cap_b.len()
                 && cap_a

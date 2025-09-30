@@ -118,10 +118,7 @@ impl Quiver {
             .map_err(Error::RuntimeError)?;
 
         let entry = match result {
-            Some(Value::Function {
-                function: main_func,
-                captures,
-            }) => {
+            Some(Value::Function(main_func, captures)) => {
                 if !captures.is_empty() {
                     self.vm.inject_function_captures(main_func, captures);
                 }
