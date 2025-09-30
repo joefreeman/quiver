@@ -119,9 +119,14 @@ impl Quiver {
 
         let entry = match result {
             Some(Value::Function {
-                function,
-                captures: _,
-            }) => Some(function),
+                function: main_func,
+                captures,
+            }) => {
+                if !captures.is_empty() {
+                    self.vm.inject_function_captures(main_func, captures);
+                }
+                Some(main_func)
+            }
             _ => None,
         };
 

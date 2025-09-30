@@ -255,6 +255,62 @@ impl VM {
         &self.functions
     }
 
+    pub fn inject_function_captures(&mut self, function_index: usize, captures: Vec<Value>) {
+        let mut instructions = Vec::new();
+        instructions.push(Instruction::Allocate(captures.len()));
+
+        for (i, capture_value) in captures.iter().enumerate() {
+            instructions.extend(self.value_to_instructions(capture_value));
+            instructions.push(Instruction::Store(i));
+        }
+
+        let func = &self.functions[function_index];
+        instructions.extend(func.instructions.clone());
+
+        self.functions[function_index] = Function {
+            instructions,
+            function_type: func.function_type.clone(),
+            captures: (0..captures.len()).collect(),
+        };
+    }
+
+    fn value_to_instructions(&mut self, value: &Value) -> Vec<Instruction> {
+        match value {
+            Value::Integer(n) => {
+                let const_idx = self.register_constant(Constant::Integer(*n));
+                vec![Instruction::Constant(const_idx)]
+            }
+            Value::Binary(bin_ref) => {
+                let bytes = self
+                    .get_binary_bytes(bin_ref)
+                    .expect("Binary should be valid during capture injection")
+                    .to_vec();
+                let const_idx = self.register_constant(Constant::Binary(bytes));
+                vec![Instruction::Constant(const_idx)]
+            }
+            Value::Builtin(name) => {
+                let builtin_idx = self.register_builtin(name.clone());
+                vec![Instruction::Builtin(builtin_idx)]
+            }
+            Value::Function { function, captures } => {
+                let mut instrs = Vec::new();
+                for cap in captures {
+                    instrs.extend(self.value_to_instructions(cap));
+                }
+                instrs.push(Instruction::Function(*function));
+                instrs
+            }
+            Value::Tuple(type_id, elements) => {
+                let mut instrs = Vec::new();
+                for elem in elements {
+                    instrs.extend(self.value_to_instructions(elem));
+                }
+                instrs.push(Instruction::Tuple(*type_id));
+                instrs
+            }
+        }
+    }
+
     pub fn register_builtin(&mut self, function: String) -> usize {
         if let Some(index) = self.builtins.iter().position(|b| b == &function) {
             index
