@@ -111,34 +111,19 @@ pub enum Error {
 }
 
 #[derive(Debug, Clone)]
-pub struct Scope {
-    parameter: Value,
-    variables: HashMap<String, Value>,
-}
-
-impl Scope {
-    pub fn new(parameter: Value) -> Self {
-        Self {
-            variables: HashMap::new(),
-            parameter,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct Frame {
     instructions: Vec<Instruction>,
-    captures: HashMap<String, Value>,
-    scopes: usize,
+    locals_base: usize,
+    captures_count: usize,
     counter: usize,
 }
 
 impl Frame {
-    pub fn new(instructions: Vec<Instruction>, captures: HashMap<String, Value>) -> Self {
+    pub fn new(instructions: Vec<Instruction>, locals_base: usize, captures_count: usize) -> Self {
         Self {
             instructions,
-            captures,
-            scopes: 0,
+            locals_base,
+            captures_count,
             counter: 0,
         }
     }
@@ -150,7 +135,7 @@ pub struct VM {
     functions: Vec<Function>,
     builtins: Vec<String>,
     stack: Vec<Value>,
-    scopes: Vec<Scope>,
+    locals: Vec<Value>,
     frames: Vec<Frame>,
     type_registry: TypeRegistry,
 }
@@ -179,7 +164,7 @@ impl VM {
                     functions: bytecode.functions,
                     builtins: bytecode.builtins,
                     stack: Vec::new(),
-                    scopes: vec![Scope::new(Value::nil())],
+                    locals: Vec::new(),
                     frames: Vec::new(),
                     type_registry,
                 }
@@ -189,7 +174,7 @@ impl VM {
                 functions: Vec::new(),
                 builtins: Vec::new(),
                 stack: Vec::new(),
-                scopes: vec![Scope::new(Value::nil())],
+                locals: Vec::new(),
                 frames: Vec::new(),
                 type_registry: TypeRegistry::new(),
             },
@@ -305,27 +290,22 @@ impl VM {
     pub fn execute_instructions(
         &mut self,
         instructions: Vec<Instruction>,
+        parameter: Option<Value>,
     ) -> Result<Option<Value>, Error> {
         if instructions.is_empty() {
             return Ok(None);
         }
 
-        let mut frame = Frame::new(instructions.clone(), HashMap::new());
-        frame.scopes += 1;
+        // Push parameter onto stack if provided
+        if let Some(param) = parameter {
+            self.stack.push(param);
+        }
+
+        let frame = Frame::new(instructions.clone(), 0, 0);
         self.frames.push(frame);
 
         let result = self.run();
-        let frame = self.frames.pop();
-
-        if result.is_ok() {
-            let frame = frame.ok_or(Error::FrameUnderflow)?;
-            if frame.scopes != 1 {
-                return Err(Error::ScopeCountInvalid {
-                    expected: 1,
-                    found: frame.scopes,
-                });
-            }
-        }
+        self.frames.pop();
 
         result
     }
@@ -338,7 +318,7 @@ impl VM {
         let instructions = function.instructions.clone();
 
         self.stack.push(Value::nil());
-        self.frames.push(Frame::new(instructions, HashMap::new()));
+        self.frames.push(Frame::new(instructions, 0, 0));
         self.run()
     }
 
@@ -350,8 +330,8 @@ impl VM {
                 Instruction::Duplicate => self.handle_duplicate()?,
                 Instruction::Copy(depth) => self.handle_copy(depth)?,
                 Instruction::Swap => self.handle_swap()?,
-                Instruction::Load(ref name) => self.handle_load(name)?,
-                Instruction::Store(ref name) => self.handle_store(name)?,
+                Instruction::Load(index) => self.handle_load(index)?,
+                Instruction::Store(index) => self.handle_store(index)?,
                 Instruction::Tuple(type_id) => self.handle_tuple(type_id)?,
                 Instruction::Get(index) => self.handle_get(index)?,
                 Instruction::IsInteger => self.handle_is_integer()?,
@@ -362,11 +342,9 @@ impl VM {
                 Instruction::Call => self.handle_call()?,
                 Instruction::TailCall(recurse) => self.handle_tail_call(recurse)?,
                 Instruction::Return => self.handle_return()?,
-                Instruction::Parameter => self.handle_parameter()?,
-                Instruction::Function(index) => self.handle_function(index)?,
-                Instruction::Enter => self.handle_enter()?,
-                Instruction::Exit => self.handle_exit()?,
-                Instruction::Reset => self.handle_reset()?,
+                Instruction::Function(function_index) => self.handle_function(function_index)?,
+                Instruction::Clear(count) => self.handle_clear(count)?,
+                Instruction::Allocate(count) => self.handle_allocate(count)?,
                 Instruction::Builtin(index) => self.handle_builtin(index)?,
                 Instruction::Equal(count) => self.handle_equal(count)?,
                 Instruction::Not => self.handle_not()?,
@@ -430,16 +408,34 @@ impl VM {
         Ok(())
     }
 
-    fn handle_load(&mut self, name: &str) -> Result<(), Error> {
-        let value = self.get_variable(name)?;
+    fn handle_load(&mut self, index: usize) -> Result<(), Error> {
+        let frame = self.frames.last().ok_or(Error::FrameUnderflow)?;
+        let locals_index = frame.locals_base + index;
+        let value = self
+            .locals
+            .get(locals_index)
+            .ok_or(Error::VariableUndefined(format!("local {}", index)))?
+            .clone();
         self.stack.push(value);
         Ok(())
     }
 
-    fn handle_store(&mut self, name: &str) -> Result<(), Error> {
+    fn handle_store(&mut self, index: usize) -> Result<(), Error> {
         let value = self.stack.pop().ok_or(Error::StackUnderflow)?;
-        let scope = self.scopes.last_mut().unwrap();
-        scope.variables.insert(name.to_string(), value);
+        let frame = self.frames.last().ok_or(Error::FrameUnderflow)?;
+        let locals_index = frame.locals_base + index;
+
+        // Check that local was reserved
+        if locals_index >= self.locals.len() {
+            return Err(Error::VariableUndefined(format!(
+                "local {} not reserved (locals.len = {}, locals_base = {})",
+                index,
+                self.locals.len(),
+                frame.locals_base
+            )));
+        }
+
+        self.locals[locals_index] = value;
         Ok(())
     }
 
@@ -545,13 +541,16 @@ impl VM {
                     .get(function)
                     .ok_or(Error::FunctionUndefined(function))?;
                 let instructions = func.instructions.clone();
-                let capture_map = func
-                    .captures
-                    .iter()
-                    .zip(captures.iter())
-                    .map(|(name, value)| (name.clone(), value.clone()))
-                    .collect::<HashMap<String, Value>>();
-                self.frames.push(Frame::new(instructions, capture_map));
+
+                // Set up new frame's locals_base at current end of locals
+                let locals_base = self.locals.len();
+
+                // Extend locals with captures
+                let captures_count = captures.len();
+                self.locals.extend(captures);
+
+                self.frames
+                    .push(Frame::new(instructions, locals_base, captures_count));
                 Ok(())
             }
             Value::Builtin(name) => {
@@ -579,13 +578,17 @@ impl VM {
     fn handle_tail_call(&mut self, recurse: bool) -> Result<(), Error> {
         if recurse {
             let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
-            let frame = self.frames.last().unwrap();
-            for _ in 0..frame.scopes {
-                self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
-            }
+            let frame = self.frames.last().ok_or(Error::FrameUnderflow)?;
+            let locals_base = frame.locals_base;
+            let captures_count = frame.captures_count;
+            let instructions = frame.instructions.clone();
+
+            // Clear current frame's locals, but keep captures
+            self.locals.truncate(locals_base + captures_count);
+
             self.stack.push(argument);
             *self.frames.last_mut().unwrap() =
-                Frame::new(frame.instructions.clone(), frame.captures.clone());
+                Frame::new(instructions, locals_base, captures_count);
             Ok(())
         } else {
             match self.stack.pop().ok_or(Error::StackUnderflow)? {
@@ -596,17 +599,20 @@ impl VM {
                         .get(function)
                         .ok_or(Error::FunctionUndefined(function))?;
                     let instructions = func.instructions.clone();
-                    let capture_map = func
-                        .captures
-                        .iter()
-                        .zip(captures.iter())
-                        .map(|(name, value)| (name.clone(), value.clone()))
-                        .collect::<HashMap<String, Value>>();
-                    for _ in 0..self.frames.last().unwrap().scopes {
-                        self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
-                    }
+
+                    let frame = self.frames.last().ok_or(Error::FrameUnderflow)?;
+                    let locals_base = frame.locals_base;
+
+                    // Clear current frame's locals
+                    self.locals.truncate(locals_base);
+
+                    // Extend with captures for new function
+                    let captures_count = captures.len();
+                    self.locals.extend(captures);
+
                     self.stack.push(argument);
-                    *self.frames.last_mut().unwrap() = Frame::new(instructions, capture_map);
+                    *self.frames.last_mut().unwrap() =
+                        Frame::new(instructions, locals_base, captures_count);
                     Ok(())
                 }
                 _ => Err(Error::CallInvalid),
@@ -615,27 +621,35 @@ impl VM {
     }
 
     fn handle_return(&mut self) -> Result<(), Error> {
-        self.frames.pop().ok_or(Error::FrameUnderflow)?;
+        let frame = self.frames.pop().ok_or(Error::FrameUnderflow)?;
+        // Clear frame's locals
+        self.locals.truncate(frame.locals_base);
         Ok(())
     }
 
-    fn handle_parameter(&mut self) -> Result<(), Error> {
-        let scope = self.scopes.last().unwrap();
-        self.stack.push(scope.parameter.clone());
-        Ok(())
-    }
-
-    fn handle_function(&mut self, index: usize) -> Result<(), Error> {
-        let captures = self
+    fn handle_function(&mut self, function_index: usize) -> Result<(), Error> {
+        let func = self
             .functions
-            .get(index)
-            .ok_or(Error::FunctionUndefined(index))?
-            .captures
+            .get(function_index)
+            .ok_or(Error::FunctionUndefined(function_index))?;
+        let capture_locals = func.captures.clone();
+
+        let frame = self.frames.last().ok_or(Error::FrameUnderflow)?;
+        let locals_base = frame.locals_base;
+
+        // Collect captured values from current frame's locals
+        let captures = capture_locals
             .iter()
-            .map(|n| self.get_variable(n))
+            .map(|&index| {
+                self.locals
+                    .get(locals_base + index)
+                    .cloned()
+                    .ok_or(Error::VariableUndefined(format!("capture local {}", index)))
+            })
             .collect::<Result<Vec<_>, _>>()?;
+
         self.stack.push(Value::Function {
-            function: index,
+            function: function_index,
             captures,
         });
         Ok(())
@@ -700,54 +714,18 @@ impl VM {
         Ok(())
     }
 
-    fn handle_enter(&mut self) -> Result<(), Error> {
-        let parameter = self.stack.pop().ok_or(Error::StackUnderflow)?;
-        self.scopes.push(Scope::new(parameter));
-        if let Some(frame) = self.frames.last_mut() {
-            frame.scopes += 1;
+    fn handle_clear(&mut self, count: usize) -> Result<(), Error> {
+        if count > self.locals.len() {
+            return Err(Error::StackUnderflow);
         }
+        self.locals.truncate(self.locals.len() - count);
         Ok(())
     }
 
-    fn handle_exit(&mut self) -> Result<(), Error> {
-        self.scopes.pop().ok_or(Error::ScopeUnderflow)?;
-
-        if let Some(frame) = self.frames.last_mut() {
-            frame.scopes -= 1;
-        }
-
+    fn handle_allocate(&mut self, count: usize) -> Result<(), Error> {
+        self.locals
+            .extend(std::iter::repeat(Value::nil()).take(count));
         Ok(())
-    }
-
-    fn handle_reset(&mut self) -> Result<(), Error> {
-        let scope = self.scopes.last_mut().ok_or(Error::ScopeUnderflow)?;
-        scope.variables.clear();
-        Ok(())
-    }
-
-    fn get_variable(&self, name: &str) -> Result<Value, Error> {
-        if let Some(frame) = self.frames.last() {
-            let accessible_scopes = frame.scopes;
-            let start_index = self.scopes.len().saturating_sub(accessible_scopes);
-
-            for scope in self.scopes[start_index..].iter().rev() {
-                if let Some(value) = scope.variables.get(name) {
-                    return Ok(value.clone());
-                }
-            }
-
-            if let Some(value) = frame.captures.get(name) {
-                return Ok(value.clone());
-            }
-        } else {
-            for scope in self.scopes.iter().rev() {
-                if let Some(value) = scope.variables.get(name) {
-                    return Ok(value.clone());
-                }
-            }
-        }
-
-        Err(Error::VariableUndefined(name.to_string()))
     }
 
     fn jump(&mut self, offset: isize) {
@@ -759,53 +737,49 @@ impl VM {
         self.stack.clone()
     }
 
-    pub fn set_parameter(&mut self, value: Value) {
-        if let Some(scope) = self.scopes.first_mut() {
-            scope.parameter = value;
-        }
-    }
-
-    pub fn get_parameter(&self) -> Value {
-        self.scopes
-            .first()
-            .map(|scope| scope.parameter.clone())
-            .unwrap_or_else(Value::nil)
-    }
-
     pub fn frame_count(&self) -> usize {
         self.frames.len()
     }
 
-    pub fn scope_count(&self) -> usize {
-        self.scopes.len()
-    }
+    pub fn cleanup_locals(&mut self, variables: &HashMap<String, usize>) -> HashMap<String, usize> {
+        // Collect referenced indices in sorted order
+        let mut referenced: Vec<(String, usize)> = variables
+            .iter()
+            .map(|(name, &index)| (name.clone(), index))
+            .collect();
+        referenced.sort_by_key(|(_, index)| *index);
 
-    pub fn list_variables(&self) -> Vec<(String, Value)> {
-        let mut variables = Vec::new();
+        // Build new locals array with only referenced values and create remapping
+        let mut new_locals = Vec::new();
+        let mut new_variables = HashMap::new();
 
-        if let Some(frame) = self.frames.last() {
-            let accessible_scopes = frame.scopes;
-            let start_index = self.scopes.len().saturating_sub(accessible_scopes);
-
-            for scope in &self.scopes[start_index..] {
-                for (name, value) in &scope.variables {
-                    variables.push((name.clone(), value.clone()));
-                }
-            }
-
-            for (name, value) in &frame.captures {
-                variables.push((name.clone(), value.clone()));
-            }
-        } else {
-            for scope in &self.scopes {
-                for (name, value) in &scope.variables {
-                    variables.push((name.clone(), value.clone()));
-                }
+        for (name, old_index) in referenced {
+            if old_index < self.locals.len() {
+                new_variables.insert(name, new_locals.len());
+                new_locals.push(self.locals[old_index].clone());
             }
         }
 
-        variables.sort_by(|a, b| a.0.cmp(&b.0));
-        variables
+        self.locals = new_locals;
+        new_variables
+    }
+
+    pub fn get_variables(
+        &self,
+        mapping: &HashMap<String, usize>,
+    ) -> Result<HashMap<String, Value>, Error> {
+        let mut variables = HashMap::new();
+        for (name, &index) in mapping {
+            if index >= self.locals.len() {
+                return Err(Error::VariableUndefined(format!(
+                    "local index {} out of bounds (locals.len = {})",
+                    index,
+                    self.locals.len()
+                )));
+            }
+            variables.insert(name.clone(), self.locals[index].clone());
+        }
+        Ok(variables)
     }
 }
 

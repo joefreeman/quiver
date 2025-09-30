@@ -12,10 +12,11 @@ pub enum Constant {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Function {
-    pub captures: Vec<String>,
     pub instructions: Vec<Instruction>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub function_type: Option<types::CallableType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captures: Vec<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,9 +44,9 @@ impl Bytecode {
                 .functions
                 .iter()
                 .map(|f| Function {
-                    captures: f.captures.clone(),
                     instructions: f.instructions.clone(),
                     function_type: None,
+                    captures: f.captures.clone(),
                 })
                 .collect(),
             builtins: self.builtins.clone(),
@@ -62,8 +63,10 @@ pub enum Instruction {
     Duplicate,
     Copy(usize),
     Swap,
-    Load(String),
-    Store(String),
+    Allocate(usize),
+    Clear(usize),
+    Load(usize),
+    Store(usize),
     Tuple(TypeId),
     Get(usize),
     IsInteger,
@@ -74,11 +77,7 @@ pub enum Instruction {
     Call,
     TailCall(bool),
     Return,
-    Parameter,
     Function(usize),
-    Enter,
-    Exit,
-    Reset,
     Builtin(usize),
     Equal(usize),
     Not,

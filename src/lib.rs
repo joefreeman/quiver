@@ -38,44 +38,46 @@ impl Quiver {
         &mut self,
         source: &str,
         module_path: Option<std::path::PathBuf>,
-    ) -> Result<Option<Value>, Error> {
+        variables: Option<&HashMap<String, usize>>,
+        parameter: Option<&Value>,
+    ) -> Result<(Option<Value>, HashMap<String, usize>), Error> {
         let program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
-        let instructions = Compiler::compile(
+        let (instructions, variables) = Compiler::compile(
             program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
             &mut self.vm,
             module_path,
+            variables,
+            parameter,
         )
         .map_err(Error::CompileError)?;
 
         let result = self
             .vm
-            .execute_instructions(instructions)
+            .execute_instructions(instructions, parameter.cloned())
             .map_err(Error::RuntimeError)?;
 
-        Ok(result)
+        // Compact locals and get updated variable indices
+        let compacted_variables = self.vm.cleanup_locals(&variables);
+
+        Ok((result, compacted_variables))
     }
 
     pub fn get_stack(&self) -> Vec<Value> {
         self.vm.get_stack()
     }
 
-    pub fn set_parameter(&mut self, value: Value) {
-        self.vm.set_parameter(value);
-    }
-
     pub fn frame_count(&self) -> usize {
         self.vm.frame_count()
     }
 
-    pub fn scope_count(&self) -> usize {
-        self.vm.scope_count()
-    }
-
-    pub fn list_variables(&self) -> Vec<(String, Value)> {
-        self.vm.list_variables()
+    pub fn get_variables(&self, variables: &HashMap<String, usize>) -> Vec<(String, Value)> {
+        self.vm
+            .get_variables(variables)
+            .map(|map| map.into_iter().collect())
+            .unwrap_or_default()
     }
 
     pub fn list_types(&self) -> Vec<(String, bytecode::TypeId)> {
@@ -96,21 +98,23 @@ impl Quiver {
         &mut self,
         source: &str,
         module_path: Option<std::path::PathBuf>,
-    ) -> Result<bytecode::Bytecode, Error> {
+    ) -> Result<(bytecode::Bytecode, HashMap<String, usize>), Error> {
         let program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
-        let instructions = Compiler::compile(
+        let (instructions, variables) = Compiler::compile(
             program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
             &mut self.vm,
             module_path,
+            None,
+            None,
         )
         .map_err(Error::CompileError)?;
 
         let result = self
             .vm
-            .execute_instructions(instructions)
+            .execute_instructions(instructions, None)
             .map_err(Error::RuntimeError)?;
 
         let entry = match result {
@@ -129,7 +133,7 @@ impl Quiver {
             types: self.vm.get_types(),
         };
 
-        Ok(bytecode)
+        Ok((bytecode, variables))
     }
 
     pub fn execute(&mut self, bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {

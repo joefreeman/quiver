@@ -75,6 +75,8 @@ fn run_repl() -> Result<(), ReadlineError> {
     let mut rl = Editor::<(), rustyline::history::DefaultHistory>::new()?;
     let _ = rl.load_history(HISTORY_FILE);
     let mut quiver = Quiver::new(None);
+    let mut variables: HashMap<String, usize> = HashMap::new();
+    let mut last_result: Option<Value> = None;
 
     loop {
         let readline = rl.readline(">>- ");
@@ -95,7 +97,6 @@ fn run_repl() -> Result<(), ReadlineError> {
                         println!("  \\! - Reset the environment");
                         println!("  \\v - List all variables");
                         println!("  \\t - List all type aliases");
-                        continue;
                     }
 
                     "\\q" => {
@@ -104,21 +105,25 @@ fn run_repl() -> Result<(), ReadlineError> {
 
                     "\\!" => {
                         quiver = Quiver::new(None);
+                        variables.clear();
+                        last_result = None;
                         println!("Environment reset");
-                        continue;
                     }
 
                     "\\v" => {
-                        let variables = quiver.list_variables();
-                        if variables.is_empty() {
+                        let vars = quiver.get_variables(&variables);
+                        if vars.is_empty() {
                             println!("No variables defined");
                         } else {
+                            // Sort by index to maintain definition order
+                            let mut sorted_vars: Vec<_> = vars.into_iter().collect();
+                            sorted_vars.sort_by_key(|(name, _)| variables[name]);
+
                             println!("Variables:");
-                            for (name, value) in variables {
+                            for (name, value) in sorted_vars {
                                 println!("  {} = {}", name, format_value(&quiver, &value));
                             }
                         }
-                        continue;
                     }
 
                     "\\t" => {
@@ -137,18 +142,26 @@ fn run_repl() -> Result<(), ReadlineError> {
                                 )
                             }
                         }
-                        continue;
                     }
 
                     _ => {
                         let module_path = std::env::current_dir().ok();
-                        match quiver.evaluate(line, module_path) {
-                            Ok(result) => {
-                                if let Some(value) = result.clone() {
-                                    println!("{}", format_value(&quiver, &value));
-                                    // Set the parameter for REPL continuation
-                                    quiver.set_parameter(value);
+
+                        match quiver.evaluate(
+                            line,
+                            module_path,
+                            Some(&variables),
+                            last_result.as_ref(),
+                        ) {
+                            Ok((result, new_variables)) => {
+                                variables = new_variables;
+
+                                if let Some(value) = &result {
+                                    println!("{}", format_value(&quiver, value));
                                 }
+
+                                // Store result for next evaluation
+                                last_result = result;
 
                                 let remaining_stack = quiver.get_stack();
                                 if !remaining_stack.is_empty() {
@@ -165,7 +178,6 @@ fn run_repl() -> Result<(), ReadlineError> {
             }
             Err(ReadlineError::Interrupted) => {
                 println!("(Use \\q to quit)");
-                continue;
             }
 
             Err(ReadlineError::Eof) => {
@@ -208,7 +220,8 @@ fn compile_command(
         (buffer, Some(std::env::current_dir()?))
     };
 
-    let mut bytecode = quiver.compile(&source, module_path)?;
+    let (bytecode, _) = quiver.compile(&source, module_path)?;
+    let mut bytecode = bytecode;
 
     if !debug {
         bytecode = bytecode.without_debug_info();
@@ -291,7 +304,7 @@ fn compile_execute(
     source: &str,
     module_path: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bytecode = quiver.compile(source, module_path)?;
+    let (bytecode, _) = quiver.compile(source, module_path)?;
 
     if bytecode.entry.is_none() {
         return Err("Program not executable".into());
@@ -341,12 +354,6 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
 
         if bytecode.entry == Some(i) {
             header.push('*');
-        }
-
-        if !function.captures.is_empty() {
-            let captures_str: Vec<String> =
-                function.captures.iter().map(|c| c.to_string()).collect();
-            header.push_str(&format!(" [{}]", captures_str.join(", ")));
         }
 
         header.push(':');
