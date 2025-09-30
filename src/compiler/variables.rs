@@ -10,7 +10,7 @@ pub struct Capture {
 pub fn collect_free_variables(
     block: &ast::Block,
     function_parameters: &HashSet<String>,
-    defined_variables: &dyn Fn(&str) -> bool,
+    defined_variables: &dyn Fn(&str, &[ast::AccessPath]) -> bool,
 ) -> Vec<Capture> {
     let mut collector = FreeVariableCollector {
         function_parameters,
@@ -23,7 +23,7 @@ pub fn collect_free_variables(
 
 struct FreeVariableCollector<'a> {
     function_parameters: &'a HashSet<String>,
-    defined_variables: &'a dyn Fn(&str) -> bool,
+    defined_variables: &'a dyn Fn(&str, &[ast::AccessPath]) -> bool,
     captures: HashSet<Capture>,
 }
 
@@ -98,7 +98,9 @@ impl<'a> FreeVariableCollector<'a> {
     }
 
     fn visit_identifier(&mut self, identifier: &str, accessors: Vec<ast::AccessPath>) {
-        if !self.function_parameters.contains(identifier) && (self.defined_variables)(identifier) {
+        if !self.function_parameters.contains(identifier)
+            && (self.defined_variables)(identifier, &accessors)
+        {
             self.captures.insert(Capture {
                 base: identifier.to_string(),
                 accessors,

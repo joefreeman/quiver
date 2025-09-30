@@ -99,3 +99,16 @@ fn test_closure_captures_nested_member_access() {
         )
         .expect("42");
 }
+
+#[test]
+fn test_nested_function_captures() {
+    quiver()
+        .evaluate(
+            r#"
+            %"math" ~> math,
+            #{ #int { ~> [~, 1] ~> math.add! } ~> inc, 42 ~> inc! } ~> f,
+            f!
+            "#,
+        )
+        .expect("43");
+}

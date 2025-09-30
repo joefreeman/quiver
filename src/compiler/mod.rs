@@ -346,7 +346,7 @@ impl<'a> Compiler<'a> {
                     let ripple_var_name = format!("~{}", self.ripple_depth - 1);
                     // We need to get the type and index of the ripple value
                     let (ripple_type, ripple_index) = self
-                        .lookup_variable(&ripple_var_name)
+                        .lookup_variable(&self.scopes, &ripple_var_name, &[])
                         .ok_or_else(|| Error::InternalError {
                             message: "Ripple value type not found in scope".to_string(),
                         })?;
@@ -396,7 +396,7 @@ impl<'a> Compiler<'a> {
         // Use a unique variable name for each ripple context to avoid conflicts
         let ripple_var_name = format!("~{}", self.ripple_depth);
         self.ripple_depth += 1;
-        let ripple_index = self.define_variable(&ripple_var_name, value_type.clone());
+        let ripple_index = self.define_variable(&ripple_var_name, &[], value_type.clone());
         self.codegen.add_instruction(Instruction::Allocate(1));
         self.codegen
             .add_instruction(Instruction::Store(ripple_index));
@@ -411,7 +411,7 @@ impl<'a> Compiler<'a> {
                     // Use the stored ripple value
                     let ripple_var_name = format!("~{}", self.ripple_depth - 1);
                     let (ripple_type, ripple_index) = self
-                        .lookup_variable(&ripple_var_name)
+                        .lookup_variable(&self.scopes, &ripple_var_name, &[])
                         .ok_or_else(|| Error::InternalError {
                             message: "Ripple value not found in scope".to_string(),
                         })?;
@@ -459,7 +459,12 @@ impl<'a> Compiler<'a> {
         let captures = variables::collect_free_variables(
             &function_definition.body,
             &function_params,
-            &|name| self.lookup_variable(name).is_some(),
+            &|name, accessors| {
+                // Check if the full path (base + accessors) is defined, or just the base
+                self.lookup_variable(&self.scopes, name, accessors)
+                    .is_some()
+                    || self.lookup_variable(&self.scopes, name, &[]).is_some()
+            },
         );
 
         // Deduplicate captures (same base + accessors may appear multiple times)
@@ -476,7 +481,15 @@ impl<'a> Compiler<'a> {
         let mut capture_temps = Vec::new(); // Track which locals we allocated for captures
 
         for capture in &unique_captures {
-            if let Some((var_type, base_index)) = self.lookup_variable(&capture.base) {
+            // First check if the full path is available (for nested captures)
+            if let Some((_full_type, full_index)) =
+                self.lookup_variable(&self.scopes, &capture.base, &capture.accessors)
+            {
+                // The full path is already captured, just reuse it
+                capture_locals.push(full_index);
+            } else if let Some((var_type, base_index)) =
+                self.lookup_variable(&self.scopes, &capture.base, &[])
+            {
                 if capture.accessors.is_empty() {
                     // Simple capture - just reference the existing local
                     capture_locals.push(base_index);
@@ -517,10 +530,15 @@ impl<'a> Compiler<'a> {
         // Define captures as first locals in function body scope
         for capture in &unique_captures {
             // Determine the type of the captured value
-            let capture_type = if capture.accessors.is_empty() {
+            // First check if the full path is already available (for nested captures)
+            let capture_type = if let Some((full_type, _)) =
+                self.lookup_variable(&saved_scopes, &capture.base, &capture.accessors)
+            {
+                // The full path is already available from parent, use its type
+                full_type
+            } else if capture.accessors.is_empty() {
                 // Simple capture - use the base variable's type
-                if let Some((var_type, _)) =
-                    self.lookup_variable_in_scopes(&saved_scopes, &capture.base)
+                if let Some((var_type, _)) = self.lookup_variable(&saved_scopes, &capture.base, &[])
                 {
                     var_type
                 } else {
@@ -528,8 +546,7 @@ impl<'a> Compiler<'a> {
                 }
             } else {
                 // Capture with accessors - need to compute the accessed type
-                if let Some((var_type, _)) =
-                    self.lookup_variable_in_scopes(&saved_scopes, &capture.base)
+                if let Some((var_type, _)) = self.lookup_variable(&saved_scopes, &capture.base, &[])
                 {
                     // Use compile_accessor logic to determine type
                     // We need to compute this without generating bytecode
@@ -561,11 +578,7 @@ impl<'a> Compiler<'a> {
                 }
             };
 
-            // Generate a variable name for the capture
-            // For captures with accessors, create a synthetic name representing the full path
-            let capture_var_name = self.make_capture_name(&capture.base, &capture.accessors);
-
-            self.define_variable(&capture_var_name, capture_type);
+            self.define_variable(&capture.base, &capture.accessors, capture_type);
         }
 
         let mut parameter_fields = HashMap::new();
@@ -1076,7 +1089,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     // Load the variable when no value present
                     let (var_type, index) = self
-                        .lookup_variable(&name)
+                        .lookup_variable(&self.scopes, &name, &[])
                         .ok_or_else(|| Error::VariableUndefined(name.clone()))?;
                     self.codegen.add_instruction(Instruction::Load(index));
                     Ok(var_type)
@@ -1236,7 +1249,7 @@ impl<'a> Compiler<'a> {
             self.codegen.add_instruction(Instruction::TailCall(true));
             Ok(Type::Union(vec![]))
         } else {
-            match self.lookup_variable(identifier) {
+            match self.lookup_variable(&self.scopes, identifier, &[]) {
                 Some((Type::Callable(func_type), index)) => {
                     self.codegen.add_instruction(Instruction::Load(index));
                     self.codegen.add_instruction(Instruction::TailCall(false));
@@ -1413,8 +1426,9 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         // Check if we have a capture for the full path (base + accessors)
         if !accessors.is_empty() {
-            let capture_name = self.make_capture_name(target, &accessors);
-            if let Some((capture_type, capture_index)) = self.lookup_variable(&capture_name) {
+            if let Some((capture_type, capture_index)) =
+                self.lookup_variable(&self.scopes, target, &accessors)
+            {
                 // We have a pre-evaluated capture for this exact path
                 self.codegen
                     .add_instruction(Instruction::Load(capture_index));
@@ -1424,7 +1438,7 @@ impl<'a> Compiler<'a> {
 
         // No pre-evaluated capture, use standard member access
         let (last_type, index) = self
-            .lookup_variable(target)
+            .lookup_variable(&self.scopes, target, &[])
             .ok_or(Error::VariableUndefined(target.to_string()))?;
         self.codegen.add_instruction(Instruction::Load(index));
 
@@ -1447,11 +1461,17 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn define_variable(&mut self, name: &str, var_type: Type) -> usize {
+    fn define_variable(
+        &mut self,
+        name: &str,
+        accessors: &[ast::AccessPath],
+        var_type: Type,
+    ) -> usize {
+        let full_name = self.make_capture_name(name, accessors);
         let index = self.local_count;
         self.local_count += 1;
         if let Some(scope) = self.scopes.last_mut() {
-            scope.variables.insert(name.to_string(), (var_type, index));
+            scope.variables.insert(full_name, (var_type, index));
         }
         index
     }
@@ -1489,13 +1509,15 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn lookup_variable(&self, name: &str) -> Option<(Type, usize)> {
-        self.lookup_variable_in_scopes(&self.scopes, name)
-    }
-
-    fn lookup_variable_in_scopes(&self, scopes: &[Scope], name: &str) -> Option<(Type, usize)> {
+    fn lookup_variable(
+        &self,
+        scopes: &[Scope],
+        name: &str,
+        accessors: &[ast::AccessPath],
+    ) -> Option<(Type, usize)> {
+        let full_name = self.make_capture_name(name, accessors);
         for scope in scopes.iter().rev() {
-            if let Some(&(ref variable_type, index)) = scope.variables.get(name) {
+            if let Some(&(ref variable_type, index)) = scope.variables.get(&full_name) {
                 return Some((variable_type.clone(), index));
             }
         }
