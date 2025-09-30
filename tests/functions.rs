@@ -73,3 +73,29 @@ fn test_nested_function_return() {
         )
         .expect("8");
 }
+
+#[test]
+fn test_closure_captures_member_accesses() {
+    quiver()
+        .evaluate(
+            r#"
+            %"math" ~> math,
+            #int { ~> x => [[x, 2] ~> math.mul!, 1] ~> math.add! } ~> double_plus_one,
+            5 ~> double_plus_one!
+            "#,
+        )
+        .expect("11");
+}
+
+#[test]
+fn test_closure_captures_nested_member_access() {
+    quiver()
+        .evaluate(
+            r#"
+            [inner: [value: 42]] ~> obj,
+            #{ obj.inner.value } ~> get_value,
+            get_value!
+            "#,
+        )
+        .expect("42");
+}

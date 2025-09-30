@@ -462,11 +462,42 @@ impl<'a> Compiler<'a> {
             &|name| self.lookup_variable(name).is_some(),
         );
 
-        // Resolve capture indexes in current scope
+        // Deduplicate captures (same base + accessors may appear multiple times)
+        let mut unique_captures: Vec<variables::Capture> = Vec::new();
+        for capture in captures {
+            if !unique_captures.contains(&capture) {
+                unique_captures.push(capture);
+            }
+        }
+
+        // Resolve capture values in current scope
+        // For captures with accessors, evaluate the access and store in temporary locals
         let mut capture_locals = Vec::new();
-        for capture_name in &captures {
-            if let Some((_var_type, index)) = self.lookup_variable(capture_name) {
-                capture_locals.push(index);
+        let mut capture_temps = Vec::new(); // Track which locals we allocated for captures
+
+        for capture in &unique_captures {
+            if let Some((var_type, base_index)) = self.lookup_variable(&capture.base) {
+                if capture.accessors.is_empty() {
+                    // Simple capture - just reference the existing local
+                    capture_locals.push(base_index);
+                } else {
+                    // Capture with accessors - evaluate the access
+                    // Load the base variable
+                    self.codegen.add_instruction(Instruction::Load(base_index));
+
+                    // Apply accessors to get the final value
+                    let _accessed_type =
+                        self.compile_accessor(var_type, capture.accessors.clone(), &capture.base)?;
+
+                    // Store in temporary local
+                    let temp_local = self.local_count;
+                    self.local_count += 1;
+                    self.codegen.add_instruction(Instruction::Allocate(1));
+                    self.codegen.add_instruction(Instruction::Store(temp_local));
+
+                    capture_locals.push(temp_local);
+                    capture_temps.push(temp_local);
+                }
             }
         }
 
@@ -483,12 +514,58 @@ impl<'a> Compiler<'a> {
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
 
-        // Define captures as first locals
-        for capture_name in &captures {
-            if let Some((var_type, _)) = self.lookup_variable_in_scopes(&saved_scopes, capture_name)
-            {
-                self.define_variable(capture_name, var_type);
-            }
+        // Define captures as first locals in function body scope
+        for capture in &unique_captures {
+            // Determine the type of the captured value
+            let capture_type = if capture.accessors.is_empty() {
+                // Simple capture - use the base variable's type
+                if let Some((var_type, _)) =
+                    self.lookup_variable_in_scopes(&saved_scopes, &capture.base)
+                {
+                    var_type
+                } else {
+                    continue;
+                }
+            } else {
+                // Capture with accessors - need to compute the accessed type
+                if let Some((var_type, _)) =
+                    self.lookup_variable_in_scopes(&saved_scopes, &capture.base)
+                {
+                    // Use compile_accessor logic to determine type
+                    // We need to compute this without generating bytecode
+                    let mut last_type = var_type;
+
+                    for accessor in &capture.accessors {
+                        let tuple_types = last_type.extract_tuple_types();
+                        let field_types = match accessor {
+                            ast::AccessPath::Field(field_name) => {
+                                match self.get_field_types_by_name(&tuple_types, field_name) {
+                                    Ok(results) if !results.is_empty() => {
+                                        results.into_iter().map(|(_, t)| t).collect()
+                                    }
+                                    _ => continue,
+                                }
+                            }
+                            ast::AccessPath::Index(index) => {
+                                match self.get_field_types_at_position(&tuple_types, *index) {
+                                    Ok(types) => types,
+                                    _ => continue,
+                                }
+                            }
+                        };
+                        last_type = Type::from_types(field_types);
+                    }
+                    last_type
+                } else {
+                    continue;
+                }
+            };
+
+            // Generate a variable name for the capture
+            // For captures with accessors, create a synthetic name representing the full path
+            let capture_var_name = self.make_capture_name(&capture.base, &capture.accessors);
+
+            self.define_variable(&capture_var_name, capture_type);
         }
 
         let mut parameter_fields = HashMap::new();
@@ -523,6 +600,13 @@ impl<'a> Compiler<'a> {
 
         self.codegen
             .add_instruction(Instruction::Function(function_index));
+
+        // Clean up temporary locals we allocated for captures with accessors
+        if !capture_temps.is_empty() {
+            self.codegen
+                .add_instruction(Instruction::Clear(capture_temps.len()));
+            self.local_count -= capture_temps.len();
+        }
 
         let function_type = Type::Callable(Box::new(func_type));
 
@@ -1050,9 +1134,7 @@ impl<'a> Compiler<'a> {
                                 "Member access cannot be applied to value".to_string(),
                             ));
                         }
-                        // Load variable or access its members
-                        let target_type = self.compile_target_access(name)?;
-                        self.compile_accessor(target_type, member_access.accessors, name)
+                        self.compile_member_access(name, member_access.accessors)
                     }
                 }
             }
@@ -1274,15 +1356,6 @@ impl<'a> Compiler<'a> {
         Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
     }
 
-    fn compile_target_access(&mut self, target: &str) -> Result<Type, Error> {
-        if let Some((var_type, index)) = self.lookup_variable(target) {
-            self.codegen.add_instruction(Instruction::Load(index));
-            return Ok(var_type);
-        }
-
-        Err(Error::VariableUndefined(target.to_string()))
-    }
-
     fn compile_accessor(
         &mut self,
         mut last_type: Type,
@@ -1338,12 +1411,40 @@ impl<'a> Compiler<'a> {
         target: &str,
         accessors: Vec<ast::AccessPath>,
     ) -> Result<Type, Error> {
+        // Check if we have a capture for the full path (base + accessors)
+        if !accessors.is_empty() {
+            let capture_name = self.make_capture_name(target, &accessors);
+            if let Some((capture_type, capture_index)) = self.lookup_variable(&capture_name) {
+                // We have a pre-evaluated capture for this exact path
+                self.codegen
+                    .add_instruction(Instruction::Load(capture_index));
+                return Ok(capture_type);
+            }
+        }
+
+        // No pre-evaluated capture, use standard member access
         let (last_type, index) = self
             .lookup_variable(target)
             .ok_or(Error::VariableUndefined(target.to_string()))?;
         self.codegen.add_instruction(Instruction::Load(index));
 
         self.compile_accessor(last_type, accessors, target)
+    }
+
+    fn make_capture_name(&self, base: &str, accessors: &[ast::AccessPath]) -> String {
+        if accessors.is_empty() {
+            base.to_string()
+        } else {
+            let accessor_suffix = accessors
+                .iter()
+                .map(|acc| match acc {
+                    ast::AccessPath::Field(name) => name.clone(),
+                    ast::AccessPath::Index(idx) => idx.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(".");
+            format!("{}.{}", base, accessor_suffix)
+        }
     }
 
     fn define_variable(&mut self, name: &str, var_type: Type) -> usize {

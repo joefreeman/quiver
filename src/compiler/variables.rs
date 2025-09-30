@@ -1,24 +1,30 @@
 use crate::ast;
 use std::collections::HashSet;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Capture {
+    pub base: String,
+    pub accessors: Vec<ast::AccessPath>,
+}
+
 pub fn collect_free_variables(
     block: &ast::Block,
     function_parameters: &HashSet<String>,
     defined_variables: &dyn Fn(&str) -> bool,
-) -> HashSet<String> {
+) -> Vec<Capture> {
     let mut collector = FreeVariableCollector {
         function_parameters,
         defined_variables,
         captures: HashSet::new(),
     };
     collector.visit_block(block);
-    collector.captures
+    collector.captures.into_iter().collect()
 }
 
 struct FreeVariableCollector<'a> {
     function_parameters: &'a HashSet<String>,
     defined_variables: &'a dyn Fn(&str) -> bool,
-    captures: HashSet<String>,
+    captures: HashSet<Capture>,
 }
 
 impl<'a> FreeVariableCollector<'a> {
@@ -47,7 +53,7 @@ impl<'a> FreeVariableCollector<'a> {
         match term {
             ast::Term::Literal(_) => {}
             ast::Term::Identifier(name) => {
-                self.visit_identifier(name);
+                self.visit_identifier(name, vec![]);
             }
             ast::Term::Tuple(tuple) => {
                 for field in &tuple.fields {
@@ -64,20 +70,24 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_block(&func.body);
             }
             ast::Term::FunctionCall(target) => {
-                if let ast::FunctionCallTarget::Identifier { name, .. } = target {
-                    self.visit_identifier(name);
+                match target {
+                    ast::FunctionCallTarget::Identifier { name, accessors } => {
+                        self.visit_identifier(name, accessors.clone());
+                    }
+                    ast::FunctionCallTarget::Builtin(_) => {
+                        // Builtins don't reference variables
+                    }
                 }
-                // Builtins don't reference variables
             }
             ast::Term::MemberAccess(member_access) => {
                 if let Some(name) = &member_access.identifier {
-                    self.visit_identifier(name);
+                    self.visit_identifier(name, member_access.accessors.clone());
                 }
             }
             ast::Term::Import(_) => {}
             ast::Term::Builtin(_) => {}
             ast::Term::TailCall(identifier) => {
-                self.visit_identifier(identifier);
+                self.visit_identifier(identifier, vec![]);
             }
             ast::Term::Equality => {}
             ast::Term::Not => {}
@@ -87,9 +97,12 @@ impl<'a> FreeVariableCollector<'a> {
         }
     }
 
-    fn visit_identifier(&mut self, identifier: &str) {
+    fn visit_identifier(&mut self, identifier: &str, accessors: Vec<ast::AccessPath>) {
         if !self.function_parameters.contains(identifier) && (self.defined_variables)(identifier) {
-            self.captures.insert(identifier.to_string());
+            self.captures.insert(Capture {
+                base: identifier.to_string(),
+                accessors,
+            });
         }
     }
 }

@@ -108,7 +108,7 @@ pub struct MemberAccess {
     pub accessors: Vec<AccessPath>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AccessPath {
     Field(String),
     Index(usize),
