@@ -111,3 +111,37 @@ fn test_multi_level_import_with_captures() {
         .evaluate("%\"./level3.qv\" ~> funcs, funcs.1 ~> f2, f2!")
         .expect("308"); // ((100 + 1) * 3) + 5 = 308
 }
+
+#[test]
+fn test_partial_type_import() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "./types.qv".to_string(),
+        "type ok = Ok[int]; type err = Err[int]; []".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate(
+            r#"type (ok, err) = %"./types.qv";
+            #ok { ~> Ok[x] => [x, 2] ~> <multiply>! } ~> double,
+            Ok[21] ~> double!"#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_star_type_import() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "./types.qv".to_string(),
+        "type result = Ok[int] | Err[int]; []".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate(
+            r#"type * = %"./types.qv";
+            #result { ~> Ok[x] => x | ~> Err[x] => 0 } ~> unwrap,
+            Ok[42] ~> unwrap!"#,
+        )
+        .expect("42");
+}
