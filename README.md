@@ -17,10 +17,12 @@ type list = Nil | Cons[int, &];
 // Compute the sum of a list using tail recursion
 #[list, int] {
   | ~> [Nil, acc] => acc
-  | ~> [Cons[head, tail], acc] => [
-    tail,
-    [head, acc] ~> math.add!
-  ] ~> &
+  | ~> [Cons[head, tail], acc] => {
+    [head, acc]
+    ~> math.add!
+    ~> [tail, ~]
+    ~> &
+  }
 } ~> sum',
 
 #list { ~> [~, 0] ~> sum'! } ~> sum,
