@@ -1223,7 +1223,7 @@ impl<'a> Compiler<'a> {
             _ => {
                 return Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: format!("{:?}", function_type),
+                    found: self.vm.format_type(&function_type),
                 });
             }
         };
@@ -1232,10 +1232,10 @@ impl<'a> Compiler<'a> {
         if !val_type.is_compatible(&func_type.parameter, self.vm) {
             return Err(Error::TypeMismatch {
                 expected: format!(
-                    "function parameter compatible with {:?}",
-                    func_type.parameter
+                    "function parameter compatible with {}",
+                    self.vm.format_type(&func_type.parameter)
                 ),
-                found: format!("{:?}", val_type),
+                found: self.vm.format_type(&val_type),
             });
         }
 
@@ -1257,7 +1257,7 @@ impl<'a> Compiler<'a> {
                 }
                 Some((other_type, _)) => Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: format!("{:?}", other_type),
+                    found: self.vm.format_type(&other_type),
                 }),
                 None => Err(Error::VariableUndefined(identifier.to_string())),
             }

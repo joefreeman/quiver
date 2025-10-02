@@ -9,10 +9,10 @@ pub mod vm;
 
 use std::collections::HashMap;
 
-use bytecode::{TypeId, tree_shake};
+use bytecode::tree_shake;
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
-use types::{TupleTypeInfo, Type};
+use types::Type;
 use vm::{VM, Value};
 
 pub struct Quiver {
