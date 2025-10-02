@@ -19,8 +19,7 @@ fn test_prepend() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -45,8 +44,7 @@ fn test_head() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -63,8 +61,7 @@ fn test_tail() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -78,8 +75,7 @@ fn test_tail() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> list.tail!
@@ -91,9 +87,7 @@ fn test_tail() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
-            ~> list.tail!
+            list.new! ~> list.tail!
             "#,
         )
         .expect("[]");
@@ -144,8 +138,7 @@ fn test_length() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -162,10 +155,7 @@ fn test_append() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
-            ~> [~, 10]
-            ~> list.append!
+            list.new! ~> [~, 10] ~> list.append!
             "#,
         )
         .expect("Cons[10, Nil]");
@@ -174,8 +164,7 @@ fn test_append() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.append!
             ~> [~, 20]
@@ -188,8 +177,7 @@ fn test_append() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -205,9 +193,7 @@ fn test_reverse() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
-            ~> list.reverse!
+            list.new! ~> list.reverse!
             "#,
         )
         .expect("Nil");
@@ -216,11 +202,7 @@ fn test_reverse() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
-            ~> [~, 10]
-            ~> list.prepend!
-            ~> list.reverse!
+            list.new! ~> [~, 10] ~> list.prepend! ~> list.reverse!
             "#,
         )
         .expect("Cons[10, Nil]");
@@ -229,8 +211,7 @@ fn test_reverse() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -244,8 +225,7 @@ fn test_reverse() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -264,8 +244,7 @@ fn test_concat() {
         .evaluate(
             r#"
             %"list" ~> list,
-            [list.new!, list.new!]
-            ~> list.concat!
+            [list.new!, list.new!] ~> list.concat!
             "#,
         )
         .expect("Nil");
@@ -274,8 +253,7 @@ fn test_concat() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -292,8 +270,7 @@ fn test_concat() {
             r#"
             %"list" ~> list,
             list.new! ~> first,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 30]
             ~> list.prepend!
             ~> [~, 40]
@@ -308,20 +285,8 @@ fn test_concat() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
-            ~> [~, 10]
-            ~> list.prepend!
-            ~> [~, 20]
-            ~> list.prepend!
-            ~> first,
-            []
-            ~> list.new!
-            ~> [~, 30]
-            ~> list.prepend!
-            ~> [~, 40]
-            ~> list.prepend!
-            ~> second,
+            list.new! ~> [~, 10] ~> list.prepend! ~> [~, 20] ~> list.prepend! ~> first,
+            list.new! ~> [~, 30] ~> list.prepend! ~> [~, 40] ~> list.prepend! ~> second,
             [first, second] ~> list.concat!
             "#,
         )
@@ -345,8 +310,7 @@ fn test_at() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -364,8 +328,7 @@ fn test_at() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -383,8 +346,7 @@ fn test_at() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -401,8 +363,7 @@ fn test_at() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -436,8 +397,7 @@ fn test_map_single_element() {
             %"list" ~> list,
             %"math" ~> math,
             #int { ~> x => [x, 2] ~> math.mul! } ~> double,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 5]
             ~> list.prepend!
             ~> [~, double]
@@ -455,8 +415,7 @@ fn test_map_multiple_elements() {
             %"list" ~> list,
             %"math" ~> math,
             #int { ~> x => [x, 2] ~> math.mul! } ~> double,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 1]
             ~> list.prepend!
             ~> [~, 2]
@@ -478,8 +437,7 @@ fn test_map_increment() {
             %"list" ~> list,
             %"math" ~> math,
             #int { ~> x => [x, 1] ~> math.add! } ~> inc,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -500,8 +458,7 @@ fn test_map_identity() {
             r#"
             %"list" ~> list,
             #int { ~> x => x } ~> id,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 5]
             ~> list.prepend!
             ~> [~, 10]
@@ -523,8 +480,7 @@ fn test_map_square() {
             %"list" ~> list,
             %"math" ~> math,
             #int { ~> x => [x, x] ~> math.mul! } ~> square,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, 3]
@@ -545,8 +501,8 @@ fn test_filter_empty_list() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> is_even,
-            list.new! ~> [~, is_even] ~> list.filter!
+            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> even?,
+            list.new! ~> [~, even?] ~> list.filter!
             "#,
         )
         .expect("Nil");
@@ -559,16 +515,15 @@ fn test_filter_no_matches() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.lt! } ~> is_negative,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.lt! } ~> negative?,
+            list.new!
             ~> [~, 1]
             ~> list.prepend!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, 3]
             ~> list.prepend!
-            ~> [~, is_negative]
+            ~> [~, negative?]
             ~> list.filter!
             "#,
         )
@@ -582,16 +537,15 @@ fn test_filter_all_match() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, 1]
             ~> list.prepend!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, 3]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.filter!
             "#,
         )
@@ -605,9 +559,8 @@ fn test_filter_even_numbers() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> is_even,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> even?,
+            list.new!
             ~> [~, 1]
             ~> list.prepend!
             ~> [~, 2]
@@ -620,7 +573,7 @@ fn test_filter_even_numbers() {
             ~> list.prepend!
             ~> [~, 6]
             ~> list.prepend!
-            ~> [~, is_even]
+            ~> [~, even?]
             ~> list.filter!
             "#,
         )
@@ -635,8 +588,7 @@ fn test_filter_greater_than() {
             %"list" ~> list,
             %"math" ~> math,
             #int { ~> x => [x, 10] ~> math.gt! } ~> gt_10,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 5]
             ~> list.prepend!
             ~> [~, 10]
@@ -661,8 +613,7 @@ fn test_filter_single_match() {
             r#"
             %"list" ~> list,
             #int { ~> x, [x, 5] ~> == => Ok } ~> equals_5,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 1]
             ~> list.prepend!
             ~> [~, 5]
@@ -703,8 +654,7 @@ fn test_drop_zero() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -724,8 +674,7 @@ fn test_drop_some_elements() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -749,8 +698,7 @@ fn test_drop_all_elements() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -770,8 +718,7 @@ fn test_drop_more_than_length() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -810,8 +757,7 @@ fn test_take_zero() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -831,8 +777,7 @@ fn test_take_some_elements() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -856,8 +801,7 @@ fn test_take_all_elements() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -877,8 +821,7 @@ fn test_take_more_than_length() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -908,8 +851,7 @@ fn test_contains_single_element_found() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 10]
@@ -925,8 +867,7 @@ fn test_contains_single_element_not_found() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -942,8 +883,7 @@ fn test_contains_multiple_elements_first() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -963,8 +903,7 @@ fn test_contains_multiple_elements_middle() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -984,8 +923,7 @@ fn test_contains_multiple_elements_last() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -1005,8 +943,7 @@ fn test_contains_not_found() {
         .evaluate(
             r#"
             %"list" ~> list,
-            []
-            ~> list.new!
+            list.new!
             ~> [~, 10]
             ~> list.prepend!
             ~> [~, 20]
@@ -1027,8 +964,8 @@ fn test_all_empty_list() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            list.new! ~> [~, is_positive] ~> list.all?!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new! ~> [~, positive?] ~> list.all?!
             "#,
         )
         .expect("Ok");
@@ -1041,12 +978,11 @@ fn test_all_single_true() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, 5]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.all?!
             "#,
         )
@@ -1060,12 +996,11 @@ fn test_all_single_false() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, -5]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.all?!
             "#,
         )
@@ -1079,16 +1014,15 @@ fn test_all_multiple_all_true() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, 1]
             ~> list.prepend!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, 3]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.all?!
             "#,
         )
@@ -1102,16 +1036,15 @@ fn test_all_multiple_some_false() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, 1]
             ~> list.prepend!
             ~> [~, -2]
             ~> list.prepend!
             ~> [~, 3]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.all?!
             "#,
         )
@@ -1125,16 +1058,15 @@ fn test_all_even_numbers() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> is_even,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> even?,
+            list.new!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, 4]
             ~> list.prepend!
             ~> [~, 6]
             ~> list.prepend!
-            ~> [~, is_even]
+            ~> [~, even?]
             ~> list.all?!
             "#,
         )
@@ -1145,16 +1077,15 @@ fn test_all_even_numbers() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> is_even,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> even?,
+            list.new!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, 3]
             ~> list.prepend!
             ~> [~, 4]
             ~> list.prepend!
-            ~> [~, is_even]
+            ~> [~, even?]
             ~> list.all?!
             "#,
         )
@@ -1168,8 +1099,8 @@ fn test_any_empty_list() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            list.new! ~> [~, is_positive] ~> list.any?!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new! ~> [~, positive?] ~> list.any?!
             "#,
         )
         .expect("[]");
@@ -1182,12 +1113,11 @@ fn test_any_single_true() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, 5]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.any?!
             "#,
         )
@@ -1201,12 +1131,11 @@ fn test_any_single_false() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, -5]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.any?!
             "#,
         )
@@ -1220,16 +1149,15 @@ fn test_any_multiple_all_false() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, -1]
             ~> list.prepend!
             ~> [~, -2]
             ~> list.prepend!
             ~> [~, -3]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.any?!
             "#,
         )
@@ -1243,16 +1171,15 @@ fn test_any_multiple_some_true() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 0] ~> math.gt! } ~> is_positive,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 0] ~> math.gt! } ~> positive?,
+            list.new!
             ~> [~, -1]
             ~> list.prepend!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, -3]
             ~> list.prepend!
-            ~> [~, is_positive]
+            ~> [~, positive?]
             ~> list.any?!
             "#,
         )
@@ -1266,16 +1193,15 @@ fn test_any_first_matches() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> is_even,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> even?,
+            list.new!
             ~> [~, 3]
             ~> list.prepend!
             ~> [~, 5]
             ~> list.prepend!
             ~> [~, 2]
             ~> list.prepend!
-            ~> [~, is_even]
+            ~> [~, even?]
             ~> list.any?!
             "#,
         )
@@ -1289,16 +1215,15 @@ fn test_any_last_matches() {
             r#"
             %"list" ~> list,
             %"math" ~> math,
-            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> is_even,
-            []
-            ~> list.new!
+            #int { ~> x => [x, 2] ~> math.mod! ~> 0 } ~> even?,
+            list.new!
             ~> [~, 2]
             ~> list.prepend!
             ~> [~, 3]
             ~> list.prepend!
             ~> [~, 5]
             ~> list.prepend!
-            ~> [~, is_even]
+            ~> [~, even?]
             ~> list.any?!
             "#,
         )
