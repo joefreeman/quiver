@@ -231,7 +231,7 @@ impl VM {
         self.functions[function_index] = Function {
             instructions,
             function_type: func.function_type.clone(),
-            captures: (0..captures.len()).collect(),
+            captures: Vec::new(),
         };
     }
 
@@ -254,12 +254,10 @@ impl VM {
                 vec![Instruction::Builtin(builtin_idx)]
             }
             Value::Function(function, captures) => {
-                let mut instrs = Vec::new();
-                for cap in captures {
-                    instrs.extend(self.value_to_instructions(cap));
+                if !captures.is_empty() {
+                    self.inject_function_captures(*function, captures.clone());
                 }
-                instrs.push(Instruction::Function(*function));
-                instrs
+                vec![Instruction::Function(*function)]
             }
             Value::Tuple(type_id, elements) => {
                 let mut instrs = Vec::new();
