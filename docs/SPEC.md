@@ -57,15 +57,25 @@ A[b: B[c: C[bin]]]       // Nested tuples
 ### Type aliases
 
 ```
-type point = Point[x: int, y: int]
-type adder = #int -> int
+type point = Point[x: int, y: int];
+type adder = #int -> int;
 ```
 
 ### Union types
 
 ```
-type shape = Circle[radius: int] | Rectangle[width: int, height: int]
-type list = Nil | Cons[int, list]
+type shape = Circle[radius: int] | Rectangle[width: int, height: int];
+type bool = True | False;
+```
+
+### Recursive types
+
+Use `&` to refer back to the root of the types, or `&1`/`&2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
+
+```
+type list = Nil | Cons[int, &];
+type tree = Leaf[int] | Node[&, &];
+type json = Null | True | False | int | Str[bin] | Array[(Nil | Cons[&, &1])];
 ```
 
 ### Strings
@@ -290,8 +300,8 @@ Modules are evaluated at compile time, and the result (e.g., the final tuple) is
 Import types from modules using patterns:
 
 ```
-type (circle, rectangle) = %"./shapes.qv"  // Import specific types
-type * = %"./geometry.qv"                  // Import all types
+type (circle, rectangle) = %"./shapes.qv";  // Import specific types
+type * = %"./geometry.qv";                  // Import all types
 ```
 
 ## Standard library
@@ -349,7 +359,7 @@ Point[x: 5, y: 15] ~> p2,
 ### Pattern matching
 
 ```
-type list = Nil | Cons[int, list];
+type list = Nil | Cons[int, &];
 
 // Determine whether a list contains an item
 #[list, int] {

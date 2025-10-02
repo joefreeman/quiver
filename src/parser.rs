@@ -279,6 +279,16 @@ fn type_identifier(input: &str) -> IResult<&str, Type> {
     map(identifier, Type::Identifier)(input)
 }
 
+fn type_cycle(input: &str) -> IResult<&str, Type> {
+    map(
+        preceded(
+            char('&'),
+            opt(map_res(digit1, |s: &str| s.parse::<usize>())),
+        ),
+        |depth| Type::Cycle(depth),
+    )(input)
+}
+
 fn function_type(input: &str) -> IResult<&str, Type> {
     map(
         preceded(
@@ -320,6 +330,7 @@ fn base_type(input: &str) -> IResult<&str, Type> {
     alt((
         tuple_type,
         primitive_type,
+        type_cycle,
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         type_identifier,
     ))(input)

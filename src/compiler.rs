@@ -275,12 +275,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
-        // Push the type name onto the resolution stack to detect cycles
-        self.type_context.resolution_stack.push(name.to_string());
         let resolved_type = self
             .type_context
             .resolve_ast_type(type_definition, self.vm)?;
-        self.type_context.resolution_stack.pop();
 
         self.type_context
             .type_aliases

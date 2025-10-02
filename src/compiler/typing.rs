@@ -33,15 +33,42 @@ pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
 
 pub struct TypeContext<'a> {
     pub type_aliases: &'a mut HashMap<String, Type>,
-    pub resolution_stack: Vec<String>,
+    pub union_stack: Vec<()>, // Track union boundaries for cycle depth calculation
 }
 
 impl<'a> TypeContext<'a> {
     pub fn new(type_aliases: &'a mut HashMap<String, Type>) -> Self {
         Self {
             type_aliases,
-            resolution_stack: Vec::new(),
+            union_stack: Vec::new(),
         }
+    }
+
+    /// Check if an AST type contains any cycle references
+    fn ast_contains_cycle(typ: &ast::Type) -> bool {
+        match typ {
+            ast::Type::Cycle(_) => true,
+            ast::Type::Union(union) => union.types.iter().any(|v| Self::ast_contains_cycle(v)),
+            ast::Type::Function(func) => {
+                Self::ast_contains_cycle(&func.input) || Self::ast_contains_cycle(&func.output)
+            }
+            ast::Type::Tuple(tuple) => tuple
+                .fields
+                .iter()
+                .any(|f| Self::ast_contains_cycle(&f.type_def)),
+            ast::Type::Primitive(_) | ast::Type::Identifier(_) => false,
+        }
+    }
+
+    /// Validate that a union has at least one non-recursive variant (base case)
+    fn validate_union_has_base_case(variants: &[ast::Type]) -> Result<(), Error> {
+        let has_base_case = variants.iter().any(|v| !Self::ast_contains_cycle(v));
+        if !has_base_case {
+            return Err(Error::TypeUnresolved(
+                "Union must have a base case with a non-recursive variant".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn resolve_ast_type(&mut self, ast_type: ast::Type, vm: &mut VM) -> Result<Type, Error> {
@@ -72,6 +99,15 @@ impl<'a> TypeContext<'a> {
                 })))
             }
             ast::Type::Union(union) => {
+                // Validate that union has at least one base case before resolution
+                if union.types.is_empty() {
+                    return Err(Error::TypeUnresolved("Empty union type".to_string()));
+                }
+                Self::validate_union_has_base_case(&union.types)?;
+
+                // Push union boundary marker
+                self.union_stack.push(());
+
                 // Resolve all union member types
                 let mut resolved_types = Vec::new();
                 for member_type in union.types {
@@ -82,35 +118,42 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // Return as union type
-                if resolved_types.is_empty() {
-                    return Err(Error::TypeUnresolved("Empty union type".to_string()));
-                }
+                // Pop union boundary marker
+                self.union_stack.pop();
+
                 Ok(Type::from_types(resolved_types))
             }
-            ast::Type::Identifier(alias) => {
-                // Check if this creates a cycle
-                if let Some(depth) = self.resolution_stack.iter().rev().position(|x| x == &alias) {
-                    // Found a cycle! Return a Cycle type
-                    return Ok(Type::Cycle(depth + 1));
+            ast::Type::Cycle(target_depth) => {
+                // & or &N syntax for cycle references
+                let target_depth = target_depth.unwrap_or(0);
+
+                // Validate: cycles require enclosing union
+                if self.union_stack.is_empty() {
+                    return Err(Error::TypeUnresolved(
+                        "Cycle reference '&' requires enclosing union type".to_string(),
+                    ));
                 }
 
-                // Look up type alias
-                if let Some(aliased_type) = self.type_aliases.get(&alias) {
-                    // Check if it's a placeholder (Union with empty vec)
-                    if let Type::Union(types) = aliased_type {
-                        if types.is_empty() {
-                            // This is a forward reference to a type being defined
-                            // For now, return a cycle pointing to the current level
-                            return Ok(Type::Cycle(self.resolution_stack.len()));
-                        }
-                    }
+                // Validate: target_depth must be <= union_stack.len()
+                if target_depth >= self.union_stack.len() {
+                    return Err(Error::TypeUnresolved(format!(
+                        "Invalid cycle reference &{}: only {} union level(s) deep",
+                        target_depth,
+                        self.union_stack.len()
+                    )));
+                }
 
-                    // Push to stack for cycle detection
-                    self.resolution_stack.push(alias.clone());
-                    let result = Ok(aliased_type.clone());
-                    self.resolution_stack.pop();
-                    result
+                // Calculate actual depth for Cycle(depth)
+                // target_depth is downward from root (0 = root, 1 = first nested union)
+                // Cycle(depth) is upward from current position
+                let cycle_depth = self.union_stack.len() - target_depth;
+
+                Ok(Type::Cycle(cycle_depth))
+            }
+            ast::Type::Identifier(alias) => {
+                // Look up already-defined type alias
+                if let Some(aliased_type) = self.type_aliases.get(&alias) {
+                    Ok(aliased_type.clone())
                 } else {
                     Err(Error::TypeAliasMissing(alias))
                 }

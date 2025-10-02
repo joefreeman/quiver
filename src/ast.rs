@@ -127,6 +127,7 @@ pub enum Type {
     Function(FunctionType),
     Union(UnionType),
     Identifier(String),
+    Cycle(Option<usize>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

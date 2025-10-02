@@ -97,7 +97,9 @@ impl Type {
     pub fn is_compatible<T: TypeLookup>(&self, pattern: &Type, type_lookup: &T) -> bool {
         let mut assumptions = HashSet::new();
         let mut type_stack = Vec::new();
-        self.is_compatible_with_impl(pattern, type_lookup, &mut assumptions, &mut type_stack)
+        let result =
+            self.is_compatible_with_impl(pattern, type_lookup, &mut assumptions, &mut type_stack);
+        result
     }
 
     /// Internal implementation of type compatibility checking.
@@ -107,7 +109,7 @@ impl Type {
         pattern: &Type,
         type_lookup: &T,
         assumptions: &mut HashSet<(Type, Type)>,
-        type_stack: &mut Vec<(Type, Type)>,
+        type_stack: &mut Vec<Type>,
     ) -> bool {
         // Check if we've already assumed these types are compatible (coinductive hypothesis)
         let key = (self.clone(), pattern.clone());
@@ -118,70 +120,96 @@ impl Type {
         // Add assumption for coinductive reasoning
         assumptions.insert(key);
 
-        // Push current types onto stack for cycle resolution
-        type_stack.push((self.clone(), pattern.clone()));
-
-        let result = match (self, pattern) {
+        match (self, pattern) {
             // Basic types must match exactly
             (Type::Integer, Type::Integer) => true,
             (Type::Binary, Type::Binary) => true,
 
             // For tuples, check structural compatibility
             (Type::Tuple(id1), Type::Tuple(id2)) => {
+                // Fast path: same ID means definitely compatible
                 if id1 == id2 {
                     return true;
                 }
 
                 // Look up both tuple types
-                let tuple1 = type_lookup.lookup_type(id1);
-                let tuple2 = type_lookup.lookup_type(id2);
+                let Some((name1, fields1)) = type_lookup.lookup_type(id1) else {
+                    return false;
+                };
+                let Some((name2, fields2)) = type_lookup.lookup_type(id2) else {
+                    return false;
+                };
 
-                match (tuple1, tuple2) {
-                    (Some((name1, fields1)), Some((name2, fields2))) => {
-                        // Names must match (or both be None)
-                        if name1 != name2 {
-                            return false;
-                        }
+                // Names must match and same number of fields required
+                name1 == name2
+                    && fields1.len() == fields2.len()
+                    && fields1.iter().zip(fields2.iter()).all(
+                        |((fname1, ftype1), (fname2, ftype2))| {
+                            fname1 == fname2
+                                && ftype1.is_compatible_with_impl(
+                                    ftype2,
+                                    type_lookup,
+                                    assumptions,
+                                    type_stack,
+                                )
+                        },
+                    )
+            }
 
-                        // Same number of fields
-                        if fields1.len() != fields2.len() {
-                            return false;
-                        }
+            // When both are cycles with same depth, they refer to the same recursive type
+            (Type::Cycle(d1), Type::Cycle(d2)) if d1 == d2 => true,
 
-                        // Check each field recursively
-                        fields1.iter().zip(fields2.iter()).all(
-                            |((fname1, ftype1), (fname2, ftype2))| {
-                                fname1 == fname2
-                                    && ftype1.is_compatible_with_impl(
-                                        ftype2,
-                                        type_lookup,
-                                        assumptions,
-                                        type_stack,
-                                    )
-                            },
+            // Handle cycles in self by looking up the type in the stack
+            (Type::Cycle(depth), _) => {
+                // Check if stack has enough context
+                if type_stack.len() < *depth {
+                    return true; // Use coinductive reasoning
+                }
+
+                let lookup_index = type_stack.len() - *depth;
+                if let Some(Type::Union(variants)) = type_stack.get(lookup_index) {
+                    // Resolve the cycle to the union and check compatibility
+                    let variants = variants.clone();
+                    variants.iter().any(|variant| {
+                        variant.is_compatible_with_impl(
+                            pattern,
+                            type_lookup,
+                            assumptions,
+                            type_stack,
                         )
-                    }
-                    _ => false,
+                    })
+                } else {
+                    // Cycles should only refer to unions, but use coinductive reasoning as fallback
+                    true
                 }
             }
 
-            // Handle cycles by looking up the type in the stack
+            // Handle cycles in pattern by looking up the type in the stack
             (_, Type::Cycle(depth)) => {
                 // Cycle(n) refers to the pattern type n positions from the end of the stack
-                if let Some((_, pattern_type)) =
-                    type_stack.get(type_stack.len().saturating_sub(*depth))
-                {
-                    let pattern_type = pattern_type.clone();
-                    let mut new_assumptions = assumptions.clone();
-                    self.is_compatible_with_impl(
-                        &pattern_type,
-                        type_lookup,
-                        &mut new_assumptions,
-                        type_stack,
-                    )
+                // Cycles always refer to union types (enforced during type resolution)
+
+                // Check if stack has enough context
+                if type_stack.len() < *depth {
+                    // Stack doesn't have enough context - this happens when comparing
+                    // a concrete type against a variant containing a Cycle outside
+                    // the context of the enclosing Union. Use coinductive reasoning:
+                    // assume compatibility and let the assumptions set prevent infinite loops.
+                    return true;
+                }
+
+                let lookup_index = type_stack.len() - *depth;
+                if let Some(Type::Union(variants)) = type_stack.get(lookup_index) {
+                    // Check if self matches any variant WITHOUT pushing the union
+                    // onto the stack again (it's already there!)
+                    let variants = variants.clone();
+                    variants.iter().any(|variant| {
+                        self.is_compatible_with_impl(variant, type_lookup, assumptions, type_stack)
+                    })
                 } else {
-                    // Invalid cycle depth - shouldn't happen with well-formed types
-                    false
+                    // This shouldn't happen - cycles should only refer to unions
+                    // But use coinductive reasoning as a fallback
+                    true
                 }
             }
 
@@ -193,40 +221,28 @@ impl Type {
             }
 
             // When self is concrete and pattern is a union, check if self matches any variant
-            (concrete_type, Type::Union(variants)) => variants.iter().any(|variant| {
-                let mut new_assumptions = assumptions.clone();
-                if concrete_type == variant {
-                    true
-                } else {
+            // Push the union pattern onto stack since cycles may reference it
+            (concrete_type, Type::Union(variants)) => {
+                type_stack.push(pattern.clone());
+                let result = variants.iter().any(|variant| {
                     concrete_type.is_compatible_with_impl(
                         variant,
                         type_lookup,
-                        &mut new_assumptions,
+                        assumptions,
                         type_stack,
                     )
-                }
-            }),
+                });
+                type_stack.pop();
+                result
+            }
 
             // When self is a union and pattern is concrete, check if any variant matches pattern
             (Type::Union(variants), pattern_type) => variants.iter().any(|variant| {
-                let mut new_assumptions = assumptions.clone();
-                if variant == pattern_type {
-                    true
-                } else {
-                    variant.is_compatible_with_impl(
-                        pattern_type,
-                        type_lookup,
-                        &mut new_assumptions,
-                        type_stack,
-                    )
-                }
+                variant.is_compatible_with_impl(pattern_type, type_lookup, assumptions, type_stack)
             }),
 
             _ => false,
-        };
-
-        type_stack.pop();
-        result
+        }
     }
 }
 

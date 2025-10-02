@@ -1,5 +1,5 @@
 
-type list = Nil | Cons[int, list];
+type list = Nil | Cons[int, &];
 
 %"math" ~> math,
 
