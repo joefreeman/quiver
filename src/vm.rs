@@ -2,7 +2,6 @@ use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
 use crate::types::{TupleTypeInfo, Type, TypeLookup, TypeRegistry};
 use std::collections::HashMap;
-use std::fmt;
 use std::rc::Rc;
 
 /// Maximum binary size in bytes (16MB)
@@ -43,35 +42,6 @@ impl Value {
             Value::Tuple(_, _) => "tuple",
             Value::Function(_, _) => "function",
             Value::Builtin(_) => "builtin",
-        }
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Integer(i) => write!(f, "{}", i),
-            Value::Binary(_) => write!(f, "'...'"), // TODO: show actual binary content
-            Value::Tuple(type_id, elements) => {
-                if *type_id == TypeId::NIL {
-                    write!(f, "[]")
-                } else if *type_id == TypeId::OK {
-                    write!(f, "Ok")
-                } else if elements.is_empty() {
-                    write!(f, "Type{}", type_id.0)
-                } else {
-                    write!(f, "Type{}[", type_id.0)?;
-                    for (i, element) in elements.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", element)?;
-                    }
-                    write!(f, "]")
-                }
-            }
-            Value::Function(_, _) => write!(f, "(function)"),
-            Value::Builtin(name) => write!(f, "<{}>", name),
         }
     }
 }
