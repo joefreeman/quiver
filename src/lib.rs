@@ -69,10 +69,10 @@ impl Quiver {
         &mut self,
         source: &str,
         module_path: Option<std::path::PathBuf>,
-    ) -> Result<(bytecode::Bytecode, HashMap<String, usize>), Error> {
+    ) -> Result<bytecode::Bytecode, Error> {
         let program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
-        let (instructions, variables) = Compiler::compile(
+        let (instructions, _) = Compiler::compile(
             program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
@@ -106,9 +106,7 @@ impl Quiver {
             types: self.vm.get_types(),
         };
 
-        let bytecode = tree_shake(bytecode);
-
-        Ok((bytecode, variables))
+        Ok(tree_shake(bytecode))
     }
 
     pub fn execute(&mut self, bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {

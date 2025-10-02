@@ -219,8 +219,7 @@ fn compile_command(
         (buffer, Some(std::env::current_dir()?))
     };
 
-    let (bytecode, _) = quiver.compile(&source, module_path)?;
-    let mut bytecode = bytecode;
+    let mut bytecode = quiver.compile(&source, module_path)?;
 
     if !debug {
         bytecode = bytecode.without_debug_info();
@@ -303,10 +302,10 @@ fn compile_execute(
     source: &str,
     module_path: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (bytecode, _) = quiver.compile(source, module_path)?;
+    let bytecode = quiver.compile(source, module_path)?;
 
     if bytecode.entry.is_none() {
-        return Err("Program not executable".into());
+        return Err("Program is not executable. Must evaluate to a function.".into());
     }
 
     let result = quiver.execute(bytecode)?;
