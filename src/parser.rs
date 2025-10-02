@@ -524,12 +524,12 @@ fn branch(input: &str) -> IResult<&str, Branch> {
 fn block(input: &str) -> IResult<&str, Block> {
     map(
         delimited(
-            pair(char('{'), ws1),
+            pair(char('{'), wsc),
             preceded(
-                opt(pair(char('|'), ws1)),
-                separated_list1(tuple((ws1, char('|'), ws1)), branch),
+                opt(pair(char('|'), wsc)),
+                separated_list1(tuple((wsc, char('|'), wsc)), branch),
             ),
-            pair(ws1, char('}')),
+            pair(wsc, char('}')),
         ),
         |branches| Block { branches },
     )(input)
