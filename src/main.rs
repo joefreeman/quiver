@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 use quiver::Quiver;
 use quiver::types::Type;
-use quiver::vm::{Value, format_type};
+use quiver::vm::{VM, Value};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::collections::HashMap;
@@ -144,7 +144,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                                     format!(
                                         "  {}: {}",
                                         type_id.0,
-                                        format_type(&quiver.get_types(), &Type::Tuple(type_id))
+                                        quiver.format_type(&Type::Tuple(type_id))
                                     )
                                     .bright_black()
                                 )
@@ -335,23 +335,27 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
         println!("  {}: {}", i, formatted);
     }
 
-    if !bytecode.types.is_empty() {
+    let entry = bytecode.entry;
+    let vm = VM::new(Some(bytecode));
+
+    let types_map = vm.get_types();
+    if !types_map.is_empty() {
         println!("\nTypes:");
-        let mut types: Vec<_> = bytecode.types.iter().collect();
+        let mut types: Vec<_> = types_map.iter().collect();
         types.sort_by_key(|(id, _)| id.0);
         for (type_id, _type_info) in types {
             println!(
                 "  {}: {}",
                 type_id.0,
-                format_type(&bytecode.types, &Type::Tuple(*type_id))
+                vm.format_type(&Type::Tuple(*type_id))
             );
         }
     }
 
-    for (i, function) in bytecode.functions.iter().enumerate() {
+    for (i, function) in vm.get_functions().iter().enumerate() {
         let mut header = format!("\nFunction{}", i);
 
-        if bytecode.entry == Some(i) {
+        if entry == Some(i) {
             header.push('*');
         }
 

@@ -155,12 +155,12 @@ impl Quiver {
             .collect()
     }
 
-    pub fn get_types(&self) -> HashMap<TypeId, TupleTypeInfo> {
-        self.vm.get_types()
-    }
-
     pub fn format_value(&self, value: &Value) -> String {
         self.vm.format_value(value)
+    }
+
+    pub fn format_type(&self, type_def: &Type) -> String {
+        self.vm.format_type(type_def)
     }
 }
 

@@ -137,12 +137,6 @@ pub struct VM {
     type_registry: TypeRegistry,
 }
 
-impl Default for VM {
-    fn default() -> Self {
-        Self::new(None)
-    }
-}
-
 impl TypeLookup for VM {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
         self.type_registry.lookup_type(type_id)
@@ -830,15 +824,70 @@ impl VM {
         Ok(variables)
     }
 
+    pub fn format_type(&self, type_def: &Type) -> String {
+        match type_def {
+            Type::Integer => "int".to_string(),
+            Type::Binary => "bin".to_string(),
+            Type::Tuple(type_id) => {
+                if let Some((name, fields)) = self.lookup_type(type_id) {
+                    let field_strs: Vec<String> = fields
+                        .iter()
+                        .map(|(field_name, field_type)| {
+                            if let Some(field_name) = field_name {
+                                format!("{}: {}", field_name, self.format_type(field_type))
+                            } else {
+                                self.format_type(field_type)
+                            }
+                        })
+                        .collect();
+
+                    if let Some(type_name) = name {
+                        if field_strs.is_empty() {
+                            format!("{}", type_name)
+                        } else {
+                            format!("{}[{}]", type_name, field_strs.join(", "))
+                        }
+                    } else {
+                        format!("[{}]", field_strs.join(", "))
+                    }
+                } else {
+                    format!("Type{}", type_id.0)
+                }
+            }
+            Type::Callable(func_type) => {
+                // Add parentheses around parameter if it's a function type
+                let param_str = match &func_type.parameter {
+                    Type::Callable(_) => format!("({})", self.format_type(&func_type.parameter)),
+                    _ => self.format_type(&func_type.parameter),
+                };
+
+                // Result type already has parentheses if it's a union
+                let result_str = self.format_type(&func_type.result);
+                format!("#{} -> {}", param_str, result_str)
+            }
+            Type::Cycle(depth) => format!("μ{}", depth),
+            Type::Union(types_list) => {
+                let type_strs: Vec<String> = types_list
+                    .iter()
+                    .map(|t| {
+                        match t {
+                            // Add parentheses around function types in unions for clarity
+                            Type::Callable(_) => format!("({})", self.format_type(t)),
+                            _ => self.format_type(t),
+                        }
+                    })
+                    .collect();
+                format!("({})", type_strs.join(" | "))
+            }
+        }
+    }
+
     pub fn format_value(&self, value: &Value) -> String {
         match value {
             Value::Function(function, _) => {
                 if let Some(func_def) = self.get_functions().get(*function) {
                     if let Some(func_type) = &func_def.function_type {
-                        return format_type(
-                            &self.get_types(),
-                            &Type::Callable(Box::new(func_type.clone())),
-                        );
+                        return self.format_type(&Type::Callable(Box::new(func_type.clone())));
                     }
                 }
                 "(function)".to_string()
@@ -927,64 +976,6 @@ fn values_equal(a: &Value, b: &Value, vm: &VM) -> bool {
                     .all(|(x, y)| values_equal(x, y, vm))
         }
         _ => false,
-    }
-}
-
-pub fn format_type(types: &HashMap<TypeId, TupleTypeInfo>, type_def: &Type) -> String {
-    match type_def {
-        Type::Integer => "int".to_string(),
-        Type::Binary => "bin".to_string(),
-        Type::Tuple(type_id) => {
-            if let Some((name, fields)) = types.get(type_id) {
-                let field_strs: Vec<String> = fields
-                    .iter()
-                    .map(|(field_name, field_type)| {
-                        if let Some(field_name) = field_name {
-                            format!("{}: {}", field_name, format_type(types, field_type))
-                        } else {
-                            format_type(types, field_type)
-                        }
-                    })
-                    .collect();
-
-                if let Some(type_name) = name {
-                    if field_strs.is_empty() {
-                        format!("{}", type_name)
-                    } else {
-                        format!("{}[{}]", type_name, field_strs.join(", "))
-                    }
-                } else {
-                    format!("[{}]", field_strs.join(", "))
-                }
-            } else {
-                format!("Type{}", type_id.0)
-            }
-        }
-        Type::Callable(func_type) => {
-            // Add parentheses around parameter if it's a function type
-            let param_str = match &func_type.parameter {
-                Type::Callable(_) => format!("({})", format_type(types, &func_type.parameter)),
-                _ => format_type(types, &func_type.parameter),
-            };
-
-            // Result type already has parentheses if it's a union
-            let result_str = format_type(types, &func_type.result);
-            format!("#{} -> {}", param_str, result_str)
-        }
-        Type::Cycle(depth) => format!("μ{}", depth),
-        Type::Union(types_list) => {
-            let type_strs: Vec<String> = types_list
-                .iter()
-                .map(|t| {
-                    match t {
-                        // Add parentheses around function types in unions for clarity
-                        Type::Callable(_) => format!("({})", format_type(types, t)),
-                        _ => format_type(types, t),
-                    }
-                })
-                .collect();
-            format!("({})", type_strs.join(" | "))
-        }
     }
 }
 
