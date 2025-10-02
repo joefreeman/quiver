@@ -9,7 +9,7 @@ pub mod vm;
 
 use std::collections::HashMap;
 
-use bytecode::{Function, TypeId, tree_shake};
+use bytecode::{TypeId, tree_shake};
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
 use types::{TupleTypeInfo, Type};
@@ -63,35 +63,6 @@ impl Quiver {
         let compacted_variables = self.vm.cleanup_locals(&variables);
 
         Ok((result, compacted_variables))
-    }
-
-    pub fn get_stack(&self) -> Vec<Value> {
-        self.vm.get_stack()
-    }
-
-    pub fn frame_count(&self) -> usize {
-        self.vm.frame_count()
-    }
-
-    pub fn get_variables(&self, variables: &HashMap<String, usize>) -> Vec<(String, Value)> {
-        self.vm
-            .get_variables(variables)
-            .map(|map| map.into_iter().collect())
-            .unwrap_or_default()
-    }
-
-    pub fn list_types(&self) -> Vec<(String, bytecode::TypeId)> {
-        self.vm
-            .get_types()
-            .iter()
-            .map(|(&type_id, (name, _fields))| {
-                let display_name = name
-                    .as_deref()
-                    .unwrap_or(&format!("Type{}", type_id.0))
-                    .to_string();
-                (display_name, type_id)
-            })
-            .collect()
     }
 
     pub fn compile(
@@ -155,23 +126,41 @@ impl Quiver {
         }
     }
 
-    pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.vm.lookup_type(type_id)
+    pub fn get_stack(&self) -> Vec<Value> {
+        self.vm.get_stack()
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.vm.frame_count()
+    }
+
+    pub fn get_variables(&self, variables: &HashMap<String, usize>) -> Vec<(String, Value)> {
+        self.vm
+            .get_variables(variables)
+            .map(|map| map.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn list_types(&self) -> Vec<(String, bytecode::TypeId)> {
+        self.vm
+            .get_types()
+            .iter()
+            .map(|(&type_id, (name, _fields))| {
+                let display_name = name
+                    .as_deref()
+                    .unwrap_or(&format!("Type{}", type_id.0))
+                    .to_string();
+                (display_name, type_id)
+            })
+            .collect()
     }
 
     pub fn get_types(&self) -> HashMap<TypeId, TupleTypeInfo> {
         self.vm.get_types()
     }
 
-    pub fn get_function(&self, function: usize) -> Option<&Function> {
-        self.vm.get_functions().get(function)
-    }
-
-    pub fn get_binary_bytes(&self, binary_ref: &vm::BinaryRef) -> Result<Vec<u8>, Error> {
-        self.vm
-            .get_binary_bytes(binary_ref)
-            .map(|bytes| bytes.to_vec())
-            .map_err(Error::RuntimeError)
+    pub fn format_value(&self, value: &Value) -> String {
+        self.vm.format_value(value)
     }
 }
 

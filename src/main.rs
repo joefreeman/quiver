@@ -1,9 +1,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 use quiver::Quiver;
-use quiver::bytecode::TypeId;
-use quiver::types::{TupleTypeInfo, Type};
-use quiver::vm::Value;
+use quiver::types::Type;
+use quiver::vm::{Value, format_type};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::collections::HashMap;
@@ -124,7 +123,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                             for (name, value) in sorted_vars {
                                 println!(
                                     "{}",
-                                    format!("  {} = {}", name, format_value(&quiver, &value))
+                                    format!("  {} = {}", name, quiver.format_value(&value))
                                         .bright_black()
                                 );
                             }
@@ -166,7 +165,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                                 variables = new_variables;
 
                                 if let Some(value) = &result {
-                                    println!("{}", format_value(&quiver, value));
+                                    println!("{}", quiver.format_value(value));
                                 }
 
                                 last_result = result;
@@ -244,7 +243,7 @@ fn compile_command(
 
 fn handle_result(result: Result<Option<quiver::vm::Value>, quiver::Error>, quiver: &Quiver) {
     match result {
-        Ok(Some(value)) => println!("{}", format_value(quiver, &value)),
+        Ok(Some(value)) => println!("{}", quiver.format_value(&value)),
         Ok(None) => {}
         Err(err) => {
             eprintln!("Error: {}", err);
@@ -380,170 +379,5 @@ fn format_binary(bytes: &[u8]) -> String {
     } else {
         let hex: String = bytes[..8].iter().map(|b| format!("{:02x}", b)).collect();
         format!("'{}...'", hex)
-    }
-}
-
-fn format_type(types: &HashMap<TypeId, TupleTypeInfo>, type_def: &Type) -> String {
-    match type_def {
-        Type::Integer => "int".to_string(),
-        Type::Binary => "bin".to_string(),
-        Type::Tuple(type_id) => {
-            if let Some((name, fields)) = types.get(type_id) {
-                let field_strs: Vec<String> = fields
-                    .iter()
-                    .map(|(field_name, field_type)| {
-                        if let Some(field_name) = field_name {
-                            format!("{}: {}", field_name, format_type(types, field_type))
-                        } else {
-                            format_type(types, field_type)
-                        }
-                    })
-                    .collect();
-
-                if let Some(type_name) = name {
-                    if field_strs.is_empty() {
-                        format!("{}", type_name)
-                    } else {
-                        format!("{}[{}]", type_name, field_strs.join(", "))
-                    }
-                } else {
-                    format!("[{}]", field_strs.join(", "))
-                }
-            } else {
-                format!("Type{}", type_id.0)
-            }
-        }
-        Type::Callable(func_type) => {
-            // Add parentheses around parameter if it's a function type
-            let param_str = match &func_type.parameter {
-                Type::Callable(_) => format!("({})", format_type(types, &func_type.parameter)),
-                _ => format_type(types, &func_type.parameter),
-            };
-
-            // Result type already has parentheses if it's a union
-            let result_str = format_type(types, &func_type.result);
-            format!("#{} -> {}", param_str, result_str)
-        }
-        Type::Cycle(depth) => format!("μ{}", depth),
-        Type::Union(types_list) => {
-            let type_strs: Vec<String> = types_list
-                .iter()
-                .map(|t| {
-                    match t {
-                        // Add parentheses around function types in unions for clarity
-                        Type::Callable(_) => format!("({})", format_type(types, t)),
-                        _ => format_type(types, t),
-                    }
-                })
-                .collect();
-            format!("({})", type_strs.join(" | "))
-        }
-    }
-}
-
-fn try_format_as_string(quiver: &Quiver, elements: &[Value]) -> Option<String> {
-    let [Value::Binary(binary_ref)] = elements else {
-        return None;
-    };
-
-    let bytes = quiver.get_binary_bytes(binary_ref).ok()?;
-    let s = String::from_utf8(bytes).ok()?;
-
-    if s.contains('\0')
-        || !s
-            .chars()
-            .any(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
-    {
-        return None;
-    }
-
-    let escaped = s
-        .chars()
-        .map(|ch| match ch {
-            '"' => "\\\"".to_string(),
-            '\\' => "\\\\".to_string(),
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
-            c => c.to_string(),
-        })
-        .collect::<String>();
-
-    Some(format!("\"{}\"", escaped))
-}
-
-fn format_tuple_elements(
-    quiver: &Quiver,
-    elements: &[Value],
-    fields: &[(Option<String>, Type)],
-) -> String {
-    elements
-        .iter()
-        .enumerate()
-        .map(|(i, elem)| {
-            let formatted = format_value(quiver, elem);
-            match fields.get(i).and_then(|(name, _)| name.as_ref()) {
-                Some(name) => format!("{}: {}", name, formatted),
-                None => formatted,
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn format_value(quiver: &Quiver, value: &Value) -> String {
-    match value {
-        Value::Function(function, _) => {
-            if let Some(func_def) = quiver.get_function(*function) {
-                if let Some(func_type) = &func_def.function_type {
-                    return format_type(
-                        &quiver.get_types(),
-                        &Type::Callable(Box::new(func_type.clone())),
-                    );
-                }
-            }
-            "(function)".to_string()
-        }
-        Value::Builtin(name) => format!("<{}>", name),
-        Value::Integer(i) => i.to_string(),
-        Value::Binary(binary_ref) => match quiver.get_binary_bytes(binary_ref) {
-            Ok(bytes) => format_binary(&bytes),
-            Err(_) => "'<error>'".to_string(),
-        },
-        Value::Tuple(type_id, elements) => {
-            if let Some((name, fields)) = quiver.lookup_type(type_id) {
-                if name.as_deref() == Some("Str") {
-                    if let Some(formatted) = try_format_as_string(quiver, elements) {
-                        return formatted;
-                    }
-                }
-
-                match (name.as_deref(), elements.is_empty()) {
-                    (_, true) => name.as_deref().unwrap_or("[]").to_string(),
-                    (Some(n), false) => {
-                        format!("{}[{}]", n, format_tuple_elements(quiver, elements, fields))
-                    }
-                    (None, false) => {
-                        format!("[{}]", format_tuple_elements(quiver, elements, fields))
-                    }
-                }
-            } else {
-                let type_name = format!("Type{}", type_id.0);
-                if elements.is_empty() {
-                    return type_name;
-                }
-
-                let mut result = format!("{}[", type_name);
-                for (i, element) in elements.iter().enumerate() {
-                    if i > 0 {
-                        result.push_str(", ");
-                    }
-                    result.push_str(&format_value(quiver, element));
-                }
-                result.push(']');
-                result
-            }
-        }
     }
 }

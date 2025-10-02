@@ -60,7 +60,7 @@ impl TestResult {
     pub fn expect(self, expected: &str) {
         match self.result {
             Ok(Some(ref value)) => {
-                let actual = self.format_value(value);
+                let actual = self.quiver.format_value(value);
                 assert_eq!(
                     actual, expected,
                     "Expected '{}', got '{}' for source: {}",
@@ -154,55 +154,6 @@ impl TestResult {
                     "Expected parse error {:?}, but got {:?} for source: {}",
                     expected, e, self.source
                 );
-            }
-        }
-    }
-
-    fn format_value(&self, value: &Value) -> String {
-        match value {
-            Value::Integer(i) => i.to_string(),
-            Value::Binary(br) => {
-                let bytes = self.quiver.get_binary_bytes(br).unwrap();
-                // Format as single-quoted hex string
-                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                format!("'{}'", hex)
-            }
-            Value::Function { .. } => "(function)".to_string(),
-            Value::Builtin(name) => format!("<{}>", name),
-            Value::Tuple(type_id, elements) => {
-                // Get type info if available
-                let (type_name, fields) = self
-                    .quiver
-                    .lookup_type(type_id)
-                    .map(|(name, fields)| (name.as_deref(), Some(fields)))
-                    .unwrap_or((None, None));
-
-                // Format elements - with field names if available
-                let formatted_elements: Vec<String> = if let Some(fields) = fields {
-                    // We have field info - check if any fields are named
-                    elements
-                        .iter()
-                        .zip(fields.iter())
-                        .map(|(val, (field_name, _))| {
-                            let val_str = self.format_value(val);
-                            if let Some(field) = field_name {
-                                format!("{}: {}", field, val_str)
-                            } else {
-                                val_str
-                            }
-                        })
-                        .collect()
-                } else {
-                    // No field info - just format values
-                    elements.iter().map(|v| self.format_value(v)).collect()
-                };
-
-                // Build the final string
-                match (type_name, elements.is_empty()) {
-                    (Some(name), true) => name.to_string(), // Named empty tuple (e.g., "Ok")
-                    (Some(name), false) => format!("{}[{}]", name, formatted_elements.join(", ")), // Named tuple with elements
-                    (None, _) => format!("[{}]", formatted_elements.join(", ")), // Anonymous tuple
-                }
             }
         }
     }

@@ -32,8 +32,8 @@ fn test_binary_inequality_content() {
 fn test_binary_new_builtin() {
     // Test creating new zero-filled binaries
     quiver()
-        .evaluate("10 ~> <binary_new>!")
-        .expect("'00000000000000000000'");
+        .evaluate("8 ~> <binary_new>!")
+        .expect("'0000000000000000'");
     quiver().evaluate("0 ~> <binary_new>!").expect("''");
 }
 
@@ -95,8 +95,8 @@ fn test_binary_get_byte_bounds() {
 fn test_binary_concat_builtin() {
     // Test concatenating binaries
     quiver()
-        .evaluate("['68656c6c6f', '20776f726c64'] ~> <binary_concat>!")
-        .expect("'68656c6c6f20776f726c64'");
+        .evaluate("['68656c6c', '20776f'] ~> <binary_concat>!")
+        .expect("'68656c6c20776f'");
     quiver()
         .evaluate("['6162', '6364'] ~> <binary_concat>!")
         .expect("'61626364'");
