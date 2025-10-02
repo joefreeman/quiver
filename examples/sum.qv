@@ -1,0 +1,24 @@
+// Define a recursive list type
+type list = Nil | Cons[int, &];
+
+// Import standard library
+%"math" ~> math,
+
+// Compute the sum of a list using tail recursion
+#[list, int] {
+  | ~> [Nil, acc] => acc
+  | ~> [Cons[head, tail], acc] => {
+    [head, acc]
+    ~> math.add!
+    ~> [tail, ~]
+    ~> &
+  }
+} ~> sum',
+
+#list { ~> [~, 0] ~> sum'! } ~> sum,
+
+#{
+  // Build and sum a list
+  Cons[1, Cons[2, Cons[3, Nil]]] ~> xs,
+  xs ~> sum!
+}
