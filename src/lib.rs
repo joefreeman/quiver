@@ -133,17 +133,6 @@ impl Quiver {
         }
     }
 
-    pub fn get_stack(&self) -> Vec<Value> {
-        // Stack is per-VM instance, so we can't provide this anymore
-        // Return empty vec for now
-        Vec::new()
-    }
-
-    pub fn frame_count(&self) -> usize {
-        // Frames are per-VM instance
-        0
-    }
-
     pub fn get_variables(&self, variables: &HashMap<String, usize>) -> Vec<(String, Value)> {
         // Variables are stored in VM locals, which is per-instance
         // We'd need to create a temporary VM to access them
@@ -153,18 +142,8 @@ impl Quiver {
             .unwrap_or_default()
     }
 
-    pub fn list_types(&self) -> Vec<(String, bytecode::TypeId)> {
-        self.program
-            .get_types()
-            .iter()
-            .map(|(&type_id, (name, _fields))| {
-                let display_name = name
-                    .as_deref()
-                    .unwrap_or(&format!("Type{}", type_id.0))
-                    .to_string();
-                (display_name, type_id)
-            })
-            .collect()
+    pub fn get_types(&self) -> HashMap<bytecode::TypeId, types::TupleTypeInfo> {
+        self.program.get_types()
     }
 
     pub fn format_value(&self, value: &Value) -> String {

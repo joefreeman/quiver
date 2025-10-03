@@ -26,19 +26,6 @@ impl TestBuilder {
             Err(e) => (Err(e), HashMap::new()),
         };
 
-        if result_value.is_ok() {
-            assert!(
-                quiver.get_stack().is_empty(),
-                "Stack should be empty after evaluation. Contains: {:?}",
-                quiver.get_stack()
-            );
-            assert_eq!(
-                quiver.frame_count(),
-                0,
-                "Should have no frames after evaluation"
-            );
-        }
-
         TestResult {
             result: result_value,
             source: source.to_string(),

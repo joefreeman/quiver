@@ -131,20 +131,21 @@ fn run_repl() -> Result<(), ReadlineError> {
                     }
 
                     "\\t" => {
-                        let mut types = quiver.list_types();
+                        let types = quiver.get_types();
                         if types.is_empty() {
                             println!("{}", "No types defined".bright_black());
                         } else {
                             // Sort by TypeId
-                            types.sort_by_key(|(_, id)| id.0);
+                            let mut types: Vec<_> = types.iter().collect();
+                            types.sort_by_key(|(id, _)| id.0);
                             println!("{}", "Types:".bright_black());
-                            for (_name, type_id) in types {
+                            for (type_id, _) in types {
                                 println!(
                                     "{}",
                                     format!(
                                         "  {}: {}",
                                         type_id.0,
-                                        quiver.format_type(&Type::Tuple(type_id))
+                                        quiver.format_type(&Type::Tuple(*type_id))
                                     )
                                     .bright_black()
                                 )

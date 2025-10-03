@@ -64,10 +64,6 @@ impl Program {
         }
     }
 
-    pub fn get_constants(&self) -> &Vec<Constant> {
-        &self.constants
-    }
-
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
     }
