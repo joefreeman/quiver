@@ -990,6 +990,9 @@ impl<'a> Compiler<'a> {
                     Err(Error::BuiltinUndefined(name.to_string()))
                 }
             }
+            Value::Pid(_) => Err(Error::FeatureUnsupported(
+                "Cannot use Pid in constant context".to_string(),
+            )),
         }
     }
 
@@ -1064,7 +1067,7 @@ impl<'a> Compiler<'a> {
         // Create a temporary VM for execution
         let mut temp_vm = VM::new(self.program.clone());
         let value = temp_vm
-            .execute_instructions(module_instructions, None)
+            .execute_instructions(module_instructions, None, None)
             .map_err(|e| Error::ModuleExecution {
                 module_path: module_path.to_string(),
                 error: e,
@@ -1170,13 +1173,13 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_builtin(&name)
             }
-            ast::Term::TailCall(identifier) => {
+            ast::Term::TailCall(tail_call) => {
                 if value_type.is_none() {
                     return Err(Error::FeatureUnsupported(
                         "Tail call requires a value".to_string(),
                     ));
                 }
-                self.compile_tail_call(&identifier)
+                self.compile_tail_call(tail_call.identifier.as_deref(), &tail_call.accessors)
             }
             ast::Term::Equality => {
                 let val_type = value_type.ok_or_else(|| {
@@ -1197,12 +1200,76 @@ impl<'a> Compiler<'a> {
                 })?;
                 self.compile_destructure(term, val_type)
             }
+            ast::Term::Spawn(term) => {
+                // Spawn should not receive a value - it spawns the term
+                if value_type.is_some() {
+                    return Err(Error::FeatureUnsupported(
+                        "Spawn cannot be applied to a value".to_string(),
+                    ));
+                }
+                // Compile the term to get the function value
+                self.compile_term(*term, None)?;
+                // Emit spawn instruction (pops function, pushes Pid)
+                self.codegen.add_instruction(Instruction::Spawn);
+                Ok(Type::Pid)
+            }
+            ast::Term::SendCall(send_call) => {
+                // Send expects a value on the stack (the message)
+                let _val_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported("Send requires a value (message)".to_string())
+                })?;
+
+                // Load the pid from the identifier with accessors
+                if send_call.accessors.is_empty() {
+                    // Simple identifier lookup
+                    let (_pid_type, index) = self
+                        .lookup_variable(&self.scopes, &send_call.name, &[])
+                        .ok_or_else(|| Error::VariableUndefined(send_call.name.clone()))?;
+                    self.codegen.add_instruction(Instruction::Load(index));
+                } else {
+                    // Use member access compilation for accessors
+                    self.compile_member_access(&send_call.name, send_call.accessors.clone())?;
+                }
+
+                // Emit send instruction (expects [message, pid] on stack)
+                self.codegen.add_instruction(Instruction::Send);
+                // Send returns nothing (nil)
+                Ok(Type::nil())
+            }
+            ast::Term::SelfRef => {
+                if value_type.is_some() {
+                    return Err(Error::FeatureUnsupported(
+                        "Self reference cannot be applied to value".to_string(),
+                    ));
+                }
+                self.codegen.add_instruction(Instruction::Self_);
+                Ok(Type::Pid)
+            }
+            ast::Term::Receive(receive) => {
+                // Resolve the type definition for type checking
+                let message_type = self
+                    .type_context
+                    .resolve_ast_type(receive.type_def.clone(), self.program)?;
+
+                // Emit Receive instruction (no TypeId parameter)
+                self.codegen.add_instruction(Instruction::Receive);
+
+                // Compile the block with the received message as parameter
+                let result_type = self.compile_block(receive.block.clone(), message_type)?;
+
+                // If block succeeds (returns non-nil), acknowledge the message
+                // Otherwise, loop back to receive
+                // For now, we'll emit acknowledge after the block
+                self.codegen.add_instruction(Instruction::Acknowledge);
+
+                Ok(result_type)
+            }
         }
     }
 
     fn compile_call(
         &mut self,
-        target: ast::FunctionCallTarget,
+        target: ast::FunctionCall,
         value_type: Option<Type>,
     ) -> Result<Type, Error> {
         // Use nil as value if value_type is None
@@ -1214,8 +1281,8 @@ impl<'a> Compiler<'a> {
 
         // Get the function type based on the target
         let function_type = match target {
-            ast::FunctionCallTarget::Builtin(name) => self.compile_builtin(&name)?,
-            ast::FunctionCallTarget::Identifier { name, accessors } => {
+            ast::FunctionCall::Builtin(name) => self.compile_builtin(&name)?,
+            ast::FunctionCall::Identifier { name, accessors } => {
                 self.compile_member_access(&name, accessors)?
             }
         };
@@ -1247,22 +1314,47 @@ impl<'a> Compiler<'a> {
         Ok(func_type.result)
     }
 
-    fn compile_tail_call(&mut self, identifier: &str) -> Result<Type, Error> {
-        if identifier.is_empty() {
+    fn compile_tail_call(
+        &mut self,
+        identifier: Option<&str>,
+        accessors: &[ast::AccessPath],
+    ) -> Result<Type, Error> {
+        if identifier.is_none() && accessors.is_empty() {
+            // Tail call to parameter
             self.codegen.add_instruction(Instruction::TailCall(true));
             Ok(Type::Union(vec![]))
         } else {
-            match self.lookup_variable(&self.scopes, identifier, &[]) {
-                Some((Type::Callable(func_type), index)) => {
-                    self.codegen.add_instruction(Instruction::Load(index));
+            // Tail call to identifier with accessors
+            let name = identifier.ok_or_else(|| {
+                Error::FeatureUnsupported(
+                    "Member access in tail call requires an identifier".to_string(),
+                )
+            })?;
+
+            let func_type = if accessors.is_empty() {
+                // Simple identifier lookup
+                match self.lookup_variable(&self.scopes, name, &[]) {
+                    Some((func_type, index)) => {
+                        self.codegen.add_instruction(Instruction::Load(index));
+                        func_type
+                    }
+                    None => return Err(Error::VariableUndefined(name.to_string())),
+                }
+            } else {
+                // Use member access compilation for accessors
+                self.compile_member_access(name, accessors.to_vec())?
+            };
+
+            // Verify it's a function
+            match func_type {
+                Type::Callable(func_type) => {
                     self.codegen.add_instruction(Instruction::TailCall(false));
                     Ok(func_type.result)
                 }
-                Some((other_type, _)) => Err(Error::TypeMismatch {
+                other_type => Err(Error::TypeMismatch {
                     expected: "function".to_string(),
                     found: crate::format::format_type(self.program, &other_type),
                 }),
-                None => Err(Error::VariableUndefined(identifier.to_string())),
             }
         }
     }
@@ -1509,6 +1601,7 @@ impl<'a> Compiler<'a> {
                     Err(Error::BuiltinUndefined(name.clone()))
                 }
             }
+            Value::Pid(_) => Ok(Type::Pid),
         }
     }
 

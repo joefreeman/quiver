@@ -71,10 +71,10 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::FunctionCall(target) => {
                 match target {
-                    ast::FunctionCallTarget::Identifier { name, accessors } => {
+                    ast::FunctionCall::Identifier { name, accessors } => {
                         self.visit_identifier(name, accessors.clone());
                     }
-                    ast::FunctionCallTarget::Builtin(_) => {
+                    ast::FunctionCall::Builtin(_) => {
                         // Builtins don't reference variables
                     }
                 }
@@ -86,14 +86,26 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::Import(_) => {}
             ast::Term::Builtin(_) => {}
-            ast::Term::TailCall(identifier) => {
-                self.visit_identifier(identifier, vec![]);
+            ast::Term::TailCall(tail_call) => {
+                if let Some(name) = &tail_call.identifier {
+                    self.visit_identifier(name, tail_call.accessors.clone());
+                }
             }
             ast::Term::Equality => {}
             ast::Term::Not => {}
             ast::Term::Partial(_) => {}
             ast::Term::Star => {}
             ast::Term::Placeholder => {}
+            ast::Term::Spawn(term) => {
+                self.visit_term(term);
+            }
+            ast::Term::SendCall(send_call) => {
+                self.visit_identifier(&send_call.name, send_call.accessors.clone());
+            }
+            ast::Term::SelfRef => {}
+            ast::Term::Receive(receive) => {
+                self.visit_block(&receive.block);
+            }
         }
     }
 

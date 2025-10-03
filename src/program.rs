@@ -135,6 +135,9 @@ impl Program {
                 instrs.push(Instruction::Tuple(*type_id));
                 instrs
             }
+            Value::Pid(_) => {
+                panic!("Cannot convert pid to instructions")
+            }
         }
     }
 

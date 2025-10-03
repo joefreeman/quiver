@@ -34,6 +34,8 @@ pub enum Type {
     Cycle(usize),
     #[serde(rename = "union")]
     Union(Vec<Type>),
+    #[serde(rename = "pid")]
+    Pid,
 }
 
 impl Type {
@@ -124,6 +126,7 @@ impl Type {
             // Basic types must match exactly
             (Type::Integer, Type::Integer) => true,
             (Type::Binary, Type::Binary) => true,
+            (Type::Pid, Type::Pid) => true,
 
             // For tuples, check structural compatibility
             (Type::Tuple(id1), Type::Tuple(id2)) => {

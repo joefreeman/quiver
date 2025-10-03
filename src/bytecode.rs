@@ -81,4 +81,9 @@ pub enum Instruction {
     Builtin(usize),
     Equal(usize),
     Not,
+    Spawn,
+    Send,
+    Self_,
+    Receive,
+    Acknowledge,
 }

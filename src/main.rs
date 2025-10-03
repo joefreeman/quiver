@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 use quiver::Quiver;
 use quiver::types::Type;
-use quiver::vm::Value;
+use quiver::vm::{ProcessStatus, Value};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::collections::HashMap;
@@ -95,8 +95,9 @@ fn run_repl() -> Result<(), ReadlineError> {
                         println!("{}", "  \\? - Show this help message".bright_black());
                         println!("{}", "  \\q - Exit the REPL".bright_black());
                         println!("{}", "  \\! - Reset the environment".bright_black());
-                        println!("{}", "  \\v - List all variables".bright_black());
-                        println!("{}", "  \\t - List all type aliases".bright_black());
+                        println!("{}", "  \\v - List variables".bright_black());
+                        println!("{}", "  \\t - List type aliases".bright_black());
+                        println!("{}", "  \\p - List processes".bright_black());
                     }
 
                     "\\q" => {
@@ -149,6 +150,30 @@ fn run_repl() -> Result<(), ReadlineError> {
                                     )
                                     .bright_black()
                                 )
+                            }
+                        }
+                    }
+
+                    "\\p" => {
+                        let statuses = quiver.get_process_statuses();
+                        if statuses.is_empty() {
+                            println!("{}", "No processes".bright_black());
+                        } else {
+                            let mut processes: Vec<_> = statuses.into_iter().collect();
+                            processes.sort_by_key(|(id, _)| id.0);
+                            println!("{}", "Processes:".bright_black());
+                            for (id, status) in processes {
+                                let status_str = match status {
+                                    ProcessStatus::Running => "running",
+                                    ProcessStatus::Queued => "queued",
+                                    ProcessStatus::Waiting => "waiting",
+                                    ProcessStatus::Sleeping => "sleeping",
+                                    ProcessStatus::Terminated => "terminated",
+                                };
+                                println!(
+                                    "{}",
+                                    format!("  {}: {}", id.0, status_str).bright_black()
+                                );
                             }
                         }
                     }

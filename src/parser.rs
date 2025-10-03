@@ -395,10 +395,10 @@ fn member_access(input: &str) -> IResult<&str, MemberAccess> {
 
 // Parse function calls - must end with '!'
 // Examples: f!, f.x!, <add>!, etc.
-fn function_call(input: &str) -> IResult<&str, FunctionCallTarget> {
+fn function_call(input: &str) -> IResult<&str, FunctionCall> {
     alt((
         // Builtin function call: <builtin>!
-        map(terminated(builtin, char('!')), FunctionCallTarget::Builtin),
+        map(terminated(builtin, char('!')), FunctionCall::Builtin),
         // Identifier function call with optional accessors: f!, f.x!, f.0!
         map(
             pair(
@@ -413,15 +413,15 @@ fn function_call(input: &str) -> IResult<&str, FunctionCallTarget> {
             ),
             |(name, accessors)| {
                 // Must consume the '!' at the end
-                FunctionCallTarget::Identifier { name, accessors }
+                FunctionCall::Identifier { name, accessors }
             },
         ),
     ))(input)
     .and_then(|(remaining, target)| {
         // For identifier calls, we need to ensure there's a '!' at the end
         match &target {
-            FunctionCallTarget::Builtin(_) => Ok((remaining, target)), // Already consumed '!'
-            FunctionCallTarget::Identifier { .. } => {
+            FunctionCall::Builtin(_) => Ok((remaining, target)), // Already consumed '!'
+            FunctionCall::Identifier { .. } => {
                 let (remaining, _) = char('!')(remaining)?;
                 Ok((remaining, target))
             }
@@ -548,8 +548,23 @@ fn function_definition(input: &str) -> IResult<&str, FunctionDefinition> {
     )(input)
 }
 
-fn tail_call(input: &str) -> IResult<&str, String> {
-    preceded(char('&'), map(opt(identifier), |i| i.unwrap_or_default()))(input)
+fn tail_call(input: &str) -> IResult<&str, Term> {
+    let (input, _) = char('&')(input)?;
+    let (input, ident) = opt(identifier)(input)?;
+    let (input, accessors) = many0(preceded(
+        char('.'),
+        alt((
+            map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
+            map(identifier, AccessPath::Field),
+        )),
+    ))(input)?;
+    Ok((
+        input,
+        Term::TailCall(TailCall {
+            identifier: ident,
+            accessors,
+        }),
+    ))
 }
 
 fn builtin(input: &str) -> IResult<&str, String> {
@@ -564,10 +579,61 @@ fn not_term(input: &str) -> IResult<&str, Term> {
     nom_value(Term::Not, char('!'))(input)
 }
 
+fn spawn_term(input: &str) -> IResult<&str, Term> {
+    // Match @ followed by a term
+    map(preceded(char('@'), term), |t| Term::Spawn(Box::new(t)))(input)
+}
+
+fn send_call(input: &str) -> IResult<&str, Term> {
+    // Match identifier with optional accessors followed by '$'
+    let (input, name) = identifier(input)?;
+    let (input, accessors) = many0(preceded(
+        char('.'),
+        alt((
+            map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
+            map(identifier, AccessPath::Field),
+        )),
+    ))(input)?;
+    let (input, _) = char('$')(input)?;
+    Ok((input, Term::SendCall(SendCall { name, accessors })))
+}
+
+fn self_ref_term(input: &str) -> IResult<&str, Term> {
+    // Match '.' NOT followed by a lowercase letter or digit
+    // This avoids conflicting with member access (.field or .0)
+    map(
+        terminated(
+            char('.'),
+            peek(not(alt((
+                recognize(satisfy(|c: char| c.is_ascii_lowercase())),
+                recognize(satisfy(|c: char| c.is_ascii_digit())),
+            )))),
+        ),
+        |_| Term::SelfRef,
+    )(input)
+}
+
+fn receive_term(input: &str) -> IResult<&str, Term> {
+    map(
+        tuple((char('$'), type_definition, preceded(ws0, block))),
+        |(_, type_def, blk)| {
+            Term::Receive(Receive {
+                type_def,
+                block: blk,
+            })
+        },
+    )(input)
+}
+
 fn term(input: &str) -> IResult<&str, Term> {
     alt((
         // String terms (before literals to handle quotes)
         string_term,
+        // Process operations
+        receive_term,
+        spawn_term,
+        send_call,
+        self_ref_term,
         // Literals
         map(literal, Term::Literal),
         // Complex terms
@@ -591,7 +657,7 @@ fn term(input: &str) -> IResult<&str, Term> {
         // Operations
         equality,
         not_term,
-        map(tail_call, Term::TailCall),
+        tail_call,
     ))(input)
 }
 

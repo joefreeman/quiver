@@ -34,6 +34,7 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
+        Type::Pid => "pid".to_string(),
         Type::Tuple(type_id) => {
             if let Some((name, fields)) = type_lookup.lookup_type(type_id) {
                 let field_strs: Vec<String> = fields
@@ -119,6 +120,7 @@ pub fn format_value(program: &Program, value: &Value) -> String {
         Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
         Value::Binary(binary_ref) => format_binary(program, binary_ref),
+        Value::Pid(process_id) => format!("@{}", process_id.0),
         Value::Tuple(type_id, elements) => {
             if let Some((name, fields)) = program.lookup_type(type_id) {
                 if name.as_deref() == Some("Str") {
