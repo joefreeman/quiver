@@ -20,18 +20,19 @@ use vm::{VM, Value};
 pub struct Quiver {
     type_aliases: HashMap<String, Type>,
     module_loader: Box<dyn ModuleLoader>,
-    program: Program,
+    vm: VM,
 }
 
 impl Quiver {
     pub fn new(modules: Option<HashMap<String, String>>) -> Self {
+        let program = Program::new();
         Self {
             type_aliases: HashMap::new(),
             module_loader: match modules {
                 Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
                 None => Box::new(FileSystemModuleLoader::new()),
             },
-            program: Program::new(),
+            vm: VM::new(program),
         }
     }
 
@@ -44,10 +45,8 @@ impl Quiver {
     ) -> Result<(Option<Value>, HashMap<String, usize>), Error> {
         let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
-        // Create a temporary VM for getting existing variable values
-        let temp_vm = VM::new(&self.program);
         let existing_locals = if let Some(vars) = variables {
-            temp_vm
+            self.vm
                 .get_variables(vars)
                 .map(|vals| vals.values().cloned().collect::<Vec<_>>())
                 .ok()
@@ -59,7 +58,7 @@ impl Quiver {
             ast_program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
-            &mut self.program,
+            self.vm.program_mut(),
             module_path,
             variables,
             existing_locals.as_deref(),
@@ -67,91 +66,97 @@ impl Quiver {
         )
         .map_err(Error::CompileError)?;
 
-        // Create a fresh VM for execution
-        let mut vm = VM::new(&self.program);
-        let result = vm
+        let result = self
+            .vm
             .execute_instructions(instructions, parameter.cloned())
             .map_err(Error::RuntimeError)?;
 
         // Compact locals and get updated variable indices
-        let compacted_variables = vm.cleanup_locals(&variables);
+        let compacted_variables = self.vm.cleanup_locals(&variables);
 
         Ok((result, compacted_variables))
     }
 
-    pub fn compile(
-        &mut self,
-        source: &str,
-        module_path: Option<std::path::PathBuf>,
-    ) -> Result<bytecode::Bytecode, Error> {
-        let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
-
-        let (instructions, _) = Compiler::compile(
-            ast_program,
-            &mut self.type_aliases,
-            self.module_loader.as_ref(),
-            &mut self.program,
-            module_path,
-            None,
-            None,
-            None,
-        )
-        .map_err(Error::CompileError)?;
-
-        // Create a temporary VM for execution
-        let mut vm = VM::new(&self.program);
-        let result = vm
-            .execute_instructions(instructions, None)
-            .map_err(Error::RuntimeError)?;
-
-        let entry = match result {
-            Some(Value::Function(main_func, captures)) => {
-                if !captures.is_empty() {
-                    self.program.inject_function_captures(main_func, captures);
-                }
-                Some(main_func)
-            }
-            _ => None,
-        };
-
-        Ok(self.program.to_bytecode(entry))
-    }
-
-    pub fn execute(&mut self, bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
-        // Get entry point before moving bytecode
-        let entry = bytecode.entry;
-
-        // Replace program with one loaded from bytecode
-        self.program = Program::from_bytecode(bytecode);
-
-        // Execute entry point if present
-        if let Some(entry) = entry {
-            let mut vm = VM::new(&self.program);
-            vm.execute_function(entry).map_err(Error::RuntimeError)
-        } else {
-            Ok(None)
-        }
-    }
-
     pub fn get_variables(&self, variables: &HashMap<String, usize>) -> Vec<(String, Value)> {
-        // Variables are stored in VM locals, which is per-instance
-        // We'd need to create a temporary VM to access them
-        let vm = VM::new(&self.program);
-        vm.get_variables(variables)
+        self.vm
+            .get_variables(variables)
             .map(|map| map.into_iter().collect())
             .unwrap_or_default()
     }
 
     pub fn get_types(&self) -> HashMap<bytecode::TypeId, types::TupleTypeInfo> {
-        self.program.get_types()
+        self.vm.program().get_types()
     }
 
     pub fn format_value(&self, value: &Value) -> String {
-        format::format_value(&self.program, value)
+        format::format_value(self.vm.program(), value)
     }
 
     pub fn format_type(&self, type_def: &Type) -> String {
-        format::format_type(&self.program, type_def)
+        format::format_type(self.vm.program(), type_def)
+    }
+}
+
+pub fn compile(
+    source: &str,
+    module_path: Option<std::path::PathBuf>,
+    modules: Option<HashMap<String, String>>,
+) -> Result<bytecode::Bytecode, Error> {
+    let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
+
+    let module_loader: Box<dyn ModuleLoader> = match modules {
+        Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
+        None => Box::new(FileSystemModuleLoader::new()),
+    };
+
+    let mut type_aliases = HashMap::new();
+    let mut program = Program::new();
+
+    let (instructions, _) = Compiler::compile(
+        ast_program,
+        &mut type_aliases,
+        module_loader.as_ref(),
+        &mut program,
+        module_path,
+        None,
+        None,
+        None,
+    )
+    .map_err(Error::CompileError)?;
+
+    // Create a temporary VM for execution
+    let mut vm = VM::new(program);
+    let result = vm
+        .execute_instructions(instructions, None)
+        .map_err(Error::RuntimeError)?;
+
+    let entry = match result {
+        Some(Value::Function(main_func, captures)) => {
+            if !captures.is_empty() {
+                vm.program_mut()
+                    .inject_function_captures(main_func, captures);
+            }
+            Some(main_func)
+        }
+        _ => None,
+    };
+
+    Ok(vm.program().to_bytecode(entry))
+}
+
+pub fn execute(bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
+    // Get entry point before moving bytecode
+    let entry = bytecode.entry;
+
+    // Create program and VM from bytecode
+    let program = Program::from_bytecode(bytecode);
+    let mut vm = VM::new(program);
+
+    // Execute entry point if present
+    if let Some(entry) = entry {
+        vm.execute_function(entry).map_err(Error::RuntimeError)
+    } else {
+        Ok(None)
     }
 }
 

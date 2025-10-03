@@ -1062,7 +1062,7 @@ impl<'a> Compiler<'a> {
 
         // Execute the module instructions to get the runtime value
         // Create a temporary VM for execution
-        let mut temp_vm = VM::new(self.program);
+        let mut temp_vm = VM::new(self.program.clone());
         let value = temp_vm
             .execute_instructions(module_instructions, None)
             .map_err(|e| Error::ModuleExecution {

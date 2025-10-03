@@ -19,7 +19,7 @@ pub struct Function {
     pub captures: Vec<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bytecode {
     pub constants: Vec<Constant>,
     pub functions: Vec<Function>,

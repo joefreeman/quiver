@@ -98,27 +98,35 @@ impl Frame {
 }
 
 #[derive(Debug)]
-pub struct VM<'a> {
-    program: &'a Program,
+pub struct VM {
+    program: Program,
     stack: Vec<Value>,
     locals: Vec<Value>,
     frames: Vec<Frame>,
 }
 
-impl<'a> TypeLookup for VM<'a> {
+impl TypeLookup for VM {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
         self.program.lookup_type(type_id)
     }
 }
 
-impl<'a> VM<'a> {
-    pub fn new(program: &'a Program) -> Self {
+impl VM {
+    pub fn new(program: Program) -> Self {
         Self {
             program,
             stack: Vec::new(),
             locals: Vec::new(),
             frames: Vec::new(),
         }
+    }
+
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
+    pub fn program_mut(&mut self) -> &mut Program {
+        &mut self.program
     }
 
     /// Create a new heap-allocated binary
@@ -411,7 +419,7 @@ impl<'a> VM<'a> {
                             "Unrecognised builtin: {}",
                             name
                         )))?;
-                let result = builtin_fn(&argument, self.program)?;
+                let result = builtin_fn(&argument, &self.program)?;
                 self.stack.push(result);
                 // Unlike regular calls, builtins don't create a new frame
                 // So we need to manually increment the counter
@@ -629,11 +637,11 @@ impl<'a> VM<'a> {
     }
 
     pub fn format_value(&self, value: &Value) -> String {
-        crate::format::format_value(self.program, value)
+        crate::format::format_value(&self.program, value)
     }
 
     pub fn format_type(&self, type_def: &Type) -> String {
-        crate::format::format_type(self.program, type_def)
+        crate::format::format_type(&self.program, type_def)
     }
 }
 
