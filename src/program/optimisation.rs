@@ -2,7 +2,7 @@ use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
 use crate::types::TupleTypeInfo;
 use std::collections::{HashMap, HashSet};
 
-/// Perform tree shaking on program data to remove unused functions, constants, and types
+/// Perform tree shaking on program data to remove unused functions, constants, types, and builtins
 /// Returns the collections needed to build an optimized Bytecode
 pub fn tree_shake(
     functions: &[Function],
@@ -11,10 +11,11 @@ pub fn tree_shake(
     builtins: &[String],
     entry_fn: usize,
 ) -> Bytecode {
-    // Mark phase: find all reachable functions, constants, and types
+    // Mark phase: find all reachable functions, constants, types, and builtins
     let mut used_functions = HashSet::new();
     let mut used_constants = HashSet::new();
     let mut used_types = HashSet::new();
+    let mut used_builtins = HashSet::new();
 
     // Always mark NIL and OK as used (they're built-in control flow types)
     used_types.insert(TypeId::NIL);
@@ -44,6 +45,9 @@ pub fn tree_shake(
                 }
                 Instruction::Tuple(type_id) | Instruction::IsTuple(type_id) => {
                     used_types.insert(*type_id);
+                }
+                Instruction::Builtin(id) => {
+                    used_builtins.insert(*id);
                 }
                 _ => {}
             }
@@ -82,6 +86,16 @@ pub fn tree_shake(
         }
     }
 
+    let mut builtin_remap = HashMap::new();
+    let mut new_builtins = Vec::new();
+
+    for (old_id, builtin) in builtins.iter().enumerate() {
+        if used_builtins.contains(&old_id) {
+            builtin_remap.insert(old_id, new_builtins.len());
+            new_builtins.push(builtin.clone());
+        }
+    }
+
     // Filter types: keep only used types without remapping IDs
     let new_types: HashMap<_, _> = types
         .iter()
@@ -89,7 +103,7 @@ pub fn tree_shake(
         .map(|(k, v)| (*k, v.clone()))
         .collect();
 
-    // Remap phase: update function and constant indices
+    // Remap phase: update function, constant, and builtin indices
     let remapped_functions = new_functions
         .into_iter()
         .map(|mut function| {
@@ -102,6 +116,9 @@ pub fn tree_shake(
                     }
                     Instruction::Constant(old_id) => {
                         Instruction::Constant(*constant_remap.get(&old_id).unwrap_or(&old_id))
+                    }
+                    Instruction::Builtin(old_id) => {
+                        Instruction::Builtin(*builtin_remap.get(&old_id).unwrap_or(&old_id))
                     }
                     other => other,
                 })
@@ -116,7 +133,7 @@ pub fn tree_shake(
     Bytecode {
         constants: new_constants,
         functions: remapped_functions,
-        builtins: builtins.to_vec(),
+        builtins: new_builtins,
         entry: new_entry,
         types: new_types,
     }
