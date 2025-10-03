@@ -3,6 +3,8 @@ use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use crate::vm::{BinaryRef, Error, Value};
 use std::collections::HashMap;
 
+mod optimisation;
+
 /// Program represents the compiled program data that is static during execution.
 /// It contains constants, functions, builtins, and type information.
 /// The compiler writes to this structure, and the VM reads from it.
@@ -199,14 +201,26 @@ impl Program {
     }
 
     /// Convert this program to bytecode format with an optional entry point
+    /// Automatically performs tree shaking to remove unused functions, constants, and types
     pub fn to_bytecode(&self, entry: Option<usize>) -> Bytecode {
-        Bytecode {
-            constants: self.constants.clone(),
-            functions: self.functions.clone(),
-            builtins: self.builtins.clone(),
-            entry,
-            types: self.types.clone(),
-        }
+        // If there's no entry point, return as-is (nothing to tree shake)
+        let Some(entry_fn) = entry else {
+            return Bytecode {
+                constants: self.constants.clone(),
+                functions: self.functions.clone(),
+                builtins: self.builtins.clone(),
+                entry: None,
+                types: self.types.clone(),
+            };
+        };
+
+        optimisation::tree_shake(
+            &self.functions,
+            &self.constants,
+            &self.types,
+            &self.builtins,
+            entry_fn,
+        )
     }
 
     /// Get the actual bytes of a binary value

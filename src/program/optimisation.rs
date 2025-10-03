@@ -1,12 +1,16 @@
-use super::{Bytecode, Instruction, TypeId};
+use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
+use crate::types::TupleTypeInfo;
 use std::collections::{HashMap, HashSet};
 
-pub fn tree_shake(bytecode: Bytecode) -> Bytecode {
-    // If there's no entry point, return as-is
-    let Some(entry_fn) = bytecode.entry else {
-        return bytecode;
-    };
-
+/// Perform tree shaking on program data to remove unused functions, constants, and types
+/// Returns the collections needed to build an optimized Bytecode
+pub fn tree_shake(
+    functions: &[Function],
+    constants: &[Constant],
+    types: &HashMap<TypeId, TupleTypeInfo>,
+    builtins: &[String],
+    entry_fn: usize,
+) -> Bytecode {
     // Mark phase: find all reachable functions, constants, and types
     let mut used_functions = HashSet::new();
     let mut used_constants = HashSet::new();
@@ -25,7 +29,7 @@ pub fn tree_shake(bytecode: Bytecode) -> Bytecode {
         }
 
         // Get the function (if it exists)
-        let Some(function) = bytecode.functions.get(fn_id) else {
+        let Some(function) = functions.get(fn_id) else {
             continue;
         };
 
@@ -46,41 +50,46 @@ pub fn tree_shake(bytecode: Bytecode) -> Bytecode {
         }
     }
 
-    // If nothing is used (shouldn't happen), return original
+    // If nothing is used (shouldn't happen), return original without tree shaking
     if used_functions.is_empty() {
-        return bytecode;
+        return Bytecode {
+            constants: constants.to_vec(),
+            functions: functions.to_vec(),
+            builtins: builtins.to_vec(),
+            entry: Some(entry_fn),
+            types: types.clone(),
+        };
     }
 
-    // Sweep phase: build remapping tables
+    // Sweep phase: build remapping tables and collect used items
     let mut function_remap = HashMap::new();
     let mut new_functions = Vec::new();
 
-    for (old_id, function) in bytecode.functions.into_iter().enumerate() {
+    for (old_id, function) in functions.iter().enumerate() {
         if used_functions.contains(&old_id) {
             function_remap.insert(old_id, new_functions.len());
-            new_functions.push(function);
+            new_functions.push(function.clone());
         }
     }
 
     let mut constant_remap = HashMap::new();
     let mut new_constants = Vec::new();
 
-    for (old_id, constant) in bytecode.constants.into_iter().enumerate() {
+    for (old_id, constant) in constants.iter().enumerate() {
         if used_constants.contains(&old_id) {
             constant_remap.insert(old_id, new_constants.len());
-            new_constants.push(constant);
+            new_constants.push(constant.clone());
         }
     }
 
     // Filter types: keep only used types without remapping IDs
-    // This avoids having to update TypeId references within type definitions
-    let new_types: HashMap<_, _> = bytecode
-        .types
-        .into_iter()
+    let new_types: HashMap<_, _> = types
+        .iter()
         .filter(|(type_id, _)| used_types.contains(type_id))
+        .map(|(k, v)| (*k, v.clone()))
         .collect();
 
-    // Remap phase: update function and constant indices only
+    // Remap phase: update function and constant indices
     let remapped_functions = new_functions
         .into_iter()
         .map(|mut function| {
@@ -102,14 +111,12 @@ pub fn tree_shake(bytecode: Bytecode) -> Bytecode {
         .collect();
 
     // Remap entry point
-    let new_entry = bytecode
-        .entry
-        .and_then(|old_id| function_remap.get(&old_id).copied());
+    let new_entry = function_remap.get(&entry_fn).copied();
 
     Bytecode {
         constants: new_constants,
         functions: remapped_functions,
-        builtins: bytecode.builtins,
+        builtins: builtins.to_vec(),
         entry: new_entry,
         types: new_types,
     }

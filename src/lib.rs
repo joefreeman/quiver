@@ -11,7 +11,6 @@ pub mod vm;
 
 use std::collections::HashMap;
 
-use bytecode::optimisation::tree_shake;
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
 use program::Program;
@@ -115,9 +114,7 @@ impl Quiver {
             _ => None,
         };
 
-        let bytecode = self.program.to_bytecode(entry);
-
-        Ok(tree_shake(bytecode))
+        Ok(self.program.to_bytecode(entry))
     }
 
     pub fn execute(&mut self, bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
