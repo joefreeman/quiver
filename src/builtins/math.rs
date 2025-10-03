@@ -1,11 +1,11 @@
 //! Math builtin function implementations
 
-use crate::bytecode::Constant;
+use crate::program::Program;
 use crate::vm::{Error, Value};
 
 /// Builtin function: math:abs
 /// Returns the absolute value of an integer
-pub fn builtin_math_abs(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_math_abs(arg: &Value, _program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Integer(n) => Ok(Value::Integer(n.abs())),
         _other => Err(Error::TypeMismatch {
@@ -17,7 +17,7 @@ pub fn builtin_math_abs(arg: &Value, _constants: &[Constant]) -> Result<Value, E
 
 /// Builtin function: math:sqrt
 /// Returns the square root of an integer (truncated to integer)
-pub fn builtin_math_sqrt(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_math_sqrt(arg: &Value, _program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Integer(n) => {
             if *n < 0 {
@@ -38,7 +38,7 @@ pub fn builtin_math_sqrt(arg: &Value, _constants: &[Constant]) -> Result<Value, 
 
 /// Builtin function: math:sin
 /// Returns the sine of an integer (treating it as radians, truncated to integer)
-pub fn builtin_math_sin(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_math_sin(arg: &Value, _program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Integer(n) => {
             let result = (*n as f64).sin() as i64;
@@ -53,7 +53,7 @@ pub fn builtin_math_sin(arg: &Value, _constants: &[Constant]) -> Result<Value, E
 
 /// Builtin function: math:cos
 /// Returns the cosine of an integer (treating it as radians, truncated to integer)
-pub fn builtin_math_cos(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_math_cos(arg: &Value, _program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Integer(n) => {
             let result = (*n as f64).cos() as i64;
@@ -108,28 +108,28 @@ fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
 
 /// Builtin function: <add>
 /// Adds two integers from a tuple
-pub fn builtin_add(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_add(arg: &Value, _program: &Program) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     Ok(Value::Integer(a + b))
 }
 
 /// Builtin function: <subtract>
 /// Subtracts two integers from a tuple
-pub fn builtin_subtract(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_subtract(arg: &Value, _program: &Program) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     Ok(Value::Integer(a - b))
 }
 
 /// Builtin function: <multiply>
 /// Multiplies two integers from a tuple
-pub fn builtin_multiply(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_multiply(arg: &Value, _program: &Program) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     Ok(Value::Integer(a * b))
 }
 
 /// Builtin function: <divide>
 /// Divides two integers from a tuple
-pub fn builtin_divide(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_divide(arg: &Value, _program: &Program) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     if b == 0 {
         return Err(Error::InvalidArgument("Division by zero".to_string()));
@@ -139,7 +139,7 @@ pub fn builtin_divide(arg: &Value, _constants: &[Constant]) -> Result<Value, Err
 
 /// Builtin function: <modulo>
 /// Takes modulo of two integers from a tuple
-pub fn builtin_modulo(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_modulo(arg: &Value, _program: &Program) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     if b == 0 {
         return Err(Error::InvalidArgument("Modulo by zero".to_string()));
@@ -149,7 +149,7 @@ pub fn builtin_modulo(arg: &Value, _constants: &[Constant]) -> Result<Value, Err
 
 /// Builtin function: <compare>
 /// Compares two integers and returns -1, 0, or 1
-pub fn builtin_compare(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_compare(arg: &Value, _program: &Program) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
 
     let result = if a < b {

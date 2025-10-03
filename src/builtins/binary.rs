@@ -1,16 +1,16 @@
 //! Binary builtin function implementations
 
-use crate::bytecode::Constant;
+use crate::program::Program;
 use crate::vm::{BinaryRef, Error, Value};
 
-/// Helper function to get bytes from a BinaryRef using the constants array
+/// Helper function to get bytes from a BinaryRef using the program
 fn get_binary_bytes_from_ref<'a>(
     binary_ref: &'a BinaryRef,
-    constants: &'a [Constant],
+    program: &'a Program,
 ) -> Result<&'a [u8], Error> {
     match binary_ref {
-        BinaryRef::Constant(index) => match constants.get(*index) {
-            Some(Constant::Binary(bytes)) => Ok(bytes),
+        BinaryRef::Constant(index) => match program.get_constant(*index) {
+            Some(crate::bytecode::Constant::Binary(bytes)) => Ok(bytes),
             Some(_) => Err(Error::TypeMismatch {
                 expected: "binary constant".to_string(),
                 found: "non-binary constant".to_string(),
@@ -23,7 +23,7 @@ fn get_binary_bytes_from_ref<'a>(
 
 /// Create a new zero-filled binary of the specified size
 /// binary_new(size: int) -> bin
-pub fn builtin_binary_new(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_new(arg: &Value, _program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Integer(size) => {
             if *size < 0 {
@@ -53,10 +53,10 @@ pub fn builtin_binary_new(arg: &Value, _constants: &[Constant]) -> Result<Value,
 
 /// Get the length of a binary
 /// binary_length(bin) -> int
-pub fn builtin_binary_length(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_length(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
             Ok(Value::Integer(bytes.len() as i64))
         }
         other => Err(Error::TypeMismatch {
@@ -68,11 +68,11 @@ pub fn builtin_binary_length(arg: &Value, constants: &[Constant]) -> Result<Valu
 
 /// Get a byte at a specific index (returns 0-255)
 /// binary_get_byte(bin, index: int) -> int
-pub fn builtin_binary_get_byte(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_get_byte(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_ref), Value::Integer(index)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
                 if *index < 0 {
                     return Err(Error::InvalidArgument(
                         "Index cannot be negative".to_string(),
@@ -102,12 +102,12 @@ pub fn builtin_binary_get_byte(arg: &Value, constants: &[Constant]) -> Result<Va
 
 /// Concatenate two binaries
 /// binary_concat([bin, bin]) -> bin
-pub fn builtin_binary_concat(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_concat(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                let bytes_a = get_binary_bytes_from_ref(binary_ref_a, constants)?;
-                let bytes_b = get_binary_bytes_from_ref(binary_ref_b, constants)?;
+                let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
+                let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
 
                 let total_len = bytes_a.len() + bytes_b.len();
                 if total_len > crate::vm::MAX_BINARY_SIZE {
@@ -143,13 +143,13 @@ pub fn builtin_binary_concat(arg: &Value, constants: &[Constant]) -> Result<Valu
 
 /// Bitwise AND of two binaries
 /// binary_and([bin, bin]) -> bin
-pub fn builtin_binary_and(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_and(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, constants)?;
-                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, constants)?;
+                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
+                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
 
                     // For bitwise operations, take the shorter length
                     let result_len = bytes_a.len().min(bytes_b.len());
@@ -177,13 +177,13 @@ pub fn builtin_binary_and(arg: &Value, constants: &[Constant]) -> Result<Value, 
 
 /// Bitwise OR of two binaries
 /// binary_or([bin, bin]) -> bin
-pub fn builtin_binary_or(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_or(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, constants)?;
-                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, constants)?;
+                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
+                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
 
                     // For bitwise operations, take the longer length, padding with zeros
                     let result_len = bytes_a.len().max(bytes_b.len());
@@ -213,13 +213,13 @@ pub fn builtin_binary_or(arg: &Value, constants: &[Constant]) -> Result<Value, E
 
 /// Bitwise XOR of two binaries
 /// binary_xor([bin, bin]) -> bin
-pub fn builtin_binary_xor(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_xor(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, constants)?;
-                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, constants)?;
+                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
+                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
 
                     // For XOR, take the longer length, padding with zeros
                     let result_len = bytes_a.len().max(bytes_b.len());
@@ -249,10 +249,10 @@ pub fn builtin_binary_xor(arg: &Value, constants: &[Constant]) -> Result<Value, 
 
 /// Bitwise NOT of a binary
 /// binary_not(bin) -> bin
-pub fn builtin_binary_not(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_not(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
             let result: Vec<u8> = bytes.iter().map(|&byte| !byte).collect();
 
             let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
@@ -271,12 +271,12 @@ pub fn builtin_binary_not(arg: &Value, constants: &[Constant]) -> Result<Value, 
 
 /// Left shift binary by n bits
 /// binary_shift_left([bin, int]) -> bin
-pub fn builtin_binary_shift_left(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_shift_left(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref), Value::Integer(shift_bits)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *shift_bits < 0 {
                         return Err(Error::InvalidArgument(
@@ -333,12 +333,12 @@ pub fn builtin_binary_shift_left(arg: &Value, constants: &[Constant]) -> Result<
 
 /// Right shift binary by n bits (logical shift)
 /// binary_shift_right([bin, int]) -> bin
-pub fn builtin_binary_shift_right(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_shift_right(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref), Value::Integer(shift_bits)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *shift_bits < 0 {
                         return Err(Error::InvalidArgument(
@@ -396,12 +396,12 @@ pub fn builtin_binary_shift_right(arg: &Value, constants: &[Constant]) -> Result
 
 /// Get bit at specific position (0 = rightmost bit)
 /// binary_get_bit_pos([bin, int]) -> int
-pub fn builtin_binary_get_bit_pos(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_get_bit_pos(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref), Value::Integer(bit_index)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *bit_index < 0 {
                         return Err(Error::InvalidArgument(
@@ -442,10 +442,10 @@ pub fn builtin_binary_get_bit_pos(arg: &Value, constants: &[Constant]) -> Result
 
 /// Count number of set bits (popcount) - CRITICAL for HAMT
 /// binary_popcount(bin) -> int
-pub fn builtin_binary_popcount(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_popcount(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
             // Use efficient bit counting algorithm
             let mut count = 0u64;
@@ -464,7 +464,7 @@ pub fn builtin_binary_popcount(arg: &Value, constants: &[Constant]) -> Result<Va
 
 /// Set bit at specific position to value (0 or 1)
 /// binary_set_bit([bin, int, int]) -> bin
-pub fn builtin_binary_set_bit(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_set_bit(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
@@ -473,7 +473,7 @@ pub fn builtin_binary_set_bit(arg: &Value, constants: &[Constant]) -> Result<Val
                     Value::Integer(bit_index),
                     Value::Integer(bit_value),
                 ) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *bit_index < 0 {
                         return Err(Error::InvalidArgument(
@@ -529,11 +529,11 @@ pub fn builtin_binary_set_bit(arg: &Value, constants: &[Constant]) -> Result<Val
 
 /// Get a 32-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u32([bin, int]) -> int
-pub fn builtin_binary_get_u32(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_get_u32(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_ref), Value::Integer(offset)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                 if *offset < 0 {
                     return Err(Error::InvalidArgument(
@@ -571,12 +571,12 @@ pub fn builtin_binary_get_u32(arg: &Value, constants: &[Constant]) -> Result<Val
 
 /// Set a 32-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u32([bin, int, int]) -> bin
-pub fn builtin_binary_set_u32(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_set_u32(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary_ref), Value::Integer(offset), Value::Integer(value)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -623,12 +623,12 @@ pub fn builtin_binary_set_u32(arg: &Value, constants: &[Constant]) -> Result<Val
 
 /// Get a 64-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u64([bin, int]) -> int
-pub fn builtin_binary_get_u64(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_get_u64(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref), Value::Integer(offset)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -672,12 +672,12 @@ pub fn builtin_binary_get_u64(arg: &Value, constants: &[Constant]) -> Result<Val
 
 /// Set a 64-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u64([bin, int, int]) -> bin
-pub fn builtin_binary_set_u64(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_set_u64(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary_ref), Value::Integer(offset), Value::Integer(value)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -721,12 +721,12 @@ pub fn builtin_binary_set_u64(arg: &Value, constants: &[Constant]) -> Result<Val
 
 /// Extract a slice from binary [start, end) (end is exclusive)
 /// binary_slice([bin, int, int]) -> bin
-pub fn builtin_binary_slice(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_slice(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary_ref), Value::Integer(start), Value::Integer(end)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *start < 0 || *end < 0 {
                         return Err(Error::InvalidArgument(
@@ -766,11 +766,11 @@ pub fn builtin_binary_slice(arg: &Value, constants: &[Constant]) -> Result<Value
 
 /// Take first N bytes from binary
 /// binary_take([bin, int]) -> bin
-pub fn builtin_binary_take(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_take(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_ref), Value::Integer(count)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                 if *count < 0 {
                     return Err(Error::InvalidArgument(
@@ -798,11 +798,11 @@ pub fn builtin_binary_take(arg: &Value, constants: &[Constant]) -> Result<Value,
 
 /// Drop first N bytes from binary
 /// binary_drop([bin, int]) -> bin
-pub fn builtin_binary_drop(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_drop(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_ref), Value::Integer(count)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                 if *count < 0 {
                     return Err(Error::InvalidArgument(
@@ -830,12 +830,12 @@ pub fn builtin_binary_drop(arg: &Value, constants: &[Constant]) -> Result<Value,
 
 /// Pad binary to specified length with zeros at the end
 /// binary_pad([bin, int]) -> bin
-pub fn builtin_binary_pad(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_pad(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_ref), Value::Integer(target_length)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
                     if *target_length < 0 {
                         return Err(Error::InvalidArgument(
@@ -876,10 +876,10 @@ pub fn builtin_binary_pad(arg: &Value, constants: &[Constant]) -> Result<Value, 
 
 /// Simple FNV-1a hash implementation for 32-bit hashes
 /// binary_hash32(bin) -> int
-pub fn builtin_binary_hash32(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_hash32(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
             // FNV-1a 32-bit hash
             let mut hash: u32 = 2166136261; // FNV offset basis
@@ -899,10 +899,10 @@ pub fn builtin_binary_hash32(arg: &Value, constants: &[Constant]) -> Result<Valu
 
 /// Simple FNV-1a hash implementation for 64-bit hashes
 /// binary_hash64(bin) -> int
-pub fn builtin_binary_hash64(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_binary_hash64(arg: &Value, program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, constants)?;
+            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
 
             // FNV-1a 64-bit hash
             let mut hash: u64 = 14695981039346656037; // FNV offset basis
@@ -923,15 +923,15 @@ pub fn builtin_binary_hash64(arg: &Value, constants: &[Constant]) -> Result<Valu
 
 /// Hash a string (converted to binary) for use in data structures
 /// string_hash(bin) -> int
-pub fn builtin_string_hash(arg: &Value, constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_string_hash(arg: &Value, program: &Program) -> Result<Value, Error> {
     // For strings, we use the same implementation as hash32 but with a different name
     // This is common in many languages to have separate string vs binary hash functions
-    builtin_binary_hash32(arg, constants)
+    builtin_binary_hash32(arg, program)
 }
 
 /// Extract N-bit chunks from hash for HAMT navigation
 /// hash_chunk([int, int, int]) -> int (hash, shift_bits, chunk_size_bits)
-pub fn builtin_hash_chunk(arg: &Value, _constants: &[Constant]) -> Result<Value, Error> {
+pub fn builtin_hash_chunk(arg: &Value, _program: &Program) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {

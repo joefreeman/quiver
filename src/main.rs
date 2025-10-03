@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 use quiver::Quiver;
 use quiver::types::Type;
-use quiver::vm::{VM, Value};
+use quiver::vm::Value;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::collections::HashMap;
@@ -335,9 +335,12 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
     }
 
     let entry = bytecode.entry;
-    let vm = VM::new(Some(bytecode));
 
-    let types_map = vm.get_types();
+    // Create program from bytecode
+    use quiver::program::Program;
+    let program = Program::from_bytecode(bytecode);
+
+    let types_map = program.get_types();
     if !types_map.is_empty() {
         println!("\nTypes:");
         let mut types: Vec<_> = types_map.iter().collect();
@@ -346,12 +349,12 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
             println!(
                 "  {}: {}",
                 type_id.0,
-                vm.format_type(&Type::Tuple(*type_id))
+                quiver::format::format_type(&program, &Type::Tuple(*type_id))
             );
         }
     }
 
-    for (i, function) in vm.get_functions().iter().enumerate() {
+    for (i, function) in program.get_functions().iter().enumerate() {
         let mut header = format!("\nFunction{}", i);
 
         if entry == Some(i) {

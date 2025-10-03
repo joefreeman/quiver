@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::bytecode::TypeId;
 
@@ -243,69 +243,5 @@ impl Type {
 
             _ => false,
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TypeRegistry {
-    types: HashMap<TypeId, TupleTypeInfo>,
-    next_id: usize,
-}
-
-impl Default for TypeRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TypeLookup for TypeRegistry {
-    fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.types.get(type_id)
-    }
-}
-
-impl TypeRegistry {
-    pub fn new() -> Self {
-        let mut registry = Self {
-            types: HashMap::new(),
-            next_id: 0,
-        };
-
-        let nil_type_id = registry.register_type(None, vec![]);
-        assert_eq!(nil_type_id, TypeId::NIL);
-
-        let ok_type_id = registry.register_type(Some("Ok".to_string()), vec![]);
-        assert_eq!(ok_type_id, TypeId::OK);
-
-        registry
-    }
-
-    pub fn register_type(
-        &mut self,
-        name: Option<String>,
-        fields: Vec<(Option<String>, Type)>,
-    ) -> TypeId {
-        for (&existing_id, existing_type) in &self.types {
-            if existing_type.0 == name && existing_type.1 == fields {
-                return existing_id;
-            }
-        }
-
-        let type_id = TypeId(self.next_id);
-        self.next_id += 1;
-
-        self.types.insert(type_id, (name, fields));
-        type_id
-    }
-
-    pub fn get_types(&self) -> &HashMap<TypeId, TupleTypeInfo> {
-        &self.types
-    }
-
-    // Load types with specific IDs (for bytecode loading)
-    pub fn load_types(&mut self, types: HashMap<TypeId, TupleTypeInfo>) {
-        // Update next_id to be higher than all loaded IDs
-        self.next_id = types.keys().map(|id| id.0).max().unwrap_or(0) + 1;
-        self.types = types;
     }
 }

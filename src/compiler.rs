@@ -19,7 +19,8 @@ use crate::{
     builtins::BUILTIN_REGISTRY,
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
-    types::{CallableType, Type},
+    program::Program,
+    types::{CallableType, Type, TypeLookup},
     vm::{BinaryRef, VM, Value},
 };
 
@@ -145,7 +146,7 @@ pub struct Compiler<'a> {
     // State management
     scopes: Vec<Scope>,
     local_count: usize,
-    vm: &'a mut VM,
+    program: &'a mut Program,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
 
@@ -158,9 +159,10 @@ impl<'a> Compiler<'a> {
         program: ast::Program,
         type_aliases: &'a mut HashMap<String, Type>,
         module_loader: &'a dyn ModuleLoader,
-        vm: &'a mut VM,
+        compiled_program: &'a mut Program,
         module_path: Option<PathBuf>,
         existing_variables: Option<&HashMap<String, usize>>,
+        existing_locals: Option<&[Value]>,
         parameter: Option<&Value>,
     ) -> Result<(Vec<Instruction>, HashMap<String, usize>), Error> {
         let mut compiler = Self {
@@ -169,7 +171,7 @@ impl<'a> Compiler<'a> {
             module_cache: ModuleCache::new(),
             scopes: vec![],
             local_count: 0,
-            vm,
+            program: compiled_program,
             module_loader,
             module_path,
             ripple_depth: 0,
@@ -178,26 +180,21 @@ impl<'a> Compiler<'a> {
         // Prepare scope variables from existing variables
         let mut scope_variables = HashMap::new();
         if let Some(variables) = existing_variables {
-            let variable_values =
-                compiler
-                    .vm
-                    .get_variables(variables)
-                    .map_err(|e| Error::InternalError {
-                        message: format!("Failed to get existing variables: {:?}", e),
-                    })?;
+            if let Some(locals) = existing_locals {
+                for (name, &index) in variables {
+                    if let Some(value) = locals.get(index) {
+                        let var_type = compiler.value_to_type(value)?;
+                        scope_variables.insert(name.clone(), (var_type, index));
+                    }
+                }
 
-            for (name, value) in variable_values {
-                let var_type = compiler.value_to_type(&value)?;
-                let index = variables[&name];
-                scope_variables.insert(name.clone(), (var_type, index));
+                compiler.local_count = variables
+                    .values()
+                    .copied()
+                    .max()
+                    .map(|max_index| max_index + 1)
+                    .unwrap_or(0);
             }
-
-            compiler.local_count = variables
-                .values()
-                .copied()
-                .max()
-                .map(|max_index| max_index + 1)
-                .unwrap_or(0);
         }
 
         // Prepare parameter
@@ -277,7 +274,7 @@ impl<'a> Compiler<'a> {
     fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
         let resolved_type = self
             .type_context
-            .resolve_ast_type(type_definition, self.vm)?;
+            .resolve_ast_type(type_definition, self.program)?;
 
         self.type_context
             .type_aliases
@@ -297,20 +294,22 @@ impl<'a> Compiler<'a> {
             self.module_loader,
             self.module_path.as_ref(),
             &mut self.type_context,
-            self.vm,
+            self.program,
         )
     }
 
     fn compile_literal(&mut self, literal: ast::Literal) -> Result<Type, Error> {
         match literal {
             ast::Literal::Integer(integer) => {
-                let index = self.vm.register_constant(Constant::Integer(integer));
+                let index = self.program.register_constant(Constant::Integer(integer));
                 self.codegen.add_instruction(Instruction::Constant(index));
                 Ok(Type::Integer)
             }
             ast::Literal::Binary(bytes) => {
                 // TODO: is clone bad?
-                let index = self.vm.register_constant(Constant::Binary(bytes.clone()));
+                let index = self
+                    .program
+                    .register_constant(Constant::Binary(bytes.clone()));
                 self.codegen.add_instruction(Instruction::Constant(index));
                 Ok(Type::Binary)
             }
@@ -356,7 +355,7 @@ impl<'a> Compiler<'a> {
         }
 
         // Register the tuple type with potentially union field types
-        let type_id = self.vm.register_type(tuple_name, field_types);
+        let type_id = self.program.register_type(tuple_name, field_types);
         self.codegen.add_instruction(Instruction::Tuple(type_id));
 
         Ok(Type::Tuple(type_id))
@@ -429,7 +428,7 @@ impl<'a> Compiler<'a> {
         self.ripple_depth -= 1;
 
         // Register the tuple type with potentially union field types
-        let type_id = self.vm.register_type(name, field_types);
+        let type_id = self.program.register_type(name, field_types);
         self.codegen.add_instruction(Instruction::Tuple(type_id));
 
         // Clear the ripple local now that we're done with it
@@ -512,7 +511,9 @@ impl<'a> Compiler<'a> {
         }
 
         let parameter_type = match &function_definition.parameter_type {
-            Some(t) => self.type_context.resolve_ast_type(t.clone(), self.vm)?,
+            Some(t) => self
+                .type_context
+                .resolve_ast_type(t.clone(), self.program)?,
             None => Type::nil(),
         };
 
@@ -584,7 +585,7 @@ impl<'a> Compiler<'a> {
                 if let Some(field_name) = &field.name {
                     let field_type = self
                         .type_context
-                        .resolve_ast_type(field.type_def.clone(), self.vm)?;
+                        .resolve_ast_type(field.type_def.clone(), self.program)?;
                     parameter_fields.insert(field_name.clone(), (field_index, field_type));
                 }
             }
@@ -598,7 +599,7 @@ impl<'a> Compiler<'a> {
         };
 
         let function_instructions = std::mem::take(&mut self.codegen.instructions);
-        let function_index = self.vm.register_function(Function {
+        let function_index = self.program.register_function(Function {
             instructions: function_instructions,
             function_type: Some(func_type.clone()),
             captures: capture_locals,
@@ -631,7 +632,7 @@ impl<'a> Compiler<'a> {
 
         // Analyze pattern to get bindings without generating code yet
         let (certainty, bindings, binding_sets) =
-            pattern::analyze_pattern(&self.type_context, self.vm, &term, &value_type)?;
+            pattern::analyze_pattern(&self.type_context, self.program, &term, &value_type)?;
 
         match certainty {
             MatchCertainty::WontMatch => {
@@ -667,7 +668,7 @@ impl<'a> Compiler<'a> {
                 // Now generate pattern matching code with pre-allocated locals
                 pattern::generate_pattern_code(
                     &mut self.codegen,
-                    self.vm,
+                    self.program,
                     &mut self.local_count,
                     Some(&bindings_map),
                     &binding_sets,
@@ -909,7 +910,9 @@ impl<'a> Compiler<'a> {
     fn value_to_instructions(&mut self, value: &Value) -> Result<Type, Error> {
         match value {
             Value::Integer(int_value) => {
-                let index = self.vm.register_constant(Constant::Integer(*int_value));
+                let index = self
+                    .program
+                    .register_constant(Constant::Integer(*int_value));
                 self.codegen.add_instruction(Instruction::Constant(index));
                 Ok(Type::Integer)
             }
@@ -922,7 +925,7 @@ impl<'a> Compiler<'a> {
                     BinaryRef::Heap(bytes) => {
                         // Create a constant from the heap binary
                         let constant = crate::bytecode::Constant::Binary(bytes.to_vec());
-                        let index = self.vm.register_constant(constant);
+                        let index = self.program.register_constant(constant);
                         self.codegen.add_instruction(Instruction::Constant(index));
                     }
                 }
@@ -937,7 +940,7 @@ impl<'a> Compiler<'a> {
             }
             Value::Function(function, captures) => {
                 // Get the function definition
-                let func_def = self.vm.get_functions().get(*function).cloned().ok_or(
+                let func_def = self.program.get_function(*function).cloned().ok_or(
                     Error::FeatureUnsupported("Invalid function reference".to_string()),
                 )?;
 
@@ -959,7 +962,7 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Register function with new capture locals for this context
-                let func_index = self.vm.register_function(Function {
+                let func_index = self.program.register_function(Function {
                     instructions: func_def.instructions,
                     function_type: func_def.function_type,
                     captures: capture_locals,
@@ -972,12 +975,12 @@ impl<'a> Compiler<'a> {
                 self.function_to_type(func_index)
             }
             Value::Builtin(name) => {
-                let builtin_index = self.vm.register_builtin(name.to_string());
+                let builtin_index = self.program.register_builtin(name.to_string());
                 self.codegen
                     .add_instruction(Instruction::Builtin(builtin_index));
 
                 if let Some((param_type, result_type)) =
-                    BUILTIN_REGISTRY.resolve_signature(name, self.vm)
+                    BUILTIN_REGISTRY.resolve_signature(name, self.program)
                 {
                     Ok(Type::Callable(Box::new(CallableType {
                         parameter: param_type,
@@ -1036,10 +1039,12 @@ impl<'a> Compiler<'a> {
         // Save current compiler state
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_local_count = self.local_count;
         let saved_type_aliases = self.type_context.type_aliases.clone();
 
         // Reset to clean state for module compilation
         self.scopes = vec![Scope::new(HashMap::new(), None)];
+        self.local_count = 0;
         self.type_context.type_aliases.clear();
 
         for statement in parsed.statements {
@@ -1052,12 +1057,13 @@ impl<'a> Compiler<'a> {
         // Restore original compiler state
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
+        self.local_count = saved_local_count;
         *self.type_context.type_aliases = saved_type_aliases;
 
         // Execute the module instructions to get the runtime value
-        // If module returns None (no value), default to NIL tuple - this is intentional
-        let value = self
-            .vm
+        // Create a temporary VM for execution
+        let mut temp_vm = VM::new(self.program);
+        let value = temp_vm
             .execute_instructions(module_instructions, None)
             .map_err(|e| Error::ModuleExecution {
                 module_path: module_path.to_string(),
@@ -1220,19 +1226,19 @@ impl<'a> Compiler<'a> {
             _ => {
                 return Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: self.vm.format_type(&function_type),
+                    found: crate::format::format_type(self.program, &function_type),
                 });
             }
         };
 
         // Check parameter compatibility
-        if !val_type.is_compatible(&func_type.parameter, self.vm) {
+        if !val_type.is_compatible(&func_type.parameter, self.program) {
             return Err(Error::TypeMismatch {
                 expected: format!(
                     "function parameter compatible with {}",
-                    self.vm.format_type(&func_type.parameter)
+                    crate::format::format_type(self.program, &func_type.parameter)
                 ),
-                found: self.vm.format_type(&val_type),
+                found: crate::format::format_type(self.program, &val_type),
             });
         }
 
@@ -1254,7 +1260,7 @@ impl<'a> Compiler<'a> {
                 }
                 Some((other_type, _)) => Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: self.vm.format_type(&other_type),
+                    found: crate::format::format_type(self.program, &other_type),
                 }),
                 None => Err(Error::VariableUndefined(identifier.to_string())),
             }
@@ -1263,10 +1269,10 @@ impl<'a> Compiler<'a> {
 
     fn compile_builtin(&mut self, name: &str) -> Result<Type, Error> {
         let (param_type, result_type) = BUILTIN_REGISTRY
-            .resolve_signature(name, self.vm)
+            .resolve_signature(name, self.program)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
 
-        let builtin_index = self.vm.register_builtin(name.to_string());
+        let builtin_index = self.program.register_builtin(name.to_string());
 
         self.codegen
             .add_instruction(Instruction::Builtin(builtin_index));
@@ -1297,7 +1303,7 @@ impl<'a> Compiler<'a> {
 
         for type_id in &tuple_types {
             let (_, fields) = self
-                .vm
+                .program
                 .lookup_type(&type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -1474,7 +1480,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn function_to_type(&self, function_index: usize) -> Result<Type, Error> {
-        if let Some(func_def) = self.vm.get_functions().get(function_index) {
+        if let Some(func_def) = self.program.get_function(function_index) {
             if let Some(func_type) = &func_def.function_type {
                 Ok(Type::Callable(Box::new(func_type.clone())))
             } else {
@@ -1493,7 +1499,7 @@ impl<'a> Compiler<'a> {
             Value::Function(function, _) => self.function_to_type(*function),
             Value::Builtin(name) => {
                 if let Some((param_type, result_type)) =
-                    BUILTIN_REGISTRY.resolve_signature(name, self.vm)
+                    BUILTIN_REGISTRY.resolve_signature(name, self.program)
                 {
                     Ok(Type::Callable(Box::new(CallableType {
                         parameter: param_type,
@@ -1556,7 +1562,7 @@ impl<'a> Compiler<'a> {
 
         for type_id in tuple_types {
             let (_, fields) = self
-                .vm
+                .program
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -1581,9 +1587,11 @@ impl<'a> Compiler<'a> {
         let mut common_index = None;
 
         for type_id in tuple_types {
-            let (index, field_type) = self
-                .type_context
-                .get_tuple_field_type_by_name(type_id, field_name, self.vm)?;
+            let (index, field_type) = self.type_context.get_tuple_field_type_by_name(
+                type_id,
+                field_name,
+                self.program,
+            )?;
 
             // Verify all tuples have the field at the same index
             if let Some(prev_index) = common_index {

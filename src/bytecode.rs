@@ -1,6 +1,4 @@
-mod optimisation;
-
-pub use optimisation::tree_shake;
+pub mod optimisation;
 
 use crate::types;
 use serde::{Deserialize, Serialize};

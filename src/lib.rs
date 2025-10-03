@@ -2,35 +2,37 @@ pub mod ast;
 pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
+pub mod format;
 pub mod modules;
 pub mod parser;
+pub mod program;
 pub mod types;
 pub mod vm;
 
 use std::collections::HashMap;
 
-use bytecode::tree_shake;
+use bytecode::optimisation::tree_shake;
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
+use program::Program;
 use types::Type;
 use vm::{VM, Value};
 
 pub struct Quiver {
     type_aliases: HashMap<String, Type>,
     module_loader: Box<dyn ModuleLoader>,
-    vm: VM,
+    program: Program,
 }
 
 impl Quiver {
     pub fn new(modules: Option<HashMap<String, String>>) -> Self {
         Self {
-            // TODO: constant/function pools?
             type_aliases: HashMap::new(),
             module_loader: match modules {
                 Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
                 None => Box::new(FileSystemModuleLoader::new()),
             },
-            vm: VM::new(None),
+            program: Program::new(),
         }
     }
 
@@ -41,26 +43,39 @@ impl Quiver {
         variables: Option<&HashMap<String, usize>>,
         parameter: Option<&Value>,
     ) -> Result<(Option<Value>, HashMap<String, usize>), Error> {
-        let program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
+        let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
+
+        // Create a temporary VM for getting existing variable values
+        let temp_vm = VM::new(&self.program);
+        let existing_locals = if let Some(vars) = variables {
+            temp_vm
+                .get_variables(vars)
+                .map(|vals| vals.values().cloned().collect::<Vec<_>>())
+                .ok()
+        } else {
+            None
+        };
 
         let (instructions, variables) = Compiler::compile(
-            program,
+            ast_program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
-            &mut self.vm,
+            &mut self.program,
             module_path,
             variables,
+            existing_locals.as_deref(),
             parameter,
         )
         .map_err(Error::CompileError)?;
 
-        let result = self
-            .vm
+        // Create a fresh VM for execution
+        let mut vm = VM::new(&self.program);
+        let result = vm
             .execute_instructions(instructions, parameter.cloned())
             .map_err(Error::RuntimeError)?;
 
         // Compact locals and get updated variable indices
-        let compacted_variables = self.vm.cleanup_locals(&variables);
+        let compacted_variables = vm.cleanup_locals(&variables);
 
         Ok((result, compacted_variables))
     }
@@ -70,41 +85,37 @@ impl Quiver {
         source: &str,
         module_path: Option<std::path::PathBuf>,
     ) -> Result<bytecode::Bytecode, Error> {
-        let program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
+        let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
         let (instructions, _) = Compiler::compile(
-            program,
+            ast_program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
-            &mut self.vm,
+            &mut self.program,
             module_path,
+            None,
             None,
             None,
         )
         .map_err(Error::CompileError)?;
 
-        let result = self
-            .vm
+        // Create a temporary VM for execution
+        let mut vm = VM::new(&self.program);
+        let result = vm
             .execute_instructions(instructions, None)
             .map_err(Error::RuntimeError)?;
 
         let entry = match result {
             Some(Value::Function(main_func, captures)) => {
                 if !captures.is_empty() {
-                    self.vm.inject_function_captures(main_func, captures);
+                    self.program.inject_function_captures(main_func, captures);
                 }
                 Some(main_func)
             }
             _ => None,
         };
 
-        let bytecode = bytecode::Bytecode {
-            constants: self.vm.get_constants().clone(),
-            functions: self.vm.get_functions().clone(),
-            builtins: self.vm.get_builtins().clone(),
-            entry,
-            types: self.vm.get_types(),
-        };
+        let bytecode = self.program.to_bytecode(entry);
 
         Ok(tree_shake(bytecode))
     }
@@ -113,34 +124,40 @@ impl Quiver {
         // Get entry point before moving bytecode
         let entry = bytecode.entry;
 
-        // Replace VM with a fresh one loaded with bytecode
-        self.vm = VM::new(Some(bytecode));
+        // Replace program with one loaded from bytecode
+        self.program = Program::from_bytecode(bytecode);
 
         // Execute entry point if present
         if let Some(entry) = entry {
-            self.vm.execute_function(entry).map_err(Error::RuntimeError)
+            let mut vm = VM::new(&self.program);
+            vm.execute_function(entry).map_err(Error::RuntimeError)
         } else {
             Ok(None)
         }
     }
 
     pub fn get_stack(&self) -> Vec<Value> {
-        self.vm.get_stack()
+        // Stack is per-VM instance, so we can't provide this anymore
+        // Return empty vec for now
+        Vec::new()
     }
 
     pub fn frame_count(&self) -> usize {
-        self.vm.frame_count()
+        // Frames are per-VM instance
+        0
     }
 
     pub fn get_variables(&self, variables: &HashMap<String, usize>) -> Vec<(String, Value)> {
-        self.vm
-            .get_variables(variables)
+        // Variables are stored in VM locals, which is per-instance
+        // We'd need to create a temporary VM to access them
+        let vm = VM::new(&self.program);
+        vm.get_variables(variables)
             .map(|map| map.into_iter().collect())
             .unwrap_or_default()
     }
 
     pub fn list_types(&self) -> Vec<(String, bytecode::TypeId)> {
-        self.vm
+        self.program
             .get_types()
             .iter()
             .map(|(&type_id, (name, _fields))| {
@@ -154,11 +171,11 @@ impl Quiver {
     }
 
     pub fn format_value(&self, value: &Value) -> String {
-        self.vm.format_value(value)
+        format::format_value(&self.program, value)
     }
 
     pub fn format_type(&self, type_def: &Type) -> String {
-        self.vm.format_type(type_def)
+        format::format_type(&self.program, type_def)
     }
 }
 

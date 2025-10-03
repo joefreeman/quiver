@@ -1,6 +1,6 @@
-use crate::bytecode::Constant;
+use crate::program::Program;
 use crate::types::Type;
-use crate::vm::{Error, VM, Value};
+use crate::vm::{Error, Value};
 use std::collections::HashMap;
 
 pub mod binary;
@@ -17,21 +17,23 @@ pub enum TypeSpec {
 }
 
 impl TypeSpec {
-    /// Resolve this type specification to a concrete Type using the VM's type registry
-    pub fn resolve(&self, vm: &mut VM) -> Type {
+    /// Resolve this type specification to a concrete Type using the Program's type registry
+    pub fn resolve(&self, program: &mut Program) -> Type {
         match self {
             TypeSpec::Integer => Type::Integer,
             TypeSpec::Binary => Type::Binary,
             TypeSpec::Tuple(name, field_specs) => {
                 let fields: Vec<(Option<String>, Type)> = field_specs
                     .iter()
-                    .map(|(field_name, spec)| (field_name.map(|s| s.to_string()), spec.resolve(vm)))
+                    .map(|(field_name, spec)| {
+                        (field_name.map(|s| s.to_string()), spec.resolve(program))
+                    })
                     .collect();
-                let type_id = vm.register_type(name.map(|s| s.to_string()), fields);
+                let type_id = program.register_type(name.map(|s| s.to_string()), fields);
                 Type::Tuple(type_id)
             }
             TypeSpec::Union(specs) => {
-                let types: Vec<Type> = specs.iter().map(|spec| spec.resolve(vm)).collect();
+                let types: Vec<Type> = specs.iter().map(|spec| spec.resolve(program)).collect();
                 Type::Union(types)
             }
         }
@@ -46,7 +48,7 @@ macro_rules! register_builtin {
 }
 
 /// Function signature for builtin implementations
-pub type BuiltinFn = fn(&Value, &[Constant]) -> Result<Value, Error>;
+pub type BuiltinFn = fn(&Value, &Program) -> Result<Value, Error>;
 
 /// Registry of all available builtin functions
 pub struct BuiltinRegistry {
@@ -61,12 +63,12 @@ impl BuiltinRegistry {
     }
 
     /// Resolve and get the type signature for a builtin by function name
-    pub fn resolve_signature(&self, function: &str, vm: &mut VM) -> Option<(Type, Type)> {
+    pub fn resolve_signature(&self, function: &str, program: &mut Program) -> Option<(Type, Type)> {
         self.functions
             .get(function)
             .map(|(_, param_spec, result_spec)| {
-                let param_type = param_spec.resolve(vm);
-                let result_type = result_spec.resolve(vm);
+                let param_type = param_spec.resolve(program);
+                let result_type = result_spec.resolve(program);
                 (param_type, result_type)
             })
     }

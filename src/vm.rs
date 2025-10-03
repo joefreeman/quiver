@@ -1,6 +1,7 @@
 use crate::builtins::BUILTIN_REGISTRY;
-use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
-use crate::types::{TupleTypeInfo, Type, TypeLookup, TypeRegistry};
+use crate::bytecode::{Constant, Instruction, TypeId};
+use crate::program::Program;
+use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -96,77 +97,27 @@ impl Frame {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct VM {
-    constants: Vec<Constant>,
-    functions: Vec<Function>,
-    builtins: Vec<String>,
+#[derive(Debug)]
+pub struct VM<'a> {
+    program: &'a Program,
     stack: Vec<Value>,
     locals: Vec<Value>,
     frames: Vec<Frame>,
-    type_registry: TypeRegistry,
 }
 
-impl TypeLookup for VM {
+impl<'a> TypeLookup for VM<'a> {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.type_registry.lookup_type(type_id)
+        self.program.lookup_type(type_id)
     }
 }
 
-impl VM {
-    pub fn new(bytecode: Option<Bytecode>) -> Self {
-        match bytecode {
-            Some(bytecode) => {
-                let mut type_registry = TypeRegistry::new();
-                type_registry.load_types(bytecode.types);
-
-                Self {
-                    constants: bytecode.constants,
-                    functions: bytecode.functions,
-                    builtins: bytecode.builtins,
-                    stack: Vec::new(),
-                    locals: Vec::new(),
-                    frames: Vec::new(),
-                    type_registry,
-                }
-            }
-            None => Self {
-                constants: Vec::new(),
-                functions: Vec::new(),
-                builtins: Vec::new(),
-                stack: Vec::new(),
-                locals: Vec::new(),
-                frames: Vec::new(),
-                type_registry: TypeRegistry::new(),
-            },
-        }
-    }
-
-    pub fn register_constant(&mut self, constant: Constant) -> usize {
-        if let Some(index) = self.constants.iter().position(|c| c == &constant) {
-            index
-        } else {
-            self.constants.push(constant);
-            self.constants.len() - 1
-        }
-    }
-
-    pub fn get_constants(&self) -> &Vec<Constant> {
-        &self.constants
-    }
-
-    /// Get the actual bytes of a binary value
-    pub fn get_binary_bytes<'a>(&'a self, binary_ref: &'a BinaryRef) -> Result<&'a [u8], Error> {
-        match binary_ref {
-            BinaryRef::Constant(index) => match self.constants.get(*index) {
-                Some(Constant::Binary(bytes)) => Ok(bytes),
-                Some(_) => Err(Error::TypeMismatch {
-                    expected: "binary constant".to_string(),
-                    found: "non-binary constant".to_string(),
-                }),
-                None => Err(Error::ConstantUndefined(*index)),
-            },
-            BinaryRef::Heap(rc_bytes) => Ok(rc_bytes),
+impl<'a> VM<'a> {
+    pub fn new(program: &'a Program) -> Self {
+        Self {
+            program,
+            stack: Vec::new(),
+            locals: Vec::new(),
+            frames: Vec::new(),
         }
     }
 
@@ -185,121 +136,6 @@ impl VM {
     /// Clone a binary reference (cheap operation)
     pub fn clone_binary(&self, binary_ref: &BinaryRef) -> BinaryRef {
         binary_ref.clone()
-    }
-
-    /// Format a binary value showing its actual content
-    pub fn format_binary(&self, binary_ref: &BinaryRef) -> String {
-        match self.get_binary_bytes(binary_ref) {
-            Ok(bytes) => {
-                if bytes.len() <= 8 {
-                    // Show short binaries in full
-                    format!("'{}'", hex::encode(bytes))
-                } else {
-                    // Show truncated for long binaries
-                    format!("'{}...'", hex::encode(&bytes[..8]))
-                }
-            }
-            Err(_) => "<invalid binary>".to_string(),
-        }
-    }
-
-    pub fn register_function(&mut self, function: Function) -> usize {
-        if let Some(index) = self.functions.iter().position(|f| f == &function) {
-            index
-        } else {
-            self.functions.push(function);
-            self.functions.len() - 1
-        }
-    }
-
-    pub fn get_functions(&self) -> &Vec<Function> {
-        &self.functions
-    }
-
-    pub fn inject_function_captures(&mut self, function_index: usize, captures: Vec<Value>) {
-        let mut instructions = Vec::new();
-        instructions.push(Instruction::Allocate(captures.len()));
-
-        for (i, capture_value) in captures.iter().enumerate() {
-            instructions.extend(self.value_to_instructions(capture_value));
-            instructions.push(Instruction::Store(i));
-        }
-
-        let func = &self.functions[function_index];
-        instructions.extend(func.instructions.clone());
-
-        self.functions[function_index] = Function {
-            instructions,
-            function_type: func.function_type.clone(),
-            captures: Vec::new(),
-        };
-    }
-
-    fn value_to_instructions(&mut self, value: &Value) -> Vec<Instruction> {
-        match value {
-            Value::Integer(n) => {
-                let const_idx = self.register_constant(Constant::Integer(*n));
-                vec![Instruction::Constant(const_idx)]
-            }
-            Value::Binary(bin_ref) => {
-                let bytes = self
-                    .get_binary_bytes(bin_ref)
-                    .expect("Binary should be valid during capture injection")
-                    .to_vec();
-                let const_idx = self.register_constant(Constant::Binary(bytes));
-                vec![Instruction::Constant(const_idx)]
-            }
-            Value::Builtin(name) => {
-                let builtin_idx = self.register_builtin(name.clone());
-                vec![Instruction::Builtin(builtin_idx)]
-            }
-            Value::Function(function, captures) => {
-                if !captures.is_empty() {
-                    self.inject_function_captures(*function, captures.clone());
-                }
-                vec![Instruction::Function(*function)]
-            }
-            Value::Tuple(type_id, elements) => {
-                let mut instrs = Vec::new();
-                for elem in elements {
-                    instrs.extend(self.value_to_instructions(elem));
-                }
-                instrs.push(Instruction::Tuple(*type_id));
-                instrs
-            }
-        }
-    }
-
-    pub fn register_builtin(&mut self, function: String) -> usize {
-        if let Some(index) = self.builtins.iter().position(|b| b == &function) {
-            index
-        } else {
-            self.builtins.push(function);
-            self.builtins.len() - 1
-        }
-    }
-
-    pub fn get_builtins(&self) -> &Vec<String> {
-        &self.builtins
-    }
-
-    // Proxy method for registering types
-    pub fn register_type(
-        &mut self,
-        name: Option<String>,
-        fields: Vec<(Option<String>, Type)>,
-    ) -> TypeId {
-        self.type_registry.register_type(name, fields)
-    }
-
-    // Proxy method for looking up types
-    pub fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.type_registry.lookup_type(type_id)
-    }
-
-    // Get all types for serialization/transfer
-    pub fn get_types(&self) -> HashMap<TypeId, TupleTypeInfo> {
-        self.type_registry.get_types().clone()
     }
 
     pub fn execute_instructions(
@@ -327,8 +163,8 @@ impl VM {
 
     pub fn execute_function(&mut self, entry: usize) -> Result<Option<Value>, Error> {
         let function = self
-            .functions
-            .get(entry)
+            .program
+            .get_function(entry)
             .ok_or(Error::FunctionUndefined(entry))?;
         let instructions = function.instructions.clone();
 
@@ -383,8 +219,8 @@ impl VM {
 
     fn handle_constant(&mut self, index: usize) -> Result<(), Error> {
         let constant = self
-            .constants
-            .get(index)
+            .program
+            .get_constant(index)
             .ok_or(Error::ConstantUndefined(index))?;
         let value = match constant {
             Constant::Integer(integer) => Value::Integer(*integer),
@@ -454,7 +290,7 @@ impl VM {
 
     fn handle_tuple(&mut self, type_id: TypeId) -> Result<(), Error> {
         // Look up the type to get the field count
-        let Some((_, fields)) = self.type_registry.lookup_type(&type_id) else {
+        let Some((_, fields)) = self.program.lookup_type(&type_id) else {
             return Err(Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
                 found: format!("unknown TypeId({:?})", type_id),
@@ -550,8 +386,8 @@ impl VM {
         match self.stack.pop().ok_or(Error::StackUnderflow)? {
             Value::Function(function, captures) => {
                 let func = self
-                    .functions
-                    .get(function)
+                    .program
+                    .get_function(function)
                     .ok_or(Error::FunctionUndefined(function))?;
                 let instructions = func.instructions.clone();
 
@@ -575,7 +411,7 @@ impl VM {
                             "Unrecognised builtin: {}",
                             name
                         )))?;
-                let result = builtin_fn(&argument, &self.constants)?;
+                let result = builtin_fn(&argument, self.program)?;
                 self.stack.push(result);
                 // Unlike regular calls, builtins don't create a new frame
                 // So we need to manually increment the counter
@@ -608,8 +444,8 @@ impl VM {
                 Value::Function(function, captures) => {
                     let argument = self.stack.pop().ok_or(Error::StackUnderflow)?;
                     let func = self
-                        .functions
-                        .get(function)
+                        .program
+                        .get_function(function)
                         .ok_or(Error::FunctionUndefined(function))?;
                     let instructions = func.instructions.clone();
 
@@ -642,8 +478,8 @@ impl VM {
 
     fn handle_function(&mut self, function_index: usize) -> Result<(), Error> {
         let func = self
-            .functions
-            .get(function_index)
+            .program
+            .get_function(function_index)
             .ok_or(Error::FunctionUndefined(function_index))?;
         let capture_locals = func.captures.clone();
 
@@ -667,8 +503,8 @@ impl VM {
 
     fn handle_builtin(&mut self, index: usize) -> Result<(), Error> {
         let function_name = self
-            .builtins
-            .get(index)
+            .program
+            .get_builtin(index)
             .ok_or(Error::BuiltinUndefined(index))?
             .clone();
         self.stack.push(Value::Builtin(function_name));
@@ -792,128 +628,12 @@ impl VM {
         Ok(variables)
     }
 
-    pub fn format_type(&self, type_def: &Type) -> String {
-        match type_def {
-            Type::Integer => "int".to_string(),
-            Type::Binary => "bin".to_string(),
-            Type::Tuple(type_id) => {
-                if let Some((name, fields)) = self.lookup_type(type_id) {
-                    let field_strs: Vec<String> = fields
-                        .iter()
-                        .map(|(field_name, field_type)| {
-                            if let Some(field_name) = field_name {
-                                format!("{}: {}", field_name, self.format_type(field_type))
-                            } else {
-                                self.format_type(field_type)
-                            }
-                        })
-                        .collect();
-
-                    if let Some(type_name) = name {
-                        if field_strs.is_empty() {
-                            format!("{}", type_name)
-                        } else {
-                            format!("{}[{}]", type_name, field_strs.join(", "))
-                        }
-                    } else {
-                        format!("[{}]", field_strs.join(", "))
-                    }
-                } else {
-                    format!("Type{}", type_id.0)
-                }
-            }
-            Type::Callable(func_type) => {
-                // Add parentheses around parameter if it's a function type
-                let param_str = match &func_type.parameter {
-                    Type::Callable(_) => format!("({})", self.format_type(&func_type.parameter)),
-                    _ => self.format_type(&func_type.parameter),
-                };
-
-                // Result type already has parentheses if it's a union
-                let result_str = self.format_type(&func_type.result);
-                format!("#{} -> {}", param_str, result_str)
-            }
-            Type::Cycle(depth) => format!("μ{}", depth),
-            Type::Union(types_list) => {
-                let type_strs: Vec<String> = types_list
-                    .iter()
-                    .map(|t| {
-                        match t {
-                            // Add parentheses around function types in unions for clarity
-                            Type::Callable(_) => format!("({})", self.format_type(t)),
-                            _ => self.format_type(t),
-                        }
-                    })
-                    .collect();
-                format!("({})", type_strs.join(" | "))
-            }
-        }
+    pub fn format_value(&self, value: &Value) -> String {
+        crate::format::format_value(self.program, value)
     }
 
-    pub fn format_value(&self, value: &Value) -> String {
-        match value {
-            Value::Function(function, _) => {
-                if let Some(func_def) = self.get_functions().get(*function) {
-                    if let Some(func_type) = &func_def.function_type {
-                        return self.format_type(&Type::Callable(Box::new(func_type.clone())));
-                    }
-                }
-                "(function)".to_string()
-            }
-            Value::Builtin(name) => format!("<{}>", name),
-            Value::Integer(i) => i.to_string(),
-            Value::Binary(binary_ref) => self.format_binary(binary_ref),
-            Value::Tuple(type_id, elements) => {
-                if let Some((name, fields)) = self.lookup_type(type_id) {
-                    if name.as_deref() == Some("Str") {
-                        if let [Value::Binary(binary_ref)] = elements.as_slice() {
-                            if let Ok(bytes) = self.get_binary_bytes(binary_ref) {
-                                if let Some(formatted) = try_format_as_string(bytes) {
-                                    return formatted;
-                                }
-                            }
-                        }
-                    }
-
-                    if elements.is_empty() {
-                        name.as_deref().unwrap_or("[]").to_string()
-                    } else {
-                        let formatted_elements = elements
-                            .iter()
-                            .enumerate()
-                            .map(|(i, elem)| {
-                                let formatted = self.format_value(elem);
-                                match fields.get(i).and_then(|(name, _)| name.as_ref()) {
-                                    Some(name) => format!("{}: {}", name, formatted),
-                                    None => formatted,
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-
-                        match name.as_deref() {
-                            Some(n) => format!("{}[{}]", n, formatted_elements),
-                            None => format!("[{}]", formatted_elements),
-                        }
-                    }
-                } else {
-                    let type_name = format!("Type{}", type_id.0);
-                    if elements.is_empty() {
-                        return type_name;
-                    }
-
-                    let mut result = format!("{}[", type_name);
-                    for (i, element) in elements.iter().enumerate() {
-                        if i > 0 {
-                            result.push_str(", ");
-                        }
-                        result.push_str(&self.format_value(element));
-                    }
-                    result.push(']');
-                    result
-                }
-            }
-        }
+    pub fn format_type(&self, type_def: &Type) -> String {
+        crate::format::format_type(self.program, type_def)
     }
 }
 
@@ -922,7 +642,10 @@ fn values_equal(a: &Value, b: &Value, vm: &VM) -> bool {
     match (a, b) {
         (Value::Integer(a), Value::Integer(b)) => a == b,
         (Value::Binary(a), Value::Binary(b)) => {
-            match (vm.get_binary_bytes(a), vm.get_binary_bytes(b)) {
+            match (
+                vm.program.get_binary_bytes(a),
+                vm.program.get_binary_bytes(b),
+            ) {
                 (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
                 _ => false, // If we can't access bytes, consider unequal
             }
@@ -945,31 +668,4 @@ fn values_equal(a: &Value, b: &Value, vm: &VM) -> bool {
         }
         _ => false,
     }
-}
-
-fn try_format_as_string(bytes: &[u8]) -> Option<String> {
-    let s = String::from_utf8(bytes.to_vec()).ok()?;
-
-    if s.contains('\0')
-        || !s
-            .chars()
-            .any(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
-    {
-        return None;
-    }
-
-    let escaped = s
-        .chars()
-        .map(|ch| match ch {
-            '"' => "\\\"".to_string(),
-            '\\' => "\\\\".to_string(),
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
-            c => c.to_string(),
-        })
-        .collect::<String>();
-
-    Some(format!("\"{}\"", escaped))
 }

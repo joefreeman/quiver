@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::{
     ast,
     bytecode::TypeId,
-    types::{CallableType, Type},
-    vm::VM,
+    program::Program,
+    types::{CallableType, Type, TypeLookup},
 };
 
 use super::Error;
@@ -71,7 +71,11 @@ impl<'a> TypeContext<'a> {
         Ok(())
     }
 
-    pub fn resolve_ast_type(&mut self, ast_type: ast::Type, vm: &mut VM) -> Result<Type, Error> {
+    pub fn resolve_ast_type(
+        &mut self,
+        ast_type: ast::Type,
+        program: &mut Program,
+    ) -> Result<Type, Error> {
         match ast_type {
             ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(Type::Integer),
             ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(Type::Binary),
@@ -80,17 +84,17 @@ impl<'a> TypeContext<'a> {
                 let mut fields = Vec::new();
 
                 for field in tuple.fields {
-                    let field_type = self.resolve_ast_type(field.type_def, vm)?;
+                    let field_type = self.resolve_ast_type(field.type_def, program)?;
                     fields.push((field.name, field_type));
                 }
 
                 // Register the tuple type with potentially union field types
-                let type_id = vm.register_type(tuple.name, fields);
+                let type_id = program.register_type(tuple.name, fields);
                 Ok(Type::Tuple(type_id))
             }
             ast::Type::Function(function) => {
-                let input_type = self.resolve_ast_type(*function.input, vm)?;
-                let output_type = self.resolve_ast_type(*function.output, vm)?;
+                let input_type = self.resolve_ast_type(*function.input, program)?;
+                let output_type = self.resolve_ast_type(*function.output, program)?;
 
                 // Create function type without distributing unions
                 Ok(Type::Callable(Box::new(CallableType {
@@ -111,7 +115,7 @@ impl<'a> TypeContext<'a> {
                 // Resolve all union member types
                 let mut resolved_types = Vec::new();
                 for member_type in union.types {
-                    let member_type = self.resolve_ast_type(member_type, vm)?;
+                    let member_type = self.resolve_ast_type(member_type, program)?;
                     match member_type {
                         Type::Union(variants) => resolved_types.extend(variants),
                         t => resolved_types.push(t),
@@ -165,9 +169,9 @@ impl<'a> TypeContext<'a> {
         &self,
         type_id: &TypeId,
         field_name: &str,
-        vm: &VM,
+        type_lookup: &impl TypeLookup,
     ) -> Result<(usize, Type), Error> {
-        let tuple_type = vm
+        let tuple_type = type_lookup
             .lookup_type(type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
         let (index, (_, field_type)) = tuple_type
@@ -186,9 +190,9 @@ impl<'a> TypeContext<'a> {
         &self,
         type_id: &TypeId,
         position: usize,
-        vm: &VM,
+        type_lookup: &impl TypeLookup,
     ) -> Result<Type, Error> {
-        let tuple_type = vm
+        let tuple_type = type_lookup
             .lookup_type(type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
         if position >= tuple_type.1.len() {

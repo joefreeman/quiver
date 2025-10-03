@@ -1,8 +1,8 @@
 use crate::{
     ast,
     bytecode::{Constant, Instruction, TypeId},
-    types::Type,
-    vm::VM,
+    program::Program,
+    types::{Type, TypeLookup},
 };
 
 use super::{Error, codegen::InstructionBuilder, typing::TypeContext};
@@ -58,11 +58,11 @@ pub struct BindingSet {
 /// Analyze pattern without generating code
 pub fn analyze_pattern(
     type_context: &TypeContext,
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     term: &ast::Term,
     value_type: &Type,
 ) -> Result<(MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>), Error> {
-    let binding_sets = analyze_term(type_context, vm, term, value_type, vec![])?;
+    let binding_sets = analyze_term(type_context, type_lookup, term, value_type, vec![])?;
 
     if binding_sets.is_empty() {
         return Ok((MatchCertainty::WontMatch, Vec::new(), Vec::new()));
@@ -90,7 +90,7 @@ pub fn analyze_pattern(
 /// Generate bytecode for pattern matching
 pub fn generate_pattern_code(
     codegen: &mut InstructionBuilder,
-    vm: &mut VM,
+    program: &mut Program,
     local_count: &mut usize,
     bindings_map: Option<&std::collections::HashMap<String, usize>>,
     binding_sets: &[BindingSet],
@@ -118,11 +118,11 @@ pub fn generate_pattern_code(
                 RuntimeCheck::Literal(literal) => {
                     match literal {
                         ast::Literal::Integer(val) => {
-                            let idx = vm.register_constant(Constant::Integer(*val));
+                            let idx = program.register_constant(Constant::Integer(*val));
                             codegen.add_instruction(Instruction::Constant(idx));
                         }
                         ast::Literal::Binary(bytes) => {
-                            let idx = vm.register_constant(Constant::Binary(bytes.clone()));
+                            let idx = program.register_constant(Constant::Binary(bytes.clone()));
                             codegen.add_instruction(Instruction::Constant(idx));
                         }
                     }
@@ -192,7 +192,7 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) ->
 
 fn analyze_term(
     type_context: &TypeContext,
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     term: &ast::Term,
     value_type: &Type,
     path: AccessPath,
@@ -206,11 +206,13 @@ fn analyze_term(
             requirements: vec![],
             bindings: vec![],
         }]),
-        ast::Term::Tuple(tuple) => analyze_tuple_pattern(type_context, vm, tuple, value_type, path),
-        ast::Term::Partial(partial_pattern) => {
-            analyze_partial_pattern(vm, partial_pattern, value_type, path)
+        ast::Term::Tuple(tuple) => {
+            analyze_tuple_pattern(type_context, type_lookup, tuple, value_type, path)
         }
-        ast::Term::Star => analyze_star_pattern(vm, value_type, path),
+        ast::Term::Partial(partial_pattern) => {
+            analyze_partial_pattern(type_lookup, partial_pattern, value_type, path)
+        }
+        ast::Term::Star => analyze_star_pattern(type_lookup, value_type, path),
         _ => Err(Error::FeatureUnsupported(format!(
             "Term cannot be used as pattern: {:?}",
             term
@@ -260,7 +262,7 @@ fn analyze_identifier_pattern(
 
 fn analyze_tuple_pattern(
     type_context: &TypeContext,
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     tuple: &ast::Tuple,
     value_type: &Type,
     path: AccessPath,
@@ -268,13 +270,13 @@ fn analyze_tuple_pattern(
     let mut binding_sets = vec![];
 
     // Collect matching types with their field mappings
-    let matching_types = find_matching_tuple_types(vm, tuple, value_type)?;
+    let matching_types = find_matching_tuple_types(type_lookup, tuple, value_type)?;
 
     // For each matching type, create binding sets
     for (type_id, field_mappings) in &matching_types {
         // Get tuple info and extract field types upfront to avoid borrow issues
         let tuple_fields: Vec<Type> = {
-            let tuple_info = vm
+            let tuple_info = type_lookup
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
             tuple_info.1.iter().map(|(_, t)| t.clone()).collect()
@@ -333,8 +335,13 @@ fn analyze_tuple_pattern(
             };
 
             // Recursively analyze the field pattern
-            let field_binding_sets =
-                analyze_term(type_context, vm, field_term, &field_type, field_path)?;
+            let field_binding_sets = analyze_term(
+                type_context,
+                type_lookup,
+                field_term,
+                &field_type,
+                field_path,
+            )?;
 
             if field_binding_sets.is_empty() {
                 // This type variant can't match, skip it entirely
@@ -379,7 +386,7 @@ fn analyze_tuple_pattern(
 }
 
 fn analyze_partial_pattern(
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     partial_pattern: &ast::PartialPattern,
     value_type: &Type,
     path: AccessPath,
@@ -388,7 +395,7 @@ fn analyze_partial_pattern(
 
     // Find types that have all required fields (and optionally matching tuple name)
     let matching_types = find_types_with_fields_and_name(
-        vm,
+        type_lookup,
         &partial_pattern.fields,
         partial_pattern.name.as_ref(),
         value_type,
@@ -405,7 +412,7 @@ fn analyze_partial_pattern(
             });
         }
 
-        let tuple_info = vm
+        let tuple_info = type_lookup
             .lookup_type(type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -432,7 +439,7 @@ fn analyze_partial_pattern(
 }
 
 fn analyze_star_pattern(
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     value_type: &Type,
     path: AccessPath,
 ) -> Result<Vec<BindingSet>, Error> {
@@ -442,7 +449,7 @@ fn analyze_star_pattern(
     // Create a binding set for each tuple type
     let mut binding_sets = vec![];
     for type_id in &tuple_types {
-        let tuple_info = vm
+        let tuple_info = type_lookup
             .lookup_type(type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -479,7 +486,7 @@ fn analyze_star_pattern(
 
 /// Find tuple types that match the given tuple term
 fn find_matching_tuple_types(
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     tuple: &ast::Tuple,
     value_type: &Type,
 ) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
@@ -492,7 +499,7 @@ fn find_matching_tuple_types(
 
     for typ in types_to_check {
         if let Type::Tuple(type_id) = typ {
-            if let Some(field_mappings) = check_tuple_match(vm, tuple, *type_id)? {
+            if let Some(field_mappings) = check_tuple_match(type_lookup, tuple, *type_id)? {
                 matching_types.push((*type_id, field_mappings));
             }
         }
@@ -503,11 +510,11 @@ fn find_matching_tuple_types(
 
 /// Check if a specific tuple type matches the pattern and return field mappings
 fn check_tuple_match(
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     tuple: &ast::Tuple,
     type_id: TypeId,
 ) -> Result<Option<Vec<(usize, usize)>>, Error> {
-    let tuple_info = vm
+    let tuple_info = type_lookup
         .lookup_type(&type_id)
         .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
 
@@ -531,7 +538,7 @@ fn check_tuple_match(
 }
 
 fn find_types_with_fields_and_name(
-    vm: &VM,
+    type_lookup: &impl TypeLookup,
     field_names: &[String],
     tuple_name: Option<&String>,
     value_type: &Type,
@@ -545,7 +552,7 @@ fn find_types_with_fields_and_name(
 
     for typ in types_to_check {
         if let Type::Tuple(type_id) = typ {
-            let tuple_info = vm
+            let tuple_info = type_lookup
                 .lookup_type(type_id)
                 .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
 
