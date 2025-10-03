@@ -32,7 +32,7 @@ Cons[1, Cons[2, Cons[3, Nil]]] ~> xs,
 xs ~> sum!  // 6
 ```
 
-> The example above can be evaluated in the REPL, or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
+> Run the example above in the REPL (`quiv repl`), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
 
 <br />
 
