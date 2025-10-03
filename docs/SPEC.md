@@ -318,7 +318,7 @@ Built-in functions can be accessed using angle brackets, although access via the
 
 ```
 [3, 4] ~> <add> ~> sum              // Built-in addition
-"Hello" ~> <println> ~> output      // Built-in print with newline
+"Hello" ~> <println>                // Built-in print with newline
 [x, 2] ~> <multiply> ~> doubled     // Built-in multiplication
 ```
 
