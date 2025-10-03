@@ -390,6 +390,6 @@ fn format_binary(bytes: &[u8]) -> String {
         format!("'{}'", hex)
     } else {
         let hex: String = bytes[..8].iter().map(|b| format!("{:02x}", b)).collect();
-        format!("'{}...'", hex)
+        format!("'{}…'", hex)
     }
 }

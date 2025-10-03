@@ -99,7 +99,7 @@ pub fn format_binary(program: &Program, binary_ref: &BinaryRef) -> String {
                 format!("'{}'", hex::encode(bytes))
             } else {
                 // Show truncated for long binaries
-                format!("'{}...'", hex::encode(&bytes[..8]))
+                format!("'{}…'", hex::encode(&bytes[..8]))
             }
         }
         Err(_) => "<invalid binary>".to_string(),
