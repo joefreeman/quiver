@@ -194,7 +194,10 @@ fn partial_pattern(input: &str) -> IResult<&str, Term> {
                 tuple_name,
                 delimited(
                     pair(char('('), ws0),
-                    separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                    terminated(
+                        separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                        opt(pair(ws0, char(','))),
+                    ),
                     pair(ws0, char(')')),
                 ),
             )),
@@ -209,7 +212,10 @@ fn partial_pattern(input: &str) -> IResult<&str, Term> {
         map(
             delimited(
                 pair(char('('), ws0),
-                separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                terminated(
+                    separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                    opt(pair(ws0, char(','))),
+                ),
                 pair(ws0, char(')')),
             ),
             |fields| Term::Partial(PartialPattern { name: None, fields }),
@@ -701,7 +707,10 @@ fn chain(input: &str) -> IResult<&str, Chain> {
 
 fn expression(input: &str) -> IResult<&str, Expression> {
     map(
-        separated_list1(tuple((ws0, char(','), wsc)), chain),
+        terminated(
+            separated_list1(tuple((ws0, char(','), wsc)), chain),
+            opt(pair(ws0, char(','))),
+        ),
         |chains| Expression { chains },
     )(input)
 }
@@ -727,7 +736,10 @@ fn type_import_pattern(input: &str) -> IResult<&str, TypeImportPattern> {
         map(
             delimited(
                 pair(char('('), ws0),
-                separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                terminated(
+                    separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                    opt(pair(ws0, char(','))),
+                ),
                 pair(ws0, char(')')),
             ),
             TypeImportPattern::Partial,
