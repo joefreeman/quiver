@@ -19,15 +19,12 @@ impl TestBuilder {
 
     pub fn evaluate(self, source: &str) -> TestResult {
         let mut quiver = Quiver::new(self.modules);
-        let result = quiver.evaluate(source, None, None, None);
-
-        let (result_value, _) = match result {
-            Ok((value, vars)) => (Ok(value), vars),
-            Err(e) => (Err(e), HashMap::new()),
-        };
+        let result = quiver
+            .evaluate(source, None, None, None)
+            .map(|(value, _, _)| value);
 
         TestResult {
-            result: result_value,
+            result,
             source: source.to_string(),
             quiver,
         }

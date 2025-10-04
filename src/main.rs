@@ -75,8 +75,8 @@ fn run_repl() -> Result<(), ReadlineError> {
     let mut rl = Editor::<(), rustyline::history::DefaultHistory>::new()?;
     let _ = rl.load_history(HISTORY_FILE);
     let mut quiver = Quiver::new(None);
-    let mut variables: HashMap<String, usize> = HashMap::new();
-    let mut last_result: Option<Value> = None;
+    let mut variables: HashMap<String, (Type, usize)> = HashMap::new();
+    let mut last_result: Option<(Value, Type)> = None;
 
     loop {
         let readline = rl.readline(&format!("{} ", ">>-".blue().bold()));
@@ -118,7 +118,7 @@ fn run_repl() -> Result<(), ReadlineError> {
                         } else {
                             // Sort by index to maintain definition order
                             let mut sorted_vars: Vec<_> = vars.into_iter().collect();
-                            sorted_vars.sort_by_key(|(name, _)| variables[name]);
+                            sorted_vars.sort_by_key(|(name, _)| variables[name].1);
 
                             println!("{}", "Variables:".bright_black());
                             for (name, value) in sorted_vars {
@@ -185,16 +185,16 @@ fn run_repl() -> Result<(), ReadlineError> {
                             line,
                             module_path,
                             Some(&variables),
-                            last_result.as_ref(),
+                            last_result.as_ref().map(|(v, t)| (v, t.clone())),
                         ) {
-                            Ok((result, new_variables)) => {
+                            Ok((result, result_type, new_variables)) => {
                                 variables = new_variables;
 
                                 if let Some(value) = &result {
                                     println!("{}", quiver.format_value(value));
                                 }
 
-                                last_result = result;
+                                last_result = result.map(|v| (v, result_type));
                             }
                             Err(error) => eprintln!("{}", error.to_string().red()),
                         }

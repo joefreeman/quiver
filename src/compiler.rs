@@ -170,10 +170,9 @@ impl<'a> Compiler<'a> {
         module_loader: &'a dyn ModuleLoader,
         compiled_program: &'a mut Program,
         module_path: Option<PathBuf>,
-        existing_variables: Option<&HashMap<String, usize>>,
-        existing_locals: Option<&[Value]>,
-        parameter: Option<&Value>,
-    ) -> Result<(Vec<Instruction>, HashMap<String, usize>), Error> {
+        existing_variables: Option<&HashMap<String, (Type, usize)>>,
+        parameter_type: Type,
+    ) -> Result<(Vec<Instruction>, Type, HashMap<String, (Type, usize)>), Error> {
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
             type_context: TypeContext::new(type_aliases),
@@ -190,32 +189,23 @@ impl<'a> Compiler<'a> {
         // Prepare scope variables from existing variables
         let mut scope_variables = HashMap::new();
         if let Some(variables) = existing_variables {
-            if let Some(locals) = existing_locals {
-                for (name, &index) in variables {
-                    if let Some(value) = locals.get(index) {
-                        let var_type = compiler.value_to_type(value)?;
-                        scope_variables.insert(name.clone(), (var_type, index));
-                    }
-                }
-
-                compiler.local_count = variables
-                    .values()
-                    .copied()
-                    .max()
-                    .map(|max_index| max_index + 1)
-                    .unwrap_or(0);
+            for (name, (var_type, index)) in variables {
+                scope_variables.insert(name.clone(), (var_type.clone(), *index));
             }
+
+            compiler.local_count = variables
+                .values()
+                .map(|(_, index)| index)
+                .copied()
+                .max()
+                .map(|max_index| max_index + 1)
+                .unwrap_or(0);
         }
 
-        // Prepare parameter (always allocate slot, even if None)
-        let (param_type, param_local) = if let Some(param_value) = parameter {
-            let param_type = compiler.value_to_type(param_value)?;
-            (param_type, compiler.local_count)
-        } else {
-            (Type::nil(), compiler.local_count)
-        };
+        // Prepare parameter (always allocate slot)
+        let param_local = compiler.local_count;
         compiler.local_count += 1;
-        let scope_parameter = Some((param_type, param_local));
+        let scope_parameter = Some((parameter_type, param_local));
 
         // Initialize scope with variables and parameter
         compiler.scopes = vec![Scope::new(scope_variables, scope_parameter.clone())];
@@ -239,11 +229,17 @@ impl<'a> Compiler<'a> {
 
         // Phase 2: Compile all statements (now forward references work)
         let num_statements = program.statements.len();
+        let mut result_type = Type::nil();
         for (i, statement) in program.statements.into_iter().enumerate() {
             let is_last = i == num_statements - 1;
             let is_expression = matches!(&statement, ast::Statement::Expression(_));
 
-            compiler.compile_statement(statement)?;
+            let statement_type = compiler.compile_statement(statement)?;
+
+            // Track the type of the last statement
+            if is_last {
+                result_type = statement_type;
+            }
 
             // Pop intermediate expression results, keeping only the last one
             if !is_last && is_expression {
@@ -251,31 +247,34 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Extract variables, excluding internal ones (like ripple variables ~0, ~1, etc.)
+        // Extract variables with types, excluding internal ones (like ripple variables ~0, ~1, etc.)
         let variables = compiler.scopes[0]
             .variables
             .iter()
             .filter(|(name, _)| !name.starts_with('~'))
-            .map(|(name, (_, index))| (name.clone(), *index))
+            .map(|(name, (var_type, index))| (name.clone(), (var_type.clone(), *index)))
             .collect();
 
-        Ok((compiler.codegen.instructions, variables))
+        Ok((compiler.codegen.instructions, result_type, variables))
     }
 
-    fn compile_statement(&mut self, statement: ast::Statement) -> Result<(), Error> {
+    fn compile_statement(&mut self, statement: ast::Statement) -> Result<Type, Error> {
         match statement {
             ast::Statement::TypeAlias {
                 name,
                 type_definition,
-            } => self.compile_type_alias(&name, type_definition),
+            } => {
+                self.compile_type_alias(&name, type_definition)?;
+                Ok(Type::nil())
+            }
             ast::Statement::TypeImport {
                 pattern,
                 module_path,
-            } => self.compile_type_import(pattern, &module_path),
-            ast::Statement::Expression(expression) => {
-                self.compile_expression(expression)?;
-                Ok(())
+            } => {
+                self.compile_type_import(pattern, &module_path)?;
+                Ok(Type::nil())
             }
+            ast::Statement::Expression(expression) => self.compile_expression(expression),
         }
     }
 
@@ -1750,29 +1749,6 @@ impl<'a> Compiler<'a> {
             }
         } else {
             Err(Error::FunctionUndefined(function_index))
-        }
-    }
-
-    fn value_to_type(&mut self, value: &Value) -> Result<Type, Error> {
-        match value {
-            Value::Integer(_) => Ok(Type::Integer),
-            Value::Binary(_) => Ok(Type::Binary),
-            Value::Tuple(type_id, _) => Ok(Type::Tuple(*type_id)),
-            Value::Function(function, _) => self.function_to_type(*function),
-            Value::Builtin(name) => {
-                if let Some((param_type, result_type)) =
-                    BUILTIN_REGISTRY.resolve_signature(name, self.program)
-                {
-                    Ok(Type::Callable(Box::new(CallableType {
-                        parameter: param_type,
-                        result: result_type,
-                        receive_type: None,
-                    })))
-                } else {
-                    Err(Error::BuiltinUndefined(name.clone()))
-                }
-            }
-            Value::Pid(_) => Ok(Type::Process(Box::new(Type::Union(vec![])))),
         }
     }
 

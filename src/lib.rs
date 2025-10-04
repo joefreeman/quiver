@@ -46,56 +46,55 @@ impl Quiver {
         &mut self,
         source: &str,
         module_path: Option<std::path::PathBuf>,
-        variables: Option<&HashMap<String, usize>>,
-        parameter: Option<&Value>,
-    ) -> Result<(Option<Value>, HashMap<String, usize>), Error> {
+        variables: Option<&HashMap<String, (Type, usize)>>,
+        parameter: Option<(&Value, Type)>,
+    ) -> Result<(Option<Value>, Type, HashMap<String, (Type, usize)>), Error> {
         let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
-        let existing_locals = if let Some(vars) = variables {
-            self.vm
-                .get_variables(self.repl_process_id, vars)
-                .ok()
-                .map(|vals_map| {
-                    // Build a Vec with values in order of their indices
-                    let max_index = vars.values().copied().max().unwrap_or(0);
-                    let mut result = vec![Value::nil(); max_index + 1];
-                    for (name, &index) in vars {
-                        if let Some(value) = vals_map.get(name) {
-                            result[index] = value.clone();
-                        }
-                    }
-                    result
-                })
-        } else {
-            None
-        };
+        // Get parameter type
+        let parameter_type = parameter
+            .as_ref()
+            .map(|(_, typ)| typ.clone())
+            .unwrap_or_else(Type::nil);
 
-        let (instructions, variables) = Compiler::compile(
+        let (instructions, result_type, variables) = Compiler::compile(
             ast_program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
             &mut *self.vm.program_mut(),
             module_path,
             variables,
-            existing_locals.as_deref(),
-            parameter,
+            parameter_type,
         )
         .map_err(Error::CompileError)?;
 
         let result = self
             .vm
-            .execute_instructions(instructions, parameter.cloned(), Some(self.repl_process_id))
+            .execute_instructions(
+                instructions,
+                parameter.map(|(v, _)| v.clone()),
+                Some(self.repl_process_id),
+            )
             .map_err(Error::RuntimeError)?;
 
         // Compact locals and get updated variable indices
         let compacted_variables = self.vm.cleanup_locals(self.repl_process_id, &variables);
 
-        Ok((result, compacted_variables))
+        Ok((result, result_type, compacted_variables))
     }
 
-    pub fn get_variables(&self, variables: &HashMap<String, usize>) -> Vec<(String, Value)> {
+    pub fn get_variables(
+        &self,
+        variables: &HashMap<String, (Type, usize)>,
+    ) -> Vec<(String, Value)> {
+        // Extract just the indices for VM lookup
+        let var_indices: HashMap<String, usize> = variables
+            .iter()
+            .map(|(name, (_, index))| (name.clone(), *index))
+            .collect();
+
         self.vm
-            .get_variables(self.repl_process_id, variables)
+            .get_variables(self.repl_process_id, &var_indices)
             .map(|map| map.into_iter().collect())
             .unwrap_or_default()
     }
@@ -132,15 +131,14 @@ pub fn compile(
     let mut type_aliases = HashMap::new();
     let mut program = Program::new();
 
-    let (instructions, _) = Compiler::compile(
+    let (instructions, _, _) = Compiler::compile(
         ast_program,
         &mut type_aliases,
         module_loader.as_ref(),
         &mut program,
         module_path,
         None,
-        None,
-        None,
+        Type::nil(),
     )
     .map_err(Error::CompileError)?;
 

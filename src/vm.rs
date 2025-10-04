@@ -209,26 +209,26 @@ impl VM {
     pub fn cleanup_locals(
         &self,
         process_id: ProcessId,
-        variables: &std::collections::HashMap<String, usize>,
-    ) -> std::collections::HashMap<String, usize> {
+        variables: &std::collections::HashMap<String, (crate::types::Type, usize)>,
+    ) -> std::collections::HashMap<String, (crate::types::Type, usize)> {
         let mut scheduler = self.scheduler_handle.scheduler.lock().unwrap();
         let process = match scheduler.get_process_mut(process_id) {
             Some(p) => p,
             None => return std::collections::HashMap::new(),
         };
 
-        let mut referenced: Vec<(String, usize)> = variables
+        let mut referenced: Vec<(String, crate::types::Type, usize)> = variables
             .iter()
-            .map(|(name, &index)| (name.clone(), index))
+            .map(|(name, (typ, index))| (name.clone(), typ.clone(), *index))
             .collect();
-        referenced.sort_by_key(|(_, index)| *index);
+        referenced.sort_by_key(|(_, _, index)| *index);
 
         let mut new_locals = Vec::new();
         let mut new_variables = std::collections::HashMap::new();
 
-        for (name, old_index) in referenced {
+        for (name, typ, old_index) in referenced {
             if old_index < process.locals.len() {
-                new_variables.insert(name, new_locals.len());
+                new_variables.insert(name, (typ, new_locals.len()));
                 new_locals.push(process.locals[old_index].clone());
             }
         }
