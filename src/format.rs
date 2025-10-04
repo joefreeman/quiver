@@ -34,9 +34,7 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
-        Type::Process(msg_type) => {
-            format!("process<{}>", format_type(type_lookup, msg_type))
-        }
+        Type::Process(msg_type) => format!("${}", format_type(type_lookup, msg_type)),
         Type::Tuple(type_id) => {
             if let Some((name, fields)) = type_lookup.lookup_type(type_id) {
                 let field_strs: Vec<String> = fields
@@ -111,14 +109,7 @@ pub fn format_binary(program: &Program, binary_ref: &BinaryRef) -> String {
 
 pub fn format_value(program: &Program, value: &Value) -> String {
     match value {
-        Value::Function(function, _) => {
-            if let Some(func_def) = program.get_function(*function) {
-                if let Some(func_type) = &func_def.function_type {
-                    return format_type(program, &Type::Callable(Box::new(func_type.clone())));
-                }
-            }
-            "(function)".to_string()
-        }
+        Value::Function(function, _) => format!("#{}", function),
         Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
         Value::Binary(binary_ref) => format_binary(program, binary_ref),

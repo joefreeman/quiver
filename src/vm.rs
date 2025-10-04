@@ -263,12 +263,4 @@ impl VM {
         }
         Ok(variables)
     }
-
-    pub fn format_value(&self, value: &Value) -> String {
-        crate::format::format_value(&*self.program.read().unwrap(), value)
-    }
-
-    pub fn format_type(&self, type_def: &crate::types::Type) -> String {
-        crate::format::format_type(&*self.program.read().unwrap(), type_def)
-    }
 }

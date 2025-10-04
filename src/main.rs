@@ -122,10 +122,16 @@ fn run_repl() -> Result<(), ReadlineError> {
 
                             println!("{}", "Variables:".bright_black());
                             for (name, value) in sorted_vars {
+                                let (var_type, _) = &variables[name.as_str()];
                                 println!(
                                     "{}",
-                                    format!("  {} = {}", name, quiver.format_value(&value))
-                                        .bright_black()
+                                    format!(
+                                        "  {} = {} ({})",
+                                        name,
+                                        quiver.format_value(&value),
+                                        quiver.format_type(var_type)
+                                    )
+                                    .bright_black()
                                 );
                             }
                         }
@@ -191,7 +197,12 @@ fn run_repl() -> Result<(), ReadlineError> {
                                 variables = new_variables;
 
                                 if let Some(value) = &result {
-                                    println!("{}", quiver.format_value(value));
+                                    println!(
+                                        "{} {}",
+                                        quiver.format_value(value),
+                                        format!("({})", quiver.format_type(&result_type))
+                                            .bright_black()
+                                    );
                                 }
 
                                 last_result = result.map(|v| (v, result_type));
