@@ -117,6 +117,12 @@ pub enum Error {
         pattern: String,
     },
 
+    // Process messaging errors
+    ReceiveTypeMismatch {
+        first: String,
+        second: String,
+    },
+
     // Internal consistency errors
     InternalError {
         message: String,
@@ -436,6 +442,98 @@ impl<'a> Compiler<'a> {
         Ok(Type::Tuple(type_id))
     }
 
+    fn extract_receive_type(&mut self, block: &ast::Block) -> Result<Option<Type>, Error> {
+        let mut receive_types = Vec::new();
+        self.collect_receive_types(block, &mut receive_types)?;
+
+        if receive_types.is_empty() {
+            return Ok(None);
+        }
+
+        // Check all receives have the same type
+        let first_type = &receive_types[0];
+        for ty in &receive_types[1..] {
+            if ty != first_type {
+                return Err(Error::ReceiveTypeMismatch {
+                    first: format!("{:?}", first_type),
+                    second: format!("{:?}", ty),
+                });
+            }
+        }
+
+        Ok(Some(first_type.clone()))
+    }
+
+    fn collect_receive_types(
+        &mut self,
+        block: &ast::Block,
+        receive_types: &mut Vec<Type>,
+    ) -> Result<(), Error> {
+        for branch in &block.branches {
+            self.collect_receive_types_from_expression(&branch.condition, receive_types)?;
+            if let Some(consequence) = &branch.consequence {
+                self.collect_receive_types_from_expression(consequence, receive_types)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_receive_types_from_expression(
+        &mut self,
+        expression: &ast::Expression,
+        receive_types: &mut Vec<Type>,
+    ) -> Result<(), Error> {
+        for chain in &expression.chains {
+            self.collect_receive_types_from_chain(chain, receive_types)?;
+        }
+        Ok(())
+    }
+
+    fn collect_receive_types_from_chain(
+        &mut self,
+        chain: &ast::Chain,
+        receive_types: &mut Vec<Type>,
+    ) -> Result<(), Error> {
+        for term in &chain.terms {
+            self.collect_receive_types_from_term(term, receive_types)?;
+        }
+        Ok(())
+    }
+
+    fn collect_receive_types_from_term(
+        &mut self,
+        term: &ast::Term,
+        receive_types: &mut Vec<Type>,
+    ) -> Result<(), Error> {
+        match term {
+            ast::Term::Receive(receive) => {
+                let message_type = self
+                    .type_context
+                    .resolve_ast_type(receive.type_def.clone(), self.program)?;
+                receive_types.push(message_type);
+                // Also check nested receives in the receive block
+                self.collect_receive_types(&receive.block, receive_types)?;
+            }
+            ast::Term::Block(block) => {
+                self.collect_receive_types(block, receive_types)?;
+            }
+            ast::Term::FunctionDefinition(func_def) => {
+                // Recursively check function bodies
+                self.collect_receive_types(&func_def.body, receive_types)?;
+            }
+            ast::Term::Tuple(tuple) => {
+                // Check tuple fields
+                for field in &tuple.fields {
+                    if let ast::FieldValue::Chain(chain) = &field.value {
+                        self.collect_receive_types_from_chain(chain, receive_types)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn compile_function(
         &mut self,
         function_definition: ast::FunctionDefinition,
@@ -514,6 +612,9 @@ impl<'a> Compiler<'a> {
                 .resolve_ast_type(t.clone(), self.program)?,
             None => Type::nil(),
         };
+
+        // Extract receive type from function body
+        let receive_type = self.extract_receive_type(&function_definition.body)?;
 
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
@@ -594,6 +695,7 @@ impl<'a> Compiler<'a> {
         let func_type = CallableType {
             parameter: parameter_type,
             result: body_type,
+            receive_type,
         };
 
         let function_instructions = std::mem::take(&mut self.codegen.instructions);
@@ -983,6 +1085,7 @@ impl<'a> Compiler<'a> {
                     Ok(Type::Callable(Box::new(CallableType {
                         parameter: param_type,
                         result: result_type,
+                        receive_type: None,
                     })))
                 } else {
                     Err(Error::BuiltinUndefined(name.to_string()))
@@ -1206,27 +1309,56 @@ impl<'a> Compiler<'a> {
                     ));
                 }
                 // Compile the term to get the function value
-                self.compile_term(*term, None)?;
-                // Emit spawn instruction (pops function, pushes Pid)
+                let term_type = self.compile_term(*term, None)?;
+
+                // Extract the receive type from the function
+                let receive_type = if let Type::Callable(callable) = &term_type {
+                    callable
+                        .receive_type
+                        .clone()
+                        .unwrap_or_else(|| Type::Union(vec![]))
+                } else {
+                    return Err(Error::FeatureUnsupported(
+                        "Can only spawn functions".to_string(),
+                    ));
+                };
+
+                // Emit spawn instruction (pops function, pushes Process)
                 self.codegen.add_instruction(Instruction::Spawn);
-                Ok(Type::Pid)
+                Ok(Type::Process(Box::new(receive_type)))
             }
             ast::Term::SendCall(send_call) => {
                 // Send expects a value on the stack (the message)
-                let _val_type = value_type.ok_or_else(|| {
+                let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Send requires a value (message)".to_string())
                 })?;
 
-                // Load the pid from the identifier with accessors
-                if send_call.accessors.is_empty() {
+                // Load the pid from the identifier with accessors and get its type
+                let pid_type = if send_call.accessors.is_empty() {
                     // Simple identifier lookup
-                    let (_pid_type, index) = self
+                    let (pid_type, index) = self
                         .lookup_variable(&self.scopes, &send_call.name, &[])
                         .ok_or_else(|| Error::VariableUndefined(send_call.name.clone()))?;
                     self.codegen.add_instruction(Instruction::Load(index));
+                    pid_type
                 } else {
                     // Use member access compilation for accessors
-                    self.compile_member_access(&send_call.name, send_call.accessors.clone())?;
+                    self.compile_member_access(&send_call.name, send_call.accessors.clone())?
+                };
+
+                // Type check: ensure the pid is a Process and message type matches
+                if let Type::Process(expected_msg_type) = &pid_type {
+                    if !val_type.is_compatible(expected_msg_type, self.program) {
+                        return Err(Error::TypeMismatch {
+                            expected: format!("{:?}", expected_msg_type),
+                            found: format!("{:?}", val_type),
+                        });
+                    }
+                } else {
+                    return Err(Error::TypeMismatch {
+                        expected: "Process".to_string(),
+                        found: format!("{:?}", pid_type),
+                    });
                 }
 
                 // Emit send instruction (expects [message, pid] on stack)
@@ -1241,7 +1373,9 @@ impl<'a> Compiler<'a> {
                     ));
                 }
                 self.codegen.add_instruction(Instruction::Self_);
-                Ok(Type::Pid)
+                // Return a process type that can't receive (for now)
+                // TODO: Track current function's receive type for better typing
+                Ok(Type::Process(Box::new(Type::Union(vec![]))))
             }
             ast::Term::Receive(receive) => {
                 // Resolve the type definition for type checking
@@ -1370,6 +1504,7 @@ impl<'a> Compiler<'a> {
         Ok(Type::Callable(Box::new(crate::types::CallableType {
             parameter: param_type,
             result: result_type,
+            receive_type: None,
         })))
     }
 
@@ -1594,12 +1729,13 @@ impl<'a> Compiler<'a> {
                     Ok(Type::Callable(Box::new(CallableType {
                         parameter: param_type,
                         result: result_type,
+                        receive_type: None,
                     })))
                 } else {
                     Err(Error::BuiltinUndefined(name.clone()))
                 }
             }
-            Value::Pid(_) => Ok(Type::Pid),
+            Value::Pid(_) => Ok(Type::Process(Box::new(Type::Union(vec![])))),
         }
     }
 

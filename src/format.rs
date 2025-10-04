@@ -34,7 +34,9 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
-        Type::Pid => "pid".to_string(),
+        Type::Process(msg_type) => {
+            format!("process<{}>", format_type(type_lookup, msg_type))
+        }
         Type::Tuple(type_id) => {
             if let Some((name, fields)) = type_lookup.lookup_type(type_id) {
                 let field_strs: Vec<String> = fields

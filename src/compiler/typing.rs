@@ -100,6 +100,7 @@ impl<'a> TypeContext<'a> {
                 Ok(Type::Callable(Box::new(CallableType {
                     parameter: input_type,
                     result: output_type,
+                    receive_type: None,
                 })))
             }
             ast::Type::Union(union) => {

@@ -18,6 +18,7 @@ pub type TupleTypeInfo = (Option<String>, Vec<TupleField>);
 pub struct CallableType {
     pub parameter: Type,
     pub result: Type,
+    pub receive_type: Option<Type>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
@@ -34,8 +35,8 @@ pub enum Type {
     Cycle(usize),
     #[serde(rename = "union")]
     Union(Vec<Type>),
-    #[serde(rename = "pid")]
-    Pid,
+    #[serde(rename = "process")]
+    Process(Box<Type>),
 }
 
 impl Type {
@@ -126,7 +127,11 @@ impl Type {
             // Basic types must match exactly
             (Type::Integer, Type::Integer) => true,
             (Type::Binary, Type::Binary) => true,
-            (Type::Pid, Type::Pid) => true,
+
+            // Process types are compatible if their message types are compatible
+            (Type::Process(msg1), Type::Process(msg2)) => {
+                msg1.is_compatible_with_impl(msg2, type_lookup, assumptions, type_stack)
+            }
 
             // For tuples, check structural compatibility
             (Type::Tuple(id1), Type::Tuple(id2)) => {
