@@ -158,6 +158,9 @@ pub struct Compiler<'a> {
 
     // Counter for nested ripple contexts in tuple construction
     ripple_depth: usize,
+
+    // Track the receive type of the function currently being compiled
+    current_receive_type: Option<Type>,
 }
 
 impl<'a> Compiler<'a> {
@@ -181,6 +184,7 @@ impl<'a> Compiler<'a> {
             module_loader,
             module_path,
             ripple_depth: 0,
+            current_receive_type: None,
         };
 
         // Prepare scope variables from existing variables
@@ -619,10 +623,12 @@ impl<'a> Compiler<'a> {
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_local_count = self.local_count;
+        let saved_receive_type = self.current_receive_type.clone();
 
         self.scopes = vec![Scope::new(HashMap::new(), None)];
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
+        self.current_receive_type = receive_type.clone();
 
         // Define captures as first locals in function body scope
         for capture in &unique_captures {
@@ -708,6 +714,7 @@ impl<'a> Compiler<'a> {
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
+        self.current_receive_type = saved_receive_type;
 
         self.codegen
             .add_instruction(Instruction::Function(function_index));
@@ -1439,6 +1446,36 @@ impl<'a> Compiler<'a> {
                 ),
                 found: crate::format::format_type(self.program, &val_type),
             });
+        }
+
+        // Check receive type compatibility
+        if let Some(called_receive_type) = &func_type.receive_type {
+            // Called function has receives - verify current context matches
+            match &self.current_receive_type {
+                Some(current_recv_type) => {
+                    if !called_receive_type.is_compatible(current_recv_type, self.program) {
+                        return Err(Error::TypeMismatch {
+                            expected: format!(
+                                "function with receive type compatible with {}",
+                                crate::format::format_type(self.program, current_recv_type)
+                            ),
+                            found: format!(
+                                "function with receive type {}",
+                                crate::format::format_type(self.program, called_receive_type)
+                            ),
+                        });
+                    }
+                }
+                None => {
+                    return Err(Error::TypeMismatch {
+                        expected: "function without receive type".to_string(),
+                        found: format!(
+                            "function with receive type {}",
+                            crate::format::format_type(self.program, called_receive_type)
+                        ),
+                    });
+                }
+            }
         }
 
         // Execute the call

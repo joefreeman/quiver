@@ -100,3 +100,59 @@ fn test_multiple_receives_different_types_error() {
             second: "Binary".to_string(),
         });
 }
+
+#[test]
+fn test_call_function_with_matching_receive_type() {
+    quiver()
+        .evaluate(
+            r#"
+            #{ $int { ~> x => x } } ~> helper,
+            #{ $int { ~> y => y }, helper! } ~> f,
+            @f
+        "#,
+        )
+        .expect("@1");
+}
+
+#[test]
+fn test_call_function_with_mismatched_receive_type() {
+    quiver()
+        .evaluate(
+            r#"
+            #{ $bin { ~> x => x } } ~> helper,
+            #{ $int { ~> y => y }, helper! } ~> f
+        "#,
+        )
+        .expect_compile_error(quiver::compiler::Error::TypeMismatch {
+            expected: "function with receive type compatible with int".to_string(),
+            found: "function with receive type bin".to_string(),
+        });
+}
+
+#[test]
+fn test_call_function_with_receive_from_non_receive_context() {
+    quiver()
+        .evaluate(
+            r#"
+            #{ $int { ~> x => x } } ~> helper,
+            #{ helper! } ~> f
+        "#,
+        )
+        .expect_compile_error(quiver::compiler::Error::TypeMismatch {
+            expected: "function without receive type".to_string(),
+            found: "function with receive type int".to_string(),
+        });
+}
+
+#[test]
+fn test_call_function_without_receive_from_any_context() {
+    quiver()
+        .evaluate(
+            r#"
+            #{ 42 } ~> helper,
+            #{ $int { ~> y => y }, helper! } ~> f,
+            @f
+        "#,
+        )
+        .expect("@1");
+}
