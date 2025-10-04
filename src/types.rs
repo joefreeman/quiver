@@ -18,7 +18,7 @@ pub type TupleTypeInfo = (Option<String>, Vec<TupleField>);
 pub struct CallableType {
     pub parameter: Type,
     pub result: Type,
-    pub receive_type: Option<Type>,
+    pub receive: Type,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
@@ -48,6 +48,11 @@ impl Type {
     /// Create an OK tuple type
     pub fn ok() -> Self {
         Type::Tuple(TypeId::OK)
+    }
+
+    /// Create a never type (empty union - bottom type)
+    pub fn never() -> Self {
+        Type::Union(vec![])
     }
 
     /// Check if this type is concrete (not a union or cycle)

@@ -25,7 +25,7 @@ pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
     }
 
     if flattened.is_empty() {
-        Ok(Type::Union(vec![]))
+        Ok(Type::never())
     } else {
         Ok(Type::from_types(flattened))
     }
@@ -100,7 +100,7 @@ impl<'a> TypeContext<'a> {
                 Ok(Type::Callable(Box::new(CallableType {
                     parameter: input_type,
                     result: output_type,
-                    receive_type: None,
+                    receive: Type::never(),
                 })))
             }
             ast::Type::Union(union) => {

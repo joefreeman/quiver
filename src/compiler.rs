@@ -160,7 +160,7 @@ pub struct Compiler<'a> {
     ripple_depth: usize,
 
     // Track the receive type of the function currently being compiled
-    current_receive_type: Option<Type>,
+    current_receive_type: Type,
 }
 
 impl<'a> Compiler<'a> {
@@ -183,7 +183,7 @@ impl<'a> Compiler<'a> {
             module_loader,
             module_path,
             ripple_depth: 0,
-            current_receive_type: None,
+            current_receive_type: Type::never(),
         };
 
         // Prepare scope variables from existing variables
@@ -445,12 +445,12 @@ impl<'a> Compiler<'a> {
         Ok(Type::Tuple(type_id))
     }
 
-    fn extract_receive_type(&mut self, block: &ast::Block) -> Result<Option<Type>, Error> {
+    fn extract_receive_type(&mut self, block: &ast::Block) -> Result<Type, Error> {
         let mut receive_types = Vec::new();
         self.collect_receive_types(block, &mut receive_types)?;
 
         if receive_types.is_empty() {
-            return Ok(None);
+            return Ok(Type::never());
         }
 
         // Check all receives have the same type
@@ -464,7 +464,7 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        Ok(Some(first_type.clone()))
+        Ok(first_type.clone())
     }
 
     fn collect_receive_types(
@@ -700,7 +700,7 @@ impl<'a> Compiler<'a> {
         let func_type = CallableType {
             parameter: parameter_type,
             result: body_type,
-            receive_type,
+            receive: receive_type.clone(),
         };
 
         let function_instructions = std::mem::take(&mut self.codegen.instructions);
@@ -1091,7 +1091,7 @@ impl<'a> Compiler<'a> {
                     Ok(Type::Callable(Box::new(CallableType {
                         parameter: param_type,
                         result: result_type,
-                        receive_type: None,
+                        receive: Type::never(),
                     })))
                 } else {
                     Err(Error::BuiltinUndefined(name.to_string()))
@@ -1319,10 +1319,7 @@ impl<'a> Compiler<'a> {
 
                 // Extract the receive type from the function
                 let receive_type = if let Type::Callable(callable) = &term_type {
-                    callable
-                        .receive_type
-                        .clone()
-                        .unwrap_or_else(|| Type::Union(vec![]))
+                    callable.receive.clone()
                 } else {
                     return Err(Error::FeatureUnsupported(
                         "Can only spawn functions".to_string(),
@@ -1379,9 +1376,8 @@ impl<'a> Compiler<'a> {
                     ));
                 }
                 self.codegen.add_instruction(Instruction::Self_);
-                // Return a process type that can't receive (for now)
-                // TODO: Track current function's receive type for better typing
-                Ok(Type::Process(Box::new(Type::Union(vec![]))))
+                // Return a process type with the current function's receive type
+                Ok(Type::Process(Box::new(self.current_receive_type.clone())))
             }
             ast::Term::Receive(receive) => {
                 // Resolve the type definition for type checking
@@ -1448,24 +1444,15 @@ impl<'a> Compiler<'a> {
         }
 
         // Check receive type compatibility
-        if let Some(called_receive_type) = &func_type.receive_type {
+        let called_receive_type = &func_type.receive;
+
+        // Check if called function has receives (not Type::never())
+        if !matches!(called_receive_type, Type::Union(v) if v.is_empty()) {
             // Called function has receives - verify current context matches
-            match &self.current_receive_type {
-                Some(current_recv_type) => {
-                    if !called_receive_type.is_compatible(current_recv_type, self.program) {
-                        return Err(Error::TypeMismatch {
-                            expected: format!(
-                                "function with receive type compatible with {}",
-                                crate::format::format_type(self.program, current_recv_type)
-                            ),
-                            found: format!(
-                                "function with receive type {}",
-                                crate::format::format_type(self.program, called_receive_type)
-                            ),
-                        });
-                    }
-                }
-                None => {
+            // Check if current context is never (empty union = can't receive)
+            if let Type::Union(variants) = &self.current_receive_type {
+                if variants.is_empty() {
+                    // Current context can't receive - can't call a receiving function
                     return Err(Error::TypeMismatch {
                         expected: "function without receive type".to_string(),
                         found: format!(
@@ -1474,6 +1461,20 @@ impl<'a> Compiler<'a> {
                         ),
                     });
                 }
+            }
+
+            // Check compatibility
+            if !called_receive_type.is_compatible(&self.current_receive_type, self.program) {
+                return Err(Error::TypeMismatch {
+                    expected: format!(
+                        "function with receive type compatible with {}",
+                        crate::format::format_type(self.program, &self.current_receive_type)
+                    ),
+                    found: format!(
+                        "function with receive type {}",
+                        crate::format::format_type(self.program, called_receive_type)
+                    ),
+                });
             }
         }
 
@@ -1488,9 +1489,9 @@ impl<'a> Compiler<'a> {
         accessors: &[ast::AccessPath],
     ) -> Result<Type, Error> {
         if identifier.is_none() && accessors.is_empty() {
-            // Tail call to parameter
+            // Tail call to parameter (never returns)
             self.codegen.add_instruction(Instruction::TailCall(true));
-            Ok(Type::Union(vec![]))
+            Ok(Type::never())
         } else {
             // Tail call to identifier with accessors
             let name = identifier.ok_or_else(|| {
@@ -1540,7 +1541,7 @@ impl<'a> Compiler<'a> {
         Ok(Type::Callable(Box::new(crate::types::CallableType {
             parameter: param_type,
             result: result_type,
-            receive_type: None,
+            receive: Type::never(),
         })))
     }
 
