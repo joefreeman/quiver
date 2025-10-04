@@ -1,6 +1,6 @@
 <div align="center">
     <img src="logo.svg" alt="Quiver" width="300" />
-    <p><em>A statically-typed functional programming language with structural typing, pattern matching, and postfix-based syntax. Data flows left-to-right through transformation pipelines.</em></p>
+    <p><em>A statically-typed functional programming language with structural typing, pattern matching, concurrent processes, and postfix-based syntax. Values flow left-to-right through transformation pipelines.</em></p>
     <br />
     <br />
     <br />
@@ -36,17 +36,18 @@ xs ~> sum!  // 6
 
 <br />
 
-## Language Features
+## Language features
 
 - **Postfix syntax**: Data flows left-to-right through transformations
 - **Structural typing**: Types are defined by their structure, not their names
 - **Pattern matching**: Destructure and branch on values with expressive pattern syntax
 - **Union types**: Model complex data with algebraic types
 - **Tail recursion**: Efficient recursive algorithms via explicit tail-calls
+- **Concurrent processes**: Erlang-inspired lightweight processes with typed message passing
 
-See [docs/SPEC.md](docs/SPEC.md) for the complete language specification.
+See [docs/spec.md](docs/spec.md) for the complete language specification.
 
-## Getting Started
+## Getting started
 
 ### Building from source
 

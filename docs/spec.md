@@ -282,6 +282,41 @@ Named tail calls to other functions:
 #int { ~> x => [x, 1] ~> &f } ~> fact
 ```
 
+## Processes
+
+Quiver supports lightweight concurrent processes inspired by Erlang. Processes communicate through typed message passing.
+
+### Spawning processes
+
+Spawn a process by applying the `@` operator to a function:
+
+```
+#int { ... } ~> worker,
+42 ~> @worker ~> pid
+```
+
+### Receiving messages
+
+Use `$type { ... }` to receive messages. The type after `$` defines the process's receive type. The block sequentially tries to match messages in the mailbox, waiting until a message matches:
+
+```
+#{
+  $int {
+    | ~> 0 => "zero"
+    | ~> x => "non-zero", [] ~> &
+  }
+} ~> receiver,
+@receiver ~> pid
+```
+
+### Sending messages
+
+Send a message to a process with:
+
+```
+42 ~> pid$
+```
+
 ## Modules and imports
 
 Import modules using `%"path"` syntax. Relative imports must start with a ".". Standard library modules start with a letter.
@@ -442,4 +477,27 @@ person ~> .date_of_birth ~> .month,    // Chain field access
 // Built-in operations
 person.age ~> [~, 1] ~> <add> ~> next_year,    // Use built-in add
 name ~> <println>                              // Print to console
+```
+
+### Concurrent processes
+
+```
+// Echo process that receives and prints messages
+#[] {
+  $Str[bin] {
+    | ~> "" => []            // Stop on empty string
+    | ~> s => {
+      s ~> <println>,        // Print received value
+      [] ~> &                // Continue receiving
+    }
+  }
+} ~> echo,
+
+// Spawn the process
+@echo ~> pid,
+
+// Send messages
+"hello" ~> pid,
+"bye" ~> pid,
+"" ~> pid                    // (stop the process)
 ```
