@@ -21,7 +21,7 @@ fn test_send_to_process() {
             42 ~> p$
         "#,
         )
-        .expect("[]");
+        .expect("Ok");
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn test_process_with_receive_accepts_correct_type() {
             42 ~> p$
         "#,
         )
-        .expect("[]");
+        .expect("Ok");
 }
 
 #[test]
@@ -152,6 +152,19 @@ fn test_call_function_without_receive_from_any_context() {
             #{ 42 } ~> helper,
             #{ $int { ~> y => y }, helper! } ~> f,
             @f
+        "#,
+        )
+        .expect("@1");
+}
+
+#[test]
+fn test_process_spawns_process_and_receives_reply() {
+    quiver()
+        .evaluate(
+            r#"
+            #{ $(@int) { ~> parent => 42 ~> parent$ } } ~> child,
+            #{ @child ~> c, . ~> c$, $int { ~> result => result } } ~> parent,
+            @parent
         "#,
         )
         .expect("@1");

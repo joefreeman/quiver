@@ -56,6 +56,7 @@ impl<'a> TypeContext<'a> {
                 .fields
                 .iter()
                 .any(|f| Self::ast_contains_cycle(&f.type_def)),
+            ast::Type::Process(process) => Self::ast_contains_cycle(&process.receive_type),
             ast::Type::Primitive(_) | ast::Type::Identifier(_) => false,
         }
     }
@@ -154,6 +155,10 @@ impl<'a> TypeContext<'a> {
                 let cycle_depth = self.union_stack.len() - target_depth;
 
                 Ok(Type::Cycle(cycle_depth))
+            }
+            ast::Type::Process(process) => {
+                let receive_type = self.resolve_ast_type(*process.receive_type, program)?;
+                Ok(Type::Process(Box::new(receive_type)))
             }
             ast::Type::Identifier(alias) => {
                 // Look up already-defined type alias

@@ -289,6 +289,14 @@ fn type_cycle(input: &str) -> IResult<&str, Type> {
     )(input)
 }
 
+fn process_type(input: &str) -> IResult<&str, Type> {
+    map(preceded(char('@'), base_type), |receive_type| {
+        Type::Process(ProcessType {
+            receive_type: Box::new(receive_type),
+        })
+    })(input)
+}
+
 fn function_type(input: &str) -> IResult<&str, Type> {
     map(
         preceded(
@@ -313,6 +321,7 @@ fn function_input_type(input: &str) -> IResult<&str, Type> {
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
+        process_type,
         type_identifier,
     ))(input)
 }
@@ -322,6 +331,7 @@ fn function_output_type(input: &str) -> IResult<&str, Type> {
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
+        process_type,
         type_identifier,
     ))(input)
 }
@@ -331,6 +341,7 @@ fn base_type(input: &str) -> IResult<&str, Type> {
         tuple_type,
         primitive_type,
         type_cycle,
+        process_type,
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         type_identifier,
     ))(input)

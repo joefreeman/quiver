@@ -520,9 +520,8 @@ impl<'a> Compiler<'a> {
             ast::Term::Block(block) => {
                 self.collect_receive_types(block, receive_types)?;
             }
-            ast::Term::FunctionDefinition(func_def) => {
-                // Recursively check function bodies
-                self.collect_receive_types(&func_def.body, receive_types)?;
+            ast::Term::FunctionDefinition(_) => {
+                // Don't recurse into nested function definitions - they have their own receive types
             }
             ast::Term::Tuple(tuple) => {
                 // Check tuple fields
@@ -1366,8 +1365,8 @@ impl<'a> Compiler<'a> {
 
                 // Emit send instruction (expects [message, pid] on stack)
                 self.codegen.add_instruction(Instruction::Send);
-                // Send returns nothing (nil)
-                Ok(Type::nil())
+                // Send returns Ok (like assignment)
+                Ok(Type::ok())
             }
             ast::Term::SelfRef => {
                 if value_type.is_some() {

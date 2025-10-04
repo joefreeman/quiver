@@ -1114,7 +1114,7 @@ fn handle_send(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
         .get_current_process_mut()
         .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-    process.stack.push(Value::nil());
+    process.stack.push(Value::ok());
     Ok(())
 }
 

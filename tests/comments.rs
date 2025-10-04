@@ -14,7 +14,7 @@ fn test_comments() {
             }
             "#,
         )
-        .expect("#[] -> int");
+        .expect("#0");
     quiver()
         .evaluate(
             r#"

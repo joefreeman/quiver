@@ -150,6 +150,12 @@ pub enum Type {
     Union(UnionType),
     Identifier(String),
     Cycle(Option<usize>),
+    Process(ProcessType),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessType {
+    pub receive_type: Box<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

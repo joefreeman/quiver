@@ -317,6 +317,12 @@ Send a message to a process with:
 42 ~> pid$
 ```
 
+### Referring to processes
+
+When spawning, a process identifier is returned. And the `.` operator can be used by the current process to refer to itself.
+
+To specify a type that refers to a process, use `@type`. For example, `@int` is a process that receives integers.
+
 ## Modules and imports
 
 Import modules using `%"path"` syntax. Relative imports must start with a ".". Standard library modules start with a letter.
