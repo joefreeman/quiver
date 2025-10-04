@@ -1,6 +1,6 @@
 <div align="center">
     <img src="logo.svg" alt="Quiver" width="300" />
-    <p><em>A statically-typed functional programming language with structural typing, pattern matching, concurrent processes, and postfix-based syntax. Values flow left-to-right through transformation pipelines.</em></p>
+    <p><em>A statically-typed functional programming language with structural typing, pattern matching, lightweight processes, typed message passing, and postfix-based syntax.</em></p>
     <br />
     <br />
     <br />
