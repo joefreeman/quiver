@@ -169,3 +169,20 @@ fn test_process_spawns_process_and_receives_reply() {
         )
         .expect("@1");
 }
+
+#[test]
+fn test_receive_skips_non_matching_messages() {
+    quiver()
+        .evaluate(
+            r#"
+            #{
+                $int { ~> 100 => Ok },
+                $int { ~> _ => Ok }
+            } ~> f,
+            @f ~> p,
+            42 ~> p$,
+            100 ~> p$
+        "#,
+        )
+        .expect("Ok");
+}

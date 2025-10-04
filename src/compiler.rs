@@ -1379,20 +1379,26 @@ impl<'a> Compiler<'a> {
                 Ok(Type::Process(Box::new(self.current_receive_type.clone())))
             }
             ast::Term::Receive(receive) => {
-                // Resolve the type definition for type checking
                 let message_type = self
                     .type_context
                     .resolve_ast_type(receive.type_def.clone(), self.program)?;
 
-                // Emit Receive instruction (no TypeId parameter)
+                let loop_start = self.codegen.instructions.len();
                 self.codegen.add_instruction(Instruction::Receive);
 
-                // Compile the block with the received message as parameter
                 let result_type = self.compile_block(receive.block.clone(), message_type)?;
 
-                // If block succeeds (returns non-nil), acknowledge the message
-                // Otherwise, loop back to receive
-                // For now, we'll emit acknowledge after the block
+                self.codegen.add_instruction(Instruction::Duplicate);
+                self.codegen
+                    .add_instruction(Instruction::IsTuple(TypeId::NIL));
+                self.codegen.add_instruction(Instruction::Not);
+                let success_jump = self.codegen.emit_jump_if_placeholder();
+
+                self.codegen.add_instruction(Instruction::Pop);
+                let offset = (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
+                self.codegen.add_instruction(Instruction::Jump(offset));
+
+                self.codegen.patch_jump_to_here(success_jump);
                 self.codegen.add_instruction(Instruction::Acknowledge);
 
                 Ok(result_type)

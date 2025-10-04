@@ -309,6 +309,8 @@ Use `$type { ... }` to receive messages. The type after `$` defines the process'
 @receiver ~> pid
 ```
 
+Avoid side effects when testing messages in the block.
+
 ### Sending messages
 
 Send a message to a process with:

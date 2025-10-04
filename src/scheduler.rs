@@ -58,7 +58,7 @@ pub struct Process {
     pub frames: Vec<Frame>,
     pub mailbox: VecDeque<Value>,
     pub persistent: bool,
-    pub current_message: Option<Value>,
+    pub cursor: usize,
 }
 
 impl Process {
@@ -70,7 +70,7 @@ impl Process {
             frames: Vec::new(),
             mailbox: VecDeque::new(),
             persistent,
-            current_message: None,
+            cursor: 0,
         }
     }
 }
@@ -695,8 +695,8 @@ fn handle_jump_if(scheduler: &Arc<Mutex<Scheduler>>, offset: isize) -> Result<()
 
     let condition = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-    let should_jump = match condition {
-        Value::Tuple(type_id, fields) => !(type_id == TypeId::NIL && fields.is_empty()),
+    let should_jump = match &condition {
+        Value::Tuple(type_id, fields) => !(type_id == &TypeId::NIL && fields.is_empty()),
         _ => true,
     };
 
@@ -1004,9 +1004,9 @@ fn handle_not(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
 
     let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-    let result = match value {
+    let result = match &value {
         Value::Tuple(type_id, fields) => {
-            if type_id == TypeId::NIL && fields.is_empty() {
+            if type_id == &TypeId::NIL && fields.is_empty() {
                 Value::ok()
             } else {
                 Value::nil()
@@ -1133,30 +1133,22 @@ fn handle_self(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
 }
 
 fn handle_receive(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let sched = scheduler.lock().unwrap();
+    let mut sched = scheduler.lock().unwrap();
     let current_pid = sched
         .active
         .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-    let has_message = {
-        let process = sched
-            .get_process(current_pid)
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-        !process.mailbox.is_empty()
-    };
+    let process = sched
+        .get_process_mut(current_pid)
+        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-    drop(sched);
-
-    if has_message {
-        let mut sched = scheduler.lock().unwrap();
-        let process = sched
-            .get_process_mut(current_pid)
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-        let message = process.mailbox.remove(0).unwrap();
-        process.current_message = Some(message.clone());
+    let cursor = process.cursor;
+    if cursor < process.mailbox.len() {
+        let message = process.mailbox[cursor].clone();
+        process.cursor = cursor + 1;
         process.stack.push(message);
     } else {
+        drop(sched);
         let mut sched = scheduler.lock().unwrap();
         sched.mark_waiting(current_pid);
     }
@@ -1170,7 +1162,11 @@ fn handle_acknowledge(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
         .get_current_process_mut()
         .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-    process.current_message = None;
+    let cursor = process.cursor;
+    if 0 < cursor && cursor - 1 < process.mailbox.len() {
+        process.mailbox.remove(cursor - 1);
+    }
+    process.cursor = 0;
     Ok(())
 }
 
