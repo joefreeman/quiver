@@ -41,6 +41,9 @@ enum Commands {
 
         #[arg(short, long)]
         eval: Option<String>,
+
+        #[arg(short, long)]
+        quiet: bool,
     },
 
     Inspect {
@@ -58,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             debug,
             eval,
         }) => compile_command(input, output, debug, eval)?,
-        Some(Commands::Run { input, eval }) => run_command(input, eval)?,
+        Some(Commands::Run { input, eval, quiet }) => run_command(input, eval, quiet)?,
         Some(Commands::Inspect { input }) => inspect_command(input)?,
         None => Cli::command().print_help().unwrap(),
     }
@@ -292,11 +295,20 @@ fn compile_command(
 fn handle_result(
     bytecode: quiver::bytecode::Bytecode,
     result: Result<Option<quiver::vm::Value>, quiver::Error>,
+    quiet: bool,
 ) {
     match result {
         Ok(Some(value)) => {
-            let program = quiver::program::Program::from_bytecode(bytecode);
-            println!("{}", quiver::format::format_value(&program, &value));
+            if matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::NIL) {
+                std::process::exit(1);
+            }
+
+            if !quiet
+                && !matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::OK || type_id == TypeId::NIL)
+            {
+                let program = quiver::program::Program::from_bytecode(bytecode);
+                println!("{}", quiver::format::format_value(&program, &value));
+            }
         }
         Ok(None) => {}
         Err(err) => {
@@ -309,21 +321,22 @@ fn handle_result(
 fn run_command(
     input: Option<String>,
     eval: Option<String>,
+    quiet: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(code) = eval {
         let module_path = Some(std::env::current_dir()?);
-        compile_execute(&code, module_path)?;
+        compile_execute(&code, module_path, quiet)?;
     } else if let Some(path) = input {
         let content = fs::read_to_string(&path)?;
 
         if path.ends_with(".qv") {
             let script_path = std::path::Path::new(&path);
             let module_path = script_path.parent().map(|p| p.to_path_buf());
-            compile_execute(&content, module_path)?;
+            compile_execute(&content, module_path, quiet)?;
         } else if path.ends_with(".qx") {
             let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
             let result = quiver::execute(bytecode.clone());
-            handle_result(bytecode, result);
+            handle_result(bytecode, result, quiet);
         } else {
             eprintln!(
                 "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
@@ -338,16 +351,16 @@ fn run_command(
             match serde_json::from_str::<quiver::bytecode::Bytecode>(&buffer) {
                 Ok(bytecode) => {
                     let result = quiver::execute(bytecode.clone());
-                    handle_result(bytecode, result);
+                    handle_result(bytecode, result, quiet);
                 }
                 Err(_) => {
                     let module_path = Some(std::env::current_dir()?);
-                    compile_execute(&buffer, module_path)?;
+                    compile_execute(&buffer, module_path, quiet)?;
                 }
             }
         } else {
             let module_path = Some(std::env::current_dir()?);
-            compile_execute(&buffer, module_path)?;
+            compile_execute(&buffer, module_path, quiet)?;
         }
     }
 
@@ -357,6 +370,7 @@ fn run_command(
 fn compile_execute(
     source: &str,
     module_path: Option<std::path::PathBuf>,
+    quiet: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytecode = quiver::compile(source, module_path, None)?;
 
@@ -365,7 +379,7 @@ fn compile_execute(
     }
 
     let result = quiver::execute(bytecode.clone());
-    handle_result(bytecode, result);
+    handle_result(bytecode, result, quiet);
 
     Ok(())
 }
