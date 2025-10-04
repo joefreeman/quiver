@@ -515,7 +515,9 @@ impl<'a> Compiler<'a> {
                     .resolve_ast_type(receive.type_def.clone(), self.program)?;
                 receive_types.push(message_type);
                 // Also check nested receives in the receive block
-                self.collect_receive_types(&receive.block, receive_types)?;
+                if let Some(block) = &receive.block {
+                    self.collect_receive_types(block, receive_types)?;
+                }
             }
             ast::Term::Block(block) => {
                 self.collect_receive_types(block, receive_types)?;
@@ -1383,25 +1385,34 @@ impl<'a> Compiler<'a> {
                     .type_context
                     .resolve_ast_type(receive.type_def.clone(), self.program)?;
 
-                let loop_start = self.codegen.instructions.len();
-                self.codegen.add_instruction(Instruction::Receive);
+                if let Some(block) = receive.block.clone() {
+                    // Receive with block - pattern matching logic
+                    let loop_start = self.codegen.instructions.len();
+                    self.codegen.add_instruction(Instruction::Receive);
 
-                let result_type = self.compile_block(receive.block.clone(), message_type)?;
+                    let result_type = self.compile_block(block, message_type)?;
 
-                self.codegen.add_instruction(Instruction::Duplicate);
-                self.codegen
-                    .add_instruction(Instruction::IsTuple(TypeId::NIL));
-                self.codegen.add_instruction(Instruction::Not);
-                let success_jump = self.codegen.emit_jump_if_placeholder();
+                    self.codegen.add_instruction(Instruction::Duplicate);
+                    self.codegen
+                        .add_instruction(Instruction::IsTuple(TypeId::NIL));
+                    self.codegen.add_instruction(Instruction::Not);
+                    let success_jump = self.codegen.emit_jump_if_placeholder();
 
-                self.codegen.add_instruction(Instruction::Pop);
-                let offset = (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
-                self.codegen.add_instruction(Instruction::Jump(offset));
+                    self.codegen.add_instruction(Instruction::Pop);
+                    let offset =
+                        (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
+                    self.codegen.add_instruction(Instruction::Jump(offset));
 
-                self.codegen.patch_jump_to_here(success_jump);
-                self.codegen.add_instruction(Instruction::Acknowledge);
+                    self.codegen.patch_jump_to_here(success_jump);
+                    self.codegen.add_instruction(Instruction::Acknowledge);
 
-                Ok(result_type)
+                    Ok(result_type)
+                } else {
+                    // Receive without block - just receive and acknowledge
+                    self.codegen.add_instruction(Instruction::Receive);
+                    self.codegen.add_instruction(Instruction::Acknowledge);
+                    Ok(message_type)
+                }
             }
         }
     }

@@ -139,7 +139,7 @@ pub struct SendCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Receive {
     pub type_def: Type,
-    pub block: Block,
+    pub block: Option<Block>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -297,7 +297,9 @@ Spawn a process by applying the `@` operator to a function:
 
 ### Receiving messages
 
-Use `$type { ... }` to receive messages. The type after `$` defines the process's receive type. The block sequentially tries to match messages in the mailbox, waiting until a message matches:
+Use `$type` (e.g., `$int`) to receive messages. The type after `$` defines the process's receive type.
+
+Messages can be filtered by specifying a block - `$type { ... }` - the block will sequentially try to match messages in the mailbox, blocking until a message matches:
 
 ```
 #{
@@ -309,7 +311,9 @@ Use `$type { ... }` to receive messages. The type after `$` defines the process'
 @receiver ~> pid
 ```
 
-Avoid side effects when testing messages in the block.
+(Note that `$type ~> { ... }` is subtly different - this would receive a message without filtering, and then evaluate the block to the received value.)
+
+Avoid side effects when testing messages in the block, since the block may be evaluated multiple times.
 
 ### Sending messages
 

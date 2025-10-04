@@ -632,13 +632,11 @@ fn self_ref_term(input: &str) -> IResult<&str, Term> {
 
 fn receive_term(input: &str) -> IResult<&str, Term> {
     map(
-        tuple((char('$'), type_definition, preceded(ws0, block))),
-        |(_, type_def, blk)| {
-            Term::Receive(Receive {
-                type_def,
-                block: blk,
-            })
-        },
+        pair(
+            preceded(char('$'), type_definition),
+            opt(preceded(ws0, block)),
+        ),
+        |(type_def, block)| Term::Receive(Receive { type_def, block }),
     )(input)
 }
 

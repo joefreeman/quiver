@@ -104,7 +104,9 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::SelfRef => {}
             ast::Term::Receive(receive) => {
-                self.visit_block(&receive.block);
+                if let Some(block) = &receive.block {
+                    self.visit_block(block);
+                }
             }
         }
     }
