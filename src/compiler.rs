@@ -197,26 +197,24 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Prepare parameter
-        let scope_parameter = if let Some(param_value) = parameter {
+        // Prepare parameter (always allocate slot, even if None)
+        let (param_type, param_local) = if let Some(param_value) = parameter {
             let param_type = compiler.value_to_type(param_value)?;
-            let param_local = compiler.local_count;
-            compiler.local_count += 1;
-            Some((param_type, param_local))
+            (param_type, compiler.local_count)
         } else {
-            None
+            (Type::nil(), compiler.local_count)
         };
+        compiler.local_count += 1;
+        let scope_parameter = Some((param_type, param_local));
 
         // Initialize scope with variables and parameter
         compiler.scopes = vec![Scope::new(scope_variables, scope_parameter.clone())];
 
-        // Emit instructions for parameter if present
-        if let Some((_, param_local)) = scope_parameter {
-            compiler.codegen.add_instruction(Instruction::Allocate(1));
-            compiler
-                .codegen
-                .add_instruction(Instruction::Store(param_local));
-        }
+        // Always emit instructions for parameter slot
+        compiler.codegen.add_instruction(Instruction::Allocate(1));
+        compiler
+            .codegen
+            .add_instruction(Instruction::Store(param_local));
 
         // Phase 1: Pre-register all type aliases as placeholders
         for statement in &program.statements {
@@ -922,9 +920,9 @@ impl<'a> Compiler<'a> {
                         self.codegen
                             .add_instruction(Instruction::Constant(*const_index));
                     }
-                    BinaryRef::Heap(bytes) => {
+                    BinaryRef::Heap(arc_bytes) => {
                         // Create a constant from the heap binary
-                        let constant = crate::bytecode::Constant::Binary(bytes.to_vec());
+                        let constant = crate::bytecode::Constant::Binary(arc_bytes.to_vec());
                         let index = self.program.register_constant(constant);
                         self.codegen.add_instruction(Instruction::Constant(index));
                     }
@@ -1065,7 +1063,7 @@ impl<'a> Compiler<'a> {
 
         // Execute the module instructions to get the runtime value
         // Create a temporary VM for execution
-        let mut temp_vm = VM::new(self.program.clone());
+        let temp_vm = VM::new(self.program.clone());
         let value = temp_vm
             .execute_instructions(module_instructions, None, None)
             .map_err(|e| Error::ModuleExecution {

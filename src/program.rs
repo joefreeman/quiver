@@ -155,7 +155,7 @@ impl Program {
                 }),
                 None => Err(Error::ConstantUndefined(*index)),
             },
-            BinaryRef::Heap(rc_bytes) => Ok(rc_bytes),
+            BinaryRef::Heap(arc_bytes) => Ok(arc_bytes),
         }
     }
 
@@ -233,7 +233,7 @@ impl Program {
                 }),
                 None => Err(Error::ConstantUndefined(*index)),
             },
-            BinaryRef::Heap(rc_bytes) => Ok(rc_bytes),
+            BinaryRef::Heap(arc_bytes) => Ok(arc_bytes),
         }
     }
 }

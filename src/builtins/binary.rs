@@ -17,7 +17,7 @@ fn get_binary_bytes_from_ref<'a>(
             }),
             None => Err(Error::ConstantUndefined(*index)),
         },
-        BinaryRef::Heap(rc_bytes) => Ok(rc_bytes),
+        BinaryRef::Heap(arc_bytes) => Ok(arc_bytes),
     }
 }
 
@@ -41,7 +41,7 @@ pub fn builtin_binary_new(arg: &Value, _program: &Program) -> Result<Value, Erro
             }
 
             let bytes = vec![0u8; size];
-            let binary_ref = BinaryRef::Heap(std::rc::Rc::new(bytes));
+            let binary_ref = BinaryRef::Heap(std::sync::Arc::new(bytes));
             Ok(Value::Binary(binary_ref))
         }
         other => Err(Error::TypeMismatch {
@@ -122,7 +122,7 @@ pub fn builtin_binary_concat(arg: &Value, program: &Program) -> Result<Value, Er
                 result.extend_from_slice(bytes_a);
                 result.extend_from_slice(bytes_b);
 
-                let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                 Ok(Value::Binary(binary_ref))
             }
             _ => Err(Error::TypeMismatch {
@@ -159,7 +159,7 @@ pub fn builtin_binary_and(arg: &Value, program: &Program) -> Result<Value, Error
                         result.push(bytes_a[i] & bytes_b[i]);
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -195,7 +195,7 @@ pub fn builtin_binary_or(arg: &Value, program: &Program) -> Result<Value, Error>
                         result.push(a | b);
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -231,7 +231,7 @@ pub fn builtin_binary_xor(arg: &Value, program: &Program) -> Result<Value, Error
                         result.push(a ^ b);
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -255,7 +255,7 @@ pub fn builtin_binary_not(arg: &Value, program: &Program) -> Result<Value, Error
             let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
             let result: Vec<u8> = bytes.iter().map(|&byte| !byte).collect();
 
-            let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+            let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
             Ok(Value::Binary(binary_ref))
         }
         other => Err(Error::TypeMismatch {
@@ -288,7 +288,7 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &Program) -> Result<Value
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
-                        let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                        let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                         return Ok(Value::Binary(binary_ref));
                     }
 
@@ -315,7 +315,7 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &Program) -> Result<Value
                         }
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -350,7 +350,7 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &Program) -> Result<Valu
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
-                        let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                        let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                         return Ok(Value::Binary(binary_ref));
                     }
 
@@ -375,7 +375,7 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &Program) -> Result<Valu
                         }
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -507,7 +507,7 @@ pub fn builtin_binary_set_bit(arg: &Value, program: &Program) -> Result<Value, E
                         result[byte_index] &= !(1 << (7 - bit_position));
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -605,7 +605,7 @@ pub fn builtin_binary_set_u32(arg: &Value, program: &Program) -> Result<Value, E
                     result[offset + 2] = value_bytes[2];
                     result[offset + 3] = value_bytes[3];
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -699,7 +699,7 @@ pub fn builtin_binary_set_u64(arg: &Value, program: &Program) -> Result<Value, E
                         result[offset + i] = value_bytes[i];
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -748,7 +748,7 @@ pub fn builtin_binary_slice(arg: &Value, program: &Program) -> Result<Value, Err
                     }
 
                     let slice = bytes[start..end].to_vec();
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(slice));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(slice));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -781,7 +781,7 @@ pub fn builtin_binary_take(arg: &Value, program: &Program) -> Result<Value, Erro
                 let count = (*count as usize).min(bytes.len());
                 let slice = bytes[..count].to_vec();
 
-                let binary_ref = BinaryRef::Heap(std::rc::Rc::new(slice));
+                let binary_ref = BinaryRef::Heap(std::sync::Arc::new(slice));
                 Ok(Value::Binary(binary_ref))
             }
             _ => Err(Error::TypeMismatch {
@@ -813,7 +813,7 @@ pub fn builtin_binary_drop(arg: &Value, program: &Program) -> Result<Value, Erro
                 let count = (*count as usize).min(bytes.len());
                 let slice = bytes[count..].to_vec();
 
-                let binary_ref = BinaryRef::Heap(std::rc::Rc::new(slice));
+                let binary_ref = BinaryRef::Heap(std::sync::Arc::new(slice));
                 Ok(Value::Binary(binary_ref))
             }
             _ => Err(Error::TypeMismatch {
@@ -847,14 +847,14 @@ pub fn builtin_binary_pad(arg: &Value, program: &Program) -> Result<Value, Error
 
                     if target_length <= bytes.len() {
                         // No padding needed, return copy of original
-                        let binary_ref = BinaryRef::Heap(std::rc::Rc::new(bytes.to_vec()));
+                        let binary_ref = BinaryRef::Heap(std::sync::Arc::new(bytes.to_vec()));
                         return Ok(Value::Binary(binary_ref));
                     }
 
                     let mut result = bytes.to_vec();
                     result.resize(target_length, 0);
 
-                    let binary_ref = BinaryRef::Heap(std::rc::Rc::new(result));
+                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
                     Ok(Value::Binary(binary_ref))
                 }
                 _ => Err(Error::TypeMismatch {

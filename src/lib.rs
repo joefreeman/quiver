@@ -6,6 +6,7 @@ pub mod format;
 pub mod modules;
 pub mod parser;
 pub mod program;
+pub mod scheduler;
 pub mod types;
 pub mod vm;
 
@@ -27,7 +28,7 @@ pub struct Quiver {
 impl Quiver {
     pub fn new(modules: Option<HashMap<String, String>>) -> Self {
         let program = Program::new();
-        let mut vm = VM::new(program);
+        let vm = VM::new(program);
         let repl_process_id = vm.spawn_process(true);
 
         Self {
@@ -73,7 +74,7 @@ impl Quiver {
             ast_program,
             &mut self.type_aliases,
             self.module_loader.as_ref(),
-            self.vm.program_mut(),
+            &mut *self.vm.program_mut(),
             module_path,
             variables,
             existing_locals.as_deref(),
@@ -100,15 +101,15 @@ impl Quiver {
     }
 
     pub fn get_types(&self) -> HashMap<bytecode::TypeId, types::TupleTypeInfo> {
-        self.vm.program().get_types()
+        self.vm.program().read().unwrap().get_types()
     }
 
     pub fn format_value(&self, value: &Value) -> String {
-        format::format_value(self.vm.program(), value)
+        format::format_value(&*self.vm.program().read().unwrap(), value)
     }
 
     pub fn format_type(&self, type_def: &Type) -> String {
-        format::format_type(self.vm.program(), type_def)
+        format::format_type(&*self.vm.program().read().unwrap(), type_def)
     }
 
     pub fn get_process_statuses(&self) -> HashMap<vm::ProcessId, vm::ProcessStatus> {
@@ -144,7 +145,7 @@ pub fn compile(
     .map_err(Error::CompileError)?;
 
     // Create a temporary VM for execution
-    let mut vm = VM::new(program);
+    let vm = VM::new(program);
     let result = vm
         .execute_instructions(instructions, None, None)
         .map_err(Error::RuntimeError)?;
@@ -160,7 +161,7 @@ pub fn compile(
         _ => None,
     };
 
-    Ok(vm.program().to_bytecode(entry))
+    Ok(vm.program().read().unwrap().to_bytecode(entry))
 }
 
 pub fn execute(bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
@@ -169,7 +170,7 @@ pub fn execute(bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
 
     // Create program and VM from bytecode
     let program = Program::from_bytecode(bytecode);
-    let mut vm = VM::new(program);
+    let vm = VM::new(program);
 
     // Execute entry point if present
     if let Some(entry) = entry {
