@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 use quiver::Quiver;
+use quiver::bytecode::TypeId;
 use quiver::types::Type;
 use quiver::vm::{ProcessStatus, Value};
 use rustyline::Editor;
@@ -65,6 +66,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn get_prompt(last_result: &Option<(Value, Type)>) -> String {
+    let prompt = match last_result {
+        None => ">>-".white(),
+        Some((Value::Tuple(type_id, _), _)) if *type_id == TypeId::NIL => ">>-".red(),
+        Some((Value::Tuple(type_id, _), _)) if *type_id == TypeId::OK => ">>-".green(),
+        Some(_) => ">>-".blue(),
+    };
+    format!("{} ", prompt.bold())
+}
+
 fn run_repl() -> Result<(), ReadlineError> {
     if std::io::stdin().is_terminal() {
         println!("Quiver v0.1.0");
@@ -79,7 +90,7 @@ fn run_repl() -> Result<(), ReadlineError> {
     let mut last_result: Option<(Value, Type)> = None;
 
     loop {
-        let readline = rl.readline(&format!("{} ", ">>-".blue().bold()));
+        let readline = rl.readline(&get_prompt(&last_result));
         match readline {
             Ok(line) => {
                 let line = line.trim();
@@ -197,12 +208,15 @@ fn run_repl() -> Result<(), ReadlineError> {
                                 variables = new_variables;
 
                                 if let Some(value) = &result {
-                                    println!(
-                                        "{} {}",
-                                        quiver.format_value(value),
-                                        format!("({})", quiver.format_type(&result_type))
-                                            .bright_black()
-                                    );
+                                    if !matches!(value, Value::Tuple(type_id, _) if *type_id == TypeId::NIL || *type_id == TypeId::OK)
+                                    {
+                                        println!(
+                                            "{} {}",
+                                            quiver.format_value(value),
+                                            format!("({})", quiver.format_type(&result_type))
+                                                .bright_black()
+                                        );
+                                    }
                                 }
 
                                 last_result = result.map(|v| (v, result_type));
