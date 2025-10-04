@@ -274,7 +274,7 @@ impl<'a> Compiler<'a> {
                 self.compile_type_import(pattern, &module_path)?;
                 Ok(Type::nil())
             }
-            ast::Statement::Expression(expression) => self.compile_expression(expression),
+            ast::Statement::Expression(expression) => self.compile_expression(expression, None),
         }
     }
 
@@ -336,7 +336,7 @@ impl<'a> Compiler<'a> {
             let field_type = match &field.value {
                 ast::FieldValue::Chain(chain) => {
                     // Value tuples don't have a value context
-                    self.compile_chain(chain.clone())?
+                    self.compile_chain(chain.clone(), None)?
                 }
                 ast::FieldValue::Ripple => {
                     // Ripple is only valid if we're inside an operation context
@@ -424,7 +424,7 @@ impl<'a> Compiler<'a> {
                 }
                 ast::FieldValue::Chain(chain) => {
                     // Regular chain compilation
-                    self.compile_chain(chain.clone())?
+                    self.compile_chain(chain.clone(), None)?
                 }
             };
 
@@ -695,7 +695,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let body_type = self.compile_block(function_definition.body, parameter_type.clone())?;
+        let body_type = self.compile_block(function_definition.body, parameter_type.clone(), None)?;
         self.codegen.add_instruction(Instruction::Return);
 
         let func_type = CallableType {
@@ -731,7 +731,12 @@ impl<'a> Compiler<'a> {
         Ok(function_type)
     }
 
-    fn compile_destructure(&mut self, term: ast::Term, value_type: Type) -> Result<Type, Error> {
+    fn compile_destructure(
+        &mut self,
+        term: ast::Term,
+        value_type: Type,
+        on_no_match: Option<usize>,
+    ) -> Result<Type, Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
 
@@ -773,20 +778,25 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Now generate pattern matching code with pre-allocated locals
+                // Use on_no_match if provided (for receive blocks), otherwise use fail_jump_addr
+                let fail_target = on_no_match.unwrap_or(fail_jump_addr);
                 pattern::generate_pattern_code(
                     &mut self.codegen,
                     self.program,
                     &mut self.local_count,
                     Some(&bindings_map),
                     &binding_sets,
-                    fail_jump_addr,
+                    fail_target,
                 )?;
 
                 self.codegen.add_instruction(Instruction::Pop);
                 self.codegen.add_instruction(Instruction::Tuple(TypeId::OK));
                 let success_jump_addr = self.codegen.emit_jump_placeholder();
 
-                self.codegen.patch_jump_to_here(fail_jump_addr);
+                // Only patch fail_jump_addr if we didn't use on_no_match
+                if on_no_match.is_none() {
+                    self.codegen.patch_jump_to_here(fail_jump_addr);
+                }
                 self.codegen.add_instruction(Instruction::Pop);
                 self.codegen
                     .add_instruction(Instruction::Tuple(TypeId::NIL));
@@ -802,7 +812,12 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_block(&mut self, block: ast::Block, parameter_type: Type) -> Result<Type, Error> {
+    fn compile_block(
+        &mut self,
+        block: ast::Block,
+        parameter_type: Type,
+        on_no_match: Option<usize>,
+    ) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -848,7 +863,7 @@ impl<'a> Compiler<'a> {
             }
 
             // Compile the condition expression - it can use ~> to access the parameter
-            let condition_type = self.compile_expression(branch.condition.clone())?;
+            let condition_type = self.compile_expression(branch.condition.clone(), on_no_match)?;
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
             if condition_type.as_concrete() == Some(&Type::nil()) {
@@ -862,7 +877,7 @@ impl<'a> Compiler<'a> {
                 next_branch_jumps.push((next_branch_jump, i + 1));
 
                 // Compile the consequence - parameter not available (nil type)
-                let consequence_type = self.compile_expression(consequence.clone())?;
+                let consequence_type = self.compile_expression(consequence.clone(), None)?;
                 branch_types.push(consequence_type);
 
                 // Clear branch-specific locals, but keep the parameter
@@ -922,7 +937,8 @@ impl<'a> Compiler<'a> {
 
         for (jump_addr, next_branch_idx) in next_branch_jumps {
             let target_addr = if next_branch_idx >= branch_starts.len() {
-                end_addr
+                // No more branches - jump to on_no_match if provided, otherwise end
+                on_no_match.unwrap_or(end_addr)
             } else {
                 branch_starts[next_branch_idx]
             };
@@ -942,12 +958,16 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_expression(&mut self, expression: ast::Expression) -> Result<Type, Error> {
+    fn compile_expression(
+        &mut self,
+        expression: ast::Expression,
+        on_no_match: Option<usize>,
+    ) -> Result<Type, Error> {
         let mut last_type = None;
         let mut end_jumps = Vec::new();
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            let chain_type = self.compile_chain(chain.clone())?;
+            let chain_type = self.compile_chain(chain.clone(), on_no_match)?;
 
             // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil = if i > 0 {
@@ -994,7 +1014,11 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn compile_chain(&mut self, chain: ast::Chain) -> Result<Type, Error> {
+    fn compile_chain(
+        &mut self,
+        chain: ast::Chain,
+        on_no_match: Option<usize>,
+    ) -> Result<Type, Error> {
         // If this is a continuation chain (starts with ~>), load the parameter
         let mut current_type = if chain.continuation {
             // Continuation chains explicitly use the parameter from scope
@@ -1006,7 +1030,7 @@ impl<'a> Compiler<'a> {
         };
 
         for term in chain.terms {
-            current_type = Some(self.compile_term(term, current_type)?);
+            current_type = Some(self.compile_term(term, current_type, on_no_match)?);
         }
 
         current_type.ok_or_else(|| Error::InternalError {
@@ -1185,12 +1209,17 @@ impl<'a> Compiler<'a> {
         Ok(value)
     }
 
-    fn compile_term(&mut self, term: ast::Term, value_type: Option<Type>) -> Result<Type, Error> {
+    fn compile_term(
+        &mut self,
+        term: ast::Term,
+        value_type: Option<Type>,
+        on_no_match: Option<usize>,
+    ) -> Result<Type, Error> {
         match term {
             ast::Term::Literal(literal) => {
                 if let Some(val_type) = value_type {
                     // Treat as pattern match when value is present
-                    self.compile_destructure(ast::Term::Literal(literal), val_type)
+                    self.compile_destructure(ast::Term::Literal(literal), val_type, on_no_match)
                 } else {
                     // Compile as value when no value present
                     self.compile_literal(literal)
@@ -1199,7 +1228,7 @@ impl<'a> Compiler<'a> {
             ast::Term::Identifier(name) => {
                 if let Some(val_type) = value_type {
                     // Treat as pattern match/destructuring when value is present
-                    self.compile_destructure(ast::Term::Identifier(name), val_type)
+                    self.compile_destructure(ast::Term::Identifier(name), val_type, on_no_match)
                 } else {
                     // Load the variable when no value present
                     let (var_type, index) = self
@@ -1216,7 +1245,7 @@ impl<'a> Compiler<'a> {
                         self.compile_wrap_tupple(tuple.name, tuple.fields, val_type)
                     } else {
                         // Treat as pattern match
-                        self.compile_destructure(ast::Term::Tuple(tuple), val_type)
+                        self.compile_destructure(ast::Term::Tuple(tuple), val_type, on_no_match)
                     }
                 } else {
                     // Compile as value tuple when no value present
@@ -1231,7 +1260,7 @@ impl<'a> Compiler<'a> {
                     self.codegen
                         .add_instruction(Instruction::Tuple(TypeId::NIL));
                 }
-                self.compile_block(block, block_parameter)
+                self.compile_block(block, block_parameter, None)
             }
             ast::Term::FunctionDefinition(func_def) => {
                 if value_type.is_some() {
@@ -1306,7 +1335,7 @@ impl<'a> Compiler<'a> {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Pattern matching requires a value".to_string())
                 })?;
-                self.compile_destructure(term, val_type)
+                self.compile_destructure(term, val_type, on_no_match)
             }
             ast::Term::Spawn(term) => {
                 // Spawn should not receive a value - it spawns the term
@@ -1316,7 +1345,7 @@ impl<'a> Compiler<'a> {
                     ));
                 }
                 // Compile the term to get the function value
-                let term_type = self.compile_term(*term, None)?;
+                let term_type = self.compile_term(*term, None, None)?;
 
                 // Extract the receive type from the function
                 let receive_type = if let Type::Callable(callable) = &term_type {
@@ -1390,20 +1419,24 @@ impl<'a> Compiler<'a> {
                     let loop_start = self.codegen.instructions.len();
                     self.codegen.add_instruction(Instruction::Receive);
 
-                    let result_type = self.compile_block(block, message_type)?;
+                    // We'll create the retry cleanup code after the success path
+                    // Use a placeholder jump to skip over it
+                    let skip_retry = self.codegen.emit_jump_placeholder();
 
-                    self.codegen.add_instruction(Instruction::Duplicate);
-                    self.codegen
-                        .add_instruction(Instruction::IsTuple(TypeId::NIL));
-                    self.codegen.add_instruction(Instruction::Not);
-                    let success_jump = self.codegen.emit_jump_if_placeholder();
-
+                    // Retry cleanup code: pop nil, clear parameter local, jump back
+                    let retry_addr = self.codegen.instructions.len();
                     self.codegen.add_instruction(Instruction::Pop);
-                    let offset =
-                        (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
+                    self.codegen.add_instruction(Instruction::Clear(1));  // Clear parameter local
+                    let offset = (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
                     self.codegen.add_instruction(Instruction::Jump(offset));
 
-                    self.codegen.patch_jump_to_here(success_jump);
+                    // Patch the skip jump to land here (after retry code)
+                    self.codegen.patch_jump_to_here(skip_retry);
+
+                    // Compile block with on_no_match pointing to retry_addr
+                    let result_type = self.compile_block(block, message_type, Some(retry_addr))?;
+
+                    // If we get here, a pattern matched - acknowledge the message
                     self.codegen.add_instruction(Instruction::Acknowledge);
 
                     Ok(result_type)
