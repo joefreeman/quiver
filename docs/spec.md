@@ -135,80 +135,71 @@ data = Outer[Inner[x: 1, y: 2], 3],
 data ~> [[x: 5]]         // Outer[Inner[x: 5, y: 2], 3]
 ```
 
-## Assignment
+## Identifiers
 
-Assignment is used to assign to variables and/or test a value against a pattern.
-
-Assignment can be done by prefixing the chain with an assignmment - `a = ...` - or with the assignment term - `... ~> =a` within a chain.
-
-```
-x = 42                     // Assign 42 to new variable x
-x = 1 ~> [~, 2]            // Assign x to the result of a chain
-p = Point[x: 10, y: 20]    // Assign tuple to variable p
-p.y ~> =y                  // Using the assignment term
-```
-
-### Identifiers
-
-Identifiers (for variables and tuple field names) start with a lowercase letter, followed by zero or more alphanumeric characters or underscores.
-
-They can also be suffixed by an optional question mark, an optional exclamation mark, and multiple quote characters (in that order).
+Identifiers (for variables and tuple field names) start with a lowercase letter, followed by alphanumeric characters or underscores. Optional suffixes: `?`, `!`, `'` (in order).
 
 ```
 x, a1, first_name
-is_empty?      // ? suffix for predicates/boolean functions
-validate!      // ! suffix for emphasis
-helper'        // ' suffix for variants or helper functions
-is_valid?!     // ? and ! can be combined
-valid?!''      // Multiple suffixes can be combined
+is_empty?      // ? for predicates
+validate!      // ! for emphasis
+helper'        // ' for variants
+is_valid?!'    // Combined
+```
+
+## Pattern matching
+
+Pattern matching binds variables and tests values. Patterns can appear before a chain (`x = ...`) or within a chain (`... ~> =x`).
+
+### Binding
+
+Create variable bindings:
+
+```
+x = 42
+p = Point[x: 10, y: 20]
+p.y ~> =y
 ```
 
 ### Destructuring
 
-Extract values from tuples during assignment.
+Extract values from tuples:
 
 ```
-// Full destructuring
-Point[x: a, y: _] = Point[x: 10, y: 20]
-
-// Partial destructuring (extract specific fields)
-(g, b) = Color[r: 255, g: 0, b: 255]
-
-// Partial named destructuring
-Person(name, age) = Person[name: "Alice", age: 30, city: "NYC"]
-
-// Star destructuring (extract all named fields)
-* = Config[host: "localhost", port: 8080, debug: True]
+Point[x, y] = Point[10, 20]              // Bind both fields
+[x: a, y: b] = Point[x: 10, y: 20]       // Rename during binding
+(x, y) = Point[x: 10, y: 20, z: 30]      // Partial (named fields only)
+* = Config[host: "localhost", port: 80]  // Star (all named fields)
+[x, _] = Point[10, 20]                   // Placeholder (ignore value)
 ```
 
-This works the similarly for assignment terms:
+### Literal matching
+
+Mix literals with bindings to test and extract:
 
 ```
-Point[x: 10, y: 20] ~> =Point[x: a, y: _]
-// etc
+Point[x: 0, y] = Point[0, 10]    // Succeeds if x=0, binds y to 10
+Point[x: 0, y] = Point[1, 10]    // Fails (evaluates to [])
+
+5 ~> =x, x ~> =5                 // Bind then compare
+"admin" ~> =role                 // String matching
 ```
 
-### Matching
+### Pinning
 
-Match on literal values:
-
-```
-// Evaluates to `Ok` and assigns y to 10
-Point[x: 0, y: 10] ~> =Point[x: 0, y: y]
-
-// Evaluates to nil (`[]`), doesn't assign to y
-Point[x: 10, y: 10] ~> =Point[x: 0, y: y]
-```
-
-This also works on literal values:
+Use `^` to check against existing variables instead of binding:
 
 ```
-// Comparing to integer
-p.x ~> =0,
+y = 2
+2 ~> ^y                          // Ok (matches)
+3 ~> ^y                          // [] (doesn't match)
 
-// Comparing to string
-user.role ~> ="admin"
+Point[x, ^y] = Point[1, 2]       // Binds x, checks y is 2
+Point[1, 2] ~> ^Point[=x, y]     // x bound, y pinned
+A[x, ^B[y, =C[z]]]               // Mixed; x and z bound; y pinned
 ```
+
+Patterns default to bind mode. Use `^` to switch to pin mode, or `=` within `^` to switch back to bind mode.
 
 ## Blocks
 

@@ -325,3 +325,56 @@ fn test_comparison_with_literal() {
 fn test_wildcard() {
     quiver().evaluate("42 ~> =_").expect("Ok");
 }
+
+#[test]
+fn test_pin_simple() {
+    quiver().evaluate("y = 2, 2 ~> ^y").expect("Ok");
+    quiver().evaluate("y = 2, 3 ~> ^y").expect("[]");
+}
+
+#[test]
+fn test_pin_in_tuple() {
+    quiver()
+        .evaluate("y = 2, Point[x, ^y] = Point[1, 2], x")
+        .expect("1");
+    quiver()
+        .evaluate("y = 2, Point[x, ^y] = Point[1, 3]")
+        .expect("[]");
+}
+
+#[test]
+fn test_pin_with_term_syntax() {
+    quiver()
+        .evaluate("y = 2, Point[1, 2] ~> ^Point[=x, y], x")
+        .expect("1");
+    quiver()
+        .evaluate("y = 2, Point[1, 3] ~> ^Point[=x, y]")
+        .expect("[]");
+}
+
+#[test]
+fn test_mixed_pin_and_bind() {
+    quiver()
+        .evaluate("y = 2, Point[1, 2] ~> ^Point[=x, y], x")
+        .expect("1");
+    quiver()
+        .evaluate("y = 2, Point[x, ^y] = Point[1, 2], x")
+        .expect("1");
+}
+
+#[test]
+fn test_nested_pin_and_bind() {
+    quiver()
+        .evaluate("y = 2, A[1, B[2, C[3]]] ~> =A[x, ^B[y, =C[z]]], [x, z]")
+        .expect("[1, 3]");
+}
+
+#[test]
+fn test_pin_multiple_variables() {
+    quiver()
+        .evaluate("x = 1, y = 2, [1, 2] ~> ^[x, y]")
+        .expect("Ok");
+    quiver()
+        .evaluate("x = 1, y = 2, [1, 3] ~> ^[x, y]")
+        .expect("[]");
+}

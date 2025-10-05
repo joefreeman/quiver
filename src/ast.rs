@@ -40,7 +40,7 @@ pub struct Expression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
-    pub assignment: Option<Assignment>,
+    pub match_pattern: Option<Match>,
     pub terms: Vec<Term>,
     pub continuation: bool,
 }
@@ -49,7 +49,8 @@ pub struct Chain {
 pub enum Term {
     Literal(Literal),
     Tuple(Tuple),
-    Assignment(Assignment),
+    BindMatch(Match),
+    PinMatch(Match),
     Block(Block),
     Function(Function),
     Access(Access),
@@ -127,25 +128,27 @@ pub struct Receive {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Assignment {
+pub enum Match {
     Identifier(String),
     Literal(Literal),
-    Tuple(AssignmentTuple),
+    Tuple(MatchTuple),
     Partial(PartialPattern),
     Star,
     Placeholder,
+    Pin(Box<Match>),
+    Bind(Box<Match>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AssignmentTuple {
+pub struct MatchTuple {
     pub name: Option<String>,
-    pub fields: Vec<AssignmentField>,
+    pub fields: Vec<MatchField>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AssignmentField {
+pub struct MatchField {
     pub name: Option<String>,
-    pub pattern: Assignment,
+    pub pattern: Match,
 }
 
 #[derive(Debug, Clone, PartialEq)]

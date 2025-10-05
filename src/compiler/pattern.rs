@@ -18,11 +18,21 @@ pub enum MatchCertainty {
     WillMatch,
 }
 
+/// Represents the mode of pattern matching
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternMode {
+    /// Bind mode - identifiers create new bindings (default)
+    Bind,
+    /// Pin mode - identifiers are checked against existing variables
+    Pin,
+}
+
 /// Represents a check that must be performed at runtime
 #[derive(Debug, Clone)]
 enum RuntimeCheck {
     TupleType(TypeId),
     Literal(ast::Literal),
+    Variable(String),
 }
 
 /// A requirement that must be satisfied for a pattern to match
@@ -59,11 +69,12 @@ pub struct BindingSet {
 pub fn analyze_pattern(
     type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
-    pattern: &ast::Assignment,
+    pattern: &ast::Match,
     value_type: &Type,
+    mode: PatternMode,
 ) -> Result<(MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>), Error> {
     let binding_sets =
-        analyze_assignment_pattern(type_context, type_lookup, pattern, value_type, vec![])?;
+        analyze_match_pattern(type_context, type_lookup, pattern, value_type, vec![], mode)?;
 
     if binding_sets.is_empty() {
         return Ok((MatchCertainty::WontMatch, Vec::new(), Vec::new()));
@@ -94,6 +105,7 @@ pub fn generate_pattern_code(
     program: &mut Program,
     local_count: &mut usize,
     bindings_map: Option<&std::collections::HashMap<String, usize>>,
+    variables: &std::collections::HashMap<String, usize>,
     binding_sets: &[BindingSet],
     fail_addr: usize,
 ) -> Result<(), Error> {
@@ -128,6 +140,16 @@ pub fn generate_pattern_code(
                         }
                     }
 
+                    codegen.add_instruction(Instruction::Equal(2));
+                }
+                RuntimeCheck::Variable(name) => {
+                    // Load the variable value from local storage
+                    let var_index = variables.get(name).ok_or_else(|| Error::InternalError {
+                        message: format!("Pin variable '{}' not found in scope", name),
+                    })?;
+                    codegen.add_instruction(Instruction::Load(*var_index));
+
+                    // Compare with the matched value
                     codegen.add_instruction(Instruction::Equal(2));
                 }
             }
@@ -191,43 +213,51 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) ->
     Ok(())
 }
 
-fn analyze_assignment_pattern(
+fn analyze_match_pattern(
     type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
-    pattern: &ast::Assignment,
+    pattern: &ast::Match,
     value_type: &Type,
     path: AccessPath,
+    mode: PatternMode,
 ) -> Result<Vec<BindingSet>, Error> {
     match pattern {
-        ast::Assignment::Identifier(name) => {
-            analyze_identifier_pattern(name.clone(), value_type.clone(), path)
+        ast::Match::Identifier(name) => {
+            analyze_identifier_pattern(name.clone(), value_type.clone(), path, mode)
         }
-        ast::Assignment::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
-        ast::Assignment::Tuple(tuple) => {
-            analyze_assignment_tuple_pattern(type_context, type_lookup, tuple, value_type, path)
+        ast::Match::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
+        ast::Match::Tuple(tuple) => {
+            analyze_match_tuple_pattern(type_context, type_lookup, tuple, value_type, path, mode)
         }
-        ast::Assignment::Partial(partial) => {
+        ast::Match::Partial(partial) => {
             analyze_partial_pattern(type_lookup, partial, value_type, path)
         }
-        ast::Assignment::Star => analyze_star_pattern(type_lookup, value_type, path),
-        ast::Assignment::Placeholder => Ok(vec![BindingSet {
+        ast::Match::Star => analyze_star_pattern(type_lookup, value_type, path),
+        ast::Match::Placeholder => Ok(vec![BindingSet {
             requirements: vec![],
             bindings: vec![],
         }]),
+        ast::Match::Pin(inner) => {
+            analyze_match_pattern(type_context, type_lookup, inner, value_type, path, PatternMode::Pin)
+        }
+        ast::Match::Bind(inner) => {
+            analyze_match_pattern(type_context, type_lookup, inner, value_type, path, PatternMode::Bind)
+        }
     }
 }
 
-fn analyze_assignment_tuple_pattern(
+fn analyze_match_tuple_pattern(
     type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
-    tuple: &ast::AssignmentTuple,
+    tuple: &ast::MatchTuple,
     value_type: &Type,
     path: AccessPath,
+    mode: PatternMode,
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
 
     // Find matching tuple types
-    let matching_types = find_matching_assignment_tuple_types(type_lookup, tuple, value_type)?;
+    let matching_types = find_matching_match_tuple_types(type_lookup, tuple, value_type)?;
 
     // For each matching type, create binding sets
     for (type_id, field_mappings) in &matching_types {
@@ -270,12 +300,13 @@ fn analyze_assignment_tuple_pattern(
             field_path.push(*actual_idx);
 
             // Recursively analyze the field pattern
-            let field_binding_sets = analyze_assignment_pattern(
+            let field_binding_sets = analyze_match_pattern(
                 type_context,
                 type_lookup,
                 &field.pattern,
                 &field_type,
                 field_path,
+                mode,
             )?;
 
             if field_binding_sets.is_empty() {
@@ -319,9 +350,9 @@ fn analyze_assignment_tuple_pattern(
     Ok(binding_sets)
 }
 
-fn find_matching_assignment_tuple_types(
+fn find_matching_match_tuple_types(
     type_lookup: &impl TypeLookup,
-    tuple: &ast::AssignmentTuple,
+    tuple: &ast::MatchTuple,
     value_type: &Type,
 ) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
     let mut matching_types = Vec::new();
@@ -334,7 +365,7 @@ fn find_matching_assignment_tuple_types(
     for typ in types_to_check {
         if let Type::Tuple(type_id) = typ {
             if let Some(field_mappings) =
-                check_assignment_tuple_match(type_lookup, tuple, *type_id)?
+                check_match_tuple_match(type_lookup, tuple, *type_id)?
             {
                 matching_types.push((*type_id, field_mappings));
             }
@@ -344,9 +375,9 @@ fn find_matching_assignment_tuple_types(
     Ok(matching_types)
 }
 
-fn check_assignment_tuple_match(
+fn check_match_tuple_match(
     type_lookup: &impl TypeLookup,
-    tuple: &ast::AssignmentTuple,
+    tuple: &ast::MatchTuple,
     type_id: TypeId,
 ) -> Result<Option<Vec<(usize, usize)>>, Error> {
     let tuple_info = type_lookup
@@ -387,6 +418,7 @@ fn analyze_identifier_pattern(
     name: String,
     value_type: Type,
     path: AccessPath,
+    mode: PatternMode,
 ) -> Result<Vec<BindingSet>, Error> {
     // Empty Type should never happen - it indicates an internal error
     if matches!(&value_type, Type::Union(types) if types.is_empty()) {
@@ -398,16 +430,29 @@ fn analyze_identifier_pattern(
         });
     }
 
-    let var_type = value_type;
-
-    Ok(vec![BindingSet {
-        requirements: vec![],
-        bindings: vec![Binding {
-            name,
-            path,
-            var_type,
-        }],
-    }])
+    match mode {
+        PatternMode::Bind => {
+            // Create a binding for this identifier
+            Ok(vec![BindingSet {
+                requirements: vec![],
+                bindings: vec![Binding {
+                    name,
+                    path,
+                    var_type: value_type,
+                }],
+            }])
+        }
+        PatternMode::Pin => {
+            // Create a runtime check against the variable
+            Ok(vec![BindingSet {
+                requirements: vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Variable(name),
+                }],
+                bindings: vec![],
+            }])
+        }
+    }
 }
 
 fn analyze_partial_pattern(

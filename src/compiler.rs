@@ -697,11 +697,12 @@ impl<'a> Compiler<'a> {
         Ok(function_type)
     }
 
-    fn compile_destructure(
+    fn compile_match(
         &mut self,
-        pattern: ast::Assignment,
+        pattern: ast::Match,
         value_type: Type,
         on_no_match: Option<usize>,
+        mode: pattern::PatternMode,
     ) -> Result<Type, Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
@@ -710,7 +711,7 @@ impl<'a> Compiler<'a> {
 
         // Analyze pattern to get bindings without generating code yet
         let (certainty, bindings, binding_sets) =
-            pattern::analyze_pattern(&self.type_context, self.program, &pattern, &value_type)?;
+            pattern::analyze_pattern(&self.type_context, self.program, &pattern, &value_type, mode)?;
 
         match certainty {
             MatchCertainty::WontMatch => {
@@ -743,6 +744,14 @@ impl<'a> Compiler<'a> {
                         .add_instruction(Instruction::Allocate(num_bindings));
                 }
 
+                // Build variables map from current scope for pin patterns
+                let mut variables = std::collections::HashMap::new();
+                if let Some(scope) = self.scopes.last() {
+                    for (name, (_type, index)) in &scope.variables {
+                        variables.insert(name.clone(), *index);
+                    }
+                }
+
                 // Now generate pattern matching code with pre-allocated locals
                 // Use on_no_match if provided (for receive blocks), otherwise use fail_jump_addr
                 let fail_target = on_no_match.unwrap_or(fail_jump_addr);
@@ -751,6 +760,7 @@ impl<'a> Compiler<'a> {
                     self.program,
                     &mut self.local_count,
                     Some(&bindings_map),
+                    &variables,
                     &binding_sets,
                     fail_target,
                 )?;
@@ -1003,9 +1013,9 @@ impl<'a> Compiler<'a> {
             message: "Chain compiled with no terms and no continuation".to_string(),
         })?;
 
-        // If there's an assignment pattern, apply it
-        if let Some(pattern) = chain.assignment {
-            self.compile_destructure(pattern, result_type, on_no_match)
+        // If there's a match pattern, apply it
+        if let Some(pattern) = chain.match_pattern {
+            self.compile_match(pattern, result_type, on_no_match, pattern::PatternMode::Bind)
         } else {
             Ok(result_type)
         }
@@ -1324,12 +1334,19 @@ impl<'a> Compiler<'a> {
                 })?;
                 self.compile_not(val_type)
             }
-            ast::Term::Assignment(pattern) => {
-                // Assignments are always patterns
+            ast::Term::BindMatch(pattern) => {
+                // Bind matches create new bindings
                 let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Assignment requires a value".to_string())
+                    Error::FeatureUnsupported("Bind match requires a value".to_string())
                 })?;
-                self.compile_destructure(pattern, val_type, on_no_match)
+                self.compile_match(pattern, val_type, on_no_match, pattern::PatternMode::Bind)
+            }
+            ast::Term::PinMatch(pattern) => {
+                // Pin matches check against existing variables
+                let val_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported("Pin match requires a value".to_string())
+                })?;
+                self.compile_match(pattern, val_type, on_no_match, pattern::PatternMode::Pin)
             }
             ast::Term::Spawn(term) => {
                 // Spawn should not receive a value - it spawns the term
