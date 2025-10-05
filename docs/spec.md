@@ -111,6 +111,30 @@ The value in a chain can be 'expanded' using the `~` ('ripple') operator. This a
 
 ```
 
+### Tuple updates
+
+Tuples can be merged to update specific named fields while preserving others. When a tuple receives another tuple, the receiving tuple's named fields update the source:
+
+```
+Point[x: 1, y: 2] ~> [x: 3]         // Point[x: 3, y: 2]
+Point[x: 1, y: 2] ~> [y: 10]        // Point[x: 1, y: 10]
+```
+
+Named tuples can be merged with name validation - the merge succeeds only if names match:
+
+```
+p = Point[x: 1, y: 2],
+p ~> Point[x: 3]         // Point[x: 3, y: 2] (names match)
+p ~> Other[x: 3]         // [] (names don't match)
+```
+
+Merging works recursively for nested tuples:
+
+```
+data = Outer[Inner[x: 1, y: 2], 3],
+data ~> [[x: 5]]         // Outer[Inner[x: 5, y: 2], 3]
+```
+
 ## Assignment
 
 Assignment is used to assign to variables and/or test a value against a pattern.
@@ -446,21 +470,24 @@ add[x, y] ~> mul[~, 2] ~> sub[~, 1]
 ### Working with tuples
 
 ```
+type point = Point[x: int, y: int];
+
 math = %"math",
 
-// Define a point type
-p1 = Point[x: 10, y: 20],
-p2 = Point[x: 5, y: 15],
+// Define points
+p0 = Point[x: 2, y: 3]
+p1 = p0 ~> [x: 5],
+p2 = p1 ~> [y: 4],
 
 // Function to add points
-add_points = #[Point[x: int, y: int], Point[x: int, y: int]] {
+add_points = #[point, point] {
   ~> =[a, b] => Point[
-    x: [a.x, b.x] ~> math.add,
-    y: [a.y, b.y] ~> math.add
+    x: math.add[a.x, b.x],
+    y: math.add[a.y, b.y],
   ]
 },
 
-result = [p1, p2] ~> add_points
+add_points[p1, p2]   // Point[x: 10, y: 7]
 ```
 
 ### Pattern matching
