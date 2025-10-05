@@ -22,6 +22,12 @@ pub struct CallableType {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+pub struct ProcessType {
+    pub receive: Option<Box<Type>>,
+    pub returns: Option<Box<Type>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub enum Type {
     #[serde(rename = "int")]
     Integer,
@@ -36,7 +42,7 @@ pub enum Type {
     #[serde(rename = "union")]
     Union(Vec<Type>),
     #[serde(rename = "process")]
-    Process(Box<Type>),
+    Process(Box<ProcessType>),
 }
 
 impl Type {
@@ -133,9 +139,25 @@ impl Type {
             (Type::Integer, Type::Integer) => true,
             (Type::Binary, Type::Binary) => true,
 
-            // Process types are compatible if their message types are compatible
-            (Type::Process(msg1), Type::Process(msg2)) => {
-                msg1.is_compatible_with_impl(msg2, type_lookup, assumptions, type_stack)
+            // Process types are compatible if their receive and return types are compatible
+            (Type::Process(proc1), Type::Process(proc2)) => {
+                // Check receive type compatibility
+                let receive_compatible = match (&proc1.receive, &proc2.receive) {
+                    (Some(r1), Some(r2)) => {
+                        r1.is_compatible_with_impl(r2, type_lookup, assumptions, type_stack)
+                    }
+                    (None, _) | (_, None) => true, // Compatible if either has no receive type
+                };
+
+                // Check return type compatibility
+                let return_compatible = match (&proc1.returns, &proc2.returns) {
+                    (Some(ret1), Some(ret2)) => {
+                        ret1.is_compatible_with_impl(ret2, type_lookup, assumptions, type_stack)
+                    }
+                    (None, _) | (_, None) => true, // Compatible if either has no return type
+                };
+
+                receive_compatible && return_compatible
             }
 
             // For tuples, check structural compatibility

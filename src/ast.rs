@@ -155,7 +155,8 @@ pub enum Type {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessType {
-    pub receive_type: Box<Type>,
+    pub receive_type: Option<Box<Type>>,
+    pub return_type: Option<Box<Type>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

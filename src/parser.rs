@@ -296,11 +296,40 @@ fn type_cycle(input: &str) -> IResult<&str, Type> {
 }
 
 fn process_type(input: &str) -> IResult<&str, Type> {
-    map(preceded(char('@'), base_type), |receive_type| {
-        Type::Process(ProcessType {
-            receive_type: Box::new(receive_type),
-        })
-    })(input)
+    map(
+        alt((
+            // (@...) - parenthesized arrow forms (@ is inside parens)
+            delimited(
+                char('('),
+                alt((
+                    // (@-> type) - return only
+                    map(
+                        preceded(tuple((char('@'), ws0, tag("->"), ws1)), base_type),
+                        |return_type| (None, Some(return_type)),
+                    ),
+                    // (@type -> type) - both receive and return
+                    map(
+                        preceded(
+                            char('@'),
+                            separated_pair(base_type, tuple((ws1, tag("->"), ws1)), base_type),
+                        ),
+                        |(receive_type, return_type)| (Some(receive_type), Some(return_type)),
+                    ),
+                )),
+                char(')'),
+            ),
+            // @ with optional type - no arrow (@ is outside)
+            map(preceded(char('@'), opt(base_type)), |receive_type| {
+                (receive_type, None)
+            }),
+        )),
+        |(receive_type, return_type)| {
+            Type::Process(ProcessType {
+                receive_type: receive_type.map(Box::new),
+                return_type: return_type.map(Box::new),
+            })
+        },
+    )(input)
 }
 
 fn function_type(input: &str) -> IResult<&str, Type> {

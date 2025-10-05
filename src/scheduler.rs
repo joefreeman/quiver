@@ -59,6 +59,8 @@ pub struct Process {
     pub mailbox: VecDeque<Value>,
     pub persistent: bool,
     pub cursor: usize,
+    pub result: Option<Value>,
+    pub awaiters: Vec<ProcessId>,
 }
 
 impl Process {
@@ -71,6 +73,8 @@ impl Process {
             mailbox: VecDeque::new(),
             persistent,
             cursor: 0,
+            result: None,
+            awaiters: Vec::new(),
         }
     }
 }
@@ -373,7 +377,7 @@ fn run(
             result?;
 
             // Don't increment counter for Call/TailCall (they manage their own frames)
-            // or Receive when process was marked waiting (so it re-executes when woken)
+            // or Receive/Call when process was marked waiting (so it re-executes when woken)
             let should_increment =
                 !matches!(instruction, Instruction::Call | Instruction::TailCall(_));
             if should_increment {
@@ -395,26 +399,51 @@ fn run(
                         frame.counter += 1;
                     }
                 }
+            } else {
+                // For Call instruction, check if process was marked waiting (awaiting a process)
+                if matches!(instruction, Instruction::Call) {
+                    let sched = scheduler.lock().unwrap();
+                    let current_pid = sched.active;
+
+                    let was_marked_waiting =
+                        current_pid.map_or(false, |pid| sched.waiting.contains(&pid));
+
+                    if was_marked_waiting {
+                        // Break out of instruction loop so scheduler can switch processes
+                        break;
+                    }
+                }
             }
         }
 
-        // Current process finished its instructions
+        // Current process finished its instructions (or is waiting)
         let mut sched = scheduler.lock().unwrap();
         let current_pid = sched.active;
 
+        // Pop initial result if this is the initial process and we haven't done so yet
+        // Only do this if the process is not waiting (it's actually done, not blocked)
         if current_pid == initial_process && initial_result.is_none() {
-            initial_result = sched.get_current_process_mut().and_then(|p| p.stack.pop());
+            let is_waiting = current_pid.map_or(false, |pid| sched.waiting.contains(&pid));
+            if !is_waiting {
+                initial_result = sched.get_current_process_mut().and_then(|p| p.stack.pop());
+            }
         }
 
-        // Clean up non-persistent processes that have finished
+        // Store result and wake awaiters when process finishes (frames are empty)
         if let Some(pid) = current_pid {
-            let should_remove = sched
+            let should_store_result = sched
                 .get_process(pid)
-                .map(|p| !p.persistent && p.frames.is_empty())
+                .map(|p| p.frames.is_empty() && p.result.is_none())
                 .unwrap_or(false);
 
-            if should_remove {
-                sched.terminate_process(pid);
+            if should_store_result {
+                if let Some(process) = sched.get_process_mut(pid) {
+                    process.result = process.stack.last().cloned();
+                    let awaiters = std::mem::take(&mut process.awaiters);
+                    for waiter in awaiters {
+                        sched.wake_process(waiter);
+                    }
+                }
             }
         }
 
@@ -718,10 +747,12 @@ fn handle_call(
         .get_current_process_mut()
         .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-    let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+    let function_value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
 
     match function_value {
         Value::Function(function_index, captures) => {
+            // Pop function and parameter now that we know we won't block
+            process.stack.pop();
             let parameter = process.stack.pop().ok_or(Error::StackUnderflow)?;
             drop(sched);
 
@@ -749,6 +780,8 @@ fn handle_call(
             Ok(())
         }
         Value::Builtin(name) => {
+            // Pop function and parameter now that we know we won't block
+            process.stack.pop();
             let parameter = process.stack.pop().ok_or(Error::StackUnderflow)?;
             drop(sched);
 
@@ -774,6 +807,55 @@ fn handle_call(
             }
 
             Ok(())
+        }
+        Value::Pid(target_pid) => {
+            let current_pid = sched
+                .active
+                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+            let target = sched
+                .get_process(target_pid)
+                .ok_or(Error::InvalidArgument(format!(
+                    "Process {:?} not found",
+                    target_pid
+                )))?;
+
+            if let Some(result) = &target.result {
+                // Process has finished - pop values and return result
+                let result = result.clone();
+
+                let process = sched
+                    .get_current_process_mut()
+                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+                process.stack.pop(); // Pop pid
+                process.stack.pop(); // Pop parameter (ignored)
+                process.stack.push(result);
+
+                // Increment counter to continue
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
+
+                Ok(())
+            } else {
+                // Process still running - block until it finishes without popping
+                let target = sched
+                    .get_process_mut(target_pid)
+                    .ok_or(Error::InvalidArgument(format!(
+                        "Process {:?} not found",
+                        target_pid
+                    )))?;
+
+                target.awaiters.push(current_pid);
+                drop(sched);
+
+                let mut sched = scheduler.lock().unwrap();
+                sched.mark_waiting(current_pid);
+
+                // Don't increment counter - will retry when woken
+                Ok(())
+            }
         }
         _ => Err(Error::TypeMismatch {
             expected: "function".to_string(),

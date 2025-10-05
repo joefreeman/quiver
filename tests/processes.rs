@@ -48,8 +48,8 @@ fn test_process_with_receive_rejects_wrong_type() {
         "#,
         )
         .expect_compile_error(quiver::compiler::Error::TypeMismatch {
-            expected: "Integer".to_string(),
-            found: "Binary".to_string(),
+            expected: "int".to_string(),
+            found: "bin".to_string(),
         });
 }
 
@@ -64,8 +64,8 @@ fn test_process_without_receive_rejects_send() {
         "#,
         )
         .expect_compile_error(quiver::compiler::Error::TypeMismatch {
-            expected: "Union([])".to_string(),
-            found: "Integer".to_string(),
+            expected: "process with receive type".to_string(),
+            found: "process without receive type (cannot send messages)".to_string(),
         });
 }
 

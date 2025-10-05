@@ -4,7 +4,7 @@ use crate::{
     ast,
     bytecode::TypeId,
     program::Program,
-    types::{CallableType, Type, TypeLookup},
+    types::{CallableType, ProcessType, Type, TypeLookup},
 };
 
 use super::Error;
@@ -49,14 +49,13 @@ impl<'a> TypeContext<'a> {
         match typ {
             ast::Type::Cycle(_) => true,
             ast::Type::Union(union) => union.types.iter().any(|v| Self::ast_contains_cycle(v)),
-            ast::Type::Function(func) => {
-                Self::ast_contains_cycle(&func.input) || Self::ast_contains_cycle(&func.output)
-            }
             ast::Type::Tuple(tuple) => tuple
                 .fields
                 .iter()
                 .any(|f| Self::ast_contains_cycle(&f.type_def)),
-            ast::Type::Process(process) => Self::ast_contains_cycle(&process.receive_type),
+            // Function and process types are boundaries - cycles inside them don't count
+            // as structural recursion
+            ast::Type::Function(_) | ast::Type::Process(_) => false,
             ast::Type::Primitive(_) | ast::Type::Identifier(_) => false,
         }
     }
@@ -157,8 +156,17 @@ impl<'a> TypeContext<'a> {
                 Ok(Type::Cycle(cycle_depth))
             }
             ast::Type::Process(process) => {
-                let receive_type = self.resolve_ast_type(*process.receive_type, program)?;
-                Ok(Type::Process(Box::new(receive_type)))
+                let receive = process
+                    .receive_type
+                    .map(|receive_type| self.resolve_ast_type(*receive_type, program))
+                    .transpose()?
+                    .map(Box::new);
+                let returns = process
+                    .return_type
+                    .map(|return_type| self.resolve_ast_type(*return_type, program))
+                    .transpose()?
+                    .map(Box::new);
+                Ok(Type::Process(Box::new(ProcessType { receive, returns })))
             }
             ast::Type::Identifier(alias) => {
                 // Look up already-defined type alias

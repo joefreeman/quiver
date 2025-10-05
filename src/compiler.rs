@@ -20,7 +20,7 @@ use crate::{
     bytecode::{Constant, Function, Instruction, TypeId},
     modules::{ModuleError, ModuleLoader},
     program::Program,
-    types::{CallableType, Type, TypeLookup},
+    types::{CallableType, ProcessType, Type, TypeLookup},
     vm::{BinaryRef, VM, Value},
 };
 
@@ -695,7 +695,8 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let body_type = self.compile_block(function_definition.body, parameter_type.clone(), None)?;
+        let body_type =
+            self.compile_block(function_definition.body, parameter_type.clone(), None)?;
         self.codegen.add_instruction(Instruction::Return);
 
         let func_type = CallableType {
@@ -1347,9 +1348,9 @@ impl<'a> Compiler<'a> {
                 // Compile the term to get the function value
                 let term_type = self.compile_term(*term, None, None)?;
 
-                // Extract the receive type from the function
-                let receive_type = if let Type::Callable(callable) = &term_type {
-                    callable.receive.clone()
+                // Extract the receive and return types from the function
+                let (receive_type, return_type) = if let Type::Callable(callable) = &term_type {
+                    (callable.receive.clone(), callable.result.clone())
                 } else {
                     return Err(Error::FeatureUnsupported(
                         "Can only spawn functions".to_string(),
@@ -1358,7 +1359,11 @@ impl<'a> Compiler<'a> {
 
                 // Emit spawn instruction (pops function, pushes Process)
                 self.codegen.add_instruction(Instruction::Spawn);
-                Ok(Type::Process(Box::new(receive_type)))
+
+                Ok(Type::Process(Box::new(ProcessType {
+                    receive: Some(Box::new(receive_type)),
+                    returns: Some(Box::new(return_type)),
+                })))
             }
             ast::Term::SendCall(send_call) => {
                 // Send expects a value on the stack (the message)
@@ -1380,11 +1385,30 @@ impl<'a> Compiler<'a> {
                 };
 
                 // Type check: ensure the pid is a Process and message type matches
-                if let Type::Process(expected_msg_type) = &pid_type {
-                    if !val_type.is_compatible(expected_msg_type, self.program) {
+                if let Type::Process(process_type) = &pid_type {
+                    if let Some(expected_msg_type) = &process_type.receive {
+                        // Check if it's the empty union (never receives)
+                        if matches!(expected_msg_type.as_ref(), Type::Union(v) if v.is_empty()) {
+                            return Err(Error::TypeMismatch {
+                                expected: "process with receive type".to_string(),
+                                found: "process without receive type (cannot send messages)"
+                                    .to_string(),
+                            });
+                        }
+                        if !val_type.is_compatible(expected_msg_type, self.program) {
+                            return Err(Error::TypeMismatch {
+                                expected: crate::format::format_type(
+                                    self.program,
+                                    expected_msg_type,
+                                ),
+                                found: crate::format::format_type(self.program, &val_type),
+                            });
+                        }
+                    } else {
+                        // None means unknown receive type
                         return Err(Error::TypeMismatch {
-                            expected: format!("{:?}", expected_msg_type),
-                            found: format!("{:?}", val_type),
+                            expected: "process with known receive type".to_string(),
+                            found: "process with unknown receive type".to_string(),
                         });
                     }
                 } else {
@@ -1407,7 +1431,12 @@ impl<'a> Compiler<'a> {
                 }
                 self.codegen.add_instruction(Instruction::Self_);
                 // Return a process type with the current function's receive type
-                Ok(Type::Process(Box::new(self.current_receive_type.clone())))
+                // Return type is None since a process can't know its own return type
+                let process_type = ProcessType {
+                    receive: Some(Box::new(self.current_receive_type.clone())),
+                    returns: None,
+                };
+                Ok(Type::Process(Box::new(process_type)))
             }
             ast::Term::Receive(receive) => {
                 let message_type = self
@@ -1426,8 +1455,9 @@ impl<'a> Compiler<'a> {
                     // Retry cleanup code: pop nil, clear parameter local, jump back
                     let retry_addr = self.codegen.instructions.len();
                     self.codegen.add_instruction(Instruction::Pop);
-                    self.codegen.add_instruction(Instruction::Clear(1));  // Clear parameter local
-                    let offset = (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
+                    self.codegen.add_instruction(Instruction::Clear(1)); // Clear parameter local
+                    let offset =
+                        (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
                     self.codegen.add_instruction(Instruction::Jump(offset));
 
                     // Patch the skip jump to land here (after retry code)
@@ -1470,66 +1500,82 @@ impl<'a> Compiler<'a> {
             }
         };
 
-        // Extract callable type and verify it's a function
-        let func_type = match function_type {
-            Type::Callable(func_type) => func_type,
+        // Extract callable type and verify it's a function or process
+        match function_type {
+            Type::Callable(func_type) => {
+                // Check parameter compatibility
+                if !val_type.is_compatible(&func_type.parameter, self.program) {
+                    return Err(Error::TypeMismatch {
+                        expected: format!(
+                            "function parameter compatible with {}",
+                            crate::format::format_type(self.program, &func_type.parameter)
+                        ),
+                        found: crate::format::format_type(self.program, &val_type),
+                    });
+                }
+
+                // Check receive type compatibility
+                let called_receive_type = &func_type.receive;
+
+                // Check if called function has receives (not Type::never())
+                if !matches!(called_receive_type, Type::Union(v) if v.is_empty()) {
+                    // Called function has receives - verify current context matches
+                    // Check if current context is never (empty union = can't receive)
+                    if let Type::Union(variants) = &self.current_receive_type {
+                        if variants.is_empty() {
+                            // Current context can't receive - can't call a receiving function
+                            return Err(Error::TypeMismatch {
+                                expected: "function without receive type".to_string(),
+                                found: format!(
+                                    "function with receive type {}",
+                                    crate::format::format_type(self.program, called_receive_type)
+                                ),
+                            });
+                        }
+                    }
+
+                    // Check compatibility
+                    if !called_receive_type.is_compatible(&self.current_receive_type, self.program)
+                    {
+                        return Err(Error::TypeMismatch {
+                            expected: format!(
+                                "function with receive type compatible with {}",
+                                crate::format::format_type(
+                                    self.program,
+                                    &self.current_receive_type
+                                )
+                            ),
+                            found: format!(
+                                "function with receive type {}",
+                                crate::format::format_type(self.program, called_receive_type)
+                            ),
+                        });
+                    }
+                }
+
+                // Execute the call
+                self.codegen.add_instruction(Instruction::Call);
+                Ok(func_type.result)
+            }
+            Type::Process(process_type) => {
+                // Await process - check it has a return type
+                if let Some(return_type) = &process_type.returns {
+                    self.codegen.add_instruction(Instruction::Call);
+                    Ok((**return_type).clone())
+                } else {
+                    Err(Error::TypeMismatch {
+                        expected: "process with return type (awaitable)".to_string(),
+                        found: "process without return type (cannot await)".to_string(),
+                    })
+                }
+            }
             _ => {
                 return Err(Error::TypeMismatch {
-                    expected: "function".to_string(),
+                    expected: "function or process".to_string(),
                     found: crate::format::format_type(self.program, &function_type),
                 });
             }
-        };
-
-        // Check parameter compatibility
-        if !val_type.is_compatible(&func_type.parameter, self.program) {
-            return Err(Error::TypeMismatch {
-                expected: format!(
-                    "function parameter compatible with {}",
-                    crate::format::format_type(self.program, &func_type.parameter)
-                ),
-                found: crate::format::format_type(self.program, &val_type),
-            });
         }
-
-        // Check receive type compatibility
-        let called_receive_type = &func_type.receive;
-
-        // Check if called function has receives (not Type::never())
-        if !matches!(called_receive_type, Type::Union(v) if v.is_empty()) {
-            // Called function has receives - verify current context matches
-            // Check if current context is never (empty union = can't receive)
-            if let Type::Union(variants) = &self.current_receive_type {
-                if variants.is_empty() {
-                    // Current context can't receive - can't call a receiving function
-                    return Err(Error::TypeMismatch {
-                        expected: "function without receive type".to_string(),
-                        found: format!(
-                            "function with receive type {}",
-                            crate::format::format_type(self.program, called_receive_type)
-                        ),
-                    });
-                }
-            }
-
-            // Check compatibility
-            if !called_receive_type.is_compatible(&self.current_receive_type, self.program) {
-                return Err(Error::TypeMismatch {
-                    expected: format!(
-                        "function with receive type compatible with {}",
-                        crate::format::format_type(self.program, &self.current_receive_type)
-                    ),
-                    found: format!(
-                        "function with receive type {}",
-                        crate::format::format_type(self.program, called_receive_type)
-                    ),
-                });
-            }
-        }
-
-        // Execute the call
-        self.codegen.add_instruction(Instruction::Call);
-        Ok(func_type.result)
     }
 
     fn compile_tail_call(

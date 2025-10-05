@@ -34,7 +34,22 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
-        Type::Process(msg_type) => format!("@{}", format_type(type_lookup, msg_type)),
+        Type::Process(process_type) => match (&process_type.receive, &process_type.returns) {
+            (Some(receive), Some(returns)) => {
+                format!(
+                    "(@{} -> {})",
+                    format_type(type_lookup, receive),
+                    format_type(type_lookup, returns)
+                )
+            }
+            (Some(receive), None) => {
+                format!("@{}", format_type(type_lookup, receive))
+            }
+            (None, Some(returns)) => {
+                format!("(@-> {})", format_type(type_lookup, returns))
+            }
+            (None, None) => "@".to_string(),
+        },
         Type::Tuple(type_id) => {
             if let Some((name, fields)) = type_lookup.lookup_type(type_id) {
                 let field_strs: Vec<String> = fields
@@ -76,17 +91,21 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
         }
         Type::Cycle(depth) => format!("μ{}", depth),
         Type::Union(types_list) => {
-            let type_strs: Vec<String> = types_list
-                .iter()
-                .map(|t| {
-                    match t {
-                        // Add parentheses around function types in unions for clarity
-                        Type::Callable(_) => format!("({})", format_type(type_lookup, t)),
-                        _ => format_type(type_lookup, t),
-                    }
-                })
-                .collect();
-            format!("({})", type_strs.join(" | "))
+            if types_list.is_empty() {
+                "never".to_string()
+            } else {
+                let type_strs: Vec<String> = types_list
+                    .iter()
+                    .map(|t| {
+                        match t {
+                            // Add parentheses around function types in unions for clarity
+                            Type::Callable(_) => format!("({})", format_type(type_lookup, t)),
+                            _ => format_type(type_lookup, t),
+                        }
+                    })
+                    .collect();
+                format!("({})", type_strs.join(" | "))
+            }
         }
     }
 }
