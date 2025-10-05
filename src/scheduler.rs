@@ -8,6 +8,9 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
+/// Number of instruction units to execute per process before yielding to the next process
+const TIME_SLICE_UNITS: usize = 100;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProcessId(pub usize);
 
@@ -303,6 +306,8 @@ fn execute_in_scheduler(
 
     {
         let mut sched = scheduler.lock().unwrap();
+        sched.queue.retain(|&id| id != pid);
+
         let process = sched
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument(format!(
@@ -340,6 +345,8 @@ fn run(
     let mut initial_result = None;
 
     loop {
+        let mut units_this_slice = 0;
+
         // Execute instructions for current process
         while let Some(instruction) = get_instruction(scheduler) {
             let result = match instruction {
@@ -412,6 +419,20 @@ fn run(
                         // Break out of instruction loop so scheduler can switch processes
                         break;
                     }
+                }
+            }
+
+            // Track instruction units consumed
+            units_this_slice += 1;
+
+            // Yield to other processes if time slice exhausted
+            if units_this_slice >= TIME_SLICE_UNITS {
+                let mut sched = scheduler.lock().unwrap();
+                if !sched.queue.is_empty() {
+                    if let Some(pid) = sched.active {
+                        sched.queue.push_back(pid);
+                    }
+                    break;
                 }
             }
         }
