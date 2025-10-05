@@ -254,8 +254,8 @@ x = coords ~> .0         // Positional access in pipeline
 ```
 [5, 5] ~> ==         // Returns 5 (all equal)
 [5, 6, 5] ~> ==      // Returns [] (not equal)
-[] ~> !              // Returns Ok (negation of nil)
-5 ~> !               // Returns [] (negation of non-nil)
+[] ~> /              // Returns Ok (negation of nil)
+5 ~> /               // Returns [] (negation of non-nil)
 ```
 
 ## Functions

@@ -613,7 +613,7 @@ fn equality(input: &str) -> IResult<&str, Term> {
 }
 
 fn not_term(input: &str) -> IResult<&str, Term> {
-    nom_value(Term::Not, char('!'))(input)
+    nom_value(Term::Not, char('/'))(input)
 }
 
 fn spawn_term(input: &str) -> IResult<&str, Term> {
