@@ -6,6 +6,7 @@ pub mod format;
 pub mod modules;
 pub mod parser;
 pub mod program;
+pub mod repl;
 pub mod scheduler;
 pub mod types;
 pub mod vm;
