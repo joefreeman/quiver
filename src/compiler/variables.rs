@@ -99,10 +99,10 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::Spawn(term) => {
                 self.visit_term(term);
             }
-            ast::Term::SendCall(send_call) => {
+            ast::Term::Send(send_call) => {
                 self.visit_identifier(&send_call.name, send_call.accessors.clone());
             }
-            ast::Term::SelfRef => {}
+            ast::Term::Self_ => {}
             ast::Term::Receive(receive) => {
                 if let Some(block) = &receive.block {
                     self.visit_block(block);

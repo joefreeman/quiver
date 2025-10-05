@@ -1365,7 +1365,7 @@ impl<'a> Compiler<'a> {
                     returns: Some(Box::new(return_type)),
                 })))
             }
-            ast::Term::SendCall(send_call) => {
+            ast::Term::Send(send_call) => {
                 // Send expects a value on the stack (the message)
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Send requires a value (message)".to_string())
@@ -1423,7 +1423,7 @@ impl<'a> Compiler<'a> {
                 // Send returns Ok (like assignment)
                 Ok(Type::ok())
             }
-            ast::Term::SelfRef => {
+            ast::Term::Self_ => {
                 if value_type.is_some() {
                     return Err(Error::FeatureUnsupported(
                         "Self reference cannot be applied to value".to_string(),

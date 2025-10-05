@@ -641,7 +641,7 @@ fn send_call(input: &str) -> IResult<&str, Term> {
         )),
     ))(input)?;
     let (input, _) = char('$')(input)?;
-    Ok((input, Term::SendCall(SendCall { name, accessors })))
+    Ok((input, Term::Send(Send { name, accessors })))
 }
 
 fn self_ref_term(input: &str) -> IResult<&str, Term> {
@@ -655,7 +655,7 @@ fn self_ref_term(input: &str) -> IResult<&str, Term> {
                 recognize(satisfy(|c: char| c.is_ascii_digit())),
             )))),
         ),
-        |_| Term::SelfRef,
+        |_| Term::Self_,
     )(input)
 }
 

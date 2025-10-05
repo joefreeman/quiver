@@ -71,8 +71,8 @@ pub enum Term {
     Star,
     Placeholder,
     Spawn(Box<Term>),
-    SendCall(SendCall),
-    SelfRef,
+    Send(Send),
+    Self_,
     Receive(Receive),
 }
 
@@ -131,7 +131,7 @@ pub struct TailCall {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SendCall {
+pub struct Send {
     pub name: String,
     pub accessors: Vec<AccessPath>,
 }
