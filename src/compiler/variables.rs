@@ -63,6 +63,9 @@ impl<'a> FreeVariableCollector<'a> {
                     // Ripple doesn't introduce variables
                 }
             }
+            ast::Term::Assignment(_) => {
+                // Assignments don't reference variables, they define them
+            }
             ast::Term::Block(block) => {
                 self.visit_block(&block);
             }
@@ -93,9 +96,6 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::Equality => {}
             ast::Term::Not => {}
-            ast::Term::Partial(_) => {}
-            ast::Term::Star => {}
-            ast::Term::Placeholder => {}
             ast::Term::Spawn(term) => {
                 self.visit_term(term);
             }

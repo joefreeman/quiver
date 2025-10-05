@@ -59,10 +59,11 @@ pub struct BindingSet {
 pub fn analyze_pattern(
     type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
-    term: &ast::Term,
+    pattern: &ast::Assignment,
     value_type: &Type,
 ) -> Result<(MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>), Error> {
-    let binding_sets = analyze_term(type_context, type_lookup, term, value_type, vec![])?;
+    let binding_sets =
+        analyze_assignment_pattern(type_context, type_lookup, pattern, value_type, vec![])?;
 
     if binding_sets.is_empty() {
         return Ok((MatchCertainty::WontMatch, Vec::new(), Vec::new()));
@@ -190,34 +191,183 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) ->
     Ok(())
 }
 
-fn analyze_term(
+fn analyze_assignment_pattern(
     type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
-    term: &ast::Term,
+    pattern: &ast::Assignment,
     value_type: &Type,
     path: AccessPath,
 ) -> Result<Vec<BindingSet>, Error> {
-    match term {
-        ast::Term::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
-        ast::Term::Identifier(name) => {
+    match pattern {
+        ast::Assignment::Identifier(name) => {
             analyze_identifier_pattern(name.clone(), value_type.clone(), path)
         }
-        ast::Term::Placeholder => Ok(vec![BindingSet {
+        ast::Assignment::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
+        ast::Assignment::Tuple(tuple) => {
+            analyze_assignment_tuple_pattern(type_context, type_lookup, tuple, value_type, path)
+        }
+        ast::Assignment::Partial(partial) => {
+            analyze_partial_pattern(type_lookup, partial, value_type, path)
+        }
+        ast::Assignment::Star => analyze_star_pattern(type_lookup, value_type, path),
+        ast::Assignment::Placeholder => Ok(vec![BindingSet {
             requirements: vec![],
             bindings: vec![],
         }]),
-        ast::Term::Tuple(tuple) => {
-            analyze_tuple_pattern(type_context, type_lookup, tuple, value_type, path)
-        }
-        ast::Term::Partial(partial_pattern) => {
-            analyze_partial_pattern(type_lookup, partial_pattern, value_type, path)
-        }
-        ast::Term::Star => analyze_star_pattern(type_lookup, value_type, path),
-        _ => Err(Error::FeatureUnsupported(format!(
-            "Term cannot be used as pattern: {:?}",
-            term
-        ))),
     }
+}
+
+fn analyze_assignment_tuple_pattern(
+    type_context: &TypeContext,
+    type_lookup: &impl TypeLookup,
+    tuple: &ast::AssignmentTuple,
+    value_type: &Type,
+    path: AccessPath,
+) -> Result<Vec<BindingSet>, Error> {
+    let mut binding_sets = vec![];
+
+    // Find matching tuple types
+    let matching_types = find_matching_assignment_tuple_types(type_lookup, tuple, value_type)?;
+
+    // For each matching type, create binding sets
+    for (type_id, field_mappings) in &matching_types {
+        // Get tuple info and extract field types upfront to avoid borrow issues
+        let tuple_fields: Vec<Type> = {
+            let tuple_info = type_lookup
+                .lookup_type(type_id)
+                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+            tuple_info.1.iter().map(|(_, t)| t.clone()).collect()
+        };
+
+        // Start with a binding set for this type
+        let mut base_requirements = vec![];
+        // Add runtime check if needed
+        if value_type.extract_tuple_types().len() > 1 {
+            base_requirements.push(Requirement {
+                path: path.clone(),
+                check: RuntimeCheck::TupleType(*type_id),
+            });
+        }
+
+        let mut current_binding_sets = vec![BindingSet {
+            requirements: base_requirements,
+            bindings: vec![],
+        }];
+
+        // Process each field pattern
+        for (pattern_idx, actual_idx) in field_mappings {
+            let field = &tuple.fields[*pattern_idx];
+            let raw_field_type = &tuple_fields[*actual_idx];
+
+            // Resolve Type::Cycle references to the actual type
+            let field_type = if let Type::Cycle(_) = raw_field_type {
+                value_type.clone()
+            } else {
+                raw_field_type.clone()
+            };
+
+            let mut field_path = path.clone();
+            field_path.push(*actual_idx);
+
+            // Recursively analyze the field pattern
+            let field_binding_sets = analyze_assignment_pattern(
+                type_context,
+                type_lookup,
+                &field.pattern,
+                &field_type,
+                field_path,
+            )?;
+
+            if field_binding_sets.is_empty() {
+                // This type variant can't match, skip it entirely
+                current_binding_sets.clear();
+                break;
+            }
+
+            // Combine field binding sets with current binding sets (cartesian product)
+            let mut new_binding_sets = vec![];
+            for current_set in &current_binding_sets {
+                for field_set in &field_binding_sets {
+                    let mut combined_requirements = current_set.requirements.clone();
+                    combined_requirements.extend(field_set.requirements.clone());
+
+                    let mut combined_bindings = current_set.bindings.clone();
+                    combined_bindings.extend(field_set.bindings.clone());
+
+                    new_binding_sets.push(BindingSet {
+                        requirements: combined_requirements,
+                        bindings: combined_bindings,
+                    });
+                }
+            }
+            current_binding_sets = new_binding_sets;
+        }
+
+        // Add all binding sets from this type to the result
+        binding_sets.extend(current_binding_sets);
+    }
+
+    if matches!(&value_type, Type::Union(types) if types.is_empty()) {
+        return Err(Error::InternalError {
+            message: format!(
+                "analyze_assignment_tuple_pattern received empty Type for tuple: {:?}",
+                tuple
+            ),
+        });
+    }
+
+    Ok(binding_sets)
+}
+
+fn find_matching_assignment_tuple_types(
+    type_lookup: &impl TypeLookup,
+    tuple: &ast::AssignmentTuple,
+    value_type: &Type,
+) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
+    let mut matching_types = Vec::new();
+
+    let types_to_check = match value_type {
+        Type::Union(types) => types.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+
+    for typ in types_to_check {
+        if let Type::Tuple(type_id) = typ {
+            if let Some(field_mappings) =
+                check_assignment_tuple_match(type_lookup, tuple, *type_id)?
+            {
+                matching_types.push((*type_id, field_mappings));
+            }
+        }
+    }
+
+    Ok(matching_types)
+}
+
+fn check_assignment_tuple_match(
+    type_lookup: &impl TypeLookup,
+    tuple: &ast::AssignmentTuple,
+    type_id: TypeId,
+) -> Result<Option<Vec<(usize, usize)>>, Error> {
+    let tuple_info = type_lookup
+        .lookup_type(&type_id)
+        .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
+
+    if tuple.name.as_ref() != tuple_info.0.as_ref() || tuple.fields.len() != tuple_info.1.len() {
+        return Ok(None);
+    }
+
+    let mut field_mappings = Vec::new();
+    for (pattern_idx, field) in tuple.fields.iter().enumerate() {
+        let tuple_field = &tuple_info.1[pattern_idx];
+        if field.name.as_ref() != tuple_field.0.as_ref() {
+            return Ok(None);
+        }
+
+        field_mappings.push((pattern_idx, pattern_idx));
+    }
+
+    Ok(Some(field_mappings))
 }
 
 fn analyze_literal_pattern(
@@ -258,131 +408,6 @@ fn analyze_identifier_pattern(
             var_type,
         }],
     }])
-}
-
-fn analyze_tuple_pattern(
-    type_context: &TypeContext,
-    type_lookup: &impl TypeLookup,
-    tuple: &ast::Tuple,
-    value_type: &Type,
-    path: AccessPath,
-) -> Result<Vec<BindingSet>, Error> {
-    let mut binding_sets = vec![];
-
-    // Collect matching types with their field mappings
-    let matching_types = find_matching_tuple_types(type_lookup, tuple, value_type)?;
-
-    // For each matching type, create binding sets
-    for (type_id, field_mappings) in &matching_types {
-        // Get tuple info and extract field types upfront to avoid borrow issues
-        let tuple_fields: Vec<Type> = {
-            let tuple_info = type_lookup
-                .lookup_type(type_id)
-                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
-            tuple_info.1.iter().map(|(_, t)| t.clone()).collect()
-        };
-
-        // Start with a binding set for this type
-        let mut base_requirements = vec![];
-        // Add runtime check if needed
-        if value_type.extract_tuple_types().len() > 1 {
-            base_requirements.push(Requirement {
-                path: path.clone(),
-                check: RuntimeCheck::TupleType(*type_id),
-            });
-        }
-
-        let mut current_binding_sets = vec![BindingSet {
-            requirements: base_requirements,
-            bindings: vec![],
-        }];
-
-        // Process each field pattern
-        for (pattern_idx, actual_idx) in field_mappings {
-            let field = &tuple.fields[*pattern_idx];
-            let raw_field_type = &tuple_fields[*actual_idx];
-
-            // Resolve Type::Cycle references to the actual type
-            let field_type = if let Type::Cycle(_) = raw_field_type {
-                // Type::Cycle in a recursive type refers back to the original type
-                // In the context of pattern matching, this should be the union of all variants
-                value_type.clone()
-            } else {
-                raw_field_type.clone()
-            };
-
-            let mut field_path = path.clone();
-            field_path.push(*actual_idx);
-
-            // Extract the term from the field value
-            let field_term = match &field.value {
-                ast::FieldValue::Ripple => {
-                    // Ripple in pattern doesn't make sense
-                    return Err(Error::FeatureUnsupported(
-                        "Ripple (~) cannot be used in pattern".to_string(),
-                    ));
-                }
-                ast::FieldValue::Chain(chain) => {
-                    // For patterns, we need a single term
-                    if chain.terms.len() == 1 {
-                        &chain.terms[0]
-                    } else {
-                        return Err(Error::FeatureUnsupported(
-                            "Multi-term chain in pattern".to_string(),
-                        ));
-                    }
-                }
-            };
-
-            // Recursively analyze the field pattern
-            let field_binding_sets = analyze_term(
-                type_context,
-                type_lookup,
-                field_term,
-                &field_type,
-                field_path,
-            )?;
-
-            if field_binding_sets.is_empty() {
-                // This type variant can't match, skip it entirely
-                current_binding_sets.clear();
-                break;
-            }
-
-            // Combine field binding sets with current binding sets (cartesian product)
-            let mut new_binding_sets = vec![];
-            for current_set in &current_binding_sets {
-                for field_set in &field_binding_sets {
-                    let mut combined_requirements = current_set.requirements.clone();
-                    combined_requirements.extend(field_set.requirements.clone());
-
-                    let mut combined_bindings = current_set.bindings.clone();
-                    combined_bindings.extend(field_set.bindings.clone());
-
-                    new_binding_sets.push(BindingSet {
-                        requirements: combined_requirements,
-                        bindings: combined_bindings,
-                    });
-                }
-            }
-            current_binding_sets = new_binding_sets;
-        }
-
-        // Add all binding sets from this type to the result
-        binding_sets.extend(current_binding_sets);
-    }
-
-    // Empty Type should never happen - it indicates an internal error
-    if matches!(&value_type, Type::Union(types) if types.is_empty()) {
-        return Err(Error::InternalError {
-            message: format!(
-                "analyze_tuple_pattern received empty Type for tuple: {:?}",
-                tuple
-            ),
-        });
-    }
-
-    Ok(binding_sets)
 }
 
 fn analyze_partial_pattern(
@@ -482,59 +507,6 @@ fn analyze_star_pattern(
     }
 
     Ok(binding_sets)
-}
-
-/// Find tuple types that match the given tuple term
-fn find_matching_tuple_types(
-    type_lookup: &impl TypeLookup,
-    tuple: &ast::Tuple,
-    value_type: &Type,
-) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
-    let mut matching_types = Vec::new();
-
-    let types_to_check = match value_type {
-        Type::Union(types) => types.as_slice(),
-        single => std::slice::from_ref(single),
-    };
-
-    for typ in types_to_check {
-        if let Type::Tuple(type_id) = typ {
-            if let Some(field_mappings) = check_tuple_match(type_lookup, tuple, *type_id)? {
-                matching_types.push((*type_id, field_mappings));
-            }
-        }
-    }
-
-    Ok(matching_types)
-}
-
-/// Check if a specific tuple type matches the pattern and return field mappings
-fn check_tuple_match(
-    type_lookup: &impl TypeLookup,
-    tuple: &ast::Tuple,
-    type_id: TypeId,
-) -> Result<Option<Vec<(usize, usize)>>, Error> {
-    let tuple_info = type_lookup
-        .lookup_type(&type_id)
-        .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
-
-    if tuple.name.as_ref() != tuple_info.0.as_ref() || tuple.fields.len() != tuple_info.1.len() {
-        return Ok(None);
-    }
-
-    let mut field_mappings = Vec::new();
-    for (pattern_idx, field) in tuple.fields.iter().enumerate() {
-        let tuple_field = &tuple_info.1[pattern_idx];
-        if field.name.as_ref() != tuple_field.0.as_ref() {
-            return Ok(None);
-        }
-
-        // For now, use positional mapping (pattern_idx -> pattern_idx)
-        // Later we might support reordering based on field names
-        field_mappings.push((pattern_idx, pattern_idx));
-    }
-
-    Ok(Some(field_mappings))
 }
 
 fn find_types_with_fields_and_name(

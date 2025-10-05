@@ -178,15 +178,7 @@ fn literal(input: &str) -> IResult<&str, Literal> {
 
 // Pattern parsers for terms
 
-fn pattern_star(input: &str) -> IResult<&str, Term> {
-    nom_value(Term::Star, char('*'))(input)
-}
-
-fn pattern_placeholder(input: &str) -> IResult<&str, Term> {
-    nom_value(Term::Placeholder, char('_'))(input)
-}
-
-fn partial_pattern(input: &str) -> IResult<&str, Term> {
+fn partial_pattern_inner(input: &str) -> IResult<&str, PartialPattern> {
     alt((
         // Named partial pattern: TupleName(field1, field2, ...)
         map(
@@ -201,11 +193,9 @@ fn partial_pattern(input: &str) -> IResult<&str, Term> {
                     pair(ws0, char(')')),
                 ),
             )),
-            |(name, fields)| {
-                Term::Partial(PartialPattern {
-                    name: Some(name),
-                    fields,
-                })
+            |(name, fields)| PartialPattern {
+                name: Some(name),
+                fields,
             },
         ),
         // Unnamed partial pattern: (field1, field2, ...)
@@ -218,7 +208,7 @@ fn partial_pattern(input: &str) -> IResult<&str, Term> {
                 ),
                 pair(ws0, char(')')),
             ),
-            |fields| Term::Partial(PartialPattern { name: None, fields }),
+            |fields| PartialPattern { name: None, fields },
         ),
     ))(input)
 }
@@ -669,6 +659,111 @@ fn receive_term(input: &str) -> IResult<&str, Term> {
     )(input)
 }
 
+fn assignment(input: &str) -> IResult<&str, Term> {
+    map(preceded(char('='), assignment_inner), Term::Assignment)(input)
+}
+
+fn assignment_field(input: &str) -> IResult<&str, AssignmentField> {
+    alt((
+        // Named field: name: pattern
+        map(
+            separated_pair(identifier, tuple((char(':'), ws1)), assignment_inner),
+            |(name, pattern)| AssignmentField {
+                name: Some(name),
+                pattern,
+            },
+        ),
+        // Unnamed pattern
+        map(assignment_inner, |pattern| AssignmentField {
+            name: None,
+            pattern,
+        }),
+    ))(input)
+}
+
+fn assignment_string(input: &str) -> IResult<&str, Assignment> {
+    map(
+        delimited(
+            char('"'),
+            map_res(take_while(|c| c != '"'), |s: &str| parse_string_content(s)),
+            char('"'),
+        ),
+        |s: String| {
+            // Create Str[binary] tuple pattern
+            Assignment::Tuple(AssignmentTuple {
+                name: Some("Str".to_string()),
+                fields: vec![AssignmentField {
+                    name: None,
+                    pattern: Assignment::Literal(Literal::Binary(s.into_bytes())),
+                }],
+            })
+        },
+    )(input)
+}
+
+fn assignment_inner(input: &str) -> IResult<&str, Assignment> {
+    alt((
+        // Try string literals first (before tuples and literals)
+        assignment_string,
+        // Try assignment tuple (handles both [..] and Name[..])
+        map(assignment_tuple, |tuple| Assignment::Tuple(tuple)),
+        // Then try partial patterns (must come before identifier)
+        map(partial_pattern_inner, |partial| {
+            Assignment::Partial(partial)
+        }),
+        // Then try literals
+        map(literal, |lit| Assignment::Literal(lit)),
+        // Star and placeholder
+        map(char('*'), |_| Assignment::Star),
+        map(char('_'), |_| Assignment::Placeholder),
+        // Identifier must come last (since it's more general)
+        map(identifier, |id| Assignment::Identifier(id)),
+    ))(input)
+}
+
+fn assignment_tuple(input: &str) -> IResult<&str, AssignmentTuple> {
+    alt((
+        // Named tuple: Name[...]
+        map(
+            tuple((
+                tuple_name,
+                delimited(
+                    pair(char('['), wsc),
+                    terminated(
+                        separated_list0(tuple((wsc, char(','), wsc)), assignment_field),
+                        opt(pair(wsc, char(','))),
+                    ),
+                    pair(wsc, char(']')),
+                ),
+            )),
+            |(name, fields)| AssignmentTuple {
+                name: Some(name),
+                fields,
+            },
+        ),
+        // Unnamed tuple: [...]
+        map(
+            delimited(
+                pair(char('['), wsc),
+                terminated(
+                    separated_list0(tuple((wsc, char(','), wsc)), assignment_field),
+                    opt(pair(wsc, char(','))),
+                ),
+                pair(wsc, char(']')),
+            ),
+            |fields| AssignmentTuple { name: None, fields },
+        ),
+        // Bare named tuple: Name (not followed by '(' which would be a partial pattern)
+        map(
+            tuple((tuple_name, peek(not(pair(ws0, char('(')))))),
+            |(name, _)| AssignmentTuple {
+                name: Some(name),
+                fields: vec![],
+            },
+        ),
+    ))(input)
+}
+
 fn term(input: &str) -> IResult<&str, Term> {
     alt((
         // String terms (before literals to handle quotes)
@@ -678,6 +773,8 @@ fn term(input: &str) -> IResult<&str, Term> {
         spawn_term,
         send_call,
         self_ref_term,
+        // Assignment (must be before literals and identifiers)
+        assignment,
         // Literals
         map(literal, Term::Literal),
         // Complex terms
@@ -694,10 +791,6 @@ fn term(input: &str) -> IResult<&str, Term> {
         map(member_access, Term::MemberAccess),
         // Identifier (must come after member_access and function_call)
         map(identifier, Term::Identifier),
-        // Patterns
-        partial_pattern,
-        pattern_star,
-        pattern_placeholder,
         // Operations
         equality,
         not_term,

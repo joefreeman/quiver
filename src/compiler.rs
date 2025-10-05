@@ -323,61 +323,82 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_create_tuple(
+    fn compile_tuple(
         &mut self,
         tuple_name: Option<String>,
         fields: Vec<ast::TupleField>,
+        value_type: Option<Type>,
     ) -> Result<Type, Error> {
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
+
+        // Allocate ripple variable if this tuple contains ripples and we have a value
+        let contains_ripple = Self::tuple_contains_ripple(&fields);
+        let ripple_index = if contains_ripple && value_type.is_some() {
+            let val_type = value_type.unwrap();
+            let ripple_var_name = format!("~{}", self.ripple_depth);
+            self.ripple_depth += 1;
+            let index = self.define_variable(&ripple_var_name, &[], val_type);
+            self.codegen.add_instruction(Instruction::Allocate(1));
+            self.codegen.add_instruction(Instruction::Store(index));
+            Some(index)
+        } else {
+            None
+        };
 
         // Compile field values and collect their types
         let mut field_types = Vec::new();
         for field in &fields {
             let field_type = match &field.value {
-                ast::FieldValue::Chain(chain) => {
-                    // Value tuples don't have a value context
-                    self.compile_chain(chain.clone(), None)?
-                }
+                ast::FieldValue::Chain(chain) => self.compile_chain(chain.clone(), None)?,
                 ast::FieldValue::Ripple => {
-                    // Ripple is only valid if we're inside an operation context
+                    // Check if we're in a ripple context
                     if self.ripple_depth == 0 {
                         return Err(Error::FeatureUnsupported(
                             "Ripple cannot be used outside of an operation context".to_string(),
                         ));
                     }
-                    // Use the stored ripple value from the enclosing operation
+                    // Load the ripple value
                     let ripple_var_name = format!("~{}", self.ripple_depth - 1);
-                    // We need to get the type and index of the ripple value
-                    let (ripple_type, ripple_index) = self
+                    let (ripple_type, ripple_idx) = self
                         .lookup_variable(&self.scopes, &ripple_var_name, &[])
                         .ok_or_else(|| Error::InternalError {
-                            message: "Ripple value type not found in scope".to_string(),
+                            message: "Ripple value not found in scope".to_string(),
                         })?;
-                    self.codegen
-                        .add_instruction(Instruction::Load(ripple_index));
+                    self.codegen.add_instruction(Instruction::Load(ripple_idx));
                     ripple_type
                 }
             };
             field_types.push((field.name.clone(), field_type));
         }
 
-        // Register the tuple type with potentially union field types
+        // Clean up ripple context if we allocated one
+        if ripple_index.is_some() {
+            self.ripple_depth -= 1;
+        }
+
+        // Register the tuple type and emit instruction
         let type_id = self.program.register_type(tuple_name, field_types);
         self.codegen.add_instruction(Instruction::Tuple(type_id));
+
+        // Clear the ripple local if we allocated one
+        if ripple_index.is_some() {
+            self.codegen.add_instruction(Instruction::Clear(1));
+            self.local_count -= 1;
+        }
 
         Ok(Type::Tuple(type_id))
     }
 
-    // Helper function to check if a tuple contains ripple operations
-    fn tuple_contains_ripple(tuple: &ast::Tuple) -> bool {
-        tuple.fields.iter().any(|field| {
+    // Helper function to check if tuple fields contain ripple operations (recursively)
+    fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
+        fields.iter().any(|field| {
             match &field.value {
                 ast::FieldValue::Ripple => true,
                 ast::FieldValue::Chain(chain) => {
                     // Check for nested tuples that contain ripples
                     chain.terms.iter().any(|term| {
                         if let ast::Term::Tuple(nested_tuple) = term {
-                            Self::tuple_contains_ripple(nested_tuple)
+                            Self::tuple_contains_ripple(&nested_tuple.fields)
                         } else {
                             false
                         }
@@ -385,64 +406,6 @@ impl<'a> Compiler<'a> {
                 }
             }
         })
-    }
-
-    fn compile_wrap_tupple(
-        &mut self,
-        name: Option<String>,
-        fields: Vec<ast::TupleField>,
-        value_type: Type,
-    ) -> Result<Type, Error> {
-        // The parser ensures only tuples with ripples are parsed as Operation::Tuple
-        // so we don't need to check for ripples here
-
-        // Use a unique variable name for each ripple context to avoid conflicts
-        let ripple_var_name = format!("~{}", self.ripple_depth);
-        self.ripple_depth += 1;
-        let ripple_index = self.define_variable(&ripple_var_name, &[], value_type.clone());
-        self.codegen.add_instruction(Instruction::Allocate(1));
-        self.codegen
-            .add_instruction(Instruction::Store(ripple_index));
-
-        Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
-
-        // Compile field values and collect their types
-        let mut field_types = Vec::new();
-        for field in &fields {
-            let field_type = match &field.value {
-                ast::FieldValue::Ripple => {
-                    // Use the stored ripple value
-                    let ripple_var_name = format!("~{}", self.ripple_depth - 1);
-                    let (ripple_type, ripple_index) = self
-                        .lookup_variable(&self.scopes, &ripple_var_name, &[])
-                        .ok_or_else(|| Error::InternalError {
-                            message: "Ripple value not found in scope".to_string(),
-                        })?;
-                    self.codegen
-                        .add_instruction(Instruction::Load(ripple_index));
-                    ripple_type.clone()
-                }
-                ast::FieldValue::Chain(chain) => {
-                    // Regular chain compilation
-                    self.compile_chain(chain.clone(), None)?
-                }
-            };
-
-            field_types.push((field.name.clone(), field_type));
-        }
-
-        // Pop the ripple context
-        self.ripple_depth -= 1;
-
-        // Register the tuple type with potentially union field types
-        let type_id = self.program.register_type(name, field_types);
-        self.codegen.add_instruction(Instruction::Tuple(type_id));
-
-        // Clear the ripple local now that we're done with it
-        self.codegen.add_instruction(Instruction::Clear(1));
-        self.local_count -= 1;
-
-        Ok(Type::Tuple(type_id))
     }
 
     fn extract_receive_type(&mut self, block: &ast::Block) -> Result<Type, Error> {
@@ -734,7 +697,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_destructure(
         &mut self,
-        term: ast::Term,
+        pattern: ast::Assignment,
         value_type: Type,
         on_no_match: Option<usize>,
     ) -> Result<Type, Error> {
@@ -745,7 +708,7 @@ impl<'a> Compiler<'a> {
 
         // Analyze pattern to get bindings without generating code yet
         let (certainty, bindings, binding_sets) =
-            pattern::analyze_pattern(&self.type_context, self.program, &term, &value_type)?;
+            pattern::analyze_pattern(&self.type_context, self.program, &pattern, &value_type)?;
 
         match certainty {
             MatchCertainty::WontMatch => {
@@ -1218,40 +1181,37 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         match term {
             ast::Term::Literal(literal) => {
-                if let Some(val_type) = value_type {
-                    // Treat as pattern match when value is present
-                    self.compile_destructure(ast::Term::Literal(literal), val_type, on_no_match)
-                } else {
-                    // Compile as value when no value present
-                    self.compile_literal(literal)
+                if value_type.is_some() {
+                    return Err(Error::FeatureUnsupported(
+                        "Literal cannot be used as pattern; use assignment pattern (e.g., =42)"
+                            .to_string(),
+                    ));
                 }
+                self.compile_literal(literal)
             }
             ast::Term::Identifier(name) => {
-                if let Some(val_type) = value_type {
-                    // Treat as pattern match/destructuring when value is present
-                    self.compile_destructure(ast::Term::Identifier(name), val_type, on_no_match)
-                } else {
-                    // Load the variable when no value present
-                    let (var_type, index) = self
-                        .lookup_variable(&self.scopes, &name, &[])
-                        .ok_or_else(|| Error::VariableUndefined(name.clone()))?;
-                    self.codegen.add_instruction(Instruction::Load(index));
-                    Ok(var_type)
+                if value_type.is_some() {
+                    return Err(Error::FeatureUnsupported(
+                        "Identifier cannot be used as pattern; use assignment pattern (e.g., =x)"
+                            .to_string(),
+                    ));
                 }
+                // Load the variable when no value present
+                let (var_type, index) = self
+                    .lookup_variable(&self.scopes, &name, &[])
+                    .ok_or_else(|| Error::VariableUndefined(name.clone()))?;
+                self.codegen.add_instruction(Instruction::Load(index));
+                Ok(var_type)
             }
             ast::Term::Tuple(tuple) => {
-                if let Some(val_type) = value_type {
-                    // If tuple contains ripples, it's an operation; otherwise pattern match
-                    if Self::tuple_contains_ripple(&tuple) {
-                        self.compile_wrap_tupple(tuple.name, tuple.fields, val_type)
-                    } else {
-                        // Treat as pattern match
-                        self.compile_destructure(ast::Term::Tuple(tuple), val_type, on_no_match)
-                    }
-                } else {
-                    // Compile as value tuple when no value present
-                    self.compile_create_tuple(tuple.name, tuple.fields)
+                // Tuples without ripples when a value is present should use assignment patterns
+                if value_type.is_some() && !Self::tuple_contains_ripple(&tuple.fields) {
+                    return Err(Error::FeatureUnsupported(
+                        "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])"
+                            .to_string(),
+                    ));
                 }
+                self.compile_tuple(tuple.name, tuple.fields, value_type)
             }
             ast::Term::Block(block) => {
                 // Blocks take their input as a parameter
@@ -1331,12 +1291,12 @@ impl<'a> Compiler<'a> {
                 })?;
                 self.compile_not(val_type)
             }
-            ast::Term::Partial(_) | ast::Term::Star | ast::Term::Placeholder => {
-                // These are always patterns
+            ast::Term::Assignment(pattern) => {
+                // Assignments are always patterns
                 let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Pattern matching requires a value".to_string())
+                    Error::FeatureUnsupported("Assignment requires a value".to_string())
                 })?;
-                self.compile_destructure(term, val_type, on_no_match)
+                self.compile_destructure(pattern, val_type, on_no_match)
             }
             ast::Term::Spawn(term) => {
                 // Spawn should not receive a value - it spawns the term

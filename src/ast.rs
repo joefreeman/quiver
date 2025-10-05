@@ -58,6 +58,7 @@ pub enum Term {
     Literal(Literal),
     Identifier(String),
     Tuple(Tuple),
+    Assignment(Assignment),
     Block(Block),
     FunctionDefinition(FunctionDefinition),
     FunctionCall(FunctionCall),
@@ -67,9 +68,6 @@ pub enum Term {
     TailCall(TailCall),
     Equality,
     Not,
-    Partial(PartialPattern),
-    Star,
-    Placeholder,
     Spawn(Box<Term>),
     Send(Send),
     Self_,
@@ -140,6 +138,28 @@ pub struct Send {
 pub struct Receive {
     pub type_def: Type,
     pub block: Option<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Assignment {
+    Identifier(String),
+    Literal(Literal),
+    Tuple(AssignmentTuple),
+    Partial(PartialPattern),
+    Star,
+    Placeholder,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssignmentTuple {
+    pub name: Option<String>,
+    pub fields: Vec<AssignmentField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssignmentField {
+    pub name: Option<String>,
+    pub pattern: Assignment,
 }
 
 #[derive(Debug, Clone, PartialEq)]
