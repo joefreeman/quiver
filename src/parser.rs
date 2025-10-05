@@ -4,8 +4,8 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while},
     character::complete::{char, digit1, multispace0, multispace1, satisfy},
-    combinator::{map, map_res, not, opt, peek, recognize, value as nom_value},
-    multi::{many0, many1, separated_list0, separated_list1},
+    combinator::{map, map_res, not, opt, peek, recognize, value as nom_value, verify},
+    multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
 };
 
@@ -392,43 +392,32 @@ fn type_definition(input: &str) -> IResult<&str, Type> {
 
 // Term parsers
 
-// Parse member access patterns - no '!' at the end
-// Examples: f.x, .x, .0, etc.
-fn member_access(input: &str) -> IResult<&str, MemberAccess> {
-    alt((
-        // Member access with identifier and accessors: foo.bar, foo.0
+// Parse access patterns
+fn access(input: &str) -> IResult<&str, Access> {
+    verify(
         map(
-            pair(
-                identifier,
-                many1(preceded(
-                    // Changed to many1 - requires at least one accessor
+            tuple((
+                opt(identifier),
+                many0(preceded(
                     char('.'),
                     alt((
                         map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
                         map(identifier, AccessPath::Field),
                     )),
                 )),
-            ),
-            |(identifier, accessors)| MemberAccess {
-                identifier: Some(identifier),
-                accessors,
-            },
-        ),
-        // Field/positional access without identifier (.x, .0, .x.0)
-        map(
-            many1(preceded(
-                char('.'),
-                alt((
-                    map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
-                    map(identifier, AccessPath::Field),
+                opt(preceded(
+                    peek(char('[')),
+                    delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
                 )),
             )),
-            |accessors| MemberAccess {
-                identifier: None,
+            |(identifier, accessors, argument)| Access {
+                identifier,
                 accessors,
+                argument: argument.map(|fields| Tuple { name: None, fields }),
             },
         ),
-    ))(input)
+        |ma| ma.identifier.is_some() || !ma.accessors.is_empty(),
+    )(input)
 }
 
 // Parse await operator - a postfix '!' that awaits a process
@@ -542,13 +531,13 @@ fn block(input: &str) -> IResult<&str, Block> {
     )(input)
 }
 
-fn function_definition(input: &str) -> IResult<&str, FunctionDefinition> {
+fn function(input: &str) -> IResult<&str, Function> {
     map(
         preceded(
             char('#'),
             pair(opt(terminated(function_input_type, ws1)), block),
         ),
-        |(parameter_type, body)| FunctionDefinition {
+        |(parameter_type, body)| Function {
             parameter_type,
             body,
         },
@@ -565,11 +554,16 @@ fn tail_call(input: &str) -> IResult<&str, Term> {
             map(identifier, AccessPath::Field),
         )),
     ))(input)?;
+    let (input, argument) = opt(preceded(
+        peek(char('[')),
+        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
+    ))(input)?;
     Ok((
         input,
         Term::TailCall(TailCall {
             identifier: ident,
             accessors,
+            argument: argument.map(|fields| Tuple { name: None, fields }),
         }),
     ))
 }
@@ -735,16 +729,14 @@ fn term(input: &str) -> IResult<&str, Term> {
         map(literal, Term::Literal),
         // Complex terms
         map(tuple_term, Term::Tuple),
-        map(function_definition, Term::FunctionDefinition),
+        map(function, Term::Function),
         map(block, Term::Block),
         // Import
         map(import, Term::Import),
         // Builtins
         map(builtin, Term::Builtin),
-        // Member access (includes field/positional access)
-        map(member_access, Term::MemberAccess),
-        // Identifier (must come after member_access)
-        map(identifier, Term::Identifier),
+        // Access (includes field/positional access and bare identifiers with optional argument)
+        map(access, Term::Access),
         // Operations
         equality,
         not_term,

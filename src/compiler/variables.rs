@@ -52,9 +52,6 @@ impl<'a> FreeVariableCollector<'a> {
     fn visit_term(&mut self, term: &ast::Term) {
         match term {
             ast::Term::Literal(_) => {}
-            ast::Term::Identifier(name) => {
-                self.visit_identifier(name, vec![]);
-            }
             ast::Term::Tuple(tuple) => {
                 for field in &tuple.fields {
                     if let ast::FieldValue::Chain(chain) = &field.value {
@@ -69,12 +66,19 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::Block(block) => {
                 self.visit_block(&block);
             }
-            ast::Term::FunctionDefinition(func) => {
+            ast::Term::Function(func) => {
                 self.visit_block(&func.body);
             }
-            ast::Term::MemberAccess(member_access) => {
-                if let Some(name) = &member_access.identifier {
-                    self.visit_identifier(name, member_access.accessors.clone());
+            ast::Term::Access(access) => {
+                if let Some(name) = &access.identifier {
+                    self.visit_identifier(name, access.accessors.clone());
+                }
+                if let Some(argument) = &access.argument {
+                    for field in &argument.fields {
+                        if let ast::FieldValue::Chain(chain) = &field.value {
+                            self.visit_chain(chain);
+                        }
+                    }
                 }
             }
             ast::Term::Import(_) => {}
@@ -82,6 +86,13 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::TailCall(tail_call) => {
                 if let Some(name) = &tail_call.identifier {
                     self.visit_identifier(name, tail_call.accessors.clone());
+                }
+                if let Some(argument) = &tail_call.argument {
+                    for field in &argument.fields {
+                        if let ast::FieldValue::Chain(chain) = &field.value {
+                            self.visit_chain(chain);
+                        }
+                    }
                 }
             }
             ast::Term::Equality => {}

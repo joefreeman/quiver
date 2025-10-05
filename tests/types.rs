@@ -334,9 +334,9 @@ fn test_recursive_type_pattern_matching_bug() {
             },
 
             // These should all work without FieldAccessInvalid errors
-            r1 = [Nil, 10] ~> process_list,
-            r2 = [Cons[5, Nil], 10] ~> process_list,
-            r3 = [Cons[5, Cons[3, Nil]], 10] ~> process_list,
+            r1 = process_list[Nil, 10],
+            r2 = process_list[Cons[5, Nil], 10],
+            r3 = process_list[Cons[5, Cons[3, Nil]], 10],
 
             [r1, r2, r3]
             "#,
@@ -354,7 +354,7 @@ fn test_union_pattern() {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
             },
-            [Empty, 1] ~> f
+            f[Empty, 1]
             "#,
         )
         .expect("100");
@@ -367,7 +367,7 @@ fn test_union_pattern() {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
             },
-            [Full[Empty], 1] ~> f
+            f[Full[Empty], 1]
             "#,
         )
         .expect("200");
@@ -381,9 +381,9 @@ fn test_recursive_union_pattern() {
             type t = Empty | Full[&];
             f = #[t, int] {
               | ~> =[Empty, _] => 100
-              | ~> =[Full[rest], n] => [rest, 0] ~> &
+              | ~> =[Full[rest], n] => &[rest, 0]
             },
-            [Full[Empty], 1] ~> f
+            f[Full[Empty], 1]
             "#,
         )
         .expect("100");

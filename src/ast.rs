@@ -48,12 +48,11 @@ pub struct Chain {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     Literal(Literal),
-    Identifier(String),
     Tuple(Tuple),
     Assignment(Assignment),
     Block(Block),
-    FunctionDefinition(FunctionDefinition),
-    MemberAccess(MemberAccess),
+    Function(Function),
+    Access(Access),
     Import(String),
     Builtin(String),
     TailCall(TailCall),
@@ -90,15 +89,16 @@ pub struct TupleField {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FunctionDefinition {
+pub struct Function {
     pub parameter_type: Option<Type>,
     pub body: Block,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MemberAccess {
+pub struct Access {
     pub identifier: Option<String>,
     pub accessors: Vec<AccessPath>,
+    pub argument: Option<Tuple>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -117,6 +117,7 @@ pub struct PartialPattern {
 pub struct TailCall {
     pub identifier: Option<String>,
     pub accessors: Vec<AccessPath>,
+    pub argument: Option<Tuple>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

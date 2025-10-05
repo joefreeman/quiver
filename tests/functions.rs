@@ -117,3 +117,29 @@ fn test_nested_function_captures() {
         )
         .expect("43");
 }
+
+#[test]
+fn test_function_call_syntax() {
+    quiver()
+        .evaluate("math = %\"math\", math.add[3, 4]")
+        .expect("7");
+}
+
+#[test]
+fn test_function_call_with_ripple() {
+    quiver()
+        .evaluate("math = %\"math\", math.add[1, 2] ~> math.mul[~, 3]")
+        .expect("9");
+}
+
+#[test]
+fn test_function_call_no_args() {
+    quiver().evaluate("f = #{ 42 }, f[]").expect("42");
+}
+
+#[test]
+fn test_function_call_field_access() {
+    quiver()
+        .evaluate("math = %\"math\", math ~> .add[1, 2]")
+        .expect("3");
+}

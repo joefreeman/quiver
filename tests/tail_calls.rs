@@ -30,6 +30,20 @@ fn test_countdown() {
 }
 
 #[test]
+fn test_tail_call_with_arguments() {
+    quiver()
+        .evaluate(
+            r#"
+            math = %"math",
+            g = #[int, int] { ~> =[x, y] => math.mul[x, y] },
+            f = #int { ~> =x => math.add[x, 1] ~> &g[~ , 2] },
+            1 ~> f
+            "#,
+        )
+        .expect("4")
+}
+
+#[test]
 fn test_factorial() {
     quiver()
         .evaluate(
@@ -41,7 +55,7 @@ fn test_factorial() {
                 [x, y] ~> <multiply>
               ] ~> &
             },
-            fact = #int { ~> =x => [x, 1] ~> f },
+            fact = #int { ~> =x => f[x, 1] },
             5 ~> fact
             "#,
         )

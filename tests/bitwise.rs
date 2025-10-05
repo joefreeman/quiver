@@ -204,12 +204,11 @@ fn test_bitwise_chaining() {
     quiver()
         .evaluate(
             r#"
-            'aa' ~> =a,  // 10101010
-            '55' ~> =b,  // 01010101
+            a = 'aa',  // 10101010
+            b = '55',  // 01010101
             // XOR then AND
-            [a, b] ~> <binary_xor> ~> =xor_result,  // Should be 0xFF
-            [xor_result, a] ~> <binary_and> ~> =and_result,  // 0xFF & 0xAA = 0xAA
-            and_result
+            xor_result = [a, b] ~> <binary_xor>,  // Should be 0xFF
+            [xor_result, a] ~> <binary_and>  // 0xFF & 0xAA = 0xAA
             "#,
         )
         .expect("'aa'");
@@ -246,21 +245,21 @@ fn test_hamt_simulation() {
         .evaluate(
             r#"
             // Simulate HAMT bitmap operations
-            8 ~> <binary_new> ~> =bitmap,  // 8-byte bitmap
+            bitmap = 8 ~> <binary_new>,  // 8-byte bitmap
 
             // Set bits at positions that would represent hash collisions
-            [bitmap, 5, 1] ~> <binary_set_bit> ~> =step1,   // Set bit 5
-            [step1, 13, 1] ~> <binary_set_bit> ~> =step2,   // Set bit 13
-            [step2, 21, 1] ~> <binary_set_bit> ~> =step3,   // Set bit 21
+            step1 = [bitmap, 5, 1] ~> <binary_set_bit>,   // Set bit 5
+            step2 = [step1, 13, 1] ~> <binary_set_bit>,   // Set bit 13
+            step3 = [step2, 21, 1] ~> <binary_set_bit>,   // Set bit 21
 
             // Count how many slots are occupied
-            step3 ~> <binary_popcount> ~> =occupied_count,
+            occupied_count = step3 ~> <binary_popcount>,
 
             // Extract a 5-bit chunk (like HAMT does for navigation)
-            [step3, 3] ~> <binary_shift_right> ~> =shifted,  // Shift right by 3
-            4 ~> <binary_new> ~> =mask,  // Create mask binary
-            [mask, 0, 1] ~> <binary_set_bit> ~> =mask_with_bits,  // Set LSB
-            [shifted, mask_with_bits] ~> <binary_and> ~> =chunk,
+            shifted = [step3, 3] ~> <binary_shift_right>,  // Shift right by 3
+            mask = 4 ~> <binary_new>,  // Create mask binary
+            mask_with_bits = [mask, 0, 1] ~> <binary_set_bit>,  // Set LSB
+            chunk = [shifted, mask_with_bits] ~> <binary_and>,
 
             occupied_count
             "#,

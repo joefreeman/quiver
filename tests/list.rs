@@ -7,7 +7,7 @@ fn test_new() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new
+            list.new[]
             "#,
         )
         .expect("Nil")
@@ -19,12 +19,9 @@ fn test_prepend() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
             "#,
         )
         .expect("Cons[20, Cons[10, Nil]]");
@@ -36,7 +33,7 @@ fn test_head() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> list.head
+            list.new[] ~> list.head
             "#,
         )
         .expect("[]");
@@ -45,12 +42,9 @@ fn test_head() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
             ~> list.head
             "#,
         )
@@ -63,12 +57,9 @@ fn test_tail() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
             ~> list.tail
             "#,
         )
@@ -78,10 +69,8 @@ fn test_tail() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
+            list.new[]
+            ~> list.prepend[~, 10]
             ~> list.tail
             "#,
         )
@@ -91,7 +80,7 @@ fn test_tail() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> list.tail
+            list.new[] ~> list.tail
             "#,
         )
         .expect("[]");
@@ -103,7 +92,7 @@ fn test_is_empty() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> list.empty?
+            list.new[] ~> list.empty?
             "#,
         )
         .expect("Ok");
@@ -112,7 +101,7 @@ fn test_is_empty() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 10] ~> list.prepend ~> list.empty?
+            list.new[] ~> list.prepend[~, 10] ~> list.empty?
             "#,
         )
         .expect("[]");
@@ -124,7 +113,7 @@ fn test_length() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> list.length
+            list.new[] ~> list.length
             "#,
         )
         .expect("0");
@@ -133,7 +122,7 @@ fn test_length() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 10] ~> list.prepend ~> list.length
+            list.new[] ~> list.prepend[~, 10] ~> list.length
             "#,
         )
         .expect("1");
@@ -142,12 +131,9 @@ fn test_length() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
             ~> list.length
             "#,
         )
@@ -160,7 +146,7 @@ fn test_append() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 10] ~> list.append
+            list.new[] ~> list.append[~, 10]
             "#,
         )
         .expect("Cons[10, Nil]");
@@ -169,12 +155,9 @@ fn test_append() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~>
-            list.new
-            ~> [~, 10]
-            ~> list.append
-            ~> [~, 20]
-            ~> list.append
+            list.new[]
+            ~> list.append[~, 10]
+            ~> list.append[~, 20]
             "#,
         )
         .expect("Cons[10, Cons[20, Nil]]");
@@ -183,12 +166,9 @@ fn test_append() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.append
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.append[~, 20]
             "#,
         )
         .expect("Cons[10, Cons[20, Nil]]");
@@ -200,7 +180,7 @@ fn test_reverse() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> list.reverse
+            list.new[] ~> list.reverse
             "#,
         )
         .expect("Nil");
@@ -209,7 +189,7 @@ fn test_reverse() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 10] ~> list.prepend ~> list.reverse
+            list.new[] ~> list.prepend[~, 10] ~> list.reverse
             "#,
         )
         .expect("Cons[10, Nil]");
@@ -218,12 +198,9 @@ fn test_reverse() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
             ~> list.reverse
             "#,
         )
@@ -233,14 +210,10 @@ fn test_reverse() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
             ~> list.reverse
             "#,
         )
@@ -253,7 +226,7 @@ fn test_concat() {
         .evaluate(
             r#"
             list = %"list"
-            [[] ~> list.new, [] ~> list.new] ~> list.concat
+            [list.new[], list.new[]] ~> list.concat
             "#,
         )
         .expect("Nil");
@@ -262,14 +235,8 @@ fn test_concat() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> =first,
-            [] ~> list.new ~> =second,
+            first = list.new[] ~> list.prepend[~, 10] ~> list.prepend[~, 20],
+            second = list.new[],
             [first, second] ~> list.concat
             "#,
         )
@@ -279,14 +246,8 @@ fn test_concat() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> =first,
-            []
-            ~> list.new
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 40]
-            ~> list.prepend
-            ~> =second,
+            first = list.new[],
+            second = list.new[] ~> list.prepend[~, 30] ~> list.prepend[~, 40]
             [first, second] ~> list.concat
             "#,
         )
@@ -296,8 +257,8 @@ fn test_concat() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 10] ~> list.prepend ~> [~, 20] ~> list.prepend ~> =first,
-            [] ~> list.new ~> [~, 30] ~> list.prepend ~> [~, 40] ~> list.prepend ~> =second,
+            first = list.new[] ~> list.prepend[~, 10] ~> list.prepend[~, 20],
+            second = list.new[] ~> list.prepend[~, 30] ~> list.prepend[~, 40],
             [first, second] ~> list.concat
             "#,
         )
@@ -311,7 +272,7 @@ fn test_at() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 0] ~> list.at
+            list.new[] ~> list.at[~, 0]
             "#,
         )
         .expect("[]");
@@ -321,16 +282,11 @@ fn test_at() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 0]
-            ~> list.at
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.at[~, 0]
             "#,
         )
         .expect("30");
@@ -340,16 +296,11 @@ fn test_at() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 1]
-            ~> list.at
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.at[~, 1]
             "#,
         )
         .expect("20");
@@ -359,16 +310,11 @@ fn test_at() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.at
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.at[~, 2]
             "#,
         )
         .expect("10");
@@ -377,14 +323,10 @@ fn test_at() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 5]
-            ~> list.at
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.at[~, 5]
             "#,
         )
         .expect("[]");
@@ -397,8 +339,8 @@ fn test_map_empty_list() {
             r#"
             list = %"list"
             math = %"math"
-            #int { ~> =x => [x, 2] ~> math.mul } ~> =double,
-            [] ~> list.new ~> [~, double] ~> list.map
+            #int { ~> =x => math.mul[x, 2] } ~> =double,
+            list.new[] ~> list.map[~, double]
             "#,
         )
         .expect("Nil");
@@ -411,13 +353,10 @@ fn test_map_single_element() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mul } ~> =double,
-            []
-            ~> list.new
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, double]
-            ~> list.map
+            #int { ~> =x => math.mul[x, 2] } ~> =double,
+            list.new[]
+            ~> list.prepend[~, 5]
+            ~> list.map[~, double]
             "#,
         )
         .expect("Cons[10, Nil]");
@@ -430,17 +369,12 @@ fn test_map_multiple_elements() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mul } ~> =double,
-            []
-            ~> list.new
-            ~> [~, 1]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, double]
-            ~> list.map
+            #int { ~> =x => math.mul[x, 2] } ~> =double,
+            list.new[]
+            ~> list.prepend[~, 1]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.map[~, double]
             "#,
         )
         .expect("Cons[6, Cons[4, Cons[2, Nil]]]");
@@ -453,17 +387,12 @@ fn test_map_increment() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 1] ~> math.add } ~> =inc,
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, inc]
-            ~> list.map
+            #int { ~> =x => math.add[x, 1] } ~> =inc,
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.map[~, inc]
             "#,
         )
         .expect("Cons[31, Cons[21, Cons[11, Nil]]]");
@@ -476,16 +405,11 @@ fn test_map_identity() {
             r#"
             list = %"list"
             #int { ~> =x => x } ~> =id,
-            []
-            ~> list.new
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 15]
-            ~> list.prepend
-            ~> [~, id]
-            ~> list.map
+            list.new[]
+            ~> list.prepend[~, 5]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 15]
+            ~> list.map[~, id]
             "#,
         )
         .expect("Cons[15, Cons[10, Cons[5, Nil]]]");
@@ -498,17 +422,12 @@ fn test_map_square() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, x] ~> math.mul } ~> =square,
-            []
-            ~> list.new
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, 4]
-            ~> list.prepend
-            ~> [~, square]
-            ~> list.map
+            #int { ~> =x => math.mul[x, x] } ~> =square,
+            list.new[]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.prepend[~, 4]
+            ~> list.map[~, square]
             "#,
         )
         .expect("Cons[16, Cons[9, Cons[4, Nil]]]");
@@ -521,8 +440,8 @@ fn test_filter_empty_list() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mod ~> =0 } ~> =even?,
-            [] ~> list.new ~> [~, even?] ~> list.filter
+            #int { ~> =x => math.mod[x, 2] ~> =0 } ~> =even?,
+            list.new[] ~> list.filter[~, even?]
             "#,
         )
         .expect("Nil");
@@ -535,17 +454,12 @@ fn test_filter_no_matches() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.lt } ~> =negative?,
-            []
-            ~> list.new
-            ~> [~, 1]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, negative?]
-            ~> list.filter
+            #int { ~> =x => math.lt[x, 0] } ~> =negative?,
+            list.new[]
+            ~> list.prepend[~, 1]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.filter[~, negative?]
             "#,
         )
         .expect("Nil");
@@ -558,17 +472,12 @@ fn test_filter_all_match() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, 1]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.filter
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, 1]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.filter[~, positive?]
             "#,
         )
         .expect("Cons[3, Cons[2, Cons[1, Nil]]]");
@@ -581,23 +490,15 @@ fn test_filter_even_numbers() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mod ~> =0 } ~> =even?,
-            []
-            ~> list.new
-            ~> [~, 1]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, 4]
-            ~> list.prepend
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, 6]
-            ~> list.prepend
-            ~> [~, even?]
-            ~> list.filter
+            #int { ~> =x => math.mod[x, 2] ~> =0 } ~> =even?,
+            list.new[]
+            ~> list.prepend[~, 1]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.prepend[~, 4]
+            ~> list.prepend[~, 5]
+            ~> list.prepend[~, 6]
+            ~> list.filter[~, even?]
             "#,
         )
         .expect("Cons[6, Cons[4, Cons[2, Nil]]]");
@@ -610,21 +511,14 @@ fn test_filter_greater_than() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 10] ~> math.gt } ~> =gt_10,
-            []
-            ~> list.new
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 15]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, gt_10]
-            ~> list.filter
+            #int { ~> =x => math.gt[x, 10] } ~> =gt_10,
+            list.new[]
+            ~> list.prepend[~, 5]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 15]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 3]
+            ~> list.filter[~, gt_10]
             "#,
         )
         .expect("Cons[20, Cons[15, Nil]]");
@@ -637,16 +531,11 @@ fn test_filter_single_match() {
             r#"
             list = %"list"
             #int { ~> =x, [x, 5] ~> == => Ok } ~> =equals_5,
-            []
-            ~> list.new
-            ~> [~, 1]
-            ~> list.prepend
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, equals_5]
-            ~> list.filter
+            list.new[]
+            ~> list.prepend[~, 1]
+            ~> list.prepend[~, 5]
+            ~> list.prepend[~, 10]
+            ~> list.filter[~, equals_5]
             "#,
         )
         .expect("Cons[5, Nil]");
@@ -658,7 +547,7 @@ fn test_drop_empty_list() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 0] ~> list.drop
+            list.new[] ~> list.drop[~, 0]
             "#,
         )
         .expect("Nil");
@@ -667,7 +556,7 @@ fn test_drop_empty_list() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 5] ~> list.drop
+            list.new[] ~> list.drop[~, 5]
             "#,
         )
         .expect("Nil");
@@ -679,16 +568,11 @@ fn test_drop_zero() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 0]
-            ~> list.drop
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.drop[~, 0]
             "#,
         )
         .expect("Cons[30, Cons[20, Cons[10, Nil]]]");
@@ -700,20 +584,13 @@ fn test_drop_some_elements() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 40]
-            ~> list.prepend
-            ~> [~, 50]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.drop
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.prepend[~, 40]
+            ~> list.prepend[~, 50]
+            ~> list.drop[~, 2]
             "#,
         )
         .expect("Cons[30, Cons[20, Cons[10, Nil]]]");
@@ -725,16 +602,11 @@ fn test_drop_all_elements() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.drop
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.drop[~, 3]
             "#,
         )
         .expect("Nil");
@@ -746,14 +618,10 @@ fn test_drop_more_than_length() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 10]
-            ~> list.drop
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.drop[~, 10]
             "#,
         )
         .expect("Nil");
@@ -765,7 +633,7 @@ fn test_take_empty_list() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 0] ~> list.take
+            list.new[] ~> list.take[~, 0]
             "#,
         )
         .expect("Nil");
@@ -774,7 +642,7 @@ fn test_take_empty_list() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 5] ~> list.take
+            list.new[] ~> list.take[~, 5]
             "#,
         )
         .expect("Nil");
@@ -786,16 +654,11 @@ fn test_take_zero() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 0]
-            ~> list.take
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.take[~, 0]
             "#,
         )
         .expect("Nil");
@@ -807,20 +670,13 @@ fn test_take_some_elements() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 40]
-            ~> list.prepend
-            ~> [~, 50]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.take
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.prepend[~, 40]
+            ~> list.prepend[~, 50]
+            ~> list.take[~, 2]
             "#,
         )
         .expect("Cons[50, Cons[40, Nil]]");
@@ -832,16 +688,11 @@ fn test_take_all_elements() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.take
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.take[~, 3]
             "#,
         )
         .expect("Cons[30, Cons[20, Cons[10, Nil]]]");
@@ -853,14 +704,10 @@ fn test_take_more_than_length() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 10]
-            ~> list.take
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.take[~, 10]
             "#,
         )
         .expect("Cons[20, Cons[10, Nil]]");
@@ -872,7 +719,7 @@ fn test_contains_empty_list() {
         .evaluate(
             r#"
             list = %"list"
-            [] ~> list.new ~> [~, 5] ~> list.contains?
+            list.new[] ~> list.contains?[~, 5]
             "#,
         )
         .expect("[]");
@@ -884,12 +731,9 @@ fn test_contains_single_element_found() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 10]
-            ~> list.contains?
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.contains?[~, 10]
             "#,
         )
         .expect("Ok");
@@ -901,12 +745,9 @@ fn test_contains_single_element_not_found() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.contains?
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.contains?[~, 20]
             "#,
         )
         .expect("[]");
@@ -918,16 +759,11 @@ fn test_contains_multiple_elements_first() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.contains?
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.contains?[~, 30]
             "#,
         )
         .expect("Ok");
@@ -939,16 +775,11 @@ fn test_contains_multiple_elements_middle() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.contains?
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.contains?[~, 20]
             "#,
         )
         .expect("Ok");
@@ -960,16 +791,11 @@ fn test_contains_multiple_elements_last() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 10]
-            ~> list.contains?
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.contains?[~, 10]
             "#,
         )
         .expect("Ok");
@@ -981,16 +807,11 @@ fn test_contains_not_found() {
         .evaluate(
             r#"
             list = %"list"
-            []
-            ~> list.new
-            ~> [~, 10]
-            ~> list.prepend
-            ~> [~, 20]
-            ~> list.prepend
-            ~> [~, 30]
-            ~> list.prepend
-            ~> [~, 40]
-            ~> list.contains?
+            list.new[]
+            ~> list.prepend[~, 10]
+            ~> list.prepend[~, 20]
+            ~> list.prepend[~, 30]
+            ~> list.contains?[~, 40]
             "#,
         )
         .expect("[]");
@@ -1003,8 +824,8 @@ fn test_all_empty_list() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            [] ~> list.new ~> [~, positive?] ~> list.all?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[] ~> list.all?[~, positive?]
             "#,
         )
         .expect("Ok");
@@ -1017,13 +838,10 @@ fn test_all_single_true() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.all?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, 5]
+            ~> list.all?[~, positive?]
             "#,
         )
         .expect("Ok");
@@ -1036,13 +854,10 @@ fn test_all_single_false() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, -5]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.all?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, -5]
+            ~> list.all?[~, positive?]
             "#,
         )
         .expect("[]");
@@ -1055,17 +870,12 @@ fn test_all_multiple_all_true() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, 1]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.all?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, 1]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.all?[~, positive?]
             "#,
         )
         .expect("Ok");
@@ -1078,17 +888,12 @@ fn test_all_multiple_some_false() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, 1]
-            ~> list.prepend
-            ~> [~, -2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.all?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, 1]
+            ~> list.prepend[~, -2]
+            ~> list.prepend[~, 3]
+            ~> list.all?[~, positive?]
             "#,
         )
         .expect("[]");
@@ -1101,17 +906,12 @@ fn test_all_even_numbers() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mod ~> =0 } ~> =even?,
-            []
-            ~> list.new
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 4]
-            ~> list.prepend
-            ~> [~, 6]
-            ~> list.prepend
-            ~> [~, even?]
-            ~> list.all?
+            #int { ~> =x => math.mod[x, 2] ~> =0 } ~> =even?,
+            list.new[]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 4]
+            ~> list.prepend[~, 6]
+            ~> list.all?[~, even?]
             "#,
         )
         .expect("Ok");
@@ -1121,17 +921,12 @@ fn test_all_even_numbers() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mod ~> =0 } ~> =even?,
-            []
-            ~> list.new
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, 4]
-            ~> list.prepend
-            ~> [~, even?]
-            ~> list.all?
+            #int { ~> =x => math.mod[x, 2] ~> =0 } ~> =even?,
+            list.new[]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.prepend[~, 4]
+            ~> list.all?[~, even?]
             "#,
         )
         .expect("[]");
@@ -1144,8 +939,8 @@ fn test_any_empty_list() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            [] ~> list.new ~> [~, positive?] ~> list.any?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[] ~> list.any?[~, positive?]
             "#,
         )
         .expect("[]");
@@ -1158,13 +953,10 @@ fn test_any_single_true() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.any?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, 5]
+            ~> list.any?[~, positive?]
             "#,
         )
         .expect("Ok");
@@ -1177,13 +969,10 @@ fn test_any_single_false() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, -5]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.any?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, -5]
+            ~> list.any?[~, positive?]
             "#,
         )
         .expect("[]");
@@ -1196,17 +985,12 @@ fn test_any_multiple_all_false() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, -1]
-            ~> list.prepend
-            ~> [~, -2]
-            ~> list.prepend
-            ~> [~, -3]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.any?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, -1]
+            ~> list.prepend[~, -2]
+            ~> list.prepend[~, -3]
+            ~> list.any?[~, positive?]
             "#,
         )
         .expect("[]");
@@ -1219,17 +1003,12 @@ fn test_any_multiple_some_true() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 0] ~> math.gt } ~> =positive?,
-            []
-            ~> list.new
-            ~> [~, -1]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, -3]
-            ~> list.prepend
-            ~> [~, positive?]
-            ~> list.any?
+            #int { ~> =x => math.gt[x, 0] } ~> =positive?,
+            list.new[]
+            ~> list.prepend[~, -1]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, -3]
+            ~> list.any?[~, positive?]
             "#,
         )
         .expect("Ok");
@@ -1242,17 +1021,12 @@ fn test_any_first_matches() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mod ~> =0 } ~> =even?,
-            []
-            ~> list.new
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, even?]
-            ~> list.any?
+            #int { ~> =x => math.mod[x, 2] ~> =0 } ~> =even?,
+            list.new[]
+            ~> list.prepend[~, 3]
+            ~> list.prepend[~, 5]
+            ~> list.prepend[~, 2]
+            ~> list.any?[~, even?]
             "#,
         )
         .expect("Ok");
@@ -1265,17 +1039,12 @@ fn test_any_last_matches() {
             r#"
             list = %"list"
             %"math" ~> =math,
-            #int { ~> =x => [x, 2] ~> math.mod ~> =0 } ~> =even?,
-            []
-            ~> list.new
-            ~> [~, 2]
-            ~> list.prepend
-            ~> [~, 3]
-            ~> list.prepend
-            ~> [~, 5]
-            ~> list.prepend
-            ~> [~, even?]
-            ~> list.any?
+            #int { ~> =x => math.mod[x, 2] ~> =0 } ~> =even?,
+            list.new[]
+            ~> list.prepend[~, 2]
+            ~> list.prepend[~, 3]
+            ~> list.prepend[~, 5]
+            ~> list.any?[~, even?]
             "#,
         )
         .expect("Ok");

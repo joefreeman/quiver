@@ -18,14 +18,11 @@ math = %"math",
 sum' = #[list, int] {
   | ~> =[Nil, acc] => acc
   | ~> =[Cons[head, tail], acc] => {
-    [head, acc]
-    ~> math.add
-    ~> [tail, ~]
-    ~> &
+     math.add[head, acc] ~> &[tail, ~]
   }
 },
 
-sum = #list { ~> [~, 0] ~> sum' },
+sum = #list { ~> sum'[~, 0] },
 
 // Build and sum a list
 xs = Cons[1, Cons[2, Cons[3, Nil]]],

@@ -485,7 +485,7 @@ impl<'a> Compiler<'a> {
             ast::Term::Block(block) => {
                 self.collect_receive_types(block, receive_types)?;
             }
-            ast::Term::FunctionDefinition(_) => {
+            ast::Term::Function(_) => {
                 // Don't recurse into nested function definitions - they have their own receive types
             }
             ast::Term::Tuple(tuple) => {
@@ -501,13 +501,10 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_function(
-        &mut self,
-        function_definition: ast::FunctionDefinition,
-    ) -> Result<Type, Error> {
+    fn compile_function(&mut self, function: ast::Function) -> Result<Type, Error> {
         let mut function_params: HashSet<String> = HashSet::new();
 
-        if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
+        if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
             for field in &tuple_type.fields {
                 if let Some(field_name) = &field.name {
                     function_params.insert(field_name.clone());
@@ -516,7 +513,7 @@ impl<'a> Compiler<'a> {
         }
 
         let captures = variables::collect_free_variables(
-            &function_definition.body,
+            &function.body,
             &function_params,
             &|name, accessors| {
                 // Check if the full path (base + accessors) is defined, or just the base
@@ -573,7 +570,7 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let parameter_type = match &function_definition.parameter_type {
+        let parameter_type = match &function.parameter_type {
             Some(t) => self
                 .type_context
                 .resolve_ast_type(t.clone(), self.program)?,
@@ -581,7 +578,7 @@ impl<'a> Compiler<'a> {
         };
 
         // Extract receive type from function body
-        let receive_type = self.extract_receive_type(&function_definition.body)?;
+        let receive_type = self.extract_receive_type(&function.body)?;
 
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
@@ -648,7 +645,7 @@ impl<'a> Compiler<'a> {
         }
 
         let mut parameter_fields = HashMap::new();
-        if let Some(ast::Type::Tuple(tuple_type)) = &function_definition.parameter_type {
+        if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
                 if let Some(field_name) = &field.name {
                     let field_type = self
@@ -658,8 +655,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let body_type =
-            self.compile_block(function_definition.body, parameter_type.clone(), None)?;
+        let body_type = self.compile_block(function.body, parameter_type.clone(), None)?;
         self.codegen.add_instruction(Instruction::Return);
 
         let func_type = CallableType {
@@ -1196,20 +1192,6 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_literal(literal)
             }
-            ast::Term::Identifier(name) => {
-                // Load the variable
-                let (var_type, index) = self
-                    .lookup_variable(&self.scopes, &name, &[])
-                    .ok_or_else(|| Error::VariableUndefined(name.clone()))?;
-                self.codegen.add_instruction(Instruction::Load(index));
-
-                // If we have a value, apply the loaded value based on its type
-                if let Some(val_type) = value_type {
-                    self.apply_value_to_type(var_type.clone(), val_type)
-                } else {
-                    Ok(var_type)
-                }
-            }
             ast::Term::Tuple(tuple) => {
                 // Tuples without ripples when a value is present should use assignment patterns
                 if value_type.is_some() && !Self::tuple_contains_ripple(&tuple.fields) {
@@ -1230,21 +1212,39 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_block(block, block_parameter, None)
             }
-            ast::Term::FunctionDefinition(func_def) => {
+            ast::Term::Function(func) => {
                 if value_type.is_some() {
                     return Err(Error::FeatureUnsupported(
-                        "Function definition cannot be applied to value".to_string(),
+                        "Function cannot be applied to value".to_string(),
                     ));
                 }
-                self.compile_function(func_def)
+                self.compile_function(func)
             }
-            ast::Term::MemberAccess(member_access) => {
-                match &member_access.identifier {
+            ast::Term::Access(access) => {
+                match &access.identifier {
                     None => {
                         // Field/positional access (.x, .0) requires a value
                         if let Some(val_type) = value_type {
                             // Access on the piped value
-                            self.compile_accessor(val_type, member_access.accessors, "value")
+                            let accessed_type =
+                                self.compile_accessor(val_type, access.accessors, "value")?;
+
+                            if let Some(args) = &access.argument {
+                                // Compile argument - no ripples allowed (pass None as value_type)
+                                let arg_type = self.compile_tuple(
+                                    args.name.clone(),
+                                    args.fields.clone(),
+                                    None,
+                                )?;
+
+                                // Now we have: [function, tuple] on stack, but we need [tuple, function]
+                                self.codegen.add_instruction(Instruction::Swap);
+
+                                // Apply argument to the accessed function
+                                self.apply_value_to_type(accessed_type, arg_type)
+                            } else {
+                                Ok(accessed_type)
+                            }
                         } else {
                             return Err(Error::FeatureUnsupported(
                                 "Field/positional access requires a value".to_string(),
@@ -1252,12 +1252,25 @@ impl<'a> Compiler<'a> {
                         }
                     }
                     Some(name) => {
-                        // Load the member access
-                        let accessed_type =
-                            self.compile_member_access(name, member_access.accessors)?;
+                        // If there's an argument, compile it first (before loading the function)
+                        // so that ripples in the argument can access the piped value on the stack
+                        let arg_type = if let Some(args) = &access.argument {
+                            Some(self.compile_tuple(
+                                args.name.clone(),
+                                args.fields.clone(),
+                                value_type.clone(),
+                            )?)
+                        } else {
+                            None
+                        };
 
-                        // If we have a value, apply the loaded value based on its type
-                        if let Some(val_type) = value_type {
+                        // Load the access
+                        let accessed_type = self.compile_member_access(name, access.accessors)?;
+
+                        // Apply argument if present, otherwise apply piped value if present
+                        if let Some(arg_type) = arg_type {
+                            self.apply_value_to_type(accessed_type, arg_type)
+                        } else if let Some(val_type) = value_type {
                             self.apply_value_to_type(accessed_type, val_type)
                         } else {
                             Ok(accessed_type)
@@ -1285,12 +1298,22 @@ impl<'a> Compiler<'a> {
                 }
             }
             ast::Term::TailCall(tail_call) => {
-                if value_type.is_none() {
-                    return Err(Error::FeatureUnsupported(
-                        "Tail call requires a value".to_string(),
-                    ));
-                }
-                self.compile_tail_call(tail_call.identifier.as_deref(), &tail_call.accessors)
+                // If there's an argument, compile it first (may contain ripples using value_type)
+                let arg_type = if let Some(args) = &tail_call.argument {
+                    Some(self.compile_tuple(args.name.clone(), args.fields.clone(), value_type)?)
+                } else if let Some(val_type) = value_type {
+                    // No argument but have piped value - use it as the argument
+                    Some(val_type)
+                } else {
+                    // No argument and no piped value
+                    None
+                };
+
+                self.compile_tail_call(
+                    tail_call.identifier.as_deref(),
+                    &tail_call.accessors,
+                    arg_type,
+                )
             }
             ast::Term::Equality => {
                 let val_type = value_type.ok_or_else(|| {
@@ -1519,9 +1542,16 @@ impl<'a> Compiler<'a> {
         &mut self,
         identifier: Option<&str>,
         accessors: &[ast::AccessPath],
+        arg_type: Option<Type>,
     ) -> Result<Type, Error> {
         if identifier.is_none() && accessors.is_empty() {
-            // Tail call to parameter (never returns)
+            // Tail call to parameter
+            if arg_type.is_none() {
+                return Err(Error::FeatureUnsupported(
+                    "Tail call requires a value".to_string(),
+                ));
+            }
+            // Argument is already on stack, just emit tail call
             self.codegen.add_instruction(Instruction::TailCall(true));
             Ok(Type::never())
         } else {
@@ -1531,6 +1561,12 @@ impl<'a> Compiler<'a> {
                     "Member access in tail call requires an identifier".to_string(),
                 )
             })?;
+
+            if arg_type.is_none() {
+                return Err(Error::FeatureUnsupported(
+                    "Tail call requires a value".to_string(),
+                ));
+            }
 
             let func_type = if accessors.is_empty() {
                 // Simple identifier lookup

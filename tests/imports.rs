@@ -12,7 +12,7 @@ fn test_module_import() {
         .evaluate(
             r#"
             math = %"./math.qv",
-            [1, 2] ~> math.add
+            math.add[1, 2]
             "#,
         )
         .expect("3");
@@ -31,7 +31,7 @@ fn test_destructured_import() {
         .evaluate(
             r#"
             (add, sub) = %"./math.qv",
-            [3, 4] ~> add ~> [~, 2] ~> sub
+            add[3, 4] ~> sub[~, 2]
             "#,
         )
         .expect("5");
@@ -44,7 +44,7 @@ fn test_star_import() {
 
     quiver()
         .with_modules(modules)
-        .evaluate("* = %\"./math.qv\", [3, 4] ~> add")
+        .evaluate("* = %\"./math.qv\", add[3, 4]")
         .expect("7");
 }
 
@@ -58,7 +58,7 @@ fn test_import_function_with_capture() {
 
     quiver()
         .with_modules(modules)
-        .evaluate("f = %\"./capture.qv\", [] ~> f")
+        .evaluate("f = %\"./capture.qv\", f[]")
         .expect("84");
 }
 
@@ -70,14 +70,14 @@ fn test_import_nested_function_captures() {
         r#"
         x = 10,
         inner = #{ [x, 1] ~> <add> },
-        #{ ~> inner ~> [~, 2] ~> <multiply> }
+        #{ inner[] ~> [~, 2] ~> <multiply> }
         "#
         .to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("f = %\"./nested.qv\", [] ~> f")
+        .evaluate("f = %\"./nested.qv\", f[]")
         .expect("22");
 }
 
@@ -91,7 +91,7 @@ fn test_import_tuple_with_captured_function() {
 
     quiver()
         .with_modules(modules)
-        .evaluate("t = %\"./tuple_capture.qv\", f = t.1, [] ~> f")
+        .evaluate("t = %\"./tuple_capture.qv\", f = t.1, f[]")
         .expect("8");
 }
 
@@ -107,7 +107,7 @@ fn test_multi_level_import_with_captures() {
         r#"
         f = %"./level1.qv",
         x = 3,
-        #{ [] ~> f ~> [~, x] ~> <multiply> }
+        #{ f[] ~> [~, x] ~> <multiply> }
         "#
         .to_string(),
     );
@@ -116,19 +116,19 @@ fn test_multi_level_import_with_captures() {
         r#"
         g = %"./level2.qv",
         x = 5,
-        [g, #{ [] ~> g ~> [~, x] ~> <add> }]
+        [g, #{ g[] ~> [~, x] ~> <add> }]
         "#
         .to_string(),
     );
 
     quiver()
         .with_modules(modules.clone())
-        .evaluate("funcs = %\"./level3.qv\", f1 = funcs.0, [] ~> f1")
+        .evaluate("funcs = %\"./level3.qv\", f1 = funcs.0, f1[]")
         .expect("303"); // (100 + 1) * 3 = 303
 
     quiver()
         .with_modules(modules)
-        .evaluate("funcs = %\"./level3.qv\", f2 = funcs.1, [] ~> f2")
+        .evaluate("funcs = %\"./level3.qv\", f2 = funcs.1, f2[]")
         .expect("308"); // ((100 + 1) * 3) + 5 = 308
 }
 

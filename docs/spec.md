@@ -295,6 +295,17 @@ Functions are called by applying a value to them in a chain. The type system det
 [] ~> list.new           // For parameterless functions, explicitly pass []
 ```
 
+Alternatively, functions can be called using shorthand syntax `f[...]` where `[...]` is an unnamed tuple. This is equivalent to `[...] ~> f`:
+
+```
+math.add[3, 4]                     // Equivalent to [3, 4] ~> math.add
+math.add[1, 2] ~> math.mul[~, 3]   // Equivalent to [1, 2] ~> math.add ~> [~, 3] ~> math.mul
+f[]                                // Equivalent to [] ~> f
+math ~> .add[1, 2]                 // Equivalent to math.add[1, 2]
+```
+
+When used with field access (`.field[...]`), ripples are not allowed in the argument.
+
 ### Tail recursion
 
 Use `&` for tail-recursive calls:
@@ -313,6 +324,14 @@ Named tail calls to other functions:
 
 ```
 fact = #int { ~> [~, 1] ~> &f }
+```
+
+Tail calls also support the shorthand argument syntax:
+
+```
+g = #[int, int] { ~> math.mul },
+f = #int { ~> math.add[~, 1] ~> &g[~, 2] },
+10 ~> f   // 22
 ```
 
 ## Processes
@@ -421,7 +440,7 @@ doubled = [x, 2] ~> <multiply>      // Built-in multiplication
 
 // Create and manipulate values
 x = 10, y = 20,
-[x, y] ~> add ~> [~, 2] ~> mul ~> [~, 1] ~> sub
+add[x, y] ~> mul[~, 2] ~> sub[~, 1]
 ```
 
 ### Working with tuples
@@ -453,7 +472,7 @@ type list = Nil | Cons[int, &];
 contains? = #[list, int] {
   | ~> =[Nil, _] => []
   | ~> =[Cons[head, tail], value], [head, value] ~> == => Ok
-  | ~> =[Cons[_, tail], value] => [tail, value] ~> &
+  | ~> =[Cons[_, tail], value] => &[tail, value]
 },
 
 xs = Cons[1, Cons[2, Cons[3, Nil]]],
@@ -466,8 +485,8 @@ xs = Cons[1, Cons[2, Cons[3, Nil]]],
 ```
 // Clamp value to range [0, 100]
 clamp = #int {
-  | ~> [~, 100] ~> math.gt => 100
-  | ~> [~, 0] ~> math.lt => 0
+  | ~> math.gt[~, 100] => 100
+  | ~> math.lt[~, 0] => 0
   | ~> =x => x
 },
 
@@ -528,8 +547,9 @@ person.name,                           // Extract name field
 person ~> .date_of_birth ~> .month,    // Chain field access
 
 // Built-in operations
-next_year = person.age ~> [~, 1] ~> <add>,    // Use built-in add
-name ~> <println>                             // Print to console
+math = %"math",
+next_year = person.age ~> math.add[~, 1],
+name ~> <println>
 ```
 
 ### Concurrent processes
