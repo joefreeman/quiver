@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 // Re-export scheduler types for public API
-pub use crate::scheduler::{ProcessId, ProcessStatus, SchedulerHandle};
+pub use crate::scheduler::{ProcessId, ProcessInfo, ProcessStatus, SchedulerHandle};
 
 /// Maximum binary size in bytes (16MB)
 pub const MAX_BINARY_SIZE: usize = 16 * 1024 * 1024;
@@ -139,6 +139,14 @@ impl VM {
             .lock()
             .unwrap()
             .get_process_statuses()
+    }
+
+    pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
+        self.scheduler_handle
+            .scheduler
+            .lock()
+            .unwrap()
+            .get_process_info(id)
     }
 
     /// Create a new heap-allocated binary

@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 use crate::Quiver;
 use crate::bytecode::TypeId;
 use crate::types::Type;
-use crate::vm::{ProcessStatus, Value};
+use crate::vm::{ProcessId, ProcessStatus, Value};
 
 const HISTORY_FILE: &str = ".quiv_history";
 
@@ -92,8 +92,10 @@ impl Repl {
     }
 
     fn handle_command(&mut self, command: &str) -> bool {
-        match command {
-            "?" => {
+        let parts: Vec<&str> = command.split_whitespace().collect();
+
+        match parts.as_slice() {
+            ["?"] => {
                 println!("{}", "Available commands:".bright_black());
                 println!("{}", "  \\? - Show this help message".bright_black());
                 println!("{}", "  \\q - Exit the REPL".bright_black());
@@ -101,30 +103,39 @@ impl Repl {
                 println!("{}", "  \\v - List variables".bright_black());
                 println!("{}", "  \\t - List type aliases".bright_black());
                 println!("{}", "  \\p - List processes".bright_black());
+                println!("{}", "  \\p X - Inspect process with ID X".bright_black());
             }
 
-            "q" => {
+            ["q"] => {
                 return false;
             }
 
-            "!" => {
+            ["!"] => {
                 self.quiver = Quiver::new(None);
                 self.variables.clear();
                 self.last_result = None;
                 println!("{}", "Environment reset".bright_black());
             }
 
-            "v" => {
+            ["v"] => {
                 self.list_variables();
             }
 
-            "t" => {
+            ["t"] => {
                 self.list_types();
             }
 
-            "p" => {
+            ["p"] => {
                 self.list_processes();
             }
+
+            ["p", process_id_str] => match process_id_str.parse::<usize>() {
+                Ok(id) => self.inspect_process(ProcessId(id)),
+                Err(_) => eprintln!(
+                    "{}",
+                    format!("Invalid process ID: {}", process_id_str).red()
+                ),
+            },
 
             _ => {
                 eprintln!("{}", format!("Unknown command: \\{}", command).red());
@@ -200,6 +211,52 @@ impl Repl {
                     ProcessStatus::Terminated => "terminated",
                 };
                 println!("{}", format!("  {}: {}", id.0, status_str).bright_black());
+            }
+        }
+    }
+
+    fn inspect_process(&self, id: ProcessId) {
+        match self.quiver.get_process_info(id) {
+            Some(info) => {
+                let status_str = match info.status {
+                    ProcessStatus::Running => "running",
+                    ProcessStatus::Queued => "queued",
+                    ProcessStatus::Waiting => "waiting",
+                    ProcessStatus::Sleeping => "sleeping",
+                    ProcessStatus::Terminated => "terminated",
+                };
+                let persistent_indicator = if info.persistent { " (persistent)" } else { "" };
+
+                println!("{}", format!("Process {}:", id.0).bright_black());
+                println!(
+                    "{}",
+                    format!("  Status: {}{}", status_str, persistent_indicator).bright_black()
+                );
+                println!("{}", format!("  Stack: {}", info.stack_size).bright_black());
+                println!(
+                    "{}",
+                    format!("  Locals: {}", info.locals_size).bright_black()
+                );
+                println!(
+                    "{}",
+                    format!("  Frames: {}", info.frames_count).bright_black()
+                );
+                println!(
+                    "{}",
+                    format!("  Mailbox: {}", info.mailbox_size).bright_black()
+                );
+
+                if let Some(result) = &info.result {
+                    println!(
+                        "{}",
+                        format!("  Result: {}", self.quiver.format_value(result)).bright_black()
+                    );
+                } else {
+                    println!("{}", "  Result: ―".bright_black());
+                }
+            }
+            None => {
+                eprintln!("{}", format!("Process {} not found", id.0).red());
             }
         }
     }

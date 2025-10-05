@@ -115,6 +115,10 @@ impl Quiver {
     pub fn get_process_statuses(&self) -> HashMap<vm::ProcessId, vm::ProcessStatus> {
         self.vm.get_process_statuses()
     }
+
+    pub fn get_process_info(&self, id: vm::ProcessId) -> Option<vm::ProcessInfo> {
+        self.vm.get_process_info(id)
+    }
 }
 
 pub fn compile(

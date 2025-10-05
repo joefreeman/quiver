@@ -32,6 +32,7 @@ pub struct ProcessInfo {
     pub frames_count: usize,
     pub mailbox_size: usize,
     pub persistent: bool,
+    pub result: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,25 +149,38 @@ impl Scheduler {
         self.active
     }
 
+    fn get_status(&self, id: ProcessId, process: &Process) -> ProcessStatus {
+        if self.active == Some(id) {
+            ProcessStatus::Running
+        } else if self.queue.contains(&id) {
+            ProcessStatus::Queued
+        } else if self.waiting.contains(&id) {
+            ProcessStatus::Waiting
+        } else if process.persistent {
+            ProcessStatus::Sleeping
+        } else {
+            ProcessStatus::Terminated
+        }
+    }
+
     pub fn get_process_statuses(&self) -> HashMap<ProcessId, ProcessStatus> {
         self.processes
             .iter()
-            .map(|(id, process)| {
-                let status = if self.active == Some(*id) {
-                    ProcessStatus::Running
-                } else if self.queue.contains(id) {
-                    ProcessStatus::Queued
-                } else if self.waiting.contains(id) {
-                    ProcessStatus::Waiting
-                } else if process.persistent {
-                    ProcessStatus::Sleeping
-                } else {
-                    ProcessStatus::Terminated
-                };
-
-                (*id, status)
-            })
+            .map(|(id, process)| (*id, self.get_status(*id, process)))
             .collect()
+    }
+
+    pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
+        self.processes.get(&id).map(|process| ProcessInfo {
+            id,
+            status: self.get_status(id, process),
+            stack_size: process.stack.len(),
+            locals_size: process.locals.len(),
+            frames_count: process.frames.len(),
+            mailbox_size: process.mailbox.len(),
+            persistent: process.persistent,
+            result: process.result.clone(),
+        })
     }
 }
 
