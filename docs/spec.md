@@ -17,7 +17,7 @@ All values in Quiver are immutable. The language supports:
 Quiver uses postfix notation where data flows left-to-right through transformations:
 
 ```
-5 ~> double! ~> increment!
+5 ~> double ~> increment
 ```
 
 ### Pattern matching
@@ -128,13 +128,15 @@ p.y ~> =y                  // Using the assignment term
 
 Identifiers (for variables and tuple field names) start with a lowercase letter, followed by zero or more alphanumeric characters or underscores.
 
-They can also be suffixed by a question mark and multiple quote characters.
+They can also be suffixed by an optional question mark, an optional exclamation mark, and multiple quote characters (in that order).
 
 ```
 x, a1, first_name
-is_empty?     // ? suffix for predicates/boolean functions
-helper'       // ' suffix for variants or helper functions
-valid?''      // Multiple suffixes can be combined
+is_empty?      // ? suffix for predicates/boolean functions
+validate!      // ! suffix for emphasis
+helper'        // ' suffix for variants or helper functions
+is_valid?!     // ? and ! can be combined
+valid?!''      // Multiple suffixes can be combined
 ```
 
 ### Destructuring
@@ -202,12 +204,12 @@ A block may contain multiple branches, separated by `|`. If a sequence evaluates
 
 ```
 // If item is valid, try to process it, otherwise show error
-item ~> { ~> is_valid?, ~> process! | show_error! }
+item ~> { ~> is_valid? ~> process | [] ~> show_error }
 
 // Try multiple sources with fallback
 value = id ~> {
-  | ~> read_cache!        // try using the id to read from the cache
-  | ~> query_database!    // try using the id to query the database
+  | ~> read_cache         // try using the id to read from the cache
+  | ~> query_database     // try using the id to query the database
   | default_value         // fall back to using a default value
 }
 ```
@@ -219,7 +221,7 @@ Branches in a block can use 'condition-consequence' syntax - `{ ... => ... | ...
 ```
 value ~> {
   | ~> =0 => "zero"
-  | ~> [~, 0] ~> math.gt! => "positive"
+  | ~> [~, 0] ~> math.gt => "positive"
   | "negative"
 }
 ```
@@ -227,7 +229,7 @@ value ~> {
 This allows 'guard'-style checks to be added to a condition:
 
 ```
-{ ~> =x, [x, 10] ~> math.gt! => "large" | "small" }
+{ ~> =x, [x, 10] ~> math.gt => "large" | "small" }
 ```
 
 ## Field access
@@ -268,12 +270,12 @@ Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
 ```
 // Single parameter function
-double = #int { ~> [~, 2] ~> math.mul! }
+double = #int { ~> [~, 2] ~> math.mul }
 
 // Pattern matching on union types
 area = #shape {
-  | ~> =Circle[radius: r] => [r, r] ~> math.mul!
-  | ~> =Rectangle[width: w, height: h] => [w, h] ~> math.mul!
+  | ~> =Circle[radius: r] => [r, r] ~> math.mul
+  | ~> =Rectangle[width: w, height: h] => [w, h] ~> math.mul
 },
 
 // Using a tuple for multiple values
@@ -285,11 +287,12 @@ area = #shape {
 
 ### Function application
 
-An exclamation mark is used to call a function. (Note that without the exclamation mark, the value may be assigned to the variable, overwriting the function.)
+Functions are called by applying a value to them in a chain. The type system determines whether to call the function or just reference it.
 
 ```
-5 ~> double!             // Apply double to 5
-[3, 4] ~> math.add!      // Apply add to tuple [3, 4]
+5 ~> double              // Apply double to 5
+[3, 4] ~> math.add       // Apply add to tuple [3, 4]
+[] ~> list.new           // For parameterless functions, explicitly pass []
 ```
 
 ### Tail recursion
@@ -300,8 +303,8 @@ Use `&` for tail-recursive calls:
 f = #[int, int] {
   | ~> =[1, y] => y
   | ~> =[x, y] => [
-    =[x, 1] ~> math.sub!,
-    =[x, y] ~> math.mul!
+    =[x, 1] ~> math.sub,
+    =[x, y] ~> math.mul
   ] ~> &
 }
 ```
@@ -322,7 +325,7 @@ Spawn a process by applying the `@` operator to a function:
 
 ```
 worker = #int { ... },
-pid = 42 ~> @worker
+pid = @worker
 ```
 
 ### Receiving messages
@@ -347,10 +350,19 @@ Avoid side effects when testing messages in the block, since the block may be ev
 
 ### Sending messages
 
-Send a message to a process with:
+Send a message to a process by applying a value to the process:
 
 ```
-42 ~> pid$
+42 ~> pid
+```
+
+### Awaiting processes
+
+Await a process result using the `!` operator:
+
+```
+p = @f,
+p ~> !
 ```
 
 ### Referring to processes
@@ -409,7 +421,7 @@ doubled = [x, 2] ~> <multiply>      // Built-in multiplication
 
 // Create and manipulate values
 x = 10, y = 20,
-[x, y] ~> add! ~> [~, 2] ~> mul! ~> [~, 1] ~> sub!
+[x, y] ~> add ~> [~, 2] ~> mul ~> [~, 1] ~> sub
 ```
 
 ### Working with tuples
@@ -424,12 +436,12 @@ p2 = Point[x: 5, y: 15],
 // Function to add points
 add_points = #[Point[x: int, y: int], Point[x: int, y: int]] {
   ~> =[a, b] => Point[
-    x: [a.x, b.x] ~> math.add!,
-    y: [a.y, b.y] ~> math.add!
+    x: [a.x, b.x] ~> math.add,
+    y: [a.y, b.y] ~> math.add
   ]
 },
 
-result = [p1, p2] ~> add_points!
+result = [p1, p2] ~> add_points
 ```
 
 ### Pattern matching
@@ -445,8 +457,8 @@ contains? = #[list, int] {
 },
 
 xs = Cons[1, Cons[2, Cons[3, Nil]]],
-[xs, 3] ~> contains?!,   // Ok
-[xs, 4] ~> contains?!    // []
+[xs, 3] ~> contains?,   // Ok
+[xs, 4] ~> contains?    // []
 ```
 
 ### Conditional logic
@@ -454,14 +466,14 @@ xs = Cons[1, Cons[2, Cons[3, Nil]]],
 ```
 // Clamp value to range [0, 100]
 clamp = #int {
-  | ~> [~, 100] ~> math.gt! => 100
-  | ~> [~, 0] ~> math.lt! => 0
+  | ~> [~, 100] ~> math.gt => 100
+  | ~> [~, 0] ~> math.lt => 0
   | ~> =x => x
 },
 
-150 ~> clamp!,   // 100
--10 ~> clamp!,   // 0
-50 ~> clamp!    // 50
+150 ~> clamp,   // 100
+-10 ~> clamp,   // 0
+50 ~> clamp    // 50
 ```
 
 ### Module organization
@@ -475,7 +487,7 @@ math = %"math",
 [
   bounding_box: #shape {
     | ~> =Circle[radius: r] => {
-      x = [r, 2] ~> math.mul!,
+      x = [r, 2] ~> math.mul,
       Rectangle[width: x, height: x]
     }
     | ~> =Rectangle[width: w, height: h] => {
@@ -496,8 +508,8 @@ math = %"math",
 circle = Circle[radius: 5],
 rectangle = Rectangle[width: 10, height: 10],
 
-circle ~> bounding_box!,      // Rectangle[width: 10, height: 10]
-rectangle ~> is_square?!      // Ok
+circle ~> bounding_box,      // Rectangle[width: 10, height: 10]
+rectangle ~> is_square?      // Ok
 ```
 
 ### Using built-ins and field access
@@ -538,7 +550,7 @@ echo = #[] {
 pid = @echo,
 
 // Send messages
-"hello" ~> pid$,
-"bye" ~> pid$,
-"" ~> pid$                    // (stop the process)
+"hello" ~> pid,
+"bye" ~> pid,
+"" ~> pid                    // (stop the process)
 ```

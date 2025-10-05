@@ -1197,18 +1197,18 @@ impl<'a> Compiler<'a> {
                 self.compile_literal(literal)
             }
             ast::Term::Identifier(name) => {
-                if value_type.is_some() {
-                    return Err(Error::FeatureUnsupported(
-                        "Identifier cannot be used as pattern; use assignment pattern (e.g., =x)"
-                            .to_string(),
-                    ));
-                }
-                // Load the variable when no value present
+                // Load the variable
                 let (var_type, index) = self
                     .lookup_variable(&self.scopes, &name, &[])
                     .ok_or_else(|| Error::VariableUndefined(name.clone()))?;
                 self.codegen.add_instruction(Instruction::Load(index));
-                Ok(var_type)
+
+                // If we have a value, apply the loaded value based on its type
+                if let Some(val_type) = value_type {
+                    self.apply_value_to_type(var_type.clone(), val_type)
+                } else {
+                    Ok(var_type)
+                }
             }
             ast::Term::Tuple(tuple) => {
                 // Tuples without ripples when a value is present should use assignment patterns
@@ -1238,7 +1238,6 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_function(func_def)
             }
-            ast::Term::FunctionCall(target) => self.compile_call(target, value_type),
             ast::Term::MemberAccess(member_access) => {
                 match &member_access.identifier {
                     None => {
@@ -1253,12 +1252,16 @@ impl<'a> Compiler<'a> {
                         }
                     }
                     Some(name) => {
-                        if value_type.is_some() {
-                            return Err(Error::FeatureUnsupported(
-                                "Member access cannot be applied to value".to_string(),
-                            ));
+                        // Load the member access
+                        let accessed_type =
+                            self.compile_member_access(name, member_access.accessors)?;
+
+                        // If we have a value, apply the loaded value based on its type
+                        if let Some(val_type) = value_type {
+                            self.apply_value_to_type(accessed_type, val_type)
+                        } else {
+                            Ok(accessed_type)
                         }
-                        self.compile_member_access(name, member_access.accessors)
                     }
                 }
             }
@@ -1271,12 +1274,15 @@ impl<'a> Compiler<'a> {
                 self.compile_import(&path)
             }
             ast::Term::Builtin(name) => {
-                if value_type.is_some() {
-                    return Err(Error::FeatureUnsupported(
-                        "Builtin cannot be applied to value".to_string(),
-                    ));
+                // Load the builtin
+                let builtin_type = self.compile_builtin(&name)?;
+
+                // If we have a value, apply the loaded value based on its type
+                if let Some(val_type) = value_type {
+                    self.apply_value_to_type(builtin_type, val_type)
+                } else {
+                    Ok(builtin_type)
                 }
-                self.compile_builtin(&name)
             }
             ast::Term::TailCall(tail_call) => {
                 if value_type.is_none() {
@@ -1332,63 +1338,29 @@ impl<'a> Compiler<'a> {
                     returns: Some(Box::new(return_type)),
                 })))
             }
-            ast::Term::Send(send_call) => {
-                // Send expects a value on the stack (the message)
+            ast::Term::Await => {
+                // Await expects a process value on the stack
                 let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Send requires a value (message)".to_string())
+                    Error::FeatureUnsupported("Await requires a value (process)".to_string())
                 })?;
 
-                // Load the pid from the identifier with accessors and get its type
-                let pid_type = if send_call.accessors.is_empty() {
-                    // Simple identifier lookup
-                    let (pid_type, index) = self
-                        .lookup_variable(&self.scopes, &send_call.name, &[])
-                        .ok_or_else(|| Error::VariableUndefined(send_call.name.clone()))?;
-                    self.codegen.add_instruction(Instruction::Load(index));
-                    pid_type
-                } else {
-                    // Use member access compilation for accessors
-                    self.compile_member_access(&send_call.name, send_call.accessors.clone())?
-                };
-
-                // Type check: ensure the pid is a Process and message type matches
-                if let Type::Process(process_type) = &pid_type {
-                    if let Some(expected_msg_type) = &process_type.receive {
-                        // Check if it's the empty union (never receives)
-                        if matches!(expected_msg_type.as_ref(), Type::Union(v) if v.is_empty()) {
-                            return Err(Error::TypeMismatch {
-                                expected: "process with receive type".to_string(),
-                                found: "process without receive type (cannot send messages)"
-                                    .to_string(),
-                            });
-                        }
-                        if !val_type.is_compatible(expected_msg_type, self.program) {
-                            return Err(Error::TypeMismatch {
-                                expected: crate::format::format_type(
-                                    self.program,
-                                    expected_msg_type,
-                                ),
-                                found: crate::format::format_type(self.program, &val_type),
-                            });
-                        }
+                // Type check: ensure the value is a Process with a return type
+                if let Type::Process(process_type) = &val_type {
+                    if let Some(return_type) = &process_type.returns {
+                        self.codegen.add_instruction(Instruction::Call);
+                        Ok((**return_type).clone())
                     } else {
-                        // None means unknown receive type
-                        return Err(Error::TypeMismatch {
-                            expected: "process with known receive type".to_string(),
-                            found: "process with unknown receive type".to_string(),
-                        });
+                        Err(Error::TypeMismatch {
+                            expected: "process with return type (awaitable)".to_string(),
+                            found: "process without return type (cannot await)".to_string(),
+                        })
                     }
                 } else {
-                    return Err(Error::TypeMismatch {
-                        expected: "Process".to_string(),
-                        found: format!("{:?}", pid_type),
-                    });
+                    Err(Error::TypeMismatch {
+                        expected: "process".to_string(),
+                        found: crate::format::format_type(self.program, &val_type),
+                    })
                 }
-
-                // Emit send instruction (expects [message, pid] on stack)
-                self.codegen.add_instruction(Instruction::Send);
-                // Send returns Ok (like assignment)
-                Ok(Type::ok())
             }
             ast::Term::Self_ => {
                 if value_type.is_some() {
@@ -1447,37 +1419,18 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_call(
-        &mut self,
-        target: ast::FunctionCall,
-        value_type: Option<Type>,
-    ) -> Result<Type, Error> {
-        // Use nil as value if value_type is None
-        let val_type = value_type.unwrap_or_else(|| {
-            self.codegen
-                .add_instruction(Instruction::Tuple(TypeId::NIL));
-            Type::nil()
-        });
-
-        // Get the function type based on the target
-        let function_type = match target {
-            ast::FunctionCall::Builtin(name) => self.compile_builtin(&name)?,
-            ast::FunctionCall::Identifier { name, accessors } => {
-                self.compile_member_access(&name, accessors)?
-            }
-        };
-
-        // Extract callable type and verify it's a function or process
-        match function_type {
+    fn apply_value_to_type(&mut self, target_type: Type, value_type: Type) -> Result<Type, Error> {
+        match target_type {
             Type::Callable(func_type) => {
+                // Function call
                 // Check parameter compatibility
-                if !val_type.is_compatible(&func_type.parameter, self.program) {
+                if !value_type.is_compatible(&func_type.parameter, self.program) {
                     return Err(Error::TypeMismatch {
                         expected: format!(
                             "function parameter compatible with {}",
                             crate::format::format_type(self.program, &func_type.parameter)
                         ),
-                        found: crate::format::format_type(self.program, &val_type),
+                        found: crate::format::format_type(self.program, &value_type),
                     });
                 }
 
@@ -1525,23 +1478,40 @@ impl<'a> Compiler<'a> {
                 Ok(func_type.result)
             }
             Type::Process(process_type) => {
-                // Await process - check it has a return type
-                if let Some(return_type) = &process_type.returns {
-                    self.codegen.add_instruction(Instruction::Call);
-                    Ok((**return_type).clone())
+                // Message send
+                // Type check: ensure the process has a receive type and message type matches
+                if let Some(expected_msg_type) = &process_type.receive {
+                    // Check if it's the empty union (never receives)
+                    if matches!(expected_msg_type.as_ref(), Type::Union(v) if v.is_empty()) {
+                        return Err(Error::TypeMismatch {
+                            expected: "process with receive type".to_string(),
+                            found: "process without receive type (cannot send messages)"
+                                .to_string(),
+                        });
+                    }
+                    if !value_type.is_compatible(expected_msg_type, self.program) {
+                        return Err(Error::TypeMismatch {
+                            expected: crate::format::format_type(self.program, expected_msg_type),
+                            found: crate::format::format_type(self.program, &value_type),
+                        });
+                    }
                 } else {
-                    Err(Error::TypeMismatch {
-                        expected: "process with return type (awaitable)".to_string(),
-                        found: "process without return type (cannot await)".to_string(),
-                    })
+                    // None means unknown receive type
+                    return Err(Error::TypeMismatch {
+                        expected: "process with known receive type".to_string(),
+                        found: "process with unknown receive type".to_string(),
+                    });
                 }
+
+                // Emit send instruction (expects [message, pid] on stack)
+                self.codegen.add_instruction(Instruction::Send);
+                // Send returns Ok (like assignment)
+                Ok(Type::ok())
             }
-            _ => {
-                return Err(Error::TypeMismatch {
-                    expected: "function or process".to_string(),
-                    found: crate::format::format_type(self.program, &function_type),
-                });
-            }
+            _ => Err(Error::TypeMismatch {
+                expected: "function or process".to_string(),
+                found: crate::format::format_type(self.program, &target_type),
+            }),
         }
     }
 

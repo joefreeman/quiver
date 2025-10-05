@@ -32,16 +32,16 @@ fn test_binary_inequality_content() {
 fn test_binary_new_builtin() {
     // Test creating new zero-filled binaries
     quiver()
-        .evaluate("8 ~> <binary_new>!")
+        .evaluate("8 ~> <binary_new>")
         .expect("'0000000000000000'");
-    quiver().evaluate("0 ~> <binary_new>!").expect("''");
+    quiver().evaluate("0 ~> <binary_new>").expect("''");
 }
 
 #[test]
 fn test_binary_new_size_validation() {
     // Test negative size validation
     quiver()
-        .evaluate("-1 ~> <binary_new>!")
+        .evaluate("-1 ~> <binary_new>")
         .expect_runtime_error(quiver::vm::Error::InvalidArgument(
             "Size cannot be negative".to_string(),
         ));
@@ -51,11 +51,11 @@ fn test_binary_new_size_validation() {
 fn test_binary_length_builtin() {
     // Test getting length of binaries
     quiver()
-        .evaluate("'68656c6c6f' ~> <binary_length>!")
+        .evaluate("'68656c6c6f' ~> <binary_length>")
         .expect("5");
-    quiver().evaluate("'4142' ~> <binary_length>!").expect("2");
+    quiver().evaluate("'4142' ~> <binary_length>").expect("2");
     quiver()
-        .evaluate("10 ~> <binary_new>! ~> <binary_length>!")
+        .evaluate("10 ~> <binary_new> ~> <binary_length>")
         .expect("10");
 }
 
@@ -63,16 +63,16 @@ fn test_binary_length_builtin() {
 fn test_binary_get_byte_builtin() {
     // Test getting bytes from binaries
     quiver()
-        .evaluate("['68656c6c6f', 0] ~> <binary_get_byte>!")
+        .evaluate("['68656c6c6f', 0] ~> <binary_get_byte>")
         .expect("104"); // 0x68 = 104
     quiver()
-        .evaluate("['68656c6c6f', 1] ~> <binary_get_byte>!")
+        .evaluate("['68656c6c6f', 1] ~> <binary_get_byte>")
         .expect("101"); // 0x65 = 101
     quiver()
-        .evaluate("['4142', 0] ~> <binary_get_byte>!")
+        .evaluate("['4142', 0] ~> <binary_get_byte>")
         .expect("65"); // 0x41 = 65
     quiver()
-        .evaluate("['4142', 1] ~> <binary_get_byte>!")
+        .evaluate("['4142', 1] ~> <binary_get_byte>")
         .expect("66"); // 0x42 = 66
 }
 
@@ -80,12 +80,12 @@ fn test_binary_get_byte_builtin() {
 fn test_binary_get_byte_bounds() {
     // Test bounds checking
     quiver()
-        .evaluate("['68656c6c6f', 5] ~> <binary_get_byte>!")
+        .evaluate("['68656c6c6f', 5] ~> <binary_get_byte>")
         .expect_runtime_error(quiver::vm::Error::InvalidArgument(
             "Index 5 out of bounds for binary of length 5".to_string(),
         ));
     quiver()
-        .evaluate("['68656c6c6f', -1] ~> <binary_get_byte>!")
+        .evaluate("['68656c6c6f', -1] ~> <binary_get_byte>")
         .expect_runtime_error(quiver::vm::Error::InvalidArgument(
             "Index cannot be negative".to_string(),
         ));
@@ -95,10 +95,10 @@ fn test_binary_get_byte_bounds() {
 fn test_binary_concat_builtin() {
     // Test concatenating binaries
     quiver()
-        .evaluate("['68656c6c', '20776f'] ~> <binary_concat>!")
+        .evaluate("['68656c6c', '20776f'] ~> <binary_concat>")
         .expect("'68656c6c20776f'");
     quiver()
-        .evaluate("['6162', '6364'] ~> <binary_concat>!")
+        .evaluate("['6162', '6364'] ~> <binary_concat>")
         .expect("'61626364'");
 }
 
@@ -106,10 +106,10 @@ fn test_binary_concat_builtin() {
 fn test_binary_concat_then_length() {
     // Test that concatenation produces correct length
     quiver()
-        .evaluate("['68656c6c6f', '20776f726c64'] ~> <binary_concat>! ~> <binary_length>!")
+        .evaluate("['68656c6c6f', '20776f726c64'] ~> <binary_concat> ~> <binary_length>")
         .expect("11");
     quiver()
-        .evaluate("['61', '62'] ~> <binary_concat>! ~> <binary_length>!")
+        .evaluate("['61', '62'] ~> <binary_concat> ~> <binary_length>")
         .expect("2");
 }
 
@@ -121,8 +121,8 @@ fn test_binary_operations_chain() {
             r#"
             hello = '68656c6c6f'
             world = '20776f726c64'
-            combined = [hello, world] ~> <binary_concat>!
-            combined ~> <binary_length>!
+            combined = [hello, world] ~> <binary_concat>
+            combined ~> <binary_length>
             "#,
         )
         .expect("11");
@@ -132,9 +132,9 @@ fn test_binary_operations_chain() {
 fn test_empty_binary() {
     // Test zero-length binaries
     quiver()
-        .evaluate("0 ~> <binary_new>! ~> <binary_length>!")
+        .evaluate("0 ~> <binary_new> ~> <binary_length>")
         .expect("0");
-    quiver().evaluate("'' ~> <binary_length>!").expect("0");
+    quiver().evaluate("'' ~> <binary_length>").expect("0");
 }
 
 #[test]
@@ -143,8 +143,8 @@ fn test_heap_vs_constant_equality() {
     quiver()
         .evaluate(
             r#"
-            heap_bin = 5 ~> <binary_new>!
-            const_bin = 5 ~> <binary_new>!
+            heap_bin = 5 ~> <binary_new>
+            const_bin = 5 ~> <binary_new>
             [heap_bin, const_bin] ~> ==
             "#,
         )

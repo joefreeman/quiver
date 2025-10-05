@@ -12,24 +12,24 @@
 type list = Nil | Cons[int, &];
 
 // Import standard library
-%"math" ~> math,
+math = %"math",
 
 // Compute the sum of a list using tail recursion
-#[list, int] {
-  | ~> [Nil, acc] => acc
-  | ~> [Cons[head, tail], acc] => {
+sum' = #[list, int] {
+  | ~> =[Nil, acc] => acc
+  | ~> =[Cons[head, tail], acc] => {
     [head, acc]
-    ~> math.add!
+    ~> math.add
     ~> [tail, ~]
     ~> &
   }
-} ~> sum',
+},
 
-#list { ~> [~, 0] ~> sum'! } ~> sum,
+sum = #list { ~> [~, 0] ~> sum' },
 
 // Build and sum a list
-Cons[1, Cons[2, Cons[3, Nil]]] ~> xs,
-xs ~> sum!  // 6
+xs = Cons[1, Cons[2, Cons[3, Nil]]],
+xs ~> sum  // 6
 ```
 
 > Run the example above in the REPL (`quiv repl`), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.

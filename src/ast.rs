@@ -46,15 +46,6 @@ pub struct Chain {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum FunctionCall {
-    Builtin(String),
-    Identifier {
-        name: String,
-        accessors: Vec<AccessPath>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     Literal(Literal),
     Identifier(String),
@@ -62,7 +53,6 @@ pub enum Term {
     Assignment(Assignment),
     Block(Block),
     FunctionDefinition(FunctionDefinition),
-    FunctionCall(FunctionCall),
     MemberAccess(MemberAccess),
     Import(String),
     Builtin(String),
@@ -70,9 +60,9 @@ pub enum Term {
     Equality,
     Not,
     Spawn(Box<Term>),
-    Send(Send),
     Self_,
     Receive(Receive),
+    Await,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,12 +116,6 @@ pub struct PartialPattern {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TailCall {
     pub identifier: Option<String>,
-    pub accessors: Vec<AccessPath>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Send {
-    pub name: String,
     pub accessors: Vec<AccessPath>,
 }
 

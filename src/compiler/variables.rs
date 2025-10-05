@@ -72,16 +72,6 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::FunctionDefinition(func) => {
                 self.visit_block(&func.body);
             }
-            ast::Term::FunctionCall(target) => {
-                match target {
-                    ast::FunctionCall::Identifier { name, accessors } => {
-                        self.visit_identifier(name, accessors.clone());
-                    }
-                    ast::FunctionCall::Builtin(_) => {
-                        // Builtins don't reference variables
-                    }
-                }
-            }
             ast::Term::MemberAccess(member_access) => {
                 if let Some(name) = &member_access.identifier {
                     self.visit_identifier(name, member_access.accessors.clone());
@@ -99,15 +89,13 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::Spawn(term) => {
                 self.visit_term(term);
             }
-            ast::Term::Send(send_call) => {
-                self.visit_identifier(&send_call.name, send_call.accessors.clone());
-            }
             ast::Term::Self_ => {}
             ast::Term::Receive(receive) => {
                 if let Some(block) = &receive.block {
                     self.visit_block(block);
                 }
             }
+            ast::Term::Await => {}
         }
     }
 

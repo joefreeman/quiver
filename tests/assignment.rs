@@ -4,7 +4,7 @@ use common::*;
 #[test]
 fn test_simple_assignment() {
     quiver()
-        .evaluate("1 ~> =x, 2 ~> =y, [x, y] ~> <add>!")
+        .evaluate("1 ~> =x, 2 ~> =y, [x, y] ~> <add>")
         .expect("3");
 
     quiver().evaluate("x = 42; x").expect("42");
@@ -13,7 +13,7 @@ fn test_simple_assignment() {
 #[test]
 fn test_tuple_destructuring() {
     quiver()
-        .evaluate("[1, 2] ~> =[a, b], [a, b] ~> <add>!")
+        .evaluate("[1, 2] ~> =[a, b], [a, b] ~> <add>")
         .expect("3");
 
     quiver().evaluate("[x, y] = [1, 2]; y").expect("2");
@@ -41,7 +41,7 @@ fn test_nested_field_assignment() {
 #[test]
 fn test_partial_tuple_assignment() {
     quiver()
-        .evaluate("[x: 1, y: 2, z: 3] ~> =(x, y), [x, y] ~> <add>!")
+        .evaluate("[x: 1, y: 2, z: 3] ~> =(x, y), [x, y] ~> <add>")
         .expect("3");
 }
 
@@ -60,8 +60,8 @@ fn test_named_partial_pattern_with_union() {
             r#"
             type union = A[x: int, y: int] | B[x: int, z: int];
             #union { ~> =A(x) => x } ~> =f,
-            A[x: 1, y: 2] ~> f! ~> =a,
-            B[x: 3, z: 4] ~> f! ~> =b,
+            A[x: 1, y: 2] ~> f ~> =a,
+            B[x: 3, z: 4] ~> f ~> =b,
             [a, b]
             "#,
         )
@@ -75,7 +75,7 @@ fn test_named_partial_pattern_in_block() {
             r#"
             A[x: 5, y: 10] ~> {
               | ~> =B(x, y) => 0
-              | ~> =A(x, y) => [x, y] ~> <add>!
+              | ~> =A(x, y) => [x, y] ~> <add>
             }
             "#,
         )
@@ -85,11 +85,11 @@ fn test_named_partial_pattern_in_block() {
 #[test]
 fn test_star_assignment() {
     quiver()
-        .evaluate("[a: 1, b: 2] ~> =*, [a, b] ~> <add>!")
+        .evaluate("[a: 1, b: 2] ~> =*, [a, b] ~> <add>")
         .expect("3");
 
     quiver()
-        .evaluate("* = [a: 1, b: 2]; [a, b] ~> <add>!")
+        .evaluate("* = [a: 1, b: 2]; [a, b] ~> <add>")
         .expect("3");
 }
 
@@ -148,8 +148,8 @@ fn test_union_match_with_tuples() {
         .evaluate(
             r#"
             A[3] ~> {
-              | ~> =A[x] => [x, 1] ~> <add>!
-              | ~> =B[x] => [x, 2] ~> <add>!
+              | ~> =A[x] => [x, 1] ~> <add>
+              | ~> =B[x] => [x, 2] ~> <add>
             }
             "#,
         )
@@ -162,7 +162,7 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             #[a: int, b: int] { ~> =(a, b) => [a, b] } ~> =f,
-            [a: 1, b: 2] ~> f!
+            [a: 1, b: 2] ~> f
             "#,
         )
         .expect("[1, 2]");
@@ -172,8 +172,8 @@ fn test_union_type_partial_destructuring() {
             r#"
             type union = [a: int, b: int] | [x: int];
             #union { ~> =(a, b) => [a, b] } ~> =f,
-            [a: 1, b: 2] ~> f! ~> =b1,
-            [x: 3] ~> f! ~> =b2,
+            [a: 1, b: 2] ~> f ~> =b1,
+            [x: 3] ~> f ~> =b2,
             [b1, b2]
             "#,
         )
@@ -184,8 +184,8 @@ fn test_union_type_partial_destructuring() {
             r#"
             type union = [a: int, b: int] | [b: int, c: int];
             #union { ~> =(b) => b } ~> =f,
-            [a: 1, b: 2] ~> f! ~> =b1,
-            [b: 3, c: 4] ~> f! ~> =b2,
+            [a: 1, b: 2] ~> f ~> =b1,
+            [b: 3, c: 4] ~> f ~> =b2,
             [b1, b2]
             "#,
         )
@@ -196,8 +196,8 @@ fn test_union_type_partial_destructuring() {
             r#"
             type union = [a: int, b: int] | [b: int, c: int];
             #union { ~> =(a, b) => [a, b] } ~> =f,
-            [a: 1, b: 2] ~> f! ~> =b1,
-            [b: 3, c: 4] ~> f! ~> =b2,
+            [a: 1, b: 2] ~> f ~> =b1,
+            [b: 3, c: 4] ~> f ~> =b2,
             [b1, b2]
             "#,
         )
@@ -212,9 +212,9 @@ fn test_match_union_in_nested_tuple() {
             type option = Some[int] | None;
             #[option, int] {
               | ~> =[None, z] => 0
-              | ~> =[Some[x], z] => [x, z] ~> <add>!
+              | ~> =[Some[x], z] => [x, z] ~> <add>
             } ~> =f,
-            [Some[5], 2] ~> f!
+            [Some[5], 2] ~> f
             "#,
         )
         .expect("7")
@@ -223,7 +223,7 @@ fn test_match_union_in_nested_tuple() {
 #[test]
 fn test_multiple_placeholders() {
     quiver()
-        .evaluate("[1, 2, 3, 4, 5] ~> =[_, x, _, y, _], [x, y] ~> <add>!")
+        .evaluate("[1, 2, 3, 4, 5] ~> =[_, x, _, y, _], [x, y] ~> <add>")
         .expect("6");
 }
 
@@ -289,7 +289,7 @@ fn test_partial_pattern_order_for_union() {
             r#"
             type union = A[x: int, y: int] | B[y: int, x: int]
             #Wrapper[union] { ~> =Wrapper[(x, y)] => [x, y] } ~> =f
-            Wrapper[B[y: 1, x: 2]] ~> f!
+            Wrapper[B[y: 1, x: 2]] ~> f
             "#,
         )
         .expect("[2, 1]");
@@ -302,7 +302,7 @@ fn test_star_pattern_order_for_union() {
             r#"
             type union = A[x: int, y: int] | B[y: int, x: int]
             #union { ~> =* => [x, y] } ~> =f
-            B[y: 1, x: 2] ~> f!
+            B[y: 1, x: 2] ~> f
             "#,
         )
         .expect("[2, 1]");

@@ -18,7 +18,7 @@ fn test_send_to_process() {
             r#"
             f = #{ $int { ~> =x => x } },
             p = @f,
-            42 ~> p$
+            42 ~> p
         "#,
         )
         .expect("Ok");
@@ -31,7 +31,7 @@ fn test_process_with_receive_accepts_correct_type() {
             r#"
             f = #{ $int { ~> =x => x } },
             p = @f,
-            42 ~> p$
+            42 ~> p
         "#,
         )
         .expect("Ok");
@@ -44,7 +44,7 @@ fn test_process_with_receive_rejects_wrong_type() {
             r#"
             f = #{ $int { ~> =x => x } },
             p = @f,
-            '00' ~> p$
+            '00' ~> p
         "#,
         )
         .expect_compile_error(quiver::compiler::Error::TypeMismatch {
@@ -60,7 +60,7 @@ fn test_process_without_receive_rejects_send() {
             r#"
             f = #{ [] },
             p = @f,
-            42 ~> p$
+            42 ~> p
         "#,
         )
         .expect_compile_error(quiver::compiler::Error::TypeMismatch {
@@ -107,7 +107,7 @@ fn test_call_function_with_matching_receive_type() {
         .evaluate(
             r#"
             helper = #{ $int { ~> =x => x } },
-            f = #{ $int { ~> =y => y }, helper! },
+            f = #{ $int { ~> =y => y }, [] ~> helper },
             @f
         "#,
         )
@@ -120,7 +120,7 @@ fn test_call_function_with_mismatched_receive_type() {
         .evaluate(
             r#"
             helper = #{ $bin { ~> =x => x } },
-            f = #{ $int { ~> =y => y }, helper! }
+            f = #{ $int { ~> =y => y }, [] ~> helper }
         "#,
         )
         .expect_compile_error(quiver::compiler::Error::TypeMismatch {
@@ -135,7 +135,7 @@ fn test_call_function_with_receive_from_non_receive_context() {
         .evaluate(
             r#"
             helper = #{ $int { ~> =x => x } },
-            f = #{ helper! }
+            f = #{ [] ~> helper }
         "#,
         )
         .expect_compile_error(quiver::compiler::Error::TypeMismatch {
@@ -150,7 +150,7 @@ fn test_call_function_without_receive_from_any_context() {
         .evaluate(
             r#"
             helper = #{ 42 },
-            f = #{ $int { ~> =y => y }, helper! },
+            f = #{ $int { ~> =y => y }, [] ~> helper },
             @f
         "#,
         )
@@ -162,8 +162,8 @@ fn test_process_spawns_process_and_receives_reply() {
     quiver()
         .evaluate(
             r#"
-            child = #{ $(@int) { ~> =parent => 42 ~> parent$ } },
-            parent = #{ c = @child, . ~> c$, $int { ~> =result => result } },
+            child = #{ $(@int) { ~> =parent => 42 ~> parent } },
+            parent = #{ c = @child, . ~> c, $int { ~> =result => result } },
             @parent
         "#,
         )
@@ -180,8 +180,8 @@ fn test_receive_skips_non_matching_messages() {
                 $int { ~> =_ => Ok }
             },
             p = @f,
-            42 ~> p$,
-            100 ~> p$
+            42 ~> p,
+            100 ~> p
         "#,
         )
         .expect("Ok");

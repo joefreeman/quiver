@@ -13,9 +13,9 @@ fn test_nested_member_access_as_operation() {
     quiver()
         .evaluate(
             r#"
-            inc = #int { ~> =x => [x, 1] ~> <add>! },
+            inc = #int { ~> =x => [x, 1] ~> <add> },
             x = [0, [f: inc]],
-            4 ~> x.1.f!
+            4 ~> x.1.f
             "#,
         )
         .expect("5");

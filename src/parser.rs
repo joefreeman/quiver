@@ -89,6 +89,7 @@ fn identifier(input: &str) -> IResult<&str, String> {
             satisfy(|c: char| c.is_ascii_lowercase()),
             take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
             opt(char('?')),
+            opt(char('!')),
             take_while(|c: char| c == '\''),
         ))),
         String::from,
@@ -430,40 +431,9 @@ fn member_access(input: &str) -> IResult<&str, MemberAccess> {
     ))(input)
 }
 
-// Parse function calls - must end with '!'
-// Examples: f!, f.x!, <add>!, etc.
-fn function_call(input: &str) -> IResult<&str, FunctionCall> {
-    alt((
-        // Builtin function call: <builtin>!
-        map(terminated(builtin, char('!')), FunctionCall::Builtin),
-        // Identifier function call with optional accessors: f!, f.x!, f.0!
-        map(
-            pair(
-                identifier,
-                many0(preceded(
-                    char('.'),
-                    alt((
-                        map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
-                        map(identifier, AccessPath::Field),
-                    )),
-                )),
-            ),
-            |(name, accessors)| {
-                // Must consume the '!' at the end
-                FunctionCall::Identifier { name, accessors }
-            },
-        ),
-    ))(input)
-    .and_then(|(remaining, target)| {
-        // For identifier calls, we need to ensure there's a '!' at the end
-        match &target {
-            FunctionCall::Builtin(_) => Ok((remaining, target)), // Already consumed '!'
-            FunctionCall::Identifier { .. } => {
-                let (remaining, _) = char('!')(remaining)?;
-                Ok((remaining, target))
-            }
-        }
-    })
+// Parse await operator - a postfix '!' that awaits a process
+fn await_term(input: &str) -> IResult<&str, Term> {
+    nom_value(Term::Await, char('!'))(input)
 }
 
 fn import(input: &str) -> IResult<&str, String> {
@@ -621,20 +591,6 @@ fn spawn_term(input: &str) -> IResult<&str, Term> {
     map(preceded(char('@'), term), |t| Term::Spawn(Box::new(t)))(input)
 }
 
-fn send_call(input: &str) -> IResult<&str, Term> {
-    // Match identifier with optional accessors followed by '$'
-    let (input, name) = identifier(input)?;
-    let (input, accessors) = many0(preceded(
-        char('.'),
-        alt((
-            map(digit1, |s: &str| AccessPath::Index(s.parse().unwrap())),
-            map(identifier, AccessPath::Field),
-        )),
-    ))(input)?;
-    let (input, _) = char('$')(input)?;
-    Ok((input, Term::Send(Send { name, accessors })))
-}
-
 fn self_ref_term(input: &str) -> IResult<&str, Term> {
     // Match '.' NOT followed by a lowercase letter or digit
     // This avoids conflicting with member access (.field or .0)
@@ -772,7 +728,6 @@ fn term(input: &str) -> IResult<&str, Term> {
         // Process operations
         receive_term,
         spawn_term,
-        send_call,
         self_ref_term,
         // Assignment (must be before literals and identifiers)
         assignment,
@@ -784,17 +739,16 @@ fn term(input: &str) -> IResult<&str, Term> {
         map(block, Term::Block),
         // Import
         map(import, Term::Import),
-        // Function calls must be tried before builtin and identifier
-        map(function_call, Term::FunctionCall),
-        // Builtins (without !)
+        // Builtins
         map(builtin, Term::Builtin),
         // Member access (includes field/positional access)
         map(member_access, Term::MemberAccess),
-        // Identifier (must come after member_access and function_call)
+        // Identifier (must come after member_access)
         map(identifier, Term::Identifier),
         // Operations
         equality,
         not_term,
+        await_term,
         tail_call,
     ))(input)
 }
