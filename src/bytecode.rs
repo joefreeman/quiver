@@ -61,7 +61,7 @@ pub enum Instruction {
     Constant(usize),
     Pop,
     Duplicate,
-    Copy(usize),
+    Over,
     Swap,
     Allocate(usize),
     Clear(usize),

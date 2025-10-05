@@ -367,7 +367,7 @@ fn run(
                 Instruction::Constant(index) => handle_constant(program, scheduler, index),
                 Instruction::Pop => handle_pop(scheduler),
                 Instruction::Duplicate => handle_duplicate(scheduler),
-                Instruction::Copy(depth) => handle_copy(scheduler, depth),
+                Instruction::Over => handle_over(scheduler),
                 Instruction::Swap => handle_swap(scheduler),
                 Instruction::Load(index) => handle_load(scheduler, index),
                 Instruction::Store(index) => handle_store(scheduler, index),
@@ -546,16 +546,16 @@ fn handle_duplicate(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
     Ok(())
 }
 
-fn handle_copy(scheduler: &Arc<Mutex<Scheduler>>, depth: usize) -> Result<(), Error> {
+fn handle_over(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
     let mut sched = scheduler.lock().unwrap();
     let process = sched
         .get_current_process_mut()
         .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-    if depth >= process.stack.len() {
+    if process.stack.len() < 2 {
         return Err(Error::StackUnderflow);
     }
-    let index = process.stack.len() - 1 - depth;
+    let index = process.stack.len() - 2;
     let value = process.stack[index].clone();
     process.stack.push(value);
     Ok(())
