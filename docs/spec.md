@@ -244,7 +244,7 @@ value ~> {
 This allows 'guard'-style checks to be added to a condition:
 
 ```
-{ ~> =x, [x, 10] ~> math.gt => "large" | "small" }
+{ ~> =x, math.gt[x, 10] => "large" | "small" }
 ```
 
 ## Field access
@@ -285,12 +285,12 @@ Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
 ```
 // Single parameter function
-double = #int { ~> [~, 2] ~> math.mul }
+double = #int { ~> math.mul[~, 2] }
 
 // Pattern matching on union types
 area = #shape {
-  | ~> =Circle[radius: r] => [r, r] ~> math.mul
-  | ~> =Rectangle[width: w, height: h] => [w, h] ~> math.mul
+  | ~> =Circle[radius: r] => math.mul[r, r]
+  | ~> =Rectangle[width: w, height: h] => math.mul[w, h]
 },
 
 // Using a tuple for multiple values
@@ -489,13 +489,13 @@ type list = Nil | Cons[int, &];
 // Determine whether a list contains an item
 contains? = #[list, int] {
   | ~> =[Nil, _] => []
-  | ~> =[Cons[head, tail], value], [head, value] ~> == => Ok
+  | ~> =[Cons[^value, _], ^value] => Ok
   | ~> =[Cons[_, tail], value] => &[tail, value]
 },
 
 xs = Cons[1, Cons[2, Cons[3, Nil]]],
-[xs, 3] ~> contains?,   // Ok
-[xs, 4] ~> contains?    // []
+contains?[xs, 3],   // Ok
+contains?[xs, 4]    // []
 ```
 
 ### Conditional logic
@@ -533,7 +533,7 @@ math = %"math",
   },
 
   is_square?: #shape {
-    ~> =Rectangle[width: w, height: h], [w, h] ~> ==
+    ~> =Rectangle[width: ^x, height: ^x]
   }
 ]
 ```

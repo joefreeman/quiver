@@ -378,3 +378,60 @@ fn test_pin_multiple_variables() {
         .evaluate("x = 1, y = 2, [1, 3] ~> ^[x, y]")
         .expect("[]");
 }
+
+#[test]
+fn test_repeated_identifier_bind() {
+    // Repeated identifier in bind mode - checks equality
+    quiver().evaluate("[1, 1] ~> =[x, x], x").expect("1");
+    quiver().evaluate("[1, 2] ~> =[x, x]").expect("[]");
+}
+
+#[test]
+fn test_repeated_identifier_pin() {
+    // Repeated identifier in pin mode - checks equality
+    quiver().evaluate("[5, 5] ~> ^[x, x]").expect("Ok");
+    quiver().evaluate("[5, 6] ~> ^[x, x]").expect("[]");
+}
+
+#[test]
+fn test_repeated_identifier_nested() {
+    quiver()
+        .evaluate("[Point[1, 2], 1] ~> =[Point[x, _], x], x")
+        .expect("1");
+    quiver()
+        .evaluate("[Point[1, 2], 2] ~> =[Point[x, _], x]")
+        .expect("[]");
+}
+
+#[test]
+fn test_repeated_identifier_multiple_times() {
+    quiver().evaluate("[1, 1, 1] ~> =[x, x, x], x").expect("1");
+    quiver().evaluate("[1, 1, 2] ~> =[x, x, x]").expect("[]");
+}
+
+#[test]
+fn test_pin_with_variable_and_repetition() {
+    // When variable exists and identifier is repeated, check both Variable and FieldEquality
+    quiver().evaluate("x = 5, [5, 5] ~> ^[x, x]").expect("Ok");
+    quiver().evaluate("x = 5, [5, 6] ~> ^[x, x]").expect("[]"); // Fails field equality
+    quiver().evaluate("x = 5, [4, 4] ~> ^[x, x]").expect("[]"); // Fails variable check
+}
+
+#[test]
+fn test_pin_without_variable_single_occurrence() {
+    // Pin with single occurrence and no variable should error
+    quiver()
+        .evaluate("5 ~> ^x")
+        .expect_compile_error(quiver::compiler::Error::InternalError {
+            message: "Pin variable 'x' not found in scope".to_string(),
+        });
+}
+
+#[test]
+fn test_pin_mixed_repeated_and_single() {
+    quiver()
+        .evaluate("[1, 1, 2] ~> ^[x, x, y]")
+        .expect_compile_error(quiver::compiler::Error::InternalError {
+            message: "Pin variable 'y' not found in scope".to_string(),
+        });
+}

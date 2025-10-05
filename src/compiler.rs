@@ -709,9 +709,17 @@ impl<'a> Compiler<'a> {
 
         self.codegen.patch_jump_to_here(start_jump_addr);
 
+        // Build available variables set from current scope for pin patterns
+        let mut available_variables = std::collections::HashSet::new();
+        if let Some(scope) = self.scopes.last() {
+            for (name, (_type, _index)) in &scope.variables {
+                available_variables.insert(name.clone());
+            }
+        }
+
         // Analyze pattern to get bindings without generating code yet
         let (certainty, bindings, binding_sets) =
-            pattern::analyze_pattern(&self.type_context, self.program, &pattern, &value_type, mode)?;
+            pattern::analyze_pattern(&self.type_context, self.program, &pattern, &value_type, mode, &available_variables)?;
 
         match certainty {
             MatchCertainty::WontMatch => {

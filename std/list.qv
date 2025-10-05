@@ -103,7 +103,7 @@ take' = #[list, int, list] {
 
   contains?: #[list, int] {
     | ~> =[Nil, _] => []
-    | ~> =[Cons[head, tail], value], [head, value] ~> == => Ok
+    | ~> =[Cons[^value, _], ^value] => Ok
     | ~> =[Cons[_, tail], value] => &[tail, value]
   },
 

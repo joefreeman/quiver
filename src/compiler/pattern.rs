@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::{
     ast,
     bytecode::{Constant, Instruction, TypeId},
@@ -33,6 +35,7 @@ enum RuntimeCheck {
     TupleType(TypeId),
     Literal(ast::Literal),
     Variable(String),
+    Path(AccessPath),
 }
 
 /// A requirement that must be satisfied for a pattern to match
@@ -45,6 +48,14 @@ struct Requirement {
 /// Represents a path to access a value within a data structure
 /// Empty vector means root, otherwise it's a sequence of field indices
 type AccessPath = Vec<usize>;
+
+/// Tracks information about identifiers encountered during pattern analysis
+#[derive(Debug, Clone)]
+struct Indentifier {
+    first_path: AccessPath,
+    is_pin_mode: bool,
+    is_repeated: bool,
+}
 
 /// Information about a variable binding
 #[derive(Debug, Clone)]
@@ -61,10 +72,6 @@ pub struct BindingSet {
     bindings: Vec<Binding>,         // Variable bindings to create if requirements are met
 }
 
-// Pattern analysis returns a Vec<BindingSet>
-// Empty vec means pattern cannot match
-// Each BindingSet represents an alternative way the pattern could match
-
 /// Analyze pattern without generating code
 pub fn analyze_pattern(
     type_context: &TypeContext,
@@ -72,12 +79,31 @@ pub fn analyze_pattern(
     pattern: &ast::Match,
     value_type: &Type,
     mode: PatternMode,
+    variables: &HashSet<String>,
 ) -> Result<(MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>), Error> {
-    let binding_sets =
-        analyze_match_pattern(type_context, type_lookup, pattern, value_type, vec![], mode)?;
+    let mut identifiers = HashMap::new();
+    let binding_sets = analyze_match_pattern(
+        type_context,
+        type_lookup,
+        pattern,
+        value_type,
+        vec![],
+        mode,
+        &mut identifiers,
+        variables,
+    )?;
 
     if binding_sets.is_empty() {
         return Ok((MatchCertainty::WontMatch, Vec::new(), Vec::new()));
+    }
+
+    // Validate: check for single-occurrence pins with no variable in scope
+    for (name, info) in &identifiers {
+        if info.is_pin_mode && !info.is_repeated && !variables.contains(name) {
+            return Err(Error::InternalError {
+                message: format!("Pin variable '{}' not found in scope", name),
+            });
+        }
     }
 
     let certainty = if binding_sets.iter().any(|bs| bs.requirements.is_empty()) {
@@ -104,8 +130,8 @@ pub fn generate_pattern_code(
     codegen: &mut InstructionBuilder,
     program: &mut Program,
     local_count: &mut usize,
-    bindings_map: Option<&std::collections::HashMap<String, usize>>,
-    variables: &std::collections::HashMap<String, usize>,
+    bindings_map: Option<&HashMap<String, usize>>,
+    variables: &HashMap<String, usize>,
     binding_sets: &[BindingSet],
     fail_addr: usize,
 ) -> Result<(), Error> {
@@ -122,13 +148,24 @@ pub fn generate_pattern_code(
 
         // Check all requirements for this binding set
         for requirement in &binding_set.requirements {
-            generate_value_access(codegen, &requirement.path)?;
-
             match &requirement.check {
+                RuntimeCheck::Path(other_path) => {
+                    codegen.add_instruction(Instruction::Duplicate);
+                    for &index in &requirement.path {
+                        codegen.add_instruction(Instruction::Get(index));
+                    }
+                    codegen.add_instruction(Instruction::Over);
+                    for &index in other_path {
+                        codegen.add_instruction(Instruction::Get(index));
+                    }
+                    codegen.add_instruction(Instruction::Equal(2));
+                }
                 RuntimeCheck::TupleType(type_id) => {
+                    generate_value_access(codegen, &requirement.path);
                     codegen.add_instruction(Instruction::IsTuple(*type_id));
                 }
                 RuntimeCheck::Literal(literal) => {
+                    generate_value_access(codegen, &requirement.path);
                     match literal {
                         ast::Literal::Integer(val) => {
                             let idx = program.register_constant(Constant::Integer(*val));
@@ -139,17 +176,14 @@ pub fn generate_pattern_code(
                             codegen.add_instruction(Instruction::Constant(idx));
                         }
                     }
-
                     codegen.add_instruction(Instruction::Equal(2));
                 }
                 RuntimeCheck::Variable(name) => {
-                    // Load the variable value from local storage
+                    generate_value_access(codegen, &requirement.path);
                     let var_index = variables.get(name).ok_or_else(|| Error::InternalError {
                         message: format!("Pin variable '{}' not found in scope", name),
                     })?;
                     codegen.add_instruction(Instruction::Load(*var_index));
-
-                    // Compare with the matched value
                     codegen.add_instruction(Instruction::Equal(2));
                 }
             }
@@ -165,7 +199,7 @@ pub fn generate_pattern_code(
 
         // If we get here, all checks passed - extract bindings
         for binding in binding_set.bindings.iter() {
-            generate_value_access(codegen, &binding.path)?;
+            generate_value_access(codegen, &binding.path);
 
             // Get local index from bindings_map if provided, otherwise allocate new
             let local_index = if let Some(map) = bindings_map {
@@ -201,16 +235,11 @@ pub fn generate_pattern_code(
     Ok(())
 }
 
-fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) -> Result<(), Error> {
-    // Start with duplicating the root value
+fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
     codegen.add_instruction(Instruction::Duplicate);
-
-    // Apply each field access in sequence
     for &index in path {
         codegen.add_instruction(Instruction::Get(index));
     }
-
-    Ok(())
 }
 
 fn analyze_match_pattern(
@@ -220,29 +249,57 @@ fn analyze_match_pattern(
     value_type: &Type,
     path: AccessPath,
     mode: PatternMode,
+    identifiers: &mut HashMap<String, Indentifier>,
+    variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     match pattern {
-        ast::Match::Identifier(name) => {
-            analyze_identifier_pattern(name.clone(), value_type.clone(), path, mode)
-        }
+        ast::Match::Identifier(name) => analyze_identifier_pattern(
+            name.clone(),
+            value_type.clone(),
+            path,
+            mode,
+            identifiers,
+            variables,
+        ),
         ast::Match::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
-        ast::Match::Tuple(tuple) => {
-            analyze_match_tuple_pattern(type_context, type_lookup, tuple, value_type, path, mode)
-        }
+        ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
+            type_context,
+            type_lookup,
+            tuple,
+            value_type,
+            path,
+            mode,
+            identifiers,
+            variables,
+        ),
         ast::Match::Partial(partial) => {
-            analyze_partial_pattern(type_lookup, partial, value_type, path)
+            analyze_partial_pattern(type_lookup, partial, value_type, path, identifiers)
         }
-        ast::Match::Star => analyze_star_pattern(type_lookup, value_type, path),
+        ast::Match::Star => analyze_star_pattern(type_lookup, value_type, path, identifiers),
         ast::Match::Placeholder => Ok(vec![BindingSet {
             requirements: vec![],
             bindings: vec![],
         }]),
-        ast::Match::Pin(inner) => {
-            analyze_match_pattern(type_context, type_lookup, inner, value_type, path, PatternMode::Pin)
-        }
-        ast::Match::Bind(inner) => {
-            analyze_match_pattern(type_context, type_lookup, inner, value_type, path, PatternMode::Bind)
-        }
+        ast::Match::Pin(inner) => analyze_match_pattern(
+            type_context,
+            type_lookup,
+            inner,
+            value_type,
+            path,
+            PatternMode::Pin,
+            identifiers,
+            variables,
+        ),
+        ast::Match::Bind(inner) => analyze_match_pattern(
+            type_context,
+            type_lookup,
+            inner,
+            value_type,
+            path,
+            PatternMode::Bind,
+            identifiers,
+            variables,
+        ),
     }
 }
 
@@ -253,6 +310,8 @@ fn analyze_match_tuple_pattern(
     value_type: &Type,
     path: AccessPath,
     mode: PatternMode,
+    identifiers: &mut HashMap<String, Indentifier>,
+    variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
 
@@ -260,7 +319,17 @@ fn analyze_match_tuple_pattern(
     let matching_types = find_matching_match_tuple_types(type_lookup, tuple, value_type)?;
 
     // For each matching type, create binding sets
-    for (type_id, field_mappings) in &matching_types {
+    for (_idx, (type_id, field_mappings)) in matching_types.iter().enumerate() {
+        // Clone identifiers only if there are multiple variants to avoid cross-contamination
+        // For a single variant, use the parent's identifiers directly
+        let mut variant_identifiers_storage;
+        let variant_identifiers = if matching_types.len() > 1 {
+            variant_identifiers_storage = identifiers.clone();
+            &mut variant_identifiers_storage
+        } else {
+            &mut *identifiers
+        };
+
         // Get tuple info and extract field types upfront to avoid borrow issues
         let tuple_fields: Vec<Type> = {
             let tuple_info = type_lookup
@@ -307,6 +376,8 @@ fn analyze_match_tuple_pattern(
                 &field_type,
                 field_path,
                 mode,
+                variant_identifiers,
+                variables,
             )?;
 
             if field_binding_sets.is_empty() {
@@ -364,9 +435,7 @@ fn find_matching_match_tuple_types(
 
     for typ in types_to_check {
         if let Type::Tuple(type_id) = typ {
-            if let Some(field_mappings) =
-                check_match_tuple_match(type_lookup, tuple, *type_id)?
-            {
+            if let Some(field_mappings) = check_match_tuple_match(type_lookup, tuple, *type_id)? {
                 matching_types.push((*type_id, field_mappings));
             }
         }
@@ -419,6 +488,8 @@ fn analyze_identifier_pattern(
     value_type: Type,
     path: AccessPath,
     mode: PatternMode,
+    identifiers: &mut HashMap<String, Indentifier>,
+    variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     // Empty Type should never happen - it indicates an internal error
     if matches!(&value_type, Type::Union(types) if types.is_empty()) {
@@ -430,27 +501,55 @@ fn analyze_identifier_pattern(
         });
     }
 
-    match mode {
-        PatternMode::Bind => {
-            // Create a binding for this identifier
-            Ok(vec![BindingSet {
-                requirements: vec![],
-                bindings: vec![Binding {
-                    name,
-                    path,
-                    var_type: value_type,
-                }],
-            }])
-        }
-        PatternMode::Pin => {
-            // Create a runtime check against the variable
-            Ok(vec![BindingSet {
-                requirements: vec![Requirement {
-                    path,
-                    check: RuntimeCheck::Variable(name),
-                }],
-                bindings: vec![],
-            }])
+    // Check if we've seen this identifier before
+    if let Some(info) = identifiers.get_mut(&name) {
+        // Second or later occurrence - mark as repeated and create Path requirement
+        info.is_repeated = true;
+        Ok(vec![BindingSet {
+            requirements: vec![Requirement {
+                path: info.first_path.clone(),
+                check: RuntimeCheck::Path(path),
+            }],
+            bindings: vec![],
+        }])
+    } else {
+        // First occurrence - record it
+        identifiers.insert(
+            name.clone(),
+            Indentifier {
+                first_path: path.clone(),
+                is_pin_mode: mode == PatternMode::Pin,
+                is_repeated: false,
+            },
+        );
+
+        match mode {
+            PatternMode::Bind => {
+                // Create a binding for this identifier
+                Ok(vec![BindingSet {
+                    requirements: vec![],
+                    bindings: vec![Binding {
+                        name,
+                        path,
+                        var_type: value_type,
+                    }],
+                }])
+            }
+            PatternMode::Pin => {
+                // In pin mode, only create Variable requirement if variable exists in scope
+                // If it doesn't exist and this is the only occurrence, we'll error later
+                let mut requirements = vec![];
+                if variables.contains(&name) {
+                    requirements.push(Requirement {
+                        path,
+                        check: RuntimeCheck::Variable(name),
+                    });
+                }
+                Ok(vec![BindingSet {
+                    requirements,
+                    bindings: vec![],
+                }])
+            }
         }
     }
 }
@@ -460,6 +559,7 @@ fn analyze_partial_pattern(
     partial_pattern: &ast::PartialPattern,
     value_type: &Type,
     path: AccessPath,
+    identifiers: &mut HashMap<String, Indentifier>,
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
 
@@ -472,7 +572,16 @@ fn analyze_partial_pattern(
     )?;
 
     // Create a binding set for each matching type
-    for (type_id, field_indices) in &matching_types {
+    for (_idx, (type_id, field_indices)) in matching_types.iter().enumerate() {
+        // Clone identifiers only if there are multiple variants to avoid cross-contamination
+        let mut variant_identifiers_storage;
+        let variant_identifiers = if matching_types.len() > 1 {
+            variant_identifiers_storage = identifiers.clone();
+            &mut variant_identifiers_storage
+        } else {
+            &mut *identifiers
+        };
+
         let mut requirements = vec![];
 
         if value_type.extract_tuple_types().len() > 1 {
@@ -492,11 +601,31 @@ fn analyze_partial_pattern(
             let field_type = &tuple_info.1[idx].1;
             let mut field_path = path.clone();
             field_path.push(idx);
-            bindings.push(Binding {
-                name: field_name.clone(),
-                path: field_path,
-                var_type: field_type.clone(),
-            });
+
+            // Check if we've seen this identifier before
+            if let Some(info) = variant_identifiers.get_mut(field_name) {
+                // Repeated identifier - mark as repeated and add Path requirement
+                info.is_repeated = true;
+                requirements.push(Requirement {
+                    path: info.first_path.clone(),
+                    check: RuntimeCheck::Path(field_path),
+                });
+            } else {
+                // First occurrence - record it and create binding
+                variant_identifiers.insert(
+                    field_name.clone(),
+                    Indentifier {
+                        first_path: field_path.clone(),
+                        is_pin_mode: false,
+                        is_repeated: false,
+                    },
+                );
+                bindings.push(Binding {
+                    name: field_name.clone(),
+                    path: field_path,
+                    var_type: field_type.clone(),
+                });
+            }
         }
 
         binding_sets.push(BindingSet {
@@ -512,13 +641,23 @@ fn analyze_star_pattern(
     type_lookup: &impl TypeLookup,
     value_type: &Type,
     path: AccessPath,
+    identifiers: &mut HashMap<String, Indentifier>,
 ) -> Result<Vec<BindingSet>, Error> {
     // Collect all tuple types
     let tuple_types = value_type.extract_tuple_types();
 
     // Create a binding set for each tuple type
     let mut binding_sets = vec![];
-    for type_id in &tuple_types {
+    for (_idx, type_id) in tuple_types.iter().enumerate() {
+        // Clone identifiers only if there are multiple variants to avoid cross-contamination
+        let mut variant_identifiers_storage;
+        let variant_identifiers = if tuple_types.len() > 1 {
+            variant_identifiers_storage = identifiers.clone();
+            &mut variant_identifiers_storage
+        } else {
+            &mut *identifiers
+        };
+
         let tuple_info = type_lookup
             .lookup_type(type_id)
             .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
@@ -537,11 +676,31 @@ fn analyze_star_pattern(
             if let Some(field_name) = name {
                 let mut field_path = path.clone();
                 field_path.push(idx);
-                bindings.push(Binding {
-                    name: field_name.clone(),
-                    path: field_path,
-                    var_type: field_type.clone(),
-                });
+
+                // Check if we've seen this identifier before
+                if let Some(info) = variant_identifiers.get_mut(field_name) {
+                    // Repeated identifier - mark as repeated and add Path requirement
+                    info.is_repeated = true;
+                    requirements.push(Requirement {
+                        path: info.first_path.clone(),
+                        check: RuntimeCheck::Path(field_path),
+                    });
+                } else {
+                    // First occurrence - record it and create binding
+                    variant_identifiers.insert(
+                        field_name.clone(),
+                        Indentifier {
+                            first_path: field_path.clone(),
+                            is_pin_mode: false,
+                            is_repeated: false,
+                        },
+                    );
+                    bindings.push(Binding {
+                        name: field_name.clone(),
+                        path: field_path,
+                        var_type: field_type.clone(),
+                    });
+                }
             }
         }
 
