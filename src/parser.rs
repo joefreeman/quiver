@@ -140,6 +140,7 @@ fn string_term(input: &str) -> IResult<&str, Term> {
                 fields: vec![TupleField {
                     name: None,
                     value: FieldValue::Chain(Chain {
+                        assignment: None,
                         terms: vec![Term::Literal(Literal::Binary(bytes))],
                         continuation: false,
                     }),
@@ -800,6 +801,29 @@ fn term(input: &str) -> IResult<&str, Term> {
 
 fn chain(input: &str) -> IResult<&str, Chain> {
     alt((
+        // Assignment: pattern = chain_inner
+        map(
+            pair(
+                terminated(assignment_inner, tuple((ws1, char('='), ws1))),
+                chain_inner,
+            ),
+            |(assignment, (terms, continuation))| Chain {
+                assignment: Some(assignment),
+                terms,
+                continuation,
+            },
+        ),
+        // Plain chain
+        map(chain_inner, |(terms, continuation)| Chain {
+            assignment: None,
+            terms,
+            continuation,
+        }),
+    ))(input)
+}
+
+fn chain_inner(input: &str) -> IResult<&str, (Vec<Term>, bool)> {
+    alt((
         // Continuation chain: starts with ~>, terms are optional
         map(
             pair(
@@ -809,18 +833,12 @@ fn chain(input: &str) -> IResult<&str, Chain> {
                     separated_list1(tuple((ws1, tag("~>"), ws1)), term),
                 )),
             ),
-            |(_, terms)| Chain {
-                terms: terms.unwrap_or_default(),
-                continuation: true,
-            },
+            |(_, terms)| (terms.unwrap_or_default(), true),
         ),
         // Normal chain: must have at least one term
         map(
             separated_list1(tuple((ws1, tag("~>"), ws1)), term),
-            |terms| Chain {
-                terms,
-                continuation: false,
-            },
+            |terms| (terms, false),
         ),
     ))(input)
 }

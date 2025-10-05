@@ -27,11 +27,11 @@ Pattern matching allows destructuring values and branching based on their struct
 ```
 type response = Success[bin] | Error[code: int];
 
-#response {
-  | ~> Success[content] => content
-  | ~> Error[code: 404] => default_page
+handle_response = #response {
+  | ~> =Success[content] => content
+  | ~> =Error[code: 404] => default_page
   | error_page
-} ~> handle_response
+}
 ```
 
 ## Types
@@ -92,7 +92,12 @@ A chain is a `~>`-separated sequence of terms. A chain that starts with a `~>` i
 
 ### Control flow
 
-Chains of an expression are executed one at a time, unless a chain evaluates to nil (`[]`), in which case the expression terminats.
+Chains in a sequence are executed one at a time, unless a chain evaluates to nil (`[]`), in which case the expression short-circuits, and evaluates to nil.
+
+```
+[], 5     // single expression, evaluates to []
+[]; 5     // multiple expressions, evaluates to 5
+```
 
 See 'blocks' below for further details about control flow.
 
@@ -106,13 +111,17 @@ The value in a chain can be 'expanded' using the `~` ('ripple') operator. This a
 
 ```
 
-## Variables and assignment
+## Assignment
 
-Variables are declared through assignment using the `~>` operator:
+Assignment is used to assign to variables and/or test a value against a pattern.
+
+Assignment can be done by prefixing the chain with an assignmment - `a = ...` - or with the assignment term - `... ~> =a` within a chain.
 
 ```
-42 ~> x                    // Assign 42 to new variable x
-Point[x: 10, y: 20] ~> p   // Assign tuple to variable p
+x = 42                     // Assign 42 to new variable x
+x = 1 ~> [~, 2]            // Assign x to the result of a chain
+p = Point[x: 10, y: 20]    // Assign tuple to variable p
+p.y ~> =y                  // Using the assignment term
 ```
 
 ### Identifiers
@@ -134,16 +143,23 @@ Extract values from tuples during assignment.
 
 ```
 // Full destructuring
-Point[x: 10, y: 20] ~> Point[x: a, y: _]
+Point[x: a, y: _] = Point[x: 10, y: 20]
 
 // Partial destructuring (extract specific fields)
-Color[r: 255, g: 0, b: 255] ~> (g, b)
+(g, b) = Color[r: 255, g: 0, b: 255]
 
 // Partial named destructuring
-Person[name: "Alice", age: 30, city: "NYC"] ~> Person(name, age)
+Person(name, age) = Person[name: "Alice", age: 30, city: "NYC"]
 
 // Star destructuring (extract all named fields)
-Config[host: "localhost", port: 8080, debug: True] ~> *
+* = Config[host: "localhost", port: 8080, debug: True]
+```
+
+This works the similarly for assignment terms:
+
+```
+Point[x: 10, y: 20] ~> =Point[x: a, y: _]
+// etc
 ```
 
 ### Matching
@@ -152,10 +168,20 @@ Match on literal values:
 
 ```
 // Evaluates to `Ok` and assigns y to 10
-Point[x: 0, y: 10] ~> Point[x: 0, y: y]
+Point[x: 0, y: 10] ~> =Point[x: 0, y: y]
 
 // Evaluates to nil (`[]`), doesn't assign to y
-Point[x: 10, y: 10] ~> Point[x: 0, y: y]
+Point[x: 10, y: 10] ~> =Point[x: 0, y: y]
+```
+
+This also works on literal values:
+
+```
+// Comparing to integer
+p.x ~> =0,
+
+// Comparing to string
+user.role ~> ="admin"
 ```
 
 ## Blocks
@@ -167,37 +193,41 @@ Blocks are specified in the form `{ ... }`. They provide variable scoping, contr
 Blocks create new scopes. Variables assigned within a block shadow outer variables but don't affect them.
 
 ```
-42 ~> x, { 5 ~> x }, x  // 42
+x = 42, { x = 5 }, x  // 42
 ```
 
-### Conditional logic
+### Branches
 
-Comma-separated chains provide conditional execution. If a chain evaluates to nil, the expression terminates early. This enables concise logic similar to `&&` and `||` operators or ternary expressions in other languages.
+A block may contain multiple branches, separated by `|`. If a sequence evaluates to nil (`[]`), execution jumps to the next branch, or, if there are no more branches, to the end of the block. (This enables concise logic similar to `&&` and `||` operators or ternary expressions in other languages.)
 
 ```
 // If item is valid, try to process it, otherwise show error
 item ~> { ~> is_valid?, ~> process! | show_error! }
 
 // Try multiple sources with fallback
-id ~> { ~> read_cache! | ~> query_database! | default_value } ~> value
+value = id ~> {
+  | ~> read_cache!        // try using the id to read from the cache
+  | ~> query_database!    // try using the id to query the database
+  | default_value         // fall back to using a default value
+}
 ```
 
 ### Pattern matching
 
-Blocks can use 'condition-consequence' syntax - `{ ... => ... | ... }` - with multiple branches. If the 'condition' expression (on the left of the `=>`) doesn't evaluate to nil (`[]`), then the 'consequence' expression will be executed, and then execution will jump to the end of the block, taking the value of the consequence. If the condition does evaluate to nil, execution will jump to the next branch within the block, if any; otherwise the block will evaluate to nil.
+Branches in a block can use 'condition-consequence' syntax - `{ ... => ... | ... }`. If the 'condition' expression (on the left of the `=>`) doesn't evaluate to nil (`[]`), then the 'consequence' expression will be executed, and then execution will jump to the end of the block, taking the value of the consequence. If the condition does evaluate to nil, execution will jump to the next branch within the block, if any; otherwise the block will evaluate to nil. The significance is that if a consequence fails (i.e., evaluateas to nil), execution jumps to the end of the block rather than to the next branch.
 
 ```
 value ~> {
-  | ~> 0 => "zero"
+  | ~> =0 => "zero"
   | ~> [~, 0] ~> math.gt! => "positive"
   | "negative"
 }
 ```
 
-Guards can be added with comma-separated conditions:
+This allows 'guard'-style checks to be added to a condition:
 
 ```
-{ ~> x, [x, 10] ~> math.gt! => "large" | "small" }
+{ ~> =x, [x, 10] ~> math.gt! => "large" | "small" }
 ```
 
 ## Field access
@@ -213,8 +243,8 @@ nested.outer.inner   // Chained access
 Field access can also be used as postfix operations:
 
 ```
-data ~> .name ~> extracted_name     // Extract field in pipeline
-coords ~> .0 ~> x_coord             // Positional access in pipeline
+name = data ~> .name     // Extract field in pipeline
+x = coords ~> .0         // Positional access in pipeline
 ```
 
 ## Operators
@@ -238,16 +268,16 @@ Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
 ```
 // Single parameter function
-#int { ~> [~, 2] ~> math.mul! } ~> double
+double = #int { ~> [~, 2] ~> math.mul! }
 
 // Pattern matching on union types
-#shape {
-  | ~> Circle[radius: r] => [r, r] ~> math.mul!
-  | ~> Rectangle[width: w, height: h] => [w, h] ~> math.mul!
-} ~> area,
+area = #shape {
+  | ~> =Circle[radius: r] => [r, r] ~> math.mul!
+  | ~> =Rectangle[width: w, height: h] => [w, h] ~> math.mul!
+},
 
 // Using a tuple for multiple values
-#[int, int] { ~> [a, b] => [b, a] } ~> swap
+#[int, int] { ~> =[a, b] => [b, a] } ~> swap
 
 // Shorthand for nil parameter
 #{ 42 }
@@ -267,19 +297,19 @@ An exclamation mark is used to call a function. (Note that without the exclamati
 Use `&` for tail-recursive calls:
 
 ```
-#[int, int] {
-  | ~> [1, y] => y
-  | ~> [x, y] => [
-    [x, 1] ~> math.sub!,
-    [x, y] ~> math.mul!
+f = #[int, int] {
+  | ~> =[1, y] => y
+  | ~> =[x, y] => [
+    =[x, 1] ~> math.sub!,
+    =[x, y] ~> math.mul!
   ] ~> &
-} ~> f
+}
 ```
 
 Named tail calls to other functions:
 
 ```
-#int { ~> x => [x, 1] ~> &f } ~> fact
+fact = #int { ~> [~, 1] ~> &f }
 ```
 
 ## Processes
@@ -291,8 +321,8 @@ Quiver supports lightweight concurrent processes inspired by Erlang. Processes c
 Spawn a process by applying the `@` operator to a function:
 
 ```
-#int { ... } ~> worker,
-42 ~> @worker ~> pid
+worker = #int { ... },
+pid = 42 ~> @worker
 ```
 
 ### Receiving messages
@@ -302,16 +332,16 @@ Use `$type` (e.g., `$int`) to receive messages. The type after `$` defines the p
 Messages can be filtered by specifying a block - `$type { ... }` - the block will sequentially try to match messages in the mailbox, blocking until a message matches:
 
 ```
-#{
+receiver = #{
   $int {
-    | ~> 0 => "zero"
-    | ~> x => "non-zero", [] ~> &
+    | ~> =0 => "zero"
+    | "non-zero", [] ~> &
   }
-} ~> receiver,
-@receiver ~> pid
+},
+pid = @receiver
 ```
 
-(Note that `$type ~> { ... }` is subtly different - this would receive a message without filtering, and then evaluate the block to the received value.)
+(Note that `$type ~> { ... }` would give subtly different behaviour - this would receive a message without filtering, and then evaluate the block to the received value.)
 
 Avoid side effects when testing messages in the block, since the block may be evaluated multiple times.
 
@@ -336,10 +366,10 @@ Import modules using `%"path"` syntax. Relative imports must start with a ".". S
 Modules are evaluated at compile time, and the result (e.g., the final tuple) is the value that's imported.
 
 ```
-%"math" ~> math                   // Import standard library
-%"./utils.qv" ~> utils            // Import local file
-%"math" ~> (add, mul)             // Import specific functions
-%"./config.qv" ~> *               // Import all named exports
+math = %"math"                   // Import standard library
+utils = %"./utils.qv"            // Import local file
+(add, mul) = %"math"             // Import specific functions
+* = %"./config.qv"               // Import all named exports
 ```
 
 ### Type imports
@@ -364,9 +394,9 @@ The following standard library modules are available:
 Built-in functions can be accessed using angle brackets, although access via the standard library should be preferred.
 
 ```
-[3, 4] ~> <add> ~> sum              // Built-in addition
+sum = [3, 4] ~> <add>               // Built-in addition
 "Hello" ~> <println>                // Built-in print with newline
-[x, 2] ~> <multiply> ~> doubled     // Built-in multiplication
+doubled = [x, 2] ~> <multiply>      // Built-in multiplication
 ```
 
 ## Examples
@@ -375,32 +405,31 @@ Built-in functions can be accessed using angle brackets, although access via the
 
 ```
 // Import math functions
-%"math" ~> (add, mul, sub),
+(add, mul, sub) = math,
 
 // Create and manipulate values
-10 ~> x, 20 ~> y,
-[x, y] ~> add! ~> sum,
-[sum, 2] ~> mul! ~> result
+x = 10, y = 20,
+[x, y] ~> add! ~> [~, 2] ~> mul! ~> [~, 1] ~> sub!
 ```
 
 ### Working with tuples
 
 ```
-%"math" ~> math,
+math = %"math",
 
 // Define a point type
-Point[x: 10, y: 20] ~> p1,
-Point[x: 5, y: 15] ~> p2,
+p1 = Point[x: 10, y: 20],
+p2 = Point[x: 5, y: 15],
 
 // Function to add points
-#[Point[x: int, y: int], Point[x: int, y: int]] {
-  ~> [a, b] => Point[
+add_points = #[Point[x: int, y: int], Point[x: int, y: int]] {
+  ~> =[a, b] => Point[
     x: [a.x, b.x] ~> math.add!,
     y: [a.y, b.y] ~> math.add!
   ]
-} ~> add_points,
+},
 
-[p1, p2] ~> add_points! ~> result
+result = [p1, p2] ~> add_points!
 ```
 
 ### Pattern matching
@@ -409,13 +438,13 @@ Point[x: 5, y: 15] ~> p2,
 type list = Nil | Cons[int, &];
 
 // Determine whether a list contains an item
-#[list, int] {
-  | ~> [Nil, _] => []
-  | ~> [Cons[head, tail], value], [head, value] ~> == => Ok
-  | ~> [Cons[_, tail], value] => [tail, value] ~> &
-} ~> contains?,
+contains? = #[list, int] {
+  | ~> =[Nil, _] => []
+  | ~> =[Cons[head, tail], value], [head, value] ~> == => Ok
+  | ~> =[Cons[_, tail], value] => [tail, value] ~> &
+},
 
-Cons[1, Cons[2, Cons[3, Nil]]] ~> xs,
+xs = Cons[1, Cons[2, Cons[3, Nil]]],
 [xs, 3] ~> contains?!,   // Ok
 [xs, 4] ~> contains?!    // []
 ```
@@ -424,11 +453,11 @@ Cons[1, Cons[2, Cons[3, Nil]]] ~> xs,
 
 ```
 // Clamp value to range [0, 100]
-#int {
+clamp = #int {
   | ~> [~, 100] ~> math.gt! => 100
   | ~> [~, 0] ~> math.lt! => 0
-  | ~> x => x
-} ~> clamp,
+  | ~> =x => x
+},
 
 150 ~> clamp!,   // 100
 -10 ~> clamp!,   // 0
@@ -441,31 +470,31 @@ Cons[1, Cons[2, Cons[3, Nil]]] ~> xs,
 // shapes.qv
 type shape = Circle[radius: int] | Rectangle[width: int, height: int];
 
-%"math" ~> math,
+math = %"math",
 
 [
   bounding_box: #shape {
-    | ~> Circle[radius: r] => {
-      [r, 2] ~> math.mul! ~> x,
+    | ~> =Circle[radius: r] => {
+      x = [r, 2] ~> math.mul!,
       Rectangle[width: x, height: x]
     }
-    | ~> Rectangle[width: w, height: h] => {
+    | ~> =Rectangle[width: w, height: h] => {
       Rectangle[width: w, height: h]
     }
   },
 
   is_square?: #shape {
-    ~> Rectangle[width: w, height: h], [w, h] ~> ==
+    ~> =Rectangle[width: w, height: h], [w, h] ~> ==
   }
 ]
 ```
 
 ```
 // main.qv
-%"./shapes.qv" ~> (bounding_box, is_square?),
+(bounding_box, is_square?) = %"./shapes.qv",
 
-Circle[radius: 5] ~> circle,
-Rectangle[width: 10, height: 10] ~> rectangle,
+circle = Circle[radius: 5],
+rectangle = Rectangle[width: 10, height: 10],
 
 circle ~> bounding_box!,      // Rectangle[width: 10, height: 10]
 rectangle ~> is_square?!      // Ok
@@ -475,41 +504,41 @@ rectangle ~> is_square?!      // Ok
 
 ```
 // Extract and process data
-Person[
+person = Person[
   name: "Alan",
   date_of_birth: [
     year: 1912,
     month: June,
     day: 23
   ]
-] ~> person,
+],
 person.name,                           // Extract name field
 person ~> .date_of_birth ~> .month,    // Chain field access
 
 // Built-in operations
-person.age ~> [~, 1] ~> <add> ~> next_year,    // Use built-in add
-name ~> <println>                              // Print to console
+next_year = person.age ~> [~, 1] ~> <add>,    // Use built-in add
+name ~> <println>                             // Print to console
 ```
 
 ### Concurrent processes
 
 ```
 // Echo process that receives and prints messages
-#[] {
+echo = #[] {
   $Str[bin] {
-    | ~> "" => []            // Stop on empty string
-    | ~> s => {
+    | ~> ="" => []           // Stop on empty string
+    | ~> =s => {
       s ~> <println>,        // Print received value
       [] ~> &                // Continue receiving
     }
   }
-} ~> echo,
+},
 
 // Spawn the process
-@echo ~> pid,
+pid = @echo,
 
 // Send messages
-"hello" ~> pid,
-"bye" ~> pid,
-"" ~> pid                    // (stop the process)
+"hello" ~> pid$,
+"bye" ~> pid$,
+"" ~> pid$                    // (stop the process)
 ```

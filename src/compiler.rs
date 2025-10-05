@@ -997,9 +997,16 @@ impl<'a> Compiler<'a> {
             current_type = Some(self.compile_term(term, current_type, on_no_match)?);
         }
 
-        current_type.ok_or_else(|| Error::InternalError {
+        let result_type = current_type.ok_or_else(|| Error::InternalError {
             message: "Chain compiled with no terms and no continuation".to_string(),
-        })
+        })?;
+
+        // If there's an assignment pattern, apply it
+        if let Some(pattern) = chain.assignment {
+            self.compile_destructure(pattern, result_type, on_no_match)
+        } else {
+            Ok(result_type)
+        }
     }
 
     fn value_to_instructions(&mut self, value: &Value) -> Result<Type, Error> {

@@ -6,6 +6,8 @@ fn test_simple_assignment() {
     quiver()
         .evaluate("1 ~> =x, 2 ~> =y, [x, y] ~> <add>!")
         .expect("3");
+
+    quiver().evaluate("x = 42; x").expect("42");
 }
 
 #[test]
@@ -13,6 +15,8 @@ fn test_tuple_destructuring() {
     quiver()
         .evaluate("[1, 2] ~> =[a, b], [a, b] ~> <add>!")
         .expect("3");
+
+    quiver().evaluate("[x, y] = [1, 2]; y").expect("2");
 }
 
 #[test]
@@ -24,6 +28,7 @@ fn test_named_field_assignment() {
         .expect("[]");
     quiver().evaluate("A[a: 1] ~> =A[x: a], a").expect("[]");
     quiver().evaluate("A[a: 1] ~> =A[a], a").expect("[]");
+    quiver().evaluate("A[a: a] = A[a: 5]; a").expect("5")
 }
 
 #[test]
@@ -82,16 +87,23 @@ fn test_star_assignment() {
     quiver()
         .evaluate("[a: 1, b: 2] ~> =*, [a, b] ~> <add>!")
         .expect("3");
+
+    quiver()
+        .evaluate("* = [a: 1, b: 2]; [a, b] ~> <add>!")
+        .expect("3");
 }
 
 #[test]
 fn test_ignore_placeholder() {
     quiver().evaluate("[1, 2] ~> =[a, _], a").expect("1");
+    quiver().evaluate("[1, 2] ~> =_").expect("Ok");
+    quiver().evaluate("_ = [1, 2]").expect("Ok");
 }
 
 #[test]
 fn test_failed_assignment_length() {
     quiver().evaluate("[1, 2] ~> =[a]").expect("[]");
+    quiver().evaluate("[a] = [1, 2]").expect("[]");
 }
 
 #[test]

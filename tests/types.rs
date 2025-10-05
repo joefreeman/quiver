@@ -21,12 +21,12 @@ fn test_function_with_type_pattern() {
         .evaluate(
             r#"
             type shape = Circle[r: int] | Rectangle[w: int, h: int];
-            #shape {
+            area = #shape {
               | ~> =Circle[r: r] => [r, r] ~> <multiply>!
               | ~> =Rectangle[w: w, h: h] => [w, h] ~> <multiply>!
-            } ~> =area,
-            Circle[r: 5] ~> area! ~> =a1,
-            Rectangle[w: 4, h: 3] ~> area! ~> =a2,
+            },
+            a1 = Circle[r: 5] ~> area!,
+            a2 = Rectangle[w: 4, h: 3] ~> area!,
             [a1, a2] ~> <add>!
             "#,
         )
@@ -39,7 +39,7 @@ fn test_recursive_list_type() {
         .evaluate(
             r#"
             type list = Nil | Cons[int, &];
-            Cons[1, Cons[2, Cons[3, Nil]]] ~> =xs,
+            xs = Cons[1, Cons[2, Cons[3, Nil]]],
             [xs.1.0, xs.1.1.0] ~> <add>!
             "#,
         )
@@ -52,10 +52,10 @@ fn test_cycle_ref_with_pattern_matching() {
         .evaluate(
             r#"
             type list = Nil | Cons[int, &];
-            #list {
+            get_head = #list {
               | ~> =Cons[h, _] => h
               | ~> =Nil => 0
-            } ~> =get_head,
+            },
             Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head!
             "#,
         )
@@ -68,7 +68,7 @@ fn test_cycle_ref_nested_depth() {
         .evaluate(
             r#"
             type json = True | False | Array[(Nil | Cons[&0, &1])];
-            #json { ~> =Array[Cons[a, Cons[b, Nil]]] => [a, b] } ~> =f,
+            f = #json { ~> =Array[Cons[a, Cons[b, Nil]]] => [a, b] },
             Array[Cons[False, Cons[True, Nil]]] ~> f!
             "#,
         )
@@ -138,10 +138,10 @@ fn test_nested_union_pattern_matching_in_function() {
             type list = Nil | Cons[int, &];
 
             // Test extracting second element with nested pattern
-            #list {
+            get_second = #list {
               | ~> =Cons[_, Cons[h, _]] => h
               | 999
-            } ~> =get_second,
+            },
 
             Cons[10, Cons[20, Cons[30, Nil]]] ~> get_second!
             "#,
@@ -153,10 +153,10 @@ fn test_nested_union_pattern_matching_in_function() {
             r#"
             type list = Nil | Cons[int, &];
 
-            #list {
+            get_first_two = #list {
               | ~> =Cons[first, Cons[second, _]] => [first, second]
               | [0, 0]
-            } ~> =get_first_two,
+            },
 
             Cons[10, Cons[20, Cons[30, Nil]]] ~> get_first_two!
             "#,
@@ -168,10 +168,10 @@ fn test_nested_union_pattern_matching_in_function() {
             r#"
             type list = Nil | Cons[int, &];
 
-            #list {
+            get_third = #list {
               | ~> =Cons[_, Cons[_, Cons[h, _]]] => h
               | 999
-            } ~> =get_third,
+            },
 
             Cons[10, Cons[20, Cons[30, Cons[40, Nil]]]] ~> get_third!
             "#,
@@ -189,19 +189,19 @@ fn test_multiple_runtime_type_checks_with_nested_patterns() {
             type tree = Leaf[int] | Node[&, &];
 
             // Function with multiple nested patterns requiring runtime checks
-            #tree {
+            extract_left_leaf = #tree {
               | ~> =Node[Node[Leaf[x], _], _] => x
               | ~> =Node[Leaf[x], _] => x
               | ~> =Leaf[x] => x
-            } ~> =extract_left_leaf,
+            },
 
-            Node[Node[Leaf[42], Leaf[99]], Leaf[7]] ~> =t1,
-            Node[Leaf[15], Leaf[25]] ~> =t2,
-            Leaf[3] ~> =t3,
+            t1 = Node[Node[Leaf[42], Leaf[99]], Leaf[7]],
+            t2 = Node[Leaf[15], Leaf[25]],
+            t3 = Leaf[3],
 
-            t1 ~> extract_left_leaf! ~> =r1,
-            t2 ~> extract_left_leaf! ~> =r2,
-            t3 ~> extract_left_leaf! ~> =r3,
+            r1 = t1 ~> extract_left_leaf!,
+            r2 = t2 ~> extract_left_leaf!,
+            r3 = t3 ~> extract_left_leaf!,
 
             [r1, r2, r3]
             "#,
@@ -215,10 +215,10 @@ fn test_recursive_type_as_function_parameter() {
         .evaluate(
             r#"
             type list = Nil | Cons[int, &];
-            #list {
+            get_head = #list {
               | ~> =Cons[h, _] => h
               | ~> =Nil => 0
-            } ~> =get_head,
+            },
             Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head!
             "#,
         )
@@ -231,7 +231,7 @@ fn test_recursive_tree_type() {
         .evaluate(
             r#"
             type tree = Node[left: &, right: &] | Leaf[int];
-            Node[
+            t = Node[
               left: Node[
                 left: Leaf[1],
                 right: Leaf[2]
@@ -246,7 +246,7 @@ fn test_recursive_tree_type() {
                 ],
                 right: Leaf[6]
               ]
-            ] ~> =t,
+            ],
             t.right.left.left ~> =Leaf[value],
             value
             "#,
@@ -260,7 +260,7 @@ fn test_recursive_type_with_cycle() {
         .evaluate(
             r#"
             type list = Nil | Cons[int, &];
-            #list { ~> =x => Cons[10, x] } ~> =prepend,
+            prepend = #list { ~> =x => Cons[10, x] },
             Cons[20, Cons[30, Nil]] ~> prepend! ~> .0
             "#,
         )
@@ -282,19 +282,19 @@ fn test_recursive_type_pattern_matching_bug() {
             // This function matches on a tuple where the first element is a recursive type
             // The bug would occur when the pattern compiler tried to access field 0 of Empty
             // (which has no fields) when matching the pattern [Full[rest], n]
-            #[t, int] {
+            match_recursive = #[t, int] {
               | ~> =[Empty, n] => n
               | ~> =[Full[rest], n] => [n, 100] ~> <add>!
-            } ~> =match_recursive,
+            },
 
             // Test with Empty - should return n
-            [Empty, 42] ~> match_recursive! ~> =r1,
+            r1 = [Empty, 42] ~> match_recursive!,
 
             // Test with Full[Empty] - should return n + 100
-            [Full[Empty], 42] ~> match_recursive! ~> =r2,
+            r2 = [Full[Empty], 42] ~> match_recursive!,
 
             // Test with Full[Full[Empty]] - should return n + 100
-            [Full[Full[Empty]], 42] ~> match_recursive! ~> =r3,
+            r3 = [Full[Full[Empty]], 42] ~> match_recursive!,
 
             [r1, r2, r3]
             "#,
@@ -308,13 +308,13 @@ fn test_recursive_type_pattern_matching_bug() {
             type tree = Leaf[int] | Node[&, &];
 
             // Function that matches on first element of tuple
-            #[tree, int] {
+            match_first = #[tree, int] {
               | ~> =[Leaf[x], n] => [x, n] ~> <add>!
               | ~> =[Node[l, r], n] => n
-            } ~> =match_first,
+            },
 
-            [Leaf[42], 10] ~> match_first! ~> =t1,
-            [Node[Leaf[1], Leaf[2]], 20] ~> match_first! ~> =t2,
+            t1 = [Leaf[42], 10] ~> match_first!,
+            t2 = [Node[Leaf[1], Leaf[2]], 20] ~> match_first!,
 
             [t1, t2]
             "#,
@@ -328,15 +328,15 @@ fn test_recursive_type_pattern_matching_bug() {
             type list = Nil | Cons[int, &];
 
             // Pattern matching that would trigger the bug
-            #[list, int] {
+            process_list = #[list, int] {
               | ~> =[Nil, x] => x
               | ~> =[Cons[head, tail], x] => [head, x] ~> <add>!
-            } ~> =process_list,
+            },
 
             // These should all work without FieldAccessInvalid errors
-            [Nil, 10] ~> process_list! ~> =r1,
-            [Cons[5, Nil], 10] ~> process_list! ~> =r2,
-            [Cons[5, Cons[3, Nil]], 10] ~> process_list! ~> =r3,
+            r1 = [Nil, 10] ~> process_list!,
+            r2 = [Cons[5, Nil], 10] ~> process_list!,
+            r3 = [Cons[5, Cons[3, Nil]], 10] ~> process_list!,
 
             [r1, r2, r3]
             "#,
@@ -350,10 +350,10 @@ fn test_union_pattern() {
         .evaluate(
             r#"
             type t = Empty | Full[&];
-            #[t, int] {
+            f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
-            } ~> =f,
+            },
             [Empty, 1] ~> f!
             "#,
         )
@@ -363,10 +363,10 @@ fn test_union_pattern() {
         .evaluate(
             r#"
             type t = Empty | Full[&];
-            #[t, int] {
+            f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
-            } ~> =f,
+            },
             [Full[Empty], 1] ~> f!
             "#,
         )
@@ -379,10 +379,10 @@ fn test_recursive_union_pattern() {
         .evaluate(
             r#"
             type t = Empty | Full[&];
-            #[t, int] {
+            f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => [rest, 0] ~> &
-            } ~> =f,
+            },
             [Full[Empty], 1] ~> f!
             "#,
         )

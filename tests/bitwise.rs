@@ -158,10 +158,9 @@ fn test_binary_set_bit() {
     quiver()
         .evaluate(
             r#"
-            '00' ~> =start,
-            [start, 0, 1] ~> <binary_set_bit>! ~> =bit0_set,
-            [bit0_set, 7, 1] ~> <binary_set_bit>! ~> =bit7_set,
-            bit7_set
+            start = '00'
+            bit0_set = [start, 0, 1] ~> <binary_set_bit>!
+            [bit0_set, 7, 1] ~> <binary_set_bit>!
             "#,
         )
         .expect("'81'"); // 10000001
@@ -176,10 +175,10 @@ fn test_binary_popcount_hamt_pattern() {
         .evaluate(
             r#"
             // Create binary: set some bits to simulate HAMT bitmap
-            4 ~> <binary_new>! ~> =empty,
-            [empty, 0, 1] ~> <binary_set_bit>! ~> =with_bit0,
-            [with_bit0, 5, 1] ~> <binary_set_bit>! ~> =with_bit5,
-            [with_bit5, 10, 1] ~> <binary_set_bit>! ~> =with_bit10,
+            empty = 4 ~> <binary_new>!
+            with_bit0 = [empty, 0, 1] ~> <binary_set_bit>!
+            with_bit5 = [with_bit0, 5, 1] ~> <binary_set_bit>!
+            with_bit10 = [with_bit5, 10, 1] ~> <binary_set_bit>!
             with_bit10 ~> <binary_popcount>!
             "#,
         )

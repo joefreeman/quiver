@@ -3,18 +3,18 @@ use common::*;
 
 #[test]
 fn test_block_scope() {
-    quiver().evaluate("1 ~> =x, { 2 ~> =x }, x").expect("1");
+    quiver().evaluate("x = 1; { x = 2 }; x").expect("1");
 }
 
 #[test]
 fn test_block_evaluation() {
-    quiver().evaluate("{ 1, 2, 3 } ~> =x, x").expect("3");
+    quiver().evaluate("x = { 1, 2, 3 }; x").expect("3");
 }
 
 #[test]
 fn test_block_with_closure() {
     quiver()
-        .evaluate("1 ~> =x, { 2 ~> =y, [x, y] ~> <add>! }")
+        .evaluate("x = 1; { 2 ~> =y, [x, y] ~> <add>! }")
         .expect("3");
 }
 

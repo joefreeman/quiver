@@ -3,15 +3,13 @@ use common::quiver;
 
 #[test]
 fn test_await_simple_process() {
-    quiver()
-        .evaluate("#{ 42 } ~> =f, @f ~> =p, p!")
-        .expect("42");
+    quiver().evaluate("f = #{ 42 }; p = @f; p!").expect("42");
 }
 
 #[test]
 fn test_await_returns_process_result() {
     quiver()
-        .evaluate("#{ [1, 2] ~> <add>! } ~> =f, @f ~> =p, p!")
+        .evaluate("f = #{ [1, 2] ~> <add>! }; p = @f; p!")
         .expect("3");
 }
 
@@ -21,8 +19,8 @@ fn test_explicit_process_type_return_only() {
     quiver()
         .evaluate(
             r#"
-            #(@-> int) { ~> =p => p! } ~> =await_fn,
-            #{ 42 } ~> =f,
+            await_fn = #(@-> int) { ~> =p => p! }
+            f = #{ 42 }
             @f ~> await_fn!
             "#,
         )
@@ -35,8 +33,8 @@ fn test_explicit_process_type_receive_and_return() {
     quiver()
         .evaluate(
             r#"
-            #(@int -> bin) { ~> =p => 42 ~> p$, p! } ~> =send_and_await,
-            #{ $int { ~> =x => '00' } } ~> =f,
+            send_and_await = #(@int -> bin) { ~> =p => 42 ~> p$, p! }
+            f = #{ $int { ~> =x => '00' } }
             @f ~> send_and_await!
             "#,
         )
@@ -49,8 +47,8 @@ fn test_self_reference_cannot_be_awaited() {
     quiver()
         .evaluate(
             r#"
-            #{ $int { ~> =x => . ~> =self_pid, self_pid! } } ~> =f,
-            @f ~> =p,
+            f = #{ $int { ~> =x => . ~> =self_pid, self_pid! } }
+            p = @f
             42 ~> p$
             "#,
         )

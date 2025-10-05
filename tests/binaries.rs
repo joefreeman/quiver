@@ -119,9 +119,9 @@ fn test_binary_operations_chain() {
     quiver()
         .evaluate(
             r#"
-            '68656c6c6f' ~> =hello,
-            '20776f726c64' ~> =world,
-            [hello, world] ~> <binary_concat>! ~> =combined,
+            hello = '68656c6c6f'
+            world = '20776f726c64'
+            combined = [hello, world] ~> <binary_concat>!
             combined ~> <binary_length>!
             "#,
         )
@@ -143,8 +143,8 @@ fn test_heap_vs_constant_equality() {
     quiver()
         .evaluate(
             r#"
-            5 ~> <binary_new>! ~> =heap_bin,
-            5 ~> <binary_new>! ~> =const_bin,
+            heap_bin = 5 ~> <binary_new>!
+            const_bin = 5 ~> <binary_new>!
             [heap_bin, const_bin] ~> ==
             "#,
         )
