@@ -31,17 +31,21 @@ pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
     }
 }
 
-pub struct TypeContext<'a> {
-    pub type_aliases: &'a mut HashMap<String, Type>,
+pub struct TypeContext {
+    pub type_aliases: HashMap<String, Type>,
     pub union_stack: Vec<()>, // Track union boundaries for cycle depth calculation
 }
 
-impl<'a> TypeContext<'a> {
-    pub fn new(type_aliases: &'a mut HashMap<String, Type>) -> Self {
+impl TypeContext {
+    pub fn new(type_aliases: HashMap<String, Type>) -> Self {
         Self {
             type_aliases,
             union_stack: Vec::new(),
         }
+    }
+
+    pub fn into_type_aliases(self) -> HashMap<String, Type> {
+        self.type_aliases
     }
 
     /// Check if an AST type contains any cycle references

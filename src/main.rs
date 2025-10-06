@@ -2,7 +2,6 @@ use clap::{CommandFactory, Parser, Subcommand};
 use quiver::bytecode::TypeId;
 use quiver::repl::Repl;
 use quiver::types::Type;
-use quiver::vm::Value;
 use std::fs;
 use std::io::{self, Read};
 
@@ -109,12 +108,15 @@ fn compile_command(
 }
 
 fn handle_result(
-    bytecode: quiver::bytecode::Bytecode,
+    vm: &quiver::vm::VM,
     result: Result<Option<quiver::vm::Value>, quiver::Error>,
     quiet: bool,
 ) {
+    use quiver::vm::Value;
+
     match result {
         Ok(Some(value)) => {
+            // Check if result is NIL tuple (exit with error)
             if matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::NIL) {
                 std::process::exit(1);
             }
@@ -122,8 +124,7 @@ fn handle_result(
             if !quiet
                 && !matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::OK || type_id == TypeId::NIL)
             {
-                let program = quiver::program::Program::from_bytecode(bytecode);
-                println!("{}", quiver::format::format_value(&program, &value));
+                println!("{}", quiver::format::format_value(&vm.scheduler(), &value));
             }
         }
         Ok(None) => {}
@@ -151,8 +152,17 @@ fn run_command(
             compile_execute(&content, module_path, quiet)?;
         } else if path.ends_with(".qx") {
             let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
-            let result = quiver::execute(bytecode.clone());
-            handle_result(bytecode, result, quiet);
+            let entry = bytecode.entry;
+            let program = quiver::program::Program::from_bytecode(bytecode);
+            let vm = quiver::vm::VM::new(program);
+
+            let result = if let Some(entry) = entry {
+                vm.execute_function(entry)
+                    .map_err(quiver::Error::RuntimeError)
+            } else {
+                Ok(None)
+            };
+            handle_result(&vm, result, quiet);
         } else {
             eprintln!(
                 "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
@@ -166,8 +176,17 @@ fn run_command(
         if buffer.trim_start().starts_with('{') {
             match serde_json::from_str::<quiver::bytecode::Bytecode>(&buffer) {
                 Ok(bytecode) => {
-                    let result = quiver::execute(bytecode.clone());
-                    handle_result(bytecode, result, quiet);
+                    let entry = bytecode.entry;
+                    let program = quiver::program::Program::from_bytecode(bytecode);
+                    let vm = quiver::vm::VM::new(program);
+
+                    let result = if let Some(entry) = entry {
+                        vm.execute_function(entry)
+                            .map_err(quiver::Error::RuntimeError)
+                    } else {
+                        Ok(None)
+                    };
+                    handle_result(&vm, result, quiet);
                 }
                 Err(_) => {
                     let module_path = Some(std::env::current_dir()?);
@@ -190,12 +209,17 @@ fn compile_execute(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytecode = quiver::compile(source, module_path, None)?;
 
-    if bytecode.entry.is_none() {
-        return Err("Program is not executable. Must evaluate to a function.".into());
-    }
+    let entry = bytecode
+        .entry
+        .ok_or("Program is not executable. Must evaluate to a function.")?;
 
-    let result = quiver::execute(bytecode.clone());
-    handle_result(bytecode, result, quiet);
+    let program = quiver::program::Program::from_bytecode(bytecode);
+    let vm = quiver::vm::VM::new(program);
+
+    let result = vm
+        .execute_function(entry)
+        .map_err(quiver::Error::RuntimeError);
+    handle_result(&vm, result, quiet);
 
     Ok(())
 }

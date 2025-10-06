@@ -195,29 +195,35 @@ impl Repl {
     }
 
     fn list_processes(&self) {
-        let statuses = self.quiver.get_process_statuses();
-        if statuses.is_empty() {
-            println!("{}", "No processes".bright_black());
-        } else {
-            let mut processes: Vec<_> = statuses.into_iter().collect();
-            processes.sort_by_key(|(id, _)| id.0);
-            println!("{}", "Processes:".bright_black());
-            for (id, status) in processes {
-                let status_str = match status {
-                    ProcessStatus::Running => "running",
-                    ProcessStatus::Queued => "queued",
-                    ProcessStatus::Waiting => "waiting",
-                    ProcessStatus::Sleeping => "sleeping",
-                    ProcessStatus::Terminated => "terminated",
-                };
-                println!("{}", format!("  {}: {}", id.0, status_str).bright_black());
+        match self.quiver.get_process_statuses() {
+            Ok(statuses) => {
+                if statuses.is_empty() {
+                    println!("{}", "No processes".bright_black());
+                } else {
+                    let mut processes: Vec<_> = statuses.into_iter().collect();
+                    processes.sort_by_key(|(id, _)| id.0);
+                    println!("{}", "Processes:".bright_black());
+                    for (id, status) in processes {
+                        let status_str = match status {
+                            ProcessStatus::Running => "running",
+                            ProcessStatus::Queued => "queued",
+                            ProcessStatus::Waiting => "waiting",
+                            ProcessStatus::Sleeping => "sleeping",
+                            ProcessStatus::Terminated => "terminated",
+                        };
+                        println!("{}", format!("  {}: {}", id.0, status_str).bright_black());
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", format!("Error listing processes: {:?}", e).red());
             }
         }
     }
 
     fn inspect_process(&self, id: ProcessId) {
         match self.quiver.get_process_info(id) {
-            Some(info) => {
+            Ok(Some(info)) => {
                 let status_str = match info.status {
                     ProcessStatus::Running => "running",
                     ProcessStatus::Queued => "queued",
@@ -255,8 +261,11 @@ impl Repl {
                     println!("{}", "  Result: ―".bright_black());
                 }
             }
-            None => {
+            Ok(None) => {
                 eprintln!("{}", format!("Process {} not found", id.0).red());
+            }
+            Err(e) => {
+                eprintln!("{}", format!("Error inspecting process: {:?}", e).red());
             }
         }
     }

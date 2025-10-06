@@ -1,26 +1,21 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::{ast, modules::ModuleLoader, parser, program::Program, vm::Value};
+use crate::{ast, bytecode::Instruction, modules::ModuleLoader, parser, program::Program};
 
 use super::{Error, typing::TypeContext};
 
+#[derive(Clone)]
 pub struct ModuleCache {
     pub ast_cache: HashMap<String, ast::Program>,
-    pub evaluation_cache: HashMap<String, Value>,
+    pub instruction_cache: HashMap<String, (Vec<Instruction>, crate::types::Type)>,
     pub import_stack: Vec<String>,
-}
-
-impl Default for ModuleCache {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ModuleCache {
     pub fn new() -> Self {
         Self {
             ast_cache: HashMap::new(),
-            evaluation_cache: HashMap::new(),
+            instruction_cache: HashMap::new(),
             import_stack: Vec::new(),
         }
     }

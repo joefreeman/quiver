@@ -1,6 +1,6 @@
-use crate::program::Program;
+use crate::scheduler::Scheduler;
 use crate::types::{Type, TypeLookup};
-use crate::vm::{BinaryRef, Value};
+use crate::vm::{Binary, Value};
 
 /// Helper function to format bytes as a string if they represent valid UTF-8 text
 fn try_format_as_string(bytes: &[u8]) -> Option<String> {
@@ -111,34 +111,35 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
 }
 
 /// Format a binary value showing its actual content
-pub fn format_binary(program: &Program, binary_ref: &BinaryRef) -> String {
-    match program.get_binary_bytes(binary_ref) {
-        Ok(bytes) => {
-            if bytes.len() <= 8 {
+pub fn format_binary(scheduler: &Scheduler, binary: &Binary) -> String {
+    scheduler
+        .with_binary_bytes(binary, |bytes| {
+            Ok(if bytes.len() <= 8 {
                 // Show short binaries in full
                 format!("'{}'", hex::encode(bytes))
             } else {
                 // Show truncated for long binaries
                 format!("'{}…'", hex::encode(&bytes[..8]))
-            }
-        }
-        Err(_) => "<invalid binary>".to_string(),
-    }
+            })
+        })
+        .unwrap_or_else(|_| "<invalid binary>".to_string())
 }
 
-pub fn format_value(program: &Program, value: &Value) -> String {
+pub fn format_value(scheduler: &Scheduler, value: &Value) -> String {
     match value {
         Value::Function(function, _) => format!("#{}", function),
         Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
-        Value::Binary(binary_ref) => format_binary(program, binary_ref),
+        Value::Binary(binary) => format_binary(scheduler, binary),
         Value::Pid(process_id) => format!("@{}", process_id.0),
         Value::Tuple(type_id, elements) => {
-            if let Some((name, fields)) = program.lookup_type(type_id) {
+            if let Some((name, fields)) = scheduler.lookup_type(type_id) {
                 if name.as_deref() == Some("Str") {
-                    if let [Value::Binary(binary_ref)] = elements.as_slice() {
-                        if let Ok(bytes) = program.get_binary_bytes(binary_ref) {
-                            if let Some(formatted) = try_format_as_string(bytes) {
+                    if let [Value::Binary(binary)] = elements.as_slice() {
+                        if let Ok(formatted) = scheduler
+                            .with_binary_bytes(binary, |bytes| Ok(try_format_as_string(bytes)))
+                        {
+                            if let Some(formatted) = formatted {
                                 return formatted;
                             }
                         }
@@ -152,7 +153,7 @@ pub fn format_value(program: &Program, value: &Value) -> String {
                         .iter()
                         .enumerate()
                         .map(|(i, elem)| {
-                            let formatted = format_value(program, elem);
+                            let formatted = format_value(scheduler, elem);
                             match fields.get(i).and_then(|(name, _)| name.as_ref()) {
                                 Some(name) => format!("{}: {}", name, formatted),
                                 None => formatted,
@@ -177,7 +178,7 @@ pub fn format_value(program: &Program, value: &Value) -> String {
                     if i > 0 {
                         result.push_str(", ");
                     }
-                    result.push_str(&format_value(program, element));
+                    result.push_str(&format_value(scheduler, element));
                 }
                 result.push(']');
                 result

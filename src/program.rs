@@ -1,6 +1,6 @@
 use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
-use crate::vm::{BinaryRef, Error, Value};
+use crate::vm::{Binary, Error, Value};
 use std::collections::HashMap;
 
 mod optimisation;
@@ -24,6 +24,47 @@ impl TypeLookup for Program {
 }
 
 impl Program {
+    pub fn get_constant(&self, index: usize) -> Option<&Constant> {
+        self.constants.get(index)
+    }
+
+    pub fn with_binary_bytes<F, R>(&self, binary: &Binary, f: F) -> Result<R, Error>
+    where
+        F: FnOnce(&[u8]) -> Result<R, Error>,
+    {
+        match binary {
+            Binary::Constant(index) => match self.constants.get(*index) {
+                Some(Constant::Binary(bytes)) => f(bytes),
+                Some(_) => Err(Error::TypeMismatch {
+                    expected: "binary constant".to_string(),
+                    found: "non-binary constant".to_string(),
+                }),
+                None => Err(Error::ConstantUndefined(*index)),
+            },
+            Binary::Heap(_) => Err(Error::InvalidArgument(
+                "Heap binaries cannot be accessed from Program (no scheduler context)".to_string(),
+            )),
+        }
+    }
+
+    /// Convenience method that clones the binary data
+    /// For cases where the closure API would be cumbersome (e.g., multiple binary accesses)
+    pub fn get_binary_bytes(&self, binary: &Binary) -> Result<Vec<u8>, Error> {
+        self.with_binary_bytes(binary, |bytes| Ok(bytes.to_vec()))
+    }
+
+    pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
+        if bytes.len() > crate::vm::MAX_BINARY_SIZE {
+            return Err(Error::InvalidArgument(format!(
+                "Binary size {} exceeds maximum {}",
+                bytes.len(),
+                crate::vm::MAX_BINARY_SIZE
+            )));
+        }
+        let index = self.register_constant(Constant::Binary(bytes));
+        Ok(Binary::Constant(index))
+    }
+
     pub fn new() -> Self {
         let mut program = Self {
             constants: Vec::new(),
@@ -64,8 +105,8 @@ impl Program {
         }
     }
 
-    pub fn get_constant(&self, index: usize) -> Option<&Constant> {
-        self.constants.get(index)
+    pub fn get_constants(&self) -> &Vec<Constant> {
+        &self.constants
     }
 
     pub fn register_function(&mut self, function: Function) -> usize {
@@ -143,11 +184,11 @@ impl Program {
 
     // Helper method for getting binary bytes without &self (for use in value_to_instructions)
     fn get_binary_bytes_static<'a>(
-        binary_ref: &'a BinaryRef,
+        binary: &'a Binary,
         constants: &'a [Constant],
     ) -> Result<&'a [u8], Error> {
-        match binary_ref {
-            BinaryRef::Constant(index) => match constants.get(*index) {
+        match binary {
+            Binary::Constant(index) => match constants.get(*index) {
                 Some(Constant::Binary(bytes)) => Ok(bytes),
                 Some(_) => Err(Error::TypeMismatch {
                     expected: "binary constant".to_string(),
@@ -155,7 +196,9 @@ impl Program {
                 }),
                 None => Err(Error::ConstantUndefined(*index)),
             },
-            BinaryRef::Heap(arc_bytes) => Ok(arc_bytes),
+            Binary::Heap(_) => Err(Error::InvalidArgument(
+                "Heap binaries cannot be accessed from Program (no scheduler context)".to_string(),
+            )),
         }
     }
 
@@ -221,25 +264,5 @@ impl Program {
             entry_fn,
         )
     }
-
-    /// Get the actual bytes of a binary value
-    pub fn get_binary_bytes<'a>(&'a self, binary_ref: &'a BinaryRef) -> Result<&'a [u8], Error> {
-        match binary_ref {
-            BinaryRef::Constant(index) => match self.constants.get(*index) {
-                Some(Constant::Binary(bytes)) => Ok(bytes),
-                Some(_) => Err(Error::TypeMismatch {
-                    expected: "binary constant".to_string(),
-                    found: "non-binary constant".to_string(),
-                }),
-                None => Err(Error::ConstantUndefined(*index)),
-            },
-            BinaryRef::Heap(arc_bytes) => Ok(arc_bytes),
-        }
-    }
 }
 
-impl Default for Program {
-    fn default() -> Self {
-        Self::new()
-    }
-}

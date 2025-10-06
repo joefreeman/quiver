@@ -1,7 +1,9 @@
 use crate::program::Program;
+use crate::scheduler::Scheduler;
 use crate::types::Type;
 use crate::vm::{Error, Value};
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 pub mod binary;
 pub mod io;
@@ -40,15 +42,20 @@ impl TypeSpec {
     }
 }
 
+/// Function signature for builtin implementations
+pub type BuiltinFn = fn(&Value, &mut Scheduler) -> Result<Value, Error>;
+
+/// Helper to coerce function item to function pointer (avoids rust-analyzer warnings)
+const fn coerce_builtin(f: BuiltinFn) -> BuiltinFn {
+    f
+}
+
 /// Macro for registering a single builtin function
 macro_rules! register_builtin {
     ($functions:expr, $fn_name:literal, $impl:path, $param:expr => $result:expr) => {
-        $functions.insert($fn_name, ($impl as BuiltinFn, $param, $result));
+        $functions.insert($fn_name, (coerce_builtin($impl), $param, $result));
     };
 }
-
-/// Function signature for builtin implementations
-pub type BuiltinFn = fn(&Value, &Program) -> Result<Value, Error>;
 
 /// Registry of all available builtin functions
 pub struct BuiltinRegistry {
@@ -177,5 +184,4 @@ fn create_builtin_registry() -> BuiltinRegistry {
 }
 
 /// Global builtin registry instance
-pub static BUILTIN_REGISTRY: std::sync::LazyLock<BuiltinRegistry> =
-    std::sync::LazyLock::new(create_builtin_registry);
+pub static BUILTIN_REGISTRY: LazyLock<BuiltinRegistry> = LazyLock::new(create_builtin_registry);

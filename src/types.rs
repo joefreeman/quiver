@@ -3,7 +3,9 @@ use std::collections::HashSet;
 
 use crate::bytecode::TypeId;
 
-/// Trait for types that can look up type information
+/// Trait for looking up type information.
+/// This trait exists in types.rs to break circular dependencies - it allows
+/// Type methods to look up type info without depending on Program.
 pub trait TypeLookup {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo>;
 }

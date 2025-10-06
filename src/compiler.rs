@@ -22,7 +22,7 @@ use crate::{
     modules::{ModuleError, ModuleLoader},
     program::Program,
     types::{CallableType, ProcessType, Type, TypeLookup},
-    vm::{BinaryRef, VM, Value},
+    vm::{VM, Value},
 };
 
 use typing::TypeContext;
@@ -147,13 +147,13 @@ impl Scope {
 pub struct Compiler<'a> {
     // Core components
     codegen: InstructionBuilder,
-    type_context: TypeContext<'a>,
+    type_context: TypeContext,
     module_cache: ModuleCache,
 
     // State management
     scopes: Vec<Scope>,
     local_count: usize,
-    program: &'a mut Program,
+    program: Program,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
 
@@ -167,20 +167,31 @@ pub struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     pub fn compile(
         program: ast::Program,
-        type_aliases: &'a mut HashMap<String, Type>,
+        type_aliases: HashMap<String, Type>,
+        module_cache: ModuleCache,
         module_loader: &'a dyn ModuleLoader,
-        compiled_program: &'a mut Program,
+        base_program: &Program,
         module_path: Option<PathBuf>,
         existing_variables: Option<&HashMap<String, (Type, usize)>>,
         parameter_type: Type,
-    ) -> Result<(Vec<Instruction>, Type, HashMap<String, (Type, usize)>), Error> {
+    ) -> Result<
+        (
+            Vec<Instruction>,
+            Type,
+            HashMap<String, (Type, usize)>,
+            Program,
+            HashMap<String, Type>,
+            ModuleCache,
+        ),
+        Error,
+    > {
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
             type_context: TypeContext::new(type_aliases),
-            module_cache: ModuleCache::new(),
+            module_cache,
             scopes: vec![],
             local_count: 0,
-            program: compiled_program,
+            program: base_program.clone(),
             module_loader,
             module_path,
             ripple_depth: 0,
@@ -256,7 +267,14 @@ impl<'a> Compiler<'a> {
             .map(|(name, (var_type, index))| (name.clone(), (var_type.clone(), *index)))
             .collect();
 
-        Ok((compiler.codegen.instructions, result_type, variables))
+        Ok((
+            compiler.codegen.instructions,
+            result_type,
+            variables,
+            compiler.program,
+            compiler.type_context.into_type_aliases(),
+            compiler.module_cache,
+        ))
     }
 
     fn compile_statement(&mut self, statement: ast::Statement) -> Result<Type, Error> {
@@ -282,7 +300,7 @@ impl<'a> Compiler<'a> {
     fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
         let resolved_type = self
             .type_context
-            .resolve_ast_type(type_definition, self.program)?;
+            .resolve_ast_type(type_definition, &mut self.program)?;
 
         self.type_context
             .type_aliases
@@ -302,7 +320,7 @@ impl<'a> Compiler<'a> {
             self.module_loader,
             self.module_path.as_ref(),
             &mut self.type_context,
-            self.program,
+            &mut self.program,
         )
     }
 
@@ -481,7 +499,7 @@ impl<'a> Compiler<'a> {
             ast::Term::Receive(receive) => {
                 let message_type = self
                     .type_context
-                    .resolve_ast_type(receive.type_def.clone(), self.program)?;
+                    .resolve_ast_type(receive.type_def.clone(), &mut self.program)?;
                 receive_types.push(message_type);
                 // Also check nested receives in the receive block
                 if let Some(block) = &receive.block {
@@ -579,7 +597,7 @@ impl<'a> Compiler<'a> {
         let parameter_type = match &function.parameter_type {
             Some(t) => self
                 .type_context
-                .resolve_ast_type(t.clone(), self.program)?,
+                .resolve_ast_type(t.clone(), &mut self.program)?,
             None => Type::nil(),
         };
 
@@ -656,7 +674,7 @@ impl<'a> Compiler<'a> {
                 if let Some(field_name) = &field.name {
                     let field_type = self
                         .type_context
-                        .resolve_ast_type(field.type_def.clone(), self.program)?;
+                        .resolve_ast_type(field.type_def.clone(), &mut self.program)?;
                     parameter_fields.insert(field_name.clone(), (field_index, field_type));
                 }
             }
@@ -710,7 +728,7 @@ impl<'a> Compiler<'a> {
         self.codegen.patch_jump_to_here(start_jump_addr);
 
         // Build available variables set from current scope for pin patterns
-        let mut available_variables = std::collections::HashSet::new();
+        let mut available_variables = HashSet::new();
         if let Some(scope) = self.scopes.last() {
             for (name, (_type, _index)) in &scope.variables {
                 available_variables.insert(name.clone());
@@ -718,8 +736,14 @@ impl<'a> Compiler<'a> {
         }
 
         // Analyze pattern to get bindings without generating code yet
-        let (certainty, bindings, binding_sets) =
-            pattern::analyze_pattern(&self.type_context, self.program, &pattern, &value_type, mode, &available_variables)?;
+        let (certainty, bindings, binding_sets) = pattern::analyze_pattern(
+            &self.type_context,
+            &self.program,
+            &pattern,
+            &value_type,
+            mode,
+            &available_variables,
+        )?;
 
         match certainty {
             MatchCertainty::WontMatch => {
@@ -730,7 +754,7 @@ impl<'a> Compiler<'a> {
             }
             MatchCertainty::WillMatch | MatchCertainty::MightMatch => {
                 // Pre-allocate locals for all bindings
-                let mut bindings_map = std::collections::HashMap::new();
+                let mut bindings_map = HashMap::new();
 
                 for (variable_name, variable_type) in &bindings {
                     let local_index = self.local_count;
@@ -753,7 +777,7 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Build variables map from current scope for pin patterns
-                let mut variables = std::collections::HashMap::new();
+                let mut variables = HashMap::new();
                 if let Some(scope) = self.scopes.last() {
                     for (name, (_type, index)) in &scope.variables {
                         variables.insert(name.clone(), *index);
@@ -765,7 +789,7 @@ impl<'a> Compiler<'a> {
                 let fail_target = on_no_match.unwrap_or(fail_jump_addr);
                 pattern::generate_pattern_code(
                     &mut self.codegen,
-                    self.program,
+                    &mut self.program,
                     &mut self.local_count,
                     Some(&bindings_map),
                     &variables,
@@ -1023,99 +1047,14 @@ impl<'a> Compiler<'a> {
 
         // If there's a match pattern, apply it
         if let Some(pattern) = chain.match_pattern {
-            self.compile_match(pattern, result_type, on_no_match, pattern::PatternMode::Bind)
+            self.compile_match(
+                pattern,
+                result_type,
+                on_no_match,
+                pattern::PatternMode::Bind,
+            )
         } else {
             Ok(result_type)
-        }
-    }
-
-    fn value_to_instructions(&mut self, value: &Value) -> Result<Type, Error> {
-        match value {
-            Value::Integer(int_value) => {
-                let index = self
-                    .program
-                    .register_constant(Constant::Integer(*int_value));
-                self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Integer)
-            }
-            Value::Binary(binary_ref) => {
-                match binary_ref {
-                    BinaryRef::Constant(const_index) => {
-                        self.codegen
-                            .add_instruction(Instruction::Constant(*const_index));
-                    }
-                    BinaryRef::Heap(arc_bytes) => {
-                        // Create a constant from the heap binary
-                        let constant = crate::bytecode::Constant::Binary(arc_bytes.to_vec());
-                        let index = self.program.register_constant(constant);
-                        self.codegen.add_instruction(Instruction::Constant(index));
-                    }
-                }
-                Ok(Type::Binary)
-            }
-            Value::Tuple(type_id, fields) => {
-                for field in fields {
-                    self.value_to_instructions(field)?;
-                }
-                self.codegen.add_instruction(Instruction::Tuple(*type_id));
-                Ok(Type::Tuple(*type_id))
-            }
-            Value::Function(function, captures) => {
-                // Get the function definition
-                let func_def = self.program.get_function(*function).cloned().ok_or(
-                    Error::FeatureUnsupported("Invalid function reference".to_string()),
-                )?;
-
-                // If we have captures, store them in locals
-                let mut capture_locals = Vec::new();
-                if !captures.is_empty() {
-                    // Store each capture value in locals
-                    for value in captures {
-                        // Recursively convert the captured value to instructions
-                        self.value_to_instructions(value)?;
-                        // Allocate a local and store it
-                        let local_index = self.local_count;
-                        self.local_count += 1;
-                        self.codegen.add_instruction(Instruction::Allocate(1));
-                        self.codegen
-                            .add_instruction(Instruction::Store(local_index));
-                        capture_locals.push(local_index);
-                    }
-                }
-
-                // Register function with new capture locals for this context
-                let func_index = self.program.register_function(Function {
-                    instructions: func_def.instructions,
-                    function_type: func_def.function_type,
-                    captures: capture_locals,
-                });
-
-                // Emit the function instruction
-                self.codegen
-                    .add_instruction(Instruction::Function(func_index));
-
-                self.function_to_type(func_index)
-            }
-            Value::Builtin(name) => {
-                let builtin_index = self.program.register_builtin(name.to_string());
-                self.codegen
-                    .add_instruction(Instruction::Builtin(builtin_index));
-
-                if let Some((param_type, result_type)) =
-                    BUILTIN_REGISTRY.resolve_signature(name, self.program)
-                {
-                    Ok(Type::Callable(Box::new(CallableType {
-                        parameter: param_type,
-                        result: result_type,
-                        receive: Type::never(),
-                    })))
-                } else {
-                    Err(Error::BuiltinUndefined(name.to_string()))
-                }
-            }
-            Value::Pid(_) => Err(Error::FeatureUnsupported(
-                "Cannot use Pid in constant context".to_string(),
-            )),
         }
     }
 
@@ -1131,30 +1070,39 @@ impl<'a> Compiler<'a> {
             ));
         }
 
-        // Check if we already have the evaluated module cached
-        let value = if let Some(cached_value) =
-            self.module_cache.evaluation_cache.get(module_path).cloned()
+        // Check if we already have the compiled module instructions cached
+        let (instructions, result_type) = if let Some((cached_instructions, cached_type)) = self
+            .module_cache
+            .instruction_cache
+            .get(module_path)
+            .cloned()
         {
-            cached_value
+            // Return cached reconstruction instructions and type
+            (cached_instructions, cached_type)
         } else {
             // Add to import stack to track circular imports
             self.module_cache.import_stack.push(module_path.to_string());
-            let value = self.import_module(module_path)?;
+            let (instructions, result_type) = self.import_module(module_path)?;
             self.module_cache.import_stack.pop();
 
-            // Cache the evaluated module
-            self.module_cache
-                .evaluation_cache
-                .insert(module_path.to_string(), value.clone());
+            // Cache the reconstruction instructions and type
+            self.module_cache.instruction_cache.insert(
+                module_path.to_string(),
+                (instructions.clone(), result_type.clone()),
+            );
 
-            value
+            (instructions, result_type)
         };
 
-        // Convert the runtime value back to instructions
-        self.value_to_instructions(&value)
+        // Emit the cached instructions
+        for instruction in instructions {
+            self.codegen.add_instruction(instruction);
+        }
+
+        Ok(result_type)
     }
 
-    fn import_module(&mut self, module_path: &str) -> Result<Value, Error> {
+    fn import_module(&mut self, module_path: &str) -> Result<(Vec<Instruction>, Type), Error> {
         // Parse the module
         let parsed = self.module_cache.load_and_cache_ast(
             module_path,
@@ -1184,20 +1132,129 @@ impl<'a> Compiler<'a> {
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
-        *self.type_context.type_aliases = saved_type_aliases;
+        self.type_context.type_aliases = saved_type_aliases;
 
-        // Execute the module instructions to get the runtime value
-        // Create a temporary VM for execution
+        // Execute the module instructions to get the result value
         let temp_vm = VM::new(self.program.clone());
-        let value = temp_vm
-            .execute_instructions(module_instructions, None, None)
+        let (value, _) = temp_vm
+            .execute_instructions(module_instructions, None, None, None)
             .map_err(|e| Error::ModuleExecution {
                 module_path: module_path.to_string(),
                 error: e,
-            })?
-            .unwrap_or(Value::nil());
+            })?;
+        let value = value.unwrap_or(Value::nil());
 
-        Ok(value)
+        // Convert the value back to instructions that reconstruct it
+        // Save current instructions
+        let saved_instructions = std::mem::take(&mut self.codegen.instructions);
+
+        let result_type = self.value_to_instructions(&value, &temp_vm)?;
+
+        // Get the reconstruction instructions
+        let reconstruction_instructions = std::mem::take(&mut self.codegen.instructions);
+
+        // Restore previous instructions
+        self.codegen.instructions = saved_instructions;
+
+        Ok((reconstruction_instructions, result_type))
+    }
+
+    /// Convert a runtime value back to instructions that reconstruct it
+    fn value_to_instructions(&mut self, value: &Value, vm: &VM) -> Result<Type, Error> {
+        match value {
+            Value::Integer(int_value) => {
+                let index = self
+                    .program
+                    .register_constant(Constant::Integer(*int_value));
+                self.codegen.add_instruction(Instruction::Constant(index));
+                Ok(Type::Integer)
+            }
+            Value::Binary(binary_ref) => {
+                // Get the binary bytes (handles both Constant and Heap cases)
+                let scheduler = vm.scheduler();
+                let binary_data = scheduler.get_binary_bytes(binary_ref).map_err(|e| {
+                    Error::FeatureUnsupported(format!("Failed to get binary bytes: {:?}", e))
+                })?;
+                drop(scheduler);
+
+                // Create a constant from the binary data
+                let constant = Constant::Binary(binary_data);
+                let index = self.program.register_constant(constant);
+                self.codegen.add_instruction(Instruction::Constant(index));
+                Ok(Type::Binary)
+            }
+            Value::Tuple(type_id, fields) => {
+                for field in fields {
+                    self.value_to_instructions(field, vm)?;
+                }
+                self.codegen.add_instruction(Instruction::Tuple(*type_id));
+                Ok(Type::Tuple(*type_id))
+            }
+            Value::Function(function, captures) => {
+                // Get the function definition
+                let func_def = self.program.get_function(*function).cloned().ok_or(
+                    Error::FeatureUnsupported("Invalid function reference".to_string()),
+                )?;
+
+                // If we have captures, store them in locals
+                let mut capture_locals = Vec::new();
+                if !captures.is_empty() {
+                    // Store each capture value in locals
+                    for value in captures {
+                        // Recursively convert the captured value to instructions
+                        self.value_to_instructions(value, vm)?;
+                        // Allocate a local and store it
+                        let local_index = self.local_count;
+                        self.local_count += 1;
+                        self.codegen.add_instruction(Instruction::Allocate(1));
+                        self.codegen
+                            .add_instruction(Instruction::Store(local_index));
+                        capture_locals.push(local_index);
+                    }
+                }
+
+                // Register function with new capture locals for this context
+                let func_index = self.program.register_function(Function {
+                    instructions: func_def.instructions,
+                    function_type: func_def.function_type,
+                    captures: capture_locals,
+                });
+
+                // Emit the function instruction
+                self.codegen
+                    .add_instruction(Instruction::Function(func_index));
+
+                // Return the function type
+                let func = self
+                    .program
+                    .get_function(func_index)
+                    .ok_or(Error::FunctionUndefined(func_index))?;
+                let function_type = func.function_type.clone().ok_or_else(|| {
+                    Error::TypeUnresolved(format!("Function {} has no type annotation", func_index))
+                })?;
+                Ok(Type::Callable(Box::new(function_type)))
+            }
+            Value::Builtin(name) => {
+                let builtin_index = self.program.register_builtin(name.to_string());
+                self.codegen
+                    .add_instruction(Instruction::Builtin(builtin_index));
+
+                if let Some((param_type, result_type)) =
+                    BUILTIN_REGISTRY.resolve_signature(name, &mut self.program)
+                {
+                    Ok(Type::Callable(Box::new(CallableType {
+                        parameter: param_type,
+                        result: result_type,
+                        receive: Type::never(),
+                    })))
+                } else {
+                    Err(Error::BuiltinUndefined(name.to_string()))
+                }
+            }
+            Value::Pid(_) => Err(Error::FeatureUnsupported(
+                "Cannot use Pid in constant context".to_string(),
+            )),
+        }
     }
 
     fn compile_term(
@@ -1403,7 +1460,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     Err(Error::TypeMismatch {
                         expected: "process".to_string(),
-                        found: crate::format::format_type(self.program, &val_type),
+                        found: crate::format::format_type(&self.program, &val_type),
                     })
                 }
             }
@@ -1425,7 +1482,7 @@ impl<'a> Compiler<'a> {
             ast::Term::Receive(receive) => {
                 let message_type = self
                     .type_context
-                    .resolve_ast_type(receive.type_def.clone(), self.program)?;
+                    .resolve_ast_type(receive.type_def.clone(), &mut self.program)?;
 
                 if let Some(block) = receive.block.clone() {
                     // Receive with block - pattern matching logic
@@ -1469,13 +1526,13 @@ impl<'a> Compiler<'a> {
             Type::Callable(func_type) => {
                 // Function call
                 // Check parameter compatibility
-                if !value_type.is_compatible(&func_type.parameter, self.program) {
+                if !value_type.is_compatible(&func_type.parameter, &self.program) {
                     return Err(Error::TypeMismatch {
                         expected: format!(
                             "function parameter compatible with {}",
-                            crate::format::format_type(self.program, &func_type.parameter)
+                            crate::format::format_type(&self.program, &func_type.parameter)
                         ),
-                        found: crate::format::format_type(self.program, &value_type),
+                        found: crate::format::format_type(&self.program, &value_type),
                     });
                 }
 
@@ -1493,26 +1550,26 @@ impl<'a> Compiler<'a> {
                                 expected: "function without receive type".to_string(),
                                 found: format!(
                                     "function with receive type {}",
-                                    crate::format::format_type(self.program, called_receive_type)
+                                    crate::format::format_type(&self.program, called_receive_type)
                                 ),
                             });
                         }
                     }
 
                     // Check compatibility
-                    if !called_receive_type.is_compatible(&self.current_receive_type, self.program)
+                    if !called_receive_type.is_compatible(&self.current_receive_type, &self.program)
                     {
                         return Err(Error::TypeMismatch {
                             expected: format!(
                                 "function with receive type compatible with {}",
                                 crate::format::format_type(
-                                    self.program,
+                                    &self.program,
                                     &self.current_receive_type
                                 )
                             ),
                             found: format!(
                                 "function with receive type {}",
-                                crate::format::format_type(self.program, called_receive_type)
+                                crate::format::format_type(&self.program, called_receive_type)
                             ),
                         });
                     }
@@ -1534,10 +1591,10 @@ impl<'a> Compiler<'a> {
                                 .to_string(),
                         });
                     }
-                    if !value_type.is_compatible(expected_msg_type, self.program) {
+                    if !value_type.is_compatible(expected_msg_type, &self.program) {
                         return Err(Error::TypeMismatch {
-                            expected: crate::format::format_type(self.program, expected_msg_type),
-                            found: crate::format::format_type(self.program, &value_type),
+                            expected: crate::format::format_type(&self.program, expected_msg_type),
+                            found: crate::format::format_type(&self.program, &value_type),
                         });
                     }
                 } else {
@@ -1555,7 +1612,7 @@ impl<'a> Compiler<'a> {
             }
             _ => Err(Error::TypeMismatch {
                 expected: "function or process".to_string(),
-                found: crate::format::format_type(self.program, &target_type),
+                found: crate::format::format_type(&self.program, &target_type),
             }),
         }
     }
@@ -1612,7 +1669,7 @@ impl<'a> Compiler<'a> {
                 }
                 other_type => Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: crate::format::format_type(self.program, &other_type),
+                    found: crate::format::format_type(&self.program, &other_type),
                 }),
             }
         }
@@ -1620,7 +1677,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_builtin(&mut self, name: &str) -> Result<Type, Error> {
         let (param_type, result_type) = BUILTIN_REGISTRY
-            .resolve_signature(name, self.program)
+            .resolve_signature(name, &mut self.program)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
 
         let builtin_index = self.program.register_builtin(name.to_string());
@@ -1831,18 +1888,6 @@ impl<'a> Compiler<'a> {
         index
     }
 
-    fn function_to_type(&self, function_index: usize) -> Result<Type, Error> {
-        if let Some(func_def) = self.program.get_function(function_index) {
-            if let Some(func_type) = &func_def.function_type {
-                Ok(Type::Callable(Box::new(func_type.clone())))
-            } else {
-                Err(Error::FunctionUndefined(function_index))
-            }
-        } else {
-            Err(Error::FunctionUndefined(function_index))
-        }
-    }
-
     fn lookup_variable(
         &self,
         scopes: &[Scope],
@@ -1921,7 +1966,7 @@ impl<'a> Compiler<'a> {
             let (index, field_type) = self.type_context.get_tuple_field_type_by_name(
                 type_id,
                 field_name,
-                self.program,
+                &self.program,
             )?;
 
             // Verify all tuples have the field at the same index

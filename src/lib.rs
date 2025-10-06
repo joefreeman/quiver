@@ -21,6 +21,7 @@ use vm::{VM, Value};
 
 pub struct Quiver {
     type_aliases: HashMap<String, Type>,
+    module_cache: compiler::ModuleCache,
     module_loader: Box<dyn ModuleLoader>,
     vm: VM,
     repl_process_id: vm::ProcessId,
@@ -30,10 +31,13 @@ impl Quiver {
     pub fn new(modules: Option<HashMap<String, String>>) -> Self {
         let program = Program::new();
         let vm = VM::new(program);
-        let repl_process_id = vm.spawn_process(true);
+        let repl_process_id = vm
+            .spawn_process(true)
+            .expect("Failed to spawn REPL process");
 
         Self {
             type_aliases: HashMap::new(),
+            module_cache: compiler::ModuleCache::new(),
             module_loader: match modules {
                 Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
                 None => Box::new(FileSystemModuleLoader::new()),
@@ -58,28 +62,39 @@ impl Quiver {
             .map(|(_, typ)| typ.clone())
             .unwrap_or_else(Type::nil);
 
-        let (instructions, result_type, variables) = Compiler::compile(
-            ast_program,
-            &mut self.type_aliases,
-            self.module_loader.as_ref(),
-            &mut *self.vm.program_mut(),
-            module_path,
-            variables,
-            parameter_type,
-        )
-        .map_err(Error::CompileError)?;
+        // Get current program state before compilation
+        let old_program = self.vm.program().read().unwrap().clone();
 
-        let result = self
+        let (instructions, result_type, variables, new_program, new_type_aliases, new_module_cache) =
+            Compiler::compile(
+                ast_program,
+                self.type_aliases.clone(),
+                self.module_cache.clone(),
+                self.module_loader.as_ref(),
+                &old_program,
+                module_path,
+                variables,
+                parameter_type,
+            )
+            .map_err(Error::CompileError)?;
+
+        // On success: update program and update type_aliases and module_cache
+        self.vm.update_program(new_program);
+        self.type_aliases = new_type_aliases;
+        self.module_cache = new_module_cache;
+
+        let (result, compacted_variables) = self
             .vm
             .execute_instructions(
                 instructions,
                 parameter.map(|(v, _)| v.clone()),
                 Some(self.repl_process_id),
+                Some(variables),
             )
             .map_err(Error::RuntimeError)?;
 
-        // Compact locals and get updated variable indices
-        let compacted_variables = self.vm.cleanup_locals(self.repl_process_id, &variables);
+        // Variables were compacted as part of execute
+        let compacted_variables = compacted_variables.unwrap_or_default();
 
         Ok((result, result_type, compacted_variables))
     }
@@ -105,19 +120,19 @@ impl Quiver {
     }
 
     pub fn format_value(&self, value: &Value) -> String {
-        format::format_value(&*self.vm.program().read().unwrap(), value)
+        format::format_value(&self.vm.scheduler(), value)
     }
 
     pub fn format_type(&self, type_def: &Type) -> String {
-        format::format_type(&*self.vm.program().read().unwrap(), type_def)
+        format::format_type(&*self.vm.scheduler(), type_def)
     }
 
-    pub fn get_process_statuses(&self) -> HashMap<vm::ProcessId, vm::ProcessStatus> {
-        self.vm.get_process_statuses()
+    pub fn get_process_statuses(&self) -> Result<HashMap<vm::ProcessId, vm::ProcessStatus>, Error> {
+        self.vm.get_process_statuses().map_err(Error::RuntimeError)
     }
 
-    pub fn get_process_info(&self, id: vm::ProcessId) -> Option<vm::ProcessInfo> {
-        self.vm.get_process_info(id)
+    pub fn get_process_info(&self, id: vm::ProcessId) -> Result<Option<vm::ProcessInfo>, Error> {
+        self.vm.get_process_info(id).map_err(Error::RuntimeError)
     }
 }
 
@@ -133,31 +148,32 @@ pub fn compile(
         None => Box::new(FileSystemModuleLoader::new()),
     };
 
-    let mut type_aliases = HashMap::new();
-    let mut program = Program::new();
+    let type_aliases = HashMap::new();
+    let module_cache = compiler::ModuleCache::new();
+    let program = Program::new();
 
-    let (instructions, _, _) = Compiler::compile(
+    let (instructions, _, _, new_program, _, _) = Compiler::compile(
         ast_program,
-        &mut type_aliases,
+        type_aliases,
+        module_cache,
         module_loader.as_ref(),
-        &mut program,
+        &program,
         module_path,
         None,
         Type::nil(),
     )
     .map_err(Error::CompileError)?;
 
-    // Create a temporary VM for execution
-    let vm = VM::new(program);
-    let result = vm
-        .execute_instructions(instructions, None, None)
+    // Create a temporary VM for execution with the new program
+    let vm = VM::new(new_program);
+    let (result, _) = vm
+        .execute_instructions(instructions, None, None, None)
         .map_err(Error::RuntimeError)?;
 
     let entry = match result {
         Some(Value::Function(main_func, captures)) => {
             if !captures.is_empty() {
-                vm.program_mut()
-                    .inject_function_captures(main_func, captures);
+                vm.inject_function_captures(main_func, captures);
             }
             Some(main_func)
         }
@@ -165,22 +181,6 @@ pub fn compile(
     };
 
     Ok(vm.program().read().unwrap().to_bytecode(entry))
-}
-
-pub fn execute(bytecode: bytecode::Bytecode) -> Result<Option<Value>, Error> {
-    // Get entry point before moving bytecode
-    let entry = bytecode.entry;
-
-    // Create program and VM from bytecode
-    let program = Program::from_bytecode(bytecode);
-    let vm = VM::new(program);
-
-    // Execute entry point if present
-    if let Some(entry) = entry {
-        vm.execute_function(entry).map_err(Error::RuntimeError)
-    } else {
-        Ok(None)
-    }
 }
 
 #[derive(Debug, PartialEq)]

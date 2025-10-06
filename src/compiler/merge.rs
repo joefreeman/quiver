@@ -13,7 +13,7 @@ impl<'a> Compiler<'a> {
         if source_type_ids.is_empty() {
             return Err(Error::TypeMismatch {
                 expected: "tuple".to_string(),
-                found: crate::format::format_type(self.program, &source_type),
+                found: crate::format::format_type(&self.program, &source_type),
             });
         }
 
@@ -154,7 +154,7 @@ impl<'a> Compiler<'a> {
         source_type_id: TypeId,
     ) -> Result<(), Error> {
         // Build update map: position -> merge field
-        let mut update_map = std::collections::HashMap::new();
+        let mut update_map = HashMap::new();
         for (merge_idx, field) in merge_fields.iter().enumerate() {
             let position = if let Some(ref field_name) = field.name {
                 Self::find_field_position(source_fields, field_name)?

@@ -1,29 +1,11 @@
 //! Binary builtin function implementations
 
-use crate::program::Program;
-use crate::vm::{BinaryRef, Error, Value};
-
-/// Helper function to get bytes from a BinaryRef using the program
-fn get_binary_bytes_from_ref<'a>(
-    binary_ref: &'a BinaryRef,
-    program: &'a Program,
-) -> Result<&'a [u8], Error> {
-    match binary_ref {
-        BinaryRef::Constant(index) => match program.get_constant(*index) {
-            Some(crate::bytecode::Constant::Binary(bytes)) => Ok(bytes),
-            Some(_) => Err(Error::TypeMismatch {
-                expected: "binary constant".to_string(),
-                found: "non-binary constant".to_string(),
-            }),
-            None => Err(Error::ConstantUndefined(*index)),
-        },
-        BinaryRef::Heap(arc_bytes) => Ok(arc_bytes),
-    }
-}
+use crate::scheduler::Scheduler;
+use crate::vm::{Error, Value};
 
 /// Create a new zero-filled binary of the specified size
 /// binary_new(size: int) -> bin
-pub fn builtin_binary_new(arg: &Value, _program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_new(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Integer(size) => {
             if *size < 0 {
@@ -41,8 +23,8 @@ pub fn builtin_binary_new(arg: &Value, _program: &Program) -> Result<Value, Erro
             }
 
             let bytes = vec![0u8; size];
-            let binary_ref = BinaryRef::Heap(std::sync::Arc::new(bytes));
-            Ok(Value::Binary(binary_ref))
+            let binary = program.allocate_binary(bytes)?;
+            Ok(Value::Binary(binary))
         }
         other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
@@ -53,11 +35,10 @@ pub fn builtin_binary_new(arg: &Value, _program: &Program) -> Result<Value, Erro
 
 /// Get the length of a binary
 /// binary_length(bin) -> int
-pub fn builtin_binary_length(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_length(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
-        Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
-            Ok(Value::Integer(bytes.len() as i64))
+        Value::Binary(binary) => {
+            program.with_binary_bytes(binary, |bytes| Ok(Value::Integer(bytes.len() as i64)))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -68,25 +49,26 @@ pub fn builtin_binary_length(arg: &Value, program: &Program) -> Result<Value, Er
 
 /// Get a byte at a specific index (returns 0-255)
 /// binary_get_byte(bin, index: int) -> int
-pub fn builtin_binary_get_byte(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_get_byte(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary_ref), Value::Integer(index)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
-                if *index < 0 {
-                    return Err(Error::InvalidArgument(
-                        "Index cannot be negative".to_string(),
-                    ));
-                }
-                let index = *index as usize;
-                if index >= bytes.len() {
-                    return Err(Error::InvalidArgument(format!(
-                        "Index {} out of bounds for binary of length {}",
-                        index,
-                        bytes.len()
-                    )));
-                }
-                Ok(Value::Integer(bytes[index] as i64))
+            (Value::Binary(binary), Value::Integer(index)) => {
+                program.with_binary_bytes(binary, |bytes| {
+                    if *index < 0 {
+                        return Err(Error::InvalidArgument(
+                            "Index cannot be negative".to_string(),
+                        ));
+                    }
+                    let index = *index as usize;
+                    if index >= bytes.len() {
+                        return Err(Error::InvalidArgument(format!(
+                            "Index {} out of bounds for binary of length {}",
+                            index,
+                            bytes.len()
+                        )));
+                    }
+                    Ok(Value::Integer(bytes[index] as i64))
+                })
             }
             _ => Err(Error::TypeMismatch {
                 expected: "[binary, integer]".to_string(),
@@ -102,12 +84,12 @@ pub fn builtin_binary_get_byte(arg: &Value, program: &Program) -> Result<Value, 
 
 /// Concatenate two binaries
 /// binary_concat([bin, bin]) -> bin
-pub fn builtin_binary_concat(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_concat(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
-                let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
+            (Value::Binary(binary_a), Value::Binary(binary_b)) => {
+                let bytes_a = program.get_binary_bytes(binary_a)?;
+                let bytes_b = program.get_binary_bytes(binary_b)?;
 
                 let total_len = bytes_a.len() + bytes_b.len();
                 if total_len > crate::vm::MAX_BINARY_SIZE {
@@ -119,11 +101,11 @@ pub fn builtin_binary_concat(arg: &Value, program: &Program) -> Result<Value, Er
                 }
 
                 let mut result = Vec::with_capacity(total_len);
-                result.extend_from_slice(bytes_a);
-                result.extend_from_slice(bytes_b);
+                result.extend_from_slice(&bytes_a);
+                result.extend_from_slice(&bytes_b);
 
-                let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                Ok(Value::Binary(binary_ref))
+                let binary = program.allocate_binary(result)?;
+                Ok(Value::Binary(binary))
             }
             _ => Err(Error::TypeMismatch {
                 expected: "[binary, binary]".to_string(),
@@ -143,13 +125,13 @@ pub fn builtin_binary_concat(arg: &Value, program: &Program) -> Result<Value, Er
 
 /// Bitwise AND of two binaries
 /// binary_and([bin, bin]) -> bin
-pub fn builtin_binary_and(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_and(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
-                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
+                (Value::Binary(binary_a), Value::Binary(binary_b)) => {
+                    let bytes_a = program.get_binary_bytes(binary_a)?;
+                    let bytes_b = program.get_binary_bytes(binary_b)?;
 
                     // For bitwise operations, take the shorter length
                     let result_len = bytes_a.len().min(bytes_b.len());
@@ -159,8 +141,8 @@ pub fn builtin_binary_and(arg: &Value, program: &Program) -> Result<Value, Error
                         result.push(bytes_a[i] & bytes_b[i]);
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, binary]".to_string(),
@@ -177,13 +159,13 @@ pub fn builtin_binary_and(arg: &Value, program: &Program) -> Result<Value, Error
 
 /// Bitwise OR of two binaries
 /// binary_or([bin, bin]) -> bin
-pub fn builtin_binary_or(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_or(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
-                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
+                (Value::Binary(binary_a), Value::Binary(binary_b)) => {
+                    let bytes_a = program.get_binary_bytes(binary_a)?;
+                    let bytes_b = program.get_binary_bytes(binary_b)?;
 
                     // For bitwise operations, take the longer length, padding with zeros
                     let result_len = bytes_a.len().max(bytes_b.len());
@@ -195,8 +177,8 @@ pub fn builtin_binary_or(arg: &Value, program: &Program) -> Result<Value, Error>
                         result.push(a | b);
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, binary]".to_string(),
@@ -213,13 +195,13 @@ pub fn builtin_binary_or(arg: &Value, program: &Program) -> Result<Value, Error>
 
 /// Bitwise XOR of two binaries
 /// binary_xor([bin, bin]) -> bin
-pub fn builtin_binary_xor(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_xor(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref_a), Value::Binary(binary_ref_b)) => {
-                    let bytes_a = get_binary_bytes_from_ref(binary_ref_a, program)?;
-                    let bytes_b = get_binary_bytes_from_ref(binary_ref_b, program)?;
+                (Value::Binary(binary_a), Value::Binary(binary_b)) => {
+                    let bytes_a = program.get_binary_bytes(binary_a)?;
+                    let bytes_b = program.get_binary_bytes(binary_b)?;
 
                     // For XOR, take the longer length, padding with zeros
                     let result_len = bytes_a.len().max(bytes_b.len());
@@ -231,8 +213,8 @@ pub fn builtin_binary_xor(arg: &Value, program: &Program) -> Result<Value, Error
                         result.push(a ^ b);
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, binary]".to_string(),
@@ -249,14 +231,14 @@ pub fn builtin_binary_xor(arg: &Value, program: &Program) -> Result<Value, Error
 
 /// Bitwise NOT of a binary
 /// binary_not(bin) -> bin
-pub fn builtin_binary_not(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_not(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
-        Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+        Value::Binary(binary) => {
+            let bytes = program.get_binary_bytes(binary)?;
             let result: Vec<u8> = bytes.iter().map(|&byte| !byte).collect();
 
-            let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-            Ok(Value::Binary(binary_ref))
+            let binary = program.allocate_binary(result)?;
+            Ok(Value::Binary(binary))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -271,12 +253,12 @@ pub fn builtin_binary_not(arg: &Value, program: &Program) -> Result<Value, Error
 
 /// Left shift binary by n bits
 /// binary_shift_left([bin, int]) -> bin
-pub fn builtin_binary_shift_left(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_shift_left(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref), Value::Integer(shift_bits)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(shift_bits)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *shift_bits < 0 {
                         return Err(Error::InvalidArgument(
@@ -288,8 +270,8 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &Program) -> Result<Value
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
-                        let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                        return Ok(Value::Binary(binary_ref));
+                        let binary = program.allocate_binary(result)?;
+                        return Ok(Value::Binary(binary));
                     }
 
                     let mut result = vec![0u8; bytes.len()];
@@ -315,8 +297,8 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &Program) -> Result<Value
                         }
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer]".to_string(),
@@ -333,12 +315,12 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &Program) -> Result<Value
 
 /// Right shift binary by n bits (logical shift)
 /// binary_shift_right([bin, int]) -> bin
-pub fn builtin_binary_shift_right(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_shift_right(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref), Value::Integer(shift_bits)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(shift_bits)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *shift_bits < 0 {
                         return Err(Error::InvalidArgument(
@@ -350,8 +332,8 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &Program) -> Result<Valu
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
-                        let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                        return Ok(Value::Binary(binary_ref));
+                        let binary = program.allocate_binary(result)?;
+                        return Ok(Value::Binary(binary));
                     }
 
                     let mut result = vec![0u8; bytes.len()];
@@ -375,8 +357,8 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &Program) -> Result<Valu
                         }
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer]".to_string(),
@@ -396,12 +378,12 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &Program) -> Result<Valu
 
 /// Get bit at specific position (0 = rightmost bit)
 /// binary_get_bit_pos([bin, int]) -> int
-pub fn builtin_binary_get_bit_pos(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_get_bit_pos(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref), Value::Integer(bit_index)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(bit_index)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *bit_index < 0 {
                         return Err(Error::InvalidArgument(
@@ -442,14 +424,14 @@ pub fn builtin_binary_get_bit_pos(arg: &Value, program: &Program) -> Result<Valu
 
 /// Count number of set bits (popcount) - CRITICAL for HAMT
 /// binary_popcount(bin) -> int
-pub fn builtin_binary_popcount(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_popcount(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
-        Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+        Value::Binary(binary) => {
+            let bytes = program.get_binary_bytes(binary)?;
 
             // Use efficient bit counting algorithm
             let mut count = 0u64;
-            for &byte in bytes {
+            for &byte in &bytes {
                 count += byte.count_ones() as u64;
             }
 
@@ -464,16 +446,12 @@ pub fn builtin_binary_popcount(arg: &Value, program: &Program) -> Result<Value, 
 
 /// Set bit at specific position to value (0 or 1)
 /// binary_set_bit([bin, int, int]) -> bin
-pub fn builtin_binary_set_bit(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_set_bit(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
-                (
-                    Value::Binary(binary_ref),
-                    Value::Integer(bit_index),
-                    Value::Integer(bit_value),
-                ) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(bit_index), Value::Integer(bit_value)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *bit_index < 0 {
                         return Err(Error::InvalidArgument(
@@ -507,8 +485,8 @@ pub fn builtin_binary_set_bit(arg: &Value, program: &Program) -> Result<Value, E
                         result[byte_index] &= !(1 << (7 - bit_position));
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer]".to_string(),
@@ -529,11 +507,11 @@ pub fn builtin_binary_set_bit(arg: &Value, program: &Program) -> Result<Value, E
 
 /// Get a 32-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u32([bin, int]) -> int
-pub fn builtin_binary_get_u32(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_get_u32(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary_ref), Value::Integer(offset)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+            (Value::Binary(binary), Value::Integer(offset)) => {
+                let bytes = program.get_binary_bytes(binary)?;
 
                 if *offset < 0 {
                     return Err(Error::InvalidArgument(
@@ -571,12 +549,12 @@ pub fn builtin_binary_get_u32(arg: &Value, program: &Program) -> Result<Value, E
 
 /// Set a 32-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u32([bin, int, int]) -> bin
-pub fn builtin_binary_set_u32(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_set_u32(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
-                (Value::Binary(binary_ref), Value::Integer(offset), Value::Integer(value)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(offset), Value::Integer(value)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -605,8 +583,8 @@ pub fn builtin_binary_set_u32(arg: &Value, program: &Program) -> Result<Value, E
                     result[offset + 2] = value_bytes[2];
                     result[offset + 3] = value_bytes[3];
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer]".to_string(),
@@ -623,12 +601,12 @@ pub fn builtin_binary_set_u32(arg: &Value, program: &Program) -> Result<Value, E
 
 /// Get a 64-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u64([bin, int]) -> int
-pub fn builtin_binary_get_u64(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_get_u64(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref), Value::Integer(offset)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(offset)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -672,12 +650,12 @@ pub fn builtin_binary_get_u64(arg: &Value, program: &Program) -> Result<Value, E
 
 /// Set a 64-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u64([bin, int, int]) -> bin
-pub fn builtin_binary_set_u64(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_set_u64(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
-                (Value::Binary(binary_ref), Value::Integer(offset), Value::Integer(value)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(offset), Value::Integer(value)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -699,8 +677,8 @@ pub fn builtin_binary_set_u64(arg: &Value, program: &Program) -> Result<Value, E
                         result[offset + i] = value_bytes[i];
                     }
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer]".to_string(),
@@ -721,12 +699,12 @@ pub fn builtin_binary_set_u64(arg: &Value, program: &Program) -> Result<Value, E
 
 /// Extract a slice from binary [start, end) (end is exclusive)
 /// binary_slice([bin, int, int]) -> bin
-pub fn builtin_binary_slice(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_slice(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
-                (Value::Binary(binary_ref), Value::Integer(start), Value::Integer(end)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(start), Value::Integer(end)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *start < 0 || *end < 0 {
                         return Err(Error::InvalidArgument(
@@ -748,8 +726,8 @@ pub fn builtin_binary_slice(arg: &Value, program: &Program) -> Result<Value, Err
                     }
 
                     let slice = bytes[start..end].to_vec();
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(slice));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(slice)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer]".to_string(),
@@ -766,11 +744,11 @@ pub fn builtin_binary_slice(arg: &Value, program: &Program) -> Result<Value, Err
 
 /// Take first N bytes from binary
 /// binary_take([bin, int]) -> bin
-pub fn builtin_binary_take(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_take(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary_ref), Value::Integer(count)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+            (Value::Binary(binary), Value::Integer(count)) => {
+                let bytes = program.get_binary_bytes(binary)?;
 
                 if *count < 0 {
                     return Err(Error::InvalidArgument(
@@ -781,8 +759,8 @@ pub fn builtin_binary_take(arg: &Value, program: &Program) -> Result<Value, Erro
                 let count = (*count as usize).min(bytes.len());
                 let slice = bytes[..count].to_vec();
 
-                let binary_ref = BinaryRef::Heap(std::sync::Arc::new(slice));
-                Ok(Value::Binary(binary_ref))
+                let binary = program.allocate_binary(slice)?;
+                Ok(Value::Binary(binary))
             }
             _ => Err(Error::TypeMismatch {
                 expected: "[binary, integer]".to_string(),
@@ -798,11 +776,11 @@ pub fn builtin_binary_take(arg: &Value, program: &Program) -> Result<Value, Erro
 
 /// Drop first N bytes from binary
 /// binary_drop([bin, int]) -> bin
-pub fn builtin_binary_drop(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_drop(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary_ref), Value::Integer(count)) => {
-                let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+            (Value::Binary(binary), Value::Integer(count)) => {
+                let bytes = program.get_binary_bytes(binary)?;
 
                 if *count < 0 {
                     return Err(Error::InvalidArgument(
@@ -813,8 +791,8 @@ pub fn builtin_binary_drop(arg: &Value, program: &Program) -> Result<Value, Erro
                 let count = (*count as usize).min(bytes.len());
                 let slice = bytes[count..].to_vec();
 
-                let binary_ref = BinaryRef::Heap(std::sync::Arc::new(slice));
-                Ok(Value::Binary(binary_ref))
+                let binary = program.allocate_binary(slice)?;
+                Ok(Value::Binary(binary))
             }
             _ => Err(Error::TypeMismatch {
                 expected: "[binary, integer]".to_string(),
@@ -830,12 +808,12 @@ pub fn builtin_binary_drop(arg: &Value, program: &Program) -> Result<Value, Erro
 
 /// Pad binary to specified length with zeros at the end
 /// binary_pad([bin, int]) -> bin
-pub fn builtin_binary_pad(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_pad(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary_ref), Value::Integer(target_length)) => {
-                    let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+                (Value::Binary(binary), Value::Integer(target_length)) => {
+                    let bytes = program.get_binary_bytes(binary)?;
 
                     if *target_length < 0 {
                         return Err(Error::InvalidArgument(
@@ -847,15 +825,15 @@ pub fn builtin_binary_pad(arg: &Value, program: &Program) -> Result<Value, Error
 
                     if target_length <= bytes.len() {
                         // No padding needed, return copy of original
-                        let binary_ref = BinaryRef::Heap(std::sync::Arc::new(bytes.to_vec()));
-                        return Ok(Value::Binary(binary_ref));
+                        let binary = program.allocate_binary(bytes.to_vec())?;
+                        return Ok(Value::Binary(binary));
                     }
 
                     let mut result = bytes.to_vec();
                     result.resize(target_length, 0);
 
-                    let binary_ref = BinaryRef::Heap(std::sync::Arc::new(result));
-                    Ok(Value::Binary(binary_ref))
+                    let binary = program.allocate_binary(result)?;
+                    Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer]".to_string(),
@@ -876,14 +854,14 @@ pub fn builtin_binary_pad(arg: &Value, program: &Program) -> Result<Value, Error
 
 /// Simple FNV-1a hash implementation for 32-bit hashes
 /// binary_hash32(bin) -> int
-pub fn builtin_binary_hash32(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_hash32(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
-        Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+        Value::Binary(binary) => {
+            let bytes = program.get_binary_bytes(binary)?;
 
             // FNV-1a 32-bit hash
             let mut hash: u32 = 2166136261; // FNV offset basis
-            for &byte in bytes {
+            for &byte in &bytes {
                 hash ^= byte as u32;
                 hash = hash.wrapping_mul(16777619); // FNV prime
             }
@@ -899,14 +877,14 @@ pub fn builtin_binary_hash32(arg: &Value, program: &Program) -> Result<Value, Er
 
 /// Simple FNV-1a hash implementation for 64-bit hashes
 /// binary_hash64(bin) -> int
-pub fn builtin_binary_hash64(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_binary_hash64(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
-        Value::Binary(binary_ref) => {
-            let bytes = get_binary_bytes_from_ref(binary_ref, program)?;
+        Value::Binary(binary) => {
+            let bytes = program.get_binary_bytes(binary)?;
 
             // FNV-1a 64-bit hash
             let mut hash: u64 = 14695981039346656037; // FNV offset basis
-            for &byte in bytes {
+            for &byte in &bytes {
                 hash ^= byte as u64;
                 hash = hash.wrapping_mul(1099511628211); // FNV prime
             }
@@ -923,7 +901,7 @@ pub fn builtin_binary_hash64(arg: &Value, program: &Program) -> Result<Value, Er
 
 /// Hash a string (converted to binary) for use in data structures
 /// string_hash(bin) -> int
-pub fn builtin_string_hash(arg: &Value, program: &Program) -> Result<Value, Error> {
+pub fn builtin_string_hash(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
     // For strings, we use the same implementation as hash32 but with a different name
     // This is common in many languages to have separate string vs binary hash functions
     builtin_binary_hash32(arg, program)
@@ -931,7 +909,7 @@ pub fn builtin_string_hash(arg: &Value, program: &Program) -> Result<Value, Erro
 
 /// Extract N-bit chunks from hash for HAMT navigation
 /// hash_chunk([int, int, int]) -> int (hash, shift_bits, chunk_size_bits)
-pub fn builtin_hash_chunk(arg: &Value, _program: &Program) -> Result<Value, Error> {
+pub fn builtin_hash_chunk(arg: &Value, _program: &mut Scheduler) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
