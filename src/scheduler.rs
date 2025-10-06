@@ -37,6 +37,14 @@ pub struct ProcessInfo {
     pub result: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepResult {
+    /// More work remains - processes are ready to execute
+    Running,
+    /// All processes are waiting for messages/events
+    Idle,
+}
+
 #[derive(Debug, Clone)]
 pub struct Frame {
     instructions: Vec<Instruction>,
@@ -260,6 +268,867 @@ impl Scheduler {
 
     pub fn get_builtin(&self, index: usize) -> Option<&String> {
         self.builtins.get(index)
+    }
+
+    /// Execute up to max_units instruction units across all ready processes.
+    /// Returns whether more work remains or all processes are idle.
+    pub fn step(
+        &mut self,
+        max_units: usize,
+        next_process_id: &Arc<AtomicUsize>,
+    ) -> Result<StepResult, Error> {
+        let mut units_executed = 0;
+
+        loop {
+            // Check if we've exhausted our budget
+            if units_executed >= max_units {
+                return Ok(StepResult::Running);
+            }
+
+            let mut units_this_slice = 0;
+            let units_remaining = max_units - units_executed;
+            let slice_limit = TIME_SLICE_UNITS.min(units_remaining);
+
+            // Execute instructions for current process
+            while let Some(instruction) = self.get_current_instruction() {
+                let result = match instruction {
+                    Instruction::Constant(index) => self.handle_constant(index),
+                    Instruction::Pop => self.handle_pop(),
+                    Instruction::Duplicate => self.handle_duplicate(),
+                    Instruction::Over => self.handle_over(),
+                    Instruction::Swap => self.handle_swap(),
+                    Instruction::Load(index) => self.handle_load(index),
+                    Instruction::Store(index) => self.handle_store(index),
+                    Instruction::Tuple(type_id) => self.handle_tuple(type_id),
+                    Instruction::Get(index) => self.handle_get(index),
+                    Instruction::IsInteger => self.handle_is_integer(),
+                    Instruction::IsBinary => self.handle_is_binary(),
+                    Instruction::IsTuple(type_id) => self.handle_is_tuple(type_id),
+                    Instruction::Jump(offset) => Ok(self.handle_jump(offset)),
+                    Instruction::JumpIf(offset) => self.handle_jump_if(offset),
+                    Instruction::Call => self.handle_call(),
+                    Instruction::TailCall(recurse) => self.handle_tail_call(recurse),
+                    Instruction::Return => self.handle_return(),
+                    Instruction::Function(function_index) => self.handle_function(function_index),
+                    Instruction::Clear(count) => self.handle_clear(count),
+                    Instruction::Allocate(count) => self.handle_allocate(count),
+                    Instruction::Builtin(index) => self.handle_builtin(index),
+                    Instruction::Equal(count) => self.handle_equal(count),
+                    Instruction::Not => self.handle_not(),
+                    Instruction::Spawn => self.handle_spawn(next_process_id),
+                    Instruction::Send => self.handle_send(),
+                    Instruction::Self_ => self.handle_self(),
+                    Instruction::Receive => self.handle_receive(),
+                    Instruction::Acknowledge => self.handle_acknowledge(),
+                };
+                result?;
+
+                // Don't increment counter for Call/TailCall (they manage their own frames)
+                // or Receive/Call when process was marked waiting (so it re-executes when woken)
+                let should_increment =
+                    !matches!(instruction, Instruction::Call | Instruction::TailCall(_));
+                if should_increment {
+                    let current_pid = self.active;
+
+                    // If process was marked waiting by Receive, don't increment and break out
+                    let was_marked_waiting = if matches!(instruction, Instruction::Receive) {
+                        current_pid.map_or(false, |pid| self.waiting.contains(&pid))
+                    } else {
+                        false
+                    };
+
+                    if was_marked_waiting {
+                        // Break out of instruction loop so scheduler can switch processes
+                        break;
+                    } else if let Some(process) = self.get_current_process_mut() {
+                        if let Some(frame) = process.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+                    }
+                } else {
+                    // For Call instruction, check if process was marked waiting (awaiting a process)
+                    if matches!(instruction, Instruction::Call) {
+                        let current_pid = self.active;
+                        let was_marked_waiting =
+                            current_pid.map_or(false, |pid| self.waiting.contains(&pid));
+
+                        if was_marked_waiting {
+                            // Break out of instruction loop so scheduler can switch processes
+                            break;
+                        }
+                    }
+                }
+
+                // Track instruction units consumed
+                units_this_slice += 1;
+                units_executed += 1;
+
+                // Yield to other processes if time slice exhausted
+                if units_this_slice >= slice_limit {
+                    if !self.queue.is_empty() {
+                        if let Some(pid) = self.active {
+                            self.queue.push_back(pid);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Current process finished its instructions (or is waiting)
+            let current_pid = self.active;
+
+            // Store result and wake awaiters when process finishes (frames are empty)
+            if let Some(pid) = current_pid {
+                let should_store_result = self
+                    .get_process(pid)
+                    .map(|p| p.frames.is_empty() && p.result.is_none())
+                    .unwrap_or(false);
+
+                if should_store_result {
+                    if let Some(process) = self.get_process_mut(pid) {
+                        process.result = process.stack.last().cloned();
+                        let awaiters = std::mem::take(&mut process.awaiters);
+                        for waiter in awaiters {
+                            self.wake_process(waiter);
+                        }
+                    }
+                }
+            }
+
+            // Schedule next process from run queue
+            if self.schedule_next().is_none() {
+                // No more processes ready - clear active and return idle
+                self.active = None;
+                return Ok(StepResult::Idle);
+            }
+        }
+    }
+
+    fn get_current_instruction(&self) -> Option<Instruction> {
+        let process = self.get_current_process()?;
+        let frame = process.frames.last()?;
+        frame.instructions.get(frame.counter).cloned()
+    }
+
+    fn handle_constant(&mut self, index: usize) -> Result<(), Error> {
+        let constant = self
+            .get_constant(index)
+            .ok_or(Error::ConstantUndefined(index))?;
+        let value = match constant {
+            Constant::Integer(integer) => Value::Integer(*integer),
+            Constant::Binary(_) => Value::Binary(Binary::Constant(index)),
+        };
+
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+        process.stack.push(value);
+        Ok(())
+    }
+
+    fn handle_pop(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+        process.stack.pop().ok_or(Error::StackUnderflow)?;
+        Ok(())
+    }
+
+    fn handle_duplicate(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+        let value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
+        process.stack.push(value);
+        Ok(())
+    }
+
+    fn handle_over(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        if process.stack.len() < 2 {
+            return Err(Error::StackUnderflow);
+        }
+        let index = process.stack.len() - 2;
+        let value = process.stack[index].clone();
+        process.stack.push(value);
+        Ok(())
+    }
+
+    fn handle_swap(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let len = process.stack.len();
+        if len < 2 {
+            return Err(Error::StackUnderflow);
+        }
+        process.stack.swap(len - 1, len - 2);
+        Ok(())
+    }
+
+    fn handle_load(&mut self, index: usize) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+        let actual_index = frame.locals_base + index;
+
+        let value = process
+            .locals
+            .get(actual_index)
+            .ok_or(Error::VariableUndefined(format!("local[{}]", index)))?
+            .clone();
+
+        process.stack.push(value);
+        Ok(())
+    }
+
+    fn handle_store(&mut self, index: usize) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+        let actual_index = frame.locals_base + index;
+
+        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        if actual_index >= process.locals.len() {
+            return Err(Error::VariableUndefined(format!("local[{}]", index)));
+        }
+
+        process.locals[actual_index] = value;
+        Ok(())
+    }
+
+    fn handle_tuple(&mut self, type_id: TypeId) -> Result<(), Error> {
+        let (_, fields) = self
+            .lookup_type(&type_id)
+            .ok_or_else(|| Error::TypeMismatch {
+                expected: "known tuple type".to_string(),
+                found: format!("unknown TypeId({:?})", type_id),
+            })?;
+        let size = fields.len();
+
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let mut values = Vec::new();
+        for _ in 0..size {
+            let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+            values.push(value);
+        }
+        values.reverse();
+        process.stack.push(Value::Tuple(type_id, values));
+        Ok(())
+    }
+
+    fn handle_get(&mut self, index: usize) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        match value {
+            Value::Tuple(_, elements) => {
+                let element = elements
+                    .get(index)
+                    .ok_or(Error::FieldAccessInvalid(index))?
+                    .clone();
+                process.stack.push(element);
+                Ok(())
+            }
+            _ => Err(Error::TypeMismatch {
+                expected: "tuple".to_string(),
+                found: value.type_name().to_string(),
+            }),
+        }
+    }
+
+    fn handle_is_integer(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let result = if matches!(value, Value::Integer(_)) {
+            Value::ok()
+        } else {
+            Value::nil()
+        };
+
+        process.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_is_binary(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let result = if matches!(value, Value::Binary(_)) {
+            Value::ok()
+        } else {
+            Value::nil()
+        };
+
+        process.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_is_tuple(&mut self, type_id: TypeId) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let is_match = if let Value::Tuple(actual_type_id, _) = &value {
+            if actual_type_id == &type_id {
+                // Fast path: exact match
+                true
+            } else {
+                // Use Type::is_compatible for structural checking
+                let actual_type = Type::Tuple(*actual_type_id);
+                let expected_type = Type::Tuple(type_id);
+                actual_type.is_compatible(&expected_type, self)
+            }
+        } else {
+            false
+        };
+
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        process
+            .stack
+            .push(if is_match { Value::ok() } else { Value::nil() });
+        Ok(())
+    }
+
+    fn handle_jump(&mut self, offset: isize) {
+        if let Some(process) = self.get_current_process_mut() {
+            if let Some(frame) = process.frames.last_mut() {
+                frame.counter = frame.counter.wrapping_add_signed(offset);
+            }
+        }
+    }
+
+    fn handle_jump_if(&mut self, offset: isize) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let condition = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let should_jump = match &condition {
+            Value::Tuple(type_id, fields) => !(type_id == &TypeId::NIL && fields.is_empty()),
+            _ => true,
+        };
+
+        if should_jump {
+            if let Some(frame) = process.frames.last_mut() {
+                frame.counter = frame.counter.wrapping_add_signed(offset);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_call(&mut self) -> Result<(), Error> {
+        let function_value = {
+            let process = self
+                .get_current_process_mut()
+                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            process.stack.last().ok_or(Error::StackUnderflow)?.clone()
+        };
+
+        match function_value {
+            Value::Function(function_index, captures) => {
+                // Get function instructions before modifying process
+                let func = self
+                    .get_function(function_index)
+                    .ok_or(Error::FunctionUndefined(function_index))?;
+                let instructions = func.instructions.clone();
+
+                // Now modify process
+                let process = self
+                    .get_current_process_mut()
+                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+                // Pop function and parameter
+                process.stack.pop();
+                let parameter = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+                let locals_base = process.locals.len();
+                let captures_count = captures.len();
+                process.stack.push(parameter);
+                process.locals.extend(captures);
+
+                process
+                    .frames
+                    .push(Frame::new(instructions, locals_base, captures_count));
+
+                Ok(())
+            }
+            Value::Builtin(name) => {
+                // Pop function and parameter
+                let parameter = {
+                    let process = self
+                        .get_current_process_mut()
+                        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                    process.stack.pop(); // Pop function
+                    process.stack.pop().ok_or(Error::StackUnderflow)?
+                };
+
+                let builtin = BUILTIN_REGISTRY.get_implementation(&name).ok_or_else(|| {
+                    Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
+                })?;
+
+                let result = builtin(&parameter, self)?;
+
+                let process = self
+                    .get_current_process_mut()
+                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+                process.stack.push(result);
+
+                // Unlike regular calls, builtins don't create a new frame
+                // So we need to manually increment the counter
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
+
+                Ok(())
+            }
+            Value::Pid(target_pid) => {
+                let current_pid = self
+                    .active
+                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+                let target =
+                    self.get_process(target_pid)
+                        .ok_or(Error::InvalidArgument(format!(
+                            "Process {:?} not found",
+                            target_pid
+                        )))?;
+
+                if let Some(result) = &target.result {
+                    // Process has finished - pop values and return result
+                    let result = result.clone();
+
+                    let process = self
+                        .get_current_process_mut()
+                        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+                    process.stack.pop(); // Pop pid
+                    process.stack.pop(); // Pop parameter (ignored)
+                    process.stack.push(result);
+
+                    // Increment counter to continue
+                    if let Some(frame) = process.frames.last_mut() {
+                        frame.counter += 1;
+                    }
+
+                    Ok(())
+                } else {
+                    // Process still running - block until it finishes without popping
+                    let target = self
+                        .get_process_mut(target_pid)
+                        .ok_or(Error::InvalidArgument(format!(
+                            "Process {:?} not found",
+                            target_pid
+                        )))?;
+
+                    target.awaiters.push(current_pid);
+
+                    self.mark_waiting(current_pid);
+
+                    // Don't increment counter - will retry when woken
+                    Ok(())
+                }
+            }
+            _ => Err(Error::TypeMismatch {
+                expected: "function".to_string(),
+                found: function_value.type_name().to_string(),
+            }),
+        }
+    }
+
+    fn handle_tail_call(&mut self, recurse: bool) -> Result<(), Error> {
+        if recurse {
+            let process = self
+                .get_current_process_mut()
+                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+            let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
+            let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+            let locals_base = frame.locals_base;
+            let captures_count = frame.captures_count;
+            let instructions = frame.instructions.clone();
+
+            // Clear current frame's locals, but keep captures
+            process.locals.truncate(locals_base + captures_count);
+
+            process.stack.push(argument);
+            *process.frames.last_mut().unwrap() =
+                Frame::new(instructions, locals_base, captures_count);
+            Ok(())
+        } else {
+            let (function_value, argument) = {
+                let process = self
+                    .get_current_process_mut()
+                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+                let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
+                (function_value, argument)
+            };
+
+            match function_value {
+                Value::Function(function, captures) => {
+                    let func = self
+                        .get_function(function)
+                        .ok_or(Error::FunctionUndefined(function))?;
+                    let instructions = func.instructions.clone();
+
+                    let process = self
+                        .get_current_process_mut()
+                        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+                    let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+                    let locals_base = frame.locals_base;
+
+                    // Clear current frame's locals
+                    process.locals.truncate(locals_base);
+
+                    // Extend with captures for new function
+                    let captures_count = captures.len();
+                    process.locals.extend(captures);
+
+                    process.stack.push(argument);
+                    *process.frames.last_mut().unwrap() =
+                        Frame::new(instructions, locals_base, captures_count);
+                    Ok(())
+                }
+                _ => Err(Error::CallInvalid),
+            }
+        }
+    }
+
+    fn handle_return(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let return_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let frame = process.frames.pop().ok_or(Error::FrameUnderflow)?;
+
+        let locals_to_clear = process.locals.len() - frame.locals_base - frame.captures_count;
+
+        if locals_to_clear > 0 {
+            let new_len = process.locals.len() - locals_to_clear;
+            process.locals.truncate(new_len);
+        }
+
+        process.stack.push(return_value);
+
+        Ok(())
+    }
+
+    fn handle_function(&mut self, function_index: usize) -> Result<(), Error> {
+        let func = self
+            .get_function(function_index)
+            .ok_or(Error::FunctionUndefined(function_index))?;
+        let capture_locals = func.captures.clone();
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+        let locals_base = frame.locals_base;
+
+        // Collect captured values from current frame's locals using the function's capture list
+        let captures = capture_locals
+            .iter()
+            .map(|&index| {
+                process
+                    .locals
+                    .get(locals_base + index)
+                    .cloned()
+                    .ok_or(Error::VariableUndefined(format!("capture local {}", index)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let function_value = Value::Function(function_index, captures);
+        process.stack.push(function_value);
+
+        Ok(())
+    }
+
+    fn handle_clear(&mut self, count: usize) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        if count > process.locals.len() {
+            return Err(Error::StackUnderflow);
+        }
+        process.locals.truncate(process.locals.len() - count);
+        Ok(())
+    }
+
+    fn handle_allocate(&mut self, count: usize) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        process
+            .locals
+            .extend(std::iter::repeat(Value::nil()).take(count));
+        Ok(())
+    }
+
+    fn handle_builtin(&mut self, index: usize) -> Result<(), Error> {
+        let builtin_name = self
+            .get_builtin(index)
+            .ok_or(Error::BuiltinUndefined(index))?
+            .clone();
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        process.stack.push(Value::Builtin(builtin_name));
+        Ok(())
+    }
+
+    fn handle_equal(&mut self, count: usize) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let values = {
+            if count > process.stack.len() {
+                return Err(Error::StackUnderflow);
+            }
+
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                values.push(process.stack.pop().ok_or(Error::StackUnderflow)?);
+            }
+            values.reverse();
+            values
+        };
+
+        let first = &values[0];
+        let all_equal = values.iter().all(|value| self.values_equal(first, value));
+
+        let result = if all_equal {
+            first.clone()
+        } else {
+            Value::nil()
+        };
+
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        process.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_not(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let result = match &value {
+            Value::Tuple(type_id, fields) => {
+                if type_id == &TypeId::NIL && fields.is_empty() {
+                    Value::ok()
+                } else {
+                    Value::nil()
+                }
+            }
+            _ => Value::nil(),
+        };
+
+        process.stack.push(result);
+        Ok(())
+    }
+
+    fn handle_spawn(&mut self, next_process_id: &Arc<AtomicUsize>) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let (function_index, captures) = match function_value {
+            Value::Function(idx, caps) => (idx, caps),
+            _ => {
+                return Err(Error::TypeMismatch {
+                    expected: "function".to_string(),
+                    found: function_value.type_name().to_string(),
+                });
+            }
+        };
+
+        let func = self
+            .get_function(function_index)
+            .ok_or(Error::FunctionUndefined(function_index))?;
+        let instructions = func.instructions.clone();
+
+        let new_pid = ProcessId(next_process_id.fetch_add(1, Ordering::SeqCst));
+
+        self.spawn_process(new_pid, false);
+
+        let new_process = self.get_process_mut(new_pid).ok_or(Error::InvalidArgument(
+            "Failed to create process".to_string(),
+        ))?;
+
+        let captures_count = captures.len();
+        new_process.stack.push(Value::nil());
+        new_process.locals.extend(captures);
+        new_process
+            .frames
+            .push(Frame::new(instructions, 0, captures_count));
+
+        let calling_process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        calling_process.stack.push(Value::Pid(new_pid));
+
+        Ok(())
+    }
+
+    fn handle_send(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let pid_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        let target_pid = match pid_value {
+            Value::Pid(pid) => pid,
+            _ => {
+                return Err(Error::TypeMismatch {
+                    expected: "pid".to_string(),
+                    found: pid_value.type_name().to_string(),
+                });
+            }
+        };
+
+        let target_process = self
+            .get_process_mut(target_pid)
+            .ok_or(Error::InvalidArgument(format!(
+                "Process {:?} not found",
+                target_pid
+            )))?;
+
+        target_process.mailbox.push_back(message);
+
+        self.wake_process(target_pid);
+
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        process.stack.push(Value::ok());
+        Ok(())
+    }
+
+    fn handle_self(&mut self) -> Result<(), Error> {
+        let current_pid = self
+            .active
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        process.stack.push(Value::Pid(current_pid));
+        Ok(())
+    }
+
+    fn handle_receive(&mut self) -> Result<(), Error> {
+        let current_pid = self
+            .active
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let process = self
+            .get_process_mut(current_pid)
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let cursor = process.cursor;
+        if cursor < process.mailbox.len() {
+            let message = process.mailbox[cursor].clone();
+            process.cursor = cursor + 1;
+            process.stack.push(message);
+        } else {
+            self.mark_waiting(current_pid);
+        }
+
+        Ok(())
+    }
+
+    fn handle_acknowledge(&mut self) -> Result<(), Error> {
+        let process = self
+            .get_current_process_mut()
+            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+
+        let cursor = process.cursor;
+        if 0 < cursor && cursor - 1 < process.mailbox.len() {
+            process.mailbox.remove(cursor - 1);
+        }
+        process.cursor = 0;
+        Ok(())
+    }
+
+    fn values_equal(&self, a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Binary(a), Value::Binary(b)) => {
+                match (self.get_binary_bytes(a), self.get_binary_bytes(b)) {
+                    (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
+                    _ => false,
+                }
+            }
+            (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
+                type_a == type_b
+                    && elements_a.len() == elements_b.len()
+                    && elements_a
+                        .iter()
+                        .zip(elements_b.iter())
+                        .all(|(a, b)| self.values_equal(a, b))
+            }
+            (Value::Function(idx_a, caps_a), Value::Function(idx_b, caps_b)) => {
+                idx_a == idx_b
+                    && caps_a.len() == caps_b.len()
+                    && caps_a
+                        .iter()
+                        .zip(caps_b.iter())
+                        .all(|(a, b)| self.values_equal(a, b))
+            }
+            (Value::Builtin(a), Value::Builtin(b)) => a == b,
+            (Value::Pid(a), Value::Pid(b)) => a == b,
+            _ => false,
+        }
     }
 }
 
@@ -766,900 +1635,39 @@ fn run(
     let initial_process = scheduler.lock().unwrap().active;
     let mut initial_result = None;
 
+    // Use step() to execute until completion
     loop {
-        let mut units_this_slice = 0;
+        // Call step with a reasonable batch size
+        let step_result = scheduler.lock().unwrap().step(1000, next_process_id)?;
 
-        // Execute instructions for current process
-        while let Some(instruction) = get_instruction(scheduler) {
-            let result = match instruction {
-                Instruction::Constant(index) => handle_constant(scheduler, index),
-                Instruction::Pop => handle_pop(scheduler),
-                Instruction::Duplicate => handle_duplicate(scheduler),
-                Instruction::Over => handle_over(scheduler),
-                Instruction::Swap => handle_swap(scheduler),
-                Instruction::Load(index) => handle_load(scheduler, index),
-                Instruction::Store(index) => handle_store(scheduler, index),
-                Instruction::Tuple(type_id) => handle_tuple(scheduler, type_id),
-                Instruction::Get(index) => handle_get(scheduler, index),
-                Instruction::IsInteger => handle_is_integer(scheduler),
-                Instruction::IsBinary => handle_is_binary(scheduler),
-                Instruction::IsTuple(type_id) => handle_is_tuple(scheduler, type_id),
-                Instruction::Jump(offset) => Ok(handle_jump(scheduler, offset)),
-                Instruction::JumpIf(offset) => handle_jump_if(scheduler, offset),
-                Instruction::Call => handle_call(scheduler),
-                Instruction::TailCall(recurse) => handle_tail_call(scheduler, recurse),
-                Instruction::Return => handle_return(scheduler),
-                Instruction::Function(function_index) => handle_function(scheduler, function_index),
-                Instruction::Clear(count) => handle_clear(scheduler, count),
-                Instruction::Allocate(count) => handle_allocate(scheduler, count),
-                Instruction::Builtin(index) => handle_builtin(scheduler, index),
-                Instruction::Equal(count) => handle_equal(scheduler, count),
-                Instruction::Not => handle_not(scheduler),
-                Instruction::Spawn => handle_spawn(scheduler, &next_process_id),
-                Instruction::Send => handle_send(scheduler),
-                Instruction::Self_ => handle_self(scheduler),
-                Instruction::Receive => handle_receive(scheduler),
-                Instruction::Acknowledge => handle_acknowledge(scheduler),
-            };
-            result?;
+        // Check if initial process completed and grab its result
+        // Must check even when Idle, since the process may have just finished
+        if initial_result.is_none() {
+            let mut sched = scheduler.lock().unwrap();
+            if let Some(init_pid) = initial_process {
+                // Check if process is not waiting - if so, extract result from stack
+                let is_waiting = sched.waiting.contains(&init_pid);
+                if !is_waiting {
+                    if let Some(process) = sched.get_process_mut(init_pid) {
+                        // Check if there are no more instructions to execute in current frame
+                        let no_more_instructions = process
+                            .frames
+                            .last()
+                            .map_or(true, |frame| frame.counter >= frame.instructions.len());
 
-            // Don't increment counter for Call/TailCall (they manage their own frames)
-            // or Receive/Call when process was marked waiting (so it re-executes when woken)
-            let should_increment =
-                !matches!(instruction, Instruction::Call | Instruction::TailCall(_));
-            if should_increment {
-                let mut sched = scheduler.lock().unwrap();
-                let current_pid = sched.active;
-
-                // If process was marked waiting by Receive, don't increment and break out
-                let was_marked_waiting = if matches!(instruction, Instruction::Receive) {
-                    current_pid.map_or(false, |pid| sched.waiting.contains(&pid))
-                } else {
-                    false
-                };
-
-                if was_marked_waiting {
-                    // Break out of instruction loop so scheduler can switch processes
-                    break;
-                } else if let Some(process) = sched.get_current_process_mut() {
-                    if let Some(frame) = process.frames.last_mut() {
-                        frame.counter += 1;
-                    }
-                }
-            } else {
-                // For Call instruction, check if process was marked waiting (awaiting a process)
-                if matches!(instruction, Instruction::Call) {
-                    let sched = scheduler.lock().unwrap();
-                    let current_pid = sched.active;
-
-                    let was_marked_waiting =
-                        current_pid.map_or(false, |pid| sched.waiting.contains(&pid));
-
-                    if was_marked_waiting {
-                        // Break out of instruction loop so scheduler can switch processes
-                        break;
-                    }
-                }
-            }
-
-            // Track instruction units consumed
-            units_this_slice += 1;
-
-            // Yield to other processes if time slice exhausted
-            if units_this_slice >= TIME_SLICE_UNITS {
-                let mut sched = scheduler.lock().unwrap();
-                if !sched.queue.is_empty() {
-                    if let Some(pid) = sched.active {
-                        sched.queue.push_back(pid);
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Current process finished its instructions (or is waiting)
-        let mut sched = scheduler.lock().unwrap();
-        let current_pid = sched.active;
-
-        // Pop initial result if this is the initial process and we haven't done so yet
-        // Only do this if the process is not waiting (it's actually done, not blocked)
-        if current_pid == initial_process && initial_result.is_none() {
-            let is_waiting = current_pid.map_or(false, |pid| sched.waiting.contains(&pid));
-            if !is_waiting {
-                initial_result = sched.get_current_process_mut().and_then(|p| p.stack.pop());
-            }
-        }
-
-        // Store result and wake awaiters when process finishes (frames are empty)
-        if let Some(pid) = current_pid {
-            let should_store_result = sched
-                .get_process(pid)
-                .map(|p| p.frames.is_empty() && p.result.is_none())
-                .unwrap_or(false);
-
-            if should_store_result {
-                if let Some(process) = sched.get_process_mut(pid) {
-                    process.result = process.stack.last().cloned();
-                    let awaiters = std::mem::take(&mut process.awaiters);
-                    for waiter in awaiters {
-                        sched.wake_process(waiter);
+                        if no_more_instructions && !process.stack.is_empty() {
+                            initial_result = process.stack.pop();
+                        }
                     }
                 }
             }
         }
 
-        // Schedule next process from run queue
-        if sched.schedule_next().is_none() {
+        // Continue until scheduler is idle
+        if step_result == StepResult::Idle {
             break;
         }
     }
 
-    // Clear active when scheduler is idle
-    scheduler.lock().unwrap().active = None;
-
     Ok(initial_result)
-}
-
-fn get_instruction(scheduler: &Arc<Mutex<Scheduler>>) -> Option<Instruction> {
-    let sched = scheduler.lock().unwrap();
-    let process = sched.get_current_process()?;
-    let frame = process.frames.last()?;
-    frame.instructions.get(frame.counter).cloned()
-}
-
-// Placeholder implementations for all handle_* functions
-// These will be moved from vm.rs
-
-fn handle_constant(scheduler: &Arc<Mutex<Scheduler>>, index: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let constant = sched
-        .get_constant(index)
-        .ok_or(Error::ConstantUndefined(index))?;
-    let value = match constant {
-        Constant::Integer(integer) => Value::Integer(*integer),
-        Constant::Binary(_) => Value::Binary(Binary::Constant(index)),
-    };
-
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-    process.stack.push(value);
-    Ok(())
-}
-
-fn handle_pop(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-    process.stack.pop().ok_or(Error::StackUnderflow)?;
-    Ok(())
-}
-
-fn handle_duplicate(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-    let value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
-    process.stack.push(value);
-    Ok(())
-}
-
-fn handle_over(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    if process.stack.len() < 2 {
-        return Err(Error::StackUnderflow);
-    }
-    let index = process.stack.len() - 2;
-    let value = process.stack[index].clone();
-    process.stack.push(value);
-    Ok(())
-}
-
-fn handle_swap(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let len = process.stack.len();
-    if len < 2 {
-        return Err(Error::StackUnderflow);
-    }
-    process.stack.swap(len - 1, len - 2);
-    Ok(())
-}
-
-fn handle_load(scheduler: &Arc<Mutex<Scheduler>>, index: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
-    let actual_index = frame.locals_base + index;
-
-    let value = process
-        .locals
-        .get(actual_index)
-        .ok_or(Error::VariableUndefined(format!("local[{}]", index)))?
-        .clone();
-
-    process.stack.push(value);
-    Ok(())
-}
-
-fn handle_store(scheduler: &Arc<Mutex<Scheduler>>, index: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
-    let actual_index = frame.locals_base + index;
-
-    let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    if actual_index >= process.locals.len() {
-        return Err(Error::VariableUndefined(format!("local[{}]", index)));
-    }
-
-    process.locals[actual_index] = value;
-    Ok(())
-}
-
-fn handle_tuple(scheduler: &Arc<Mutex<Scheduler>>, type_id: TypeId) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let (_, fields) = sched
-        .lookup_type(&type_id)
-        .ok_or_else(|| Error::TypeMismatch {
-            expected: "known tuple type".to_string(),
-            found: format!("unknown TypeId({:?})", type_id),
-        })?;
-    let size = fields.len();
-
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let mut values = Vec::new();
-    for _ in 0..size {
-        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-        values.push(value);
-    }
-    values.reverse();
-    process.stack.push(Value::Tuple(type_id, values));
-    Ok(())
-}
-
-fn handle_get(scheduler: &Arc<Mutex<Scheduler>>, index: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    match value {
-        Value::Tuple(_, elements) => {
-            let element = elements
-                .get(index)
-                .ok_or(Error::FieldAccessInvalid(index))?
-                .clone();
-            process.stack.push(element);
-            Ok(())
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        }),
-    }
-}
-
-fn handle_is_integer(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let result = if matches!(value, Value::Integer(_)) {
-        Value::ok()
-    } else {
-        Value::nil()
-    };
-
-    process.stack.push(result);
-    Ok(())
-}
-
-fn handle_is_binary(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let result = if matches!(value, Value::Binary(_)) {
-        Value::ok()
-    } else {
-        Value::nil()
-    };
-
-    process.stack.push(result);
-    Ok(())
-}
-
-fn handle_is_tuple(scheduler: &Arc<Mutex<Scheduler>>, type_id: TypeId) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let is_match = if let Value::Tuple(actual_type_id, _) = &value {
-        if actual_type_id == &type_id {
-            // Fast path: exact match
-            true
-        } else {
-            // Use Type::is_compatible for structural checking
-            let actual_type = Type::Tuple(*actual_type_id);
-            let expected_type = Type::Tuple(type_id);
-            actual_type.is_compatible(&expected_type, &*sched)
-        }
-    } else {
-        false
-    };
-
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    process
-        .stack
-        .push(if is_match { Value::ok() } else { Value::nil() });
-    Ok(())
-}
-
-fn handle_jump(scheduler: &Arc<Mutex<Scheduler>>, offset: isize) {
-    let mut sched = scheduler.lock().unwrap();
-    if let Some(process) = sched.get_current_process_mut() {
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter = frame.counter.wrapping_add_signed(offset);
-        }
-    }
-}
-
-fn handle_jump_if(scheduler: &Arc<Mutex<Scheduler>>, offset: isize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let condition = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let should_jump = match &condition {
-        Value::Tuple(type_id, fields) => !(type_id == &TypeId::NIL && fields.is_empty()),
-        _ => true,
-    };
-
-    if should_jump {
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter = frame.counter.wrapping_add_signed(offset);
-        }
-    }
-
-    Ok(())
-}
-
-fn handle_call(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let function_value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
-
-    match function_value {
-        Value::Function(function_index, captures) => {
-            // Pop function and parameter now that we know we won't block
-            process.stack.pop();
-            let parameter = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-            let func = sched
-                .get_function(function_index)
-                .ok_or(Error::FunctionUndefined(function_index))?;
-            let instructions = func.instructions.clone();
-            drop(sched);
-
-            let mut sched = scheduler.lock().unwrap();
-            let process = sched
-                .get_current_process_mut()
-                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-            let locals_base = process.locals.len();
-            let captures_count = captures.len();
-            process.stack.push(parameter);
-            process.locals.extend(captures);
-
-            process
-                .frames
-                .push(Frame::new(instructions, locals_base, captures_count));
-
-            Ok(())
-        }
-        Value::Builtin(name) => {
-            // Pop function and parameter now that we know we won't block
-            process.stack.pop();
-            let parameter = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-            let builtin = BUILTIN_REGISTRY
-                .get_implementation(&name)
-                .ok_or_else(|| Error::InvalidArgument(format!("Unrecognised builtin: {}", name)))?;
-
-            let result = builtin(&parameter, &mut *sched)?;
-
-            let process = sched
-                .get_current_process_mut()
-                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-            process.stack.push(result);
-
-            // Unlike regular calls, builtins don't create a new frame
-            // So we need to manually increment the counter
-            if let Some(frame) = process.frames.last_mut() {
-                frame.counter += 1;
-            }
-
-            Ok(())
-        }
-        Value::Pid(target_pid) => {
-            let current_pid = sched
-                .active
-                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-            let target = sched
-                .get_process(target_pid)
-                .ok_or(Error::InvalidArgument(format!(
-                    "Process {:?} not found",
-                    target_pid
-                )))?;
-
-            if let Some(result) = &target.result {
-                // Process has finished - pop values and return result
-                let result = result.clone();
-
-                let process = sched
-                    .get_current_process_mut()
-                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-                process.stack.pop(); // Pop pid
-                process.stack.pop(); // Pop parameter (ignored)
-                process.stack.push(result);
-
-                // Increment counter to continue
-                if let Some(frame) = process.frames.last_mut() {
-                    frame.counter += 1;
-                }
-
-                Ok(())
-            } else {
-                // Process still running - block until it finishes without popping
-                let target = sched
-                    .get_process_mut(target_pid)
-                    .ok_or(Error::InvalidArgument(format!(
-                        "Process {:?} not found",
-                        target_pid
-                    )))?;
-
-                target.awaiters.push(current_pid);
-                drop(sched);
-
-                let mut sched = scheduler.lock().unwrap();
-                sched.mark_waiting(current_pid);
-
-                // Don't increment counter - will retry when woken
-                Ok(())
-            }
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "function".to_string(),
-            found: function_value.type_name().to_string(),
-        }),
-    }
-}
-
-fn handle_tail_call(scheduler: &Arc<Mutex<Scheduler>>, recurse: bool) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    if recurse {
-        let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
-        let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
-        let locals_base = frame.locals_base;
-        let captures_count = frame.captures_count;
-        let instructions = frame.instructions.clone();
-
-        // Clear current frame's locals, but keep captures
-        process.locals.truncate(locals_base + captures_count);
-
-        process.stack.push(argument);
-        *process.frames.last_mut().unwrap() = Frame::new(instructions, locals_base, captures_count);
-        Ok(())
-    } else {
-        let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-        let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-        match function_value {
-            Value::Function(function, captures) => {
-                let func = sched
-                    .get_function(function)
-                    .ok_or(Error::FunctionUndefined(function))?;
-                let instructions = func.instructions.clone();
-                drop(sched);
-
-                let mut sched = scheduler.lock().unwrap();
-                let process = sched
-                    .get_current_process_mut()
-                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-                let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
-                let locals_base = frame.locals_base;
-
-                // Clear current frame's locals
-                process.locals.truncate(locals_base);
-
-                // Extend with captures for new function
-                let captures_count = captures.len();
-                process.locals.extend(captures);
-
-                process.stack.push(argument);
-                *process.frames.last_mut().unwrap() =
-                    Frame::new(instructions, locals_base, captures_count);
-                Ok(())
-            }
-            _ => Err(Error::CallInvalid),
-        }
-    }
-}
-
-fn handle_return(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let return_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let frame = process.frames.pop().ok_or(Error::FrameUnderflow)?;
-
-    let locals_to_clear = process.locals.len() - frame.locals_base - frame.captures_count;
-
-    if locals_to_clear > 0 {
-        let new_len = process.locals.len() - locals_to_clear;
-        process.locals.truncate(new_len);
-    }
-
-    process.stack.push(return_value);
-
-    Ok(())
-}
-
-fn handle_function(scheduler: &Arc<Mutex<Scheduler>>, function_index: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let func = sched
-        .get_function(function_index)
-        .ok_or(Error::FunctionUndefined(function_index))?;
-    let capture_locals = func.captures.clone();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
-    let locals_base = frame.locals_base;
-
-    // Collect captured values from current frame's locals using the function's capture list
-    let captures = capture_locals
-        .iter()
-        .map(|&index| {
-            process
-                .locals
-                .get(locals_base + index)
-                .cloned()
-                .ok_or(Error::VariableUndefined(format!("capture local {}", index)))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let function_value = Value::Function(function_index, captures);
-    process.stack.push(function_value);
-
-    Ok(())
-}
-
-fn handle_clear(scheduler: &Arc<Mutex<Scheduler>>, count: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    if count > process.locals.len() {
-        return Err(Error::StackUnderflow);
-    }
-    process.locals.truncate(process.locals.len() - count);
-    Ok(())
-}
-
-fn handle_allocate(scheduler: &Arc<Mutex<Scheduler>>, count: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    process
-        .locals
-        .extend(std::iter::repeat(Value::nil()).take(count));
-    Ok(())
-}
-
-fn handle_builtin(scheduler: &Arc<Mutex<Scheduler>>, index: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let builtin_name = sched
-        .get_builtin(index)
-        .ok_or(Error::BuiltinUndefined(index))?
-        .clone();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    process.stack.push(Value::Builtin(builtin_name));
-    Ok(())
-}
-
-fn handle_equal(scheduler: &Arc<Mutex<Scheduler>>, count: usize) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let values = {
-        if count > process.stack.len() {
-            return Err(Error::StackUnderflow);
-        }
-
-        let mut values = Vec::with_capacity(count);
-        for _ in 0..count {
-            values.push(process.stack.pop().ok_or(Error::StackUnderflow)?);
-        }
-        values.reverse();
-        values
-    };
-
-    let first = &values[0];
-    let all_equal = values
-        .iter()
-        .all(|value| values_equal(&sched, first, value));
-
-    let result = if all_equal {
-        first.clone()
-    } else {
-        Value::nil()
-    };
-
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    process.stack.push(result);
-    Ok(())
-}
-
-fn handle_not(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let result = match &value {
-        Value::Tuple(type_id, fields) => {
-            if type_id == &TypeId::NIL && fields.is_empty() {
-                Value::ok()
-            } else {
-                Value::nil()
-            }
-        }
-        _ => Value::nil(),
-    };
-
-    process.stack.push(result);
-    Ok(())
-}
-
-fn handle_spawn(
-    scheduler: &Arc<Mutex<Scheduler>>,
-    next_process_id: &Arc<AtomicUsize>,
-) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let (function_index, captures) = match function_value {
-        Value::Function(idx, caps) => (idx, caps),
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "function".to_string(),
-                found: function_value.type_name().to_string(),
-            });
-        }
-    };
-
-    let func = sched
-        .get_function(function_index)
-        .ok_or(Error::FunctionUndefined(function_index))?;
-    let instructions = func.instructions.clone();
-    drop(sched);
-
-    let new_pid = ProcessId(next_process_id.fetch_add(1, Ordering::SeqCst));
-
-    let mut sched = scheduler.lock().unwrap();
-    sched.spawn_process(new_pid, false);
-
-    let new_process = sched
-        .get_process_mut(new_pid)
-        .ok_or(Error::InvalidArgument(
-            "Failed to create process".to_string(),
-        ))?;
-
-    let captures_count = captures.len();
-    new_process.stack.push(Value::nil());
-    new_process.locals.extend(captures);
-    new_process
-        .frames
-        .push(Frame::new(instructions, 0, captures_count));
-
-    let calling_process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    calling_process.stack.push(Value::Pid(new_pid));
-
-    Ok(())
-}
-
-fn handle_send(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let pid_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-    let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-    let target_pid = match pid_value {
-        Value::Pid(pid) => pid,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "pid".to_string(),
-                found: pid_value.type_name().to_string(),
-            });
-        }
-    };
-
-    let target_process = sched
-        .get_process_mut(target_pid)
-        .ok_or(Error::InvalidArgument(format!(
-            "Process {:?} not found",
-            target_pid
-        )))?;
-
-    target_process.mailbox.push_back(message);
-
-    drop(sched);
-
-    let mut sched = scheduler.lock().unwrap();
-    sched.wake_process(target_pid);
-
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    process.stack.push(Value::ok());
-    Ok(())
-}
-
-fn handle_self(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let current_pid = sched
-        .active
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    process.stack.push(Value::Pid(current_pid));
-    Ok(())
-}
-
-fn handle_receive(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let current_pid = sched
-        .active
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let process = sched
-        .get_process_mut(current_pid)
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let cursor = process.cursor;
-    if cursor < process.mailbox.len() {
-        let message = process.mailbox[cursor].clone();
-        process.cursor = cursor + 1;
-        process.stack.push(message);
-    } else {
-        drop(sched);
-        let mut sched = scheduler.lock().unwrap();
-        sched.mark_waiting(current_pid);
-    }
-
-    Ok(())
-}
-
-fn handle_acknowledge(scheduler: &Arc<Mutex<Scheduler>>) -> Result<(), Error> {
-    let mut sched = scheduler.lock().unwrap();
-    let process = sched
-        .get_current_process_mut()
-        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-    let cursor = process.cursor;
-    if 0 < cursor && cursor - 1 < process.mailbox.len() {
-        process.mailbox.remove(cursor - 1);
-    }
-    process.cursor = 0;
-    Ok(())
-}
-
-fn values_equal(scheduler: &Scheduler, a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => a == b,
-        (Value::Binary(a), Value::Binary(b)) => {
-            match (scheduler.get_binary_bytes(a), scheduler.get_binary_bytes(b)) {
-                (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
-                _ => false,
-            }
-        }
-        (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
-            type_a == type_b
-                && elements_a.len() == elements_b.len()
-                && elements_a
-                    .iter()
-                    .zip(elements_b.iter())
-                    .all(|(a, b)| values_equal(scheduler, a, b))
-        }
-        (Value::Function(idx_a, caps_a), Value::Function(idx_b, caps_b)) => {
-            idx_a == idx_b
-                && caps_a.len() == caps_b.len()
-                && caps_a
-                    .iter()
-                    .zip(caps_b.iter())
-                    .all(|(a, b)| values_equal(scheduler, a, b))
-        }
-        (Value::Builtin(a), Value::Builtin(b)) => a == b,
-        (Value::Pid(a), Value::Pid(b)) => a == b,
-        _ => false,
-    }
 }
