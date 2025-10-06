@@ -441,7 +441,6 @@ Built-in functions can be accessed using angle brackets, although access via the
 
 ```
 sum = [3, 4] ~> <add>               // Built-in addition
-"Hello" ~> <println>                // Built-in print with newline
 doubled = [x, 2] ~> <multiply>      // Built-in multiplication
 ```
 
@@ -567,7 +566,6 @@ person ~> .date_of_birth ~> .month,    // Chain field access
 // Built-in operations
 math = %"math",
 next_year = person.age ~> math.add[~, 1],
-name ~> <println>
 ```
 
 ### Concurrent processes
@@ -578,7 +576,7 @@ echo = #[] {
   $Str[bin] {
     | ~> ="" => []           // Stop on empty string
     | ~> =s => {
-      s ~> <println>,        // Print received value
+      s ~> <println>,        // (not implemented!)
       [] ~> &                // Continue receiving
     }
   }

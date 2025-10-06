@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub mod binary;
-pub mod io;
 pub mod math;
 
 /// Type specification for lazy type resolution
@@ -98,7 +97,6 @@ fn create_builtin_registry() -> BuiltinRegistry {
     let mut functions = HashMap::new();
 
     // Common type specifications
-    let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
     let int_int = TypeSpec::Tuple(
         None,
         vec![(None, TypeSpec::Integer), (None, TypeSpec::Integer)],
@@ -119,7 +117,6 @@ fn create_builtin_registry() -> BuiltinRegistry {
             (None, TypeSpec::Integer),
         ],
     );
-    let str = TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]);
 
     // Math functions
     register_builtin!(functions, "abs", math::builtin_math_abs, TypeSpec::Integer => TypeSpec::Integer);
@@ -175,10 +172,6 @@ fn create_builtin_registry() -> BuiltinRegistry {
     register_builtin!(functions, "binary_hash64", binary::builtin_binary_hash64, TypeSpec::Binary => TypeSpec::Integer);
     register_builtin!(functions, "string_hash", binary::builtin_string_hash, TypeSpec::Binary => TypeSpec::Integer);
     register_builtin!(functions, "hash_chunk", binary::builtin_hash_chunk, bin_int.clone() => TypeSpec::Integer);
-
-    // IO functions
-    register_builtin!(functions, "print", io::builtin_io_print, str.clone() => ok.clone());
-    register_builtin!(functions, "println", io::builtin_io_println, str.clone() => ok.clone());
 
     BuiltinRegistry { functions }
 }

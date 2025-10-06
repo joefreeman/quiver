@@ -1,7 +1,0 @@
-// Standard library I/O module
-// Provides convenient wrappers around the print and println builtins
-
-[
-  print: <print>,
-  println: <println>
-]
