@@ -1,5 +1,5 @@
 [workspace]
-members = ["quiver-core", "quiver-compiler", "quiver-cli", "quiver-tests"]
+members = ["quiver-core", "quiver-compiler", "quiver-cli", "quiver-tests", "quiver-web"]
 resolver = "2"
 
 [workspace.package]
