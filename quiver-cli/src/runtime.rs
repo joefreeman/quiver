@@ -102,46 +102,20 @@ impl NativeRuntime {
         drop(program_snapshot);
 
         let (command_tx, command_rx) = sync_channel(100);
-        let (response_tx, response_rx) = sync_channel(100);
-        let response_rx = Arc::new(Mutex::new(response_rx));
         let pending: Arc<Mutex<HashMap<u64, SyncSender<SchedulerResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let next_request_id = Arc::new(AtomicU64::new(0));
 
         let executor_clone = Arc::clone(&executor);
         let next_process_id_clone = Arc::clone(&next_process_id);
+        let pending_clone = Arc::clone(&pending);
         let thread_handle = thread::spawn(move || {
             scheduler_thread(
                 executor_clone,
                 next_process_id_clone,
                 command_rx,
-                response_tx,
+                pending_clone,
             );
-        });
-
-        // Spawn response handler thread to route responses to pending senders
-        let pending_clone = Arc::clone(&pending);
-        let response_rx_clone = Arc::clone(&response_rx);
-        thread::spawn(move || {
-            loop {
-                let response = match response_rx_clone.lock().unwrap().recv() {
-                    Ok(r) => r,
-                    Err(_) => break, // Channel closed
-                };
-
-                // Route response by request_id
-                let request_id = match &response {
-                    SchedulerResponse::Execute { request_id, .. } => *request_id,
-                    SchedulerResponse::SpawnProcess { request_id, .. } => *request_id,
-                    SchedulerResponse::GetProcessStatuses { request_id, .. } => *request_id,
-                    SchedulerResponse::GetProcessInfo { request_id, .. } => *request_id,
-                    SchedulerResponse::GetVariables { request_id, .. } => *request_id,
-                };
-
-                if let Some(tx) = pending_clone.lock().unwrap().remove(&request_id) {
-                    let _ = tx.send(response);
-                }
-            }
         });
 
         Self {
@@ -457,7 +431,7 @@ fn scheduler_thread(
     executor: Arc<Mutex<Executor>>,
     next_process_id: Arc<AtomicUsize>,
     command_rx: Receiver<SchedulerCommand>,
-    response_tx: SyncSender<SchedulerResponse>,
+    pending: Arc<Mutex<HashMap<u64, SyncSender<SchedulerResponse>>>>,
 ) {
     loop {
         match command_rx.recv() {
@@ -484,10 +458,12 @@ fn scheduler_thread(
                             let process = match exec.get_process_mut(process_id) {
                                 Some(p) => p,
                                 None => {
-                                    let _ = response_tx.send(SchedulerResponse::Execute {
-                                        request_id,
-                                        result: Ok((value, None)),
-                                    });
+                                    if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
+                                        let _ = tx.send(SchedulerResponse::Execute {
+                                            request_id,
+                                            result: Ok((value, None)),
+                                        });
+                                    }
                                     continue;
                                 }
                             };
@@ -518,7 +494,9 @@ fn scheduler_thread(
                     Err(e) => Err(e),
                 };
 
-                let _ = response_tx.send(SchedulerResponse::Execute { request_id, result });
+                if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
+                    let _ = tx.send(SchedulerResponse::Execute { request_id, result });
+                }
             }
             Ok(SchedulerCommand::RegisterConstant { index, constant }) => {
                 let mut exec = executor.lock().unwrap();
@@ -543,26 +521,32 @@ fn scheduler_thread(
             }) => {
                 let mut exec = executor.lock().unwrap();
                 exec.spawn_process(id, persistent);
-                let _ = response_tx.send(SchedulerResponse::SpawnProcess {
-                    request_id,
-                    result: Ok(()),
-                });
+                if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
+                    let _ = tx.send(SchedulerResponse::SpawnProcess {
+                        request_id,
+                        result: Ok(()),
+                    });
+                }
             }
             Ok(SchedulerCommand::GetProcessStatuses { request_id }) => {
                 let exec = executor.lock().unwrap();
                 let statuses = exec.get_process_statuses();
-                let _ = response_tx.send(SchedulerResponse::GetProcessStatuses {
-                    request_id,
-                    result: Ok(statuses),
-                });
+                if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
+                    let _ = tx.send(SchedulerResponse::GetProcessStatuses {
+                        request_id,
+                        result: Ok(statuses),
+                    });
+                }
             }
             Ok(SchedulerCommand::GetProcessInfo { request_id, id }) => {
                 let exec = executor.lock().unwrap();
                 let info = exec.get_process_info(id);
-                let _ = response_tx.send(SchedulerResponse::GetProcessInfo {
-                    request_id,
-                    result: Ok(info),
-                });
+                if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
+                    let _ = tx.send(SchedulerResponse::GetProcessInfo {
+                        request_id,
+                        result: Ok(info),
+                    });
+                }
             }
             Ok(SchedulerCommand::GetVariables {
                 request_id,
@@ -592,7 +576,9 @@ fn scheduler_thread(
                         process_id
                     ))),
                 };
-                let _ = response_tx.send(SchedulerResponse::GetVariables { request_id, result });
+                if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
+                    let _ = tx.send(SchedulerResponse::GetVariables { request_id, result });
+                }
             }
             Ok(SchedulerCommand::Shutdown) | Err(_) => {
                 break;
