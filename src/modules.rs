@@ -24,9 +24,9 @@ impl InMemoryModuleLoader {
 
 impl ModuleLoader for InMemoryModuleLoader {
     fn load(&self, path: &str, from_dir: Option<&Path>) -> Result<String, ModuleError> {
-        if path.starts_with("./") || path.starts_with("../") {
-            // Relative import - use in-memory modules
-            let normalised = if let Some(base_dir) = from_dir {
+        let normalised = if path.starts_with("./") || path.starts_with("../") {
+            // Relative import - normalize relative to from_dir
+            if let Some(base_dir) = from_dir {
                 base_dir
                     .join(path)
                     .components()
@@ -35,17 +35,16 @@ impl ModuleLoader for InMemoryModuleLoader {
                     .to_string()
             } else {
                 path.to_string()
-            };
-
-            self.modules
-                .get(&normalised)
-                .cloned()
-                .ok_or_else(|| ModuleError::NotFound(path.to_string()))
+            }
         } else {
-            // Standard library import - fall back to filesystem
-            let filesystem_loader = FileSystemModuleLoader::new();
-            filesystem_loader.load(path, from_dir)
-        }
+            // Standard library import - use path as-is
+            path.to_string()
+        };
+
+        self.modules
+            .get(&normalised)
+            .cloned()
+            .ok_or_else(|| ModuleError::NotFound(path.to_string()))
     }
 }
 

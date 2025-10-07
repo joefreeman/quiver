@@ -1,6 +1,19 @@
 use quiver::{Quiver, vm::Value};
 use std::collections::HashMap;
 
+macro_rules! load_stdlib_modules {
+    ($($name:literal),* $(,)?) => {{
+        let mut modules = HashMap::new();
+        $(
+            modules.insert(
+                $name.to_string(),
+                include_str!(concat!("../std/", $name, ".qv")).to_string()
+            );
+        )*
+        modules
+    }};
+}
+
 #[allow(dead_code)]
 pub struct TestBuilder {
     modules: Option<HashMap<String, String>>,
@@ -9,10 +22,18 @@ pub struct TestBuilder {
 #[allow(dead_code)]
 impl TestBuilder {
     pub fn new() -> Self {
-        Self { modules: None }
+        Self {
+            modules: Some(load_stdlib_modules!("math", "list")),
+        }
     }
 
-    pub fn with_modules(mut self, modules: HashMap<String, String>) -> Self {
+    pub fn with_modules(mut self, mut modules: HashMap<String, String>) -> Self {
+        // Merge additional modules with standard library modules
+        if let Some(stdlib_modules) = self.modules {
+            for (key, value) in stdlib_modules {
+                modules.entry(key).or_insert(value);
+            }
+        }
         self.modules = Some(modules);
         self
     }
