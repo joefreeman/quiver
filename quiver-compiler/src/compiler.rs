@@ -17,12 +17,16 @@ pub use typing::{TupleAccessor, union_types};
 
 use crate::{
     ast,
+    modules::{ModuleError, ModuleLoader},
+};
+
+use quiver_core::{
     builtins::BUILTIN_REGISTRY,
     bytecode::{Constant, Function, Instruction, TypeId},
-    modules::{ModuleError, ModuleLoader},
+    executor::Executor,
     program::Program,
     types::{CallableType, ProcessType, Type, TypeLookup},
-    vm::{VM, Value},
+    value::Value,
 };
 
 use typing::TypeContext;
@@ -93,7 +97,7 @@ pub enum Error {
     },
     ModuleExecution {
         module_path: String,
-        error: crate::vm::Error,
+        error: quiver_core::error::Error,
     },
     ModuleTypeMissing {
         type_name: String,
@@ -1135,27 +1139,34 @@ impl<'a> Compiler<'a> {
         self.type_context.type_aliases = saved_type_aliases;
 
         // Execute the module instructions to get the result value
-        let temp_vm = VM::new(self.program.clone());
-        let (value, _) = temp_vm
-            .execute_instructions(module_instructions, None, None, None)
-            .map_err(|e| Error::ModuleExecution {
+        let (result, executor) =
+            quiver_core::execute_instructions_sync(&self.program, module_instructions).map_err(
+                |e| Error::ModuleExecution {
+                    module_path: module_path.to_string(),
+                    error: e,
+                },
+            )?;
+
+        let Some(module_value) = result else {
+            return Err(Error::ModuleExecution {
                 module_path: module_path.to_string(),
-                error: e,
-            })?;
-        let value = value.unwrap_or(Value::nil());
+                error: quiver_core::error::Error::InvalidArgument(
+                    "Module returned no value".to_string(),
+                ),
+            });
+        };
 
-        // Convert the value back to instructions that reconstruct it
-        let (reconstruction_instructions, result_type) =
-            self.value_to_instructions(&value, &temp_vm)?;
+        // Convert the runtime value back to instructions
+        let (instructions, module_type) = self.value_to_instructions(&module_value, &executor)?;
 
-        Ok((reconstruction_instructions, result_type))
+        Ok((instructions, module_type))
     }
 
     /// Convert a runtime value back to instructions that reconstruct it
     fn value_to_instructions(
         &mut self,
         value: &Value,
-        vm: &VM,
+        executor: &Executor,
     ) -> Result<(Vec<Instruction>, Type), Error> {
         match value {
             Value::Integer(int_value) => {
@@ -1166,11 +1177,9 @@ impl<'a> Compiler<'a> {
             }
             Value::Binary(binary_ref) => {
                 // Get the binary bytes (handles both Constant and Heap cases)
-                let scheduler = vm.scheduler();
-                let binary_data = scheduler.get_binary_bytes(binary_ref).map_err(|e| {
+                let binary_data = executor.get_binary_bytes(binary_ref).map_err(|e| {
                     Error::FeatureUnsupported(format!("Failed to get binary bytes: {:?}", e))
                 })?;
-                drop(scheduler);
 
                 // Create a constant from the binary data
                 let constant = Constant::Binary(binary_data);
@@ -1180,7 +1189,7 @@ impl<'a> Compiler<'a> {
             Value::Tuple(type_id, fields) => {
                 let mut instructions = Vec::new();
                 for field in fields {
-                    let (field_instructions, _) = self.value_to_instructions(field, vm)?;
+                    let (field_instructions, _) = self.value_to_instructions(field, executor)?;
                     instructions.extend(field_instructions);
                 }
                 instructions.push(Instruction::Tuple(*type_id));
@@ -1198,7 +1207,7 @@ impl<'a> Compiler<'a> {
                 // Store each capture value in locals
                 for value in captures {
                     // Recursively convert the captured value to instructions
-                    let (capture_instructions, _) = self.value_to_instructions(value, vm)?;
+                    let (capture_instructions, _) = self.value_to_instructions(value, executor)?;
                     instructions.extend(capture_instructions);
 
                     // Allocate a local and store it
@@ -1681,7 +1690,7 @@ impl<'a> Compiler<'a> {
         self.codegen
             .add_instruction(Instruction::Builtin(builtin_index));
 
-        Ok(Type::Callable(Box::new(crate::types::CallableType {
+        Ok(Type::Callable(Box::new(CallableType {
             parameter: param_type,
             result: result_type,
             receive: Type::never(),

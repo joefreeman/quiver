@@ -1,105 +1,23 @@
 use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{Constant, Function, Instruction, TypeId};
+use crate::error::Error;
+use crate::process::{Frame, Process, ProcessId, ProcessInfo, ProcessStatus, StepResult};
 use crate::program::Program;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
-use crate::vm::{Binary, Error, Value};
-use serde::{Deserialize, Serialize};
+use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Number of instruction units to execute per process before yielding to the next process
 const TIME_SLICE_UNITS: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProcessId(pub usize);
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ProcessStatus {
-    Running,
-    Queued,
-    Waiting,
-    Sleeping,
-    Terminated,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcessInfo {
-    pub id: ProcessId,
-    pub status: ProcessStatus,
-    pub stack_size: usize,
-    pub locals_size: usize,
-    pub frames_count: usize,
-    pub mailbox_size: usize,
-    pub persistent: bool,
-    pub result: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StepResult {
-    /// More work remains - processes are ready to execute
-    Running,
-    /// All processes are waiting for messages/events
-    Idle,
-}
-
-#[derive(Debug, Clone)]
-pub struct Frame {
-    instructions: Vec<Instruction>,
-    locals_base: usize,
-    captures_count: usize,
-    counter: usize,
-}
-
-impl Frame {
-    pub fn new(instructions: Vec<Instruction>, locals_base: usize, captures_count: usize) -> Self {
-        Self {
-            instructions,
-            locals_base,
-            captures_count,
-            counter: 0,
-        }
-    }
-}
-
 #[derive(Debug)]
-pub struct Process {
-    pub id: ProcessId,
-    pub stack: Vec<Value>,
-    pub locals: Vec<Value>,
-    pub frames: Vec<Frame>,
-    pub mailbox: VecDeque<Value>,
-    pub persistent: bool,
-    pub cursor: usize,
-    pub result: Option<Value>,
-    pub awaiters: Vec<ProcessId>,
-}
-
-impl Process {
-    pub fn new(id: ProcessId, persistent: bool) -> Self {
-        Self {
-            id,
-            stack: Vec::new(),
-            locals: Vec::new(),
-            frames: Vec::new(),
-            mailbox: VecDeque::new(),
-            persistent,
-            cursor: 0,
-            result: None,
-            awaiters: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Scheduler {
+pub struct Executor {
     processes: HashMap<ProcessId, Process>,
     queue: VecDeque<ProcessId>,
     waiting: HashSet<ProcessId>,
     active: Option<ProcessId>,
-    // Program data owned by scheduler
+    // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<String>,
@@ -108,13 +26,13 @@ pub struct Scheduler {
     heap: Vec<Vec<u8>>,
 }
 
-impl TypeLookup for Scheduler {
+impl TypeLookup for Executor {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
         self.types.get(type_id)
     }
 }
 
-impl Scheduler {
+impl Executor {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
     }
@@ -152,11 +70,11 @@ impl Scheduler {
     }
 
     pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
-        if bytes.len() > crate::vm::MAX_BINARY_SIZE {
+        if bytes.len() > MAX_BINARY_SIZE {
             return Err(Error::InvalidArgument(format!(
                 "Binary size {} exceeds maximum {}",
                 bytes.len(),
-                crate::vm::MAX_BINARY_SIZE
+                MAX_BINARY_SIZE
             )));
         }
         let index = self.heap.len();
@@ -227,6 +145,22 @@ impl Scheduler {
         self.active
     }
 
+    pub fn set_active(&mut self, process_id: ProcessId) {
+        self.active = Some(process_id);
+    }
+
+    pub fn get_active(&self) -> Option<ProcessId> {
+        self.active
+    }
+
+    pub fn remove_from_queue(&mut self, process_id: ProcessId) {
+        self.queue.retain(|&pid| pid != process_id);
+    }
+
+    pub fn is_waiting(&self, process_id: ProcessId) -> bool {
+        self.waiting.contains(&process_id)
+    }
+
     fn get_status(&self, id: ProcessId, process: &Process) -> ProcessStatus {
         if self.active == Some(id) {
             ProcessStatus::Running
@@ -270,12 +204,45 @@ impl Scheduler {
         self.builtins.get(index)
     }
 
+    // Program data mutators (for runtime synchronization)
+    pub fn register_constant(&mut self, index: usize, constant: Constant) {
+        if index >= self.constants.len() {
+            self.constants.resize(index + 1, Constant::Integer(0));
+        }
+        self.constants[index] = constant;
+    }
+
+    pub fn register_function(&mut self, index: usize, function: Function) {
+        if index >= self.functions.len() {
+            self.functions.resize(
+                index + 1,
+                Function {
+                    instructions: vec![],
+                    function_type: None,
+                    captures: vec![],
+                },
+            );
+        }
+        self.functions[index] = function;
+    }
+
+    pub fn register_builtin(&mut self, index: usize, name: String) {
+        if index >= self.builtins.len() {
+            self.builtins.resize(index + 1, String::new());
+        }
+        self.builtins[index] = name;
+    }
+
+    pub fn register_type(&mut self, type_id: TypeId, info: TupleTypeInfo) {
+        self.types.insert(type_id, info);
+    }
+
     /// Execute up to max_units instruction units across all ready processes.
     /// Returns whether more work remains or all processes are idle.
     pub fn step(
         &mut self,
         max_units: usize,
-        next_process_id: &Arc<AtomicUsize>,
+        next_process_id: &AtomicUsize,
     ) -> Result<StepResult, Error> {
         let mut units_executed = 0;
 
@@ -970,7 +937,7 @@ impl Scheduler {
         Ok(())
     }
 
-    fn handle_spawn(&mut self, next_process_id: &Arc<AtomicUsize>) -> Result<(), Error> {
+    fn handle_spawn(&mut self, next_process_id: &AtomicUsize) -> Result<(), Error> {
         let process = self
             .get_current_process_mut()
             .ok_or(Error::InvalidArgument("No current process".to_string()))?;
@@ -1130,544 +1097,4 @@ impl Scheduler {
             _ => false,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SchedulerCommand {
-    Execute {
-        request_id: u64,
-        process_id: ProcessId,
-        instructions: Vec<Instruction>,
-        parameter: Option<Value>,
-        variables: Option<HashMap<String, (Type, usize)>>,
-    },
-    SpawnProcess {
-        request_id: u64,
-        id: ProcessId,
-        persistent: bool,
-    },
-    GetProcessStatuses {
-        request_id: u64,
-    },
-    GetProcessInfo {
-        request_id: u64,
-        id: ProcessId,
-    },
-    GetVariables {
-        request_id: u64,
-        process_id: ProcessId,
-        mapping: HashMap<String, usize>,
-    },
-    RegisterConstant {
-        index: usize,
-        constant: Constant,
-    },
-    RegisterFunction {
-        index: usize,
-        function: Function,
-    },
-    RegisterBuiltin {
-        index: usize,
-        name: String,
-    },
-    RegisterType {
-        type_id: TypeId,
-        info: TupleTypeInfo,
-    },
-    Shutdown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SchedulerResponse {
-    Execute {
-        request_id: u64,
-        result: Result<(Option<Value>, Option<HashMap<String, (Type, usize)>>), Error>,
-    },
-    SpawnProcess {
-        request_id: u64,
-        result: Result<(), Error>,
-    },
-    GetProcessStatuses {
-        request_id: u64,
-        result: Result<HashMap<ProcessId, ProcessStatus>, Error>,
-    },
-    GetProcessInfo {
-        request_id: u64,
-        result: Result<Option<ProcessInfo>, Error>,
-    },
-    GetVariables {
-        request_id: u64,
-        result: Result<HashMap<String, Value>, Error>,
-    },
-}
-
-pub struct SchedulerHandle {
-    pub scheduler: Arc<Mutex<Scheduler>>,
-    command_tx: SyncSender<SchedulerCommand>,
-    pending: Arc<Mutex<HashMap<u64, SyncSender<SchedulerResponse>>>>,
-    thread_handle: Option<JoinHandle<()>>,
-    next_process_id: Arc<AtomicUsize>,
-    next_request_id: Arc<AtomicU64>,
-}
-
-impl std::fmt::Debug for SchedulerHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SchedulerHandle")
-            .field("scheduler", &self.scheduler)
-            .field("command_tx", &self.command_tx)
-            .field("pending", &self.pending)
-            .field("thread_handle", &"<thread handle>")
-            .field("next_process_id", &self.next_process_id)
-            .field("next_request_id", &self.next_request_id)
-            .finish()
-    }
-}
-
-impl SchedulerHandle {
-    pub fn new(program: Arc<RwLock<Program>>, next_process_id: Arc<AtomicUsize>) -> Self {
-        // Initialize scheduler with current program state
-        let program_snapshot = program.read().unwrap();
-        let scheduler = Arc::new(Mutex::new(Scheduler::new(&*program_snapshot)));
-        drop(program_snapshot);
-
-        let (command_tx, command_rx) = sync_channel(100);
-        let (response_tx, response_rx) = sync_channel(100);
-        let response_rx = Arc::new(Mutex::new(response_rx));
-        let pending: Arc<Mutex<HashMap<u64, SyncSender<SchedulerResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let next_request_id = Arc::new(AtomicU64::new(0));
-
-        let scheduler_clone = Arc::clone(&scheduler);
-        let next_process_id_clone = Arc::clone(&next_process_id);
-        let thread_handle = thread::spawn(move || {
-            scheduler_thread(
-                scheduler_clone,
-                next_process_id_clone,
-                command_rx,
-                response_tx,
-            );
-        });
-
-        // Spawn response handler thread to route responses to pending senders
-        let pending_clone = Arc::clone(&pending);
-        let response_rx_clone = Arc::clone(&response_rx);
-        thread::spawn(move || {
-            loop {
-                let response = match response_rx_clone.lock().unwrap().recv() {
-                    Ok(r) => r,
-                    Err(_) => break, // Channel closed
-                };
-
-                // Route response by request_id
-                let request_id = match &response {
-                    SchedulerResponse::Execute { request_id, .. } => *request_id,
-                    SchedulerResponse::SpawnProcess { request_id, .. } => *request_id,
-                    SchedulerResponse::GetProcessStatuses { request_id, .. } => *request_id,
-                    SchedulerResponse::GetProcessInfo { request_id, .. } => *request_id,
-                    SchedulerResponse::GetVariables { request_id, .. } => *request_id,
-                };
-
-                if let Some(tx) = pending_clone.lock().unwrap().remove(&request_id) {
-                    let _ = tx.send(response);
-                }
-            }
-        });
-
-        Self {
-            scheduler,
-            command_tx,
-            pending,
-            thread_handle: Some(thread_handle),
-            next_process_id,
-            next_request_id,
-        }
-    }
-
-    fn send_request<F>(&self, build_command: F) -> Result<SchedulerResponse, Error>
-    where
-        F: FnOnce(u64) -> SchedulerCommand,
-    {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
-        let (response_tx, response_rx) = sync_channel(1);
-        self.pending.lock().unwrap().insert(request_id, response_tx);
-
-        let command = build_command(request_id);
-        self.command_tx
-            .send(command)
-            .map_err(|_| Error::InvalidArgument("Scheduler thread died".to_string()))?;
-
-        response_rx
-            .recv()
-            .map_err(|_| Error::InvalidArgument("Scheduler thread died".to_string()))
-    }
-
-    pub fn execute(
-        &self,
-        process_id: ProcessId,
-        instructions: Vec<Instruction>,
-        parameter: Option<Value>,
-        variables: Option<HashMap<String, (Type, usize)>>,
-    ) -> Result<(Option<Value>, Option<HashMap<String, (Type, usize)>>), Error> {
-        let response = self.send_request(|request_id| SchedulerCommand::Execute {
-            request_id,
-            process_id,
-            instructions,
-            parameter,
-            variables,
-        })?;
-
-        match response {
-            SchedulerResponse::Execute { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    pub fn spawn_process(&self, id: ProcessId, persistent: bool) -> Result<(), Error> {
-        let response = self.send_request(|request_id| SchedulerCommand::SpawnProcess {
-            request_id,
-            id,
-            persistent,
-        })?;
-
-        match response {
-            SchedulerResponse::SpawnProcess { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_process_statuses(&self) -> Result<HashMap<ProcessId, ProcessStatus>, Error> {
-        let response =
-            self.send_request(|request_id| SchedulerCommand::GetProcessStatuses { request_id })?;
-
-        match response {
-            SchedulerResponse::GetProcessStatuses { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_process_info(&self, id: ProcessId) -> Result<Option<ProcessInfo>, Error> {
-        let response =
-            self.send_request(|request_id| SchedulerCommand::GetProcessInfo { request_id, id })?;
-
-        match response {
-            SchedulerResponse::GetProcessInfo { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_variables(
-        &self,
-        process_id: ProcessId,
-        mapping: HashMap<String, usize>,
-    ) -> Result<HashMap<String, Value>, Error> {
-        let response = self.send_request(|request_id| SchedulerCommand::GetVariables {
-            request_id,
-            process_id,
-            mapping,
-        })?;
-
-        match response {
-            SchedulerResponse::GetVariables { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    pub fn sync_constant(&self, index: usize, constant: Constant) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterConstant { index, constant });
-    }
-
-    pub fn sync_function(&self, index: usize, function: Function) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterFunction { index, function });
-    }
-
-    pub fn sync_builtin(&self, index: usize, name: String) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterBuiltin { index, name });
-    }
-
-    pub fn sync_type(&self, type_id: TypeId, info: TupleTypeInfo) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterType { type_id, info });
-    }
-
-    pub fn shutdown(&mut self) {
-        let _ = self.command_tx.send(SchedulerCommand::Shutdown);
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for SchedulerHandle {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-fn scheduler_thread(
-    scheduler: Arc<Mutex<Scheduler>>,
-    next_process_id: Arc<AtomicUsize>,
-    command_rx: Receiver<SchedulerCommand>,
-    response_tx: SyncSender<SchedulerResponse>,
-) {
-    loop {
-        match command_rx.recv() {
-            Ok(SchedulerCommand::Execute {
-                request_id,
-                process_id,
-                instructions,
-                parameter,
-                variables,
-            }) => {
-                let exec_result = execute_in_scheduler(
-                    &scheduler,
-                    &next_process_id,
-                    process_id,
-                    instructions,
-                    parameter,
-                );
-
-                // Compact locals if variables map was provided
-                let result = match exec_result {
-                    Ok(value) => {
-                        let compacted_variables = if let Some(vars) = variables {
-                            let mut sched = scheduler.lock().unwrap();
-                            let process = match sched.get_process_mut(process_id) {
-                                Some(p) => p,
-                                None => {
-                                    let _ = response_tx.send(SchedulerResponse::Execute {
-                                        request_id,
-                                        result: Ok((value, None)),
-                                    });
-                                    continue;
-                                }
-                            };
-
-                            let mut referenced: Vec<(String, Type, usize)> = vars
-                                .iter()
-                                .map(|(name, (typ, index))| (name.clone(), typ.clone(), *index))
-                                .collect();
-                            referenced.sort_by_key(|(_, _, index)| *index);
-
-                            let mut new_locals = Vec::new();
-                            let mut new_variables = HashMap::new();
-
-                            for (name, typ, old_index) in referenced {
-                                if old_index < process.locals.len() {
-                                    new_variables.insert(name, (typ, new_locals.len()));
-                                    new_locals.push(process.locals[old_index].clone());
-                                }
-                            }
-
-                            process.locals = new_locals;
-                            Some(new_variables)
-                        } else {
-                            None
-                        };
-                        Ok((value, compacted_variables))
-                    }
-                    Err(e) => Err(e),
-                };
-
-                let _ = response_tx.send(SchedulerResponse::Execute { request_id, result });
-            }
-            Ok(SchedulerCommand::RegisterConstant { index, constant }) => {
-                let mut sched = scheduler.lock().unwrap();
-                // Ensure the vec is large enough
-                if index >= sched.constants.len() {
-                    sched.constants.resize(index + 1, Constant::Integer(0));
-                }
-                sched.constants[index] = constant;
-            }
-            Ok(SchedulerCommand::RegisterFunction { index, function }) => {
-                let mut sched = scheduler.lock().unwrap();
-                if index >= sched.functions.len() {
-                    sched.functions.resize(
-                        index + 1,
-                        Function {
-                            instructions: vec![],
-                            function_type: None,
-                            captures: vec![],
-                        },
-                    );
-                }
-                sched.functions[index] = function;
-            }
-            Ok(SchedulerCommand::RegisterBuiltin { index, name }) => {
-                let mut sched = scheduler.lock().unwrap();
-                if index >= sched.builtins.len() {
-                    sched.builtins.resize(index + 1, String::new());
-                }
-                sched.builtins[index] = name;
-            }
-            Ok(SchedulerCommand::RegisterType { type_id, info }) => {
-                let mut sched = scheduler.lock().unwrap();
-                sched.types.insert(type_id, info);
-            }
-            Ok(SchedulerCommand::SpawnProcess {
-                request_id,
-                id,
-                persistent,
-            }) => {
-                let mut sched = scheduler.lock().unwrap();
-                sched.spawn_process(id, persistent);
-                let _ = response_tx.send(SchedulerResponse::SpawnProcess {
-                    request_id,
-                    result: Ok(()),
-                });
-            }
-            Ok(SchedulerCommand::GetProcessStatuses { request_id }) => {
-                let sched = scheduler.lock().unwrap();
-                let statuses = sched.get_process_statuses();
-                let _ = response_tx.send(SchedulerResponse::GetProcessStatuses {
-                    request_id,
-                    result: Ok(statuses),
-                });
-            }
-            Ok(SchedulerCommand::GetProcessInfo { request_id, id }) => {
-                let sched = scheduler.lock().unwrap();
-                let info = sched.get_process_info(id);
-                let _ = response_tx.send(SchedulerResponse::GetProcessInfo {
-                    request_id,
-                    result: Ok(info),
-                });
-            }
-            Ok(SchedulerCommand::GetVariables {
-                request_id,
-                process_id,
-                mapping,
-            }) => {
-                let sched = scheduler.lock().unwrap();
-                let result = match sched.get_process(process_id) {
-                    Some(process) => {
-                        let mut vars = HashMap::new();
-                        for (name, &index) in &mapping {
-                            if index >= process.locals.len() {
-                                break;
-                            }
-                            vars.insert(name.clone(), process.locals[index].clone());
-                        }
-                        if vars.len() == mapping.len() {
-                            Ok(vars)
-                        } else {
-                            Err(Error::VariableUndefined(
-                                "One or more variables out of bounds".to_string(),
-                            ))
-                        }
-                    }
-                    None => Err(Error::InvalidArgument(format!(
-                        "Process {:?} not found",
-                        process_id
-                    ))),
-                };
-                let _ = response_tx.send(SchedulerResponse::GetVariables { request_id, result });
-            }
-            Ok(SchedulerCommand::Shutdown) | Err(_) => {
-                break;
-            }
-        }
-    }
-}
-
-fn execute_in_scheduler(
-    scheduler: &Arc<Mutex<Scheduler>>,
-    next_process_id: &Arc<AtomicUsize>,
-    process_id: ProcessId,
-    instructions: Vec<Instruction>,
-    parameter: Option<Value>,
-) -> Result<Option<Value>, Error> {
-    if instructions.is_empty() {
-        return Ok(None);
-    }
-
-    {
-        let mut sched = scheduler.lock().unwrap();
-        sched.queue.retain(|&id| id != process_id);
-
-        let process = sched
-            .get_process_mut(process_id)
-            .ok_or(Error::InvalidArgument(format!(
-                "Process {:?} not found",
-                process_id
-            )))?;
-
-        process.stack.push(parameter.unwrap_or_else(Value::nil));
-
-        let frame = Frame::new(instructions.clone(), 0, 0);
-        process.frames.push(frame);
-
-        sched.active = Some(process_id);
-    }
-
-    let result = run(scheduler, next_process_id);
-
-    // Pop frame
-    {
-        let mut sched = scheduler.lock().unwrap();
-        if let Some(process) = sched.get_process_mut(process_id) {
-            process.frames.pop();
-        }
-    }
-
-    result
-}
-
-fn run(
-    scheduler: &Arc<Mutex<Scheduler>>,
-    next_process_id: &Arc<AtomicUsize>,
-) -> Result<Option<Value>, Error> {
-    let initial_process = scheduler.lock().unwrap().active;
-    let mut initial_result = None;
-
-    // Use step() to execute until completion
-    loop {
-        // Call step with a reasonable batch size
-        let step_result = scheduler.lock().unwrap().step(1000, next_process_id)?;
-
-        // Check if initial process completed and grab its result
-        // Must check even when Idle, since the process may have just finished
-        if initial_result.is_none() {
-            let mut sched = scheduler.lock().unwrap();
-            if let Some(init_pid) = initial_process {
-                // Check if process is not waiting - if so, extract result from stack
-                let is_waiting = sched.waiting.contains(&init_pid);
-                if !is_waiting {
-                    if let Some(process) = sched.get_process_mut(init_pid) {
-                        // Check if there are no more instructions to execute in current frame
-                        let no_more_instructions = process
-                            .frames
-                            .last()
-                            .map_or(true, |frame| frame.counter >= frame.instructions.len());
-
-                        if no_more_instructions && !process.stack.is_empty() {
-                            initial_result = process.stack.pop();
-                        }
-                    }
-                }
-            }
-        }
-
-        // Continue until scheduler is idle
-        if step_result == StepResult::Idle {
-            break;
-        }
-    }
-
-    Ok(initial_result)
 }

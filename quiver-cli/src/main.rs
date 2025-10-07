@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
-use quiver::bytecode::TypeId;
-use quiver::repl::Repl;
-use quiver::types::Type;
+use quiver::compile;
+use quiver::repl;
+use quiver_core::bytecode;
 use std::fs;
 use std::io::{self, Read};
 
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
-    let repl = Repl::new()?;
+    let repl = repl::Repl::new()?;
     repl.run()?;
     Ok(())
 }
@@ -86,7 +86,7 @@ fn compile_command(
         (buffer, Some(std::env::current_dir()?))
     };
 
-    let mut bytecode = quiver::compile(&source, module_path, None)?;
+    let mut bytecode = compile(&source, module_path, None)?;
 
     if !debug {
         bytecode = bytecode.without_debug_info();
@@ -108,23 +108,26 @@ fn compile_command(
 }
 
 fn handle_result(
-    vm: &quiver::vm::VM,
-    result: Result<Option<quiver::vm::Value>, quiver::Error>,
+    runtime: &quiver::runtime::NativeRuntime,
+    result: Result<Option<quiver_core::value::Value>, quiver::Error>,
     quiet: bool,
 ) {
-    use quiver::vm::Value;
+    use quiver_core::value::Value;
 
     match result {
         Ok(Some(value)) => {
             // Check if result is NIL tuple (exit with error)
-            if matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::NIL) {
+            if matches!(value, Value::Tuple(type_id, _) if type_id == bytecode::TypeId::NIL) {
                 std::process::exit(1);
             }
 
             if !quiet
-                && !matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::OK || type_id == TypeId::NIL)
+                && !matches!(value, Value::Tuple(type_id, _) if type_id == bytecode::TypeId::OK || type_id == bytecode::TypeId::NIL)
             {
-                println!("{}", quiver::format::format_value(&vm.scheduler(), &value));
+                println!(
+                    "{}",
+                    quiver_compiler::format::format_value(&runtime.executor(), &value)
+                );
             }
         }
         Ok(None) => {}
@@ -151,18 +154,19 @@ fn run_command(
             let module_path = script_path.parent().map(|p| p.to_path_buf());
             compile_execute(&content, module_path, quiet)?;
         } else if path.ends_with(".qx") {
-            let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
-            let entry = bytecode.entry;
-            let program = quiver::program::Program::from_bytecode(bytecode);
-            let vm = quiver::vm::VM::new(program);
+            let bytecode_data: bytecode::Bytecode = serde_json::from_str(&content)?;
+            let entry = bytecode_data.entry;
+            let program = quiver_core::program::Program::from_bytecode(bytecode_data);
+            let runtime = quiver::runtime::NativeRuntime::new(program);
 
             let result = if let Some(entry) = entry {
-                vm.execute_function(entry)
+                runtime
+                    .execute_function(entry)
                     .map_err(quiver::Error::RuntimeError)
             } else {
                 Ok(None)
             };
-            handle_result(&vm, result, quiet);
+            handle_result(&runtime, result, quiet);
         } else {
             eprintln!(
                 "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
@@ -174,19 +178,20 @@ fn run_command(
         io::stdin().read_to_string(&mut buffer)?;
 
         if buffer.trim_start().starts_with('{') {
-            match serde_json::from_str::<quiver::bytecode::Bytecode>(&buffer) {
-                Ok(bytecode) => {
-                    let entry = bytecode.entry;
-                    let program = quiver::program::Program::from_bytecode(bytecode);
-                    let vm = quiver::vm::VM::new(program);
+            match serde_json::from_str::<bytecode::Bytecode>(&buffer) {
+                Ok(bytecode_data) => {
+                    let entry = bytecode_data.entry;
+                    let program = quiver_core::program::Program::from_bytecode(bytecode_data);
+                    let runtime = quiver::runtime::NativeRuntime::new(program);
 
                     let result = if let Some(entry) = entry {
-                        vm.execute_function(entry)
+                        runtime
+                            .execute_function(entry)
                             .map_err(quiver::Error::RuntimeError)
                     } else {
                         Ok(None)
                     };
-                    handle_result(&vm, result, quiet);
+                    handle_result(&runtime, result, quiet);
                 }
                 Err(_) => {
                     let module_path = Some(std::env::current_dir()?);
@@ -207,19 +212,19 @@ fn compile_execute(
     module_path: Option<std::path::PathBuf>,
     quiet: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bytecode = quiver::compile(source, module_path, None)?;
+    let bytecode_data = compile(source, module_path, None)?;
 
-    let entry = bytecode
+    let entry = bytecode_data
         .entry
         .ok_or("Program is not executable. Must evaluate to a function.")?;
 
-    let program = quiver::program::Program::from_bytecode(bytecode);
-    let vm = quiver::vm::VM::new(program);
+    let program = quiver_core::program::Program::from_bytecode(bytecode_data);
+    let runtime = quiver::runtime::NativeRuntime::new(program);
 
-    let result = vm
+    let result = runtime
         .execute_function(entry)
         .map_err(quiver::Error::RuntimeError);
-    handle_result(&vm, result, quiet);
+    handle_result(&runtime, result, quiet);
 
     Ok(())
 }
@@ -233,22 +238,23 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
         buffer
     };
 
-    let bytecode: quiver::bytecode::Bytecode = serde_json::from_str(&content)?;
+    let bytecode_data: bytecode::Bytecode = serde_json::from_str(&content)?;
 
     println!("Constants:");
-    for (i, constant) in bytecode.constants.iter().enumerate() {
+    for (i, constant) in bytecode_data.constants.iter().enumerate() {
         let formatted = match constant {
-            quiver::bytecode::Constant::Integer(n) => n.to_string(),
-            quiver::bytecode::Constant::Binary(bytes) => format_binary(bytes),
+            bytecode::Constant::Integer(n) => n.to_string(),
+            bytecode::Constant::Binary(bytes) => format_binary(bytes),
         };
         println!("  {}: {}", i, formatted);
     }
 
-    let entry = bytecode.entry;
+    let entry = bytecode_data.entry;
 
     // Create program from bytecode
-    use quiver::program::Program;
-    let program = Program::from_bytecode(bytecode);
+    use quiver_core::program::Program;
+    use quiver_core::types::Type;
+    let program = Program::from_bytecode(bytecode_data);
 
     let types_map = program.get_types();
     if !types_map.is_empty() {
@@ -259,7 +265,7 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
             println!(
                 "  {}: {}",
                 type_id.0,
-                quiver::format::format_type(&program, &Type::Tuple(*type_id))
+                quiver_compiler::format::format_type(&program, &Type::Tuple(*type_id))
             );
         }
     }

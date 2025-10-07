@@ -1,0 +1,21 @@
+[package]
+name = "quiver-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "quiv"
+path = "src/main.rs"
+
+[dependencies]
+quiver-core = { path = "../quiver-core" }
+quiver-compiler = { path = "../quiver-compiler" }
+clap = { version = "4.5.46", features = ["derive"] }
+colored = "2.2.0"
+rustyline = "17.0.1"
+serde.workspace = true
+serde_json.workspace = true
+
+[lib]
+name = "quiver"
+path = "src/lib.rs"

@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 
 use crate::Quiver;
-use crate::bytecode::TypeId;
-use crate::types::Type;
-use crate::vm::{ProcessId, ProcessStatus, Value};
+use quiver_core::bytecode::TypeId;
+use quiver_core::types::Type;
+use quiver_core::value::Value;
+use quiver_core::{ProcessId, ProcessStatus};
 
 const HISTORY_FILE: &str = ".quiv_history";
 

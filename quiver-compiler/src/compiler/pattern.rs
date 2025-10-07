@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    ast,
+use crate::ast;
+use quiver_core::{
     bytecode::{Constant, Instruction, TypeId},
     program::Program,
     types::{Type, TypeLookup},

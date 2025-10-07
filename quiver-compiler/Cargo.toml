@@ -1,0 +1,10 @@
+[package]
+name = "quiver-compiler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quiver-core = { path = "../quiver-core" }
+nom = "7.1"
+serde.workspace = true
+hex = "0.4.3"

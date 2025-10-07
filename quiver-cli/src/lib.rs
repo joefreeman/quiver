@@ -1,49 +1,60 @@
-pub mod ast;
-pub mod builtins;
-pub mod bytecode;
-pub mod compiler;
-pub mod format;
-pub mod modules;
-pub mod parser;
-pub mod program;
 pub mod repl;
-pub mod scheduler;
-pub mod types;
-pub mod vm;
+pub mod runtime;
+
+// Re-exports for easier access in tests
+pub mod vm {
+    pub use quiver_core::error::Error;
+    pub use quiver_core::value::Value;
+    pub use quiver_core::{ProcessId, ProcessInfo, ProcessStatus};
+}
+
+pub mod compiler {
+    pub use quiver_compiler::compiler::Error;
+}
+
+pub mod parser {
+    pub use quiver_compiler::parser::Error;
+}
+
+pub use quiver_compiler::compiler::Error as CompilerError;
+pub use quiver_compiler::parser::Error as ParserError;
 
 use std::collections::HashMap;
 
-use bytecode::{Constant, Function, Instruction};
-use compiler::Compiler;
-use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
-use program::Program;
-use types::Type;
-use vm::{VM, Value};
+use quiver_compiler::compiler::ModuleCache;
+use quiver_compiler::{Compiler, FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
+use quiver_compiler::{format, parse};
+use quiver_core::bytecode::{Constant, Function, Instruction};
+use quiver_core::program::Program;
+use quiver_core::types::Type;
+use quiver_core::value::Value;
+use quiver_core::{ProcessId, ProcessInfo, ProcessStatus};
+use runtime::NativeRuntime;
 
 pub struct Quiver {
     type_aliases: HashMap<String, Type>,
-    module_cache: compiler::ModuleCache,
+    module_cache: ModuleCache,
     module_loader: Box<dyn ModuleLoader>,
-    vm: VM,
-    repl_process_id: vm::ProcessId,
+    runtime: NativeRuntime,
+    repl_process_id: ProcessId,
 }
 
 impl Quiver {
     pub fn new(modules: Option<HashMap<String, String>>) -> Self {
         let program = Program::new();
-        let vm = VM::new(program);
-        let repl_process_id = vm
+        let runtime = NativeRuntime::new(program);
+        let repl_process_id = runtime
             .spawn_process(true)
             .expect("Failed to spawn REPL process");
 
         Self {
             type_aliases: HashMap::new(),
-            module_cache: compiler::ModuleCache::new(),
+            module_cache: ModuleCache::new(),
             module_loader: match modules {
                 Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
                 None => Box::new(FileSystemModuleLoader::new()),
             },
-            vm,
+            runtime,
             repl_process_id,
         }
     }
@@ -55,7 +66,7 @@ impl Quiver {
         variables: Option<&HashMap<String, (Type, usize)>>,
         parameter: Option<(&Value, Type)>,
     ) -> Result<(Option<Value>, Type, HashMap<String, (Type, usize)>), Error> {
-        let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
+        let ast_program = parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
         // Get parameter type
         let parameter_type = parameter
@@ -64,7 +75,7 @@ impl Quiver {
             .unwrap_or_else(Type::nil);
 
         // Get current program state before compilation
-        let old_program = self.vm.program().read().unwrap().clone();
+        let old_program = self.runtime.program().read().unwrap().clone();
 
         let (instructions, result_type, variables, new_program, new_type_aliases, new_module_cache) =
             Compiler::compile(
@@ -80,12 +91,12 @@ impl Quiver {
             .map_err(Error::CompileError)?;
 
         // On success: update program and update type_aliases and module_cache
-        self.vm.update_program(new_program);
+        self.runtime.update_program(new_program);
         self.type_aliases = new_type_aliases;
         self.module_cache = new_module_cache;
 
         let (result, compacted_variables) = self
-            .vm
+            .runtime
             .execute_instructions(
                 instructions,
                 parameter.map(|(v, _)| v.clone()),
@@ -104,36 +115,42 @@ impl Quiver {
         &self,
         variables: &HashMap<String, (Type, usize)>,
     ) -> Vec<(String, Value)> {
-        // Extract just the indices for VM lookup
+        // Extract just the indices for Runtime lookup
         let var_indices: HashMap<String, usize> = variables
             .iter()
             .map(|(name, (_, index))| (name.clone(), *index))
             .collect();
 
-        self.vm
+        self.runtime
             .get_variables(self.repl_process_id, &var_indices)
             .map(|map| map.into_iter().collect())
             .unwrap_or_default()
     }
 
-    pub fn get_types(&self) -> HashMap<bytecode::TypeId, types::TupleTypeInfo> {
-        self.vm.program().read().unwrap().get_types()
+    pub fn get_types(
+        &self,
+    ) -> HashMap<quiver_core::bytecode::TypeId, quiver_core::types::TupleTypeInfo> {
+        self.runtime.program().read().unwrap().get_types()
     }
 
     pub fn format_value(&self, value: &Value) -> String {
-        format::format_value(&self.vm.scheduler(), value)
+        format::format_value(&self.runtime.executor(), value)
     }
 
     pub fn format_type(&self, type_def: &Type) -> String {
-        format::format_type(&*self.vm.scheduler(), type_def)
+        format::format_type(&*self.runtime.executor(), type_def)
     }
 
-    pub fn get_process_statuses(&self) -> Result<HashMap<vm::ProcessId, vm::ProcessStatus>, Error> {
-        self.vm.get_process_statuses().map_err(Error::RuntimeError)
+    pub fn get_process_statuses(&self) -> Result<HashMap<ProcessId, ProcessStatus>, Error> {
+        self.runtime
+            .get_process_statuses()
+            .map_err(Error::RuntimeError)
     }
 
-    pub fn get_process_info(&self, id: vm::ProcessId) -> Result<Option<vm::ProcessInfo>, Error> {
-        self.vm.get_process_info(id).map_err(Error::RuntimeError)
+    pub fn get_process_info(&self, id: ProcessId) -> Result<Option<ProcessInfo>, Error> {
+        self.runtime
+            .get_process_info(id)
+            .map_err(Error::RuntimeError)
     }
 }
 
@@ -141,8 +158,8 @@ pub fn compile(
     source: &str,
     module_path: Option<std::path::PathBuf>,
     modules: Option<HashMap<String, String>>,
-) -> Result<bytecode::Bytecode, Error> {
-    let ast_program = parser::parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
+) -> Result<quiver_core::bytecode::Bytecode, Error> {
+    let ast_program = parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
     let module_loader: Box<dyn ModuleLoader> = match modules {
         Some(modules) => Box::new(InMemoryModuleLoader::new(modules)),
@@ -150,7 +167,7 @@ pub fn compile(
     };
 
     let type_aliases = HashMap::new();
-    let module_cache = compiler::ModuleCache::new();
+    let module_cache = ModuleCache::new();
     let program = Program::new();
 
     let (instructions, _, _, new_program, _, _) = Compiler::compile(
@@ -165,16 +182,16 @@ pub fn compile(
     )
     .map_err(Error::CompileError)?;
 
-    // Create a temporary VM for execution with the new program
-    let vm = VM::new(new_program);
-    let (result, _) = vm
+    // Create a temporary Runtime for execution with the new program
+    let runtime = NativeRuntime::new(new_program);
+    let (result, _) = runtime
         .execute_instructions(instructions, None, None, None)
         .map_err(Error::RuntimeError)?;
 
     let entry = match result {
         Some(Value::Function(main_func, captures)) => {
             let func_index = if !captures.is_empty() {
-                inject_function_captures(&vm, main_func, captures)
+                inject_function_captures(&runtime, main_func, captures)
             } else {
                 main_func
             };
@@ -183,19 +200,23 @@ pub fn compile(
         _ => None,
     };
 
-    Ok(vm.program().read().unwrap().to_bytecode(entry))
+    Ok(runtime.program().read().unwrap().to_bytecode(entry))
 }
 
 /// Inject function captures into a function, returning a new Function
-fn inject_function_captures(vm: &VM, function_index: usize, captures: Vec<Value>) -> usize {
-    let program_arc = vm.program();
+fn inject_function_captures(
+    runtime: &NativeRuntime,
+    function_index: usize,
+    captures: Vec<Value>,
+) -> usize {
+    let program_arc = runtime.program();
     let program = program_arc.read().unwrap();
 
     let mut instructions = Vec::new();
     instructions.push(Instruction::Allocate(captures.len()));
 
     for (i, capture_value) in captures.iter().enumerate() {
-        instructions.extend(value_to_instructions(vm, capture_value));
+        instructions.extend(value_to_instructions(runtime, capture_value));
         instructions.push(Instruction::Store(i));
     }
 
@@ -207,7 +228,7 @@ fn inject_function_captures(vm: &VM, function_index: usize, captures: Vec<Value>
 
     drop(program);
 
-    vm.register_function(Function {
+    runtime.register_function(Function {
         instructions,
         function_type,
         captures: Vec::new(),
@@ -215,24 +236,24 @@ fn inject_function_captures(vm: &VM, function_index: usize, captures: Vec<Value>
 }
 
 /// Convert a runtime value to instructions that reconstruct it
-fn value_to_instructions(vm: &VM, value: &Value) -> Vec<Instruction> {
+fn value_to_instructions(runtime: &NativeRuntime, value: &Value) -> Vec<Instruction> {
     match value {
         Value::Integer(n) => {
-            let program_arc = vm.program();
+            let program_arc = runtime.program();
             let mut program = program_arc.write().unwrap();
             let const_idx = program.register_constant(Constant::Integer(*n));
             vec![Instruction::Constant(const_idx)]
         }
         Value::Binary(bin_ref) => {
-            // Get the binary bytes using the scheduler (handles both Constant and Heap cases)
-            let scheduler = vm.scheduler();
-            let bytes = scheduler
+            // Get the binary bytes using the executor (handles both Constant and Heap cases)
+            let executor = runtime.executor();
+            let bytes = executor
                 .get_binary_bytes(bin_ref)
                 .expect("Binary should be valid during capture injection")
                 .to_vec();
-            drop(scheduler);
+            drop(executor);
 
-            let program_arc = vm.program();
+            let program_arc = runtime.program();
             let mut program = program_arc.write().unwrap();
             let const_idx = program.register_constant(Constant::Binary(bytes));
             vec![Instruction::Constant(const_idx)]
@@ -240,21 +261,21 @@ fn value_to_instructions(vm: &VM, value: &Value) -> Vec<Instruction> {
         Value::Tuple(type_id, elements) => {
             let mut instrs = Vec::new();
             for elem in elements {
-                instrs.extend(value_to_instructions(vm, elem));
+                instrs.extend(value_to_instructions(runtime, elem));
             }
             instrs.push(Instruction::Tuple(*type_id));
             instrs
         }
         Value::Function(function, captures) => {
             let func_index = if !captures.is_empty() {
-                inject_function_captures(vm, *function, captures.clone())
+                inject_function_captures(runtime, *function, captures.clone())
             } else {
                 *function
             };
             vec![Instruction::Function(func_index)]
         }
         Value::Builtin(name) => {
-            let program_arc = vm.program();
+            let program_arc = runtime.program();
             let mut program = program_arc.write().unwrap();
             let builtin_idx = program.register_builtin(name.clone());
             vec![Instruction::Builtin(builtin_idx)]
@@ -267,9 +288,9 @@ fn value_to_instructions(vm: &VM, value: &Value) -> Vec<Instruction> {
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
-    ParseError(Box<parser::Error>),
-    RuntimeError(vm::Error),
-    CompileError(compiler::Error),
+    ParseError(Box<ParserError>),
+    RuntimeError(quiver_core::error::Error),
+    CompileError(CompilerError),
 }
 
 impl std::fmt::Display for Error {

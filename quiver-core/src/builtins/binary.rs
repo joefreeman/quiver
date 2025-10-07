@@ -1,11 +1,12 @@
 //! Binary builtin function implementations
 
-use crate::scheduler::Scheduler;
-use crate::vm::{Error, Value};
+use crate::error::Error;
+use crate::executor::Executor;
+use crate::value::Value;
 
 /// Create a new zero-filled binary of the specified size
 /// binary_new(size: int) -> bin
-pub fn builtin_binary_new(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_new(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Integer(size) => {
             if *size < 0 {
@@ -14,11 +15,11 @@ pub fn builtin_binary_new(arg: &Value, program: &mut Scheduler) -> Result<Value,
                 ));
             }
             let size = *size as usize;
-            if size > crate::vm::MAX_BINARY_SIZE {
+            if size > crate::value::MAX_BINARY_SIZE {
                 return Err(Error::InvalidArgument(format!(
                     "Size {} exceeds maximum {}",
                     size,
-                    crate::vm::MAX_BINARY_SIZE
+                    crate::value::MAX_BINARY_SIZE
                 )));
             }
 
@@ -35,7 +36,7 @@ pub fn builtin_binary_new(arg: &Value, program: &mut Scheduler) -> Result<Value,
 
 /// Get the length of a binary
 /// binary_length(bin) -> int
-pub fn builtin_binary_length(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_length(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
             program.with_binary_bytes(binary, |bytes| Ok(Value::Integer(bytes.len() as i64)))
@@ -49,7 +50,7 @@ pub fn builtin_binary_length(arg: &Value, program: &mut Scheduler) -> Result<Val
 
 /// Get a byte at a specific index (returns 0-255)
 /// binary_get_byte(bin, index: int) -> int
-pub fn builtin_binary_get_byte(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_get_byte(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(index)) => {
@@ -84,7 +85,7 @@ pub fn builtin_binary_get_byte(arg: &Value, program: &mut Scheduler) -> Result<V
 
 /// Concatenate two binaries
 /// binary_concat([bin, bin]) -> bin
-pub fn builtin_binary_concat(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_concat(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_a), Value::Binary(binary_b)) => {
@@ -92,11 +93,11 @@ pub fn builtin_binary_concat(arg: &Value, program: &mut Scheduler) -> Result<Val
                 let bytes_b = program.get_binary_bytes(binary_b)?;
 
                 let total_len = bytes_a.len() + bytes_b.len();
-                if total_len > crate::vm::MAX_BINARY_SIZE {
+                if total_len > crate::value::MAX_BINARY_SIZE {
                     return Err(Error::InvalidArgument(format!(
                         "Combined size {} exceeds maximum {}",
                         total_len,
-                        crate::vm::MAX_BINARY_SIZE
+                        crate::value::MAX_BINARY_SIZE
                     )));
                 }
 
@@ -125,7 +126,7 @@ pub fn builtin_binary_concat(arg: &Value, program: &mut Scheduler) -> Result<Val
 
 /// Bitwise AND of two binaries
 /// binary_and([bin, bin]) -> bin
-pub fn builtin_binary_and(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_and(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -159,7 +160,7 @@ pub fn builtin_binary_and(arg: &Value, program: &mut Scheduler) -> Result<Value,
 
 /// Bitwise OR of two binaries
 /// binary_or([bin, bin]) -> bin
-pub fn builtin_binary_or(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_or(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -195,7 +196,7 @@ pub fn builtin_binary_or(arg: &Value, program: &mut Scheduler) -> Result<Value, 
 
 /// Bitwise XOR of two binaries
 /// binary_xor([bin, bin]) -> bin
-pub fn builtin_binary_xor(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_xor(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -231,7 +232,7 @@ pub fn builtin_binary_xor(arg: &Value, program: &mut Scheduler) -> Result<Value,
 
 /// Bitwise NOT of a binary
 /// binary_not(bin) -> bin
-pub fn builtin_binary_not(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_not(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
             let bytes = program.get_binary_bytes(binary)?;
@@ -253,7 +254,7 @@ pub fn builtin_binary_not(arg: &Value, program: &mut Scheduler) -> Result<Value,
 
 /// Left shift binary by n bits
 /// binary_shift_left([bin, int]) -> bin
-pub fn builtin_binary_shift_left(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_shift_left(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -315,7 +316,7 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &mut Scheduler) -> Result
 
 /// Right shift binary by n bits (logical shift)
 /// binary_shift_right([bin, int]) -> bin
-pub fn builtin_binary_shift_right(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_shift_right(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -378,7 +379,7 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &mut Scheduler) -> Resul
 
 /// Get bit at specific position (0 = rightmost bit)
 /// binary_get_bit_pos([bin, int]) -> int
-pub fn builtin_binary_get_bit_pos(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_get_bit_pos(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -424,7 +425,7 @@ pub fn builtin_binary_get_bit_pos(arg: &Value, program: &mut Scheduler) -> Resul
 
 /// Count number of set bits (popcount) - CRITICAL for HAMT
 /// binary_popcount(bin) -> int
-pub fn builtin_binary_popcount(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_popcount(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
             let bytes = program.get_binary_bytes(binary)?;
@@ -446,7 +447,7 @@ pub fn builtin_binary_popcount(arg: &Value, program: &mut Scheduler) -> Result<V
 
 /// Set bit at specific position to value (0 or 1)
 /// binary_set_bit([bin, int, int]) -> bin
-pub fn builtin_binary_set_bit(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_set_bit(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
@@ -507,7 +508,7 @@ pub fn builtin_binary_set_bit(arg: &Value, program: &mut Scheduler) -> Result<Va
 
 /// Get a 32-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u32([bin, int]) -> int
-pub fn builtin_binary_get_u32(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_get_u32(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(offset)) => {
@@ -549,7 +550,7 @@ pub fn builtin_binary_get_u32(arg: &Value, program: &mut Scheduler) -> Result<Va
 
 /// Set a 32-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u32([bin, int, int]) -> bin
-pub fn builtin_binary_set_u32(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_set_u32(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
@@ -601,7 +602,7 @@ pub fn builtin_binary_set_u32(arg: &Value, program: &mut Scheduler) -> Result<Va
 
 /// Get a 64-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u64([bin, int]) -> int
-pub fn builtin_binary_get_u64(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_get_u64(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -650,7 +651,7 @@ pub fn builtin_binary_get_u64(arg: &Value, program: &mut Scheduler) -> Result<Va
 
 /// Set a 64-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u64([bin, int, int]) -> bin
-pub fn builtin_binary_set_u64(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_set_u64(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
@@ -699,7 +700,7 @@ pub fn builtin_binary_set_u64(arg: &Value, program: &mut Scheduler) -> Result<Va
 
 /// Extract a slice from binary [start, end) (end is exclusive)
 /// binary_slice([bin, int, int]) -> bin
-pub fn builtin_binary_slice(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_slice(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
@@ -744,7 +745,7 @@ pub fn builtin_binary_slice(arg: &Value, program: &mut Scheduler) -> Result<Valu
 
 /// Take first N bytes from binary
 /// binary_take([bin, int]) -> bin
-pub fn builtin_binary_take(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_take(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(count)) => {
@@ -776,7 +777,7 @@ pub fn builtin_binary_take(arg: &Value, program: &mut Scheduler) -> Result<Value
 
 /// Drop first N bytes from binary
 /// binary_drop([bin, int]) -> bin
-pub fn builtin_binary_drop(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_drop(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(count)) => {
@@ -808,7 +809,7 @@ pub fn builtin_binary_drop(arg: &Value, program: &mut Scheduler) -> Result<Value
 
 /// Pad binary to specified length with zeros at the end
 /// binary_pad([bin, int]) -> bin
-pub fn builtin_binary_pad(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_pad(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -854,7 +855,7 @@ pub fn builtin_binary_pad(arg: &Value, program: &mut Scheduler) -> Result<Value,
 
 /// Simple FNV-1a hash implementation for 32-bit hashes
 /// binary_hash32(bin) -> int
-pub fn builtin_binary_hash32(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_hash32(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
             let bytes = program.get_binary_bytes(binary)?;
@@ -877,7 +878,7 @@ pub fn builtin_binary_hash32(arg: &Value, program: &mut Scheduler) -> Result<Val
 
 /// Simple FNV-1a hash implementation for 64-bit hashes
 /// binary_hash64(bin) -> int
-pub fn builtin_binary_hash64(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_binary_hash64(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
             let bytes = program.get_binary_bytes(binary)?;
@@ -901,7 +902,7 @@ pub fn builtin_binary_hash64(arg: &Value, program: &mut Scheduler) -> Result<Val
 
 /// Hash a string (converted to binary) for use in data structures
 /// string_hash(bin) -> int
-pub fn builtin_string_hash(arg: &Value, program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_string_hash(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
     // For strings, we use the same implementation as hash32 but with a different name
     // This is common in many languages to have separate string vs binary hash functions
     builtin_binary_hash32(arg, program)
@@ -909,7 +910,7 @@ pub fn builtin_string_hash(arg: &Value, program: &mut Scheduler) -> Result<Value
 
 /// Extract N-bit chunks from hash for HAMT navigation
 /// hash_chunk([int, int, int]) -> int (hash, shift_bits, chunk_size_bits)
-pub fn builtin_hash_chunk(arg: &Value, _program: &mut Scheduler) -> Result<Value, Error> {
+pub fn builtin_hash_chunk(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {

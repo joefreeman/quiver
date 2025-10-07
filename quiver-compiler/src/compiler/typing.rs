@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::{
-    ast,
+use crate::ast;
+use quiver_core::{
     bytecode::TypeId,
     program::Program,
     types::{CallableType, ProcessType, Type, TypeLookup},

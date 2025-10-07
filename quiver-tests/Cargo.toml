@@ -1,0 +1,12 @@
+[package]
+name = "quiver-tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quiver-core = { path = "../quiver-core" }
+quiver-compiler = { path = "../quiver-compiler" }
+quiver = { path = "../quiver-cli", package = "quiver-cli" }
+
+[dev-dependencies]
+# Test dependencies if needed

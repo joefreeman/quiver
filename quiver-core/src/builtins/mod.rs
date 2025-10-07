@@ -1,7 +1,8 @@
+use crate::error::Error;
+use crate::executor::Executor;
 use crate::program::Program;
-use crate::scheduler::Scheduler;
 use crate::types::Type;
-use crate::vm::{Error, Value};
+use crate::value::Value;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -42,7 +43,7 @@ impl TypeSpec {
 }
 
 /// Function signature for builtin implementations
-pub type BuiltinFn = fn(&Value, &mut Scheduler) -> Result<Value, Error>;
+pub type BuiltinFn = fn(&Value, &mut Executor) -> Result<Value, Error>;
 
 /// Helper to coerce function item to function pointer (avoids rust-analyzer warnings)
 const fn coerce_builtin(f: BuiltinFn) -> BuiltinFn {

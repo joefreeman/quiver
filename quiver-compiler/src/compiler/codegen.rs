@@ -1,4 +1,4 @@
-use crate::bytecode::Instruction;
+use quiver_core::bytecode::Instruction;
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {

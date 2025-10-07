@@ -1,6 +1,7 @@
 use crate::bytecode::{Bytecode, Constant, Function, TypeId};
+use crate::error::Error;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
-use crate::vm::{Binary, Error};
+use crate::value::{Binary, MAX_BINARY_SIZE};
 use std::collections::HashMap;
 
 mod optimisation;
@@ -54,11 +55,11 @@ impl Program {
     }
 
     pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
-        if bytes.len() > crate::vm::MAX_BINARY_SIZE {
+        if bytes.len() > MAX_BINARY_SIZE {
             return Err(Error::InvalidArgument(format!(
                 "Binary size {} exceeds maximum {}",
                 bytes.len(),
-                crate::vm::MAX_BINARY_SIZE
+                MAX_BINARY_SIZE
             )));
         }
         let index = self.register_constant(Constant::Binary(bytes));

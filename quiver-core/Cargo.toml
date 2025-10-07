@@ -1,0 +1,9 @@
+[package]
+name = "quiver-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+base64 = "0.22.1"
+hex = "0.4.3"

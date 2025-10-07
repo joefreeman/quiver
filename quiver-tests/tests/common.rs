@@ -1,4 +1,5 @@
-use quiver::{Quiver, vm::Value};
+use quiver::Quiver;
+use quiver_core::value::Value;
 use std::collections::HashMap;
 
 macro_rules! load_stdlib_modules {
@@ -7,7 +8,7 @@ macro_rules! load_stdlib_modules {
         $(
             modules.insert(
                 $name.to_string(),
-                include_str!(concat!("../std/", $name, ".qv")).to_string()
+                include_str!(concat!("../../std/", $name, ".qv")).to_string()
             );
         )*
         modules
@@ -90,7 +91,7 @@ impl TestResult {
         }
     }
 
-    pub fn expect_runtime_error(self, expected: quiver::vm::Error) {
+    pub fn expect_runtime_error(self, expected: quiver_core::error::Error) {
         match self.result {
             Ok(result) => {
                 panic!(
@@ -114,7 +115,7 @@ impl TestResult {
         }
     }
 
-    pub fn expect_compile_error(self, expected: quiver::compiler::Error) {
+    pub fn expect_compile_error(self, expected: quiver_compiler::compiler::Error) {
         match self.result {
             Ok(result) => {
                 panic!(
@@ -138,7 +139,7 @@ impl TestResult {
         }
     }
 
-    pub fn expect_parse_error(self, expected: quiver::parser::Error) {
+    pub fn expect_parse_error(self, expected: quiver_compiler::parser::Error) {
         match self.result {
             Ok(result) => {
                 panic!(
