@@ -62,7 +62,7 @@ impl QuiverRuntime {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<QuiverRuntime, JsValue> {
         let program = Program::new();
-        let executor = Executor::new(&program);
+        let executor = Executor::new(&program, None);
 
         Ok(QuiverRuntime {
             executor,
@@ -149,7 +149,7 @@ impl QuiverRuntime {
                 };
 
                 // Recreate executor after injecting captures (which modifies self.program)
-                self.executor = Executor::new(&self.program);
+                self.executor = Executor::new(&self.program, None);
 
                 let result = CompileResult {
                     success: true,

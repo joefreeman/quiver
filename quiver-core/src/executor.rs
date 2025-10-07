@@ -11,7 +11,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Number of instruction units to execute per process before yielding to the next process
 const TIME_SLICE_UNITS: usize = 100;
 
-#[derive(Debug)]
+/// Trait for routing operations across executor boundaries
+pub trait Router {
+    /// Send a message to a process that may be on a different executor
+    fn send_message(&self, target: ProcessId, value: Value);
+
+    /// Query a process on another executor, returning its result if available
+    /// Returns: Some(result) if process has finished, None if still running or not found
+    fn query_process_result(&self, target: ProcessId) -> Option<Value>;
+
+    /// Register that a process on this executor is waiting for a process on another executor
+    /// When the target process completes, it should wake the awaiter
+    fn register_cross_executor_awaiter(&self, target: ProcessId, awaiter: ProcessId);
+
+    /// Notify that a process on this executor has finished, so cross-executor awaiters can be woken
+    fn notify_process_finished(&self, process: ProcessId, result: Value);
+}
+
 pub struct Executor {
     processes: HashMap<ProcessId, Process>,
     queue: VecDeque<ProcessId>,
@@ -24,6 +40,25 @@ pub struct Executor {
     types: HashMap<TypeId, TupleTypeInfo>,
     // Heap for runtime-allocated binaries
     heap: Vec<Vec<u8>>,
+    // Router for cross-executor operations (None for single-executor scenarios)
+    router: Option<Box<dyn Router + Send>>,
+}
+
+impl std::fmt::Debug for Executor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Executor")
+            .field("processes", &self.processes)
+            .field("queue", &self.queue)
+            .field("waiting", &self.waiting)
+            .field("active", &self.active)
+            .field("constants", &self.constants.len())
+            .field("functions", &self.functions.len())
+            .field("builtins", &self.builtins.len())
+            .field("types", &self.types.len())
+            .field("heap", &self.heap.len())
+            .field("router", &self.router.as_ref().map(|_| "<trait object>"))
+            .finish()
+    }
 }
 
 impl TypeLookup for Executor {
@@ -82,7 +117,7 @@ impl Executor {
         Ok(Binary::Heap(index))
     }
 
-    pub fn new(program: &Program) -> Self {
+    pub fn new(program: &Program, router: Option<Box<dyn Router + Send>>) -> Self {
         Self {
             processes: HashMap::new(),
             queue: VecDeque::new(),
@@ -94,7 +129,12 @@ impl Executor {
             builtins: program.get_builtins().clone(),
             types: program.get_types(),
             heap: Vec::new(),
+            router,
         }
+    }
+
+    pub fn set_router(&mut self, router: Option<Box<dyn Router + Send>>) {
+        self.router = router;
     }
 
     pub fn spawn_process(&mut self, id: ProcessId, persistent: bool) {
@@ -354,9 +394,14 @@ impl Executor {
                 if should_store_result {
                     if let Some(process) = self.get_process_mut(pid) {
                         process.result = process.stack.last().cloned();
+                        let result = process.result.clone().unwrap_or(Value::nil());
                         let awaiters = std::mem::take(&mut process.awaiters);
                         for waiter in awaiters {
                             self.wake_process(waiter);
+                        }
+                        // Notify runtime about process completion for cross-executor awaiters
+                        if let Some(router) = &self.router {
+                            router.notify_process_finished(pid, result);
                         }
                     }
                 }
@@ -684,46 +729,73 @@ impl Executor {
                     .active
                     .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-                let target =
-                    self.get_process(target_pid)
-                        .ok_or(Error::InvalidArgument(format!(
-                            "Process {:?} not found",
-                            target_pid
-                        )))?;
+                // Check if target process is on this executor (fast path)
+                if let Some(target) = self.get_process(target_pid) {
+                    if let Some(result) = &target.result {
+                        // Process has finished - pop values and return result
+                        let result = result.clone();
 
-                if let Some(result) = &target.result {
-                    // Process has finished - pop values and return result
-                    let result = result.clone();
+                        let process = self
+                            .get_current_process_mut()
+                            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-                    let process = self
-                        .get_current_process_mut()
-                        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                        process.stack.pop(); // Pop pid
+                        process.stack.pop(); // Pop parameter (ignored)
+                        process.stack.push(result);
 
-                    process.stack.pop(); // Pop pid
-                    process.stack.pop(); // Pop parameter (ignored)
-                    process.stack.push(result);
+                        // Increment counter to continue
+                        if let Some(frame) = process.frames.last_mut() {
+                            frame.counter += 1;
+                        }
 
-                    // Increment counter to continue
-                    if let Some(frame) = process.frames.last_mut() {
-                        frame.counter += 1;
+                        Ok(())
+                    } else {
+                        // Process still running - block until it finishes without popping
+                        let target =
+                            self.get_process_mut(target_pid)
+                                .ok_or(Error::InvalidArgument(format!(
+                                    "Process {:?} not found",
+                                    target_pid
+                                )))?;
+
+                        target.awaiters.push(current_pid);
+                        self.mark_waiting(current_pid);
+
+                        // Don't increment counter - will retry when woken
+                        Ok(())
                     }
+                } else if let Some(router) = &self.router {
+                    // Target process is on another executor - use router
+                    if let Some(result) = router.query_process_result(target_pid) {
+                        // Remote process has finished
+                        let process = self
+                            .get_current_process_mut()
+                            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
 
-                    Ok(())
+                        process.stack.pop(); // Pop pid
+                        process.stack.pop(); // Pop parameter (ignored)
+                        process.stack.push(result);
+
+                        // Increment counter to continue
+                        if let Some(frame) = process.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+
+                        Ok(())
+                    } else {
+                        // Remote process still running - register as cross-executor awaiter
+                        router.register_cross_executor_awaiter(target_pid, current_pid);
+                        self.mark_waiting(current_pid);
+
+                        // Don't increment counter - will retry when woken
+                        Ok(())
+                    }
                 } else {
-                    // Process still running - block until it finishes without popping
-                    let target = self
-                        .get_process_mut(target_pid)
-                        .ok_or(Error::InvalidArgument(format!(
-                            "Process {:?} not found",
-                            target_pid
-                        )))?;
-
-                    target.awaiters.push(current_pid);
-
-                    self.mark_waiting(current_pid);
-
-                    // Don't increment counter - will retry when woken
-                    Ok(())
+                    // Process not found and no router available
+                    Err(Error::InvalidArgument(format!(
+                        "Process {:?} not found",
+                        target_pid
+                    )))
                 }
             }
             _ => Err(Error::TypeMismatch {
@@ -1001,16 +1073,19 @@ impl Executor {
             }
         };
 
-        let target_process = self
-            .get_process_mut(target_pid)
-            .ok_or(Error::InvalidArgument(format!(
+        // Check if target process is on this executor (fast path)
+        if let Some(target_process) = self.get_process_mut(target_pid) {
+            target_process.mailbox.push_back(message);
+            self.wake_process(target_pid);
+        } else if let Some(router) = &self.router {
+            // Target process is on another executor - use router
+            router.send_message(target_pid, message);
+        } else {
+            return Err(Error::InvalidArgument(format!(
                 "Process {:?} not found",
                 target_pid
-            )))?;
-
-        target_process.mailbox.push_back(message);
-
-        self.wake_process(target_pid);
+            )));
+        }
 
         let process = self
             .get_current_process_mut()

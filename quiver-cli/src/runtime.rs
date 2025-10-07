@@ -1,6 +1,6 @@
 use quiver_core::bytecode::{Constant, Function, Instruction, TypeId};
 use quiver_core::error::Error;
-use quiver_core::executor::Executor;
+use quiver_core::executor::{Executor, Router};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus, StepResult};
 use quiver_core::program::Program;
 use quiver_core::types::{TupleTypeInfo, Type};
@@ -24,6 +24,7 @@ pub enum SchedulerCommand {
         request_id: u64,
         id: ProcessId,
         persistent: bool,
+        executor_id: usize,
     },
     GetProcessStatuses {
         request_id: u64,
@@ -53,6 +54,17 @@ pub enum SchedulerCommand {
         type_id: TypeId,
         info: TupleTypeInfo,
     },
+    DeliverMessage {
+        target_process: ProcessId,
+        value: Value,
+    },
+    QueryProcessStatus {
+        request_id: u64,
+        process_id: ProcessId,
+    },
+    WakeProcess {
+        process_id: ProcessId,
+    },
     Shutdown,
 }
 
@@ -78,59 +90,174 @@ pub enum SchedulerResponse {
         request_id: u64,
         result: Result<HashMap<String, Value>, Error>,
     },
+    QueryProcessStatus {
+        request_id: u64,
+        result: Result<Option<ProcessStatus>, Error>,
+    },
+}
+
+/// Router implementation for the native runtime
+struct NativeRuntimeRouter {
+    process_registry: Arc<RwLock<HashMap<ProcessId, usize>>>,
+    executors: Vec<Arc<Mutex<Executor>>>,
+    command_txs: Vec<SyncSender<SchedulerCommand>>,
+    cross_executor_awaiters: Arc<RwLock<HashMap<ProcessId, Vec<ProcessId>>>>,
+}
+
+impl Router for NativeRuntimeRouter {
+    fn send_message(&self, target: ProcessId, value: Value) {
+        if let Some(&target_executor_id) = self.process_registry.read().unwrap().get(&target) {
+            let _ = self.command_txs[target_executor_id].send(SchedulerCommand::DeliverMessage {
+                target_process: target,
+                value,
+            });
+        }
+    }
+
+    fn query_process_result(&self, target: ProcessId) -> Option<Value> {
+        // Look up which executor owns the target process
+        let target_executor_id = self
+            .process_registry
+            .read()
+            .unwrap()
+            .get(&target)
+            .copied()?;
+
+        // Lock the target executor and query the process
+        let executor = self.executors[target_executor_id].lock().unwrap();
+        executor
+            .get_process_info(target)
+            .and_then(|info| info.result)
+    }
+
+    fn register_cross_executor_awaiter(&self, target: ProcessId, awaiter: ProcessId) {
+        let mut awaiters = self.cross_executor_awaiters.write().unwrap();
+        awaiters
+            .entry(target)
+            .or_insert_with(Vec::new)
+            .push(awaiter);
+    }
+
+    fn notify_process_finished(&self, process: ProcessId, _result: Value) {
+        // Check if there are cross-executor awaiters for this process
+        if let Some(awaiters) = self
+            .cross_executor_awaiters
+            .write()
+            .unwrap()
+            .remove(&process)
+        {
+            for awaiter in awaiters {
+                // Wake each awaiter by sending a wake command to its executor
+                if let Some(&awaiter_executor_id) =
+                    self.process_registry.read().unwrap().get(&awaiter)
+                {
+                    let _ =
+                        self.command_txs[awaiter_executor_id].send(SchedulerCommand::WakeProcess {
+                            process_id: awaiter,
+                        });
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct NativeRuntime {
     program: Arc<RwLock<Program>>,
     next_process_id: Arc<AtomicUsize>,
-    executor: Arc<Mutex<Executor>>,
-    command_tx: SyncSender<SchedulerCommand>,
+    executors: Vec<Arc<Mutex<Executor>>>,
+    command_txs: Vec<SyncSender<SchedulerCommand>>,
+    process_registry: Arc<RwLock<HashMap<ProcessId, usize>>>,
+    next_executor: Arc<AtomicUsize>,
     pending: Arc<Mutex<HashMap<u64, SyncSender<SchedulerResponse>>>>,
-    thread_handle: Option<JoinHandle<()>>,
+    thread_handles: Vec<JoinHandle<()>>,
     next_request_id: Arc<AtomicU64>,
+    #[allow(dead_code)] // Used via Arc clones in NativeRuntimeCrossExecutorOps
+    cross_executor_awaiters: Arc<RwLock<HashMap<ProcessId, Vec<ProcessId>>>>,
 }
 
 impl NativeRuntime {
-    pub fn new(program: Program) -> Self {
+    pub fn new(program: Program, executor_count: usize) -> Self {
         let program = Arc::new(RwLock::new(program));
         let next_process_id = Arc::new(AtomicUsize::new(0));
-
-        // Initialize executor with current program state
-        let program_snapshot = program.read().unwrap();
-        let executor = Arc::new(Mutex::new(Executor::new(&*program_snapshot)));
-        drop(program_snapshot);
-
-        let (command_tx, command_rx) = sync_channel(100);
+        let next_executor = Arc::new(AtomicUsize::new(0));
+        let process_registry = Arc::new(RwLock::new(HashMap::new()));
+        let cross_executor_awaiters = Arc::new(RwLock::new(HashMap::new()));
         let pending: Arc<Mutex<HashMap<u64, SyncSender<SchedulerResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let next_request_id = Arc::new(AtomicU64::new(0));
 
-        let executor_clone = Arc::clone(&executor);
-        let next_process_id_clone = Arc::clone(&next_process_id);
-        let pending_clone = Arc::clone(&pending);
-        let thread_handle = thread::spawn(move || {
-            scheduler_thread(
-                executor_clone,
-                next_process_id_clone,
-                command_rx,
-                pending_clone,
-            );
-        });
+        let mut executors = Vec::new();
+        let mut command_txs = Vec::new();
+        let mut thread_handles = Vec::new();
+
+        // Create command channels first
+        let mut command_rxs = Vec::new();
+        for _ in 0..executor_count {
+            let (command_tx, command_rx) = sync_channel(100);
+            command_txs.push(command_tx);
+            command_rxs.push(command_rx);
+        }
+
+        // Create executors first (without cross-executor ops)
+        let program_snapshot = program.read().unwrap();
+        for _ in 0..executor_count {
+            let executor = Arc::new(Mutex::new(Executor::new(&*program_snapshot, None)));
+            executors.push(executor);
+        }
+        drop(program_snapshot);
+
+        // Now create router with access to all executors and update each executor
+        for executor_id in 0..executor_count {
+            let router = Box::new(NativeRuntimeRouter {
+                process_registry: Arc::clone(&process_registry),
+                executors: executors.iter().map(Arc::clone).collect(),
+                command_txs: command_txs.clone(),
+                cross_executor_awaiters: Arc::clone(&cross_executor_awaiters),
+            });
+
+            // Update executor with router
+            executors[executor_id]
+                .lock()
+                .unwrap()
+                .set_router(Some(router));
+
+            let executor_clone = Arc::clone(&executors[executor_id]);
+            let next_process_id_clone = Arc::clone(&next_process_id);
+            let pending_clone = Arc::clone(&pending);
+            let command_rx = command_rxs.remove(0);
+
+            let thread_handle = thread::spawn(move || {
+                scheduler_thread(
+                    executor_id,
+                    executor_clone,
+                    next_process_id_clone,
+                    command_rx,
+                    pending_clone,
+                );
+            });
+
+            thread_handles.push(thread_handle);
+        }
 
         Self {
             program,
             next_process_id,
-            executor,
-            command_tx,
+            executors,
+            command_txs,
+            process_registry,
+            next_executor,
             pending,
-            thread_handle: Some(thread_handle),
+            thread_handles,
             next_request_id,
+            cross_executor_awaiters,
         }
     }
 
+    /// Get access to an executor for formatting and inspection purposes.
+    /// All executors have the same program state, so any executor can be used.
     pub fn executor(&self) -> MutexGuard<'_, Executor> {
-        self.executor.lock().unwrap()
+        self.executors[0].lock().unwrap()
     }
 
     pub fn program(&self) -> Arc<RwLock<Program>> {
@@ -224,7 +351,12 @@ impl NativeRuntime {
 
     pub fn spawn_process(&self, persistent: bool) -> Result<ProcessId, Error> {
         let id = ProcessId(self.next_process_id.fetch_add(1, Ordering::SeqCst));
-        self.spawn_process_with_id(id, persistent)?;
+        let executor_id = self.next_executor.fetch_add(1, Ordering::SeqCst) % self.executors.len();
+        self.process_registry
+            .write()
+            .unwrap()
+            .insert(id, executor_id);
+        self.spawn_process_with_id(id, persistent, executor_id)?;
         Ok(id)
     }
 
@@ -267,7 +399,13 @@ impl NativeRuntime {
     }
 
     pub fn get_stack(&self, process_id: ProcessId) -> Option<Vec<Value>> {
-        self.executor
+        let executor_id = self
+            .process_registry
+            .read()
+            .unwrap()
+            .get(&process_id)
+            .copied()?;
+        self.executors[executor_id]
             .lock()
             .unwrap()
             .get_process(process_id)
@@ -275,7 +413,13 @@ impl NativeRuntime {
     }
 
     pub fn frame_count(&self, process_id: ProcessId) -> Option<usize> {
-        self.executor
+        let executor_id = self
+            .process_registry
+            .read()
+            .unwrap()
+            .get(&process_id)
+            .copied()?;
+        self.executors[executor_id]
             .lock()
             .unwrap()
             .get_process(process_id)
@@ -290,7 +434,11 @@ impl NativeRuntime {
         self.get_variables_internal(process_id, mapping.clone())
     }
 
-    fn send_request<F>(&self, build_command: F) -> Result<SchedulerResponse, Error>
+    fn send_request_to_executor<F>(
+        &self,
+        executor_id: usize,
+        build_command: F,
+    ) -> Result<SchedulerResponse, Error>
     where
         F: FnOnce(u64) -> SchedulerCommand,
     {
@@ -299,13 +447,32 @@ impl NativeRuntime {
         self.pending.lock().unwrap().insert(request_id, response_tx);
 
         let command = build_command(request_id);
-        self.command_tx
+        self.command_txs[executor_id]
             .send(command)
             .map_err(|_| Error::InvalidArgument("Scheduler thread died".to_string()))?;
 
         response_rx
             .recv()
             .map_err(|_| Error::InvalidArgument("Scheduler thread died".to_string()))
+    }
+
+    fn send_request_to_process_executor<F>(
+        &self,
+        process_id: ProcessId,
+        build_command: F,
+    ) -> Result<SchedulerResponse, Error>
+    where
+        F: FnOnce(u64) -> SchedulerCommand,
+    {
+        let executor_id = *self
+            .process_registry
+            .read()
+            .unwrap()
+            .get(&process_id)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("Process {:?} not found in registry", process_id))
+            })?;
+        self.send_request_to_executor(executor_id, build_command)
     }
 
     fn execute(
@@ -315,12 +482,14 @@ impl NativeRuntime {
         parameter: Option<Value>,
         variables: Option<HashMap<String, (Type, usize)>>,
     ) -> Result<(Option<Value>, Option<HashMap<String, (Type, usize)>>), Error> {
-        let response = self.send_request(|request_id| SchedulerCommand::Execute {
-            request_id,
-            process_id,
-            instructions,
-            parameter,
-            variables,
+        let response = self.send_request_to_process_executor(process_id, |request_id| {
+            SchedulerCommand::Execute {
+                request_id,
+                process_id,
+                instructions,
+                parameter,
+                variables,
+            }
         })?;
 
         match response {
@@ -331,11 +500,19 @@ impl NativeRuntime {
         }
     }
 
-    fn spawn_process_with_id(&self, id: ProcessId, persistent: bool) -> Result<(), Error> {
-        let response = self.send_request(|request_id| SchedulerCommand::SpawnProcess {
-            request_id,
-            id,
-            persistent,
+    fn spawn_process_with_id(
+        &self,
+        id: ProcessId,
+        persistent: bool,
+        executor_id: usize,
+    ) -> Result<(), Error> {
+        let response = self.send_request_to_executor(executor_id, |request_id| {
+            SchedulerCommand::SpawnProcess {
+                request_id,
+                id,
+                persistent,
+                executor_id,
+            }
         })?;
 
         match response {
@@ -347,20 +524,33 @@ impl NativeRuntime {
     }
 
     fn get_process_statuses_internal(&self) -> Result<HashMap<ProcessId, ProcessStatus>, Error> {
-        let response =
-            self.send_request(|request_id| SchedulerCommand::GetProcessStatuses { request_id })?;
+        let mut all_statuses = HashMap::new();
 
-        match response {
-            SchedulerResponse::GetProcessStatuses { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
+        // Query all executors and aggregate results
+        for executor_id in 0..self.executors.len() {
+            let response = self.send_request_to_executor(executor_id, |request_id| {
+                SchedulerCommand::GetProcessStatuses { request_id }
+            })?;
+
+            match response {
+                SchedulerResponse::GetProcessStatuses { result, .. } => {
+                    all_statuses.extend(result?);
+                }
+                _ => {
+                    return Err(Error::InvalidArgument(
+                        "Unexpected response type".to_string(),
+                    ));
+                }
+            }
         }
+
+        Ok(all_statuses)
     }
 
     fn get_process_info_internal(&self, id: ProcessId) -> Result<Option<ProcessInfo>, Error> {
-        let response =
-            self.send_request(|request_id| SchedulerCommand::GetProcessInfo { request_id, id })?;
+        let response = self.send_request_to_process_executor(id, |request_id| {
+            SchedulerCommand::GetProcessInfo { request_id, id }
+        })?;
 
         match response {
             SchedulerResponse::GetProcessInfo { result, .. } => result,
@@ -375,10 +565,12 @@ impl NativeRuntime {
         process_id: ProcessId,
         mapping: HashMap<String, usize>,
     ) -> Result<HashMap<String, Value>, Error> {
-        let response = self.send_request(|request_id| SchedulerCommand::GetVariables {
-            request_id,
-            process_id,
-            mapping,
+        let response = self.send_request_to_process_executor(process_id, |request_id| {
+            SchedulerCommand::GetVariables {
+                request_id,
+                process_id,
+                mapping,
+            }
         })?;
 
         match response {
@@ -390,32 +582,46 @@ impl NativeRuntime {
     }
 
     fn sync_constant(&self, index: usize, constant: Constant) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterConstant { index, constant });
+        for command_tx in &self.command_txs {
+            let _ = command_tx.send(SchedulerCommand::RegisterConstant {
+                index,
+                constant: constant.clone(),
+            });
+        }
     }
 
     fn sync_function(&self, index: usize, function: Function) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterFunction { index, function });
+        for command_tx in &self.command_txs {
+            let _ = command_tx.send(SchedulerCommand::RegisterFunction {
+                index,
+                function: function.clone(),
+            });
+        }
     }
 
     fn sync_builtin(&self, index: usize, name: String) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterBuiltin { index, name });
+        for command_tx in &self.command_txs {
+            let _ = command_tx.send(SchedulerCommand::RegisterBuiltin {
+                index,
+                name: name.clone(),
+            });
+        }
     }
 
     fn sync_type(&self, type_id: TypeId, info: TupleTypeInfo) {
-        let _ = self
-            .command_tx
-            .send(SchedulerCommand::RegisterType { type_id, info });
+        for command_tx in &self.command_txs {
+            let _ = command_tx.send(SchedulerCommand::RegisterType {
+                type_id,
+                info: info.clone(),
+            });
+        }
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.command_tx.send(SchedulerCommand::Shutdown);
-        if let Some(handle) = self.thread_handle.take() {
+        for command_tx in &self.command_txs {
+            let _ = command_tx.send(SchedulerCommand::Shutdown);
+        }
+        for handle in self.thread_handles.drain(..) {
             let _ = handle.join();
         }
     }
@@ -428,6 +634,7 @@ impl Drop for NativeRuntime {
 }
 
 fn scheduler_thread(
+    _executor_id: usize,
     executor: Arc<Mutex<Executor>>,
     next_process_id: Arc<AtomicUsize>,
     command_rx: Receiver<SchedulerCommand>,
@@ -518,6 +725,7 @@ fn scheduler_thread(
                 request_id,
                 id,
                 persistent,
+                executor_id: _,
             }) => {
                 let mut exec = executor.lock().unwrap();
                 exec.spawn_process(id, persistent);
@@ -579,6 +787,32 @@ fn scheduler_thread(
                 if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
                     let _ = tx.send(SchedulerResponse::GetVariables { request_id, result });
                 }
+            }
+            Ok(SchedulerCommand::DeliverMessage {
+                target_process,
+                value,
+            }) => {
+                let mut exec = executor.lock().unwrap();
+                if let Some(process) = exec.get_process_mut(target_process) {
+                    process.mailbox.push_back(value);
+                }
+            }
+            Ok(SchedulerCommand::QueryProcessStatus {
+                request_id,
+                process_id,
+            }) => {
+                let exec = executor.lock().unwrap();
+                let status = exec.get_process_info(process_id).map(|info| info.status);
+                if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
+                    let _ = tx.send(SchedulerResponse::QueryProcessStatus {
+                        request_id,
+                        result: Ok(status),
+                    });
+                }
+            }
+            Ok(SchedulerCommand::WakeProcess { process_id }) => {
+                let mut exec = executor.lock().unwrap();
+                exec.wake_process(process_id);
             }
             Ok(SchedulerCommand::Shutdown) | Err(_) => {
                 break;

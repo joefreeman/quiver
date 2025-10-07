@@ -42,7 +42,10 @@ pub struct Quiver {
 impl Quiver {
     pub fn new(modules: Option<HashMap<String, String>>) -> Self {
         let program = Program::new();
-        let runtime = NativeRuntime::new(program);
+        let executor_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let runtime = NativeRuntime::new(program, executor_count);
         let repl_process_id = runtime
             .spawn_process(true)
             .expect("Failed to spawn REPL process");
@@ -183,7 +186,8 @@ pub fn compile(
     .map_err(Error::CompileError)?;
 
     // Create a temporary Runtime for execution with the new program
-    let runtime = NativeRuntime::new(new_program);
+    // Use a single executor for one-time script execution
+    let runtime = NativeRuntime::new(new_program, 1);
     let (result, _) = runtime
         .execute_instructions(instructions, None, None, None)
         .map_err(Error::RuntimeError)?;

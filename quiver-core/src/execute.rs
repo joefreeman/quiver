@@ -17,7 +17,7 @@ pub fn execute_instructions_sync(
     program: &Program,
     instructions: Vec<Instruction>,
 ) -> Result<(Option<Value>, Executor), Error> {
-    let mut executor = Executor::new(program);
+    let mut executor = Executor::new(program, None);
 
     if instructions.is_empty() {
         return Ok((None, executor));

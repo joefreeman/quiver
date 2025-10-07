@@ -157,7 +157,8 @@ fn run_command(
             let bytecode_data: bytecode::Bytecode = serde_json::from_str(&content)?;
             let entry = bytecode_data.entry;
             let program = quiver_core::program::Program::from_bytecode(bytecode_data);
-            let runtime = quiver::runtime::NativeRuntime::new(program);
+            // Use single executor for bytecode execution
+            let runtime = quiver::runtime::NativeRuntime::new(program, 1);
 
             let result = if let Some(entry) = entry {
                 runtime
@@ -182,7 +183,8 @@ fn run_command(
                 Ok(bytecode_data) => {
                     let entry = bytecode_data.entry;
                     let program = quiver_core::program::Program::from_bytecode(bytecode_data);
-                    let runtime = quiver::runtime::NativeRuntime::new(program);
+                    // Use single executor for bytecode execution
+                    let runtime = quiver::runtime::NativeRuntime::new(program, 1);
 
                     let result = if let Some(entry) = entry {
                         runtime
@@ -219,7 +221,8 @@ fn compile_execute(
         .ok_or("Program is not executable. Must evaluate to a function.")?;
 
     let program = quiver_core::program::Program::from_bytecode(bytecode_data);
-    let runtime = quiver::runtime::NativeRuntime::new(program);
+    // Use single executor for bytecode execution
+    let runtime = quiver::runtime::NativeRuntime::new(program, 1);
 
     let result = runtime
         .execute_function(entry)
