@@ -22,9 +22,9 @@ pub use quiver_compiler::parser::Error as ParserError;
 use std::collections::HashMap;
 
 use quiver_compiler::compiler::ModuleCache;
-use quiver_compiler::{Compiler, FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
-use quiver_compiler::{format, parse};
-use quiver_core::bytecode::{Constant, Function, Instruction};
+use quiver_compiler::{
+    Compiler, FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader, format, parse,
+};
 use quiver_core::program::Program;
 use quiver_core::types::Type;
 use quiver_core::value::Value;
@@ -191,7 +191,10 @@ pub fn compile(
     let entry = match result {
         Some(Value::Function(main_func, captures)) => {
             let func_index = if !captures.is_empty() {
-                inject_function_captures(&runtime, main_func, captures)
+                let executor = runtime.executor();
+                let program_arc = runtime.program();
+                let mut program = program_arc.write().unwrap();
+                program.inject_function_captures(main_func, captures, &executor)
             } else {
                 main_func
             };
@@ -201,89 +204,6 @@ pub fn compile(
     };
 
     Ok(runtime.program().read().unwrap().to_bytecode(entry))
-}
-
-/// Inject function captures into a function, returning a new Function
-fn inject_function_captures(
-    runtime: &NativeRuntime,
-    function_index: usize,
-    captures: Vec<Value>,
-) -> usize {
-    let program_arc = runtime.program();
-    let program = program_arc.read().unwrap();
-
-    let mut instructions = Vec::new();
-    instructions.push(Instruction::Allocate(captures.len()));
-
-    for (i, capture_value) in captures.iter().enumerate() {
-        instructions.extend(value_to_instructions(runtime, capture_value));
-        instructions.push(Instruction::Store(i));
-    }
-
-    let func = program
-        .get_function(function_index)
-        .expect("Function should exist during capture injection");
-    instructions.extend(func.instructions.clone());
-    let function_type = func.function_type.clone();
-
-    drop(program);
-
-    runtime.register_function(Function {
-        instructions,
-        function_type,
-        captures: Vec::new(),
-    })
-}
-
-/// Convert a runtime value to instructions that reconstruct it
-fn value_to_instructions(runtime: &NativeRuntime, value: &Value) -> Vec<Instruction> {
-    match value {
-        Value::Integer(n) => {
-            let program_arc = runtime.program();
-            let mut program = program_arc.write().unwrap();
-            let const_idx = program.register_constant(Constant::Integer(*n));
-            vec![Instruction::Constant(const_idx)]
-        }
-        Value::Binary(bin_ref) => {
-            // Get the binary bytes using the executor (handles both Constant and Heap cases)
-            let executor = runtime.executor();
-            let bytes = executor
-                .get_binary_bytes(bin_ref)
-                .expect("Binary should be valid during capture injection")
-                .to_vec();
-            drop(executor);
-
-            let program_arc = runtime.program();
-            let mut program = program_arc.write().unwrap();
-            let const_idx = program.register_constant(Constant::Binary(bytes));
-            vec![Instruction::Constant(const_idx)]
-        }
-        Value::Tuple(type_id, elements) => {
-            let mut instrs = Vec::new();
-            for elem in elements {
-                instrs.extend(value_to_instructions(runtime, elem));
-            }
-            instrs.push(Instruction::Tuple(*type_id));
-            instrs
-        }
-        Value::Function(function, captures) => {
-            let func_index = if !captures.is_empty() {
-                inject_function_captures(runtime, *function, captures.clone())
-            } else {
-                *function
-            };
-            vec![Instruction::Function(func_index)]
-        }
-        Value::Builtin(name) => {
-            let program_arc = runtime.program();
-            let mut program = program_arc.write().unwrap();
-            let builtin_idx = program.register_builtin(name.clone());
-            vec![Instruction::Builtin(builtin_idx)]
-        }
-        Value::Pid(_) => {
-            panic!("Cannot convert pid to instructions")
-        }
-    }
 }
 
 #[derive(Debug, PartialEq)]

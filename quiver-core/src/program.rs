@@ -1,7 +1,8 @@
-use crate::bytecode::{Bytecode, Constant, Function, TypeId};
+use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
 use crate::error::Error;
+use crate::executor::Executor;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
-use crate::value::{Binary, MAX_BINARY_SIZE};
+use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use std::collections::HashMap;
 
 mod optimisation;
@@ -188,5 +189,77 @@ impl Program {
             &self.builtins,
             entry_fn,
         )
+    }
+
+    /// Inject function captures into a function, returning a new function index.
+    /// Creates a new function that allocates locals for the captures, converts each
+    /// capture value to instructions, stores them in locals, then executes the original
+    /// function's instructions.
+    pub fn inject_function_captures(
+        &mut self,
+        function_index: usize,
+        captures: Vec<Value>,
+        executor: &Executor,
+    ) -> usize {
+        let mut instructions = Vec::new();
+        instructions.push(Instruction::Allocate(captures.len()));
+
+        for (i, capture_value) in captures.iter().enumerate() {
+            instructions.extend(self.value_to_instructions(capture_value, executor));
+            instructions.push(Instruction::Store(i));
+        }
+
+        let func = self
+            .get_function(function_index)
+            .expect("Function should exist during capture injection");
+        instructions.extend(func.instructions.clone());
+        let function_type = func.function_type.clone();
+
+        self.register_function(Function {
+            instructions,
+            function_type,
+            captures: Vec::new(),
+        })
+    }
+
+    /// Convert a runtime value to instructions that reconstruct it.
+    /// This is used for serializing values (like captures) back into bytecode.
+    fn value_to_instructions(&mut self, value: &Value, executor: &Executor) -> Vec<Instruction> {
+        match value {
+            Value::Integer(n) => {
+                let const_idx = self.register_constant(Constant::Integer(*n));
+                vec![Instruction::Constant(const_idx)]
+            }
+            Value::Binary(bin_ref) => {
+                let bytes = executor
+                    .get_binary_bytes(bin_ref)
+                    .expect("Binary should be valid during value serialization");
+                let const_idx = self.register_constant(Constant::Binary(bytes));
+                vec![Instruction::Constant(const_idx)]
+            }
+            Value::Tuple(type_id, elements) => {
+                let mut instrs = Vec::new();
+                for elem in elements {
+                    instrs.extend(self.value_to_instructions(elem, executor));
+                }
+                instrs.push(Instruction::Tuple(*type_id));
+                instrs
+            }
+            Value::Function(function, captures) => {
+                let func_index = if !captures.is_empty() {
+                    self.inject_function_captures(*function, captures.clone(), executor)
+                } else {
+                    *function
+                };
+                vec![Instruction::Function(func_index)]
+            }
+            Value::Builtin(name) => {
+                let builtin_idx = self.register_builtin(name.clone());
+                vec![Instruction::Builtin(builtin_idx)]
+            }
+            Value::Pid(_) => {
+                panic!("Cannot convert pid to instructions")
+            }
+        }
     }
 }
