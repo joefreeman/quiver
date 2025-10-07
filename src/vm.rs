@@ -154,15 +154,6 @@ impl VM {
         type_id
     }
 
-    pub fn inject_function_captures(&self, function_index: usize, captures: Vec<Value>) {
-        let mut program = self.program.write().unwrap();
-        program.inject_function_captures(function_index, captures);
-        let function = program.get_function(function_index).unwrap().clone();
-        drop(program);
-        self.scheduler_handle
-            .sync_function(function_index, function);
-    }
-
     /// Update the Program with a new one, syncing only the differences to the scheduler.
     pub fn update_program(&self, new_program: Program) {
         let old_program = self.program.read().unwrap();

@@ -1,6 +1,6 @@
-use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
+use crate::bytecode::{Bytecode, Constant, Function, TypeId};
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
-use crate::vm::{Binary, Error, Value};
+use crate::vm::{Binary, Error};
 use std::collections::HashMap;
 
 mod optimisation;
@@ -126,82 +126,6 @@ impl Program {
         self.functions.get(index)
     }
 
-    pub fn inject_function_captures(&mut self, function_index: usize, captures: Vec<Value>) {
-        let mut instructions = Vec::new();
-        instructions.push(Instruction::Allocate(captures.len()));
-
-        for (i, capture_value) in captures.iter().enumerate() {
-            instructions.extend(self.value_to_instructions(capture_value));
-            instructions.push(Instruction::Store(i));
-        }
-
-        let func = &self.functions[function_index];
-        instructions.extend(func.instructions.clone());
-
-        self.functions[function_index] = Function {
-            instructions,
-            function_type: func.function_type.clone(),
-            captures: Vec::new(),
-        };
-    }
-
-    fn value_to_instructions(&mut self, value: &Value) -> Vec<Instruction> {
-        match value {
-            Value::Integer(n) => {
-                let const_idx = self.register_constant(Constant::Integer(*n));
-                vec![Instruction::Constant(const_idx)]
-            }
-            Value::Binary(bin_ref) => {
-                let bytes = Self::get_binary_bytes_static(bin_ref, &self.constants)
-                    .expect("Binary should be valid during capture injection")
-                    .to_vec();
-                let const_idx = self.register_constant(Constant::Binary(bytes));
-                vec![Instruction::Constant(const_idx)]
-            }
-            Value::Builtin(name) => {
-                let builtin_idx = self.register_builtin(name.clone());
-                vec![Instruction::Builtin(builtin_idx)]
-            }
-            Value::Function(function, captures) => {
-                if !captures.is_empty() {
-                    self.inject_function_captures(*function, captures.clone());
-                }
-                vec![Instruction::Function(*function)]
-            }
-            Value::Tuple(type_id, elements) => {
-                let mut instrs = Vec::new();
-                for elem in elements {
-                    instrs.extend(self.value_to_instructions(elem));
-                }
-                instrs.push(Instruction::Tuple(*type_id));
-                instrs
-            }
-            Value::Pid(_) => {
-                panic!("Cannot convert pid to instructions")
-            }
-        }
-    }
-
-    // Helper method for getting binary bytes without &self (for use in value_to_instructions)
-    fn get_binary_bytes_static<'a>(
-        binary: &'a Binary,
-        constants: &'a [Constant],
-    ) -> Result<&'a [u8], Error> {
-        match binary {
-            Binary::Constant(index) => match constants.get(*index) {
-                Some(Constant::Binary(bytes)) => Ok(bytes),
-                Some(_) => Err(Error::TypeMismatch {
-                    expected: "binary constant".to_string(),
-                    found: "non-binary constant".to_string(),
-                }),
-                None => Err(Error::ConstantUndefined(*index)),
-            },
-            Binary::Heap(_) => Err(Error::InvalidArgument(
-                "Heap binaries cannot be accessed from Program (no scheduler context)".to_string(),
-            )),
-        }
-    }
-
     pub fn register_builtin(&mut self, function: String) -> usize {
         if let Some(index) = self.builtins.iter().position(|b| b == &function) {
             index
@@ -265,4 +189,3 @@ impl Program {
         )
     }
 }
-

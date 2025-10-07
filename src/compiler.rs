@@ -1145,29 +1145,24 @@ impl<'a> Compiler<'a> {
         let value = value.unwrap_or(Value::nil());
 
         // Convert the value back to instructions that reconstruct it
-        // Save current instructions
-        let saved_instructions = std::mem::take(&mut self.codegen.instructions);
-
-        let result_type = self.value_to_instructions(&value, &temp_vm)?;
-
-        // Get the reconstruction instructions
-        let reconstruction_instructions = std::mem::take(&mut self.codegen.instructions);
-
-        // Restore previous instructions
-        self.codegen.instructions = saved_instructions;
+        let (reconstruction_instructions, result_type) =
+            self.value_to_instructions(&value, &temp_vm)?;
 
         Ok((reconstruction_instructions, result_type))
     }
 
     /// Convert a runtime value back to instructions that reconstruct it
-    fn value_to_instructions(&mut self, value: &Value, vm: &VM) -> Result<Type, Error> {
+    fn value_to_instructions(
+        &mut self,
+        value: &Value,
+        vm: &VM,
+    ) -> Result<(Vec<Instruction>, Type), Error> {
         match value {
             Value::Integer(int_value) => {
                 let index = self
                     .program
                     .register_constant(Constant::Integer(*int_value));
-                self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Integer)
+                Ok((vec![Instruction::Constant(index)], Type::Integer))
             }
             Value::Binary(binary_ref) => {
                 // Get the binary bytes (handles both Constant and Heap cases)
@@ -1180,15 +1175,16 @@ impl<'a> Compiler<'a> {
                 // Create a constant from the binary data
                 let constant = Constant::Binary(binary_data);
                 let index = self.program.register_constant(constant);
-                self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Binary)
+                Ok((vec![Instruction::Constant(index)], Type::Binary))
             }
             Value::Tuple(type_id, fields) => {
+                let mut instructions = Vec::new();
                 for field in fields {
-                    self.value_to_instructions(field, vm)?;
+                    let (field_instructions, _) = self.value_to_instructions(field, vm)?;
+                    instructions.extend(field_instructions);
                 }
-                self.codegen.add_instruction(Instruction::Tuple(*type_id));
-                Ok(Type::Tuple(*type_id))
+                instructions.push(Instruction::Tuple(*type_id));
+                Ok((instructions, Type::Tuple(*type_id)))
             }
             Value::Function(function, captures) => {
                 // Get the function definition
@@ -1196,21 +1192,21 @@ impl<'a> Compiler<'a> {
                     Error::FeatureUnsupported("Invalid function reference".to_string()),
                 )?;
 
-                // If we have captures, store them in locals
+                let mut instructions = Vec::new();
                 let mut capture_locals = Vec::new();
-                if !captures.is_empty() {
-                    // Store each capture value in locals
-                    for value in captures {
-                        // Recursively convert the captured value to instructions
-                        self.value_to_instructions(value, vm)?;
-                        // Allocate a local and store it
-                        let local_index = self.local_count;
-                        self.local_count += 1;
-                        self.codegen.add_instruction(Instruction::Allocate(1));
-                        self.codegen
-                            .add_instruction(Instruction::Store(local_index));
-                        capture_locals.push(local_index);
-                    }
+
+                // Store each capture value in locals
+                for value in captures {
+                    // Recursively convert the captured value to instructions
+                    let (capture_instructions, _) = self.value_to_instructions(value, vm)?;
+                    instructions.extend(capture_instructions);
+
+                    // Allocate a local and store it
+                    let local_index = self.local_count;
+                    self.local_count += 1;
+                    instructions.push(Instruction::Allocate(1));
+                    instructions.push(Instruction::Store(local_index));
+                    capture_locals.push(local_index);
                 }
 
                 // Register function with new capture locals for this context
@@ -1221,8 +1217,7 @@ impl<'a> Compiler<'a> {
                 });
 
                 // Emit the function instruction
-                self.codegen
-                    .add_instruction(Instruction::Function(func_index));
+                instructions.push(Instruction::Function(func_index));
 
                 // Return the function type
                 let func = self
@@ -1232,21 +1227,22 @@ impl<'a> Compiler<'a> {
                 let function_type = func.function_type.clone().ok_or_else(|| {
                     Error::TypeUnresolved(format!("Function {} has no type annotation", func_index))
                 })?;
-                Ok(Type::Callable(Box::new(function_type)))
+                Ok((instructions, Type::Callable(Box::new(function_type))))
             }
             Value::Builtin(name) => {
                 let builtin_index = self.program.register_builtin(name.to_string());
-                self.codegen
-                    .add_instruction(Instruction::Builtin(builtin_index));
 
                 if let Some((param_type, result_type)) =
                     BUILTIN_REGISTRY.resolve_signature(name, &mut self.program)
                 {
-                    Ok(Type::Callable(Box::new(CallableType {
-                        parameter: param_type,
-                        result: result_type,
-                        receive: Type::never(),
-                    })))
+                    Ok((
+                        vec![Instruction::Builtin(builtin_index)],
+                        Type::Callable(Box::new(CallableType {
+                            parameter: param_type,
+                            result: result_type,
+                            receive: Type::never(),
+                        })),
+                    ))
                 } else {
                     Err(Error::BuiltinUndefined(name.to_string()))
                 }

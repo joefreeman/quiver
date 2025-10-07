@@ -13,6 +13,7 @@ pub mod vm;
 
 use std::collections::HashMap;
 
+use bytecode::{Constant, Function, Instruction};
 use compiler::Compiler;
 use modules::{FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader};
 use program::Program;
@@ -172,15 +173,96 @@ pub fn compile(
 
     let entry = match result {
         Some(Value::Function(main_func, captures)) => {
-            if !captures.is_empty() {
-                vm.inject_function_captures(main_func, captures);
-            }
-            Some(main_func)
+            let func_index = if !captures.is_empty() {
+                inject_function_captures(&vm, main_func, captures)
+            } else {
+                main_func
+            };
+            Some(func_index)
         }
         _ => None,
     };
 
     Ok(vm.program().read().unwrap().to_bytecode(entry))
+}
+
+/// Inject function captures into a function, returning a new Function
+fn inject_function_captures(vm: &VM, function_index: usize, captures: Vec<Value>) -> usize {
+    let program_arc = vm.program();
+    let program = program_arc.read().unwrap();
+
+    let mut instructions = Vec::new();
+    instructions.push(Instruction::Allocate(captures.len()));
+
+    for (i, capture_value) in captures.iter().enumerate() {
+        instructions.extend(value_to_instructions(vm, capture_value));
+        instructions.push(Instruction::Store(i));
+    }
+
+    let func = program
+        .get_function(function_index)
+        .expect("Function should exist during capture injection");
+    instructions.extend(func.instructions.clone());
+    let function_type = func.function_type.clone();
+
+    drop(program);
+
+    vm.register_function(Function {
+        instructions,
+        function_type,
+        captures: Vec::new(),
+    })
+}
+
+/// Convert a runtime value to instructions that reconstruct it
+fn value_to_instructions(vm: &VM, value: &Value) -> Vec<Instruction> {
+    match value {
+        Value::Integer(n) => {
+            let program_arc = vm.program();
+            let mut program = program_arc.write().unwrap();
+            let const_idx = program.register_constant(Constant::Integer(*n));
+            vec![Instruction::Constant(const_idx)]
+        }
+        Value::Binary(bin_ref) => {
+            // Get the binary bytes using the scheduler (handles both Constant and Heap cases)
+            let scheduler = vm.scheduler();
+            let bytes = scheduler
+                .get_binary_bytes(bin_ref)
+                .expect("Binary should be valid during capture injection")
+                .to_vec();
+            drop(scheduler);
+
+            let program_arc = vm.program();
+            let mut program = program_arc.write().unwrap();
+            let const_idx = program.register_constant(Constant::Binary(bytes));
+            vec![Instruction::Constant(const_idx)]
+        }
+        Value::Tuple(type_id, elements) => {
+            let mut instrs = Vec::new();
+            for elem in elements {
+                instrs.extend(value_to_instructions(vm, elem));
+            }
+            instrs.push(Instruction::Tuple(*type_id));
+            instrs
+        }
+        Value::Function(function, captures) => {
+            let func_index = if !captures.is_empty() {
+                inject_function_captures(vm, *function, captures.clone())
+            } else {
+                *function
+            };
+            vec![Instruction::Function(func_index)]
+        }
+        Value::Builtin(name) => {
+            let program_arc = vm.program();
+            let mut program = program_arc.write().unwrap();
+            let builtin_idx = program.register_builtin(name.clone());
+            vec![Instruction::Builtin(builtin_idx)]
+        }
+        Value::Pid(_) => {
+            panic!("Cannot convert pid to instructions")
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
