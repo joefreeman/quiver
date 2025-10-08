@@ -1,7 +1,7 @@
 use quiver_core::bytecode::{Constant, Function, Instruction, TypeId};
 use quiver_core::error::Error;
 use quiver_core::executor::{Executor, Router};
-use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus, StepResult};
+use quiver_core::process::{Frame, ProcessId, ProcessInfo, ProcessStatus, StepResult};
 use quiver_core::program::Program;
 use quiver_core::types::{TupleTypeInfo, Type};
 use quiver_core::value::Value;
@@ -17,26 +17,25 @@ pub enum SchedulerCommand {
         request_id: u64,
         process_id: ProcessId,
         instructions: Vec<Instruction>,
-        parameter: Option<Value>,
         variables: Option<HashMap<String, (Type, usize)>>,
     },
-    SpawnProcess {
+    Spawn {
         request_id: u64,
         id: ProcessId,
         persistent: bool,
         executor_id: usize,
     },
-    GetProcessStatuses {
+    GetProcesses {
         request_id: u64,
     },
-    GetProcessInfo {
+    GetProcess {
         request_id: u64,
         id: ProcessId,
     },
-    GetVariables {
+    GetLocals {
         request_id: u64,
         process_id: ProcessId,
-        mapping: HashMap<String, usize>,
+        indices: Vec<usize>,
     },
     RegisterConstant {
         index: usize,
@@ -54,15 +53,11 @@ pub enum SchedulerCommand {
         type_id: TypeId,
         info: TupleTypeInfo,
     },
-    DeliverMessage {
+    Deliver {
         target_process: ProcessId,
         value: Value,
     },
-    QueryProcessStatus {
-        request_id: u64,
-        process_id: ProcessId,
-    },
-    WakeProcess {
+    Notify {
         process_id: ProcessId,
     },
     Shutdown,
@@ -74,25 +69,21 @@ pub enum SchedulerResponse {
         request_id: u64,
         result: Result<(Option<Value>, Option<HashMap<String, (Type, usize)>>), Error>,
     },
-    SpawnProcess {
+    Spawn {
         request_id: u64,
         result: Result<(), Error>,
     },
-    GetProcessStatuses {
+    GetProcesses {
         request_id: u64,
         result: Result<HashMap<ProcessId, ProcessStatus>, Error>,
     },
-    GetProcessInfo {
+    GetProcess {
         request_id: u64,
         result: Result<Option<ProcessInfo>, Error>,
     },
-    GetVariables {
+    GetLocals {
         request_id: u64,
-        result: Result<HashMap<String, Value>, Error>,
-    },
-    QueryProcessStatus {
-        request_id: u64,
-        result: Result<Option<ProcessStatus>, Error>,
+        result: Result<Vec<Value>, Error>,
     },
 }
 
@@ -107,7 +98,7 @@ struct NativeRuntimeRouter {
 impl Router for NativeRuntimeRouter {
     fn send_message(&self, target: ProcessId, value: Value) {
         if let Some(&target_executor_id) = self.process_registry.read().unwrap().get(&target) {
-            let _ = self.command_txs[target_executor_id].send(SchedulerCommand::DeliverMessage {
+            let _ = self.command_txs[target_executor_id].send(SchedulerCommand::Deliver {
                 target_process: target,
                 value,
             });
@@ -147,14 +138,13 @@ impl Router for NativeRuntimeRouter {
             .remove(&process)
         {
             for awaiter in awaiters {
-                // Wake each awaiter by sending a wake command to its executor
+                // Notify each awaiter by sending a notify command to its executor
                 if let Some(&awaiter_executor_id) =
                     self.process_registry.read().unwrap().get(&awaiter)
                 {
-                    let _ =
-                        self.command_txs[awaiter_executor_id].send(SchedulerCommand::WakeProcess {
-                            process_id: awaiter,
-                        });
+                    let _ = self.command_txs[awaiter_executor_id].send(SchedulerCommand::Notify {
+                        process_id: awaiter,
+                    });
                 }
             }
         }
@@ -356,32 +346,87 @@ impl NativeRuntime {
             .write()
             .unwrap()
             .insert(id, executor_id);
-        self.spawn_process_with_id(id, persistent, executor_id)?;
+
+        let response =
+            self.send_request_to_executor(executor_id, |request_id| SchedulerCommand::Spawn {
+                request_id,
+                id,
+                persistent,
+                executor_id,
+            })?;
+
+        match response {
+            SchedulerResponse::Spawn { result, .. } => result?,
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "Unexpected response type".to_string(),
+                ));
+            }
+        }
+
         Ok(id)
     }
 
     pub fn get_process_statuses(&self) -> Result<HashMap<ProcessId, ProcessStatus>, Error> {
-        self.get_process_statuses_internal()
+        let mut all_statuses = HashMap::new();
+
+        // Query all executors and aggregate results
+        for executor_id in 0..self.executors.len() {
+            let response = self.send_request_to_executor(executor_id, |request_id| {
+                SchedulerCommand::GetProcesses { request_id }
+            })?;
+
+            match response {
+                SchedulerResponse::GetProcesses { result, .. } => {
+                    all_statuses.extend(result?);
+                }
+                _ => {
+                    return Err(Error::InvalidArgument(
+                        "Unexpected response type".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(all_statuses)
     }
 
     pub fn get_process_info(&self, id: ProcessId) -> Result<Option<ProcessInfo>, Error> {
-        self.get_process_info_internal(id)
+        let response = self.send_request_to_process(id, |request_id| {
+            SchedulerCommand::GetProcess { request_id, id }
+        })?;
+
+        match response {
+            SchedulerResponse::GetProcess { result, .. } => result,
+            _ => Err(Error::InvalidArgument(
+                "Unexpected response type".to_string(),
+            )),
+        }
     }
 
     pub fn execute_instructions(
         &self,
         instructions: Vec<Instruction>,
-        parameter: Option<Value>,
         process_id: Option<ProcessId>,
         variables: Option<HashMap<String, (Type, usize)>>,
     ) -> Result<(Option<Value>, Option<HashMap<String, (Type, usize)>>), Error> {
         let pid = if let Some(id) = process_id {
+            // If explicitly providing a process, verify it's persistent
+            let info = self.get_process_info(id)?;
+            if let Some(process_info) = info {
+                if !process_info.persistent {
+                    return Err(Error::InvalidArgument(format!(
+                        "Cannot execute on non-persistent process {:?}",
+                        id
+                    )));
+                }
+            }
             id
         } else {
             self.spawn_process(false)?
         };
 
-        self.execute(pid, instructions, parameter, variables)
+        self.execute(pid, instructions, variables)
     }
 
     pub fn execute_function(&self, entry: usize) -> Result<Option<Value>, Error> {
@@ -394,7 +439,7 @@ impl NativeRuntime {
             .clone();
 
         let pid = self.spawn_process(false)?;
-        let (result, _) = self.execute(pid, function.instructions, Some(Value::nil()), None)?;
+        let (result, _) = self.execute(pid, function.instructions, None)?;
         Ok(result)
     }
 
@@ -426,12 +471,24 @@ impl NativeRuntime {
             .map(|p| p.frames.len())
     }
 
-    pub fn get_variables(
+    pub fn get_locals(
         &self,
         process_id: ProcessId,
-        mapping: &HashMap<String, usize>,
-    ) -> Result<HashMap<String, Value>, Error> {
-        self.get_variables_internal(process_id, mapping.clone())
+        indices: &[usize],
+    ) -> Result<Vec<Value>, Error> {
+        let response =
+            self.send_request_to_process(process_id, |request_id| SchedulerCommand::GetLocals {
+                request_id,
+                process_id,
+                indices: indices.to_vec(),
+            })?;
+
+        match response {
+            SchedulerResponse::GetLocals { result, .. } => result,
+            _ => Err(Error::InvalidArgument(
+                "Unexpected response type".to_string(),
+            )),
+        }
     }
 
     fn send_request_to_executor<F>(
@@ -456,7 +513,7 @@ impl NativeRuntime {
             .map_err(|_| Error::InvalidArgument("Scheduler thread died".to_string()))
     }
 
-    fn send_request_to_process_executor<F>(
+    fn send_request_to_process<F>(
         &self,
         process_id: ProcessId,
         build_command: F,
@@ -479,102 +536,18 @@ impl NativeRuntime {
         &self,
         process_id: ProcessId,
         instructions: Vec<Instruction>,
-        parameter: Option<Value>,
         variables: Option<HashMap<String, (Type, usize)>>,
     ) -> Result<(Option<Value>, Option<HashMap<String, (Type, usize)>>), Error> {
-        let response = self.send_request_to_process_executor(process_id, |request_id| {
-            SchedulerCommand::Execute {
+        let response =
+            self.send_request_to_process(process_id, |request_id| SchedulerCommand::Execute {
                 request_id,
                 process_id,
                 instructions,
-                parameter,
                 variables,
-            }
-        })?;
+            })?;
 
         match response {
             SchedulerResponse::Execute { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    fn spawn_process_with_id(
-        &self,
-        id: ProcessId,
-        persistent: bool,
-        executor_id: usize,
-    ) -> Result<(), Error> {
-        let response = self.send_request_to_executor(executor_id, |request_id| {
-            SchedulerCommand::SpawnProcess {
-                request_id,
-                id,
-                persistent,
-                executor_id,
-            }
-        })?;
-
-        match response {
-            SchedulerResponse::SpawnProcess { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    fn get_process_statuses_internal(&self) -> Result<HashMap<ProcessId, ProcessStatus>, Error> {
-        let mut all_statuses = HashMap::new();
-
-        // Query all executors and aggregate results
-        for executor_id in 0..self.executors.len() {
-            let response = self.send_request_to_executor(executor_id, |request_id| {
-                SchedulerCommand::GetProcessStatuses { request_id }
-            })?;
-
-            match response {
-                SchedulerResponse::GetProcessStatuses { result, .. } => {
-                    all_statuses.extend(result?);
-                }
-                _ => {
-                    return Err(Error::InvalidArgument(
-                        "Unexpected response type".to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(all_statuses)
-    }
-
-    fn get_process_info_internal(&self, id: ProcessId) -> Result<Option<ProcessInfo>, Error> {
-        let response = self.send_request_to_process_executor(id, |request_id| {
-            SchedulerCommand::GetProcessInfo { request_id, id }
-        })?;
-
-        match response {
-            SchedulerResponse::GetProcessInfo { result, .. } => result,
-            _ => Err(Error::InvalidArgument(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    fn get_variables_internal(
-        &self,
-        process_id: ProcessId,
-        mapping: HashMap<String, usize>,
-    ) -> Result<HashMap<String, Value>, Error> {
-        let response = self.send_request_to_process_executor(process_id, |request_id| {
-            SchedulerCommand::GetVariables {
-                request_id,
-                process_id,
-                mapping,
-            }
-        })?;
-
-        match response {
-            SchedulerResponse::GetVariables { result, .. } => result,
             _ => Err(Error::InvalidArgument(
                 "Unexpected response type".to_string(),
             )),
@@ -646,60 +619,15 @@ fn scheduler_thread(
                 request_id,
                 process_id,
                 instructions,
-                parameter,
                 variables,
             }) => {
-                let exec_result = execute_in_scheduler(
+                let result = execute_instructions(
                     &executor,
                     &next_process_id,
                     process_id,
                     instructions,
-                    parameter,
+                    variables,
                 );
-
-                // Compact locals if variables map was provided
-                let result = match exec_result {
-                    Ok(value) => {
-                        let compacted_variables = if let Some(vars) = variables {
-                            let mut exec = executor.lock().unwrap();
-                            let process = match exec.get_process_mut(process_id) {
-                                Some(p) => p,
-                                None => {
-                                    if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
-                                        let _ = tx.send(SchedulerResponse::Execute {
-                                            request_id,
-                                            result: Ok((value, None)),
-                                        });
-                                    }
-                                    continue;
-                                }
-                            };
-
-                            let mut referenced: Vec<(String, Type, usize)> = vars
-                                .iter()
-                                .map(|(name, (typ, index))| (name.clone(), typ.clone(), *index))
-                                .collect();
-                            referenced.sort_by_key(|(_, _, index)| *index);
-
-                            let mut new_locals = Vec::new();
-                            let mut new_variables = HashMap::new();
-
-                            for (name, typ, old_index) in referenced {
-                                if old_index < process.locals.len() {
-                                    new_variables.insert(name, (typ, new_locals.len()));
-                                    new_locals.push(process.locals[old_index].clone());
-                                }
-                            }
-
-                            process.locals = new_locals;
-                            Some(new_variables)
-                        } else {
-                            None
-                        };
-                        Ok((value, compacted_variables))
-                    }
-                    Err(e) => Err(e),
-                };
 
                 if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
                     let _ = tx.send(SchedulerResponse::Execute { request_id, result });
@@ -721,7 +649,7 @@ fn scheduler_thread(
                 let mut exec = executor.lock().unwrap();
                 exec.register_type(type_id, info);
             }
-            Ok(SchedulerCommand::SpawnProcess {
+            Ok(SchedulerCommand::Spawn {
                 request_id,
                 id,
                 persistent,
@@ -730,52 +658,53 @@ fn scheduler_thread(
                 let mut exec = executor.lock().unwrap();
                 exec.spawn_process(id, persistent);
                 if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
-                    let _ = tx.send(SchedulerResponse::SpawnProcess {
+                    let _ = tx.send(SchedulerResponse::Spawn {
                         request_id,
                         result: Ok(()),
                     });
                 }
             }
-            Ok(SchedulerCommand::GetProcessStatuses { request_id }) => {
+            Ok(SchedulerCommand::GetProcesses { request_id }) => {
                 let exec = executor.lock().unwrap();
                 let statuses = exec.get_process_statuses();
                 if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
-                    let _ = tx.send(SchedulerResponse::GetProcessStatuses {
+                    let _ = tx.send(SchedulerResponse::GetProcesses {
                         request_id,
                         result: Ok(statuses),
                     });
                 }
             }
-            Ok(SchedulerCommand::GetProcessInfo { request_id, id }) => {
+            Ok(SchedulerCommand::GetProcess { request_id, id }) => {
                 let exec = executor.lock().unwrap();
                 let info = exec.get_process_info(id);
                 if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
-                    let _ = tx.send(SchedulerResponse::GetProcessInfo {
+                    let _ = tx.send(SchedulerResponse::GetProcess {
                         request_id,
                         result: Ok(info),
                     });
                 }
             }
-            Ok(SchedulerCommand::GetVariables {
+            Ok(SchedulerCommand::GetLocals {
                 request_id,
                 process_id,
-                mapping,
+                indices,
             }) => {
                 let exec = executor.lock().unwrap();
                 let result = match exec.get_process(process_id) {
                     Some(process) => {
-                        let mut vars = HashMap::new();
-                        for (name, &index) in &mapping {
+                        let mut values = Vec::new();
+                        for &index in &indices {
                             if index >= process.locals.len() {
+                                values.clear();
                                 break;
                             }
-                            vars.insert(name.clone(), process.locals[index].clone());
+                            values.push(process.locals[index].clone());
                         }
-                        if vars.len() == mapping.len() {
-                            Ok(vars)
+                        if values.len() == indices.len() {
+                            Ok(values)
                         } else {
-                            Err(Error::VariableUndefined(
-                                "One or more variables out of bounds".to_string(),
+                            Err(Error::InvalidArgument(
+                                "One or more local indices out of bounds".to_string(),
                             ))
                         }
                     }
@@ -785,10 +714,10 @@ fn scheduler_thread(
                     ))),
                 };
                 if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
-                    let _ = tx.send(SchedulerResponse::GetVariables { request_id, result });
+                    let _ = tx.send(SchedulerResponse::GetLocals { request_id, result });
                 }
             }
-            Ok(SchedulerCommand::DeliverMessage {
+            Ok(SchedulerCommand::Deliver {
                 target_process,
                 value,
             }) => {
@@ -797,22 +726,9 @@ fn scheduler_thread(
                     process.mailbox.push_back(value);
                 }
             }
-            Ok(SchedulerCommand::QueryProcessStatus {
-                request_id,
-                process_id,
-            }) => {
-                let exec = executor.lock().unwrap();
-                let status = exec.get_process_info(process_id).map(|info| info.status);
-                if let Some(tx) = pending.lock().unwrap().remove(&request_id) {
-                    let _ = tx.send(SchedulerResponse::QueryProcessStatus {
-                        request_id,
-                        result: Ok(status),
-                    });
-                }
-            }
-            Ok(SchedulerCommand::WakeProcess { process_id }) => {
+            Ok(SchedulerCommand::Notify { process_id }) => {
                 let mut exec = executor.lock().unwrap();
-                exec.wake_process(process_id);
+                exec.notify_process(process_id);
             }
             Ok(SchedulerCommand::Shutdown) | Err(_) => {
                 break;
@@ -821,15 +737,15 @@ fn scheduler_thread(
     }
 }
 
-fn execute_in_scheduler(
+fn execute_instructions(
     executor: &Arc<Mutex<Executor>>,
     next_process_id: &Arc<AtomicUsize>,
     process_id: ProcessId,
     instructions: Vec<Instruction>,
-    parameter: Option<Value>,
-) -> Result<Option<Value>, Error> {
+    variables: Option<HashMap<String, (Type, usize)>>,
+) -> Result<(Option<Value>, Option<HashMap<String, (Type, usize)>>), Error> {
     if instructions.is_empty() {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     {
@@ -843,25 +759,62 @@ fn execute_in_scheduler(
                 process_id
             )))?;
 
-        process.stack.push(parameter.unwrap_or_else(Value::nil));
+        // Clear existing result to allow new result to be stored
+        // Use the previous result as the initial stack value
+        let initial_value = process.result.take().unwrap_or_else(Value::nil);
 
-        let frame = quiver_core::process::Frame::new(instructions.clone(), 0, 0);
-        process.frames.push(frame);
-
+        process.stack.push(initial_value);
+        process.frames.push(Frame::new(instructions.clone(), 0, 0));
         exec.set_active(process_id);
     }
 
-    let result = run(executor, next_process_id);
+    let value = run(executor, next_process_id)?;
 
-    // Pop frame
-    {
+    // Pop frame and compact locals if variables map was provided
+    // Note: We manually store the result because the executor only auto-stores when frames
+    // become empty via Return instruction. Since we manually push/pop frames here, we need
+    // to manually store the result for the next execution to use.
+    let compacted_variables = {
         let mut exec = executor.lock().unwrap();
-        if let Some(process) = exec.get_process_mut(process_id) {
-            process.frames.pop();
-        }
-    }
+        let process = exec
+            .get_process_mut(process_id)
+            .ok_or(Error::InvalidArgument(format!(
+                "Process {:?} not found",
+                process_id
+            )))?;
 
-    result
+        process.frames.pop();
+
+        // Store result for next execution (only if frames are now empty)
+        if process.frames.is_empty() {
+            process.result = value.clone();
+        }
+
+        if let Some(vars) = variables {
+            let mut referenced: Vec<(String, Type, usize)> = vars
+                .iter()
+                .map(|(name, (typ, index))| (name.clone(), typ.clone(), *index))
+                .collect();
+            referenced.sort_by_key(|(_, _, index)| *index);
+
+            let mut new_locals = Vec::new();
+            let mut new_variables = HashMap::new();
+
+            for (name, typ, old_index) in referenced {
+                if old_index < process.locals.len() {
+                    new_variables.insert(name, (typ, new_locals.len()));
+                    new_locals.push(process.locals[old_index].clone());
+                }
+            }
+
+            process.locals = new_locals;
+            Some(new_variables)
+        } else {
+            None
+        }
+    };
+
+    Ok((value, compacted_variables))
 }
 
 fn run(

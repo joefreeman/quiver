@@ -67,18 +67,14 @@ impl Quiver {
         source: &str,
         module_path: Option<std::path::PathBuf>,
         variables: Option<&HashMap<String, (Type, usize)>>,
-        parameter: Option<(&Value, Type)>,
+        parameter_type: Option<Type>,
     ) -> Result<(Option<Value>, Type, HashMap<String, (Type, usize)>), Error> {
         let ast_program = parse(source).map_err(|e| Error::ParseError(Box::new(e)))?;
 
-        // Get parameter type
-        let parameter_type = parameter
-            .as_ref()
-            .map(|(_, typ)| typ.clone())
-            .unwrap_or_else(Type::nil);
-
         // Get current program state before compilation
         let old_program = self.runtime.program().read().unwrap().clone();
+
+        let parameter_type = parameter_type.unwrap_or_else(Type::nil);
 
         let (instructions, result_type, variables, new_program, new_type_aliases, new_module_cache) =
             Compiler::compile(
@@ -100,12 +96,7 @@ impl Quiver {
 
         let (result, compacted_variables) = self
             .runtime
-            .execute_instructions(
-                instructions,
-                parameter.map(|(v, _)| v.clone()),
-                Some(self.repl_process_id),
-                Some(variables),
-            )
+            .execute_instructions(instructions, Some(self.repl_process_id), Some(variables))
             .map_err(Error::RuntimeError)?;
 
         // Variables were compacted as part of execute
@@ -118,15 +109,26 @@ impl Quiver {
         &self,
         variables: &HashMap<String, (Type, usize)>,
     ) -> Vec<(String, Value)> {
-        // Extract just the indices for Runtime lookup
-        let var_indices: HashMap<String, usize> = variables
+        // Build ordered list of (name, index) pairs
+        let mut var_list: Vec<(String, usize)> = variables
             .iter()
             .map(|(name, (_, index))| (name.clone(), *index))
             .collect();
+        var_list.sort_by_key(|(_, index)| *index);
 
+        // Extract just the indices for Runtime lookup
+        let indices: Vec<usize> = var_list.iter().map(|(_, index)| *index).collect();
+
+        // Get values and zip back with names
         self.runtime
-            .get_variables(self.repl_process_id, &var_indices)
-            .map(|map| map.into_iter().collect())
+            .get_locals(self.repl_process_id, &indices)
+            .map(|values| {
+                var_list
+                    .into_iter()
+                    .zip(values)
+                    .map(|((name, _), value)| (name, value))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -189,7 +191,7 @@ pub fn compile(
     // Use a single executor for one-time script execution
     let runtime = NativeRuntime::new(new_program, 1);
     let (result, _) = runtime
-        .execute_instructions(instructions, None, None, None)
+        .execute_instructions(instructions, None, None)
         .map_err(Error::RuntimeError)?;
 
     let entry = match result {

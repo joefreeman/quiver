@@ -21,10 +21,10 @@ pub trait Router {
     fn query_process_result(&self, target: ProcessId) -> Option<Value>;
 
     /// Register that a process on this executor is waiting for a process on another executor
-    /// When the target process completes, it should wake the awaiter
+    /// When the target process completes, it should notify the awaiter
     fn register_cross_executor_awaiter(&self, target: ProcessId, awaiter: ProcessId);
 
-    /// Notify that a process on this executor has finished, so cross-executor awaiters can be woken
+    /// Notify that a process on this executor has finished, so cross-executor awaiters can be notified
     fn notify_process_finished(&self, process: ProcessId, result: Value);
 }
 
@@ -163,7 +163,7 @@ impl Executor {
         self.queue.retain(|&pid| pid != id);
     }
 
-    pub fn wake_process(&mut self, id: ProcessId) {
+    pub fn notify_process(&mut self, id: ProcessId) {
         if self.waiting.remove(&id) {
             self.queue.push_back(id);
         }
@@ -331,7 +331,7 @@ impl Executor {
                 result?;
 
                 // Don't increment counter for Call/TailCall (they manage their own frames)
-                // or Receive/Call when process was marked waiting (so it re-executes when woken)
+                // or Receive/Call when process was marked waiting (so it re-executes when notified)
                 let should_increment =
                     !matches!(instruction, Instruction::Call | Instruction::TailCall(_));
                 if should_increment {
@@ -384,7 +384,7 @@ impl Executor {
             // Current process finished its instructions (or is waiting)
             let current_pid = self.active;
 
-            // Store result and wake awaiters when process finishes (frames are empty)
+            // Store result and notify awaiters when process finishes (frames are empty)
             if let Some(pid) = current_pid {
                 let should_store_result = self
                     .get_process(pid)
@@ -397,7 +397,7 @@ impl Executor {
                         let result = process.result.clone().unwrap_or(Value::nil());
                         let awaiters = std::mem::take(&mut process.awaiters);
                         for waiter in awaiters {
-                            self.wake_process(waiter);
+                            self.notify_process(waiter);
                         }
                         // Notify runtime about process completion for cross-executor awaiters
                         if let Some(router) = &self.router {
@@ -761,7 +761,7 @@ impl Executor {
                         target.awaiters.push(current_pid);
                         self.mark_waiting(current_pid);
 
-                        // Don't increment counter - will retry when woken
+                        // Don't increment counter - will retry when notified
                         Ok(())
                     }
                 } else if let Some(router) = &self.router {
@@ -787,7 +787,7 @@ impl Executor {
                         router.register_cross_executor_awaiter(target_pid, current_pid);
                         self.mark_waiting(current_pid);
 
-                        // Don't increment counter - will retry when woken
+                        // Don't increment counter - will retry when notified
                         Ok(())
                     }
                 } else {
@@ -1076,7 +1076,7 @@ impl Executor {
         // Check if target process is on this executor (fast path)
         if let Some(target_process) = self.get_process_mut(target_pid) {
             target_process.mailbox.push_back(message);
-            self.wake_process(target_pid);
+            self.notify_process(target_pid);
         } else if let Some(router) = &self.router {
             // Target process is on another executor - use router
             router.send_message(target_pid, message);

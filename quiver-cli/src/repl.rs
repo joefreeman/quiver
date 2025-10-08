@@ -274,12 +274,12 @@ impl Repl {
     fn evaluate(&mut self, line: &str) {
         let module_path = std::env::current_dir().ok();
 
-        match self.quiver.evaluate(
-            line,
-            module_path,
-            Some(&self.variables),
-            self.last_result.as_ref().map(|(v, t)| (v, t.clone())),
-        ) {
+        let parameter_type = self.last_result.as_ref().map(|(_, t)| t.clone());
+
+        match self
+            .quiver
+            .evaluate(line, module_path, Some(&self.variables), parameter_type)
+        {
             Ok((result, result_type, new_variables)) => {
                 self.variables = new_variables;
 
