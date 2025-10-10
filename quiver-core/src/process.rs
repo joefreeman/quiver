@@ -8,8 +8,7 @@ pub struct ProcessId(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProcessStatus {
-    Running,
-    Queued,
+    Active,
     Waiting,
     Sleeping,
     Terminated,
@@ -27,12 +26,21 @@ pub struct ProcessInfo {
     pub result: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum StepResult {
-    /// More work remains - processes are ready to execute
-    Running,
-    /// All processes are waiting for messages/events
-    Idle,
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// Spawn a new process with the given function and captures
+    Spawn {
+        caller: ProcessId,
+        function_index: usize,
+        captures: Vec<Value>,
+    },
+    /// Deliver a message to a target process
+    Deliver { target: ProcessId, value: Value },
+    /// Request the result of a target process
+    AwaitResult {
+        target: ProcessId,
+        caller: ProcessId,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +64,6 @@ impl Frame {
 
 #[derive(Debug)]
 pub struct Process {
-    pub id: ProcessId,
     pub stack: Vec<Value>,
     pub locals: Vec<Value>,
     pub frames: Vec<Frame>,
@@ -64,13 +71,11 @@ pub struct Process {
     pub persistent: bool,
     pub cursor: usize,
     pub result: Option<Value>,
-    pub awaiters: Vec<ProcessId>,
 }
 
 impl Process {
-    pub fn new(id: ProcessId, persistent: bool) -> Self {
+    pub fn new(persistent: bool) -> Self {
         Self {
-            id,
             stack: Vec::new(),
             locals: Vec::new(),
             frames: Vec::new(),
@@ -78,7 +83,6 @@ impl Process {
             persistent,
             cursor: 0,
             result: None,
-            awaiters: Vec::new(),
         }
     }
 }

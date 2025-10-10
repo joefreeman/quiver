@@ -43,7 +43,7 @@ impl TestBuilder {
         let mut quiver = Quiver::new(self.modules);
         let result = quiver
             .evaluate(source, None, None, None)
-            .map(|(value, _, _)| value);
+            .map(|(value, _, _, heap_data)| value.map(|v| (v, heap_data)));
 
         TestResult {
             result,
@@ -55,7 +55,7 @@ impl TestBuilder {
 
 #[allow(dead_code)]
 pub struct TestResult {
-    result: Result<Option<Value>, quiver::Error>,
+    result: Result<Option<(Value, Vec<Vec<u8>>)>, quiver::Error>,
     source: String,
     quiver: Quiver,
 }
@@ -65,8 +65,8 @@ impl TestResult {
     /// Expect a value matching the given Quiver syntax string representation
     pub fn expect(self, expected: &str) {
         match self.result {
-            Ok(Some(ref value)) => {
-                let actual = self.quiver.format_value(value);
+            Ok(Some((ref value, ref heap_data))) => {
+                let actual = self.quiver.format_value(value, heap_data);
                 assert_eq!(
                     actual, expected,
                     "Expected '{}', got '{}' for source: {}",

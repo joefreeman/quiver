@@ -2,8 +2,10 @@ use clap::{CommandFactory, Parser, Subcommand};
 use quiver::compile;
 use quiver::repl;
 use quiver_core::bytecode;
+use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Read};
+use std::rc::Rc;
 
 #[derive(Parser)]
 #[command(name = "quiv")]
@@ -109,13 +111,13 @@ fn compile_command(
 
 fn handle_result(
     runtime: &quiver::runtime::NativeRuntime,
-    result: Result<Option<quiver_core::value::Value>, quiver::Error>,
+    result: Result<Option<(quiver_core::value::Value, Vec<Vec<u8>>)>, quiver::Error>,
     quiet: bool,
 ) {
     use quiver_core::value::Value;
 
     match result {
-        Ok(Some(value)) => {
+        Ok(Some((value, heap_data))) => {
             // Check if result is NIL tuple (exit with error)
             if matches!(value, Value::Tuple(type_id, _) if type_id == bytecode::TypeId::NIL) {
                 std::process::exit(1);
@@ -124,9 +126,15 @@ fn handle_result(
             if !quiet
                 && !matches!(value, Value::Tuple(type_id, _) if type_id == bytecode::TypeId::OK || type_id == bytecode::TypeId::NIL)
             {
+                let constants = runtime.program().get_constants();
                 println!(
                     "{}",
-                    quiver_compiler::format::format_value(&runtime.executor(), &value)
+                    quiver_compiler::format::format_value(
+                        &value,
+                        &heap_data,
+                        constants,
+                        runtime.program()
+                    )
                 );
             }
         }
@@ -158,12 +166,10 @@ fn run_command(
             let entry = bytecode_data.entry;
             let program = quiver_core::program::Program::from_bytecode(bytecode_data);
             // Use single executor for bytecode execution
-            let runtime = quiver::runtime::NativeRuntime::new(program, 1);
+            let mut runtime = quiver::runtime::NativeRuntime::new(program, 1);
 
             let result = if let Some(entry) = entry {
-                runtime
-                    .execute_function(entry)
-                    .map_err(quiver::Error::RuntimeError)
+                execute_function(&mut runtime, entry).map_err(quiver::Error::RuntimeError)
             } else {
                 Ok(None)
             };
@@ -184,12 +190,10 @@ fn run_command(
                     let entry = bytecode_data.entry;
                     let program = quiver_core::program::Program::from_bytecode(bytecode_data);
                     // Use single executor for bytecode execution
-                    let runtime = quiver::runtime::NativeRuntime::new(program, 1);
+                    let mut runtime = quiver::runtime::NativeRuntime::new(program, 1);
 
                     let result = if let Some(entry) = entry {
-                        runtime
-                            .execute_function(entry)
-                            .map_err(quiver::Error::RuntimeError)
+                        execute_function(&mut runtime, entry).map_err(quiver::Error::RuntimeError)
                     } else {
                         Ok(None)
                     };
@@ -222,14 +226,59 @@ fn compile_execute(
 
     let program = quiver_core::program::Program::from_bytecode(bytecode_data);
     // Use single executor for bytecode execution
-    let runtime = quiver::runtime::NativeRuntime::new(program, 1);
+    let mut runtime = quiver::runtime::NativeRuntime::new(program, 1);
 
-    let result = runtime
-        .execute_function(entry)
-        .map_err(quiver::Error::RuntimeError);
+    let result = execute_function(&mut runtime, entry).map_err(quiver::Error::RuntimeError);
     handle_result(&runtime, result, quiet);
 
     Ok(())
+}
+
+fn execute_function(
+    runtime: &mut quiver::runtime::NativeRuntime,
+    entry: usize,
+) -> Result<Option<(quiver_core::value::Value, Vec<Vec<u8>>)>, quiver_core::error::Error> {
+    use quiver_core::error::Error;
+
+    let function = runtime
+        .program()
+        .get_function(entry)
+        .ok_or(Error::FunctionUndefined(entry))?
+        .clone();
+
+    // Execute the function in a new non-persistent process
+    let process_id_result = Rc::new(RefCell::new(None));
+    let process_id_result_clone = process_id_result.clone();
+    runtime.execute(function.instructions, false, move |result| {
+        *process_id_result_clone.borrow_mut() = Some(result);
+    });
+
+    // Wait for callback
+    let _ = runtime.wait_for_callbacks();
+
+    let process_id = process_id_result
+        .borrow()
+        .as_ref()
+        .expect("Execute callback not called")
+        .clone()?;
+
+    // Get the result with heap data
+    let value_result = Rc::new(RefCell::new(None));
+    let value_result_clone = value_result.clone();
+    runtime.get_result(process_id, move |result| {
+        *value_result_clone.borrow_mut() = Some(result);
+    });
+
+    // Wait for callback
+    let _ = runtime.wait_for_callbacks();
+
+    let (value, heap_data) = value_result
+        .borrow()
+        .as_ref()
+        .expect("GetResult callback not called")
+        .clone()?;
+
+    Ok(Some((value, heap_data)))
 }
 
 fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {

@@ -146,7 +146,7 @@ impl Repl {
         true
     }
 
-    fn list_variables(&self) {
+    fn list_variables(&mut self) {
         let vars = self.quiver.get_variables(&self.variables);
         if vars.is_empty() {
             println!("{}", "No variables defined".bright_black());
@@ -163,7 +163,7 @@ impl Repl {
                     format!(
                         "  {} = {} ({})",
                         name,
-                        self.quiver.format_value(&value),
+                        self.quiver.format_value(&value, &[]),
                         self.quiver.format_type(var_type)
                     )
                     .bright_black()
@@ -195,7 +195,7 @@ impl Repl {
         }
     }
 
-    fn list_processes(&self) {
+    fn list_processes(&mut self) {
         match self.quiver.get_process_statuses() {
             Ok(statuses) => {
                 if statuses.is_empty() {
@@ -206,8 +206,7 @@ impl Repl {
                     println!("{}", "Processes:".bright_black());
                     for (id, status) in processes {
                         let status_str = match status {
-                            ProcessStatus::Running => "running",
-                            ProcessStatus::Queued => "queued",
+                            ProcessStatus::Active => "active",
                             ProcessStatus::Waiting => "waiting",
                             ProcessStatus::Sleeping => "sleeping",
                             ProcessStatus::Terminated => "terminated",
@@ -222,12 +221,11 @@ impl Repl {
         }
     }
 
-    fn inspect_process(&self, id: ProcessId) {
+    fn inspect_process(&mut self, id: ProcessId) {
         match self.quiver.get_process_info(id) {
             Ok(Some(info)) => {
                 let status_str = match info.status {
-                    ProcessStatus::Running => "running",
-                    ProcessStatus::Queued => "queued",
+                    ProcessStatus::Active => "active",
                     ProcessStatus::Waiting => "waiting",
                     ProcessStatus::Sleeping => "sleeping",
                     ProcessStatus::Terminated => "terminated",
@@ -256,7 +254,8 @@ impl Repl {
                 if let Some(result) = &info.result {
                     println!(
                         "{}",
-                        format!("  Result: {}", self.quiver.format_value(result)).bright_black()
+                        format!("  Result: {}", self.quiver.format_value(result, &[]))
+                            .bright_black()
                     );
                 } else {
                     println!("{}", "  Result: ―".bright_black());
@@ -273,14 +272,13 @@ impl Repl {
 
     fn evaluate(&mut self, line: &str) {
         let module_path = std::env::current_dir().ok();
-
         let parameter_type = self.last_result.as_ref().map(|(_, t)| t.clone());
 
         match self
             .quiver
             .evaluate(line, module_path, Some(&self.variables), parameter_type)
         {
-            Ok((result, result_type, new_variables)) => {
+            Ok((result, result_type, new_variables, heap_data)) => {
                 self.variables = new_variables;
 
                 if let Some(value) = &result {
@@ -288,7 +286,7 @@ impl Repl {
                     {
                         println!(
                             "{} {}",
-                            self.quiver.format_value(value),
+                            self.quiver.format_value(value, &heap_data),
                             format!("({})", self.quiver.format_type(&result_type)).bright_black()
                         );
                     }

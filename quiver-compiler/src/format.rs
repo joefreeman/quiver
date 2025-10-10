@@ -1,4 +1,5 @@
-use quiver_core::executor::Executor;
+use quiver_core::bytecode::Constant;
+use quiver_core::error::Error;
 use quiver_core::types::{Type, TypeLookup};
 use quiver_core::value::{Binary, Value};
 
@@ -110,36 +111,65 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
     }
 }
 
+/// Get binary bytes from either a constant or heap
+fn get_binary_bytes(
+    binary: &Binary,
+    heap: &[Vec<u8>],
+    constants: &[Constant],
+) -> Result<Vec<u8>, Error> {
+    match binary {
+        Binary::Constant(index) => {
+            let constant = constants
+                .get(*index)
+                .ok_or(Error::ConstantUndefined(*index))?;
+            match constant {
+                Constant::Binary(bytes) => Ok(bytes.clone()),
+                _ => Err(Error::TypeMismatch {
+                    expected: "binary".to_string(),
+                    found: "integer".to_string(),
+                }),
+            }
+        }
+        Binary::Heap(index) => heap.get(*index).cloned().ok_or_else(|| {
+            Error::InvalidArgument(format!("Heap binary index {} not found", index))
+        }),
+    }
+}
+
 /// Format a binary value showing its actual content
-pub fn format_binary(executor: &Executor, binary: &Binary) -> String {
-    executor
-        .with_binary_bytes(binary, |bytes| {
-            Ok(if bytes.len() <= 8 {
+pub fn format_binary(binary: &Binary, heap: &[Vec<u8>], constants: &[Constant]) -> String {
+    match get_binary_bytes(binary, heap, constants) {
+        Ok(bytes) => {
+            if bytes.len() <= 8 {
                 // Show short binaries in full
                 format!("'{}'", hex::encode(bytes))
             } else {
                 // Show truncated for long binaries
                 format!("'{}…'", hex::encode(&bytes[..8]))
-            })
-        })
-        .unwrap_or_else(|_| "<invalid binary>".to_string())
+            }
+        }
+        Err(_) => "<invalid binary>".to_string(),
+    }
 }
 
-pub fn format_value(executor: &Executor, value: &Value) -> String {
+pub fn format_value(
+    value: &Value,
+    heap: &[Vec<u8>],
+    constants: &[Constant],
+    type_lookup: &impl TypeLookup,
+) -> String {
     match value {
         Value::Function(function, _) => format!("#{}", function),
         Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
-        Value::Binary(binary) => format_binary(executor, binary),
+        Value::Binary(binary) => format_binary(binary, heap, constants),
         Value::Pid(process_id) => format!("@{}", process_id.0),
         Value::Tuple(type_id, elements) => {
-            if let Some((name, fields)) = executor.lookup_type(type_id) {
+            if let Some((name, fields)) = type_lookup.lookup_type(type_id) {
                 if name.as_deref() == Some("Str") {
                     if let [Value::Binary(binary)] = elements.as_slice() {
-                        if let Ok(formatted) = executor
-                            .with_binary_bytes(binary, |bytes| Ok(try_format_as_string(bytes)))
-                        {
-                            if let Some(formatted) = formatted {
+                        if let Ok(bytes) = get_binary_bytes(binary, heap, constants) {
+                            if let Some(formatted) = try_format_as_string(&bytes) {
                                 return formatted;
                             }
                         }
@@ -153,7 +183,7 @@ pub fn format_value(executor: &Executor, value: &Value) -> String {
                         .iter()
                         .enumerate()
                         .map(|(i, elem)| {
-                            let formatted = format_value(executor, elem);
+                            let formatted = format_value(elem, heap, constants, type_lookup);
                             match fields.get(i).and_then(|(name, _)| name.as_ref()) {
                                 Some(name) => format!("{}: {}", name, formatted),
                                 None => formatted,
@@ -178,7 +208,7 @@ pub fn format_value(executor: &Executor, value: &Value) -> String {
                     if i > 0 {
                         result.push_str(", ");
                     }
-                    result.push_str(&format_value(executor, element));
+                    result.push_str(&format_value(element, heap, constants, type_lookup));
                 }
                 result.push(']');
                 result

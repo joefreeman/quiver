@@ -1,13 +1,12 @@
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{Compiler, InMemoryModuleLoader, format, parse};
 use quiver_core::Executor;
-use quiver_core::process::{ProcessId, ProcessStatus, StepResult};
+use quiver_core::process::{Action, ProcessId, ProcessStatus};
 use quiver_core::program::Program;
 use quiver_core::types::Type;
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use wasm_bindgen::prelude::*;
 
 macro_rules! load_stdlib_modules {
@@ -31,7 +30,7 @@ pub fn init() {
 #[wasm_bindgen]
 pub struct QuiverRuntime {
     executor: Executor,
-    next_process_id: AtomicUsize,
+    next_process_id: usize,
     program: Program,
     type_aliases: HashMap<String, Type>,
     module_cache: ModuleCache,
@@ -62,11 +61,11 @@ impl QuiverRuntime {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<QuiverRuntime, JsValue> {
         let program = Program::new();
-        let executor = Executor::new(&program, None);
+        let executor = Executor::new(&program);
 
         Ok(QuiverRuntime {
             executor,
-            next_process_id: AtomicUsize::new(0),
+            next_process_id: 0,
             program,
             type_aliases: HashMap::new(),
             module_cache: ModuleCache::new(),
@@ -149,7 +148,7 @@ impl QuiverRuntime {
                 };
 
                 // Recreate executor after injecting captures (which modifies self.program)
-                self.executor = Executor::new(&self.program, None);
+                self.executor = Executor::new(&self.program);
 
                 let result = CompileResult {
                     success: true,
@@ -173,10 +172,8 @@ impl QuiverRuntime {
 
     #[wasm_bindgen]
     pub fn spawn(&mut self, entry_function: usize, persistent: bool) -> u64 {
-        let process_id = ProcessId(
-            self.next_process_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        );
+        let process_id = ProcessId(self.next_process_id);
+        self.next_process_id += 1;
         self.executor.spawn_process(process_id, persistent);
 
         // Initialize the process with the entry function
@@ -195,13 +192,62 @@ impl QuiverRuntime {
     pub fn step(&mut self, max_steps: usize) -> Result<JsValue, JsValue> {
         let result = self
             .executor
-            .step(max_steps, &self.next_process_id)
+            .step(max_steps)
             .map_err(|e| JsValue::from_str(&format!("Execution error: {:?}", e)))?;
 
-        let status_str = match result {
-            StepResult::Running => "running",
-            StepResult::Idle => "idle",
-        };
+        // Handle routing requests from the step
+        match result {
+            None => {
+                // No routing needed
+            }
+            Some(Action::Spawn {
+                caller,
+                function_index,
+                captures,
+            }) => {
+                // Allocate a new process ID for the spawned process
+                let new_pid = ProcessId(self.next_process_id);
+                self.next_process_id += 1;
+
+                // Spawn the new process
+                self.executor.spawn_process(new_pid, false);
+
+                // Set up the process with the function and captures
+                if let Some(process) = self.executor.get_process_mut(new_pid) {
+                    process.stack.push(Value::nil());
+                    process
+                        .stack
+                        .push(Value::Function(function_index, captures));
+                    process.frames.push(quiver_core::process::Frame::new(
+                        vec![quiver_core::bytecode::Instruction::Call],
+                        0,
+                        0,
+                    ));
+                }
+
+                // Add the new process to the queue so it can run
+                self.executor.add_to_queue(new_pid);
+
+                // Notify the caller with the new PID
+                self.executor.notify_spawn(caller, Value::Pid(new_pid));
+            }
+            Some(Action::Deliver { target, value }) => {
+                // Deliver message to target process
+                self.executor.notify_message(target, value);
+            }
+            Some(Action::AwaitResult { target, caller }) => {
+                // Check if target process has a result available
+                let result = self
+                    .executor
+                    .get_process(target)
+                    .and_then(|p| p.result.clone());
+                if let Some(result) = result {
+                    // Result is available, notify the caller immediately
+                    self.executor.notify_result(caller, result);
+                }
+                // If result not available, the caller will remain in waiting state
+            }
+        }
 
         // Collect process information
         let processes: Vec<ProcessInfo> = self
@@ -212,8 +258,7 @@ impl QuiverRuntime {
                 self.executor.get_process_info(pid).map(|info| ProcessInfo {
                     id: info.id.0 as u64,
                     status: match info.status {
-                        ProcessStatus::Running => "running".to_string(),
-                        ProcessStatus::Queued => "queued".to_string(),
+                        ProcessStatus::Active => "active".to_string(),
                         ProcessStatus::Waiting => "waiting".to_string(),
                         ProcessStatus::Sleeping => "sleeping".to_string(),
                         ProcessStatus::Terminated => "terminated".to_string(),
@@ -222,6 +267,19 @@ impl QuiverRuntime {
                 })
             })
             .collect();
+
+        // Determine overall status: idle if no active processes, running otherwise
+        let has_active_processes = self
+            .executor
+            .get_process_statuses()
+            .values()
+            .any(|status| !matches!(status, ProcessStatus::Terminated));
+
+        let status_str = if has_active_processes {
+            "running"
+        } else {
+            "idle"
+        };
 
         let step_result = StepResultInfo {
             status: status_str.to_string(),
@@ -237,11 +295,14 @@ impl QuiverRuntime {
         let pid = ProcessId(process_id as usize);
 
         if let Some(process) = self.executor.get_process(pid) {
+            let constants = self.program.get_constants();
             if let Some(value) = &process.result {
-                let formatted = format::format_value(&self.executor, value);
+                // For web runtime, heap data is directly accessible via the executor
+                // We pass empty heap_data since all binaries should be constants
+                let formatted = format::format_value(value, &[], constants, &self.program);
                 Ok(JsValue::from_str(&formatted))
             } else if let Some(value) = process.stack.last() {
-                let formatted = format::format_value(&self.executor, value);
+                let formatted = format::format_value(value, &[], constants, &self.program);
                 Ok(JsValue::from_str(&formatted))
             } else {
                 Ok(JsValue::NULL)

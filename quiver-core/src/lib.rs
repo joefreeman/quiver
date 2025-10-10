@@ -11,5 +11,5 @@ pub mod value;
 pub use error::Error;
 pub use execute::execute_instructions_sync;
 pub use executor::Executor;
-pub use process::{ProcessId, ProcessInfo, ProcessStatus, StepResult};
+pub use process::{Action, ProcessId, ProcessInfo, ProcessStatus};
 pub use value::{Binary, MAX_BINARY_SIZE, Value};

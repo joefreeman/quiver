@@ -1,38 +1,17 @@
 use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{Constant, Function, Instruction, TypeId};
 use crate::error::Error;
-use crate::process::{Frame, Process, ProcessId, ProcessInfo, ProcessStatus, StepResult};
+use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus};
 use crate::program::Program;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Number of instruction units to execute per process before yielding to the next process
-const TIME_SLICE_UNITS: usize = 100;
-
-/// Trait for routing operations across executor boundaries
-pub trait Router {
-    /// Send a message to a process that may be on a different executor
-    fn send_message(&self, target: ProcessId, value: Value);
-
-    /// Query a process on another executor, returning its result if available
-    /// Returns: Some(result) if process has finished, None if still running or not found
-    fn query_process_result(&self, target: ProcessId) -> Option<Value>;
-
-    /// Register that a process on this executor is waiting for a process on another executor
-    /// When the target process completes, it should notify the awaiter
-    fn register_cross_executor_awaiter(&self, target: ProcessId, awaiter: ProcessId);
-
-    /// Notify that a process on this executor has finished, so cross-executor awaiters can be notified
-    fn notify_process_finished(&self, process: ProcessId, result: Value);
-}
 
 pub struct Executor {
     processes: HashMap<ProcessId, Process>,
     queue: VecDeque<ProcessId>,
-    waiting: HashSet<ProcessId>,
-    active: Option<ProcessId>,
+    receiving: HashSet<ProcessId>,
+    awaiting: HashSet<ProcessId>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
@@ -40,8 +19,6 @@ pub struct Executor {
     types: HashMap<TypeId, TupleTypeInfo>,
     // Heap for runtime-allocated binaries
     heap: Vec<Vec<u8>>,
-    // Router for cross-executor operations (None for single-executor scenarios)
-    router: Option<Box<dyn Router + Send>>,
 }
 
 impl std::fmt::Debug for Executor {
@@ -49,14 +26,13 @@ impl std::fmt::Debug for Executor {
         f.debug_struct("Executor")
             .field("processes", &self.processes)
             .field("queue", &self.queue)
-            .field("waiting", &self.waiting)
-            .field("active", &self.active)
+            .field("receiving", &self.receiving)
+            .field("awaiting", &self.awaiting)
             .field("constants", &self.constants.len())
             .field("functions", &self.functions.len())
             .field("builtins", &self.builtins.len())
             .field("types", &self.types.len())
             .field("heap", &self.heap.len())
-            .field("router", &self.router.as_ref().map(|_| "<trait object>"))
             .finish()
     }
 }
@@ -117,28 +93,23 @@ impl Executor {
         Ok(Binary::Heap(index))
     }
 
-    pub fn new(program: &Program, router: Option<Box<dyn Router + Send>>) -> Self {
+    pub fn new(program: &Program) -> Self {
         Self {
             processes: HashMap::new(),
             queue: VecDeque::new(),
-            waiting: HashSet::new(),
-            active: None,
+            receiving: HashSet::new(),
+            awaiting: HashSet::new(),
             // Clone Program's data
             constants: program.get_constants().clone(),
             functions: program.get_functions().clone(),
             builtins: program.get_builtins().clone(),
             types: program.get_types(),
             heap: Vec::new(),
-            router,
         }
     }
 
-    pub fn set_router(&mut self, router: Option<Box<dyn Router + Send>>) {
-        self.router = router;
-    }
-
     pub fn spawn_process(&mut self, id: ProcessId, persistent: bool) {
-        let process = Process::new(id, persistent);
+        let process = Process::new(persistent);
         self.processes.insert(id, process);
         self.queue.push_back(id);
     }
@@ -151,62 +122,69 @@ impl Executor {
         self.processes.get_mut(&id)
     }
 
-    pub fn get_current_process(&self) -> Option<&Process> {
-        self.active.and_then(|id| self.processes.get(&id))
-    }
-
-    pub fn get_current_process_mut(&mut self) -> Option<&mut Process> {
-        self.active.and_then(|id| self.processes.get_mut(&id))
-    }
-
     pub fn suspend_process(&mut self, id: ProcessId) {
         self.queue.retain(|&pid| pid != id);
     }
 
-    pub fn notify_process(&mut self, id: ProcessId) {
-        if self.waiting.remove(&id) {
-            self.queue.push_back(id);
+    /// Notify a process that spawned a new process with the new PID
+    pub fn notify_spawn(&mut self, id: ProcessId, pid: Value) {
+        if self.awaiting.remove(&id) {
+            if let Some(process) = self.processes.get_mut(&id) {
+                // For spawn notifications, just push the PID onto the stack
+                // The counter was already incremented after the Spawn instruction
+                process.stack.push(pid);
+                self.queue.push_back(id);
+            }
         }
     }
 
-    pub fn mark_waiting(&mut self, id: ProcessId) {
-        self.waiting.insert(id);
+    /// Notify a process that was awaiting a result with the result value
+    pub fn notify_result(&mut self, id: ProcessId, result: Value) {
+        if self.awaiting.remove(&id) {
+            if let Some(process) = self.processes.get_mut(&id) {
+                // When awaiting on a PID, the stack has [parameter, pid]
+                // We need to pop both and push the result, then increment counter
+                process.stack.pop(); // Pop pid
+                process.stack.pop(); // Pop parameter (ignored for await)
+                process.stack.push(result);
+
+                // Increment counter to move past the Call instruction
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
+
+                self.queue.push_back(id);
+            }
+        }
+    }
+
+    pub fn notify_message(&mut self, id: ProcessId, message: Value) {
+        if let Some(process) = self.processes.get_mut(&id) {
+            process.mailbox.push_back(message);
+            if self.receiving.remove(&id) {
+                self.queue.push_back(id);
+            }
+        }
+    }
+
+    pub fn mark_receiving(&mut self, id: ProcessId) {
+        self.receiving.insert(id);
         self.queue.retain(|&pid| pid != id);
     }
 
-    pub fn terminate_process(&mut self, id: ProcessId) {
-        self.processes.remove(&id);
+    pub fn mark_awaiting(&mut self, id: ProcessId) {
+        self.awaiting.insert(id);
         self.queue.retain(|&pid| pid != id);
-        self.waiting.remove(&id);
     }
 
-    pub fn schedule_next(&mut self) -> Option<ProcessId> {
-        self.active = self.queue.pop_front();
-        self.active
-    }
-
-    pub fn set_active(&mut self, process_id: ProcessId) {
-        self.active = Some(process_id);
-    }
-
-    pub fn get_active(&self) -> Option<ProcessId> {
-        self.active
-    }
-
-    pub fn remove_from_queue(&mut self, process_id: ProcessId) {
-        self.queue.retain(|&pid| pid != process_id);
-    }
-
-    pub fn is_waiting(&self, process_id: ProcessId) -> bool {
-        self.waiting.contains(&process_id)
+    pub fn add_to_queue(&mut self, process_id: ProcessId) {
+        self.queue.push_back(process_id);
     }
 
     fn get_status(&self, id: ProcessId, process: &Process) -> ProcessStatus {
-        if self.active == Some(id) {
-            ProcessStatus::Running
-        } else if self.queue.contains(&id) {
-            ProcessStatus::Queued
-        } else if self.waiting.contains(&id) {
+        if self.queue.contains(&id) {
+            ProcessStatus::Active
+        } else if self.receiving.contains(&id) || self.awaiting.contains(&id) {
             ProcessStatus::Waiting
         } else if process.persistent {
             ProcessStatus::Sleeping
@@ -277,152 +255,183 @@ impl Executor {
         self.types.insert(type_id, info);
     }
 
-    /// Execute up to max_units instruction units across all ready processes.
-    /// Returns whether more work remains or all processes are idle.
-    pub fn step(
-        &mut self,
-        max_units: usize,
-        next_process_id: &AtomicUsize,
-    ) -> Result<StepResult, Error> {
+    /// Execute up to max_units instruction units for a single process.
+    /// Returns None to continue, or Some(request) for a routing request that needs to be handled by the scheduler.
+    pub fn step(&mut self, max_units: usize) -> Result<Option<Action>, Error> {
+        // Pop process from queue
+        let current_pid = match self.queue.pop_front() {
+            Some(pid) => pid,
+            None => return Ok(None),
+        };
+
         let mut units_executed = 0;
+        let mut pending_request = None;
 
-        loop {
-            // Check if we've exhausted our budget
-            if units_executed >= max_units {
-                return Ok(StepResult::Running);
-            }
-
-            let mut units_this_slice = 0;
-            let units_remaining = max_units - units_executed;
-            let slice_limit = TIME_SLICE_UNITS.min(units_remaining);
-
-            // Execute instructions for current process
-            while let Some(instruction) = self.get_current_instruction() {
-                let result = match instruction {
-                    Instruction::Constant(index) => self.handle_constant(index),
-                    Instruction::Pop => self.handle_pop(),
-                    Instruction::Duplicate => self.handle_duplicate(),
-                    Instruction::Over => self.handle_over(),
-                    Instruction::Swap => self.handle_swap(),
-                    Instruction::Load(index) => self.handle_load(index),
-                    Instruction::Store(index) => self.handle_store(index),
-                    Instruction::Tuple(type_id) => self.handle_tuple(type_id),
-                    Instruction::Get(index) => self.handle_get(index),
-                    Instruction::IsInteger => self.handle_is_integer(),
-                    Instruction::IsBinary => self.handle_is_binary(),
-                    Instruction::IsTuple(type_id) => self.handle_is_tuple(type_id),
-                    Instruction::Jump(offset) => Ok(self.handle_jump(offset)),
-                    Instruction::JumpIf(offset) => self.handle_jump_if(offset),
-                    Instruction::Call => self.handle_call(),
-                    Instruction::TailCall(recurse) => self.handle_tail_call(recurse),
-                    Instruction::Return => self.handle_return(),
-                    Instruction::Function(function_index) => self.handle_function(function_index),
-                    Instruction::Clear(count) => self.handle_clear(count),
-                    Instruction::Allocate(count) => self.handle_allocate(count),
-                    Instruction::Builtin(index) => self.handle_builtin(index),
-                    Instruction::Equal(count) => self.handle_equal(count),
-                    Instruction::Not => self.handle_not(),
-                    Instruction::Spawn => self.handle_spawn(next_process_id),
-                    Instruction::Send => self.handle_send(),
-                    Instruction::Self_ => self.handle_self(),
-                    Instruction::Receive => self.handle_receive(),
-                    Instruction::Acknowledge => self.handle_acknowledge(),
+        // Execute instructions for current process
+        while units_executed < max_units {
+            let instruction = {
+                let process = self
+                    .get_process(current_pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                let frame = match process.frames.last() {
+                    Some(f) => f,
+                    None => break, // Process finished
                 };
-                result?;
+                frame.instructions.get(frame.counter).cloned()
+            };
 
-                // Don't increment counter for Call/TailCall (they manage their own frames)
-                // or Receive/Call when process was marked waiting (so it re-executes when notified)
-                let should_increment =
-                    !matches!(instruction, Instruction::Call | Instruction::TailCall(_));
-                if should_increment {
-                    let current_pid = self.active;
+            let Some(instruction) = instruction else {
+                break; // No more instructions in current frame
+            };
 
-                    // If process was marked waiting by Receive, don't increment and break out
-                    let was_marked_waiting = if matches!(instruction, Instruction::Receive) {
-                        current_pid.map_or(false, |pid| self.waiting.contains(&pid))
+            let step_result = match instruction {
+                Instruction::Constant(index) => self.handle_constant(current_pid, index),
+                Instruction::Pop => self.handle_pop(current_pid),
+                Instruction::Duplicate => self.handle_duplicate(current_pid),
+                Instruction::Over => self.handle_over(current_pid),
+                Instruction::Swap => self.handle_swap(current_pid),
+                Instruction::Load(index) => self.handle_load(current_pid, index),
+                Instruction::Store(index) => self.handle_store(current_pid, index),
+                Instruction::Tuple(type_id) => self.handle_tuple(current_pid, type_id),
+                Instruction::Get(index) => self.handle_get(current_pid, index),
+                Instruction::IsInteger => self.handle_is_integer(current_pid),
+                Instruction::IsBinary => self.handle_is_binary(current_pid),
+                Instruction::IsTuple(type_id) => self.handle_is_tuple(current_pid, type_id),
+                Instruction::Jump(offset) => self.handle_jump(current_pid, offset),
+                Instruction::JumpIf(offset) => self.handle_jump_if(current_pid, offset),
+                Instruction::Call => self.handle_call(current_pid),
+                Instruction::TailCall(recurse) => self.handle_tail_call(current_pid, recurse),
+                Instruction::Return => self.handle_return(current_pid),
+                Instruction::Function(function_index) => {
+                    self.handle_function(current_pid, function_index)
+                }
+                Instruction::Clear(count) => self.handle_clear(current_pid, count),
+                Instruction::Allocate(count) => self.handle_allocate(current_pid, count),
+                Instruction::Builtin(index) => self.handle_builtin(current_pid, index),
+                Instruction::Equal(count) => self.handle_equal(current_pid, count),
+                Instruction::Not => self.handle_not(current_pid),
+                Instruction::Spawn => self.handle_spawn(current_pid),
+                Instruction::Send => self.handle_send(current_pid),
+                Instruction::Self_ => self.handle_self(current_pid),
+                Instruction::Receive => self.handle_receive(current_pid),
+                Instruction::Acknowledge => self.handle_acknowledge(current_pid),
+            };
+
+            // Handle instruction result
+            match step_result {
+                Ok(request) => {
+                    // Store routing request if present
+                    if request.is_some() {
+                        pending_request = request;
+                    }
+                }
+                Err(error) => {
+                    // Clear frames to terminate current execution
+                    // The error will be returned from step() so the scheduler can handle it
+                    if let Some(process) = self.get_process_mut(current_pid) {
+                        process.frames.clear();
+                        // For non-persistent processes, ensure there's a result
+                        // (even if it's nil) so the process can be collected
+                        if !process.persistent {
+                            process.stack.clear();
+                            process.stack.push(Value::nil());
+                            process.result = Some(Value::nil());
+                        }
+                        // For persistent processes: leave stack/result as-is
+                        // This will cause "Process has no result" error which at least
+                        // indicates something went wrong (proper error handling would require
+                        // adding an error field to Process struct)
+                    }
+                    // Return the error so the scheduler can handle it
+                    return Err(error);
+                }
+            }
+
+            // Increment instruction counter unless instruction manages it itself
+            // This must happen BEFORE checking if process yielded, so that when
+            // the process resumes, it continues from the next instruction
+            // Receive is excluded because it only increments if it successfully retrieves a message
+            let should_increment = !matches!(
+                instruction,
+                Instruction::Call | Instruction::TailCall(_) | Instruction::Receive
+            );
+            if should_increment {
+                if let Some(process) = self.get_process_mut(current_pid) {
+                    if let Some(frame) = process.frames.last_mut() {
+                        frame.counter += 1;
+                    }
+                }
+            }
+
+            // Check if process should yield (moved to receiving or awaiting, or has pending request)
+            // Pending request check ensures only ONE routing request per step
+            if self.receiving.contains(&current_pid)
+                || self.awaiting.contains(&current_pid)
+                || pending_request.is_some()
+            {
+                break;
+            }
+
+            units_executed += 1;
+        }
+
+        // Handle process completion or re-queueing
+        // Process should be re-queued if:
+        // 1. It didn't yield, AND it's not waiting (receiving/awaiting), OR
+        // 2. It yielded due to pending_routing, but it's NOT waiting (e.g., after Send)
+        let should_requeue =
+            !self.receiving.contains(&current_pid) && !self.awaiting.contains(&current_pid);
+
+        if should_requeue {
+            // Auto-pop any exhausted frames before checking if process is finished
+            if let Some(process) = self.get_process_mut(current_pid) {
+                while let Some(frame) = process.frames.last() {
+                    if frame.counter >= frame.instructions.len() {
+                        // Frame exhausted - pop it without stack manipulation
+                        // (the result is already on the stack from the last instruction)
+                        let frame = process.frames.pop().unwrap();
+
+                        // Clear locals from the popped frame
+                        // BUT: for persistent processes, keep locals so variables persist across evaluations
+                        if !process.persistent {
+                            let locals_to_clear = process
+                                .locals
+                                .len()
+                                .saturating_sub(frame.locals_base + frame.captures_count);
+                            if locals_to_clear > 0 {
+                                process
+                                    .locals
+                                    .truncate(process.locals.len() - locals_to_clear);
+                            }
+                        }
                     } else {
-                        false
-                    };
-
-                    if was_marked_waiting {
-                        // Break out of instruction loop so scheduler can switch processes
-                        break;
-                    } else if let Some(process) = self.get_current_process_mut() {
-                        if let Some(frame) = process.frames.last_mut() {
-                            frame.counter += 1;
-                        }
-                    }
-                } else {
-                    // For Call instruction, check if process was marked waiting (awaiting a process)
-                    if matches!(instruction, Instruction::Call) {
-                        let current_pid = self.active;
-                        let was_marked_waiting =
-                            current_pid.map_or(false, |pid| self.waiting.contains(&pid));
-
-                        if was_marked_waiting {
-                            // Break out of instruction loop so scheduler can switch processes
-                            break;
-                        }
-                    }
-                }
-
-                // Track instruction units consumed
-                units_this_slice += 1;
-                units_executed += 1;
-
-                // Yield to other processes if time slice exhausted
-                if units_this_slice >= slice_limit {
-                    if !self.queue.is_empty() {
-                        if let Some(pid) = self.active {
-                            self.queue.push_back(pid);
-                        }
                         break;
                     }
                 }
             }
 
-            // Current process finished its instructions (or is waiting)
-            let current_pid = self.active;
+            let process = self.get_process(current_pid);
+            let finished = process.map(|p| p.frames.is_empty()).unwrap_or(false);
 
-            // Store result and notify awaiters when process finishes (frames are empty)
-            if let Some(pid) = current_pid {
-                let should_store_result = self
-                    .get_process(pid)
-                    .map(|p| p.frames.is_empty() && p.result.is_none())
-                    .unwrap_or(false);
-
-                if should_store_result {
-                    if let Some(process) = self.get_process_mut(pid) {
+            if finished {
+                // Store result
+                if let Some(process) = self.get_process_mut(current_pid) {
+                    if process.result.is_none() {
                         process.result = process.stack.last().cloned();
-                        let result = process.result.clone().unwrap_or(Value::nil());
-                        let awaiters = std::mem::take(&mut process.awaiters);
-                        for waiter in awaiters {
-                            self.notify_process(waiter);
-                        }
-                        // Notify runtime about process completion for cross-executor awaiters
-                        if let Some(router) = &self.router {
-                            router.notify_process_finished(pid, result);
-                        }
                     }
                 }
-            }
-
-            // Schedule next process from run queue
-            if self.schedule_next().is_none() {
-                // No more processes ready - clear active and return idle
-                self.active = None;
-                return Ok(StepResult::Idle);
+            } else {
+                // Process not finished - re-queue it so it can continue
+                // This handles both: time slice exhaustion AND yielding after routing (e.g., Send)
+                self.queue.push_back(current_pid);
             }
         }
+
+        // Return pending routing request if one was set, otherwise None
+        Ok(pending_request)
     }
 
-    fn get_current_instruction(&self) -> Option<Instruction> {
-        let process = self.get_current_process()?;
-        let frame = process.frames.last()?;
-        frame.instructions.get(frame.counter).cloned()
-    }
-
-    fn handle_constant(&mut self, index: usize) -> Result<(), Error> {
+    fn handle_constant(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
         let constant = self
             .get_constant(index)
             .ok_or(Error::ConstantUndefined(index))?;
@@ -432,33 +441,33 @@ impl Executor {
         };
 
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         process.stack.push(value);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_pop(&mut self) -> Result<(), Error> {
+    fn handle_pop(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         process.stack.pop().ok_or(Error::StackUnderflow)?;
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_duplicate(&mut self) -> Result<(), Error> {
+    fn handle_duplicate(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         let value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
         process.stack.push(value);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_over(&mut self) -> Result<(), Error> {
+    fn handle_over(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         if process.stack.len() < 2 {
             return Err(Error::StackUnderflow);
@@ -466,26 +475,26 @@ impl Executor {
         let index = process.stack.len() - 2;
         let value = process.stack[index].clone();
         process.stack.push(value);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_swap(&mut self) -> Result<(), Error> {
+    fn handle_swap(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let len = process.stack.len();
         if len < 2 {
             return Err(Error::StackUnderflow);
         }
         process.stack.swap(len - 1, len - 2);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_load(&mut self, index: usize) -> Result<(), Error> {
+    fn handle_load(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
         let actual_index = frame.locals_base + index;
@@ -497,13 +506,13 @@ impl Executor {
             .clone();
 
         process.stack.push(value);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_store(&mut self, index: usize) -> Result<(), Error> {
+    fn handle_store(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
         let actual_index = frame.locals_base + index;
@@ -515,10 +524,10 @@ impl Executor {
         }
 
         process.locals[actual_index] = value;
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_tuple(&mut self, type_id: TypeId) -> Result<(), Error> {
+    fn handle_tuple(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
         let (_, fields) = self
             .lookup_type(&type_id)
             .ok_or_else(|| Error::TypeMismatch {
@@ -528,8 +537,8 @@ impl Executor {
         let size = fields.len();
 
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let mut values = Vec::new();
         for _ in 0..size {
@@ -538,13 +547,13 @@ impl Executor {
         }
         values.reverse();
         process.stack.push(Value::Tuple(type_id, values));
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_get(&mut self, index: usize) -> Result<(), Error> {
+    fn handle_get(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -555,7 +564,7 @@ impl Executor {
                     .ok_or(Error::FieldAccessInvalid(index))?
                     .clone();
                 process.stack.push(element);
-                Ok(())
+                Ok(None)
             }
             _ => Err(Error::TypeMismatch {
                 expected: "tuple".to_string(),
@@ -564,10 +573,10 @@ impl Executor {
         }
     }
 
-    fn handle_is_integer(&mut self) -> Result<(), Error> {
+    fn handle_is_integer(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -578,13 +587,13 @@ impl Executor {
         };
 
         process.stack.push(result);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_is_binary(&mut self) -> Result<(), Error> {
+    fn handle_is_binary(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -595,13 +604,17 @@ impl Executor {
         };
 
         process.stack.push(result);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_is_tuple(&mut self, type_id: TypeId) -> Result<(), Error> {
+    fn handle_is_tuple(
+        &mut self,
+        pid: ProcessId,
+        type_id: TypeId,
+    ) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -620,27 +633,28 @@ impl Executor {
         };
 
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process
             .stack
             .push(if is_match { Value::ok() } else { Value::nil() });
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_jump(&mut self, offset: isize) {
-        if let Some(process) = self.get_current_process_mut() {
+    fn handle_jump(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action>, Error> {
+        if let Some(process) = self.get_process_mut(pid) {
             if let Some(frame) = process.frames.last_mut() {
                 frame.counter = frame.counter.wrapping_add_signed(offset);
             }
         }
+        Ok(None)
     }
 
-    fn handle_jump_if(&mut self, offset: isize) -> Result<(), Error> {
+    fn handle_jump_if(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let condition = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -655,14 +669,14 @@ impl Executor {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_call(&mut self) -> Result<(), Error> {
+    fn handle_call(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let function_value = {
             let process = self
-                .get_current_process_mut()
-                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
             process.stack.last().ok_or(Error::StackUnderflow)?.clone()
         };
 
@@ -676,8 +690,8 @@ impl Executor {
 
                 // Now modify process
                 let process = self
-                    .get_current_process_mut()
-                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                    .get_process_mut(pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
                 // Pop function and parameter
                 process.stack.pop();
@@ -692,14 +706,14 @@ impl Executor {
                     .frames
                     .push(Frame::new(instructions, locals_base, captures_count));
 
-                Ok(())
+                Ok(None)
             }
             Value::Builtin(name) => {
                 // Pop function and parameter
                 let parameter = {
                     let process = self
-                        .get_current_process_mut()
-                        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                        .get_process_mut(pid)
+                        .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
                     process.stack.pop(); // Pop function
                     process.stack.pop().ok_or(Error::StackUnderflow)?
                 };
@@ -711,8 +725,8 @@ impl Executor {
                 let result = builtin(&parameter, self)?;
 
                 let process = self
-                    .get_current_process_mut()
-                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                    .get_process_mut(pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
                 process.stack.push(result);
 
@@ -722,81 +736,18 @@ impl Executor {
                     frame.counter += 1;
                 }
 
-                Ok(())
+                Ok(None)
             }
             Value::Pid(target_pid) => {
-                let current_pid = self
-                    .active
-                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                // Mark caller as awaiting result
+                self.mark_awaiting(pid);
 
-                // Check if target process is on this executor (fast path)
-                if let Some(target) = self.get_process(target_pid) {
-                    if let Some(result) = &target.result {
-                        // Process has finished - pop values and return result
-                        let result = result.clone();
-
-                        let process = self
-                            .get_current_process_mut()
-                            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-                        process.stack.pop(); // Pop pid
-                        process.stack.pop(); // Pop parameter (ignored)
-                        process.stack.push(result);
-
-                        // Increment counter to continue
-                        if let Some(frame) = process.frames.last_mut() {
-                            frame.counter += 1;
-                        }
-
-                        Ok(())
-                    } else {
-                        // Process still running - block until it finishes without popping
-                        let target =
-                            self.get_process_mut(target_pid)
-                                .ok_or(Error::InvalidArgument(format!(
-                                    "Process {:?} not found",
-                                    target_pid
-                                )))?;
-
-                        target.awaiters.push(current_pid);
-                        self.mark_waiting(current_pid);
-
-                        // Don't increment counter - will retry when notified
-                        Ok(())
-                    }
-                } else if let Some(router) = &self.router {
-                    // Target process is on another executor - use router
-                    if let Some(result) = router.query_process_result(target_pid) {
-                        // Remote process has finished
-                        let process = self
-                            .get_current_process_mut()
-                            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-                        process.stack.pop(); // Pop pid
-                        process.stack.pop(); // Pop parameter (ignored)
-                        process.stack.push(result);
-
-                        // Increment counter to continue
-                        if let Some(frame) = process.frames.last_mut() {
-                            frame.counter += 1;
-                        }
-
-                        Ok(())
-                    } else {
-                        // Remote process still running - register as cross-executor awaiter
-                        router.register_cross_executor_awaiter(target_pid, current_pid);
-                        self.mark_waiting(current_pid);
-
-                        // Don't increment counter - will retry when notified
-                        Ok(())
-                    }
-                } else {
-                    // Process not found and no router available
-                    Err(Error::InvalidArgument(format!(
-                        "Process {:?} not found",
-                        target_pid
-                    )))
-                }
+                // Return routing request for scheduler to handle
+                // Don't increment counter - will be incremented when notified
+                Ok(Some(Action::AwaitResult {
+                    target: target_pid,
+                    caller: pid,
+                }))
             }
             _ => Err(Error::TypeMismatch {
                 expected: "function".to_string(),
@@ -805,11 +756,15 @@ impl Executor {
         }
     }
 
-    fn handle_tail_call(&mut self, recurse: bool) -> Result<(), Error> {
+    fn handle_tail_call(
+        &mut self,
+        pid: ProcessId,
+        recurse: bool,
+    ) -> Result<Option<Action>, Error> {
         if recurse {
             let process = self
-                .get_current_process_mut()
-                .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
             let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
             let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
@@ -823,12 +778,12 @@ impl Executor {
             process.stack.push(argument);
             *process.frames.last_mut().unwrap() =
                 Frame::new(instructions, locals_base, captures_count);
-            Ok(())
+            Ok(None)
         } else {
             let (function_value, argument) = {
                 let process = self
-                    .get_current_process_mut()
-                    .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                    .get_process_mut(pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
                 let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
                 let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
                 (function_value, argument)
@@ -842,8 +797,8 @@ impl Executor {
                     let instructions = func.instructions.clone();
 
                     let process = self
-                        .get_current_process_mut()
-                        .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+                        .get_process_mut(pid)
+                        .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
                     let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
                     let locals_base = frame.locals_base;
@@ -858,17 +813,17 @@ impl Executor {
                     process.stack.push(argument);
                     *process.frames.last_mut().unwrap() =
                         Frame::new(instructions, locals_base, captures_count);
-                    Ok(())
+                    Ok(None)
                 }
                 _ => Err(Error::CallInvalid),
             }
         }
     }
 
-    fn handle_return(&mut self) -> Result<(), Error> {
+    fn handle_return(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let return_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -883,17 +838,21 @@ impl Executor {
 
         process.stack.push(return_value);
 
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_function(&mut self, function_index: usize) -> Result<(), Error> {
+    fn handle_function(
+        &mut self,
+        pid: ProcessId,
+        function_index: usize,
+    ) -> Result<Option<Action>, Error> {
         let func = self
             .get_function(function_index)
             .ok_or(Error::FunctionUndefined(function_index))?;
         let capture_locals = func.captures.clone();
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
         let locals_base = frame.locals_base;
@@ -913,49 +872,49 @@ impl Executor {
         let function_value = Value::Function(function_index, captures);
         process.stack.push(function_value);
 
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_clear(&mut self, count: usize) -> Result<(), Error> {
+    fn handle_clear(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         if count > process.locals.len() {
             return Err(Error::StackUnderflow);
         }
         process.locals.truncate(process.locals.len() - count);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_allocate(&mut self, count: usize) -> Result<(), Error> {
+    fn handle_allocate(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process
             .locals
             .extend(std::iter::repeat(Value::nil()).take(count));
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_builtin(&mut self, index: usize) -> Result<(), Error> {
+    fn handle_builtin(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
         let builtin_name = self
             .get_builtin(index)
             .ok_or(Error::BuiltinUndefined(index))?
             .clone();
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process.stack.push(Value::Builtin(builtin_name));
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_equal(&mut self, count: usize) -> Result<(), Error> {
+    fn handle_equal(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let values = {
             if count > process.stack.len() {
@@ -980,17 +939,17 @@ impl Executor {
         };
 
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process.stack.push(result);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_not(&mut self) -> Result<(), Error> {
+    fn handle_not(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -1006,13 +965,13 @@ impl Executor {
         };
 
         process.stack.push(result);
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_spawn(&mut self, next_process_id: &AtomicUsize) -> Result<(), Error> {
+    fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -1026,45 +985,27 @@ impl Executor {
             }
         };
 
-        let func = self
-            .get_function(function_index)
-            .ok_or(Error::FunctionUndefined(function_index))?;
-        let instructions = func.instructions.clone();
+        // Mark caller as awaiting - will be notified with Value::Pid(new_pid)
+        self.mark_awaiting(pid);
 
-        let new_pid = ProcessId(next_process_id.fetch_add(1, Ordering::SeqCst));
-
-        self.spawn_process(new_pid, false);
-
-        let new_process = self.get_process_mut(new_pid).ok_or(Error::InvalidArgument(
-            "Failed to create process".to_string(),
-        ))?;
-
-        let captures_count = captures.len();
-        new_process.stack.push(Value::nil());
-        new_process.locals.extend(captures);
-        new_process
-            .frames
-            .push(Frame::new(instructions, 0, captures_count));
-
-        let calling_process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
-        calling_process.stack.push(Value::Pid(new_pid));
-
-        Ok(())
+        // Return routing request for scheduler to handle
+        Ok(Some(Action::Spawn {
+            caller: pid,
+            function_index,
+            captures,
+        }))
     }
 
-    fn handle_send(&mut self) -> Result<(), Error> {
+    fn handle_send(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let pid_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
         let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
         let target_pid = match pid_value {
-            Value::Pid(pid) => pid,
+            Value::Pid(target) => target,
             _ => {
                 return Err(Error::TypeMismatch {
                     expected: "pid".to_string(),
@@ -1073,73 +1014,62 @@ impl Executor {
             }
         };
 
-        // Check if target process is on this executor (fast path)
-        if let Some(target_process) = self.get_process_mut(target_pid) {
-            target_process.mailbox.push_back(message);
-            self.notify_process(target_pid);
-        } else if let Some(router) = &self.router {
-            // Target process is on another executor - use router
-            router.send_message(target_pid, message);
-        } else {
-            return Err(Error::InvalidArgument(format!(
-                "Process {:?} not found",
-                target_pid
-            )));
-        }
-
+        // Push ok onto stack before returning routing request
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         process.stack.push(Value::ok());
-        Ok(())
+
+        // Return routing request for scheduler to handle
+        Ok(Some(Action::Deliver {
+            target: target_pid,
+            value: message,
+        }))
     }
 
-    fn handle_self(&mut self) -> Result<(), Error> {
-        let current_pid = self
-            .active
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
+    fn handle_self(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        process.stack.push(Value::Pid(current_pid));
-        Ok(())
+        process.stack.push(Value::Pid(pid));
+        Ok(None)
     }
 
-    fn handle_receive(&mut self) -> Result<(), Error> {
-        let current_pid = self
-            .active
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
-
+    fn handle_receive(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_process_mut(current_pid)
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let cursor = process.cursor;
         if cursor < process.mailbox.len() {
             let message = process.mailbox[cursor].clone();
             process.cursor = cursor + 1;
             process.stack.push(message);
+
+            // Increment counter to move past the Receive instruction
+            if let Some(frame) = process.frames.last_mut() {
+                frame.counter += 1;
+            }
         } else {
-            self.mark_waiting(current_pid);
+            self.mark_receiving(pid);
+            // Don't increment counter - will retry Receive when a message arrives
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    fn handle_acknowledge(&mut self) -> Result<(), Error> {
+    fn handle_acknowledge(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
         let process = self
-            .get_current_process_mut()
-            .ok_or(Error::InvalidArgument("No current process".to_string()))?;
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let cursor = process.cursor;
         if 0 < cursor && cursor - 1 < process.mailbox.len() {
             process.mailbox.remove(cursor - 1);
         }
         process.cursor = 0;
-        Ok(())
+        Ok(None)
     }
 
     fn values_equal(&self, a: &Value, b: &Value) -> bool {
@@ -1170,6 +1100,119 @@ impl Executor {
             (Value::Builtin(a), Value::Builtin(b)) => a == b,
             (Value::Pid(a), Value::Pid(b)) => a == b,
             _ => false,
+        }
+    }
+
+    /// Extract heap data from a value for cross-executor transfer.
+    /// Returns the value with heap indices remapped to 0..n and the extracted heap data.
+    pub fn extract_heap_data(&self, value: &Value) -> Result<(Value, Vec<Vec<u8>>), Error> {
+        let mut heap_data = Vec::new();
+        let mut heap_map = HashMap::new();
+        let converted = self.extract_value_recursive(value, &mut heap_data, &mut heap_map)?;
+        Ok((converted, heap_data))
+    }
+
+    fn extract_value_recursive(
+        &self,
+        value: &Value,
+        heap_data: &mut Vec<Vec<u8>>,
+        heap_map: &mut HashMap<usize, usize>,
+    ) -> Result<Value, Error> {
+        match value {
+            Value::Binary(Binary::Heap(heap_index)) => {
+                // Check if we've already extracted this heap entry
+                if let Some(&new_index) = heap_map.get(heap_index) {
+                    return Ok(Value::Binary(Binary::Heap(new_index)));
+                }
+
+                // Read the binary data from heap
+                let bytes = self.get_binary_bytes(&Binary::Heap(*heap_index))?;
+
+                // Add to extracted heap data with new index
+                let new_index = heap_data.len();
+                heap_data.push(bytes);
+                heap_map.insert(*heap_index, new_index);
+
+                Ok(Value::Binary(Binary::Heap(new_index)))
+            }
+            Value::Binary(Binary::Constant(_)) => {
+                // Constants don't need extraction
+                Ok(value.clone())
+            }
+            Value::Tuple(type_id, elements) => {
+                // Recursively extract from all tuple elements
+                let converted_elements = elements
+                    .iter()
+                    .map(|elem| self.extract_value_recursive(elem, heap_data, heap_map))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Tuple(*type_id, converted_elements))
+            }
+            Value::Function(func_index, captures) => {
+                // Recursively extract from all captures
+                let converted_captures = captures
+                    .iter()
+                    .map(|cap| self.extract_value_recursive(cap, heap_data, heap_map))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Function(*func_index, converted_captures))
+            }
+            // Other value types don't contain heap references
+            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_) => Ok(value.clone()),
+        }
+    }
+
+    /// Inject heap data into this executor and remap heap indices in the value.
+    pub fn inject_heap_data(
+        &mut self,
+        value: Value,
+        heap_data: &[Vec<u8>],
+    ) -> Result<Value, Error> {
+        // Allocate all heap entries and build remap table
+        let mut remap = HashMap::new();
+        for (old_index, bytes) in heap_data.iter().enumerate() {
+            let new_index = self.heap.len();
+            self.heap.push(bytes.clone());
+            remap.insert(old_index, new_index);
+        }
+
+        // Remap heap indices in the value
+        self.inject_value_recursive(value, &remap)
+    }
+
+    fn inject_value_recursive(
+        &self,
+        value: Value,
+        remap: &HashMap<usize, usize>,
+    ) -> Result<Value, Error> {
+        match value {
+            Value::Binary(Binary::Heap(old_index)) => {
+                // Remap to new heap index
+                let new_index = remap.get(&old_index).copied().ok_or_else(|| {
+                    Error::InvalidArgument(format!("Heap index {} not in remap table", old_index))
+                })?;
+                Ok(Value::Binary(Binary::Heap(new_index)))
+            }
+            Value::Binary(Binary::Constant(_)) => {
+                // Constants don't need remapping
+                Ok(value)
+            }
+            Value::Tuple(type_id, elements) => {
+                // Recursively remap all tuple elements
+                let remapped_elements = elements
+                    .into_iter()
+                    .map(|elem| self.inject_value_recursive(elem, remap))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Tuple(type_id, remapped_elements))
+            }
+            Value::Function(func_index, captures) => {
+                // Recursively remap all captures
+                let remapped_captures = captures
+                    .into_iter()
+                    .map(|cap| self.inject_value_recursive(cap, remap))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Function(func_index, remapped_captures))
+            }
+            // Other value types don't contain heap references
+            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_) => Ok(value),
         }
     }
 }

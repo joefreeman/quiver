@@ -107,6 +107,15 @@ impl Program {
         }
     }
 
+    /// Register a constant at a specific index, expanding the vector if necessary.
+    /// Used for syncing constants from executor threads back to the main program.
+    pub fn register_constant_at(&mut self, index: usize, constant: Constant) {
+        if index >= self.constants.len() {
+            self.constants.resize(index + 1, Constant::Integer(0));
+        }
+        self.constants[index] = constant;
+    }
+
     pub fn get_constants(&self) -> &Vec<Constant> {
         &self.constants
     }
