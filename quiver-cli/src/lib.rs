@@ -25,8 +25,9 @@ use std::rc::Rc;
 
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{
-    Compiler, FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader, format, parse,
+    Compiler, FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader, parse,
 };
+use quiver_core::format;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
 use quiver_core::value::Value;

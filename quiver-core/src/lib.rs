@@ -3,6 +3,7 @@ pub mod bytecode;
 pub mod error;
 pub mod execute;
 pub mod executor;
+pub mod format;
 pub mod process;
 pub mod program;
 pub mod types;

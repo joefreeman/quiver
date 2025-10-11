@@ -1,6 +1,5 @@
 pub mod ast;
 pub mod compiler;
-pub mod format;
 pub mod modules;
 pub mod parser;
 

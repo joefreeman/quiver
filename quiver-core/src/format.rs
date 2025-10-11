@@ -1,7 +1,7 @@
-use quiver_core::bytecode::Constant;
-use quiver_core::error::Error;
-use quiver_core::types::{Type, TypeLookup};
-use quiver_core::value::{Binary, Value};
+use crate::bytecode::Constant;
+use crate::error::Error;
+use crate::types::{Type, TypeLookup};
+use crate::value::{Binary, Value};
 
 /// Helper function to format bytes as a string if they represent valid UTF-8 text
 fn try_format_as_string(bytes: &[u8]) -> Option<String> {

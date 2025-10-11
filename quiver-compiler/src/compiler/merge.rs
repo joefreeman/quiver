@@ -13,7 +13,7 @@ impl<'a> Compiler<'a> {
         if source_type_ids.is_empty() {
             return Err(Error::TypeMismatch {
                 expected: "tuple".to_string(),
-                found: crate::format::format_type(&self.program, &source_type),
+                found: quiver_core::format::format_type(&self.program, &source_type),
             });
         }
 

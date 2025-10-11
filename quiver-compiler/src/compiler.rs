@@ -1465,7 +1465,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     Err(Error::TypeMismatch {
                         expected: "process".to_string(),
-                        found: crate::format::format_type(&self.program, &val_type),
+                        found: quiver_core::format::format_type(&self.program, &val_type),
                     })
                 }
             }
@@ -1535,9 +1535,9 @@ impl<'a> Compiler<'a> {
                     return Err(Error::TypeMismatch {
                         expected: format!(
                             "function parameter compatible with {}",
-                            crate::format::format_type(&self.program, &func_type.parameter)
+                            quiver_core::format::format_type(&self.program, &func_type.parameter)
                         ),
-                        found: crate::format::format_type(&self.program, &value_type),
+                        found: quiver_core::format::format_type(&self.program, &value_type),
                     });
                 }
 
@@ -1555,7 +1555,10 @@ impl<'a> Compiler<'a> {
                                 expected: "function without receive type".to_string(),
                                 found: format!(
                                     "function with receive type {}",
-                                    crate::format::format_type(&self.program, called_receive_type)
+                                    quiver_core::format::format_type(
+                                        &self.program,
+                                        called_receive_type
+                                    )
                                 ),
                             });
                         }
@@ -1567,14 +1570,17 @@ impl<'a> Compiler<'a> {
                         return Err(Error::TypeMismatch {
                             expected: format!(
                                 "function with receive type compatible with {}",
-                                crate::format::format_type(
+                                quiver_core::format::format_type(
                                     &self.program,
                                     &self.current_receive_type
                                 )
                             ),
                             found: format!(
                                 "function with receive type {}",
-                                crate::format::format_type(&self.program, called_receive_type)
+                                quiver_core::format::format_type(
+                                    &self.program,
+                                    called_receive_type
+                                )
                             ),
                         });
                     }
@@ -1598,8 +1604,11 @@ impl<'a> Compiler<'a> {
                     }
                     if !value_type.is_compatible(expected_msg_type, &self.program) {
                         return Err(Error::TypeMismatch {
-                            expected: crate::format::format_type(&self.program, expected_msg_type),
-                            found: crate::format::format_type(&self.program, &value_type),
+                            expected: quiver_core::format::format_type(
+                                &self.program,
+                                expected_msg_type,
+                            ),
+                            found: quiver_core::format::format_type(&self.program, &value_type),
                         });
                     }
                 } else {
@@ -1617,7 +1626,7 @@ impl<'a> Compiler<'a> {
             }
             _ => Err(Error::TypeMismatch {
                 expected: "function or process".to_string(),
-                found: crate::format::format_type(&self.program, &target_type),
+                found: quiver_core::format::format_type(&self.program, &target_type),
             }),
         }
     }
@@ -1674,7 +1683,7 @@ impl<'a> Compiler<'a> {
                 }
                 other_type => Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: crate::format::format_type(&self.program, &other_type),
+                    found: quiver_core::format::format_type(&self.program, &other_type),
                 }),
             }
         }

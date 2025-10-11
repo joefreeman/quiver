@@ -129,7 +129,7 @@ fn handle_result(
                 let constants = runtime.program().get_constants();
                 println!(
                     "{}",
-                    quiver_compiler::format::format_value(
+                    quiver_core::format::format_value(
                         &value,
                         &heap_data,
                         constants,
@@ -317,7 +317,7 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
             println!(
                 "  {}: {}",
                 type_id.0,
-                quiver_compiler::format::format_type(&program, &Type::Tuple(*type_id))
+                quiver_core::format::format_type(&program, &Type::Tuple(*type_id))
             );
         }
     }

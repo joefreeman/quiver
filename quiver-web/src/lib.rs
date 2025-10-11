@@ -1,5 +1,6 @@
 use quiver_compiler::compiler::ModuleCache;
-use quiver_compiler::{Compiler, InMemoryModuleLoader, format, parse};
+use quiver_compiler::{Compiler, InMemoryModuleLoader, parse};
+use quiver_core::format;
 use quiver_core::Executor;
 use quiver_core::process::{Action, ProcessId, ProcessStatus};
 use quiver_core::program::Program;
