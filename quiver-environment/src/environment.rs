@@ -396,6 +396,31 @@ impl<R: Runtime> Environment<R> {
 
     fn process_event(&mut self, event: Event) {
         match event {
+            Event::ExecuteResponse { request_id, result } => {
+                self.handle_execute_response(request_id, result);
+            }
+            Event::WakeResponse { request_id, result } => {
+                self.handle_wake_response(request_id, result);
+            }
+            Event::GetResultResponse {
+                request_id,
+                result,
+                heap_data,
+            } => {
+                self.handle_get_result_response(request_id, result, heap_data);
+            }
+            Event::GetProcessesResponse { request_id, result } => {
+                self.handle_get_processes_response(request_id, result);
+            }
+            Event::GetProcessResponse { request_id, result } => {
+                self.handle_get_process_response(request_id, result);
+            }
+            Event::GetLocalsResponse { request_id, result } => {
+                self.handle_get_locals_response(request_id, result);
+            }
+            Event::CompactLocalsResponse { request_id, result } => {
+                self.handle_compact_locals_response(request_id, result);
+            }
             Event::SpawnRequested {
                 caller,
                 function_index,
@@ -421,112 +446,144 @@ impl<R: Runtime> Environment<R> {
             } => {
                 self.handle_process_completed(process_id, result, heap_data);
             }
-            _ => {
-                let request_id = match &event {
-                    Event::ExecuteResponse { request_id, .. } => *request_id,
-                    Event::WakeResponse { request_id, .. } => *request_id,
-                    Event::GetProcessesResponse { request_id, .. } => *request_id,
-                    Event::GetProcessResponse { request_id, .. } => *request_id,
-                    Event::GetLocalsResponse { request_id, .. } => *request_id,
-                    Event::GetResultResponse { request_id, .. } => *request_id,
-                    Event::CompactLocalsResponse { request_id, .. } => *request_id,
-                    _ => return,
-                };
+        }
+    }
 
-                if let Some(awaiter_pid) = self.awaiting_result_requests.remove(&request_id) {
-                    if let Event::GetResultResponse {
-                        result, heap_data, ..
-                    } = event
-                    {
-                        match result {
-                            Ok(value) => {
-                                if let Some(&awaiter_executor_id) =
-                                    self.process_registry.get(&awaiter_pid)
-                                {
-                                    let _ = self.runtime.send_command(
-                                        awaiter_executor_id,
-                                        SchedulerCommand::NotifyResult {
-                                            process_id: awaiter_pid,
-                                            result: value,
-                                            heap_data,
-                                        },
-                                    );
-                                }
-                                let mut target_to_remove = None;
-                                for (target_pid, awaiters) in self.awaiting_map.iter_mut() {
-                                    if let Some(pos) =
-                                        awaiters.iter().position(|&pid| pid == awaiter_pid)
-                                    {
-                                        awaiters.remove(pos);
-                                        if awaiters.is_empty() {
-                                            target_to_remove = Some(*target_pid);
-                                        }
-                                        break;
-                                    }
-                                }
-                                if let Some(target_pid) = target_to_remove {
-                                    self.awaiting_map.remove(&target_pid);
-                                }
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                    return;
-                }
+    fn handle_execute_response(&mut self, request_id: u64, result: Result<ProcessId, Error>) {
+        if let Some(PendingCallback::Execute(callback, _executor_id)) =
+            self.pending_callbacks.remove(&request_id)
+        {
+            callback(result);
+        } else {
+            eprintln!(
+                "Warning: No pending Execute callback for request {}",
+                request_id
+            );
+        }
+    }
 
-                if let Some(pending) = self.pending_callbacks.remove(&request_id) {
-                    match (pending, event) {
-                        (
-                            PendingCallback::Execute(callback, _executor_id),
-                            Event::ExecuteResponse { result, .. },
-                        ) => {
-                            callback(result);
-                        }
-                        (PendingCallback::Wake(callback), Event::WakeResponse { result, .. }) => {
-                            callback(result);
-                        }
-                        (
-                            PendingCallback::GetResult(callback),
-                            Event::GetResultResponse {
-                                result, heap_data, ..
-                            },
-                        ) => {
-                            let result_with_heap = result.map(|value| (value, heap_data));
-                            callback(result_with_heap);
-                        }
-                        (
-                            PendingCallback::GetProcessStatuses(callback),
-                            Event::GetProcessesResponse { result, .. },
-                        ) => {
-                            callback(result);
-                        }
-                        (
-                            PendingCallback::GetProcessInfo(callback),
-                            Event::GetProcessResponse { result, .. },
-                        ) => {
-                            callback(result);
-                        }
-                        (
-                            PendingCallback::GetLocals(callback),
-                            Event::GetLocalsResponse { result, .. },
-                        ) => {
-                            callback(result);
-                        }
-                        (
-                            PendingCallback::CompactLocals(callback),
-                            Event::CompactLocalsResponse { result, .. },
-                        ) => {
-                            callback(result);
-                        }
-                        _ => {
-                            eprintln!(
-                                "Warning: Mismatched response/callback types for request {}",
-                                request_id
-                            );
-                        }
-                    }
+    fn handle_wake_response(&mut self, request_id: u64, result: Result<(), Error>) {
+        if let Some(PendingCallback::Wake(callback)) = self.pending_callbacks.remove(&request_id) {
+            callback(result);
+        } else {
+            eprintln!(
+                "Warning: No pending Wake callback for request {}",
+                request_id
+            );
+        }
+    }
+
+    fn handle_get_result_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Value, Error>,
+        heap_data: Vec<Vec<u8>>,
+    ) {
+        // Check if this is a GetResult for an awaiting process
+        if let Some(awaiter_pid) = self.awaiting_result_requests.remove(&request_id) {
+            if let Ok(value) = result {
+                if let Some(&awaiter_executor_id) = self.process_registry.get(&awaiter_pid) {
+                    let _ = self.runtime.send_command(
+                        awaiter_executor_id,
+                        SchedulerCommand::NotifyResult {
+                            process_id: awaiter_pid,
+                            result: value,
+                            heap_data,
+                        },
+                    );
                 }
+                self.cleanup_awaiting_map(awaiter_pid);
             }
+            return;
+        }
+
+        // Normal GetResult callback
+        if let Some(PendingCallback::GetResult(callback)) =
+            self.pending_callbacks.remove(&request_id)
+        {
+            let result_with_heap = result.map(|value| (value, heap_data));
+            callback(result_with_heap);
+        } else {
+            eprintln!(
+                "Warning: No pending GetResult callback for request {}",
+                request_id
+            );
+        }
+    }
+
+    fn handle_get_processes_response(
+        &mut self,
+        request_id: u64,
+        result: Result<HashMap<ProcessId, ProcessStatus>, Error>,
+    ) {
+        if let Some(PendingCallback::GetProcessStatuses(callback)) =
+            self.pending_callbacks.remove(&request_id)
+        {
+            callback(result);
+        } else {
+            eprintln!(
+                "Warning: No pending GetProcessStatuses callback for request {}",
+                request_id
+            );
+        }
+    }
+
+    fn handle_get_process_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Option<ProcessInfo>, Error>,
+    ) {
+        if let Some(PendingCallback::GetProcessInfo(callback)) =
+            self.pending_callbacks.remove(&request_id)
+        {
+            callback(result);
+        } else {
+            eprintln!(
+                "Warning: No pending GetProcessInfo callback for request {}",
+                request_id
+            );
+        }
+    }
+
+    fn handle_get_locals_response(&mut self, request_id: u64, result: Result<Vec<Value>, Error>) {
+        if let Some(PendingCallback::GetLocals(callback)) =
+            self.pending_callbacks.remove(&request_id)
+        {
+            callback(result);
+        } else {
+            eprintln!(
+                "Warning: No pending GetLocals callback for request {}",
+                request_id
+            );
+        }
+    }
+
+    fn handle_compact_locals_response(&mut self, request_id: u64, result: Result<(), Error>) {
+        if let Some(PendingCallback::CompactLocals(callback)) =
+            self.pending_callbacks.remove(&request_id)
+        {
+            callback(result);
+        } else {
+            eprintln!(
+                "Warning: No pending CompactLocals callback for request {}",
+                request_id
+            );
+        }
+    }
+
+    fn cleanup_awaiting_map(&mut self, awaiter_pid: ProcessId) {
+        let mut target_to_remove = None;
+        for (target_pid, awaiters) in self.awaiting_map.iter_mut() {
+            if let Some(pos) = awaiters.iter().position(|&pid| pid == awaiter_pid) {
+                awaiters.remove(pos);
+                if awaiters.is_empty() {
+                    target_to_remove = Some(*target_pid);
+                }
+                break;
+            }
+        }
+        if let Some(target_pid) = target_to_remove {
+            self.awaiting_map.remove(&target_pid);
         }
     }
 
