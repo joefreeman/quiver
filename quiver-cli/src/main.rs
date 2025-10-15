@@ -258,7 +258,7 @@ fn execute_function(
     });
 
     // Wait for callback
-    quiver::wait_for_callbacks_native(environment)?;
+    quiver::wait_for_callbacks(environment)?;
 
     let process_id = process_id_result
         .borrow()
@@ -274,7 +274,7 @@ fn execute_function(
     });
 
     // Wait for callback
-    quiver::wait_for_callbacks_native(environment)?;
+    quiver::wait_for_callbacks(environment)?;
 
     let (value, heap_data) = value_result
         .borrow()

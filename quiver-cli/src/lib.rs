@@ -33,7 +33,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 /// Wait for all pending callbacks to complete on a native environment.
-pub fn wait_for_callbacks_native(
+pub fn wait_for_callbacks(
     environment: &mut Environment<NativeRuntime>,
 ) -> Result<(), quiver_core::error::Error> {
     while environment.has_pending() {
@@ -98,7 +98,7 @@ pub fn compile(
         *process_id_result_clone.borrow_mut() = Some(result);
     });
 
-    wait_for_callbacks_native(&mut environment).map_err(Error::RuntimeError)?;
+    wait_for_callbacks(&mut environment).map_err(Error::RuntimeError)?;
 
     let process_id = process_id_result
         .borrow()
@@ -114,7 +114,7 @@ pub fn compile(
         *value_result_clone.borrow_mut() = Some(result);
     });
 
-    wait_for_callbacks_native(&mut environment).map_err(Error::RuntimeError)?;
+    wait_for_callbacks(&mut environment).map_err(Error::RuntimeError)?;
 
     let (value, _heap_data) = value_result
         .borrow()

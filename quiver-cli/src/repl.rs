@@ -5,9 +5,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::rc::Rc;
-use std::time::Duration;
 
-use crate::NativeRuntime;
+use crate::{NativeRuntime, wait_for_callbacks};
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{
     Compiler, FileSystemModuleLoader, InMemoryModuleLoader, ModuleLoader, parse,
@@ -21,30 +20,6 @@ use quiver_core::{ProcessId, ProcessStatus};
 use quiver_environment::Environment;
 
 const HISTORY_FILE: &str = ".quiv_history";
-
-/// Wait for all pending callbacks to complete on a native environment
-fn wait_for_callbacks(environment: &mut Environment<NativeRuntime>) -> Result<(), CoreError> {
-    while environment.has_pending() {
-        environment.runtime_mut().poll();
-        if environment.process_pending_events() == 0 {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    // Continue polling for routing events
-    let mut idle_iterations = 0;
-    while idle_iterations < 5 {
-        environment.runtime_mut().poll();
-        if environment.process_pending_events() > 0 {
-            idle_iterations = 0;
-        } else {
-            idle_iterations += 1;
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    Ok(())
-}
 
 /// CLI-specific REPL
 pub struct ReplCli {
