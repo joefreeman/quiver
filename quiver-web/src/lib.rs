@@ -1,315 +1,339 @@
-use quiver_compiler::compiler::ModuleCache;
-use quiver_compiler::{Compiler, InMemoryModuleLoader, parse};
-use quiver_core::format;
-use quiver_core::Executor;
-use quiver_core::process::{Action, ProcessId, ProcessStatus};
-use quiver_core::program::Program;
-use quiver_core::types::Type;
-use quiver_core::value::Value;
+mod repl;
+mod runtime;
+mod worker_executor;
+
+use quiver_environment::Environment;
+use repl::Repl;
+use runtime::WebRuntime;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-
-macro_rules! load_stdlib_modules {
-    ($($name:literal),* $(,)?) => {{
-        let mut modules = HashMap::new();
-        $(
-            modules.insert(
-                $name.to_string(),
-                include_str!(concat!("../../std/", $name, ".qv")).to_string()
-            );
-        )*
-        modules
-    }};
-}
+pub use worker_executor::WorkerExecutor;
 
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct EvaluateResult {
+    pub success: bool,
+    pub error: Option<String>,
+    pub value: Option<String>,
+    pub type_str: Option<String>,
+}
+
+/// Common state needed during REPL initialization
+struct InitializingData {
+    environment: Environment<WebRuntime>,
+    type_aliases: HashMap<String, quiver_core::types::Type>,
+    module_cache: quiver_compiler::compiler::ModuleCache,
+    module_loader: Box<dyn quiver_compiler::ModuleLoader>,
+}
+
+enum ReplState {
+    /// Waiting for workers to be ready before starting REPL process
+    WaitingForWorker {
+        data: InitializingData,
+        poll_count: u32,
+    },
+    /// Waiting for the REPL process to be created
+    Initializing {
+        data: InitializingData,
+        repl_process_id_cell:
+            std::rc::Rc<std::cell::RefCell<Option<quiver_core::process::ProcessId>>>,
+    },
+    /// REPL is ready to evaluate expressions
+    Ready(Repl),
+    /// Currently evaluating an expression
+    Evaluating {
+        repl: Repl,
+        eval_state: EvaluationState,
+    },
+    /// An error occurred
+    Error(String),
+}
+
+type AsyncResult<T> = std::rc::Rc<std::cell::RefCell<Option<Result<T, quiver_core::error::Error>>>>;
+
+pub struct EvaluationState {
+    pub result_type: quiver_core::types::Type,
+    pub new_variables: HashMap<String, (quiver_core::types::Type, usize)>,
+    pub wake_result: AsyncResult<()>,
+    pub value_result: AsyncResult<(quiver_core::value::Value, Vec<Vec<u8>>)>,
+    pub compact_result: Option<AsyncResult<()>>,
+    pub stage: EvaluationStage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EvaluationStage {
+    WaitingForWake,
+    WaitingForResult,
+    WaitingForCompact,
+    Done,
+}
+
+/// Web-based REPL wrapper with polling API for async operations
 #[wasm_bindgen]
-pub struct QuiverRuntime {
-    executor: Executor,
-    next_process_id: usize,
-    program: Program,
-    type_aliases: HashMap<String, Type>,
-    module_cache: ModuleCache,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CompileResult {
-    success: bool,
-    error: Option<String>,
-    entry_function: Option<usize>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ProcessInfo {
-    pub id: u64,
-    pub status: String,
-    pub stack_size: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct StepResultInfo {
-    pub status: String,
-    pub processes: Vec<ProcessInfo>,
+pub struct QuiverRepl {
+    state: ReplState,
+    variables: HashMap<String, (quiver_core::types::Type, usize)>,
 }
 
 #[wasm_bindgen]
-impl QuiverRuntime {
+impl QuiverRepl {
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Result<QuiverRuntime, JsValue> {
-        let program = Program::new();
-        let executor = Executor::new(&program);
+    pub fn new() -> QuiverRepl {
+        let program = quiver_core::program::Program::new();
+        let runtime = WebRuntime::new();
+        let environment = Environment::new(runtime, program, 4);
 
-        Ok(QuiverRuntime {
-            executor,
-            next_process_id: 0,
-            program,
-            type_aliases: HashMap::new(),
-            module_cache: ModuleCache::new(),
-        })
+        QuiverRepl {
+            state: ReplState::WaitingForWorker {
+                data: InitializingData {
+                    environment,
+                    type_aliases: HashMap::new(),
+                    module_cache: quiver_compiler::compiler::ModuleCache::new(),
+                    module_loader: Box::new(quiver_compiler::InMemoryModuleLoader::new(
+                        Self::load_stdlib(),
+                    )),
+                },
+                poll_count: 0,
+            },
+            variables: HashMap::new(),
+        }
+    }
+
+    /// Poll initialization status. Returns true when ready, false when still initializing.
+    /// Call this repeatedly (e.g., with setTimeout) until it returns true.
+    #[wasm_bindgen]
+    pub fn poll_init(&mut self) -> bool {
+        match &mut self.state {
+            ReplState::WaitingForWorker { data, poll_count } => {
+                // Poll for events (worker should send empty array when ready)
+                data.environment.process_pending_events();
+                *poll_count += 1;
+
+                // Wait for at least 5 polls (~50ms) to give worker time to initialize
+                if *poll_count >= 5 {
+                    // Transition to Initializing state and send Execute command
+                    if let ReplState::WaitingForWorker { mut data, .. } = std::mem::replace(
+                        &mut self.state,
+                        ReplState::Error("Transitioning".to_string()),
+                    ) {
+                        let repl_process_id = std::rc::Rc::new(std::cell::RefCell::new(None));
+                        let repl_process_id_clone = repl_process_id.clone();
+
+                        data.environment.execute(vec![], true, move |result| {
+                            match result {
+                                Ok(pid) => *repl_process_id_clone.borrow_mut() = Some(pid),
+                                Err(_) => {} // Will be caught in next poll
+                            }
+                        });
+
+                        self.state = ReplState::Initializing {
+                            data,
+                            repl_process_id_cell: repl_process_id,
+                        };
+                    }
+                }
+                false
+            }
+            ReplState::Initializing {
+                data,
+                repl_process_id_cell,
+            } => {
+                // Poll for Execute response
+                data.environment.process_pending_events();
+                let pid_opt = *repl_process_id_cell.borrow();
+
+                // If we have a PID, transition to Ready state
+                if let Some(pid) = pid_opt {
+                    if let ReplState::Initializing { data, .. } = std::mem::replace(
+                        &mut self.state,
+                        ReplState::Error("Transitioning".to_string()),
+                    ) {
+                        let repl = Repl::from_parts(
+                            data.environment,
+                            pid,
+                            data.type_aliases,
+                            data.module_cache,
+                            data.module_loader,
+                        );
+                        self.state = ReplState::Ready(repl);
+                        return true;
+                    }
+                }
+                false
+            }
+            ReplState::Ready(_) => true,
+            ReplState::Evaluating { .. } => true,
+            ReplState::Error(_) => true,
+        }
     }
 
     /// Load standard library modules
     fn load_stdlib() -> HashMap<String, String> {
-        load_stdlib_modules!("math", "list")
+        let mut modules = HashMap::new();
+        modules.insert(
+            "math".to_string(),
+            include_str!("../../std/math.qv").to_string(),
+        );
+        modules.insert(
+            "list".to_string(),
+            include_str!("../../std/list.qv").to_string(),
+        );
+        modules
     }
 
+    /// Start evaluating source code. Returns immediately.
+    /// Call poll_evaluate() repeatedly until it returns a result.
     #[wasm_bindgen]
-    pub fn compile(&mut self, source: &str, modules: JsValue) -> Result<JsValue, JsValue> {
-        let user_modules: Option<HashMap<String, String>> = if modules.is_null()
-            || modules.is_undefined()
-        {
-            None
-        } else {
-            Some(
-                serde_wasm_bindgen::from_value(modules)
-                    .map_err(|e| JsValue::from_str(&format!("Failed to parse modules: {}", e)))?,
-            )
-        };
-
-        let ast_program =
-            parse(source).map_err(|e| JsValue::from_str(&format!("Parse error: {:?}", e)))?;
-
-        // Merge stdlib with user-provided modules (user modules take precedence)
-        let mut all_modules = Self::load_stdlib();
-        if let Some(user_modules) = user_modules {
-            all_modules.extend(user_modules);
-        }
-
-        let module_loader = InMemoryModuleLoader::new(all_modules);
-
-        match Compiler::compile(
-            ast_program,
-            self.type_aliases.clone(),
-            self.module_cache.clone(),
-            &module_loader,
-            &self.program,
-            None,
-            None,
-            Type::nil(),
+    pub fn evaluate(&mut self, source: &str) -> Result<(), JsValue> {
+        let repl = match std::mem::replace(
+            &mut self.state,
+            ReplState::Error("Transitioning".to_string()),
         ) {
-            Ok((
-                instructions,
-                _result_type,
-                _variables,
-                new_program,
-                new_type_aliases,
-                new_module_cache,
-            )) => {
-                self.program = new_program;
-                self.type_aliases = new_type_aliases;
-                self.module_cache = new_module_cache;
-
-                // Execute the compiled instructions to get the main function
-                let (result_value, new_executor) =
-                    quiver_core::execute_instructions_sync(&self.program, instructions)
-                        .map_err(|e| JsValue::from_str(&format!("Execution error: {:?}", e)))?;
-
-                self.executor = new_executor;
-
-                // Extract the entry function index from the result, injecting captures if needed
-                let entry_function = match result_value {
-                    Some(Value::Function(func_idx, captures)) => {
-                        let final_func_idx = if !captures.is_empty() {
-                            self.program.inject_function_captures(
-                                func_idx,
-                                captures,
-                                &self.executor,
-                            )
-                        } else {
-                            func_idx
-                        };
-                        Some(final_func_idx)
-                    }
-                    _ => None,
-                };
-
-                // Recreate executor after injecting captures (which modifies self.program)
-                self.executor = Executor::new(&self.program);
-
-                let result = CompileResult {
-                    success: true,
-                    error: None,
-                    entry_function,
-                };
-                serde_wasm_bindgen::to_value(&result)
-                    .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+            ReplState::Ready(repl) => repl,
+            ReplState::WaitingForWorker { .. } | ReplState::Initializing { .. } => {
+                return Err(JsValue::from_str(
+                    "REPL not initialized yet - call poll_init() until ready",
+                ));
             }
-            Err(e) => {
-                let result = CompileResult {
-                    success: false,
-                    error: Some(format!("{:?}", e)),
-                    entry_function: None,
-                };
-                serde_wasm_bindgen::to_value(&result)
-                    .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+            ReplState::Evaluating { .. } => {
+                return Err(JsValue::from_str(
+                    "Already evaluating - call poll_evaluate() to check status",
+                ));
+            }
+            ReplState::Error(e) => {
+                return Err(JsValue::from_str(&format!("REPL in error state: {}", e)));
+            }
+        };
+
+        let module_path = None;
+        let parameter_type = None;
+
+        match repl.start_evaluate(source, module_path, Some(&self.variables), parameter_type) {
+            Ok((repl, eval_state)) => {
+                self.state = ReplState::Evaluating { repl, eval_state };
+                Ok(())
+            }
+            Err((repl, err)) => {
+                self.state = ReplState::Ready(repl);
+                Err(JsValue::from_str(&err))
             }
         }
     }
 
+    /// Poll the evaluation status. Returns null if still evaluating, or the result when done.
     #[wasm_bindgen]
-    pub fn spawn(&mut self, entry_function: usize, persistent: bool) -> u64 {
-        let process_id = ProcessId(self.next_process_id);
-        self.next_process_id += 1;
-        self.executor.spawn_process(process_id, persistent);
+    pub fn poll_evaluate(&mut self) -> Result<JsValue, JsValue> {
+        match &mut self.state {
+            ReplState::Evaluating { repl, eval_state } => {
+                repl.poll_evaluate(eval_state);
 
-        // Initialize the process with the entry function
-        if let Some(process) = self.executor.get_process_mut(process_id) {
-            process.stack.push(Value::nil());
-            if let Some(function) = self.program.get_function(entry_function) {
-                let frame = quiver_core::process::Frame::new(function.instructions.clone(), 0, 0);
-                process.frames.push(frame);
+                if eval_state.stage == EvaluationStage::Done {
+                    self.finalize_evaluation()
+                } else {
+                    Ok(JsValue::NULL)
+                }
             }
+            ReplState::Ready(_) => Err(JsValue::from_str("Not evaluating - call evaluate() first")),
+            ReplState::WaitingForWorker { .. } | ReplState::Initializing { .. } => {
+                Err(JsValue::from_str("REPL not initialized yet"))
+            }
+            ReplState::Error(e) => Err(JsValue::from_str(&format!("REPL in error state: {}", e))),
         }
-
-        process_id.0 as u64
     }
 
-    #[wasm_bindgen]
-    pub fn step(&mut self, max_steps: usize) -> Result<JsValue, JsValue> {
-        let result = self
-            .executor
-            .step(max_steps)
-            .map_err(|e| JsValue::from_str(&format!("Execution error: {:?}", e)))?;
-
-        // Handle routing requests from the step
-        match result {
-            None => {
-                // No routing needed
-            }
-            Some(Action::Spawn {
-                caller,
-                function_index,
-                captures,
-            }) => {
-                // Allocate a new process ID for the spawned process
-                let new_pid = ProcessId(self.next_process_id);
-                self.next_process_id += 1;
-
-                // Spawn the new process
-                self.executor.spawn_process(new_pid, false);
-
-                // Set up the process with the function and captures
-                if let Some(process) = self.executor.get_process_mut(new_pid) {
-                    process.stack.push(Value::nil());
-                    process
-                        .stack
-                        .push(Value::Function(function_index, captures));
-                    process.frames.push(quiver_core::process::Frame::new(
-                        vec![quiver_core::bytecode::Instruction::Call],
-                        0,
-                        0,
-                    ));
+    fn finalize_evaluation(&mut self) -> Result<JsValue, JsValue> {
+        if let ReplState::Evaluating { repl, eval_state } = std::mem::replace(
+            &mut self.state,
+            ReplState::Error("Transitioning".to_string()),
+        ) {
+            match repl.finish_evaluate(eval_state) {
+                Ok((repl, result, result_type, new_variables, heap_data)) => {
+                    self.variables = new_variables;
+                    let eval_result = Self::format_success(&repl, result, result_type, &heap_data);
+                    self.state = ReplState::Ready(repl);
+                    Self::serialize_result(&eval_result)
                 }
-
-                // Add the new process to the queue so it can run
-                self.executor.add_to_queue(new_pid);
-
-                // Notify the caller with the new PID
-                self.executor.notify_spawn(caller, Value::Pid(new_pid));
-            }
-            Some(Action::Deliver { target, value }) => {
-                // Deliver message to target process
-                self.executor.notify_message(target, value);
-            }
-            Some(Action::AwaitResult { target, caller }) => {
-                // Check if target process has a result available
-                let result = self
-                    .executor
-                    .get_process(target)
-                    .and_then(|p| p.result.clone());
-                if let Some(result) = result {
-                    // Result is available, notify the caller immediately
-                    self.executor.notify_result(caller, result);
+                Err((repl, err)) => {
+                    let eval_result = Self::format_error(err);
+                    self.state = ReplState::Ready(repl);
+                    Self::serialize_result(&eval_result)
                 }
-                // If result not available, the caller will remain in waiting state
             }
-        }
-
-        // Collect process information
-        let processes: Vec<ProcessInfo> = self
-            .executor
-            .get_process_statuses()
-            .into_keys()
-            .filter_map(|pid| {
-                self.executor.get_process_info(pid).map(|info| ProcessInfo {
-                    id: info.id.0 as u64,
-                    status: match info.status {
-                        ProcessStatus::Active => "active".to_string(),
-                        ProcessStatus::Waiting => "waiting".to_string(),
-                        ProcessStatus::Sleeping => "sleeping".to_string(),
-                        ProcessStatus::Terminated => "terminated".to_string(),
-                    },
-                    stack_size: info.stack_size,
-                })
-            })
-            .collect();
-
-        // Determine overall status: idle if no active processes, running otherwise
-        let has_active_processes = self
-            .executor
-            .get_process_statuses()
-            .values()
-            .any(|status| !matches!(status, ProcessStatus::Terminated));
-
-        let status_str = if has_active_processes {
-            "running"
         } else {
-            "idle"
+            Err(JsValue::from_str("Internal state error"))
+        }
+    }
+
+    fn format_success(
+        repl: &Repl,
+        result: Option<quiver_core::value::Value>,
+        result_type: quiver_core::types::Type,
+        heap_data: &[Vec<u8>],
+    ) -> EvaluateResult {
+        let (value, type_str) = if let Some(v) = result {
+            (
+                Some(repl.format_value(&v, heap_data)),
+                Some(repl.format_type(&result_type)),
+            )
+        } else {
+            (None, None)
         };
 
-        let step_result = StepResultInfo {
-            status: status_str.to_string(),
-            processes,
-        };
+        EvaluateResult {
+            success: true,
+            error: None,
+            value,
+            type_str,
+        }
+    }
 
-        serde_wasm_bindgen::to_value(&step_result)
+    fn format_error(err: String) -> EvaluateResult {
+        EvaluateResult {
+            success: false,
+            error: Some(err),
+            value: None,
+            type_str: None,
+        }
+    }
+
+    fn serialize_result(result: &EvaluateResult) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(result)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 
     #[wasm_bindgen]
-    pub fn get_result(&self, process_id: u64) -> Result<JsValue, JsValue> {
-        let pid = ProcessId(process_id as usize);
-
-        if let Some(process) = self.executor.get_process(pid) {
-            let constants = self.program.get_constants();
-            if let Some(value) = &process.result {
-                // For web runtime, heap data is directly accessible via the executor
-                // We pass empty heap_data since all binaries should be constants
-                let formatted = format::format_value(value, &[], constants, &self.program);
-                Ok(JsValue::from_str(&formatted))
-            } else if let Some(value) = process.stack.last() {
-                let formatted = format::format_value(value, &[], constants, &self.program);
-                Ok(JsValue::from_str(&formatted))
-            } else {
-                Ok(JsValue::NULL)
+    pub fn get_variables(&mut self) -> Result<JsValue, JsValue> {
+        let repl = match &mut self.state {
+            ReplState::Ready(repl) => repl,
+            ReplState::Evaluating { repl, .. } => repl,
+            ReplState::WaitingForWorker { .. } | ReplState::Initializing { .. } => {
+                return Err(JsValue::from_str("REPL not initialized yet"));
             }
-        } else {
-            Err(JsValue::from_str("Process not found"))
-        }
+            ReplState::Error(e) => {
+                return Err(JsValue::from_str(&format!("REPL in error state: {}", e)));
+            }
+        };
+
+        let vars = repl.get_variables(&self.variables);
+
+        let formatted_vars: Vec<(String, String, String)> = vars
+            .into_iter()
+            .map(|(name, value)| {
+                let (var_type, _) = &self.variables[&name];
+                (
+                    name,
+                    repl.format_value(&value, &[]),
+                    repl.format_type(var_type),
+                )
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&formatted_vars)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 }

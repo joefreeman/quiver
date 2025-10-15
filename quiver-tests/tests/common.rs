@@ -1,4 +1,4 @@
-use quiver::Quiver;
+use quiver::repl::{ReplCli, TestError};
 use quiver_core::value::Value;
 use std::collections::HashMap;
 
@@ -40,24 +40,22 @@ impl TestBuilder {
     }
 
     pub fn evaluate(self, source: &str) -> TestResult {
-        let mut quiver = Quiver::new(self.modules);
-        let result = quiver
-            .evaluate(source, None, None, None)
-            .map(|(value, _, _, heap_data)| value.map(|v| (v, heap_data)));
+        let mut repl = ReplCli::with_modules(self.modules).expect("Failed to create REPL");
+        let result = repl.evaluate_for_test(source);
 
         TestResult {
             result,
             source: source.to_string(),
-            quiver,
+            repl,
         }
     }
 }
 
 #[allow(dead_code)]
 pub struct TestResult {
-    result: Result<Option<(Value, Vec<Vec<u8>>)>, quiver::Error>,
+    result: Result<Option<(Value, Vec<Vec<u8>>)>, TestError>,
     source: String,
-    quiver: Quiver,
+    repl: ReplCli,
 }
 
 #[allow(dead_code)]
@@ -66,7 +64,7 @@ impl TestResult {
     pub fn expect(self, expected: &str) {
         match self.result {
             Ok(Some((ref value, ref heap_data))) => {
-                let actual = self.quiver.format_value(value, heap_data);
+                let actual = self.repl.format_value(value, heap_data);
                 assert_eq!(
                     actual, expected,
                     "Expected '{}', got '{}' for source: {}",
@@ -99,7 +97,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(quiver::Error::RuntimeError(actual)) => {
+            Err(TestError::RuntimeError(actual)) => {
                 assert_eq!(
                     actual, expected,
                     "Expected runtime error {:?}, but got {:?} for source: {}",
@@ -123,7 +121,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(quiver::Error::CompileError(actual)) => {
+            Err(TestError::CompileError(actual)) => {
                 assert_eq!(
                     actual, expected,
                     "Expected compile error {:?}, but got {:?} for source: {}",
@@ -147,7 +145,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(quiver::Error::ParseError(boxed_actual)) => {
+            Err(TestError::ParseError(boxed_actual)) => {
                 let actual = *boxed_actual;
                 assert_eq!(
                     actual, expected,

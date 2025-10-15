@@ -12,6 +12,6 @@ cargo build --target wasm32-unknown-unknown --release
 # Generate bindings
 wasm-bindgen \
     --target no-modules \
-    --out-dir out \
+    --out-dir www/pkg \
     --out-name quiver \
     ../target/wasm32-unknown-unknown/release/quiver_web.wasm

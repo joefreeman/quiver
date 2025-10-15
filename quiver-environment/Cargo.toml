@@ -1,0 +1,9 @@
+[package]
+name = "quiver-environment"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quiver-core = { path = "../quiver-core" }
+quiver-compiler = { path = "../quiver-compiler" }
+serde.workspace = true

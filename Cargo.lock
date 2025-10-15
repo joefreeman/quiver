@@ -329,6 +329,7 @@ dependencies = [
  "colored",
  "quiver-compiler",
  "quiver-core",
+ "quiver-environment",
  "rustyline",
  "serde",
  "serde_json",
@@ -354,12 +355,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "quiver-environment"
+version = "0.1.0"
+dependencies = [
+ "quiver-compiler",
+ "quiver-core",
+ "serde",
+]
+
+[[package]]
 name = "quiver-tests"
 version = "0.1.0"
 dependencies = [
  "quiver-cli",
  "quiver-compiler",
  "quiver-core",
+ "quiver-environment",
 ]
 
 [[package]]
@@ -371,6 +382,7 @@ dependencies = [
  "js-sys",
  "quiver-compiler",
  "quiver-core",
+ "quiver-environment",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",

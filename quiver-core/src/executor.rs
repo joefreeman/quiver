@@ -230,6 +230,10 @@ impl Executor {
         self.constants[index] = constant;
     }
 
+    pub fn append_constant(&mut self, constant: Constant) {
+        self.constants.push(constant);
+    }
+
     pub fn register_function(&mut self, index: usize, function: Function) {
         if index >= self.functions.len() {
             self.functions.resize(
@@ -244,11 +248,19 @@ impl Executor {
         self.functions[index] = function;
     }
 
+    pub fn append_function(&mut self, function: Function) {
+        self.functions.push(function);
+    }
+
     pub fn register_builtin(&mut self, index: usize, name: String) {
         if index >= self.builtins.len() {
             self.builtins.resize(index + 1, String::new());
         }
         self.builtins[index] = name;
+    }
+
+    pub fn append_builtin(&mut self, name: String) {
+        self.builtins.push(name);
     }
 
     pub fn register_type(&mut self, type_id: TypeId, info: TupleTypeInfo) {
@@ -756,11 +768,7 @@ impl Executor {
         }
     }
 
-    fn handle_tail_call(
-        &mut self,
-        pid: ProcessId,
-        recurse: bool,
-    ) -> Result<Option<Action>, Error> {
+    fn handle_tail_call(&mut self, pid: ProcessId, recurse: bool) -> Result<Option<Action>, Error> {
         if recurse {
             let process = self
                 .get_process_mut(pid)
