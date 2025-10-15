@@ -10,15 +10,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-enum PendingCallback {
-    Execute(Box<dyn FnOnce(Result<ProcessId, Error>)>, usize), // callback, executor_id
-    Wake(Box<dyn FnOnce(Result<(), Error>)>),
-    GetResult(Box<dyn FnOnce(Result<(Value, Vec<Vec<u8>>), Error>)>),
-    GetProcessStatuses(Box<dyn FnOnce(Result<HashMap<ProcessId, ProcessStatus>, Error>)>),
-    GetProcessInfo(Box<dyn FnOnce(Result<Option<ProcessInfo>, Error>)>),
-    GetLocals(Box<dyn FnOnce(Result<Vec<Value>, Error>)>),
-    CompactLocals(Box<dyn FnOnce(Result<(), Error>)>),
-}
+type PendingCallback = Box<dyn FnOnce(Event)>;
 
 /// Manages process ID allocation and process-to-executor mapping.
 struct ProcessRegistry {
@@ -254,10 +246,16 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.request_tracker.register_callback(
-            request_id,
-            PendingCallback::Execute(Box::new(callback), executor_id),
-        );
+        let wrapped_callback = Box::new(move |event: Event| {
+            if let Event::ExecuteResponse { result, .. } = event {
+                callback(result);
+            } else {
+                eprintln!("Warning: Unexpected event type for ExecuteResponse");
+            }
+        });
+
+        self.request_tracker
+            .register_callback(request_id, wrapped_callback);
     }
 
     /// Wake an existing persistent process with new instructions.
@@ -289,8 +287,16 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
+        let wrapped_callback = Box::new(move |event: Event| {
+            if let Event::WakeResponse { result, .. } = event {
+                callback(result);
+            } else {
+                eprintln!("Warning: Unexpected event type for WakeResponse");
+            }
+        });
+
         self.request_tracker
-            .register_callback(request_id, PendingCallback::Wake(Box::new(callback)));
+            .register_callback(request_id, wrapped_callback);
     }
 
     /// Get the result of a process execution.
@@ -321,8 +327,20 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
+        let wrapped_callback = Box::new(move |event: Event| {
+            if let Event::GetResultResponse {
+                result, heap_data, ..
+            } = event
+            {
+                let result_with_heap = result.map(|value| (value, heap_data));
+                callback(result_with_heap);
+            } else {
+                eprintln!("Warning: Unexpected event type for GetResultResponse");
+            }
+        });
+
         self.request_tracker
-            .register_callback(request_id, PendingCallback::GetResult(Box::new(callback)));
+            .register_callback(request_id, wrapped_callback);
     }
 
     /// Get the number of executors in this runtime.
@@ -352,10 +370,16 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.request_tracker.register_callback(
-            request_id,
-            PendingCallback::GetProcessStatuses(Box::new(callback)),
-        );
+        let wrapped_callback = Box::new(move |event: Event| {
+            if let Event::GetProcessesResponse { result, .. } = event {
+                callback(result);
+            } else {
+                eprintln!("Warning: Unexpected event type for GetProcessesResponse");
+            }
+        });
+
+        self.request_tracker
+            .register_callback(request_id, wrapped_callback);
     }
 
     /// Get information about a specific process.
@@ -386,10 +410,16 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.request_tracker.register_callback(
-            request_id,
-            PendingCallback::GetProcessInfo(Box::new(callback)),
-        );
+        let wrapped_callback = Box::new(move |event: Event| {
+            if let Event::GetProcessResponse { result, .. } = event {
+                callback(result);
+            } else {
+                eprintln!("Warning: Unexpected event type for GetProcessResponse");
+            }
+        });
+
+        self.request_tracker
+            .register_callback(request_id, wrapped_callback);
     }
 
     /// Get local variables from a process.
@@ -421,8 +451,16 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
+        let wrapped_callback = Box::new(move |event: Event| {
+            if let Event::GetLocalsResponse { result, .. } = event {
+                callback(result);
+            } else {
+                eprintln!("Warning: Unexpected event type for GetLocalsResponse");
+            }
+        });
+
         self.request_tracker
-            .register_callback(request_id, PendingCallback::GetLocals(Box::new(callback)));
+            .register_callback(request_id, wrapped_callback);
     }
 
     /// Compact locals in a persistent process to keep only referenced variables.
@@ -458,10 +496,16 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.request_tracker.register_callback(
-            request_id,
-            PendingCallback::CompactLocals(Box::new(callback)),
-        );
+        let wrapped_callback = Box::new(move |event: Event| {
+            if let Event::CompactLocalsResponse { result, .. } = event {
+                callback(result);
+            } else {
+                eprintln!("Warning: Unexpected event type for CompactLocalsResponse");
+            }
+        });
+
+        self.request_tracker
+            .register_callback(request_id, wrapped_callback);
     }
 
     /// Check if there are pending callbacks waiting for responses.
@@ -544,28 +588,18 @@ impl<R: Runtime> Environment<R> {
     }
 
     fn handle_execute_response(&mut self, request_id: u64, result: Result<ProcessId, Error>) {
-        if let Some(PendingCallback::Execute(callback, _executor_id)) =
-            self.request_tracker.take_callback(request_id)
-        {
-            callback(result);
+        if let Some(callback) = self.request_tracker.take_callback(request_id) {
+            callback(Event::ExecuteResponse { request_id, result });
         } else {
-            eprintln!(
-                "Warning: No pending Execute callback for request {}",
-                request_id
-            );
+            eprintln!("Warning: No pending callback for request {}", request_id);
         }
     }
 
     fn handle_wake_response(&mut self, request_id: u64, result: Result<(), Error>) {
-        if let Some(PendingCallback::Wake(callback)) =
-            self.request_tracker.take_callback(request_id)
-        {
-            callback(result);
+        if let Some(callback) = self.request_tracker.take_callback(request_id) {
+            callback(Event::WakeResponse { request_id, result });
         } else {
-            eprintln!(
-                "Warning: No pending Wake callback for request {}",
-                request_id
-            );
+            eprintln!("Warning: No pending callback for request {}", request_id);
         }
     }
 
@@ -596,16 +630,14 @@ impl<R: Runtime> Environment<R> {
         }
 
         // Normal GetResult callback
-        if let Some(PendingCallback::GetResult(callback)) =
-            self.request_tracker.take_callback(request_id)
-        {
-            let result_with_heap = result.map(|value| (value, heap_data));
-            callback(result_with_heap);
+        if let Some(callback) = self.request_tracker.take_callback(request_id) {
+            callback(Event::GetResultResponse {
+                request_id,
+                result,
+                heap_data,
+            });
         } else {
-            eprintln!(
-                "Warning: No pending GetResult callback for request {}",
-                request_id
-            );
+            eprintln!("Warning: No pending callback for request {}", request_id);
         }
     }
 
@@ -614,15 +646,10 @@ impl<R: Runtime> Environment<R> {
         request_id: u64,
         result: Result<HashMap<ProcessId, ProcessStatus>, Error>,
     ) {
-        if let Some(PendingCallback::GetProcessStatuses(callback)) =
-            self.request_tracker.take_callback(request_id)
-        {
-            callback(result);
+        if let Some(callback) = self.request_tracker.take_callback(request_id) {
+            callback(Event::GetProcessesResponse { request_id, result });
         } else {
-            eprintln!(
-                "Warning: No pending GetProcessStatuses callback for request {}",
-                request_id
-            );
+            eprintln!("Warning: No pending callback for request {}", request_id);
         }
     }
 
@@ -631,41 +658,26 @@ impl<R: Runtime> Environment<R> {
         request_id: u64,
         result: Result<Option<ProcessInfo>, Error>,
     ) {
-        if let Some(PendingCallback::GetProcessInfo(callback)) =
-            self.request_tracker.take_callback(request_id)
-        {
-            callback(result);
+        if let Some(callback) = self.request_tracker.take_callback(request_id) {
+            callback(Event::GetProcessResponse { request_id, result });
         } else {
-            eprintln!(
-                "Warning: No pending GetProcessInfo callback for request {}",
-                request_id
-            );
+            eprintln!("Warning: No pending callback for request {}", request_id);
         }
     }
 
     fn handle_get_locals_response(&mut self, request_id: u64, result: Result<Vec<Value>, Error>) {
-        if let Some(PendingCallback::GetLocals(callback)) =
-            self.request_tracker.take_callback(request_id)
-        {
-            callback(result);
+        if let Some(callback) = self.request_tracker.take_callback(request_id) {
+            callback(Event::GetLocalsResponse { request_id, result });
         } else {
-            eprintln!(
-                "Warning: No pending GetLocals callback for request {}",
-                request_id
-            );
+            eprintln!("Warning: No pending callback for request {}", request_id);
         }
     }
 
     fn handle_compact_locals_response(&mut self, request_id: u64, result: Result<(), Error>) {
-        if let Some(PendingCallback::CompactLocals(callback)) =
-            self.request_tracker.take_callback(request_id)
-        {
-            callback(result);
+        if let Some(callback) = self.request_tracker.take_callback(request_id) {
+            callback(Event::CompactLocalsResponse { request_id, result });
         } else {
-            eprintln!(
-                "Warning: No pending CompactLocals callback for request {}",
-                request_id
-            );
+            eprintln!("Warning: No pending callback for request {}", request_id);
         }
     }
 
