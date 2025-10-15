@@ -20,19 +20,129 @@ enum PendingCallback {
     CompactLocals(Box<dyn FnOnce(Result<(), Error>)>),
 }
 
+/// Manages process ID allocation and process-to-executor mapping.
+struct ProcessRegistry {
+    processes: HashMap<ProcessId, usize>,
+    next_process_id: usize,
+    next_executor: usize,
+    executor_count: usize,
+}
+
+impl ProcessRegistry {
+    fn new(executor_count: usize) -> Self {
+        Self {
+            processes: HashMap::new(),
+            next_process_id: 0,
+            next_executor: 0,
+            executor_count,
+        }
+    }
+
+    fn allocate_process(&mut self) -> ProcessId {
+        let pid = ProcessId(self.next_process_id);
+        self.next_process_id += 1;
+
+        let executor_id = self.next_executor % self.executor_count;
+        self.next_executor += 1;
+
+        self.processes.insert(pid, executor_id);
+        pid
+    }
+
+    fn get_executor(&self, process_id: ProcessId) -> Option<usize> {
+        self.processes.get(&process_id).copied()
+    }
+}
+
+/// Manages request ID generation and pending callback tracking.
+struct RequestTracker {
+    next_request_id: u64,
+    pending_callbacks: HashMap<u64, PendingCallback>,
+}
+
+impl RequestTracker {
+    fn new() -> Self {
+        Self {
+            next_request_id: 0,
+            pending_callbacks: HashMap::new(),
+        }
+    }
+
+    fn allocate_request_id(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        request_id
+    }
+
+    fn register_callback(&mut self, request_id: u64, callback: PendingCallback) {
+        self.pending_callbacks.insert(request_id, callback);
+    }
+
+    fn take_callback(&mut self, request_id: u64) -> Option<PendingCallback> {
+        self.pending_callbacks.remove(&request_id)
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending_callbacks.is_empty()
+    }
+}
+
+/// Manages inter-process coordination for await operations.
+struct ProcessCoordinator {
+    awaiting_map: HashMap<ProcessId, Vec<ProcessId>>,
+    awaiting_result_requests: HashMap<u64, ProcessId>,
+}
+
+impl ProcessCoordinator {
+    fn new() -> Self {
+        Self {
+            awaiting_map: HashMap::new(),
+            awaiting_result_requests: HashMap::new(),
+        }
+    }
+
+    fn register_await(&mut self, request_id: u64, target: ProcessId, caller: ProcessId) {
+        self.awaiting_result_requests.insert(request_id, caller);
+
+        let awaiting_map_entry = self.awaiting_map.entry(target).or_insert_with(Vec::new);
+        if !awaiting_map_entry.contains(&caller) {
+            awaiting_map_entry.push(caller);
+        }
+    }
+
+    fn take_awaiter(&mut self, request_id: u64) -> Option<ProcessId> {
+        self.awaiting_result_requests.remove(&request_id)
+    }
+
+    fn take_awaiters(&mut self, process_id: ProcessId) -> Option<Vec<ProcessId>> {
+        self.awaiting_map.remove(&process_id)
+    }
+
+    fn remove_awaiter(&mut self, awaiter_pid: ProcessId) -> Option<ProcessId> {
+        for (target_pid, awaiters) in self.awaiting_map.iter_mut() {
+            if let Some(pos) = awaiters.iter().position(|&pid| pid == awaiter_pid) {
+                awaiters.remove(pos);
+                let target_to_remove = if awaiters.is_empty() {
+                    Some(*target_pid)
+                } else {
+                    None
+                };
+                return target_to_remove;
+            }
+        }
+        None
+    }
+}
+
 /// Environment manages program state, process registry, and coordinates
 /// execution across multiple executors in a platform-agnostic way.
 pub struct Environment<R: Runtime> {
     runtime: R,
     program: Program,
     executor_count: usize,
-    process_registry: HashMap<ProcessId, usize>,
-    next_executor: usize,
-    next_request_id: u64,
-    pending_callbacks: HashMap<u64, PendingCallback>,
-    next_process_id: usize,
-    awaiting_map: HashMap<ProcessId, Vec<ProcessId>>,
-    awaiting_result_requests: HashMap<u64, ProcessId>,
+    process_registry: ProcessRegistry,
+    request_tracker: RequestTracker,
+    process_coordinator: ProcessCoordinator,
     event_queue: Arc<Mutex<VecDeque<Event>>>,
 }
 
@@ -55,13 +165,9 @@ impl<R: Runtime> Environment<R> {
             runtime,
             program,
             executor_count,
-            process_registry: HashMap::new(),
-            next_executor: 0,
-            next_request_id: 0,
-            pending_callbacks: HashMap::new(),
-            next_process_id: 0,
-            awaiting_map: HashMap::new(),
-            awaiting_result_requests: HashMap::new(),
+            process_registry: ProcessRegistry::new(executor_count),
+            request_tracker: RequestTracker::new(),
+            process_coordinator: ProcessCoordinator::new(),
             event_queue,
         }
     }
@@ -131,16 +237,10 @@ impl<R: Runtime> Environment<R> {
     where
         F: FnOnce(Result<ProcessId, Error>) + 'static,
     {
-        let new_pid = ProcessId(self.next_process_id);
-        self.next_process_id += 1;
+        let new_pid = self.process_registry.allocate_process();
+        let executor_id = self.process_registry.get_executor(new_pid).unwrap();
 
-        let executor_id = self.next_executor % self.executor_count;
-        self.next_executor += 1;
-
-        self.process_registry.insert(new_pid, executor_id);
-
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
+        let request_id = self.request_tracker.allocate_request_id();
 
         let command = SchedulerCommand::Execute {
             request_id,
@@ -154,7 +254,7 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.pending_callbacks.insert(
+        self.request_tracker.register_callback(
             request_id,
             PendingCallback::Execute(Box::new(callback), executor_id),
         );
@@ -165,8 +265,8 @@ impl<R: Runtime> Environment<R> {
     where
         F: FnOnce(Result<(), Error>) + 'static,
     {
-        let executor_id = match self.process_registry.get(&process_id) {
-            Some(&id) => id,
+        let executor_id = match self.process_registry.get_executor(process_id) {
+            Some(id) => id,
             None => {
                 callback(Err(Error::InvalidArgument(format!(
                     "Process {:?} not found in registry",
@@ -176,8 +276,7 @@ impl<R: Runtime> Environment<R> {
             }
         };
 
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
+        let request_id = self.request_tracker.allocate_request_id();
 
         let command = SchedulerCommand::Wake {
             request_id,
@@ -190,8 +289,8 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.pending_callbacks
-            .insert(request_id, PendingCallback::Wake(Box::new(callback)));
+        self.request_tracker
+            .register_callback(request_id, PendingCallback::Wake(Box::new(callback)));
     }
 
     /// Get the result of a process execution.
@@ -199,8 +298,8 @@ impl<R: Runtime> Environment<R> {
     where
         F: FnOnce(Result<(Value, Vec<Vec<u8>>), Error>) + 'static,
     {
-        let executor_id = match self.process_registry.get(&process_id) {
-            Some(&id) => id,
+        let executor_id = match self.process_registry.get_executor(process_id) {
+            Some(id) => id,
             None => {
                 callback(Err(Error::InvalidArgument(format!(
                     "Process {:?} not found in registry",
@@ -210,8 +309,7 @@ impl<R: Runtime> Environment<R> {
             }
         };
 
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
+        let request_id = self.request_tracker.allocate_request_id();
 
         let command = SchedulerCommand::GetResult {
             request_id,
@@ -223,8 +321,8 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.pending_callbacks
-            .insert(request_id, PendingCallback::GetResult(Box::new(callback)));
+        self.request_tracker
+            .register_callback(request_id, PendingCallback::GetResult(Box::new(callback)));
     }
 
     /// Get the number of executors in this runtime.
@@ -245,8 +343,7 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
+        let request_id = self.request_tracker.allocate_request_id();
 
         let command = SchedulerCommand::GetProcesses { request_id };
 
@@ -255,7 +352,7 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.pending_callbacks.insert(
+        self.request_tracker.register_callback(
             request_id,
             PendingCallback::GetProcessStatuses(Box::new(callback)),
         );
@@ -266,8 +363,8 @@ impl<R: Runtime> Environment<R> {
     where
         F: FnOnce(Result<Option<ProcessInfo>, Error>) + 'static,
     {
-        let executor_id = match self.process_registry.get(&process_id) {
-            Some(&id) => id,
+        let executor_id = match self.process_registry.get_executor(process_id) {
+            Some(id) => id,
             None => {
                 callback(Err(Error::InvalidArgument(format!(
                     "Process {:?} not found in registry",
@@ -277,8 +374,7 @@ impl<R: Runtime> Environment<R> {
             }
         };
 
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
+        let request_id = self.request_tracker.allocate_request_id();
 
         let command = SchedulerCommand::GetProcess {
             request_id,
@@ -290,7 +386,7 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.pending_callbacks.insert(
+        self.request_tracker.register_callback(
             request_id,
             PendingCallback::GetProcessInfo(Box::new(callback)),
         );
@@ -301,8 +397,8 @@ impl<R: Runtime> Environment<R> {
     where
         F: FnOnce(Result<Vec<Value>, Error>) + 'static,
     {
-        let executor_id = match self.process_registry.get(&process_id) {
-            Some(&id) => id,
+        let executor_id = match self.process_registry.get_executor(process_id) {
+            Some(id) => id,
             None => {
                 callback(Err(Error::InvalidArgument(format!(
                     "Process {:?} not found in registry",
@@ -312,8 +408,7 @@ impl<R: Runtime> Environment<R> {
             }
         };
 
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
+        let request_id = self.request_tracker.allocate_request_id();
 
         let command = SchedulerCommand::GetLocals {
             request_id,
@@ -326,8 +421,8 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.pending_callbacks
-            .insert(request_id, PendingCallback::GetLocals(Box::new(callback)));
+        self.request_tracker
+            .register_callback(request_id, PendingCallback::GetLocals(Box::new(callback)));
     }
 
     /// Compact locals in a persistent process to keep only referenced variables.
@@ -339,8 +434,8 @@ impl<R: Runtime> Environment<R> {
     ) where
         F: FnOnce(Result<(), Error>) + 'static,
     {
-        let executor_id = match self.process_registry.get(&process_id) {
-            Some(&id) => id,
+        let executor_id = match self.process_registry.get_executor(process_id) {
+            Some(id) => id,
             None => {
                 callback(Err(Error::InvalidArgument(format!(
                     "Process {:?} not found in registry",
@@ -350,8 +445,7 @@ impl<R: Runtime> Environment<R> {
             }
         };
 
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
+        let request_id = self.request_tracker.allocate_request_id();
 
         let command = SchedulerCommand::CompactLocals {
             request_id,
@@ -364,7 +458,7 @@ impl<R: Runtime> Environment<R> {
             return;
         }
 
-        self.pending_callbacks.insert(
+        self.request_tracker.register_callback(
             request_id,
             PendingCallback::CompactLocals(Box::new(callback)),
         );
@@ -372,7 +466,7 @@ impl<R: Runtime> Environment<R> {
 
     /// Check if there are pending callbacks waiting for responses.
     pub fn has_pending(&self) -> bool {
-        !self.pending_callbacks.is_empty()
+        self.request_tracker.has_pending()
     }
 
     /// Process all pending events from the event queue.
@@ -451,7 +545,7 @@ impl<R: Runtime> Environment<R> {
 
     fn handle_execute_response(&mut self, request_id: u64, result: Result<ProcessId, Error>) {
         if let Some(PendingCallback::Execute(callback, _executor_id)) =
-            self.pending_callbacks.remove(&request_id)
+            self.request_tracker.take_callback(request_id)
         {
             callback(result);
         } else {
@@ -463,7 +557,9 @@ impl<R: Runtime> Environment<R> {
     }
 
     fn handle_wake_response(&mut self, request_id: u64, result: Result<(), Error>) {
-        if let Some(PendingCallback::Wake(callback)) = self.pending_callbacks.remove(&request_id) {
+        if let Some(PendingCallback::Wake(callback)) =
+            self.request_tracker.take_callback(request_id)
+        {
             callback(result);
         } else {
             eprintln!(
@@ -480,9 +576,9 @@ impl<R: Runtime> Environment<R> {
         heap_data: Vec<Vec<u8>>,
     ) {
         // Check if this is a GetResult for an awaiting process
-        if let Some(awaiter_pid) = self.awaiting_result_requests.remove(&request_id) {
+        if let Some(awaiter_pid) = self.process_coordinator.take_awaiter(request_id) {
             if let Ok(value) = result {
-                if let Some(&awaiter_executor_id) = self.process_registry.get(&awaiter_pid) {
+                if let Some(awaiter_executor_id) = self.process_registry.get_executor(awaiter_pid) {
                     let _ = self.runtime.send_command(
                         awaiter_executor_id,
                         SchedulerCommand::NotifyResult {
@@ -492,14 +588,16 @@ impl<R: Runtime> Environment<R> {
                         },
                     );
                 }
-                self.cleanup_awaiting_map(awaiter_pid);
+                if let Some(target_pid) = self.process_coordinator.remove_awaiter(awaiter_pid) {
+                    self.process_coordinator.take_awaiters(target_pid);
+                }
             }
             return;
         }
 
         // Normal GetResult callback
         if let Some(PendingCallback::GetResult(callback)) =
-            self.pending_callbacks.remove(&request_id)
+            self.request_tracker.take_callback(request_id)
         {
             let result_with_heap = result.map(|value| (value, heap_data));
             callback(result_with_heap);
@@ -517,7 +615,7 @@ impl<R: Runtime> Environment<R> {
         result: Result<HashMap<ProcessId, ProcessStatus>, Error>,
     ) {
         if let Some(PendingCallback::GetProcessStatuses(callback)) =
-            self.pending_callbacks.remove(&request_id)
+            self.request_tracker.take_callback(request_id)
         {
             callback(result);
         } else {
@@ -534,7 +632,7 @@ impl<R: Runtime> Environment<R> {
         result: Result<Option<ProcessInfo>, Error>,
     ) {
         if let Some(PendingCallback::GetProcessInfo(callback)) =
-            self.pending_callbacks.remove(&request_id)
+            self.request_tracker.take_callback(request_id)
         {
             callback(result);
         } else {
@@ -547,7 +645,7 @@ impl<R: Runtime> Environment<R> {
 
     fn handle_get_locals_response(&mut self, request_id: u64, result: Result<Vec<Value>, Error>) {
         if let Some(PendingCallback::GetLocals(callback)) =
-            self.pending_callbacks.remove(&request_id)
+            self.request_tracker.take_callback(request_id)
         {
             callback(result);
         } else {
@@ -560,7 +658,7 @@ impl<R: Runtime> Environment<R> {
 
     fn handle_compact_locals_response(&mut self, request_id: u64, result: Result<(), Error>) {
         if let Some(PendingCallback::CompactLocals(callback)) =
-            self.pending_callbacks.remove(&request_id)
+            self.request_tracker.take_callback(request_id)
         {
             callback(result);
         } else {
@@ -571,22 +669,6 @@ impl<R: Runtime> Environment<R> {
         }
     }
 
-    fn cleanup_awaiting_map(&mut self, awaiter_pid: ProcessId) {
-        let mut target_to_remove = None;
-        for (target_pid, awaiters) in self.awaiting_map.iter_mut() {
-            if let Some(pos) = awaiters.iter().position(|&pid| pid == awaiter_pid) {
-                awaiters.remove(pos);
-                if awaiters.is_empty() {
-                    target_to_remove = Some(*target_pid);
-                }
-                break;
-            }
-        }
-        if let Some(target_pid) = target_to_remove {
-            self.awaiting_map.remove(&target_pid);
-        }
-    }
-
     fn handle_spawn_request(
         &mut self,
         caller: ProcessId,
@@ -594,13 +676,8 @@ impl<R: Runtime> Environment<R> {
         captures: Vec<Value>,
         heap_data: Vec<Vec<u8>>,
     ) {
-        let new_pid = ProcessId(self.next_process_id);
-        self.next_process_id += 1;
-
-        let executor_id = self.next_executor % self.executor_count;
-        self.next_executor += 1;
-
-        self.process_registry.insert(new_pid, executor_id);
+        let new_pid = self.process_registry.allocate_process();
+        let executor_id = self.process_registry.get_executor(new_pid).unwrap();
 
         let _ = self.runtime.send_command(
             executor_id,
@@ -612,7 +689,7 @@ impl<R: Runtime> Environment<R> {
             },
         );
 
-        if let Some(&caller_executor_id) = self.process_registry.get(&caller) {
+        if let Some(caller_executor_id) = self.process_registry.get_executor(caller) {
             let _ = self.runtime.send_command(
                 caller_executor_id,
                 SchedulerCommand::NotifySpawn {
@@ -625,7 +702,7 @@ impl<R: Runtime> Environment<R> {
     }
 
     fn handle_deliver_message(&mut self, target: ProcessId, value: Value, heap_data: Vec<Vec<u8>>) {
-        if let Some(&executor_id) = self.process_registry.get(&target) {
+        if let Some(executor_id) = self.process_registry.get_executor(target) {
             let _ = self.runtime.send_command(
                 executor_id,
                 SchedulerCommand::NotifyMessage {
@@ -638,9 +715,8 @@ impl<R: Runtime> Environment<R> {
     }
 
     fn handle_await_result(&mut self, target: ProcessId, caller: ProcessId) {
-        if let Some(&target_executor_id) = self.process_registry.get(&target) {
-            let request_id = self.next_request_id;
-            self.next_request_id += 1;
+        if let Some(target_executor_id) = self.process_registry.get_executor(target) {
+            let request_id = self.request_tracker.allocate_request_id();
 
             let command = SchedulerCommand::GetResult {
                 request_id,
@@ -652,12 +728,8 @@ impl<R: Runtime> Environment<R> {
                 .send_command(target_executor_id, command)
                 .is_ok()
             {
-                self.awaiting_result_requests.insert(request_id, caller);
-
-                let awaiting_map_entry = self.awaiting_map.entry(target).or_insert_with(Vec::new);
-                if !awaiting_map_entry.contains(&caller) {
-                    awaiting_map_entry.push(caller);
-                }
+                self.process_coordinator
+                    .register_await(request_id, target, caller);
             }
         }
     }
@@ -668,9 +740,9 @@ impl<R: Runtime> Environment<R> {
         result: Value,
         heap_data: Vec<Vec<u8>>,
     ) {
-        if let Some(awaiters) = self.awaiting_map.remove(&process_id) {
+        if let Some(awaiters) = self.process_coordinator.take_awaiters(process_id) {
             for awaiter_pid in awaiters {
-                if let Some(&executor_id) = self.process_registry.get(&awaiter_pid) {
+                if let Some(executor_id) = self.process_registry.get_executor(awaiter_pid) {
                     let _ = self.runtime.send_command(
                         executor_id,
                         SchedulerCommand::NotifyResult {
