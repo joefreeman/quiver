@@ -214,10 +214,16 @@ impl Repl {
         }
     }
 
-    pub fn get_variables(
-        &mut self,
+    /// Start getting variables asynchronously. Returns (self, result_cell, var_list).
+    /// The caller should poll process_pending_events() until result_cell is populated.
+    pub fn start_get_variables(
+        mut self,
         variables: &HashMap<String, (Type, usize)>,
-    ) -> Vec<(String, Value)> {
+    ) -> (
+        Self,
+        Rc<RefCell<Option<Result<Vec<Value>, quiver_core::error::Error>>>>,
+        Vec<(String, usize)>,
+    ) {
         let mut var_list: Vec<(String, usize)> = variables
             .iter()
             .map(|(name, (_, index))| (name.clone(), *index))
@@ -233,24 +239,12 @@ impl Repl {
                 *locals_result_clone.borrow_mut() = Some(result);
             });
 
-        // Process events until get_locals completes
-        while locals_result.borrow().is_none() {
-            self.environment.process_pending_events();
-        }
+        (self, locals_result, var_list)
+    }
 
-        locals_result
-            .borrow()
-            .as_ref()
-            .expect("GetLocals callback not called")
-            .clone()
-            .map(|values| {
-                var_list
-                    .into_iter()
-                    .zip(values)
-                    .map(|((name, _), value)| (name, value))
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// Process pending events from the environment
+    pub fn process_pending_events(&mut self) {
+        self.environment.process_pending_events();
     }
 
     pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {

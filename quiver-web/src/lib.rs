@@ -50,6 +50,12 @@ enum ReplState {
         repl: Repl,
         eval_state: EvaluationState,
     },
+    /// Currently getting variables
+    GettingVariables {
+        repl: Repl,
+        locals_result: AsyncResult<Vec<quiver_core::value::Value>>,
+        var_list: Vec<(String, usize)>,
+    },
     /// An error occurred
     Error(String),
 }
@@ -168,6 +174,7 @@ impl QuiverRepl {
             }
             ReplState::Ready(_) => true,
             ReplState::Evaluating { .. } => true,
+            ReplState::GettingVariables { .. } => true,
             ReplState::Error(_) => true,
         }
     }
@@ -205,6 +212,9 @@ impl QuiverRepl {
                     "Already evaluating - call poll_evaluate() to check status",
                 ));
             }
+            ReplState::GettingVariables { .. } => {
+                return Err(JsValue::from_str("Cannot evaluate while getting variables"));
+            }
             ReplState::Error(e) => {
                 return Err(JsValue::from_str(&format!("REPL in error state: {}", e)));
             }
@@ -241,6 +251,9 @@ impl QuiverRepl {
             ReplState::Ready(_) => Err(JsValue::from_str("Not evaluating - call evaluate() first")),
             ReplState::WaitingForWorker { .. } | ReplState::Initializing { .. } => {
                 Err(JsValue::from_str("REPL not initialized yet"))
+            }
+            ReplState::GettingVariables { .. } => {
+                Err(JsValue::from_str("Currently getting variables"))
             }
             ReplState::Error(e) => Err(JsValue::from_str(&format!("REPL in error state: {}", e))),
         }
@@ -306,34 +319,110 @@ impl QuiverRepl {
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 
+    /// Start getting variables. Returns immediately.
+    /// Call poll_get_variables() repeatedly until it returns a result.
     #[wasm_bindgen]
-    pub fn get_variables(&mut self) -> Result<JsValue, JsValue> {
-        let repl = match &mut self.state {
+    pub fn start_get_variables(&mut self) -> Result<(), JsValue> {
+        let repl = match std::mem::replace(
+            &mut self.state,
+            ReplState::Error("Transitioning".to_string()),
+        ) {
             ReplState::Ready(repl) => repl,
-            ReplState::Evaluating { repl, .. } => repl,
             ReplState::WaitingForWorker { .. } | ReplState::Initializing { .. } => {
                 return Err(JsValue::from_str("REPL not initialized yet"));
+            }
+            ReplState::Evaluating { .. } => {
+                return Err(JsValue::from_str("Cannot get variables while evaluating"));
+            }
+            ReplState::GettingVariables { .. } => {
+                return Err(JsValue::from_str("Already getting variables"));
             }
             ReplState::Error(e) => {
                 return Err(JsValue::from_str(&format!("REPL in error state: {}", e)));
             }
         };
 
-        let vars = repl.get_variables(&self.variables);
+        let (repl, locals_result, var_list) = repl.start_get_variables(&self.variables);
 
-        let formatted_vars: Vec<(String, String, String)> = vars
-            .into_iter()
-            .map(|(name, value)| {
-                let (var_type, _) = &self.variables[&name];
-                (
-                    name,
-                    repl.format_value(&value, &[]),
-                    repl.format_type(var_type),
-                )
-            })
-            .collect();
+        self.state = ReplState::GettingVariables {
+            repl,
+            locals_result,
+            var_list,
+        };
 
-        serde_wasm_bindgen::to_value(&formatted_vars)
-            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+        Ok(())
+    }
+
+    /// Poll the get_variables status. Returns null if still fetching, or the result when done.
+    #[wasm_bindgen]
+    pub fn poll_get_variables(&mut self) -> Result<JsValue, JsValue> {
+        match &mut self.state {
+            ReplState::GettingVariables {
+                repl,
+                locals_result,
+                var_list: _,
+            } => {
+                // Process any pending events
+                repl.process_pending_events();
+
+                // Check if result is ready
+                if locals_result.borrow().is_some() {
+                    self.finalize_get_variables()
+                } else {
+                    Ok(JsValue::NULL)
+                }
+            }
+            ReplState::Ready(_) => Err(JsValue::from_str(
+                "Not getting variables - call start_get_variables() first",
+            )),
+            ReplState::WaitingForWorker { .. } | ReplState::Initializing { .. } => {
+                Err(JsValue::from_str("REPL not initialized yet"))
+            }
+            ReplState::Evaluating { .. } => Err(JsValue::from_str("Currently evaluating")),
+            ReplState::Error(e) => Err(JsValue::from_str(&format!("REPL in error state: {}", e))),
+        }
+    }
+
+    fn finalize_get_variables(&mut self) -> Result<JsValue, JsValue> {
+        if let ReplState::GettingVariables {
+            repl,
+            locals_result,
+            var_list,
+        } = std::mem::replace(
+            &mut self.state,
+            ReplState::Error("Transitioning".to_string()),
+        ) {
+            let result = locals_result.borrow().as_ref().unwrap().clone();
+
+            match result {
+                Ok(values) => {
+                    let formatted_vars: Vec<(String, String, String)> = var_list
+                        .into_iter()
+                        .zip(values)
+                        .map(|((name, _), value)| {
+                            let (var_type, _) = &self.variables[&name];
+                            (
+                                name,
+                                repl.format_value(&value, &[]),
+                                repl.format_type(var_type),
+                            )
+                        })
+                        .collect();
+
+                    self.state = ReplState::Ready(repl);
+                    serde_wasm_bindgen::to_value(&formatted_vars)
+                        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+                }
+                Err(e) => {
+                    self.state = ReplState::Ready(repl);
+                    Err(JsValue::from_str(&format!(
+                        "Error getting variables: {:?}",
+                        e
+                    )))
+                }
+            }
+        } else {
+            Err(JsValue::from_str("Internal state error"))
+        }
     }
 }
