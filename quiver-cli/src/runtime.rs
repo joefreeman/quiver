@@ -11,34 +11,28 @@ use std::time::Duration;
 
 struct ExecutorHandle {
     command_tx: SyncSender<SchedulerCommand>,
+    event_rx: Receiver<Event>,
     thread_handle: JoinHandle<()>,
     callback: Box<dyn Fn(Event) + Send>,
 }
 
 pub struct NativeRuntime {
     executors: Vec<Option<ExecutorHandle>>,
-    event_rx: Receiver<Event>,
-    event_tx: SyncSender<Event>,
 }
 
 impl NativeRuntime {
     pub fn new() -> Self {
-        let (event_tx, event_rx) = sync_channel(100);
-
         Self {
             executors: Vec::new(),
-            event_rx,
-            event_tx,
         }
     }
 
     /// Poll for events from executor threads and invoke callbacks
     pub fn poll(&mut self) {
-        while let Ok(event) = self.event_rx.recv_timeout(Duration::from_millis(1)) {
-            // Invoke all callbacks with this event
-            for executor in &self.executors {
-                if let Some(handle) = executor {
-                    (handle.callback)(event.clone());
+        for executor in &self.executors {
+            if let Some(handle) = executor {
+                while let Ok(event) = handle.event_rx.try_recv() {
+                    (handle.callback)(event);
                 }
             }
         }
@@ -68,7 +62,7 @@ impl Runtime for NativeRuntime {
         let executor_id = self.executors.len();
 
         let (command_tx, command_rx) = sync_channel(100);
-        let event_tx = self.event_tx.clone();
+        let (event_tx, event_rx) = sync_channel(100);
         let executor = Executor::new(program);
 
         let thread_handle = thread::spawn(move || {
@@ -77,6 +71,7 @@ impl Runtime for NativeRuntime {
 
         let handle = ExecutorHandle {
             command_tx,
+            event_rx,
             thread_handle,
             callback,
         };
