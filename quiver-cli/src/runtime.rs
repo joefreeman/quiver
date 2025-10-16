@@ -13,7 +13,6 @@ struct ExecutorHandle {
     command_tx: SyncSender<SchedulerCommand>,
     event_rx: Receiver<Event>,
     thread_handle: JoinHandle<()>,
-    callback: Box<dyn Fn(Event) + Send>,
 }
 
 pub struct NativeRuntime {
@@ -24,17 +23,6 @@ impl NativeRuntime {
     pub fn new() -> Self {
         Self {
             executors: Vec::new(),
-        }
-    }
-
-    /// Poll for events from executor threads and invoke callbacks
-    pub fn poll(&mut self) {
-        for executor in &self.executors {
-            if let Some(handle) = executor {
-                while let Ok(event) = handle.event_rx.try_recv() {
-                    (handle.callback)(event);
-                }
-            }
         }
     }
 }
@@ -57,7 +45,6 @@ impl Runtime for NativeRuntime {
     fn start_executor(
         &mut self,
         program: &Program,
-        callback: Box<dyn Fn(Event) + Send>,
     ) -> Result<usize, Error> {
         let executor_id = self.executors.len();
 
@@ -73,12 +60,23 @@ impl Runtime for NativeRuntime {
             command_tx,
             event_rx,
             thread_handle,
-            callback,
         };
 
         self.executors.push(Some(handle));
 
         Ok(executor_id)
+    }
+
+    fn poll(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        for executor in &self.executors {
+            if let Some(handle) = executor {
+                while let Ok(event) = handle.event_rx.try_recv() {
+                    events.push(event);
+                }
+            }
+        }
+        events
     }
 
     fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error> {

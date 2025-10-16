@@ -1,6 +1,8 @@
 use quiver_core::error::Error;
 use quiver_core::program::Program;
 use quiver_environment::runtime::{Event, Runtime, SchedulerCommand};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -9,8 +11,6 @@ use web_sys::{MessageEvent, Worker};
 /// Bundles all the pieces needed for a single worker executor
 struct WorkerHandle {
     worker: Option<Worker>,
-    /// Callback to invoke when events arrive from the worker
-    callback: Option<Rc<dyn Fn(Event)>>,
     /// Message handler closure - must be kept alive for JavaScript
     _message_closure: Closure<dyn FnMut(MessageEvent)>,
     /// Error handler closure - must be kept alive for JavaScript
@@ -20,12 +20,14 @@ struct WorkerHandle {
 /// Multi-worker web runtime
 pub struct WebRuntime {
     workers: Vec<WorkerHandle>,
+    pending_events: Rc<RefCell<VecDeque<Event>>>,
 }
 
 impl WebRuntime {
     pub fn new() -> Self {
         Self {
             workers: Vec::new(),
+            pending_events: Rc::new(RefCell::new(VecDeque::new())),
         }
     }
 }
@@ -59,7 +61,6 @@ impl Runtime for WebRuntime {
     fn start_executor(
         &mut self,
         program: &Program,
-        callback: Box<dyn Fn(Event) + Send>,
     ) -> Result<usize, Error> {
         let executor_id = self.workers.len();
 
@@ -67,18 +68,12 @@ impl Runtime for WebRuntime {
         let worker = Worker::new("./worker.js")
             .map_err(|_| Error::InvalidArgument("Failed to create worker".into()))?;
 
-        // Convert callback to Rc for sharing with closures (web is single-threaded, Send is not an issue)
-        let callback_rc: Rc<dyn Fn(Event)> =
-            unsafe { Rc::from(Box::from_raw(Box::into_raw(callback) as *mut dyn Fn(Event))) };
-
         // Set up message handler
-        let callback_clone = callback_rc.clone();
+        let pending = self.pending_events.clone();
         let message_closure = Closure::wrap(Box::new(move |e: MessageEvent| {
             // The worker sends back an array of events
             if let Ok(events) = serde_wasm_bindgen::from_value::<Vec<Event>>(e.data()) {
-                for event in events {
-                    callback_clone(event);
-                }
+                pending.borrow_mut().extend(events);
             }
         }) as Box<dyn FnMut(_)>);
 
@@ -116,12 +111,15 @@ impl Runtime for WebRuntime {
 
         self.workers.push(WorkerHandle {
             worker: Some(worker),
-            callback: Some(callback_rc),
             _message_closure: message_closure,
             _error_closure: error_closure,
         });
 
         Ok(executor_id)
+    }
+
+    fn poll(&mut self) -> Vec<Event> {
+        self.pending_events.borrow_mut().drain(..).collect()
     }
 
     fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error> {
@@ -132,8 +130,6 @@ impl Runtime for WebRuntime {
         if let Some(worker) = handle.worker.take() {
             worker.terminate();
         }
-
-        handle.callback = None;
 
         Ok(())
     }

@@ -130,14 +130,16 @@ pub trait Runtime {
     /// Send a command to a specific executor
     fn send_command(&mut self, executor_id: usize, command: SchedulerCommand) -> Result<(), Error>;
 
-    /// Start an executor with the given program and callback for handling events
+    /// Start an executor with the given program
     /// Returns the executor ID
     fn start_executor(
         &mut self,
         program: &quiver_core::program::Program,
-        callback: Box<dyn Fn(Event) + Send>,
     ) -> Result<usize, Error>;
 
     /// Stop a specific executor
     fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error>;
+
+    /// Poll for events from all executors. Returns collected events.
+    fn poll(&mut self) -> Vec<Event>;
 }

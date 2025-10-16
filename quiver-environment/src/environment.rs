@@ -7,8 +7,6 @@ use quiver_core::program::Program;
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
 use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 
 type PendingCallback = Box<dyn FnOnce(Event)>;
 
@@ -135,21 +133,14 @@ pub struct Environment<R: Runtime> {
     process_registry: ProcessRegistry,
     request_tracker: RequestTracker,
     process_coordinator: ProcessCoordinator,
-    event_queue: Arc<Mutex<VecDeque<Event>>>,
 }
 
 impl<R: Runtime> Environment<R> {
     pub fn new(mut runtime: R, program: Program, executor_count: usize) -> Self {
-        let event_queue = Arc::new(Mutex::new(VecDeque::new()));
-
-        // Start executors with callbacks that push to the event queue
+        // Start executors
         for _ in 0..executor_count {
-            let queue_clone = event_queue.clone();
-            let callback = Box::new(move |event: Event| {
-                queue_clone.lock().unwrap().push_back(event);
-            });
             runtime
-                .start_executor(&program, callback)
+                .start_executor(&program)
                 .expect("Failed to start executor");
         }
 
@@ -160,7 +151,6 @@ impl<R: Runtime> Environment<R> {
             process_registry: ProcessRegistry::new(executor_count),
             request_tracker: RequestTracker::new(),
             process_coordinator: ProcessCoordinator::new(),
-            event_queue,
         }
     }
 
@@ -513,20 +503,14 @@ impl<R: Runtime> Environment<R> {
         self.request_tracker.has_pending()
     }
 
-    /// Process all pending events from the event queue.
+    /// Process all pending events from the runtime.
     /// Returns the number of events processed.
     pub fn process_pending_events(&mut self) -> usize {
-        let mut count = 0;
+        let events = self.runtime.poll();
+        let count = events.len();
 
-        loop {
-            let event = self.event_queue.lock().unwrap().pop_front();
-            match event {
-                Some(ev) => {
-                    self.process_event(ev);
-                    count += 1;
-                }
-                None => break,
-            }
+        for event in events {
+            self.process_event(event);
         }
 
         count

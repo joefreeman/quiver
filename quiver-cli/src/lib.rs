@@ -37,7 +37,6 @@ pub fn wait_for_callbacks(
     environment: &mut Environment<NativeRuntime>,
 ) -> Result<(), quiver_core::error::Error> {
     while environment.has_pending() {
-        environment.runtime_mut().poll();
         if environment.process_pending_events() == 0 {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -46,7 +45,6 @@ pub fn wait_for_callbacks(
     // Continue polling for routing events
     let mut idle_iterations = 0;
     while idle_iterations < 5 {
-        environment.runtime_mut().poll();
         if environment.process_pending_events() > 0 {
             idle_iterations = 0;
         } else {
