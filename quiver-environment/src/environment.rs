@@ -154,11 +154,6 @@ impl<R: Runtime> Environment<R> {
         }
     }
 
-    /// Get a mutable reference to the runtime for platform-specific operations
-    pub fn runtime_mut(&mut self) -> &mut R {
-        &mut self.runtime
-    }
-
     /// Create a temporary Executor for read-only operations like formatting.
     pub fn executor(&self) -> Executor {
         Executor::new(&self.program)
