@@ -1,8 +1,7 @@
 use quiver_core::error::Error;
 use quiver_core::program::Program;
-use quiver_environment::runtime::{Event, Runtime, SchedulerCommand};
+use quiver_environment::runtime::{CommandSender, Event, SchedulerCommand};
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -17,24 +16,17 @@ struct WorkerHandle {
     _error_closure: Closure<dyn FnMut(web_sys::ErrorEvent)>,
 }
 
-/// Multi-worker web runtime
-pub struct WebRuntime {
-    workers: Vec<WorkerHandle>,
-    pending_events: Rc<RefCell<VecDeque<Event>>>,
+/// A cloneable command sender for the web runtime.
+/// Shares access to the workers through Rc<RefCell<>>.
+#[derive(Clone)]
+pub struct WebCommandSender {
+    workers: Rc<RefCell<Vec<WorkerHandle>>>,
 }
 
-impl WebRuntime {
-    pub fn new() -> Self {
-        Self {
-            workers: Vec::new(),
-            pending_events: Rc::new(RefCell::new(VecDeque::new())),
-        }
-    }
-}
-
-impl Runtime for WebRuntime {
+impl CommandSender for WebCommandSender {
     fn send_command(&mut self, executor_id: usize, command: SchedulerCommand) -> Result<(), Error> {
-        let handle = self.workers.get(executor_id).ok_or_else(|| {
+        let workers = self.workers.borrow();
+        let handle = workers.get(executor_id).ok_or_else(|| {
             Error::InvalidArgument(format!("Invalid executor_id: {}", executor_id))
         })?;
 
@@ -57,23 +49,51 @@ impl Runtime for WebRuntime {
 
         Ok(())
     }
+}
 
-    fn start_executor(
+/// Multi-worker web runtime
+pub struct WebRuntime {
+    workers: Rc<RefCell<Vec<WorkerHandle>>>,
+}
+
+impl WebRuntime {
+    pub fn new() -> Self {
+        Self {
+            workers: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// Get a cloneable command sender for this runtime.
+    pub fn command_sender(&self) -> WebCommandSender {
+        WebCommandSender {
+            workers: self.workers.clone(),
+        }
+    }
+
+    /// Start an executor with the given program and event callback.
+    /// The callback will be invoked immediately when events are received from the worker.
+    /// Returns the executor ID.
+    pub fn start_executor<F>(
         &mut self,
         program: &Program,
-    ) -> Result<usize, Error> {
-        let executor_id = self.workers.len();
+        mut event_callback: F,
+    ) -> Result<usize, Error>
+    where
+        F: FnMut(Event) + 'static,
+    {
+        let executor_id = self.workers.borrow().len();
 
         // Create worker
         let worker = Worker::new("./worker.js")
             .map_err(|_| Error::InvalidArgument("Failed to create worker".into()))?;
 
-        // Set up message handler
-        let pending = self.pending_events.clone();
+        // Set up message handler that invokes callback directly
         let message_closure = Closure::wrap(Box::new(move |e: MessageEvent| {
             // The worker sends back an array of events
             if let Ok(events) = serde_wasm_bindgen::from_value::<Vec<Event>>(e.data()) {
-                pending.borrow_mut().extend(events);
+                for event in events {
+                    event_callback(event);
+                }
             }
         }) as Box<dyn FnMut(_)>);
 
@@ -109,7 +129,7 @@ impl Runtime for WebRuntime {
             .post_message(&init_message)
             .map_err(|_| Error::InvalidArgument("Failed to send initial program".into()))?;
 
-        self.workers.push(WorkerHandle {
+        self.workers.borrow_mut().push(WorkerHandle {
             worker: Some(worker),
             _message_closure: message_closure,
             _error_closure: error_closure,
@@ -118,12 +138,11 @@ impl Runtime for WebRuntime {
         Ok(executor_id)
     }
 
-    fn poll(&mut self) -> Vec<Event> {
-        self.pending_events.borrow_mut().drain(..).collect()
-    }
-
-    fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error> {
-        let handle = self.workers.get_mut(executor_id).ok_or_else(|| {
+    /// Stop a specific executor.
+    #[allow(dead_code)]
+    pub fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error> {
+        let mut workers = self.workers.borrow_mut();
+        let handle = workers.get_mut(executor_id).ok_or_else(|| {
             Error::InvalidArgument(format!("Invalid executor_id: {}", executor_id))
         })?;
 

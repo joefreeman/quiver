@@ -24,7 +24,8 @@ const HISTORY_FILE: &str = ".quiv_history";
 /// CLI-specific REPL
 pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
-    environment: Environment<NativeRuntime>,
+    runtime: NativeRuntime,
+    environment: Environment<crate::runtime::NativeCommandSender>,
     repl_process_id: ProcessId,
     type_aliases: HashMap<String, Type>,
     module_cache: ModuleCache,
@@ -48,8 +49,13 @@ impl ReplCli {
         let executor_count = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let runtime = NativeRuntime::new();
-        let mut environment = Environment::new(runtime, program, executor_count);
+
+        let mut runtime = NativeRuntime::new();
+        for _ in 0..executor_count {
+            runtime.start_executor(&program).map_err(|e| format!("{:?}", e))?;
+        }
+        let command_sender = runtime.command_sender();
+        let mut environment = Environment::new(command_sender, program, executor_count);
 
         // Initialize REPL process
         let repl_process_id = Rc::new(RefCell::new(None));
@@ -59,7 +65,7 @@ impl ReplCli {
                 Some(result.expect("Failed to spawn REPL process"));
         });
 
-        wait_for_callbacks(&mut environment).map_err(|e| format!("Runtime error: {:?}", e))?;
+        wait_for_callbacks(&mut runtime, &mut environment).map_err(|e| format!("Runtime error: {:?}", e))?;
 
         let repl_process_id = repl_process_id
             .borrow()
@@ -67,6 +73,7 @@ impl ReplCli {
 
         Ok(Self {
             editor,
+            runtime,
             environment,
             repl_process_id,
             type_aliases: HashMap::new(),
@@ -82,7 +89,7 @@ impl ReplCli {
 
     /// Wait for all pending callbacks to complete (native-specific)
     fn wait_for_callbacks(&mut self) -> Result<(), CoreError> {
-        wait_for_callbacks(&mut self.environment)
+        wait_for_callbacks(&mut self.runtime, &mut self.environment)
     }
 
     pub fn run(mut self) -> Result<(), ReadlineError> {

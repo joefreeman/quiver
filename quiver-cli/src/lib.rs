@@ -34,10 +34,16 @@ use std::time::Duration;
 
 /// Wait for all pending callbacks to complete on a native environment.
 pub fn wait_for_callbacks(
-    environment: &mut Environment<NativeRuntime>,
+    runtime: &mut NativeRuntime,
+    environment: &mut Environment<runtime::NativeCommandSender>,
 ) -> Result<(), quiver_core::error::Error> {
     while environment.has_pending() {
-        if environment.process_pending_events() == 0 {
+        let events = runtime.poll();
+        let count = events.len();
+        for event in events {
+            environment.process_event(event);
+        }
+        if count == 0 {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -45,7 +51,12 @@ pub fn wait_for_callbacks(
     // Continue polling for routing events
     let mut idle_iterations = 0;
     while idle_iterations < 5 {
-        if environment.process_pending_events() > 0 {
+        let events = runtime.poll();
+        let count = events.len();
+        for event in events {
+            environment.process_event(event);
+        }
+        if count > 0 {
             idle_iterations = 0;
         } else {
             idle_iterations += 1;
@@ -86,8 +97,10 @@ pub fn compile(
     .map_err(Error::CompileError)?;
 
     // Create a temporary Runtime for execution with the new program
-    let runtime = NativeRuntime::new();
-    let mut environment = Environment::new(runtime, new_program, 1);
+    let mut runtime = NativeRuntime::new();
+    runtime.start_executor(&new_program).map_err(Error::RuntimeError)?;
+    let command_sender = runtime.command_sender();
+    let mut environment = Environment::new(command_sender, new_program, 1);
 
     // Execute instructions in a new non-persistent process
     let process_id_result = Rc::new(RefCell::new(None));
@@ -96,7 +109,7 @@ pub fn compile(
         *process_id_result_clone.borrow_mut() = Some(result);
     });
 
-    wait_for_callbacks(&mut environment).map_err(Error::RuntimeError)?;
+    wait_for_callbacks(&mut runtime, &mut environment).map_err(Error::RuntimeError)?;
 
     let process_id = process_id_result
         .borrow()
@@ -112,7 +125,7 @@ pub fn compile(
         *value_result_clone.borrow_mut() = Some(result);
     });
 
-    wait_for_callbacks(&mut environment).map_err(Error::RuntimeError)?;
+    wait_for_callbacks(&mut runtime, &mut environment).map_err(Error::RuntimeError)?;
 
     let (value, _heap_data) = value_result
         .borrow()

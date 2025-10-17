@@ -1,4 +1,4 @@
-use crate::runtime::{Event, Runtime, SchedulerCommand};
+use crate::runtime::{CommandSender, Event, SchedulerCommand};
 use quiver_core::bytecode::Instruction;
 use quiver_core::error::Error;
 use quiver_core::executor::Executor;
@@ -126,8 +126,8 @@ impl ProcessCoordinator {
 
 /// Environment manages program state, process registry, and coordinates
 /// execution across multiple executors in a platform-agnostic way.
-pub struct Environment<R: Runtime> {
-    runtime: R,
+pub struct Environment<C: CommandSender> {
+    command_sender: C,
     program: Program,
     executor_count: usize,
     process_registry: ProcessRegistry,
@@ -135,17 +135,10 @@ pub struct Environment<R: Runtime> {
     process_coordinator: ProcessCoordinator,
 }
 
-impl<R: Runtime> Environment<R> {
-    pub fn new(mut runtime: R, program: Program, executor_count: usize) -> Self {
-        // Start executors
-        for _ in 0..executor_count {
-            runtime
-                .start_executor(&program)
-                .expect("Failed to start executor");
-        }
-
+impl<C: CommandSender> Environment<C> {
+    pub fn new(command_sender: C, program: Program, executor_count: usize) -> Self {
         Self {
-            runtime,
+            command_sender,
             program,
             executor_count,
             process_registry: ProcessRegistry::new(executor_count),
@@ -196,7 +189,7 @@ impl<R: Runtime> Environment<R> {
             || !new_types.is_empty()
         {
             for executor_id in 0..self.executor_count {
-                let _ = self.runtime.send_command(
+                let _ = self.command_sender.send_command(
                     executor_id,
                     SchedulerCommand::UpdateProgram {
                         constants: new_constants.clone(),
@@ -226,7 +219,7 @@ impl<R: Runtime> Environment<R> {
             persistent,
         };
 
-        if let Err(_) = self.runtime.send_command(executor_id, command) {
+        if let Err(_) = self.command_sender.send_command(executor_id, command) {
             callback(Err(Error::InvalidArgument("Executor died".to_string())));
             return;
         }
@@ -267,7 +260,7 @@ impl<R: Runtime> Environment<R> {
             instructions,
         };
 
-        if let Err(_) = self.runtime.send_command(executor_id, command) {
+        if let Err(_) = self.command_sender.send_command(executor_id, command) {
             callback(Err(Error::InvalidArgument("Executor died".to_string())));
             return;
         }
@@ -307,7 +300,7 @@ impl<R: Runtime> Environment<R> {
             process_id,
         };
 
-        if let Err(_) = self.runtime.send_command(executor_id, command) {
+        if let Err(_) = self.command_sender.send_command(executor_id, command) {
             callback(Err(Error::InvalidArgument("Executor died".to_string())));
             return;
         }
@@ -350,7 +343,7 @@ impl<R: Runtime> Environment<R> {
 
         let command = SchedulerCommand::GetProcesses { request_id };
 
-        if let Err(_) = self.runtime.send_command(executor_id, command) {
+        if let Err(_) = self.command_sender.send_command(executor_id, command) {
             callback(Err(Error::InvalidArgument("Executor died".to_string())));
             return;
         }
@@ -390,7 +383,7 @@ impl<R: Runtime> Environment<R> {
             id: process_id,
         };
 
-        if let Err(_) = self.runtime.send_command(executor_id, command) {
+        if let Err(_) = self.command_sender.send_command(executor_id, command) {
             callback(Err(Error::InvalidArgument("Executor died".to_string())));
             return;
         }
@@ -431,7 +424,7 @@ impl<R: Runtime> Environment<R> {
             indices: indices.to_vec(),
         };
 
-        if let Err(_) = self.runtime.send_command(executor_id, command) {
+        if let Err(_) = self.command_sender.send_command(executor_id, command) {
             callback(Err(Error::InvalidArgument("Executor died".to_string())));
             return;
         }
@@ -476,7 +469,7 @@ impl<R: Runtime> Environment<R> {
             referenced_indices: referenced_indices.to_vec(),
         };
 
-        if let Err(_) = self.runtime.send_command(executor_id, command) {
+        if let Err(_) = self.command_sender.send_command(executor_id, command) {
             callback(Err(Error::InvalidArgument("Executor died".to_string())));
             return;
         }
@@ -498,20 +491,9 @@ impl<R: Runtime> Environment<R> {
         self.request_tracker.has_pending()
     }
 
-    /// Process all pending events from the runtime.
-    /// Returns the number of events processed.
-    pub fn process_pending_events(&mut self) -> usize {
-        let events = self.runtime.poll();
-        let count = events.len();
-
-        for event in events {
-            self.process_event(event);
-        }
-
-        count
-    }
-
-    fn process_event(&mut self, event: Event) {
+    /// Process a single event.
+    /// This is public so that platform-specific runtimes can invoke it directly.
+    pub fn process_event(&mut self, event: Event) {
         match event {
             Event::ExecuteResponse { request_id, result } => {
                 self.handle_execute_response(request_id, result);
@@ -592,7 +574,7 @@ impl<R: Runtime> Environment<R> {
         if let Some(awaiter_pid) = self.process_coordinator.take_awaiter(request_id) {
             if let Ok(value) = result {
                 if let Some(awaiter_executor_id) = self.process_registry.get_executor(awaiter_pid) {
-                    let _ = self.runtime.send_command(
+                    let _ = self.command_sender.send_command(
                         awaiter_executor_id,
                         SchedulerCommand::NotifyResult {
                             process_id: awaiter_pid,
@@ -670,7 +652,7 @@ impl<R: Runtime> Environment<R> {
         let new_pid = self.process_registry.allocate_process();
         let executor_id = self.process_registry.get_executor(new_pid).unwrap();
 
-        let _ = self.runtime.send_command(
+        let _ = self.command_sender.send_command(
             executor_id,
             SchedulerCommand::Spawn {
                 process_id: new_pid,
@@ -681,7 +663,7 @@ impl<R: Runtime> Environment<R> {
         );
 
         if let Some(caller_executor_id) = self.process_registry.get_executor(caller) {
-            let _ = self.runtime.send_command(
+            let _ = self.command_sender.send_command(
                 caller_executor_id,
                 SchedulerCommand::NotifySpawn {
                     process_id: caller,
@@ -694,7 +676,7 @@ impl<R: Runtime> Environment<R> {
 
     fn handle_deliver_message(&mut self, target: ProcessId, value: Value, heap_data: Vec<Vec<u8>>) {
         if let Some(executor_id) = self.process_registry.get_executor(target) {
-            let _ = self.runtime.send_command(
+            let _ = self.command_sender.send_command(
                 executor_id,
                 SchedulerCommand::NotifyMessage {
                     process_id: target,
@@ -715,7 +697,7 @@ impl<R: Runtime> Environment<R> {
             };
 
             if self
-                .runtime
+                .command_sender
                 .send_command(target_executor_id, command)
                 .is_ok()
             {
@@ -734,7 +716,7 @@ impl<R: Runtime> Environment<R> {
         if let Some(awaiters) = self.process_coordinator.take_awaiters(process_id) {
             for awaiter_pid in awaiters {
                 if let Some(executor_id) = self.process_registry.get_executor(awaiter_pid) {
-                    let _ = self.runtime.send_command(
+                    let _ = self.command_sender.send_command(
                         executor_id,
                         SchedulerCommand::NotifyResult {
                             process_id: awaiter_pid,
@@ -744,12 +726,6 @@ impl<R: Runtime> Environment<R> {
                     );
                 }
             }
-        }
-    }
-
-    pub fn shutdown(&mut self) {
-        for executor_id in 0..self.executor_count {
-            let _ = self.runtime.stop_executor(executor_id);
         }
     }
 }

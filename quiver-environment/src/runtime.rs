@@ -125,21 +125,9 @@ pub enum Event {
     },
 }
 
-/// Low-level runtime trait for platform-specific execution
-pub trait Runtime {
+/// Trait for sending commands to executors.
+/// Implementations should be cheap to clone for easy sharing.
+pub trait CommandSender {
     /// Send a command to a specific executor
     fn send_command(&mut self, executor_id: usize, command: SchedulerCommand) -> Result<(), Error>;
-
-    /// Start an executor with the given program
-    /// Returns the executor ID
-    fn start_executor(
-        &mut self,
-        program: &quiver_core::program::Program,
-    ) -> Result<usize, Error>;
-
-    /// Stop a specific executor
-    fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error>;
-
-    /// Poll for events from all executors. Returns collected events.
-    fn poll(&mut self) -> Vec<Event>;
 }

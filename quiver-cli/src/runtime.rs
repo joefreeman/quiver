@@ -3,7 +3,7 @@ use quiver_core::executor::Executor;
 use quiver_core::process::{Action, Frame, ProcessId, ProcessStatus};
 use quiver_core::program::Program;
 use quiver_core::value::Value;
-use quiver_environment::runtime::{Event, Runtime, SchedulerCommand};
+use quiver_environment::runtime::{CommandSender, Event, SchedulerCommand};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
@@ -13,6 +13,28 @@ struct ExecutorHandle {
     command_tx: SyncSender<SchedulerCommand>,
     event_rx: Receiver<Event>,
     thread_handle: JoinHandle<()>,
+}
+
+/// A cloneable command sender for the native runtime.
+/// Holds clones of all executor command channels.
+#[derive(Clone)]
+pub struct NativeCommandSender {
+    command_txs: Vec<SyncSender<SchedulerCommand>>,
+}
+
+impl CommandSender for NativeCommandSender {
+    fn send_command(&mut self, executor_id: usize, command: SchedulerCommand) -> Result<(), Error> {
+        if executor_id < self.command_txs.len() {
+            self.command_txs[executor_id]
+                .send(command)
+                .map_err(|_| Error::InvalidArgument("Executor thread died".to_string()))
+        } else {
+            Err(Error::InvalidArgument(format!(
+                "Invalid executor_id: {}",
+                executor_id
+            )))
+        }
+    }
 }
 
 pub struct NativeRuntime {
@@ -25,24 +47,22 @@ impl NativeRuntime {
             executors: Vec::new(),
         }
     }
-}
 
-impl Runtime for NativeRuntime {
-    fn send_command(&mut self, executor_id: usize, command: SchedulerCommand) -> Result<(), Error> {
-        if let Some(Some(handle)) = self.executors.get(executor_id) {
-            handle
-                .command_tx
-                .send(command)
-                .map_err(|_| Error::InvalidArgument("Executor thread died".to_string()))
-        } else {
-            Err(Error::InvalidArgument(format!(
-                "Invalid executor_id: {}",
-                executor_id
-            )))
-        }
+    /// Get a cloneable command sender for this runtime.
+    /// Should be called after starting all executors.
+    pub fn command_sender(&self) -> NativeCommandSender {
+        let command_txs = self
+            .executors
+            .iter()
+            .filter_map(|executor| executor.as_ref().map(|h| h.command_tx.clone()))
+            .collect();
+
+        NativeCommandSender { command_txs }
     }
 
-    fn start_executor(
+    /// Start an executor with the given program.
+    /// Returns the executor ID.
+    pub fn start_executor(
         &mut self,
         program: &Program,
     ) -> Result<usize, Error> {
@@ -67,7 +87,9 @@ impl Runtime for NativeRuntime {
         Ok(executor_id)
     }
 
-    fn poll(&mut self) -> Vec<Event> {
+    /// Poll for events from all executors. Returns collected events.
+    /// This method is specific to native runtime and moves events from worker threads to the main thread.
+    pub fn poll(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         for executor in &self.executors {
             if let Some(handle) = executor {
@@ -79,7 +101,8 @@ impl Runtime for NativeRuntime {
         events
     }
 
-    fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error> {
+    /// Stop a specific executor.
+    pub fn stop_executor(&mut self, executor_id: usize) -> Result<(), Error> {
         if executor_id >= self.executors.len() {
             return Err(Error::InvalidArgument(format!(
                 "Invalid executor_id: {}",

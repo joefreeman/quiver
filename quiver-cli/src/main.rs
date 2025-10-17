@@ -110,7 +110,7 @@ fn compile_command(
 }
 
 fn handle_result(
-    environment: &quiver::Environment<quiver::NativeRuntime>,
+    environment: &quiver::Environment<quiver::runtime::NativeCommandSender>,
     result: Result<Option<(quiver_core::value::Value, Vec<Vec<u8>>)>, quiver::Error>,
     quiet: bool,
 ) {
@@ -166,11 +166,13 @@ fn run_command(
             let entry = bytecode_data.entry;
             let program = quiver_core::program::Program::from_bytecode(bytecode_data);
             // Use single executor for bytecode execution
-            let runtime = quiver::NativeRuntime::new();
-            let mut environment = quiver::Environment::new(runtime, program, 1);
+            let mut runtime = quiver::NativeRuntime::new();
+            runtime.start_executor(&program).map_err(|e| format!("{:?}", e))?;
+            let command_sender = runtime.command_sender();
+            let mut environment = quiver::Environment::new(command_sender, program, 1);
 
             let result = if let Some(entry) = entry {
-                execute_function(&mut environment, entry).map_err(quiver::Error::RuntimeError)
+                execute_function(&mut runtime, &mut environment, entry).map_err(quiver::Error::RuntimeError)
             } else {
                 Ok(None)
             };
@@ -191,11 +193,13 @@ fn run_command(
                     let entry = bytecode_data.entry;
                     let program = quiver_core::program::Program::from_bytecode(bytecode_data);
                     // Use single executor for bytecode execution
-                    let runtime = quiver::NativeRuntime::new();
-                    let mut environment = quiver::Environment::new(runtime, program, 1);
+                    let mut runtime = quiver::NativeRuntime::new();
+                    runtime.start_executor(&program).map_err(|e| format!("{:?}", e))?;
+                    let command_sender = runtime.command_sender();
+                    let mut environment = quiver::Environment::new(command_sender, program, 1);
 
                     let result = if let Some(entry) = entry {
-                        execute_function(&mut environment, entry)
+                        execute_function(&mut runtime, &mut environment, entry)
                             .map_err(quiver::Error::RuntimeError)
                     } else {
                         Ok(None)
@@ -229,17 +233,20 @@ fn compile_execute(
 
     let program = quiver_core::program::Program::from_bytecode(bytecode_data);
     // Use single executor for bytecode execution
-    let runtime = quiver::NativeRuntime::new();
-    let mut environment = quiver::Environment::new(runtime, program, 1);
+    let mut runtime = quiver::NativeRuntime::new();
+    runtime.start_executor(&program).map_err(|e| format!("{:?}", e))?;
+    let command_sender = runtime.command_sender();
+    let mut environment = quiver::Environment::new(command_sender, program, 1);
 
-    let result = execute_function(&mut environment, entry).map_err(quiver::Error::RuntimeError);
+    let result = execute_function(&mut runtime, &mut environment, entry).map_err(quiver::Error::RuntimeError);
     handle_result(&environment, result, quiet);
 
     Ok(())
 }
 
 fn execute_function(
-    environment: &mut quiver::Environment<quiver::NativeRuntime>,
+    runtime: &mut quiver::NativeRuntime,
+    environment: &mut quiver::Environment<quiver::runtime::NativeCommandSender>,
     entry: usize,
 ) -> Result<Option<(quiver_core::value::Value, Vec<Vec<u8>>)>, quiver_core::error::Error> {
     use quiver_core::error::Error;
@@ -258,7 +265,7 @@ fn execute_function(
     });
 
     // Wait for callback
-    quiver::wait_for_callbacks(environment)?;
+    quiver::wait_for_callbacks(runtime, environment)?;
 
     let process_id = process_id_result
         .borrow()
@@ -274,7 +281,7 @@ fn execute_function(
     });
 
     // Wait for callback
-    quiver::wait_for_callbacks(environment)?;
+    quiver::wait_for_callbacks(runtime, environment)?;
 
     let (value, heap_data) = value_result
         .borrow()

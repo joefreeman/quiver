@@ -25,7 +25,7 @@ pub struct EvaluateResult {
 
 /// Common state needed during REPL initialization
 struct InitializingData {
-    environment: Environment<WebRuntime>,
+    environment: std::rc::Rc<std::cell::RefCell<Environment<runtime::WebCommandSender>>>,
     type_aliases: HashMap<String, quiver_core::types::Type>,
     module_cache: quiver_compiler::compiler::ModuleCache,
     module_loader: Box<dyn quiver_compiler::ModuleLoader>,
@@ -91,8 +91,19 @@ impl QuiverRepl {
     #[wasm_bindgen(constructor)]
     pub fn new() -> QuiverRepl {
         let program = quiver_core::program::Program::new();
-        let runtime = WebRuntime::new();
-        let environment = Environment::new(runtime, program, 4);
+
+        let mut runtime = WebRuntime::new();
+        let environment = std::rc::Rc::new(std::cell::RefCell::new(
+            Environment::new(runtime.command_sender(), program.clone(), 4)
+        ));
+
+        // Start executors with callback that processes events immediately
+        for _ in 0..4 {
+            let env = environment.clone();
+            runtime.start_executor(&program, move |event| {
+                env.borrow_mut().process_event(event);
+            }).expect("Failed to start executor");
+        }
 
         QuiverRepl {
             state: ReplState::WaitingForWorker {
@@ -115,22 +126,21 @@ impl QuiverRepl {
     #[wasm_bindgen]
     pub fn poll_init(&mut self) -> bool {
         match &mut self.state {
-            ReplState::WaitingForWorker { data, poll_count } => {
-                // Poll for events (worker should send empty array when ready)
-                data.environment.process_pending_events();
+            ReplState::WaitingForWorker { data: _, poll_count } => {
+                // No need to poll - callbacks are immediate on web
                 *poll_count += 1;
 
                 // Wait for at least 5 polls (~50ms) to give worker time to initialize
                 if *poll_count >= 5 {
                     // Transition to Initializing state and send Execute command
-                    if let ReplState::WaitingForWorker { mut data, .. } = std::mem::replace(
+                    if let ReplState::WaitingForWorker { data, .. } = std::mem::replace(
                         &mut self.state,
                         ReplState::Error("Transitioning".to_string()),
                     ) {
                         let repl_process_id = std::rc::Rc::new(std::cell::RefCell::new(None));
                         let repl_process_id_clone = repl_process_id.clone();
 
-                        data.environment.execute(vec![], true, move |result| {
+                        data.environment.borrow_mut().execute(vec![], true, move |result| {
                             match result {
                                 Ok(pid) => *repl_process_id_clone.borrow_mut() = Some(pid),
                                 Err(_) => {} // Will be caught in next poll
@@ -146,11 +156,10 @@ impl QuiverRepl {
                 false
             }
             ReplState::Initializing {
-                data,
+                data: _,
                 repl_process_id_cell,
             } => {
-                // Poll for Execute response
-                data.environment.process_pending_events();
+                // No need to poll - callbacks are immediate on web
                 let pid_opt = *repl_process_id_cell.borrow();
 
                 // If we have a PID, transition to Ready state
@@ -159,6 +168,7 @@ impl QuiverRepl {
                         &mut self.state,
                         ReplState::Error("Transitioning".to_string()),
                     ) {
+                        // Pass the environment Rc directly to Repl
                         let repl = Repl::from_parts(
                             data.environment,
                             pid,
@@ -358,12 +368,11 @@ impl QuiverRepl {
     pub fn poll_get_variables(&mut self) -> Result<JsValue, JsValue> {
         match &mut self.state {
             ReplState::GettingVariables {
-                repl,
+                repl: _,
                 locals_result,
                 var_list: _,
             } => {
-                // Process any pending events
-                repl.process_pending_events();
+                // No need to poll - callbacks are immediate on web
 
                 // Check if result is ready
                 if locals_result.borrow().is_some() {

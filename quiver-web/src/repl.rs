@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{EvaluationStage, EvaluationState, WebRuntime};
+use crate::{EvaluationStage, EvaluationState};
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{Compiler, ModuleLoader, parse};
 use quiver_core::ProcessId;
@@ -13,7 +13,7 @@ use quiver_environment::Environment;
 
 /// Web-specific REPL
 pub struct Repl {
-    environment: Environment<WebRuntime>,
+    environment: Rc<RefCell<Environment<crate::runtime::WebCommandSender>>>,
     repl_process_id: ProcessId,
     type_aliases: HashMap<String, Type>,
     module_cache: ModuleCache,
@@ -22,7 +22,7 @@ pub struct Repl {
 
 impl Repl {
     pub fn from_parts(
-        environment: Environment<WebRuntime>,
+        environment: Rc<RefCell<Environment<crate::runtime::WebCommandSender>>>,
         repl_process_id: ProcessId,
         type_aliases: HashMap<String, Type>,
         module_cache: ModuleCache,
@@ -50,7 +50,7 @@ impl Repl {
             Err(e) => return Err((self, format!("Parse error: {:?}", e))),
         };
 
-        let old_program = self.environment.program().clone();
+        let old_program = self.environment.borrow().program().clone();
         let parameter_type = parameter_type.unwrap_or_else(Type::nil);
 
         let (
@@ -74,13 +74,14 @@ impl Repl {
             Err(e) => return Err((self, format!("Compile error: {:?}", e))),
         };
 
-        self.environment.update_program(new_program);
+        self.environment.borrow_mut().update_program(new_program);
         self.type_aliases = new_type_aliases;
         self.module_cache = new_module_cache;
 
         let wake_result = Rc::new(RefCell::new(None));
         let wake_result_clone = wake_result.clone();
         self.environment
+            .borrow_mut()
             .wake(self.repl_process_id, instructions, move |result| {
                 *wake_result_clone.borrow_mut() = Some(result);
             });
@@ -101,8 +102,7 @@ impl Repl {
 
     /// Poll the evaluation state. Call repeatedly until eval_state.stage == Done.
     pub fn poll_evaluate(&mut self, eval_state: &mut EvaluationState) {
-        // Process any pending events
-        self.environment.process_pending_events();
+        // No need to poll for events - callbacks are invoked immediately on web
 
         match eval_state.stage {
             EvaluationStage::WaitingForWake => {
@@ -110,6 +110,7 @@ impl Repl {
                     // Wake completed, start getting the result
                     let value_result_clone = eval_state.value_result.clone();
                     self.environment
+                        .borrow_mut()
                         .get_result(self.repl_process_id, move |result| {
                             *value_result_clone.borrow_mut() = Some(result);
                         });
@@ -127,7 +128,7 @@ impl Repl {
 
                         let compact_result = Rc::new(RefCell::new(None));
                         let compact_result_clone = compact_result.clone();
-                        self.environment.compact_locals(
+                        self.environment.borrow_mut().compact_locals(
                             self.repl_process_id,
                             &referenced_indices,
                             move |result| {
@@ -217,7 +218,7 @@ impl Repl {
     /// Start getting variables asynchronously. Returns (self, result_cell, var_list).
     /// The caller should poll process_pending_events() until result_cell is populated.
     pub fn start_get_variables(
-        mut self,
+        self,
         variables: &HashMap<String, (Type, usize)>,
     ) -> (
         Self,
@@ -235,6 +236,7 @@ impl Repl {
         let locals_result = Rc::new(RefCell::new(None));
         let locals_result_clone = locals_result.clone();
         self.environment
+            .borrow_mut()
             .get_locals(self.repl_process_id, &indices, move |result| {
                 *locals_result_clone.borrow_mut() = Some(result);
             });
@@ -242,17 +244,13 @@ impl Repl {
         (self, locals_result, var_list)
     }
 
-    /// Process pending events from the environment
-    pub fn process_pending_events(&mut self) {
-        self.environment.process_pending_events();
-    }
-
     pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
-        let constants = self.environment.program().get_constants();
-        format::format_value(value, heap, constants, self.environment.program())
+        let env = self.environment.borrow();
+        let constants = env.program().get_constants();
+        format::format_value(value, heap, constants, env.program())
     }
 
     pub fn format_type(&self, type_def: &Type) -> String {
-        format::format_type(self.environment.program(), type_def)
+        format::format_type(self.environment.borrow().program(), type_def)
     }
 }
