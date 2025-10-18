@@ -162,7 +162,7 @@ impl ReplCli {
                 let formatted_type = self.repl.format_type(&ty);
                 println!(
                     "{}",
-                    format!("  {} : {}", name, formatted_type).bright_black()
+                    format!("  {}: {}", name, formatted_type).bright_black()
                 );
             }
         }
@@ -263,10 +263,10 @@ impl ReplCli {
 
     fn format_error(&self, error: ReplError) -> String {
         match error {
-            ReplError::ParseError(e) => format!("Parse error: {:?}", e),
-            ReplError::CompileError(e) => format!("Compile error: {:?}", e),
-            ReplError::RuntimeError(e) => format!("Runtime error: {:?}", e),
-            ReplError::Other(msg) => format!("Error: {}", msg),
+            ReplError::Parser(e) => format!("Parser error: {:?}", e),
+            ReplError::Compiler(e) => format!("Compiler error: {:?}", e),
+            ReplError::Runtime(e) => format!("Runtime error: {:?}", e),
+            ReplError::Environment(e) => format!("Environment error: {}", e),
         }
     }
 }

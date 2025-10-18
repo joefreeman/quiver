@@ -118,7 +118,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(ReplError::RuntimeError(actual)) => {
+            Err(ReplError::Runtime(actual)) => {
                 assert_eq!(
                     actual, expected,
                     "Expected runtime error {:?}, but got {:?} for source: {}",
@@ -142,7 +142,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(ReplError::CompileError(actual)) => {
+            Err(ReplError::Compiler(actual)) => {
                 assert_eq!(
                     actual, expected,
                     "Expected compile error {:?}, but got {:?} for source: {}",
@@ -166,7 +166,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(ReplError::ParseError(boxed_actual)) => {
+            Err(ReplError::Parser(boxed_actual)) => {
                 let actual = *boxed_actual;
                 assert_eq!(
                     actual, expected,

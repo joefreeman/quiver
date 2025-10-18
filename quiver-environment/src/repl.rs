@@ -1,5 +1,5 @@
 use crate::WorkerHandle;
-use crate::environment::{Environment, RequestResult};
+use crate::environment::{Environment, EnvironmentError, RequestResult};
 use quiver_compiler::modules::ModuleLoader;
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
@@ -9,19 +9,19 @@ use std::collections::HashMap;
 
 #[derive(Debug)]
 pub enum ReplError {
-    ParseError(Box<quiver_compiler::parser::Error>),
-    CompileError(quiver_compiler::compiler::Error),
-    RuntimeError(quiver_core::error::Error),
-    Other(String),
+    Parser(Box<quiver_compiler::parser::Error>),
+    Compiler(quiver_compiler::compiler::Error),
+    Runtime(quiver_core::error::Error),
+    Environment(EnvironmentError),
 }
 
 impl std::fmt::Display for ReplError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReplError::ParseError(e) => write!(f, "Parse error: {:?}", e),
-            ReplError::CompileError(e) => write!(f, "Compile error: {:?}", e),
-            ReplError::RuntimeError(e) => write!(f, "Runtime error: {:?}", e),
-            ReplError::Other(msg) => write!(f, "{}", msg),
+            ReplError::Parser(e) => write!(f, "Parser error: {:?}", e),
+            ReplError::Compiler(e) => write!(f, "Compiler error: {:?}", e),
+            ReplError::Runtime(e) => write!(f, "Runtime error: {:?}", e),
+            ReplError::Environment(e) => write!(f, "Environment error: {}", e),
         }
     }
 }
@@ -46,7 +46,7 @@ impl Repl {
         workers: Vec<Box<dyn WorkerHandle>>,
         program: Program,
         module_loader: Box<dyn ModuleLoader>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, EnvironmentError> {
         let environment = Environment::new(workers, &program)?;
 
         Ok(Self {
@@ -66,8 +66,7 @@ impl Repl {
         use quiver_compiler::compiler::ModuleCache;
 
         // Parse the source
-        let parsed =
-            quiver_compiler::parse(source).map_err(|e| ReplError::ParseError(Box::new(e)))?;
+        let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
         // Compile with existing variables
         let existing_vars = if self.variable_map.is_empty() {
@@ -87,7 +86,7 @@ impl Repl {
                 existing_vars,
                 self.last_result_type.clone(), // parameter_type - use previous result type for continuations
             )
-            .map_err(|e| ReplError::CompileError(e))?;
+            .map_err(|e| ReplError::Compiler(e))?;
 
         // Update variable map with new variables
         self.variable_map = variables;
@@ -115,7 +114,7 @@ impl Repl {
         // Send UpdateProgram to all workers (additive - only new items)
         self.environment
             .update_program(new_constants, new_functions, new_types, new_builtins)
-            .map_err(|e| ReplError::Other(e))?;
+            .map_err(|e| ReplError::Environment(e))?;
 
         // Wrap instructions in a function and register with program
         // For continuations: Return stores the result in process.result,
@@ -137,7 +136,7 @@ impl Repl {
                 std::collections::HashMap::new(),
                 vec![],
             )
-            .map_err(|e| ReplError::Other(e))?;
+            .map_err(|e| ReplError::Environment(e))?;
 
         // Create or wake the REPL process
         let repl_process_id = match self.repl_process_id {
@@ -146,7 +145,7 @@ impl Repl {
                 // wake_process will push the previous result from process.result onto the stack
                 self.environment
                     .wake_process(pid, function_index)
-                    .map_err(|e| ReplError::Other(e))?;
+                    .map_err(|e| ReplError::Environment(e))?;
                 pid
             }
             None => {
@@ -154,7 +153,7 @@ impl Repl {
                 let pid = self
                     .environment
                     .start_process(function_index, true)
-                    .map_err(|e| ReplError::Other(e))?;
+                    .map_err(|e| ReplError::Environment(e))?;
                 self.repl_process_id = Some(pid);
                 pid
             }
@@ -183,10 +182,7 @@ impl Repl {
                 let id = match self.environment.request_result(request.process_id) {
                     Ok(id) => id,
                     Err(e) => {
-                        return Some(Err(ReplError::Other(format!(
-                            "Failed to request result: {}",
-                            e
-                        ))));
+                        return Some(Err(ReplError::Environment(e)));
                     }
                 };
                 request.result_request_id = Some(id);
@@ -205,10 +201,7 @@ impl Repl {
 
                 // Compact locals to remove unused variables
                 if let Err(e) = self.compact() {
-                    return Some(Err(ReplError::Other(format!(
-                        "Failed to compact locals: {}",
-                        e
-                    ))));
+                    return Some(Err(ReplError::Environment(e)));
                 }
 
                 Some(Ok((value, heap)))
@@ -221,11 +214,13 @@ impl Repl {
             Some(RequestResult::RuntimeError(error)) => {
                 // Got a runtime error
                 request.result_request_id = None;
-                Some(Err(ReplError::RuntimeError(error)))
+                Some(Err(ReplError::Runtime(error)))
             }
             Some(_) => {
                 request.result_request_id = None;
-                Some(Err(ReplError::Other("Unexpected result type".to_string())))
+                Some(Err(ReplError::Environment(
+                    EnvironmentError::UnexpectedResultType,
+                )))
             }
             None => {
                 // Request not ready yet - keep polling with same request ID
@@ -248,9 +243,7 @@ impl Repl {
             }
 
             if start.elapsed() > timeout {
-                return Err(ReplError::Other(
-                    "Evaluation timed out after 5 seconds".to_string(),
-                ));
+                return Err(ReplError::Environment(EnvironmentError::Timeout(timeout)));
             }
 
             // Brief sleep to avoid spinning
@@ -259,15 +252,15 @@ impl Repl {
     }
 
     /// Get variable value by name
-    pub fn get_variable(&mut self, name: &str) -> Result<Value, String> {
+    pub fn get_variable(&mut self, name: &str) -> Result<Value, EnvironmentError> {
         let (_, local_index) = self
             .variable_map
             .get(name)
-            .ok_or_else(|| format!("Variable '{}' not found", name))?;
+            .ok_or_else(|| EnvironmentError::VariableNotFound(name.to_string()))?;
 
         let repl_process_id = self
             .repl_process_id
-            .ok_or_else(|| "No REPL process started yet".to_string())?;
+            .ok_or_else(|| EnvironmentError::NoReplProcess)?;
 
         let request_id = self
             .environment
@@ -276,10 +269,16 @@ impl Repl {
         let result = self.environment.wait_for_request(request_id)?;
         match result {
             RequestResult::Locals(mut locals) => {
-                let (value, _heap) = locals.pop().ok_or_else(|| "No local found".to_string())?;
+                let (value, _heap) =
+                    locals
+                        .pop()
+                        .ok_or_else(|| EnvironmentError::LocalNotFound {
+                            process_id: repl_process_id,
+                            index: *local_index,
+                        })?;
                 Ok(value)
             }
-            _ => Err("Unexpected result type".to_string()),
+            _ => Err(EnvironmentError::UnexpectedResultType),
         }
     }
 
@@ -292,10 +291,10 @@ impl Repl {
     }
 
     /// Compact locals to remove unused variables (called automatically after evaluation)
-    fn compact(&mut self) -> Result<(), String> {
+    fn compact(&mut self) -> Result<(), EnvironmentError> {
         let repl_process_id = self
             .repl_process_id
-            .ok_or_else(|| "No REPL process started yet".to_string())?;
+            .ok_or_else(|| EnvironmentError::NoReplProcess)?;
 
         // Keep all variables currently in the variable map
         // Sort indices to ensure consistent ordering
@@ -313,7 +312,7 @@ impl Repl {
         for (_, idx) in self.variable_map.values_mut() {
             *idx = *index_mapping
                 .get(idx)
-                .ok_or_else(|| "Variable index not found in mapping".to_string())?;
+                .ok_or_else(|| EnvironmentError::InvalidVariableIndex(*idx))?;
         }
 
         // Compact the locals on the worker
@@ -324,12 +323,14 @@ impl Repl {
     }
 
     /// Step the environment (process events)
-    pub fn step(&mut self) -> Result<bool, String> {
+    pub fn step(&mut self) -> Result<bool, EnvironmentError> {
         self.environment.step()
     }
 
     /// Get all process statuses across all workers
-    pub fn get_process_statuses(&mut self) -> Result<HashMap<ProcessId, ProcessStatus>, String> {
+    pub fn get_process_statuses(
+        &mut self,
+    ) -> Result<HashMap<ProcessId, ProcessStatus>, EnvironmentError> {
         let request_ids = self.environment.request_statuses()?;
 
         // Collect results from all workers
@@ -344,13 +345,16 @@ impl Repl {
     }
 
     /// Get process info for a specific process
-    pub fn get_process_info(&mut self, pid: ProcessId) -> Result<Option<ProcessInfo>, String> {
+    pub fn get_process_info(
+        &mut self,
+        pid: ProcessId,
+    ) -> Result<Option<ProcessInfo>, EnvironmentError> {
         let request_id = self.environment.request_process_info(pid)?;
         let result = self.environment.wait_for_request(request_id)?;
 
         match result {
             RequestResult::Info(info) => Ok(info),
-            _ => Err("Unexpected result type".to_string()),
+            _ => Err(EnvironmentError::UnexpectedResultType),
         }
     }
 

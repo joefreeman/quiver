@@ -10,6 +10,68 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EnvironmentError {
+    // From worker/executor
+    Executor(quiver_core::error::Error),
+
+    // Process management
+    ProcessNotFound(ProcessId),
+    FunctionNotFound(usize),
+
+    // Data operations
+    LocalNotFound { process_id: ProcessId, index: usize },
+    HeapData(String),
+
+    // Communication
+    WorkerCommunication(String),
+    ChannelDisconnected,
+
+    // Request handling
+    UnexpectedResultType,
+
+    // Timeouts
+    Timeout(std::time::Duration),
+
+    // REPL state
+    NoReplProcess,
+    VariableNotFound(String),
+    InvalidVariableIndex(usize),
+}
+
+impl std::fmt::Display for EnvironmentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnvironmentError::Executor(e) => write!(f, "{:?}", e),
+            EnvironmentError::ProcessNotFound(pid) => write!(f, "process {} not found", pid),
+            EnvironmentError::FunctionNotFound(idx) => write!(f, "function {} not found", idx),
+            EnvironmentError::LocalNotFound { process_id, index } => {
+                write!(
+                    f,
+                    "local variable {} not found in process {}",
+                    index, process_id
+                )
+            }
+            EnvironmentError::HeapData(msg) => write!(f, "heap data: {}", msg),
+            EnvironmentError::WorkerCommunication(msg) => {
+                write!(f, "worker communication: {}", msg)
+            }
+            EnvironmentError::ChannelDisconnected => write!(f, "channel disconnected"),
+            EnvironmentError::UnexpectedResultType => write!(f, "unexpected result type"),
+            EnvironmentError::Timeout(duration) => {
+                write!(f, "operation timed out after {:?}", duration)
+            }
+            EnvironmentError::NoReplProcess => write!(f, "no REPL process started"),
+            EnvironmentError::VariableNotFound(name) => write!(f, "variable '{}' not found", name),
+            EnvironmentError::InvalidVariableIndex(idx) => {
+                write!(f, "invalid variable index: {}", idx)
+            }
+        }
+    }
+}
+
+impl std::error::Error for EnvironmentError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestResult {
     Result(Option<(Value, Vec<Vec<u8>>)>),
     RuntimeError(quiver_core::error::Error),
@@ -28,7 +90,10 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn new(workers: Vec<Box<dyn WorkerHandle>>, program: &Program) -> Result<Self, String> {
+    pub fn new(
+        workers: Vec<Box<dyn WorkerHandle>>,
+        program: &Program,
+    ) -> Result<Self, EnvironmentError> {
         let num_workers = workers.len();
 
         let mut env = Self {
@@ -49,7 +114,9 @@ impl Environment {
         };
 
         for worker in &mut env.workers {
-            worker.send(update_cmd.clone())?;
+            worker
+                .send(update_cmd.clone())
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
 
         Ok(env)
@@ -57,13 +124,16 @@ impl Environment {
 
     /// Process events from workers, route actions
     /// Returns true if work was done, false if idle
-    pub fn step(&mut self) -> Result<bool, String> {
+    pub fn step(&mut self) -> Result<bool, EnvironmentError> {
         let mut did_work = false;
 
         // Collect all events from all workers first
         let mut events = Vec::new();
         for worker in &mut self.workers {
-            while let Some(event) = worker.try_recv()? {
+            while let Some(event) = worker
+                .try_recv()
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?
+            {
                 events.push(event);
                 did_work = true;
             }
@@ -84,7 +154,7 @@ impl Environment {
         functions: Vec<Function>,
         types: HashMap<TypeId, TupleTypeInfo>,
         builtins: Vec<String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         let cmd = Command::UpdateProgram {
             constants,
             functions,
@@ -93,7 +163,9 @@ impl Environment {
         };
 
         for worker in &mut self.workers {
-            worker.send(cmd.clone())?;
+            worker
+                .send(cmd.clone())
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
 
         Ok(())
@@ -104,56 +176,66 @@ impl Environment {
         &mut self,
         function_index: usize,
         persistent: bool,
-    ) -> Result<ProcessId, String> {
+    ) -> Result<ProcessId, EnvironmentError> {
         let pid = self.allocate_process_id();
         let worker_id = pid % self.num_workers; // Round-robin
 
         self.process_router.insert(pid, worker_id);
-        self.workers[worker_id].send(Command::StartProcess {
-            id: pid,
-            function_index,
-            captures: vec![],
-            heap_data: vec![],
-            persistent,
-        })?;
+        self.workers[worker_id]
+            .send(Command::StartProcess {
+                id: pid,
+                function_index,
+                captures: vec![],
+                heap_data: vec![],
+                persistent,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(pid)
     }
 
     /// Wake a sleeping persistent process
-    pub fn wake_process(&mut self, pid: ProcessId, function_index: usize) -> Result<(), String> {
+    pub fn wake_process(
+        &mut self,
+        pid: ProcessId,
+        function_index: usize,
+    ) -> Result<(), EnvironmentError> {
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| format!("Process {:?} not found", pid))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
 
-        self.workers[*worker_id].send(Command::WakeProcess {
-            id: pid,
-            function_index,
-        })?;
+        self.workers[*worker_id]
+            .send(Command::WakeProcess {
+                id: pid,
+                function_index,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())
     }
 
     /// Request a process result (async operation)
-    pub fn request_result(&mut self, pid: ProcessId) -> Result<u64, String> {
+    pub fn request_result(&mut self, pid: ProcessId) -> Result<u64, EnvironmentError> {
         let request_id = self.allocate_request_id();
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| format!("Process {:?} not found", pid))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
 
-        self.workers[*worker_id].send(Command::GetResult {
-            request_id,
-            process_id: pid,
-        })?;
+        self.workers[*worker_id]
+            .send(Command::GetResult {
+                request_id,
+                process_id: pid,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         self.pending_requests.insert(request_id, None);
         Ok(request_id)
     }
 
     /// Request all process statuses
-    pub fn request_statuses(&mut self) -> Result<Vec<u64>, String> {
+    pub fn request_statuses(&mut self) -> Result<Vec<u64>, EnvironmentError> {
         let mut request_ids = Vec::new();
         let num_workers = self.workers.len();
 
@@ -165,7 +247,9 @@ impl Environment {
         // Send requests to workers
         for (i, worker) in self.workers.iter_mut().enumerate() {
             let request_id = request_ids[i];
-            worker.send(Command::GetStatuses { request_id })?;
+            worker
+                .send(Command::GetStatuses { request_id })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
             self.pending_requests.insert(request_id, None);
         }
 
@@ -173,35 +257,43 @@ impl Environment {
     }
 
     /// Request process info
-    pub fn request_process_info(&mut self, pid: ProcessId) -> Result<u64, String> {
+    pub fn request_process_info(&mut self, pid: ProcessId) -> Result<u64, EnvironmentError> {
         let request_id = self.allocate_request_id();
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| format!("Process {:?} not found", pid))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
 
-        self.workers[*worker_id].send(Command::GetProcessInfo {
-            request_id,
-            process_id: pid,
-        })?;
+        self.workers[*worker_id]
+            .send(Command::GetProcessInfo {
+                request_id,
+                process_id: pid,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         self.pending_requests.insert(request_id, None);
         Ok(request_id)
     }
 
     /// Request process locals
-    pub fn request_locals(&mut self, pid: ProcessId, indices: Vec<usize>) -> Result<u64, String> {
+    pub fn request_locals(
+        &mut self,
+        pid: ProcessId,
+        indices: Vec<usize>,
+    ) -> Result<u64, EnvironmentError> {
         let request_id = self.allocate_request_id();
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| format!("Process {:?} not found", pid))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
 
-        self.workers[*worker_id].send(Command::GetLocals {
-            request_id,
-            process_id: pid,
-            indices,
-        })?;
+        self.workers[*worker_id]
+            .send(Command::GetLocals {
+                request_id,
+                process_id: pid,
+                indices,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         self.pending_requests.insert(request_id, None);
         Ok(request_id)
@@ -212,16 +304,18 @@ impl Environment {
         &mut self,
         pid: ProcessId,
         keep_indices: Vec<usize>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| format!("Process {:?} not found", pid))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
 
-        self.workers[*worker_id].send(Command::CompactLocals {
-            process_id: pid,
-            keep_indices,
-        })?;
+        self.workers[*worker_id]
+            .send(Command::CompactLocals {
+                process_id: pid,
+                keep_indices,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())
     }
@@ -241,7 +335,7 @@ impl Environment {
     }
 
     /// Blocking wait for request
-    pub fn wait_for_request(&mut self, request_id: u64) -> Result<RequestResult, String> {
+    pub fn wait_for_request(&mut self, request_id: u64) -> Result<RequestResult, EnvironmentError> {
         loop {
             if let Some(result) = self.poll_request(request_id) {
                 self.pending_requests.remove(&request_id);
@@ -263,7 +357,7 @@ impl Environment {
         id
     }
 
-    fn handle_event(&mut self, event: Event) -> Result<(), String> {
+    fn handle_event(&mut self, event: Event) -> Result<(), EnvironmentError> {
         match event {
             Event::ProcessCompleted {
                 process_id,
@@ -295,6 +389,7 @@ impl Environment {
             Event::LocalsResponse { request_id, result } => {
                 self.handle_locals_response(request_id, result)
             }
+            Event::WorkerError { error } => self.handle_worker_error(error),
         }
     }
 
@@ -304,19 +399,21 @@ impl Environment {
         result: Result<Value, quiver_core::error::Error>,
         heap: Vec<Vec<u8>>,
         awaiters: Vec<ProcessId>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         // Notify all awaiters
         for awaiter in awaiters {
             let worker_id = self
                 .process_router
                 .get(&awaiter)
-                .ok_or_else(|| format!("Awaiter process {:?} not found", awaiter))?;
+                .ok_or_else(|| EnvironmentError::ProcessNotFound(awaiter))?;
 
-            self.workers[*worker_id].send(Command::NotifyResult {
-                process_id: awaiter,
-                result: result.clone(),
-                heap: heap.clone(),
-            })?;
+            self.workers[*worker_id]
+                .send(Command::NotifyResult {
+                    process_id: awaiter,
+                    result: result.clone(),
+                    heap: heap.clone(),
+                })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
 
         Ok(())
@@ -328,7 +425,7 @@ impl Environment {
         function_index: usize,
         captures: Vec<Value>,
         heap: Vec<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         // Allocate new ProcessId
         let new_pid = self.allocate_process_id();
 
@@ -337,24 +434,28 @@ impl Environment {
         self.process_router.insert(new_pid, worker_id);
 
         // Start process on chosen worker with function and captures
-        self.workers[worker_id].send(Command::StartProcess {
-            id: new_pid,
-            function_index,
-            captures,
-            heap_data: heap.clone(),
-            persistent: false,
-        })?;
+        self.workers[worker_id]
+            .send(Command::StartProcess {
+                id: new_pid,
+                function_index,
+                captures,
+                heap_data: heap.clone(),
+                persistent: false,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         // Notify caller
         let caller_worker = self
             .process_router
             .get(&caller)
-            .ok_or_else(|| format!("Caller process {:?} not found", caller))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(caller))?;
 
-        self.workers[*caller_worker].send(Command::NotifySpawn {
-            process_id: caller,
-            spawned_pid: new_pid,
-        })?;
+        self.workers[*caller_worker]
+            .send(Command::NotifySpawn {
+                process_id: caller,
+                spawned_pid: new_pid,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())
     }
@@ -364,31 +465,39 @@ impl Environment {
         target: ProcessId,
         message: Value,
         heap: Vec<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         let worker_id = self
             .process_router
             .get(&target)
-            .ok_or_else(|| format!("Target process {:?} not found", target))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(target))?;
 
-        self.workers[*worker_id].send(Command::DeliverMessage {
-            target,
-            message,
-            heap,
-        })?;
+        self.workers[*worker_id]
+            .send(Command::DeliverMessage {
+                target,
+                message,
+                heap,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())
     }
 
-    fn handle_await_result(&mut self, caller: ProcessId, target: ProcessId) -> Result<(), String> {
+    fn handle_await_result(
+        &mut self,
+        caller: ProcessId,
+        target: ProcessId,
+    ) -> Result<(), EnvironmentError> {
         let target_worker = self
             .process_router
             .get(&target)
-            .ok_or_else(|| format!("Target process {:?} not found", target))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(target))?;
 
-        self.workers[*target_worker].send(Command::RegisterAwaiter {
-            target,
-            awaiter: caller,
-        })?;
+        self.workers[*target_worker]
+            .send(Command::RegisterAwaiter {
+                target,
+                awaiter: caller,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())
     }
@@ -397,7 +506,7 @@ impl Environment {
         &mut self,
         request_id: u64,
         result: Result<Option<(Value, Vec<Vec<u8>>)>, quiver_core::error::Error>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         let request_result = match result {
             Ok(value) => RequestResult::Result(value),
             Err(error) => RequestResult::RuntimeError(error),
@@ -410,9 +519,9 @@ impl Environment {
     fn handle_statuses_response(
         &mut self,
         request_id: u64,
-        result: Result<HashMap<ProcessId, ProcessStatus>, String>,
-    ) -> Result<(), String> {
-        let statuses = result.map_err(|e| format!("Statuses request failed: {}", e))?;
+        result: Result<HashMap<ProcessId, ProcessStatus>, EnvironmentError>,
+    ) -> Result<(), EnvironmentError> {
+        let statuses = result?;
         self.pending_requests
             .insert(request_id, Some(RequestResult::Statuses(statuses)));
         Ok(())
@@ -421,9 +530,9 @@ impl Environment {
     fn handle_info_response(
         &mut self,
         request_id: u64,
-        result: Result<Option<ProcessInfo>, String>,
-    ) -> Result<(), String> {
-        let info = result.map_err(|e| format!("Info request failed: {}", e))?;
+        result: Result<Option<ProcessInfo>, EnvironmentError>,
+    ) -> Result<(), EnvironmentError> {
+        let info = result?;
         self.pending_requests
             .insert(request_id, Some(RequestResult::Info(info)));
         Ok(())
@@ -432,11 +541,18 @@ impl Environment {
     fn handle_locals_response(
         &mut self,
         request_id: u64,
-        result: Result<Vec<(Value, Vec<Vec<u8>>)>, String>,
-    ) -> Result<(), String> {
-        let locals = result.map_err(|e| format!("Locals request failed: {}", e))?;
+        result: Result<Vec<(Value, Vec<Vec<u8>>)>, EnvironmentError>,
+    ) -> Result<(), EnvironmentError> {
+        let locals = result?;
         self.pending_requests
             .insert(request_id, Some(RequestResult::Locals(locals)));
+        Ok(())
+    }
+
+    fn handle_worker_error(&mut self, error: EnvironmentError) -> Result<(), EnvironmentError> {
+        // Log the worker error to stderr
+        // In the future, we could track which worker failed and handle it more gracefully
+        eprintln!("Worker error: {}", error);
         Ok(())
     }
 }

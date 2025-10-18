@@ -1,3 +1,4 @@
+use crate::environment::EnvironmentError;
 use crate::messages::{Command, Event};
 use crate::transport::{CommandReceiver, EventSender};
 use quiver_core::bytecode::{Constant, Function, TypeId};
@@ -32,11 +33,11 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
 
     /// Process one iteration of the worker loop
     /// Returns true if work was done, false if idle
-    pub fn step(&mut self) -> Result<bool, String> {
+    pub fn step(&mut self) -> Result<bool, EnvironmentError> {
         let mut did_work = false;
 
         // Process commands (non-blocking)
-        while let Some(cmd) = self.cmd_receiver.try_recv().map_err(|e| e.to_string())? {
+        while let Some(cmd) = self.cmd_receiver.try_recv()? {
             self.handle_command(cmd)?;
             did_work = true;
         }
@@ -51,7 +52,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                 // No work, idle
             }
             Err(err) => {
-                return Err(format!("Executor error: {:?}", err));
+                return Err(EnvironmentError::Executor(err));
             }
         }
 
@@ -61,7 +62,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(did_work)
     }
 
-    fn handle_command(&mut self, command: Command) -> Result<(), String> {
+    fn handle_command(&mut self, command: Command) -> Result<(), EnvironmentError> {
         match command {
             Command::UpdateProgram {
                 constants,
@@ -100,10 +101,10 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                         if let Some(result) = &process.result {
                             let (extracted_result, heap) = match result {
                                 Ok(value) => {
-                                    let (extracted, heap) = self
-                                        .executor
-                                        .extract_heap_data(value)
-                                        .map_err(|e| format!("{:?}", e))?;
+                                    let (extracted, heap) =
+                                        self.executor.extract_heap_data(value).map_err(|e| {
+                                            EnvironmentError::HeapData(format!("{:?}", e))
+                                        })?;
                                     (Ok(extracted), heap)
                                 }
                                 Err(error) => (Err(error.clone()), vec![]),
@@ -175,7 +176,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(())
     }
 
-    fn handle_action(&mut self, action: Action) -> Result<(), String> {
+    fn handle_action(&mut self, action: Action) -> Result<(), EnvironmentError> {
         match action {
             Action::Spawn {
                 caller,
@@ -190,7 +191,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                     let (extracted, mut heap) = self
                         .executor
                         .extract_heap_data(&capture)
-                        .map_err(|e| format!("{:?}", e))?;
+                        .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
                     extracted_captures.push(extracted);
                     all_heap_data.append(&mut heap);
                 }
@@ -206,7 +207,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                 let (message, heap) = self
                     .executor
                     .extract_heap_data(&value)
-                    .map_err(|e| format!("{:?}", e))?;
+                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
 
                 self.evt_sender.send(Event::ActionDeliver {
                     target,
@@ -228,7 +229,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         functions: Vec<Function>,
         types: HashMap<TypeId, TupleTypeInfo>,
         builtins: Vec<String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         // Append new constants
         for constant in constants {
             self.executor.append_constant(constant);
@@ -259,12 +260,12 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         captures: Vec<Value>,
         heap_data: Vec<Vec<u8>>,
         persistent: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         // Get function instructions
         let instructions = self
             .executor
             .get_function(function_index)
-            .ok_or_else(|| format!("Function {} not found", function_index))?
+            .ok_or_else(|| EnvironmentError::FunctionNotFound(function_index))?
             .instructions
             .clone();
 
@@ -277,12 +278,12 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             let injected = self
                 .executor
                 .inject_heap_data(value, &heap_data)
-                .map_err(|e| format!("{:?}", e))?;
+                .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
 
             let process = self
                 .executor
                 .get_process_mut(id)
-                .ok_or_else(|| "Process not found".to_string())?;
+                .ok_or_else(|| EnvironmentError::ProcessNotFound(id))?;
             process.locals.push(injected);
         }
 
@@ -290,14 +291,14 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         let process = self
             .executor
             .get_process_mut(id)
-            .ok_or_else(|| "Process not found".to_string())?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(id))?;
         process.stack.push(quiver_core::value::Value::nil());
 
         // Push initial frame with instructions
         let process = self
             .executor
             .get_process_mut(id)
-            .ok_or_else(|| "Process not found".to_string())?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(id))?;
 
         process.frames.push(quiver_core::process::Frame::new(
             instructions,
@@ -308,19 +309,23 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(())
     }
 
-    fn wake_process(&mut self, id: ProcessId, function_index: usize) -> Result<(), String> {
+    fn wake_process(
+        &mut self,
+        id: ProcessId,
+        function_index: usize,
+    ) -> Result<(), EnvironmentError> {
         // Get function instructions
         let instructions = self
             .executor
             .get_function(function_index)
-            .ok_or_else(|| format!("Function {} not found", function_index))?
+            .ok_or_else(|| EnvironmentError::FunctionNotFound(function_index))?
             .instructions
             .clone();
 
         let process = self
             .executor
             .get_process_mut(id)
-            .ok_or_else(|| "Process not found".to_string())?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(id))?;
 
         // Push the previous result (or nil) onto the stack for continuations
         let parameter = match process.result.take() {
@@ -355,13 +360,13 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         process_id: ProcessId,
         result: Result<Value, quiver_core::error::Error>,
         heap: Vec<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         match result {
             Ok(value) => {
                 let injected = self
                     .executor
                     .inject_heap_data(value, &heap)
-                    .map_err(|e| format!("{:?}", e))?;
+                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
 
                 self.executor.notify_result(process_id, injected);
             }
@@ -381,24 +386,28 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         target: ProcessId,
         message: Value,
         heap: Vec<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         let injected = self
             .executor
             .inject_heap_data(message, &heap)
-            .map_err(|e| format!("{:?}", e))?;
+            .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
 
         self.executor.notify_message(target, injected);
         Ok(())
     }
 
-    fn get_result(&mut self, request_id: u64, process_id: ProcessId) -> Result<(), String> {
+    fn get_result(
+        &mut self,
+        request_id: u64,
+        process_id: ProcessId,
+    ) -> Result<(), EnvironmentError> {
         let result = match self.executor.get_process(process_id) {
             Some(process) => match &process.result {
                 Some(Ok(value)) => {
                     let (extracted_value, heap) = self
                         .executor
                         .extract_heap_data(value)
-                        .map_err(|e| format!("{:?}", e))?;
+                        .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
                     Ok(Some((extracted_value, heap)))
                 }
                 Some(Err(error)) => Err(error.clone()),
@@ -406,7 +415,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             },
             None => {
                 // Process not found - this shouldn't happen in normal operation
-                return Err(format!("Process {:?} not found", process_id));
+                return Err(EnvironmentError::ProcessNotFound(process_id));
             }
         };
 
@@ -415,7 +424,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(())
     }
 
-    fn get_statuses(&mut self, request_id: u64) -> Result<(), String> {
+    fn get_statuses(&mut self, request_id: u64) -> Result<(), EnvironmentError> {
         let statuses = self.executor.get_process_statuses();
         self.evt_sender.send(Event::StatusesResponse {
             request_id,
@@ -424,7 +433,11 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(())
     }
 
-    fn get_process_info(&mut self, request_id: u64, process_id: ProcessId) -> Result<(), String> {
+    fn get_process_info(
+        &mut self,
+        request_id: u64,
+        process_id: ProcessId,
+    ) -> Result<(), EnvironmentError> {
         let info = self.executor.get_process_info(process_id);
         self.evt_sender.send(Event::InfoResponse {
             request_id,
@@ -438,7 +451,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         request_id: u64,
         process_id: ProcessId,
         indices: Vec<usize>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         let result = match self.executor.get_process(process_id) {
             Some(process) => {
                 let mut locals = Vec::new();
@@ -448,20 +461,20 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                             let (extracted, heap) = self
                                 .executor
                                 .extract_heap_data(value)
-                                .map_err(|e| format!("{:?}", e))?;
+                                .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
                             locals.push((extracted, heap));
                         }
                         None => {
                             return Ok(self.evt_sender.send(Event::LocalsResponse {
                                 request_id,
-                                result: Err(format!("Local index {} not found", index)),
+                                result: Err(EnvironmentError::LocalNotFound { process_id, index }),
                             })?);
                         }
                     }
                 }
                 Ok(locals)
             }
-            None => Err(format!("Process {:?} not found", process_id)),
+            None => Err(EnvironmentError::ProcessNotFound(process_id)),
         };
 
         self.evt_sender
@@ -473,11 +486,11 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         &mut self,
         process_id: ProcessId,
         keep_indices: Vec<usize>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnvironmentError> {
         let process = self
             .executor
             .get_process_mut(process_id)
-            .ok_or_else(|| format!("Process {:?} not found", process_id))?;
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(process_id))?;
 
         // Create a new locals vector with only the values we want to keep
         let mut new_locals = Vec::new();
@@ -485,7 +498,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             match process.locals.get(index) {
                 Some(value) => new_locals.push(value.clone()),
                 None => {
-                    return Err(format!("Local index {} not found", index));
+                    return Err(EnvironmentError::LocalNotFound { process_id, index });
                 }
             }
         }
@@ -494,7 +507,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(())
     }
 
-    fn check_completed_processes(&mut self) -> Result<(), String> {
+    fn check_completed_processes(&mut self) -> Result<(), EnvironmentError> {
         // Get all process statuses
         let statuses = self.executor.get_process_statuses();
 
@@ -514,7 +527,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                                 let (extracted, heap) = self
                                     .executor
                                     .extract_heap_data(value)
-                                    .map_err(|e| format!("{:?}", e))?;
+                                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
                                 (Ok(extracted), heap)
                             }
                             Err(error) => (Err(error.clone()), vec![]),

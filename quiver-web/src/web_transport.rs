@@ -1,4 +1,6 @@
-use quiver_environment::{Command, CommandReceiver, Event, EventSender, WorkerHandle};
+use quiver_environment::{
+    Command, CommandReceiver, EnvironmentError, Event, EventSender, WorkerHandle,
+};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -17,24 +19,24 @@ impl WebCommandReceiver {
 }
 
 impl CommandReceiver for WebCommandReceiver {
-    fn try_recv(&mut self) -> Result<Option<Command>, String> {
+    fn try_recv(&mut self) -> Result<Option<Command>, EnvironmentError> {
         Ok(self.queue.borrow_mut().pop_front())
     }
 }
 
 /// Event sender for Web Worker (worker side)
 pub struct WebEventSender {
-    post_message: Rc<dyn Fn(Event) -> Result<(), String>>,
+    post_message: Rc<dyn Fn(Event) -> Result<(), EnvironmentError>>,
 }
 
 impl WebEventSender {
-    pub fn new(post_message: Rc<dyn Fn(Event) -> Result<(), String>>) -> Self {
+    pub fn new(post_message: Rc<dyn Fn(Event) -> Result<(), EnvironmentError>>) -> Self {
         Self { post_message }
     }
 }
 
 impl EventSender for WebEventSender {
-    fn send(&mut self, event: Event) -> Result<(), String> {
+    fn send(&mut self, event: Event) -> Result<(), EnvironmentError> {
         (self.post_message)(event)
     }
 }
@@ -55,20 +57,23 @@ impl WebWorkerHandle {
 }
 
 impl WorkerHandle for WebWorkerHandle {
-    fn send(&mut self, command: Command) -> Result<(), String> {
+    fn send(&mut self, command: Command) -> Result<(), EnvironmentError> {
         // Serialize command to JSON
-        let json = serde_json::to_string(&command)
-            .map_err(|e| format!("Failed to serialize command: {}", e))?;
+        let json = serde_json::to_string(&command).map_err(|e| {
+            EnvironmentError::WorkerCommunication(format!("Failed to serialize command: {}", e))
+        })?;
 
         // Send via postMessage
         self.worker
             .post_message(&JsValue::from_str(&json))
-            .map_err(|e| format!("Failed to post message: {:?}", e))?;
+            .map_err(|e| {
+                EnvironmentError::WorkerCommunication(format!("Failed to post message: {:?}", e))
+            })?;
 
         Ok(())
     }
 
-    fn try_recv(&mut self) -> Result<Option<Event>, String> {
+    fn try_recv(&mut self) -> Result<Option<Event>, EnvironmentError> {
         Ok(self.event_queue.borrow_mut().pop_front())
     }
 }

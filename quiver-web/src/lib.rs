@@ -94,7 +94,7 @@ impl Environment {
         }
 
         let program = Program::new();
-        let inner = CoreEnvironment::new(workers, &program)?;
+        let inner = CoreEnvironment::new(workers, &program).map_err(|e| e.to_string())?;
 
         Ok(Environment { inner })
     }
@@ -103,7 +103,7 @@ impl Environment {
     /// Returns true if work was done
     #[wasm_bindgen]
     pub fn step(&mut self) -> Result<bool, String> {
-        self.inner.step()
+        self.inner.step().map_err(|e| e.to_string())
     }
 
     /// Start a new process
@@ -113,14 +113,17 @@ impl Environment {
         function_index: usize,
         persistent: bool,
     ) -> Result<usize, String> {
-        let pid = self.inner.start_process(function_index, persistent)?;
+        let pid = self
+            .inner
+            .start_process(function_index, persistent)
+            .map_err(|e| e.to_string())?;
         Ok(pid)
     }
 
     /// Request a process result
     #[wasm_bindgen]
     pub fn request_result(&mut self, pid: usize) -> Result<u64, String> {
-        self.inner.request_result(pid)
+        self.inner.request_result(pid).map_err(|e| e.to_string())
     }
 
     /// Poll for a request result
@@ -142,7 +145,10 @@ impl Environment {
     /// Wait for a request to complete (blocking poll loop)
     #[wasm_bindgen]
     pub fn wait_for_request(&mut self, request_id: u64) -> Result<JsValue, String> {
-        let result = self.inner.wait_for_request(request_id)?;
+        let result = self
+            .inner
+            .wait_for_request(request_id)
+            .map_err(|e| e.to_string())?;
         serde_wasm_bindgen::to_value(&result)
             .map_err(|e| format!("Failed to serialize result: {}", e))
     }
@@ -221,7 +227,8 @@ impl Repl {
         let module_loader = Box::new(create_stdlib_loader());
 
         let program = Program::new();
-        let inner = quiver_environment::Repl::new(workers, program, module_loader)?;
+        let inner = quiver_environment::Repl::new(workers, program, module_loader)
+            .map_err(|e| e.to_string())?;
 
         Ok(Repl {
             inner,
@@ -316,7 +323,7 @@ impl Repl {
     /// Get variable value by name
     #[wasm_bindgen]
     pub fn get_variable(&mut self, name: &str) -> Result<JsValue, String> {
-        let value = self.inner.get_variable(name)?;
+        let value = self.inner.get_variable(name).map_err(|e| e.to_string())?;
         serde_wasm_bindgen::to_value(&value)
             .map_err(|e| format!("Failed to serialize value: {}", e))
     }
@@ -337,7 +344,7 @@ impl Repl {
     /// Step the environment (process events)
     #[wasm_bindgen]
     pub fn step(&mut self) -> Result<bool, String> {
-        self.inner.step()
+        self.inner.step().map_err(|e| e.to_string())
     }
 
     /// Format a value for display

@@ -1,5 +1,5 @@
 use crate::web_transport::{WebCommandReceiver, WebEventSender};
-use quiver_environment::{Command, Event, Worker};
+use quiver_environment::{Command, EnvironmentError, Event, Worker};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -29,13 +29,16 @@ pub fn worker_main() {
 
     // Create event sender that uses postMessage
     let global_clone = global.clone();
-    let post_message_fn = Rc::new(move |event: Event| -> Result<(), String> {
-        let json = serde_json::to_string(&event)
-            .map_err(|e| format!("Failed to serialize event: {}", e))?;
+    let post_message_fn = Rc::new(move |event: Event| -> Result<(), EnvironmentError> {
+        let json = serde_json::to_string(&event).map_err(|e| {
+            EnvironmentError::WorkerCommunication(format!("Failed to serialize event: {}", e))
+        })?;
 
         global_clone
             .post_message(&JsValue::from_str(&json))
-            .map_err(|e| format!("Failed to post message: {:?}", e))?;
+            .map_err(|e| {
+                EnvironmentError::WorkerCommunication(format!("Failed to post message: {:?}", e))
+            })?;
 
         Ok(())
     });
@@ -90,13 +93,16 @@ fn handle_init(json: &serde_json::Value, command_queue: &Rc<RefCell<VecDeque<Com
         .dyn_into::<DedicatedWorkerGlobalScope>()
         .unwrap();
 
-    let post_message_fn = Rc::new(move |event: Event| -> Result<(), String> {
-        let json = serde_json::to_string(&event)
-            .map_err(|e| format!("Failed to serialize event: {}", e))?;
+    let post_message_fn = Rc::new(move |event: Event| -> Result<(), EnvironmentError> {
+        let json = serde_json::to_string(&event).map_err(|e| {
+            EnvironmentError::WorkerCommunication(format!("Failed to serialize event: {}", e))
+        })?;
 
         global
             .post_message(&JsValue::from_str(&json))
-            .map_err(|e| format!("Failed to post message: {:?}", e))?;
+            .map_err(|e| {
+                EnvironmentError::WorkerCommunication(format!("Failed to post message: {:?}", e))
+            })?;
 
         Ok(())
     });

@@ -127,18 +127,23 @@ pub enum Event {
     /// Response to GetStatuses
     StatusesResponse {
         request_id: u64,
-        result: Result<HashMap<ProcessId, ProcessStatus>, String>,
+        result: Result<HashMap<ProcessId, ProcessStatus>, crate::environment::EnvironmentError>,
     },
 
     /// Response to GetProcessInfo
     InfoResponse {
         request_id: u64,
-        result: Result<Option<ProcessInfo>, String>,
+        result: Result<Option<ProcessInfo>, crate::environment::EnvironmentError>,
     },
 
     /// Response to GetLocals
     LocalsResponse {
         request_id: u64,
-        result: Result<Vec<(Value, Vec<Vec<u8>>)>, String>,
+        result: Result<Vec<(Value, Vec<Vec<u8>>)>, crate::environment::EnvironmentError>,
+    },
+
+    /// Worker encountered an unrecoverable error
+    WorkerError {
+        error: crate::environment::EnvironmentError,
     },
 }

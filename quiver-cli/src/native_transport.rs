@@ -1,4 +1,6 @@
-use quiver_environment::{Command, CommandReceiver, Event, EventSender, Worker, WorkerHandle};
+use quiver_environment::{
+    Command, CommandReceiver, EnvironmentError, Event, EventSender, Worker, WorkerHandle,
+};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
@@ -8,11 +10,11 @@ pub struct NativeCommandReceiver {
 }
 
 impl CommandReceiver for NativeCommandReceiver {
-    fn try_recv(&mut self) -> Result<Option<Command>, String> {
+    fn try_recv(&mut self) -> Result<Option<Command>, EnvironmentError> {
         match self.receiver.try_recv() {
             Ok(cmd) => Ok(Some(cmd)),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err("Command channel disconnected".to_string()),
+            Err(TryRecvError::Disconnected) => Err(EnvironmentError::ChannelDisconnected),
         }
     }
 }
@@ -23,10 +25,10 @@ pub struct NativeEventSender {
 }
 
 impl EventSender for NativeEventSender {
-    fn send(&mut self, event: Event) -> Result<(), String> {
-        self.sender
-            .send(event)
-            .map_err(|e| format!("Failed to send event: {}", e))
+    fn send(&mut self, event: Event) -> Result<(), EnvironmentError> {
+        self.sender.send(event).map_err(|e| {
+            EnvironmentError::WorkerCommunication(format!("Failed to send event: {}", e))
+        })
     }
 }
 
@@ -38,17 +40,17 @@ pub struct NativeWorkerHandle {
 }
 
 impl WorkerHandle for NativeWorkerHandle {
-    fn send(&mut self, command: Command) -> Result<(), String> {
-        self.cmd_sender
-            .send(command)
-            .map_err(|e| format!("Failed to send command: {}", e))
+    fn send(&mut self, command: Command) -> Result<(), EnvironmentError> {
+        self.cmd_sender.send(command).map_err(|e| {
+            EnvironmentError::WorkerCommunication(format!("Failed to send command: {}", e))
+        })
     }
 
-    fn try_recv(&mut self) -> Result<Option<Event>, String> {
+    fn try_recv(&mut self) -> Result<Option<Event>, EnvironmentError> {
         match self.evt_receiver.try_recv() {
             Ok(event) => Ok(Some(event)),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err("Event channel disconnected".to_string()),
+            Err(TryRecvError::Disconnected) => Err(EnvironmentError::ChannelDisconnected),
         }
     }
 }
@@ -60,6 +62,9 @@ pub fn spawn_worker() -> NativeWorkerHandle {
 
     let thread_handle = thread::spawn(move || {
         let cmd_receiver = NativeCommandReceiver { receiver: cmd_rx };
+
+        // Clone the sender so we can use it for error reporting
+        let error_sender = evt_tx.clone();
         let evt_sender = NativeEventSender { sender: evt_tx };
 
         let mut worker = Worker::new(cmd_receiver, evt_sender);
@@ -75,7 +80,8 @@ pub fn spawn_worker() -> NativeWorkerHandle {
                     std::thread::sleep(std::time::Duration::from_micros(100));
                 }
                 Err(e) => {
-                    eprintln!("Worker error: {}", e);
+                    // Send error event to environment
+                    let _ = error_sender.send(Event::WorkerError { error: e });
                     break;
                 }
             }
