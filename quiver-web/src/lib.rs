@@ -317,8 +317,8 @@ impl Repl {
 
     /// Get all variable names and their types
     #[wasm_bindgen]
-    pub fn list_variables(&self) -> JsValue {
-        let variables = self.inner.list_variables();
+    pub fn get_variables(&self) -> JsValue {
+        let variables = self.inner.get_variables();
         match serde_wasm_bindgen::to_value(&variables) {
             Ok(js_value) => js_value,
             Err(e) => {
@@ -334,10 +334,22 @@ impl Repl {
         self.inner.step()
     }
 
-    /// Get the REPL process ID (if started)
+    /// Format a value for display
     #[wasm_bindgen]
-    pub fn repl_process_id(&self) -> Option<usize> {
-        self.inner.repl_process_id()
+    pub fn format_value(&self, value: JsValue, heap: JsValue) -> Result<String, String> {
+        let value: quiver_core::value::Value = serde_wasm_bindgen::from_value(value)
+            .map_err(|e| format!("Failed to deserialize value: {}", e))?;
+        let heap: Vec<Vec<u8>> = serde_wasm_bindgen::from_value(heap)
+            .map_err(|e| format!("Failed to deserialize heap: {}", e))?;
+        Ok(self.inner.format_value(&value, &heap))
+    }
+
+    /// Format a type for display
+    #[wasm_bindgen]
+    pub fn format_type(&self, ty: JsValue) -> Result<String, String> {
+        let ty: quiver_core::types::Type = serde_wasm_bindgen::from_value(ty)
+            .map_err(|e| format!("Failed to deserialize type: {}", e))?;
+        Ok(self.inner.format_type(&ty))
     }
 }
 

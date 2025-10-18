@@ -269,7 +269,7 @@ impl Repl {
     }
 
     /// Get all variable names and their types
-    pub fn list_variables(&self) -> Vec<(String, Type)> {
+    pub fn get_variables(&self) -> Vec<(String, Type)> {
         self.variable_map
             .iter()
             .map(|(name, (ty, _))| (name.clone(), ty.clone()))
@@ -339,13 +339,13 @@ impl Repl {
         }
     }
 
-    /// Get the REPL process ID (if started)
-    pub fn repl_process_id(&self) -> Option<ProcessId> {
-        self.repl_process_id
-    }
-
     /// Format a value for display
     pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
         quiver_core::format::format_value(value, heap, &self.program)
+    }
+
+    /// Format a type for display
+    pub fn format_type(&self, ty: &Type) -> String {
+        quiver_core::format::format_type(&self.program, ty)
     }
 }

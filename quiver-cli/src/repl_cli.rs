@@ -155,14 +155,14 @@ impl ReplCli {
     }
 
     fn list_variables(&self) {
-        let vars = self.repl.list_variables();
+        let vars = self.repl.get_variables();
         if vars.is_empty() {
             println!("{}", "No variables defined".bright_black());
         } else {
             println!("{}", "Variables:".bright_black());
-            for (name, _ty) in vars {
-                // Note: We can't format types without access to the program
-                println!("{}", format!("  {}", name).bright_black());
+            for (name, ty) in vars {
+                let formatted_type = self.repl.format_type(&ty);
+                println!("{}", format!("  {} : {}", name, formatted_type).bright_black());
             }
         }
     }
