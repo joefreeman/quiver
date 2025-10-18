@@ -295,16 +295,14 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
     // Create program from bytecode
     let program = Program::from_bytecode(bytecode_data);
 
-    let types_map = program.get_types();
-    if !types_map.is_empty() {
+    let types_vec = program.get_types();
+    if !types_vec.is_empty() {
         println!("\nTypes:");
-        let mut types: Vec<_> = types_map.iter().collect();
-        types.sort_by_key(|(id, _)| id.0);
-        for (type_id, _type_info) in types {
+        for (index, _type_info) in types_vec.iter().enumerate() {
             println!(
                 "  {}: {}",
-                type_id.0,
-                format::format_type(&program, &Type::Tuple(*type_id))
+                index,
+                format::format_type(&program, &Type::Tuple(TypeId(index)))
             );
         }
     }

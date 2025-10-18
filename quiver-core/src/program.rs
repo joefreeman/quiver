@@ -4,7 +4,6 @@ use crate::executor::Executor;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 mod optimisation;
 
@@ -16,13 +15,12 @@ pub struct Program {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<String>,
-    types: HashMap<TypeId, TupleTypeInfo>,
-    next_type_id: usize,
+    types: Vec<TupleTypeInfo>,
 }
 
 impl TypeLookup for Program {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.types.get(type_id)
+        self.types.get(type_id.0)
     }
 }
 
@@ -73,8 +71,7 @@ impl Program {
             constants: Vec::new(),
             functions: Vec::new(),
             builtins: Vec::new(),
-            types: HashMap::new(),
-            next_type_id: 0,
+            types: Vec::new(),
         };
 
         // Register built-in types
@@ -88,14 +85,11 @@ impl Program {
     }
 
     pub fn from_bytecode(bytecode: Bytecode) -> Self {
-        let next_type_id = bytecode.types.keys().map(|id| id.0).max().unwrap_or(0) + 1;
-
         Self {
             constants: bytecode.constants,
             functions: bytecode.functions,
             builtins: bytecode.builtins,
             types: bytecode.types,
-            next_type_id,
         }
     }
 
@@ -161,21 +155,19 @@ impl Program {
         fields: Vec<(Option<String>, Type)>,
     ) -> TypeId {
         // Check if type already exists
-        for (&existing_id, existing_type) in &self.types {
+        for (index, existing_type) in self.types.iter().enumerate() {
             if existing_type.0 == name && existing_type.1 == fields {
-                return existing_id;
+                return TypeId(index);
             }
         }
 
-        let type_id = TypeId(self.next_type_id);
-        self.next_type_id += 1;
-
-        self.types.insert(type_id, (name, fields));
+        let type_id = TypeId(self.types.len());
+        self.types.push((name, fields));
         type_id
     }
 
-    pub fn get_types(&self) -> HashMap<TypeId, TupleTypeInfo> {
-        self.types.clone()
+    pub fn get_types(&self) -> &Vec<TupleTypeInfo> {
+        &self.types
     }
 
     /// Convert this program to bytecode format with an optional entry point

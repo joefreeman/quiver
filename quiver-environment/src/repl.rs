@@ -105,7 +105,7 @@ impl Repl {
 
         let new_constants = all_constants[old_constants_len..].to_vec();
         let new_functions = all_functions[old_functions_len..].to_vec();
-        let new_types = updated_program.get_types(); // Types are always sent (they're a HashMap)
+        let new_types = updated_program.get_types().clone();
         let new_builtins = all_builtins[old_builtins_len..].to_vec();
 
         // Update our local program reference
@@ -130,12 +130,7 @@ impl Repl {
         // Send the new function to all workers
         let new_functions = vec![self.program.get_functions()[function_index].clone()];
         self.environment
-            .update_program(
-                vec![],
-                new_functions,
-                std::collections::HashMap::new(),
-                vec![],
-            )
+            .update_program(vec![], new_functions, vec![], vec![])
             .map_err(|e| ReplError::Environment(e))?;
 
         // Create or wake the REPL process

@@ -1,6 +1,5 @@
 use crate::types;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Constant {
@@ -25,7 +24,7 @@ pub struct Bytecode {
     pub functions: Vec<Function>,
     pub builtins: Vec<String>,
     pub entry: Option<usize>,
-    pub types: HashMap<TypeId, types::TupleTypeInfo>,
+    pub types: Vec<types::TupleTypeInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

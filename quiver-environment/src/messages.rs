@@ -1,4 +1,4 @@
-use quiver_core::bytecode::{Constant, Function, TypeId};
+use quiver_core::bytecode::{Constant, Function};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
@@ -12,7 +12,7 @@ pub enum Command {
     UpdateProgram {
         constants: Vec<Constant>,
         functions: Vec<Function>,
-        types: HashMap<TypeId, TupleTypeInfo>,
+        types: Vec<TupleTypeInfo>,
         builtins: Vec<String>,
     },
 

@@ -1,7 +1,7 @@
 use crate::WorkerId;
 use crate::messages::{Command, Event};
 use crate::transport::WorkerHandle;
-use quiver_core::bytecode::{Constant, Function, TypeId};
+use quiver_core::bytecode::{Constant, Function};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
 use quiver_core::types::TupleTypeInfo;
@@ -109,7 +109,7 @@ impl Environment {
         let update_cmd = Command::UpdateProgram {
             constants: program.get_constants().clone(),
             functions: program.get_functions().clone(),
-            types: program.get_types(),
+            types: program.get_types().clone(),
             builtins: program.get_builtins().clone(),
         };
 
@@ -152,7 +152,7 @@ impl Environment {
         &mut self,
         constants: Vec<Constant>,
         functions: Vec<Function>,
-        types: HashMap<TypeId, TupleTypeInfo>,
+        types: Vec<TupleTypeInfo>,
         builtins: Vec<String>,
     ) -> Result<(), EnvironmentError> {
         let cmd = Command::UpdateProgram {

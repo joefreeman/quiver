@@ -16,14 +16,14 @@ pub struct Executor {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<String>,
-    types: HashMap<TypeId, TupleTypeInfo>,
+    types: Vec<TupleTypeInfo>,
     // Heap for runtime-allocated binaries
     heap: Vec<Vec<u8>>,
 }
 
 impl TypeLookup for Executor {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.types.get(type_id)
+        self.types.get(type_id.0)
     }
 }
 
@@ -87,7 +87,7 @@ impl Executor {
             constants: program.get_constants().clone(),
             functions: program.get_functions().clone(),
             builtins: program.get_builtins().clone(),
-            types: program.get_types(),
+            types: program.get_types().clone(),
             heap: Vec::new(),
         }
     }
@@ -248,7 +248,10 @@ impl Executor {
     }
 
     pub fn register_type(&mut self, type_id: TypeId, info: TupleTypeInfo) {
-        self.types.insert(type_id, info);
+        if type_id.0 >= self.types.len() {
+            self.types.resize(type_id.0 + 1, (None, vec![]));
+        }
+        self.types[type_id.0] = info;
     }
 
     /// Execute up to max_units instruction units for a single process.
@@ -527,7 +530,7 @@ impl Executor {
     fn handle_tuple(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
         let (_, fields) = self
             .types
-            .get(&type_id)
+            .get(type_id.0)
             .ok_or_else(|| Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
                 found: format!("unknown TypeId({:?})", type_id),

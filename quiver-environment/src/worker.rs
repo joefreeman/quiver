@@ -227,7 +227,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         &mut self,
         constants: Vec<Constant>,
         functions: Vec<Function>,
-        types: HashMap<TypeId, TupleTypeInfo>,
+        types: Vec<TupleTypeInfo>,
         builtins: Vec<String>,
     ) -> Result<(), EnvironmentError> {
         // Append new constants
@@ -241,8 +241,8 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         }
 
         // Register new types
-        for (type_id, info) in types {
-            self.executor.register_type(type_id, info);
+        for (index, info) in types.into_iter().enumerate() {
+            self.executor.register_type(TypeId(index), info);
         }
 
         // Append new builtins
