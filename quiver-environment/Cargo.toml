@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 quiver-core = { path = "../quiver-core" }
 quiver-compiler = { path = "../quiver-compiler" }
-serde.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }

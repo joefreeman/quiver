@@ -54,7 +54,7 @@ fn test_self_reference_cannot_be_awaited() {
             42 ~> p
             "#,
         )
-        .expect_compile_error(quiver::compiler::Error::TypeMismatch {
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "process with return type (awaitable)".to_string(),
             found: "process without return type (cannot await)".to_string(),
         });

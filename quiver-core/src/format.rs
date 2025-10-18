@@ -31,7 +31,7 @@ fn try_format_as_string(bytes: &[u8]) -> Option<String> {
     Some(format!("\"{}\"", escaped))
 }
 
-pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
+pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
@@ -39,27 +39,27 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
             (Some(receive), Some(returns)) => {
                 format!(
                     "(@{} -> {})",
-                    format_type(type_lookup, receive),
-                    format_type(type_lookup, returns)
+                    format_type(program, receive),
+                    format_type(program, returns)
                 )
             }
             (Some(receive), None) => {
-                format!("@{}", format_type(type_lookup, receive))
+                format!("@{}", format_type(program, receive))
             }
             (None, Some(returns)) => {
-                format!("(@-> {})", format_type(type_lookup, returns))
+                format!("(@-> {})", format_type(program, returns))
             }
             (None, None) => "@".to_string(),
         },
         Type::Tuple(type_id) => {
-            if let Some((name, fields)) = type_lookup.lookup_type(type_id) {
+            if let Some((name, fields)) = program.lookup_type(type_id) {
                 let field_strs: Vec<String> = fields
                     .iter()
                     .map(|(field_name, field_type)| {
                         if let Some(field_name) = field_name {
-                            format!("{}: {}", field_name, format_type(type_lookup, field_type))
+                            format!("{}: {}", field_name, format_type(program, field_type))
                         } else {
-                            format_type(type_lookup, field_type)
+                            format_type(program, field_type)
                         }
                     })
                     .collect();
@@ -81,13 +81,13 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
             // Add parentheses around parameter if it's a function type
             let param_str = match &func_type.parameter {
                 Type::Callable(_) => {
-                    format!("({})", format_type(type_lookup, &func_type.parameter))
+                    format!("({})", format_type(program, &func_type.parameter))
                 }
-                _ => format_type(type_lookup, &func_type.parameter),
+                _ => format_type(program, &func_type.parameter),
             };
 
             // Result type already has parentheses if it's a union
-            let result_str = format_type(type_lookup, &func_type.result);
+            let result_str = format_type(program, &func_type.result);
             format!("#{} -> {}", param_str, result_str)
         }
         Type::Cycle(depth) => format!("μ{}", depth),
@@ -100,8 +100,8 @@ pub fn format_type(type_lookup: &impl TypeLookup, type_def: &Type) -> String {
                     .map(|t| {
                         match t {
                             // Add parentheses around function types in unions for clarity
-                            Type::Callable(_) => format!("({})", format_type(type_lookup, t)),
-                            _ => format_type(type_lookup, t),
+                            Type::Callable(_) => format!("({})", format_type(program, t)),
+                            _ => format_type(program, t),
                         }
                     })
                     .collect();
@@ -155,17 +155,18 @@ pub fn format_binary(binary: &Binary, heap: &[Vec<u8>], constants: &[Constant]) 
 pub fn format_value(
     value: &Value,
     heap: &[Vec<u8>],
-    constants: &[Constant],
-    type_lookup: &impl TypeLookup,
+    program: &crate::program::Program,
 ) -> String {
+    let constants = program.get_constants();
+
     match value {
         Value::Function(function, _) => format!("#{}", function),
         Value::Builtin(name) => format!("<{}>", name),
         Value::Integer(i) => i.to_string(),
         Value::Binary(binary) => format_binary(binary, heap, constants),
-        Value::Pid(process_id) => format!("@{}", process_id.0),
+        Value::Pid(process_id) => format!("@{}", process_id),
         Value::Tuple(type_id, elements) => {
-            if let Some((name, fields)) = type_lookup.lookup_type(type_id) {
+            if let Some((name, fields)) = program.lookup_type(type_id) {
                 if name.as_deref() == Some("Str") {
                     if let [Value::Binary(binary)] = elements.as_slice() {
                         if let Ok(bytes) = get_binary_bytes(binary, heap, constants) {
@@ -183,7 +184,7 @@ pub fn format_value(
                         .iter()
                         .enumerate()
                         .map(|(i, elem)| {
-                            let formatted = format_value(elem, heap, constants, type_lookup);
+                            let formatted = format_value(elem, heap, program);
                             match fields.get(i).and_then(|(name, _)| name.as_ref()) {
                                 Some(name) => format!("{}: {}", name, formatted),
                                 None => formatted,
@@ -208,7 +209,7 @@ pub fn format_value(
                     if i > 0 {
                         result.push_str(", ");
                     }
-                    result.push_str(&format_value(element, heap, constants, type_lookup));
+                    result.push_str(&format_value(element, heap, program));
                 }
                 result.push(']');
                 result

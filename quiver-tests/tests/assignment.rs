@@ -422,7 +422,7 @@ fn test_pin_without_variable_single_occurrence() {
     // Pin with single occurrence and no variable should error
     quiver()
         .evaluate("5 ~> ^x")
-        .expect_compile_error(quiver::compiler::Error::InternalError {
+        .expect_compile_error(quiver_compiler::compiler::Error::InternalError {
             message: "Pin variable 'x' not found in scope".to_string(),
         });
 }
@@ -431,7 +431,7 @@ fn test_pin_without_variable_single_occurrence() {
 fn test_pin_mixed_repeated_and_single() {
     quiver()
         .evaluate("[1, 1, 2] ~> ^[x, x, y]")
-        .expect_compile_error(quiver::compiler::Error::InternalError {
+        .expect_compile_error(quiver_compiler::compiler::Error::InternalError {
             message: "Pin variable 'y' not found in scope".to_string(),
         });
 }

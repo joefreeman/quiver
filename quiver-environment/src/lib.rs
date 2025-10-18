@@ -1,5 +1,13 @@
-pub mod environment;
-pub mod runtime;
+mod environment;
+mod messages;
+mod repl;
+mod transport;
+mod worker;
 
-pub use environment::Environment;
-pub use runtime::CommandSender;
+pub use environment::{Environment, RequestResult};
+pub use messages::{Command, Event};
+pub use repl::{EvaluateRequest, Repl, ReplError};
+pub use transport::{CommandReceiver, EventSender, WorkerHandle};
+pub use worker::Worker;
+
+pub type WorkerId = usize;

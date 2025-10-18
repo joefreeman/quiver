@@ -47,7 +47,7 @@ fn test_process_with_receive_rejects_wrong_type() {
             '00' ~> p
         "#,
         )
-        .expect_compile_error(quiver::compiler::Error::TypeMismatch {
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "int".to_string(),
             found: "bin".to_string(),
         });
@@ -63,7 +63,7 @@ fn test_process_without_receive_rejects_send() {
             42 ~> p
         "#,
         )
-        .expect_compile_error(quiver::compiler::Error::TypeMismatch {
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "process with receive type".to_string(),
             found: "process without receive type (cannot send messages)".to_string(),
         });
@@ -95,7 +95,7 @@ fn test_multiple_receives_different_types_error() {
             }
         "#,
         )
-        .expect_compile_error(quiver::compiler::Error::ReceiveTypeMismatch {
+        .expect_compile_error(quiver_compiler::compiler::Error::ReceiveTypeMismatch {
             first: "Integer".to_string(),
             second: "Binary".to_string(),
         });
@@ -123,7 +123,7 @@ fn test_call_function_with_mismatched_receive_type() {
             f = #{ $int { ~> =y => y }, [] ~> helper }
         "#,
         )
-        .expect_compile_error(quiver::compiler::Error::TypeMismatch {
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function with receive type compatible with int".to_string(),
             found: "function with receive type bin".to_string(),
         });
@@ -138,7 +138,7 @@ fn test_call_function_with_receive_from_non_receive_context() {
             f = #{ [] ~> helper }
         "#,
         )
-        .expect_compile_error(quiver::compiler::Error::TypeMismatch {
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function without receive type".to_string(),
             found: "function with receive type int".to_string(),
         });

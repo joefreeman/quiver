@@ -3,8 +3,7 @@ use crate::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProcessId(pub usize);
+pub type ProcessId = usize;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProcessStatus {
@@ -23,7 +22,7 @@ pub struct ProcessInfo {
     pub frames_count: usize,
     pub mailbox_size: usize,
     pub persistent: bool,
-    pub result: Option<Value>,
+    pub result: Option<Result<Value, crate::error::Error>>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +69,7 @@ pub struct Process {
     pub mailbox: VecDeque<Value>,
     pub persistent: bool,
     pub cursor: usize,
-    pub result: Option<Value>,
+    pub result: Option<Result<Value, crate::error::Error>>,
 }
 
 impl Process {

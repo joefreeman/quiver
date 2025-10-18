@@ -21,22 +21,6 @@ pub struct Executor {
     heap: Vec<Vec<u8>>,
 }
 
-impl std::fmt::Debug for Executor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Executor")
-            .field("processes", &self.processes)
-            .field("queue", &self.queue)
-            .field("receiving", &self.receiving)
-            .field("awaiting", &self.awaiting)
-            .field("constants", &self.constants.len())
-            .field("functions", &self.functions.len())
-            .field("builtins", &self.builtins.len())
-            .field("types", &self.types.len())
-            .field("heap", &self.heap.len())
-            .finish()
-    }
-}
-
 impl TypeLookup for Executor {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
         self.types.get(type_id)
@@ -338,24 +322,14 @@ impl Executor {
                     }
                 }
                 Err(error) => {
-                    // Clear frames to terminate current execution
-                    // The error will be returned from step() so the scheduler can handle it
+                    // Clear frames and set error result to complete the process
                     if let Some(process) = self.get_process_mut(current_pid) {
                         process.frames.clear();
-                        // For non-persistent processes, ensure there's a result
-                        // (even if it's nil) so the process can be collected
-                        if !process.persistent {
-                            process.stack.clear();
-                            process.stack.push(Value::nil());
-                            process.result = Some(Value::nil());
-                        }
-                        // For persistent processes: leave stack/result as-is
-                        // This will cause "Process has no result" error which at least
-                        // indicates something went wrong (proper error handling would require
-                        // adding an error field to Process struct)
+                        process.result = Some(Err(error.clone()));
                     }
-                    // Return the error so the scheduler can handle it
-                    return Err(error);
+                    // Process is now completed with error - don't return error from step()
+                    // Break out of execution loop so process can be marked as finished
+                    break;
                 }
             }
 
@@ -428,8 +402,19 @@ impl Executor {
             if finished {
                 // Store result
                 if let Some(process) = self.get_process_mut(current_pid) {
-                    if process.result.is_none() {
-                        process.result = process.stack.last().cloned();
+                    // Only set result if not already set (e.g., by an error or previous completion)
+                    // For persistent processes, update on each completion if no error occurred
+                    // For non-persistent, only set if not already set
+                    let should_set = match &process.result {
+                        Some(Err(_)) => false, // Don't overwrite errors
+                        Some(Ok(_)) if !process.persistent => false, // Don't overwrite non-persistent results
+                        _ => true, // Set result for: None, or persistent Ok results
+                    };
+
+                    if should_set {
+                        // If stack is empty, use nil as the result
+                        let result_value = process.stack.last().cloned().unwrap_or_else(Value::nil);
+                        process.result = Some(Ok(result_value));
                     }
                 }
             } else {
@@ -541,7 +526,8 @@ impl Executor {
 
     fn handle_tuple(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
         let (_, fields) = self
-            .lookup_type(&type_id)
+            .types
+            .get(&type_id)
             .ok_or_else(|| Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
                 found: format!("unknown TypeId({:?})", type_id),

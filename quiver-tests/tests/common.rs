@@ -1,5 +1,8 @@
-use quiver::repl::{ReplCli, TestError};
+use quiver::spawn_worker;
+use quiver_compiler::modules::InMemoryModuleLoader;
+use quiver_core::program::Program;
 use quiver_core::value::Value;
+use quiver_environment::{Repl, ReplError, WorkerHandle};
 use std::collections::HashMap;
 
 macro_rules! load_stdlib_modules {
@@ -17,31 +20,52 @@ macro_rules! load_stdlib_modules {
 
 #[allow(dead_code)]
 pub struct TestBuilder {
-    modules: Option<HashMap<String, String>>,
+    modules: HashMap<String, String>,
 }
 
 #[allow(dead_code)]
 impl TestBuilder {
     pub fn new() -> Self {
         Self {
-            modules: Some(load_stdlib_modules!("math", "list")),
+            modules: load_stdlib_modules!("math", "list"),
         }
     }
 
     pub fn with_modules(mut self, mut modules: HashMap<String, String>) -> Self {
         // Merge additional modules with standard library modules
-        if let Some(stdlib_modules) = self.modules {
-            for (key, value) in stdlib_modules {
-                modules.entry(key).or_insert(value);
-            }
+        for (key, value) in self.modules {
+            modules.entry(key).or_insert(value);
         }
-        self.modules = Some(modules);
+        self.modules = modules;
         self
     }
 
     pub fn evaluate(self, source: &str) -> TestResult {
-        let mut repl = ReplCli::with_modules(self.modules).expect("Failed to create REPL");
-        let result = repl.evaluate_for_test(source);
+        // Create workers
+        let num_workers = 1; // Single worker for tests
+        let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
+        for _ in 0..num_workers {
+            workers.push(Box::new(spawn_worker()));
+        }
+
+        // Create program and module loader
+        let program = Program::new();
+        let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
+
+        // Create REPL
+        let mut repl = Repl::new(workers, program, module_loader)
+            .expect("Failed to create REPL");
+
+        // Evaluate source
+        let result = match repl.evaluate(source) {
+            Ok(request) => {
+                match repl.wait_evaluate(request) {
+                    Ok((value, heap)) => Ok(Some((value, heap))),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
 
         TestResult {
             result,
@@ -53,9 +77,9 @@ impl TestBuilder {
 
 #[allow(dead_code)]
 pub struct TestResult {
-    result: Result<Option<(Value, Vec<Vec<u8>>)>, TestError>,
+    result: Result<Option<(Value, Vec<Vec<u8>>)>, ReplError>,
     source: String,
-    repl: ReplCli,
+    repl: Repl,
 }
 
 #[allow(dead_code)]
@@ -82,7 +106,7 @@ impl TestResult {
             }
             Err(e) => {
                 panic!(
-                    "Expected value '{}', got error: {} for source: {}",
+                    "Expected value '{}', got error: {:?} for source: {}",
                     expected, e, self.source
                 );
             }
@@ -97,7 +121,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(TestError::RuntimeError(actual)) => {
+            Err(ReplError::RuntimeError(actual)) => {
                 assert_eq!(
                     actual, expected,
                     "Expected runtime error {:?}, but got {:?} for source: {}",
@@ -121,7 +145,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(TestError::CompileError(actual)) => {
+            Err(ReplError::CompileError(actual)) => {
                 assert_eq!(
                     actual, expected,
                     "Expected compile error {:?}, but got {:?} for source: {}",
@@ -145,7 +169,7 @@ impl TestResult {
                     expected, result, self.source
                 );
             }
-            Err(TestError::ParseError(boxed_actual)) => {
+            Err(ReplError::ParseError(boxed_actual)) => {
                 let actual = *boxed_actual;
                 assert_eq!(
                     actual, expected,

@@ -1,368 +1,126 @@
-use clap::{CommandFactory, Parser, Subcommand};
-use quiver::compile;
-use quiver::repl;
-use quiver_core::bytecode;
-use std::cell::RefCell;
-use std::fs;
-use std::io::{self, Read};
-use std::rc::Rc;
+use quiver_cli::spawn_worker;
+use quiver_compiler::FileSystemModuleLoader;
+use quiver_core::program::Program;
+use quiver_environment::{Repl, ReplError, WorkerHandle};
+use std::io::{self, Write};
 
-#[derive(Parser)]
-#[command(name = "quiv")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
+fn format_error(error: ReplError) -> String {
+    match error {
+        ReplError::ParseError(e) => format!("Parse error: {:?}", e),
+        ReplError::CompileError(e) => format!("Compile error: {:?}", e),
+        ReplError::RuntimeError(e) => format!("Runtime error: {:?}", e),
+        ReplError::Other(msg) => format!("Error: {}", msg),
+    }
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    Repl,
+fn main() {
+    let num_workers = 4;
 
-    Compile {
-        input: Option<String>,
+    println!("Quiver REPL");
+    println!("Type expressions to evaluate, or :help for commands\n");
 
-        #[arg(short, long)]
-        output: Option<String>,
+    // Create an empty program
+    let program = Program::new();
 
-        #[arg(short, long)]
-        debug: bool,
-
-        #[arg(short, long)]
-        eval: Option<String>,
-    },
-
-    Run {
-        input: Option<String>,
-
-        #[arg(short, long)]
-        eval: Option<String>,
-
-        #[arg(short, long)]
-        quiet: bool,
-    },
-
-    Inspect {
-        input: Option<String>,
-    },
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-    match cli.command {
-        Some(Commands::Repl) => run_repl()?,
-        Some(Commands::Compile {
-            input,
-            output,
-            debug,
-            eval,
-        }) => compile_command(input, output, debug, eval)?,
-        Some(Commands::Run { input, eval, quiet }) => run_command(input, eval, quiet)?,
-        Some(Commands::Inspect { input }) => inspect_command(input)?,
-        None => Cli::command().print_help().unwrap(),
+    // Spawn workers
+    let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
+    for _ in 0..num_workers {
+        workers.push(Box::new(spawn_worker()));
     }
 
-    Ok(())
-}
-
-fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
-    let repl = repl::ReplCli::new()?;
-    repl.run()?;
-    Ok(())
-}
-
-fn compile_command(
-    input: Option<String>,
-    output: Option<String>,
-    debug: bool,
-    eval: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (source, module_path) = if let Some(code) = eval {
-        (code, Some(std::env::current_dir()?))
-    } else if let Some(path) = input {
-        let script_path = std::path::Path::new(&path);
-        let module_path = script_path.parent().map(|p| p.to_path_buf());
-        (fs::read_to_string(&path)?, module_path)
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        (buffer, Some(std::env::current_dir()?))
+    // Create REPL with filesystem module loader
+    let module_loader = Box::new(FileSystemModuleLoader::new());
+    let mut repl = match Repl::new(workers, program, module_loader) {
+        Ok(repl) => repl,
+        Err(e) => {
+            eprintln!("Failed to create REPL: {}", e);
+            return;
+        }
     };
 
-    let mut bytecode = compile(&source, module_path, None)?;
+    // Main REPL loop
+    loop {
+        // Print prompt
+        print!("> ");
+        if let Err(e) = io::stdout().flush() {
+            eprintln!("Failed to flush stdout: {}", e);
+            break;
+        }
 
-    if !debug {
-        bytecode = bytecode.without_debug_info();
-    }
-
-    let json = if debug {
-        serde_json::to_string_pretty(&bytecode)?
-    } else {
-        serde_json::to_string(&bytecode)?
-    };
-
-    if let Some(output_path) = output {
-        fs::write(output_path, json)?;
-    } else {
-        println!("{}", json);
-    }
-
-    Ok(())
-}
-
-fn handle_result(
-    environment: &quiver::Environment<quiver::runtime::NativeCommandSender>,
-    result: Result<Option<(quiver_core::value::Value, Vec<Vec<u8>>)>, quiver::Error>,
-    quiet: bool,
-) {
-    use quiver_core::value::Value;
-
-    match result {
-        Ok(Some((value, heap_data))) => {
-            // Check if result is NIL tuple (exit with error)
-            if matches!(value, Value::Tuple(type_id, _) if type_id == bytecode::TypeId::NIL) {
-                std::process::exit(1);
+        // Read line
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(0) => {
+                // EOF encountered (Ctrl-D)
+                println!("\nGoodbye!");
+                break;
             }
-
-            if !quiet
-                && !matches!(value, Value::Tuple(type_id, _) if type_id == bytecode::TypeId::OK || type_id == bytecode::TypeId::NIL)
-            {
-                let constants = environment.program().get_constants();
-                println!(
-                    "{}",
-                    quiver_core::format::format_value(
-                        &value,
-                        &heap_data,
-                        constants,
-                        environment.program()
-                    )
-                );
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Failed to read input: {}", e);
+                break;
             }
         }
-        Ok(None) => {}
-        Err(err) => {
-            eprintln!("Error: {}", err);
-            std::process::exit(1);
+
+        let input = input.trim();
+
+        // Handle empty input
+        if input.is_empty() {
+            continue;
         }
-    }
-}
 
-fn run_command(
-    input: Option<String>,
-    eval: Option<String>,
-    quiet: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(code) = eval {
-        let module_path = Some(std::env::current_dir()?);
-        compile_execute(&code, module_path, quiet)?;
-    } else if let Some(path) = input {
-        let content = fs::read_to_string(&path)?;
-
-        if path.ends_with(".qv") {
-            let script_path = std::path::Path::new(&path);
-            let module_path = script_path.parent().map(|p| p.to_path_buf());
-            compile_execute(&content, module_path, quiet)?;
-        } else if path.ends_with(".qx") {
-            let bytecode_data: bytecode::Bytecode = serde_json::from_str(&content)?;
-            let entry = bytecode_data.entry;
-            let program = quiver_core::program::Program::from_bytecode(bytecode_data);
-            // Use single executor for bytecode execution
-            let mut runtime = quiver::NativeRuntime::new();
-            runtime.start_executor(&program).map_err(|e| format!("{:?}", e))?;
-            let command_sender = runtime.command_sender();
-            let mut environment = quiver::Environment::new(command_sender, program, 1);
-
-            let result = if let Some(entry) = entry {
-                execute_function(&mut runtime, &mut environment, entry).map_err(quiver::Error::RuntimeError)
-            } else {
-                Ok(None)
-            };
-            handle_result(&environment, result, quiet);
-        } else {
-            eprintln!(
-                "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
-            );
-            std::process::exit(1);
-        }
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-
-        if buffer.trim_start().starts_with('{') {
-            match serde_json::from_str::<bytecode::Bytecode>(&buffer) {
-                Ok(bytecode_data) => {
-                    let entry = bytecode_data.entry;
-                    let program = quiver_core::program::Program::from_bytecode(bytecode_data);
-                    // Use single executor for bytecode execution
-                    let mut runtime = quiver::NativeRuntime::new();
-                    runtime.start_executor(&program).map_err(|e| format!("{:?}", e))?;
-                    let command_sender = runtime.command_sender();
-                    let mut environment = quiver::Environment::new(command_sender, program, 1);
-
-                    let result = if let Some(entry) = entry {
-                        execute_function(&mut runtime, &mut environment, entry)
-                            .map_err(quiver::Error::RuntimeError)
+        // Handle commands
+        if input.starts_with(':') {
+            match input {
+                ":quit" | ":q" => {
+                    println!("Goodbye!");
+                    break;
+                }
+                ":help" | ":h" => {
+                    println!("Commands:");
+                    println!("  :help, :h      - Show this help");
+                    println!("  :quit, :q      - Exit REPL");
+                    println!("  :vars, :v      - List all variables");
+                    continue;
+                }
+                ":vars" | ":v" => {
+                    let vars = repl.list_variables();
+                    if vars.is_empty() {
+                        println!("No variables defined");
                     } else {
-                        Ok(None)
-                    };
-                    handle_result(&environment, result, quiet);
+                        println!("Variables:");
+                        for (name, ty) in vars {
+                            println!("  {} : {:?}", name, ty);
+                        }
+                    }
+                    continue;
                 }
-                Err(_) => {
-                    let module_path = Some(std::env::current_dir()?);
-                    compile_execute(&buffer, module_path, quiet)?;
+                _ => {
+                    eprintln!("Unknown command: {}", input);
+                    eprintln!("Type :help for available commands");
+                    continue;
                 }
             }
-        } else {
-            let module_path = Some(std::env::current_dir()?);
-            compile_execute(&buffer, module_path, quiet)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn compile_execute(
-    source: &str,
-    module_path: Option<std::path::PathBuf>,
-    quiet: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let bytecode_data = compile(source, module_path, None)?;
-
-    let entry = bytecode_data
-        .entry
-        .ok_or("Program is not executable. Must evaluate to a function.")?;
-
-    let program = quiver_core::program::Program::from_bytecode(bytecode_data);
-    // Use single executor for bytecode execution
-    let mut runtime = quiver::NativeRuntime::new();
-    runtime.start_executor(&program).map_err(|e| format!("{:?}", e))?;
-    let command_sender = runtime.command_sender();
-    let mut environment = quiver::Environment::new(command_sender, program, 1);
-
-    let result = execute_function(&mut runtime, &mut environment, entry).map_err(quiver::Error::RuntimeError);
-    handle_result(&environment, result, quiet);
-
-    Ok(())
-}
-
-fn execute_function(
-    runtime: &mut quiver::NativeRuntime,
-    environment: &mut quiver::Environment<quiver::runtime::NativeCommandSender>,
-    entry: usize,
-) -> Result<Option<(quiver_core::value::Value, Vec<Vec<u8>>)>, quiver_core::error::Error> {
-    use quiver_core::error::Error;
-
-    let function = environment
-        .program()
-        .get_function(entry)
-        .ok_or(Error::FunctionUndefined(entry))?
-        .clone();
-
-    // Execute the function in a new non-persistent process
-    let process_id_result = Rc::new(RefCell::new(None));
-    let process_id_result_clone = process_id_result.clone();
-    environment.execute(function.instructions, false, move |result| {
-        *process_id_result_clone.borrow_mut() = Some(result);
-    });
-
-    // Wait for callback
-    quiver::wait_for_callbacks(runtime, environment)?;
-
-    let process_id = process_id_result
-        .borrow()
-        .as_ref()
-        .expect("Execute callback not called")
-        .clone()?;
-
-    // Get the result with heap data
-    let value_result = Rc::new(RefCell::new(None));
-    let value_result_clone = value_result.clone();
-    environment.get_result(process_id, move |result| {
-        *value_result_clone.borrow_mut() = Some(result);
-    });
-
-    // Wait for callback
-    quiver::wait_for_callbacks(runtime, environment)?;
-
-    let (value, heap_data) = value_result
-        .borrow()
-        .as_ref()
-        .expect("GetResult callback not called")
-        .clone()?;
-
-    Ok(Some((value, heap_data)))
-}
-
-fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let content = if let Some(path) = input {
-        fs::read_to_string(&path)?
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer
-    };
-
-    let bytecode_data: bytecode::Bytecode = serde_json::from_str(&content)?;
-
-    println!("Constants:");
-    for (i, constant) in bytecode_data.constants.iter().enumerate() {
-        let formatted = match constant {
-            bytecode::Constant::Integer(n) => n.to_string(),
-            bytecode::Constant::Binary(bytes) => format_binary(bytes),
-        };
-        println!("  {}: {}", i, formatted);
-    }
-
-    let entry = bytecode_data.entry;
-
-    // Create program from bytecode
-    use quiver_core::program::Program;
-    use quiver_core::types::Type;
-    let program = Program::from_bytecode(bytecode_data);
-
-    let types_map = program.get_types();
-    if !types_map.is_empty() {
-        println!("\nTypes:");
-        let mut types: Vec<_> = types_map.iter().collect();
-        types.sort_by_key(|(id, _)| id.0);
-        for (type_id, _type_info) in types {
-            println!(
-                "  {}: {}",
-                type_id.0,
-                quiver_core::format::format_type(&program, &Type::Tuple(*type_id))
-            );
-        }
-    }
-
-    for (i, function) in program.get_functions().iter().enumerate() {
-        let mut header = format!("\nFunction{}", i);
-
-        if entry == Some(i) {
-            header.push('*');
         }
 
-        header.push(':');
-        println!("{}", header);
-
-        let max_width = if function.instructions.is_empty() {
-            1
-        } else {
-            format!("{:x}", function.instructions.len() - 1).len()
+        // Evaluate expression
+        let request = match repl.evaluate(input) {
+            Ok(req) => req,
+            Err(e) => {
+                eprintln!("{}", format_error(e));
+                continue;
+            }
         };
 
-        for (j, instruction) in function.instructions.iter().enumerate() {
-            println!("  {:0width$x}: {:?}", j, instruction, width = max_width);
+        // Wait for result
+        match repl.wait_evaluate(request) {
+            Ok((value, heap)) => {
+                let formatted = repl.format_value(&value, &heap);
+                println!("{}", formatted);
+            }
+            Err(e) => {
+                eprintln!("{}", format_error(e));
+            }
         }
-    }
-
-    Ok(())
-}
-
-fn format_binary(bytes: &[u8]) -> String {
-    if bytes.len() <= 8 {
-        let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        format!("'{}'", hex)
-    } else {
-        let hex: String = bytes[..8].iter().map(|b| format!("{:02x}", b)).collect();
-        format!("'{}…'", hex)
     }
 }

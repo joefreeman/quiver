@@ -1,7 +1,7 @@
 use crate::bytecode::Instruction;
 use crate::error::Error;
 use crate::executor::Executor;
-use crate::process::{Frame, ProcessId};
+use crate::process::Frame;
 use crate::program::Program;
 use crate::value::Value;
 
@@ -21,7 +21,7 @@ pub fn execute_instructions_sync(
     if instructions.is_empty() {
         return Ok((None, executor));
     }
-    let process_id = ProcessId(0);
+    let process_id = 0;
 
     // Spawn a process
     executor.spawn_process(process_id, false);

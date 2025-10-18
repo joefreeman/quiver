@@ -2,9 +2,6 @@
 name = "quiver-web"
 version.workspace = true
 edition.workspace = true
-description = "WebAssembly runtime for the Quiver programming language"
-license = "MIT"
-repository = "https://github.com/yourusername/quiver"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,25 +10,19 @@ crate-type = ["cdylib", "rlib"]
 quiver-core = { path = "../quiver-core" }
 quiver-compiler = { path = "../quiver-compiler" }
 quiver-environment = { path = "../quiver-environment" }
-
 wasm-bindgen = "0.2"
-serde.workspace = true
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
-console_error_panic_hook = "0.1"
-hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dependencies.web-sys]
 version = "0.3"
 features = [
-    "console",
     "Worker",
     "WorkerOptions",
     "WorkerType",
     "MessageEvent",
-    "ErrorEvent",
+    "DedicatedWorkerGlobalScope",
+    "console",
 ]
-
-[profile.release]
-opt-level = "s"
-lto = true

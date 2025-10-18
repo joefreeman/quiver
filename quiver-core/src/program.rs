@@ -3,6 +3,7 @@ use crate::error::Error;
 use crate::executor::Executor;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod optimisation;
@@ -10,7 +11,7 @@ mod optimisation;
 /// Program represents the compiled program data that is static during execution.
 /// It contains constants, functions, builtins, and type information.
 /// The compiler writes to this structure, and the VM reads from it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
     constants: Vec<Constant>,
     functions: Vec<Function>,
