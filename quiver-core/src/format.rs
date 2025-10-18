@@ -152,11 +152,7 @@ pub fn format_binary(binary: &Binary, heap: &[Vec<u8>], constants: &[Constant]) 
     }
 }
 
-pub fn format_value(
-    value: &Value,
-    heap: &[Vec<u8>],
-    program: &crate::program::Program,
-) -> String {
+pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::Program) -> String {
     let constants = program.get_constants();
 
     match value {

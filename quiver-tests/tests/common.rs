@@ -53,17 +53,14 @@ impl TestBuilder {
         let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
 
         // Create REPL
-        let mut repl = Repl::new(workers, program, module_loader)
-            .expect("Failed to create REPL");
+        let mut repl = Repl::new(workers, program, module_loader).expect("Failed to create REPL");
 
         // Evaluate source
         let result = match repl.evaluate(source) {
-            Ok(request) => {
-                match repl.wait_evaluate(request) {
-                    Ok((value, heap)) => Ok(Some((value, heap))),
-                    Err(e) => Err(e),
-                }
-            }
+            Ok(request) => match repl.wait_evaluate(request) {
+                Ok((value, heap)) => Ok(Some((value, heap))),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
 

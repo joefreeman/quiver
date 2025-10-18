@@ -322,8 +322,12 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             .get_process_mut(id)
             .ok_or_else(|| "Process not found".to_string())?;
 
-        // Clear the result so it can be updated after the next evaluation
-        process.result = None;
+        // Push the previous result (or nil) onto the stack for continuations
+        let parameter = match process.result.take() {
+            Some(Ok(value)) => value,
+            Some(Err(_)) | None => quiver_core::value::Value::nil(),
+        };
+        process.stack.push(parameter);
 
         // For persistent processes (like REPL), always use locals_base=0
         // This allows variables to persist across wake cycles
@@ -332,9 +336,6 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         } else {
             process.locals.len()
         };
-
-        // Push nil parameter onto stack
-        process.stack.push(quiver_core::value::Value::nil());
 
         // Push new frame with appropriate locals_base
         process.frames.push(quiver_core::process::Frame::new(

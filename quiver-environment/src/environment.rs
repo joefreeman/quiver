@@ -402,7 +402,8 @@ impl Environment {
             Ok(value) => RequestResult::Result(value),
             Err(error) => RequestResult::RuntimeError(error),
         };
-        self.pending_requests.insert(request_id, Some(request_result));
+        self.pending_requests
+            .insert(request_id, Some(request_result));
         Ok(())
     }
 

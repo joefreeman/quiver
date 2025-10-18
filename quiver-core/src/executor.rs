@@ -406,7 +406,7 @@ impl Executor {
                     // For persistent processes, update on each completion if no error occurred
                     // For non-persistent, only set if not already set
                     let should_set = match &process.result {
-                        Some(Err(_)) => false, // Don't overwrite errors
+                        Some(Err(_)) => false,                       // Don't overwrite errors
                         Some(Ok(_)) if !process.persistent => false, // Don't overwrite non-persistent results
                         _ => true, // Set result for: None, or persistent Ok results
                     };

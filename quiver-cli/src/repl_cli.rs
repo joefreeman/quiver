@@ -3,7 +3,6 @@ use quiver_cli::spawn_worker;
 use quiver_compiler::FileSystemModuleLoader;
 use quiver_core::bytecode::TypeId;
 use quiver_core::program::Program;
-use quiver_core::types::Type;
 use quiver_environment::{Repl, ReplError, WorkerHandle};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
@@ -14,7 +13,7 @@ const HISTORY_FILE: &str = ".quiv_history";
 pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
     repl: Repl,
-    result_type: Option<Type>,
+    last_was_nil: bool,
 }
 
 impl ReplCli {
@@ -38,7 +37,7 @@ impl ReplCli {
         Ok(Self {
             editor,
             repl,
-            result_type: None,
+            last_was_nil: false,
         })
     }
 
@@ -93,11 +92,10 @@ impl ReplCli {
     }
 
     fn get_prompt(&self) -> String {
-        let prompt = match &self.result_type {
-            None => ">>-".white(),
-            Some(Type::Tuple(type_id)) if *type_id == TypeId::NIL => ">>-".red(),
-            Some(Type::Tuple(type_id)) if *type_id == TypeId::OK => ">>-".green(),
-            Some(_) => ">>-".blue(),
+        let prompt = if self.last_was_nil {
+            ">>-".red()
+        } else {
+            ">>-".white()
         };
         format!("{} ", prompt.bold())
     }
@@ -162,7 +160,10 @@ impl ReplCli {
             println!("{}", "Variables:".bright_black());
             for (name, ty) in vars {
                 let formatted_type = self.repl.format_type(&ty);
-                println!("{}", format!("  {} : {}", name, formatted_type).bright_black());
+                println!(
+                    "{}",
+                    format!("  {} : {}", name, formatted_type).bright_black()
+                );
             }
         }
     }
@@ -233,6 +234,7 @@ impl ReplCli {
         let request = match self.repl.evaluate(line) {
             Ok(req) => req,
             Err(e) => {
+                self.last_was_nil = false;
                 eprintln!("{}", self.format_error(e).red());
                 return;
             }
@@ -240,18 +242,11 @@ impl ReplCli {
 
         match self.repl.wait_evaluate(request) {
             Ok((value, heap)) => {
-                // Update result type for colored prompt
-                match &value {
-                    quiver_core::value::Value::Tuple(type_id, _) if *type_id == TypeId::NIL => {
-                        self.result_type = Some(Type::nil());
-                    }
-                    quiver_core::value::Value::Tuple(type_id, _) if *type_id == TypeId::OK => {
-                        self.result_type = Some(Type::ok());
-                    }
-                    _ => {
-                        self.result_type = None;
-                    }
-                }
+                // Track if result was nil for colored prompt
+                self.last_was_nil = matches!(
+                    &value,
+                    quiver_core::value::Value::Tuple(type_id, _) if *type_id == TypeId::NIL
+                );
 
                 // Don't print OK or NIL tuples
                 if !matches!(value, quiver_core::value::Value::Tuple(type_id, _) if type_id == TypeId::NIL || type_id == TypeId::OK)
@@ -260,6 +255,7 @@ impl ReplCli {
                 }
             }
             Err(e) => {
+                self.last_was_nil = false;
                 eprintln!("{}", self.format_error(e).red());
             }
         }

@@ -66,7 +66,8 @@ impl Repl {
         use quiver_compiler::compiler::ModuleCache;
 
         // Parse the source
-        let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::ParseError(Box::new(e)))?;
+        let parsed =
+            quiver_compiler::parse(source).map_err(|e| ReplError::ParseError(Box::new(e)))?;
 
         // Compile with existing variables
         let existing_vars = if self.variable_map.is_empty() {
@@ -116,19 +117,12 @@ impl Repl {
             .update_program(new_constants, new_functions, new_types, new_builtins)
             .map_err(|e| ReplError::Other(e))?;
 
-        // Remove the final Return instruction for REPL execution
-        // In a REPL, we want to leave the result on the stack without returning
-        let mut repl_instructions = instructions;
-        if let Some(last) = repl_instructions.last() {
-            if matches!(last, quiver_core::bytecode::Instruction::Return) {
-                repl_instructions.pop();
-            }
-        }
-
         // Wrap instructions in a function and register with program
+        // For continuations: Return stores the result in process.result,
+        // and wake_process pushes it back onto the stack
         use quiver_core::bytecode::Function;
         let function = Function {
-            instructions: repl_instructions,
+            instructions,
             function_type: None,
             captures: vec![],
         };
@@ -136,23 +130,31 @@ impl Repl {
 
         // Send the new function to all workers
         let new_functions = vec![self.program.get_functions()[function_index].clone()];
-        self.environment.update_program(
-            vec![],
-            new_functions,
-            std::collections::HashMap::new(),
-            vec![],
-        ).map_err(|e| ReplError::Other(e))?;
+        self.environment
+            .update_program(
+                vec![],
+                new_functions,
+                std::collections::HashMap::new(),
+                vec![],
+            )
+            .map_err(|e| ReplError::Other(e))?;
 
         // Create or wake the REPL process
         let repl_process_id = match self.repl_process_id {
             Some(pid) => {
                 // Wake existing process with new function
-                self.environment.wake_process(pid, function_index).map_err(|e| ReplError::Other(e))?;
+                // wake_process will push the previous result from process.result onto the stack
+                self.environment
+                    .wake_process(pid, function_index)
+                    .map_err(|e| ReplError::Other(e))?;
                 pid
             }
             None => {
                 // Create the persistent REPL process on first evaluation
-                let pid = self.environment.start_process(function_index, true).map_err(|e| ReplError::Other(e))?;
+                let pid = self
+                    .environment
+                    .start_process(function_index, true)
+                    .map_err(|e| ReplError::Other(e))?;
                 self.repl_process_id = Some(pid);
                 pid
             }
@@ -180,7 +182,12 @@ impl Repl {
                 // First poll - make the request
                 let id = match self.environment.request_result(request.process_id) {
                     Ok(id) => id,
-                    Err(e) => return Some(Err(ReplError::Other(format!("Failed to request result: {}", e)))),
+                    Err(e) => {
+                        return Some(Err(ReplError::Other(format!(
+                            "Failed to request result: {}",
+                            e
+                        ))));
+                    }
                 };
                 request.result_request_id = Some(id);
                 id
@@ -198,7 +205,10 @@ impl Repl {
 
                 // Compact locals to remove unused variables
                 if let Err(e) = self.compact() {
-                    return Some(Err(ReplError::Other(format!("Failed to compact locals: {}", e))));
+                    return Some(Err(ReplError::Other(format!(
+                        "Failed to compact locals: {}",
+                        e
+                    ))));
                 }
 
                 Some(Ok((value, heap)))
@@ -225,7 +235,10 @@ impl Repl {
     }
 
     /// Wait for evaluation result (blocking)
-    pub fn wait_evaluate(&mut self, mut request: EvaluateRequest) -> Result<(Value, Vec<Vec<u8>>), ReplError> {
+    pub fn wait_evaluate(
+        &mut self,
+        mut request: EvaluateRequest,
+    ) -> Result<(Value, Vec<Vec<u8>>), ReplError> {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(5);
 
@@ -235,7 +248,9 @@ impl Repl {
             }
 
             if start.elapsed() > timeout {
-                return Err(ReplError::Other("Evaluation timed out after 5 seconds".to_string()));
+                return Err(ReplError::Other(
+                    "Evaluation timed out after 5 seconds".to_string(),
+                ));
             }
 
             // Brief sleep to avoid spinning

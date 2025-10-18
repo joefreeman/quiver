@@ -233,7 +233,10 @@ impl Repl {
     /// Evaluate an expression and return a request ID
     #[wasm_bindgen]
     pub fn evaluate(&mut self, source: &str) -> Result<u64, String> {
-        let request = self.inner.evaluate(source).map_err(|e| format!("{:?}", e))?;
+        let request = self
+            .inner
+            .evaluate(source)
+            .map_err(|e| format!("{:?}", e))?;
 
         // Generate a new request ID
         let request_id = {
@@ -301,7 +304,10 @@ impl Repl {
             .remove(&request_id)
             .ok_or_else(|| format!("Request {} not found", request_id))?;
 
-        let value = self.inner.wait_evaluate(request).map_err(|e| e.to_string())?;
+        let value = self
+            .inner
+            .wait_evaluate(request)
+            .map_err(|e| e.to_string())?;
 
         serde_wasm_bindgen::to_value(&value)
             .map_err(|e| format!("Failed to serialize value: {}", e))
