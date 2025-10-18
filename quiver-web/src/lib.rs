@@ -128,17 +128,16 @@ impl Environment {
 
     /// Poll for a request result
     /// Returns result value if ready, or null if not ready yet
+    /// Throws exception on serialization failure
     #[wasm_bindgen]
-    pub fn poll_request(&mut self, request_id: u64) -> JsValue {
+    pub fn poll_request(&mut self, request_id: u64) -> Result<JsValue, String> {
         match self.inner.poll_request(request_id) {
-            Some(result) => match serde_wasm_bindgen::to_value(&result) {
-                Ok(js_value) => js_value,
-                Err(e) => {
-                    web_sys::console::error_1(&format!("Failed to serialize result: {}", e).into());
-                    JsValue::NULL
-                }
-            },
-            None => JsValue::NULL,
+            Some(result) => {
+                let js_value = serde_wasm_bindgen::to_value(&result)
+                    .map_err(|e| format!("Failed to serialize result: {}", e))?;
+                Ok(js_value)
+            }
+            None => Ok(JsValue::NULL),
         }
     }
 
@@ -262,14 +261,15 @@ impl Repl {
     }
 
     /// Poll for evaluation result (non-blocking)
-    /// Returns value if ready, or null if not ready yet
+    /// Returns value if ready, error object if evaluation failed, or null if not ready yet
+    /// Throws exception on serialization failure
     #[wasm_bindgen]
-    pub fn poll_evaluate(&mut self, request_id: u64) -> JsValue {
+    pub fn poll_evaluate(&mut self, request_id: u64) -> Result<JsValue, String> {
         // We need mutable access to update the request's result_request_id
         let mut requests = self.pending_requests.borrow_mut();
         let request = match requests.get_mut(&request_id) {
             Some(r) => r,
-            None => return JsValue::NULL,
+            None => return Ok(JsValue::NULL),
         };
 
         match self.inner.poll_evaluate(request) {
@@ -279,15 +279,9 @@ impl Repl {
                 drop(requests); // Drop the borrow before serializing
 
                 // Serialize the value
-                match serde_wasm_bindgen::to_value(&value) {
-                    Ok(js_value) => js_value,
-                    Err(e) => {
-                        web_sys::console::error_1(
-                            &format!("Failed to serialize value: {}", e).into(),
-                        );
-                        JsValue::NULL
-                    }
-                }
+                let js_value = serde_wasm_bindgen::to_value(&value)
+                    .map_err(|e| format!("Failed to serialize value: {}", e))?;
+                Ok(js_value)
             }
             Some(Err(e)) => {
                 // Remove the failed request
@@ -296,9 +290,11 @@ impl Repl {
 
                 // Return error object
                 let error = serde_json::json!({"error": e.to_string()});
-                serde_wasm_bindgen::to_value(&error).unwrap_or(JsValue::NULL)
+                let js_value = serde_wasm_bindgen::to_value(&error)
+                    .map_err(|e| format!("Failed to serialize error: {}", e))?;
+                Ok(js_value)
             }
-            None => JsValue::NULL,
+            None => Ok(JsValue::NULL),
         }
     }
 
@@ -329,16 +325,12 @@ impl Repl {
     }
 
     /// Get all variable names and their types
+    /// Throws exception on serialization failure
     #[wasm_bindgen]
-    pub fn get_variables(&self) -> JsValue {
+    pub fn get_variables(&self) -> Result<JsValue, String> {
         let variables = self.inner.get_variables();
-        match serde_wasm_bindgen::to_value(&variables) {
-            Ok(js_value) => js_value,
-            Err(e) => {
-                web_sys::console::error_1(&format!("Failed to serialize variables: {}", e).into());
-                JsValue::from(js_sys::Array::new())
-            }
-        }
+        serde_wasm_bindgen::to_value(&variables)
+            .map_err(|e| format!("Failed to serialize variables: {}", e))
     }
 
     /// Step the environment (process events)

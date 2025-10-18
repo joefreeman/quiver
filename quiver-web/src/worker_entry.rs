@@ -79,12 +79,10 @@ pub fn worker_main() {
 }
 
 fn handle_init(json: &serde_json::Value, command_queue: &Rc<RefCell<VecDeque<Command>>>) {
-    let worker_id = json
+    let _worker_id = json
         .get("worker_id")
         .and_then(|v| v.as_u64())
         .expect("Missing worker_id") as usize;
-
-    web_sys::console::log_1(&format!("[Worker {}] Initializing", worker_id).into());
 
     // Create worker
     let cmd_receiver = WebCommandReceiver::new(command_queue.clone());
@@ -114,8 +112,6 @@ fn handle_init(json: &serde_json::Value, command_queue: &Rc<RefCell<VecDeque<Com
     WORKER_STATE.with(|state| {
         *state.borrow_mut() = Some(WorkerState { worker });
     });
-
-    web_sys::console::log_1(&format!("[Worker {}] Initialized successfully", worker_id).into());
 }
 
 fn start_worker_loop() {
@@ -128,8 +124,8 @@ fn start_worker_loop() {
             if let Some(worker_state) = state.borrow_mut().as_mut() {
                 match worker_state.worker.step() {
                     Ok(_work_done) => true,
-                    Err(e) => {
-                        web_sys::console::error_1(&format!("Worker error: {}", e).into());
+                    Err(_e) => {
+                        // Worker will send WorkerError event to environment
                         false
                     }
                 }
