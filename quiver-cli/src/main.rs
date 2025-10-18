@@ -1,126 +1,344 @@
-use quiver_cli::spawn_worker;
-use quiver_compiler::FileSystemModuleLoader;
+use clap::{Parser, Subcommand};
+use quiver_compiler::compiler::ModuleCache;
+use quiver_compiler::{Compiler, FileSystemModuleLoader, parse};
+use quiver_core::bytecode::{self, TypeId};
+use quiver_core::format;
 use quiver_core::program::Program;
-use quiver_environment::{Repl, ReplError, WorkerHandle};
-use std::io::{self, Write};
+use quiver_core::types::Type;
+use quiver_core::value::Value;
+use std::collections::HashMap;
+use std::fs;
+use std::io::{self, Read};
 
-fn format_error(error: ReplError) -> String {
-    match error {
-        ReplError::ParseError(e) => format!("Parse error: {:?}", e),
-        ReplError::CompileError(e) => format!("Compile error: {:?}", e),
-        ReplError::RuntimeError(e) => format!("Runtime error: {:?}", e),
-        ReplError::Other(msg) => format!("Error: {}", msg),
-    }
+mod repl_cli;
+use repl_cli::ReplCli;
+
+#[derive(Parser)]
+#[command(name = "quiver")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-fn main() {
-    let num_workers = 4;
+#[derive(Subcommand)]
+enum Commands {
+    Repl,
 
-    println!("Quiver REPL");
-    println!("Type expressions to evaluate, or :help for commands\n");
+    Compile {
+        input: Option<String>,
 
-    // Create an empty program
-    let program = Program::new();
+        #[arg(short, long)]
+        output: Option<String>,
 
-    // Spawn workers
-    let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
-    for _ in 0..num_workers {
-        workers.push(Box::new(spawn_worker()));
+        #[arg(short, long)]
+        debug: bool,
+
+        #[arg(short, long)]
+        eval: Option<String>,
+    },
+
+    Run {
+        input: Option<String>,
+
+        #[arg(short, long)]
+        eval: Option<String>,
+
+        #[arg(short, long)]
+        quiet: bool,
+    },
+
+    Inspect {
+        input: Option<String>,
+    },
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Commands::Repl) => run_repl()?,
+        Some(Commands::Compile {
+            input,
+            output,
+            debug,
+            eval,
+        }) => compile_command(input, output, debug, eval)?,
+        Some(Commands::Run { input, eval, quiet }) => run_command(input, eval, quiet)?,
+        Some(Commands::Inspect { input }) => inspect_command(input)?,
+        None => run_repl()?,
     }
 
-    // Create REPL with filesystem module loader
-    let module_loader = Box::new(FileSystemModuleLoader::new());
-    let mut repl = match Repl::new(workers, program, module_loader) {
-        Ok(repl) => repl,
-        Err(e) => {
-            eprintln!("Failed to create REPL: {}", e);
-            return;
-        }
+    Ok(())
+}
+
+fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
+    let repl = ReplCli::new()?;
+    repl.run()?;
+    Ok(())
+}
+
+fn compile_command(
+    input: Option<String>,
+    output: Option<String>,
+    debug: bool,
+    eval: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source = if let Some(code) = eval {
+        code
+    } else if let Some(path) = input {
+        fs::read_to_string(&path)?
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+        buffer
     };
 
-    // Main REPL loop
-    loop {
-        // Print prompt
-        print!("> ");
-        if let Err(e) = io::stdout().flush() {
-            eprintln!("Failed to flush stdout: {}", e);
-            break;
-        }
+    // Compile source to bytecode
+    let module_loader = FileSystemModuleLoader::new();
+    let module_path = std::env::current_dir().ok();
+    let empty_program = Program::new();
 
-        // Read line
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(0) => {
-                // EOF encountered (Ctrl-D)
-                println!("\nGoodbye!");
-                break;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Failed to read input: {}", e);
-                break;
-            }
-        }
+    let ast = parse(&source).map_err(|e| format!("Parse error: {:?}", e))?;
+    let (instructions, _result_type, _variables, mut program, _type_aliases, _module_cache) =
+        Compiler::compile(
+            ast,
+            HashMap::new(),
+            ModuleCache::new(),
+            &module_loader,
+            &empty_program,
+            module_path,
+            None,
+            Type::nil(),
+        )
+        .map_err(|e| format!("Compile error: {:?}", e))?;
 
-        let input = input.trim();
+    // Execute the instructions synchronously to get the function value
+    let (result, executor) = quiver_core::execute_instructions_sync(&program, instructions)
+        .map_err(|e| format!("Execution error: {:?}", e))?;
 
-        // Handle empty input
-        if input.is_empty() {
-            continue;
-        }
-
-        // Handle commands
-        if input.starts_with(':') {
-            match input {
-                ":quit" | ":q" => {
-                    println!("Goodbye!");
-                    break;
-                }
-                ":help" | ":h" => {
-                    println!("Commands:");
-                    println!("  :help, :h      - Show this help");
-                    println!("  :quit, :q      - Exit REPL");
-                    println!("  :vars, :v      - List all variables");
-                    continue;
-                }
-                ":vars" | ":v" => {
-                    let vars = repl.list_variables();
-                    if vars.is_empty() {
-                        println!("No variables defined");
-                    } else {
-                        println!("Variables:");
-                        for (name, ty) in vars {
-                            println!("  {} : {:?}", name, ty);
-                        }
-                    }
-                    continue;
-                }
-                _ => {
-                    eprintln!("Unknown command: {}", input);
-                    eprintln!("Type :help for available commands");
-                    continue;
-                }
+    // Extract the entry function from the result
+    let entry = match result {
+        Some(Value::Function(func_index, captures)) => {
+            if !captures.is_empty() {
+                // Inject captures into the program to create a new function
+                Some(program.inject_function_captures(func_index, captures, &executor))
+            } else {
+                Some(func_index)
             }
         }
+        Some(_) => None, // Program didn't evaluate to a function
+        None => None,    // No result
+    };
 
-        // Evaluate expression
-        let request = match repl.evaluate(input) {
-            Ok(req) => req,
-            Err(e) => {
-                eprintln!("{}", format_error(e));
-                continue;
+    let mut bytecode = program.to_bytecode(entry);
+
+    if !debug {
+        bytecode = bytecode.without_debug_info();
+    }
+
+    let json = if debug {
+        serde_json::to_string_pretty(&bytecode)?
+    } else {
+        serde_json::to_string(&bytecode)?
+    };
+
+    if let Some(output_path) = output {
+        fs::write(output_path, json)?;
+    } else {
+        println!("{}", json);
+    }
+
+    Ok(())
+}
+
+fn run_command(
+    input: Option<String>,
+    eval: Option<String>,
+    quiet: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(code) = eval {
+        compile_execute(&code, quiet)?;
+    } else if let Some(path) = input {
+        let content = fs::read_to_string(&path)?;
+
+        if path.ends_with(".qv") {
+            compile_execute(&content, quiet)?;
+        } else if path.ends_with(".qx") {
+            execute_bytecode(&content, quiet)?;
+        } else {
+            eprintln!(
+                "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
+            );
+            std::process::exit(1);
+        }
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+
+        // Try to parse as bytecode first
+        if buffer.trim_start().starts_with('{') {
+            match serde_json::from_str::<bytecode::Bytecode>(&buffer) {
+                Ok(_) => execute_bytecode(&buffer, quiet)?,
+                Err(_) => compile_execute(&buffer, quiet)?,
             }
+        } else {
+            compile_execute(&buffer, quiet)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let module_loader = FileSystemModuleLoader::new();
+    let module_path = std::env::current_dir().ok();
+    let empty_program = Program::new();
+
+    let ast = parse(source).map_err(|e| format!("Parse error: {:?}", e))?;
+    let (instructions, _result_type, _variables, mut program, _type_aliases, _module_cache) =
+        Compiler::compile(
+            ast,
+            HashMap::new(),
+            ModuleCache::new(),
+            &module_loader,
+            &empty_program,
+            module_path,
+            None,
+            Type::nil(),
+        )
+        .map_err(|e| format!("Compile error: {:?}", e))?;
+
+    // Execute the instructions synchronously to get the function value
+    let (result, executor) = quiver_core::execute_instructions_sync(&program, instructions)
+        .map_err(|e| format!("Execution error: {:?}", e))?;
+
+    // Extract the entry function from the result
+    let entry = match result {
+        Some(Value::Function(func_index, captures)) => {
+            if !captures.is_empty() {
+                // Inject captures into the program to create a new function
+                Some(program.inject_function_captures(func_index, captures, &executor))
+            } else {
+                Some(func_index)
+            }
+        }
+        Some(_) => None, // Program didn't evaluate to a function
+        None => None,    // No result
+    };
+
+    let bytecode = program.to_bytecode(entry);
+
+    if bytecode.entry.is_none() {
+        eprintln!("Error: Program is not executable. Must evaluate to a function.");
+        std::process::exit(1);
+    }
+
+    let json = serde_json::to_string(&bytecode)?;
+    execute_bytecode(&json, quiet)
+}
+
+fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let bytecode_data: bytecode::Bytecode = serde_json::from_str(bytecode_json)?;
+    let entry = bytecode_data.entry;
+    let program = Program::from_bytecode(bytecode_data);
+
+    if let Some(entry_idx) = entry {
+        // Build instructions to call the entry function with NIL
+        let instructions = vec![
+            bytecode::Instruction::Tuple(TypeId::NIL),
+            bytecode::Instruction::Function(entry_idx),
+            bytecode::Instruction::Call,
+        ];
+
+        let (result, _executor) = quiver_core::execute_instructions_sync(&program, instructions)
+            .map_err(|e| format!("Execution error: {:?}", e))?;
+
+        if let Some(value) = result {
+            // Check if result is NIL tuple (exit with error)
+            if matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::NIL) {
+                std::process::exit(1);
+            }
+
+            // Print result unless quiet or OK/NIL
+            if !quiet
+                && !matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::OK || type_id == TypeId::NIL)
+            {
+                println!("{}", format::format_value(&value, &[], &program));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let content = if let Some(path) = input {
+        fs::read_to_string(&path)?
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    };
+
+    let bytecode_data: bytecode::Bytecode = serde_json::from_str(&content)?;
+
+    println!("Constants:");
+    for (i, constant) in bytecode_data.constants.iter().enumerate() {
+        let formatted = match constant {
+            bytecode::Constant::Integer(n) => n.to_string(),
+            bytecode::Constant::Binary(bytes) => format_binary(bytes),
+        };
+        println!("  {}: {}", i, formatted);
+    }
+
+    let entry = bytecode_data.entry;
+
+    // Create program from bytecode
+    let program = Program::from_bytecode(bytecode_data);
+
+    let types_map = program.get_types();
+    if !types_map.is_empty() {
+        println!("\nTypes:");
+        let mut types: Vec<_> = types_map.iter().collect();
+        types.sort_by_key(|(id, _)| id.0);
+        for (type_id, _type_info) in types {
+            println!(
+                "  {}: {}",
+                type_id.0,
+                format::format_type(&program, &Type::Tuple(*type_id))
+            );
+        }
+    }
+
+    for (i, function) in program.get_functions().iter().enumerate() {
+        let mut header = format!("\nFunction{}", i);
+
+        if entry == Some(i) {
+            header.push('*');
+        }
+
+        header.push(':');
+        println!("{}", header);
+
+        let max_width = if function.instructions.is_empty() {
+            1
+        } else {
+            format!("{:x}", function.instructions.len() - 1).len()
         };
 
-        // Wait for result
-        match repl.wait_evaluate(request) {
-            Ok((value, heap)) => {
-                let formatted = repl.format_value(&value, &heap);
-                println!("{}", formatted);
-            }
-            Err(e) => {
-                eprintln!("{}", format_error(e));
-            }
+        for (j, instruction) in function.instructions.iter().enumerate() {
+            println!("  {:0width$x}: {:?}", j, instruction, width = max_width);
         }
+    }
+
+    Ok(())
+}
+
+fn format_binary(bytes: &[u8]) -> String {
+    if bytes.len() <= 8 {
+        let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        format!("'{}'", hex)
+    } else {
+        let hex: String = bytes[..8].iter().map(|b| format!("{:02x}", b)).collect();
+        format!("'{}…'", hex)
     }
 }

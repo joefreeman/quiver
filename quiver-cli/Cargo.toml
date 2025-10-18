@@ -11,3 +11,7 @@ path = "src/main.rs"
 quiver-core = { path = "../quiver-core" }
 quiver-compiler = { path = "../quiver-compiler" }
 quiver-environment = { path = "../quiver-environment" }
+clap = { version = "4.5", features = ["derive"] }
+rustyline = "14.0"
+colored = "2.1"
+serde_json.workspace = true
