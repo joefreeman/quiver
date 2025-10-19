@@ -6,26 +6,24 @@ use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId, ProcessStatus};
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
-use std::collections::HashMap;
+use std::collections::HashSet;
 
-const MAX_UNITS: usize = 1000;
+const MAX_STEP_UNITS: usize = 1000;
 
 pub struct Worker<R: CommandReceiver, S: EventSender> {
     executor: Executor,
-    awaiters_for: HashMap<ProcessId, Vec<ProcessId>>,
-    completed_sent: std::collections::HashSet<ProcessId>,
-    cmd_receiver: R,
-    evt_sender: S,
+    awaited: HashSet<ProcessId>,
+    receiver: R,
+    sender: S,
 }
 
 impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
-    pub fn new(cmd_receiver: R, evt_sender: S) -> Self {
+    pub fn new(receiver: R, sender: S) -> Self {
         Self {
             executor: Executor::new(),
-            awaiters_for: HashMap::new(),
-            completed_sent: std::collections::HashSet::new(),
-            cmd_receiver,
-            evt_sender,
+            awaited: HashSet::new(),
+            receiver,
+            sender,
         }
     }
 
@@ -35,13 +33,13 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         let mut did_work = false;
 
         // Process commands (non-blocking)
-        while let Some(cmd) = self.cmd_receiver.try_recv()? {
+        while let Some(cmd) = self.receiver.try_recv()? {
             self.handle_command(cmd)?;
             did_work = true;
         }
 
         // Execute one step
-        if let Some(action) = self.executor.step(MAX_UNITS) {
+        if let Some(action) = self.executor.step(MAX_STEP_UNITS) {
             self.handle_action(action)?;
             did_work = true;
         }
@@ -74,7 +72,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             Command::ResumeProcess { id, function_index } => {
                 self.resume_process(id, function_index)?;
             }
-            Command::RegisterAwaiter { target, awaiter } => {
+            Command::RegisterAwaiter { target, awaiter: _ } => {
                 // Check if target is already completed
                 let target_status = self
                     .executor
@@ -86,7 +84,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                 );
 
                 if is_completed {
-                    // Process already completed - notify awaiter immediately
+                    // Process already completed - send completion event immediately
                     if let Some(process) = self.executor.get_process(target) {
                         if let Some(result) = &process.result {
                             let (extracted_result, heap) = match result {
@@ -100,17 +98,16 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                                 Err(error) => (Err(error.clone()), vec![]),
                             };
 
-                            self.evt_sender.send(Event::ProcessCompleted {
+                            self.sender.send(Event::Completed {
                                 process_id: target,
                                 result: extracted_result,
                                 heap,
-                                awaiters: vec![awaiter],
                             })?;
                         }
                     }
                 } else {
-                    // Process not yet completed - register awaiter for later
-                    self.awaiters_for.entry(target).or_default().push(awaiter);
+                    // Process not yet completed - mark as awaited
+                    self.awaited.insert(target);
                 }
             }
             Command::NotifyResult {
@@ -186,7 +183,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                     all_heap_data.append(&mut heap);
                 }
 
-                self.evt_sender.send(Event::ActionSpawn {
+                self.sender.send(Event::SpawnAction {
                     caller,
                     function_index,
                     captures: extracted_captures,
@@ -199,15 +196,14 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                     .extract_heap_data(&value)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
 
-                self.evt_sender.send(Event::ActionDeliver {
+                self.sender.send(Event::DeliverAction {
                     target,
                     message,
                     heap,
                 })?;
             }
             Action::AwaitResult { caller, target } => {
-                self.evt_sender
-                    .send(Event::ActionAwaitResult { caller, target })?;
+                self.sender.send(Event::AwaitAction { caller, target })?;
             }
         }
         Ok(())
@@ -392,14 +388,14 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             }
         };
 
-        self.evt_sender
+        self.sender
             .send(Event::ResultResponse { request_id, result })?;
         Ok(())
     }
 
     fn get_statuses(&mut self, request_id: u64) -> Result<(), EnvironmentError> {
         let statuses = self.executor.get_process_statuses();
-        self.evt_sender.send(Event::StatusesResponse {
+        self.sender.send(Event::StatusesResponse {
             request_id,
             result: Ok(statuses),
         })?;
@@ -412,7 +408,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         process_id: ProcessId,
     ) -> Result<(), EnvironmentError> {
         let info = self.executor.get_process_info(process_id);
-        self.evt_sender.send(Event::InfoResponse {
+        self.sender.send(Event::InfoResponse {
             request_id,
             result: Ok(info),
         })?;
@@ -438,7 +434,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                             locals.push((extracted, heap));
                         }
                         None => {
-                            return Ok(self.evt_sender.send(Event::LocalsResponse {
+                            return Ok(self.sender.send(Event::LocalsResponse {
                                 request_id,
                                 result: Err(EnvironmentError::LocalNotFound { process_id, index }),
                             })?);
@@ -450,7 +446,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             None => Err(EnvironmentError::ProcessNotFound(process_id)),
         };
 
-        self.evt_sender
+        self.sender
             .send(Event::LocalsResponse { request_id, result })?;
         Ok(())
     }
@@ -484,15 +480,15 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         // Get all process statuses
         let statuses = self.executor.get_process_statuses();
 
-        // Find newly completed processes
+        // Find newly completed processes that are being awaited
         let mut completed = Vec::new();
         for (&process_id, status) in &statuses {
             // If terminated (non-persistent) or sleeping (persistent), it's completed
             let is_completed =
                 matches!(status, ProcessStatus::Terminated | ProcessStatus::Sleeping);
 
-            // Only process if completed and we haven't sent an event yet
-            if is_completed && !self.completed_sent.contains(&process_id) {
+            // Only process if completed and being awaited
+            if is_completed && self.awaited.contains(&process_id) {
                 if let Some(process) = self.executor.get_process(process_id) {
                     if let Some(result) = &process.result {
                         let (extracted_result, heap) = match result {
@@ -506,24 +502,20 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                             Err(error) => (Err(error.clone()), vec![]),
                         };
 
-                        // Get awaiters for this process
-                        let awaiters = self.awaiters_for.remove(&process_id).unwrap_or_default();
-
-                        completed.push((process_id, extracted_result, heap, awaiters));
+                        completed.push((process_id, extracted_result, heap));
                     }
                 }
             }
         }
 
-        // Send completion events
-        for (process_id, result, heap, awaiters) in completed {
-            self.evt_sender.send(Event::ProcessCompleted {
+        // Send completion events and remove from awaited set
+        for (process_id, result, heap) in completed {
+            self.sender.send(Event::Completed {
                 process_id,
                 result,
                 heap,
-                awaiters,
             })?;
-            self.completed_sent.insert(process_id);
+            self.awaited.remove(&process_id);
         }
 
         Ok(())

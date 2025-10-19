@@ -83,6 +83,7 @@ pub enum RequestResult {
 pub struct Environment {
     workers: Vec<Box<dyn WorkerHandle>>,
     process_router: HashMap<ProcessId, WorkerId>,
+    awaiters_for: HashMap<ProcessId, Vec<ProcessId>>,
     pending_requests: HashMap<u64, Option<RequestResult>>,
     next_request_id: u64,
     next_process_id: ProcessId,
@@ -99,6 +100,7 @@ impl Environment {
         let mut env = Self {
             workers,
             process_router: HashMap::new(),
+            awaiters_for: HashMap::new(),
             pending_requests: HashMap::new(),
             next_request_id: 0,
             next_process_id: 0,
@@ -359,24 +361,23 @@ impl Environment {
 
     fn handle_event(&mut self, event: Event) -> Result<(), EnvironmentError> {
         match event {
-            Event::ProcessCompleted {
+            Event::Completed {
                 process_id,
                 result,
                 heap,
-                awaiters,
-            } => self.handle_process_completed(process_id, result, heap, awaiters),
-            Event::ActionSpawn {
+            } => self.handle_process_completed(process_id, result, heap),
+            Event::SpawnAction {
                 caller,
                 function_index,
                 captures,
                 heap,
             } => self.handle_spawn(caller, function_index, captures, heap),
-            Event::ActionDeliver {
+            Event::DeliverAction {
                 target,
                 message,
                 heap,
             } => self.handle_deliver(target, message, heap),
-            Event::ActionAwaitResult { caller, target } => self.handle_await_result(caller, target),
+            Event::AwaitAction { caller, target } => self.handle_await_result(caller, target),
             Event::ResultResponse { request_id, result } => {
                 self.handle_result_response(request_id, result)
             }
@@ -395,11 +396,13 @@ impl Environment {
 
     fn handle_process_completed(
         &mut self,
-        _process_id: ProcessId,
+        process_id: ProcessId,
         result: Result<Value, quiver_core::error::Error>,
         heap: Vec<Vec<u8>>,
-        awaiters: Vec<ProcessId>,
     ) -> Result<(), EnvironmentError> {
+        // Look up awaiters and remove the entry
+        let awaiters = self.awaiters_for.remove(&process_id).unwrap_or_default();
+
         // Notify all awaiters
         for awaiter in awaiters {
             let worker_id = self
@@ -487,6 +490,9 @@ impl Environment {
         caller: ProcessId,
         target: ProcessId,
     ) -> Result<(), EnvironmentError> {
+        // Record the awaiter relationship
+        self.awaiters_for.entry(target).or_default().push(caller);
+
         let target_worker = self
             .process_router
             .get(&target)

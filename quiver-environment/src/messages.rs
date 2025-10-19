@@ -89,16 +89,15 @@ pub enum Command {
 /// Events sent from Workers to Environment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    /// Process completed with result and list of processes awaiting it
-    ProcessCompleted {
+    /// Process completed with result
+    Completed {
         process_id: ProcessId,
         result: Result<Value, quiver_core::error::Error>,
         heap: Vec<Vec<u8>>,
-        awaiters: Vec<ProcessId>,
     },
 
     /// Action: Spawn new process
-    ActionSpawn {
+    SpawnAction {
         caller: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
@@ -106,14 +105,14 @@ pub enum Event {
     },
 
     /// Action: Deliver message
-    ActionDeliver {
+    DeliverAction {
         target: ProcessId,
         message: Value,
         heap: Vec<Vec<u8>>,
     },
 
     /// Action: Await result
-    ActionAwaitResult {
+    AwaitAction {
         caller: ProcessId,
         target: ProcessId,
     },
