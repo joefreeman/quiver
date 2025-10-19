@@ -112,9 +112,13 @@ impl Executor {
     pub fn notify_spawn(&mut self, id: ProcessId, pid: Value) {
         if self.awaiting.remove(&id) {
             if let Some(process) = self.processes.get_mut(&id) {
-                // For spawn notifications, just push the PID onto the stack
-                // The counter was already incremented after the Spawn instruction
+                // For spawn notifications, just push the PID onto the stack and increment counter
                 process.stack.push(pid);
+
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
+
                 self.queue.push_back(id);
             }
         }
@@ -299,22 +303,6 @@ impl Executor {
                 }
             }
 
-            // Increment instruction counter unless instruction manages it itself
-            // This must happen BEFORE checking if process yielded, so that when
-            // the process resumes, it continues from the next instruction
-            // Receive is excluded because it only increments if it successfully retrieves a message
-            let should_increment = !matches!(
-                instruction,
-                Instruction::Call | Instruction::TailCall(_) | Instruction::Receive
-            );
-            if should_increment {
-                if let Some(process) = self.get_process_mut(current_pid) {
-                    if let Some(frame) = process.frames.last_mut() {
-                        frame.counter += 1;
-                    }
-                }
-            }
-
             // Check if process should yield (moved to receiving or awaiting, or has pending request)
             // Pending request check ensures only ONE routing request per step
             if self.receiving.contains(&current_pid)
@@ -407,6 +395,10 @@ impl Executor {
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         process.stack.push(value);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -415,6 +407,10 @@ impl Executor {
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         process.stack.pop().ok_or(Error::StackUnderflow)?;
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -424,6 +420,10 @@ impl Executor {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         let value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
         process.stack.push(value);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -438,6 +438,10 @@ impl Executor {
         let index = process.stack.len() - 2;
         let value = process.stack[index].clone();
         process.stack.push(value);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -451,6 +455,10 @@ impl Executor {
             return Err(Error::StackUnderflow);
         }
         process.stack.swap(len - 1, len - 2);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -469,6 +477,10 @@ impl Executor {
             .clone();
 
         process.stack.push(value);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -487,6 +499,10 @@ impl Executor {
         }
 
         process.locals[actual_index] = value;
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -511,6 +527,10 @@ impl Executor {
         }
         values.reverse();
         process.stack.push(Value::Tuple(type_id, values));
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -528,6 +548,10 @@ impl Executor {
                     .ok_or(Error::FieldAccessInvalid(index))?
                     .clone();
                 process.stack.push(element);
+
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
                 Ok(None)
             }
             _ => Err(Error::TypeMismatch {
@@ -551,6 +575,10 @@ impl Executor {
         };
 
         process.stack.push(result);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -568,6 +596,10 @@ impl Executor {
         };
 
         process.stack.push(result);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -603,13 +635,19 @@ impl Executor {
         process
             .stack
             .push(if is_match { Value::ok() } else { Value::nil() });
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
     fn handle_jump(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action>, Error> {
         if let Some(process) = self.get_process_mut(pid) {
             if let Some(frame) = process.frames.last_mut() {
-                frame.counter = frame.counter.wrapping_add_signed(offset);
+                // Jump modifies counter directly
+                // Add 1 to offset because in the old code, Jump got the centralized increment
+                frame.counter = frame.counter.wrapping_add_signed(offset + 1);
             }
         }
         Ok(None)
@@ -627,9 +665,14 @@ impl Executor {
             _ => true,
         };
 
-        if should_jump {
-            if let Some(frame) = process.frames.last_mut() {
-                frame.counter = frame.counter.wrapping_add_signed(offset);
+        if let Some(frame) = process.frames.last_mut() {
+            if should_jump {
+                // Jump modifies counter directly
+                // Add 1 to offset because in the old code, JumpIf got the centralized increment
+                frame.counter = frame.counter.wrapping_add_signed(offset + 1);
+            } else {
+                // Not jumping, increment normally
+                frame.counter += 1;
             }
         }
 
@@ -670,6 +713,7 @@ impl Executor {
                     .frames
                     .push(Frame::new(instructions, locals_base, captures_count));
 
+                // Don't increment counter - new frame starts at 0
                 Ok(None)
             }
             Value::Builtin(name) => {
@@ -707,7 +751,7 @@ impl Executor {
                 self.mark_awaiting(pid);
 
                 // Return routing request for scheduler to handle
-                // Don't increment counter - will be incremented when notified
+                // Don't increment counter - will be incremented in notify_result
                 Ok(Some(Action::AwaitResult {
                     target: target_pid,
                     caller: pid,
@@ -738,6 +782,8 @@ impl Executor {
             process.stack.push(argument);
             *process.frames.last_mut().unwrap() =
                 Frame::new(instructions, locals_base, captures_count);
+
+            // Don't increment counter - frame was reset to 0
             Ok(None)
         } else {
             let (function_value, argument) = {
@@ -773,6 +819,8 @@ impl Executor {
                     process.stack.push(argument);
                     *process.frames.last_mut().unwrap() =
                         Frame::new(instructions, locals_base, captures_count);
+
+                    // Don't increment counter - frame was reset to 0
                     Ok(None)
                 }
                 _ => Err(Error::CallInvalid),
@@ -798,6 +846,10 @@ impl Executor {
 
         process.stack.push(return_value);
 
+        // Increment counter of the frame we returned to (to move past the Call instruction)
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -832,6 +884,9 @@ impl Executor {
         let function_value = Value::Function(function_index, captures);
         process.stack.push(function_value);
 
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -844,6 +899,10 @@ impl Executor {
             return Err(Error::StackUnderflow);
         }
         process.locals.truncate(process.locals.len() - count);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -855,6 +914,10 @@ impl Executor {
         process
             .locals
             .extend(std::iter::repeat(Value::nil()).take(count));
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -868,6 +931,10 @@ impl Executor {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process.stack.push(Value::Builtin(builtin_name));
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -903,6 +970,10 @@ impl Executor {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process.stack.push(result);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -925,6 +996,10 @@ impl Executor {
         };
 
         process.stack.push(result);
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -949,6 +1024,7 @@ impl Executor {
         self.mark_awaiting(pid);
 
         // Return routing request for scheduler to handle
+        // Don't increment counter - will be incremented in notify_spawn
         Ok(Some(Action::Spawn {
             caller: pid,
             function_index,
@@ -980,6 +1056,10 @@ impl Executor {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         process.stack.push(Value::ok());
 
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
+
         // Return routing request for scheduler to handle
         Ok(Some(Action::Deliver {
             target: target_pid,
@@ -993,6 +1073,10 @@ impl Executor {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process.stack.push(Value::Pid(pid));
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -1029,6 +1113,10 @@ impl Executor {
             process.mailbox.remove(cursor - 1);
         }
         process.cursor = 0;
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
