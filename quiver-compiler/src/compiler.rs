@@ -684,7 +684,6 @@ impl<'a> Compiler<'a> {
             }
         }
         let body_type = self.compile_block(function.body, parameter_type.clone(), None)?;
-        self.codegen.add_instruction(Instruction::Return);
 
         let func_type = CallableType {
             parameter: parameter_type,

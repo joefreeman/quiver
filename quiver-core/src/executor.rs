@@ -281,10 +281,12 @@ impl Executor {
                     // Frame exhausted - pop it without stack manipulation
                     // (the result is already on the stack from the last instruction)
                     let frame = process.frames.pop().unwrap();
+                    let is_last_frame = process.frames.is_empty();
 
                     // Clear locals from the popped frame
-                    // BUT: for persistent processes, keep locals so variables persist across evaluations
-                    if !process.persistent {
+                    // For persistent processes, only keep locals if this was the last (top-level) frame
+                    let should_clear_locals = !process.persistent || !is_last_frame;
+                    if should_clear_locals {
                         let locals_to_clear = process
                             .locals
                             .len()
@@ -294,6 +296,11 @@ impl Executor {
                                 .locals
                                 .truncate(process.locals.len() - locals_to_clear);
                         }
+                    }
+
+                    // Increment counter of the calling frame (if there is one)
+                    if let Some(calling_frame) = process.frames.last_mut() {
+                        calling_frame.counter += 1;
                     }
                 } else {
                     break;
@@ -347,7 +354,6 @@ impl Executor {
             Instruction::JumpIf(offset) => self.handle_jump_if(pid, offset),
             Instruction::Call => self.handle_call(pid),
             Instruction::TailCall(recurse) => self.handle_tail_call(pid, recurse),
-            Instruction::Return => self.handle_return(pid),
             Instruction::Function(function_index) => self.handle_function(pid, function_index),
             Instruction::Clear(count) => self.handle_clear(pid, count),
             Instruction::Allocate(count) => self.handle_allocate(pid, count),
@@ -806,26 +812,6 @@ impl Executor {
                 _ => Err(Error::CallInvalid),
             }
         }
-    }
-
-    fn handle_return(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let frame = process.frames.pop().ok_or(Error::FrameUnderflow)?;
-
-        let locals_to_clear = process.locals.len() - frame.locals_base - frame.captures_count;
-        if locals_to_clear > 0 {
-            let new_len = process.locals.len() - locals_to_clear;
-            process.locals.truncate(new_len);
-        }
-
-        // Increment counter of the frame we returned to (to move past the Call instruction)
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
-        Ok(None)
     }
 
     fn handle_function(

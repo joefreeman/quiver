@@ -75,7 +75,6 @@ pub enum Instruction {
     JumpIf(isize),
     Call,
     TailCall(bool),
-    Return,
     Function(usize),
     Builtin(usize),
     Equal(usize),
