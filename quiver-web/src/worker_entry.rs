@@ -7,14 +7,6 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
-thread_local! {
-    static WORKER_STATE: RefCell<Option<WorkerState>> = RefCell::new(None);
-}
-
-struct WorkerState {
-    worker: Worker<WebCommandReceiver, WebEventSender>,
-}
-
 /// Main entry point for the worker
 /// Call this from the worker's JS context
 #[wasm_bindgen]
@@ -43,23 +35,12 @@ pub fn worker_main() {
         Ok(())
     });
 
-    let _event_sender = WebEventSender::new(post_message_fn);
+    let evt_sender = WebEventSender::new(post_message_fn);
 
-    // Set up message handler
+    // Set up message handler for commands
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
-            // Try to parse as JSON first to check message type
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(msg_type) = json.get("type").and_then(|v| v.as_str()) {
-                    if msg_type == "init" {
-                        // Handle initialization
-                        handle_init(&json, &command_queue_clone);
-                        return;
-                    }
-                }
-            }
-
-            // Otherwise, try to parse as Command
+            // Parse as Command
             match serde_json::from_str::<Command>(&text) {
                 Ok(cmd) => {
                     command_queue_clone.borrow_mut().push_back(cmd);
@@ -74,66 +55,30 @@ pub fn worker_main() {
     global.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     onmessage.forget(); // Keep closure alive
 
-    // Start the worker loop
-    start_worker_loop();
-}
-
-fn handle_init(json: &serde_json::Value, command_queue: &Rc<RefCell<VecDeque<Command>>>) {
-    let _worker_id = json
-        .get("worker_id")
-        .and_then(|v| v.as_u64())
-        .expect("Missing worker_id") as usize;
-
-    // Create worker
-    let cmd_receiver = WebCommandReceiver::new(command_queue.clone());
-
-    let global = js_sys::global()
-        .dyn_into::<DedicatedWorkerGlobalScope>()
-        .unwrap();
-
-    let post_message_fn = Rc::new(move |event: Event| -> Result<(), EnvironmentError> {
-        let json = serde_json::to_string(&event).map_err(|e| {
-            EnvironmentError::WorkerCommunication(format!("Failed to serialize event: {}", e))
-        })?;
-
-        global
-            .post_message(&JsValue::from_str(&json))
-            .map_err(|e| {
-                EnvironmentError::WorkerCommunication(format!("Failed to post message: {:?}", e))
-            })?;
-
-        Ok(())
-    });
-
-    let evt_sender = WebEventSender::new(post_message_fn);
-
+    // Create and initialize worker immediately
+    let cmd_receiver = WebCommandReceiver::new(command_queue);
     let worker = Worker::new(cmd_receiver, evt_sender);
 
-    WORKER_STATE.with(|state| {
-        *state.borrow_mut() = Some(WorkerState { worker });
-    });
+    // Start the worker loop
+    start_worker_loop(worker);
 }
 
-fn start_worker_loop() {
+fn start_worker_loop(worker: Worker<WebCommandReceiver, WebEventSender>) {
+    let worker = Rc::new(RefCell::new(worker));
+    let worker_clone = worker.clone();
+
     let closure = Rc::new(RefCell::new(None::<Closure<dyn FnMut()>>));
     let closure_clone = closure.clone();
 
     *closure.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-        // Step the worker if initialized
-        let should_continue = WORKER_STATE.with(|state| {
-            if let Some(worker_state) = state.borrow_mut().as_mut() {
-                match worker_state.worker.step() {
-                    Ok(_work_done) => true,
-                    Err(_e) => {
-                        // Worker will send WorkerError event to environment
-                        false
-                    }
-                }
-            } else {
-                // Not initialized yet, keep looping
-                true
+        // Step the worker
+        let should_continue = match worker_clone.borrow_mut().step() {
+            Ok(_work_done) => true,
+            Err(_e) => {
+                // Worker will send WorkerError event to environment
+                false
             }
-        });
+        };
 
         if should_continue {
             // Schedule next step

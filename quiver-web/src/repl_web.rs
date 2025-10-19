@@ -46,7 +46,7 @@ impl Repl {
         // Create workers
         let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
 
-        for worker_id in 0..num_workers {
+        for _ in 0..num_workers {
             // Check if it's a factory function or a string URL
             let worker = if worker_url_or_factory.is_function() {
                 // It's a factory function - call it to get a Worker
@@ -73,25 +73,10 @@ impl Repl {
                 Rc::new(RefCell::new(VecDeque::new()));
             let event_queue_clone = event_queue.clone();
 
-            // Prepare initialization message to send when worker is ready
-            let init_msg = serde_json::json!({
-                "type": "init",
-                "worker_id": worker_id,
-            });
-            let init_msg_str = init_msg.to_string();
-
-            let worker_clone = worker.clone();
-
             // Set up message handler
             let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
                 if let Some(text) = event.data().as_string() {
-                    // Check for ready signal
-                    if text == "ready" {
-                        let _ = worker_clone.post_message(&JsValue::from_str(&init_msg_str));
-                        return;
-                    }
-
-                    // Otherwise parse as Event
+                    // Parse as Event
                     match serde_json::from_str::<quiver_environment::Event>(&text) {
                         Ok(evt) => {
                             event_queue_clone.borrow_mut().push_back(evt);
