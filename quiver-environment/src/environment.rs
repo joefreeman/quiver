@@ -194,8 +194,8 @@ impl Environment {
         Ok(pid)
     }
 
-    /// Wake a sleeping persistent process
-    pub fn wake_process(
+    /// Resume a sleeping persistent process
+    pub fn resume_process(
         &mut self,
         pid: ProcessId,
         function_index: usize,
@@ -206,7 +206,7 @@ impl Environment {
             .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
 
         self.workers[*worker_id]
-            .send(Command::WakeProcess {
+            .send(Command::ResumeProcess {
                 id: pid,
                 function_index,
             })

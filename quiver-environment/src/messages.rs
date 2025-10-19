@@ -25,8 +25,8 @@ pub enum Command {
         persistent: bool,
     },
 
-    /// Wake a sleeping persistent process
-    WakeProcess {
+    /// Resume a sleeping persistent process
+    ResumeProcess {
         id: ProcessId,
         function_index: usize,
     },

@@ -118,7 +118,7 @@ impl Repl {
 
         // Wrap instructions in a function and register with program
         // For continuations: Return stores the result in process.result,
-        // and wake_process pushes it back onto the stack
+        // and resume_process pushes it back onto the stack
         use quiver_core::bytecode::Function;
         let function = Function {
             instructions,
@@ -133,13 +133,13 @@ impl Repl {
             .update_program(vec![], new_functions, vec![], vec![])
             .map_err(|e| ReplError::Environment(e))?;
 
-        // Create or wake the REPL process
+        // Create or resume the REPL process
         let repl_process_id = match self.repl_process_id {
             Some(pid) => {
-                // Wake existing process with new function
-                // wake_process will push the previous result from process.result onto the stack
+                // Resume existing process with new function
+                // resume_process will push the previous result from process.result onto the stack
                 self.environment
-                    .wake_process(pid, function_index)
+                    .resume_process(pid, function_index)
                     .map_err(|e| ReplError::Environment(e))?;
                 pid
             }

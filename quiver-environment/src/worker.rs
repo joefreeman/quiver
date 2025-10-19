@@ -81,8 +81,8 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             } => {
                 self.start_process(id, function_index, captures, heap_data, persistent)?;
             }
-            Command::WakeProcess { id, function_index } => {
-                self.wake_process(id, function_index)?;
+            Command::ResumeProcess { id, function_index } => {
+                self.resume_process(id, function_index)?;
             }
             Command::RegisterAwaiter { target, awaiter } => {
                 // Check if target is already completed
@@ -309,7 +309,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(())
     }
 
-    fn wake_process(
+    fn resume_process(
         &mut self,
         id: ProcessId,
         function_index: usize,
@@ -335,7 +335,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         process.stack.push(parameter);
 
         // For persistent processes (like REPL), always use locals_base=0
-        // This allows variables to persist across wake cycles
+        // This allows variables to persist across resume cycles
         let locals_base = if process.persistent {
             0
         } else {
