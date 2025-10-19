@@ -235,61 +235,23 @@ impl Executor {
 
         // Execute instructions for current process
         while units_executed < max_units {
-            let instruction = {
-                let process = self
-                    .get_process(current_pid)
-                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-                let frame = match process.frames.last() {
-                    Some(f) => f,
-                    None => break, // Process finished
-                };
-                frame.instructions.get(frame.counter).cloned()
-            };
+            let instruction = self
+                .get_process(current_pid)
+                .and_then(|p| p.frames.last())
+                .and_then(|f| f.instructions.get(f.counter).cloned());
 
             let Some(instruction) = instruction else {
-                break; // No more instructions in current frame
+                break; // Process finished or no more instructions in current frame
             };
 
-            let step_result = match instruction {
-                Instruction::Constant(index) => self.handle_constant(current_pid, index),
-                Instruction::Pop => self.handle_pop(current_pid),
-                Instruction::Duplicate => self.handle_duplicate(current_pid),
-                Instruction::Over => self.handle_over(current_pid),
-                Instruction::Swap => self.handle_swap(current_pid),
-                Instruction::Load(index) => self.handle_load(current_pid, index),
-                Instruction::Store(index) => self.handle_store(current_pid, index),
-                Instruction::Tuple(type_id) => self.handle_tuple(current_pid, type_id),
-                Instruction::Get(index) => self.handle_get(current_pid, index),
-                Instruction::IsInteger => self.handle_is_integer(current_pid),
-                Instruction::IsBinary => self.handle_is_binary(current_pid),
-                Instruction::IsTuple(type_id) => self.handle_is_tuple(current_pid, type_id),
-                Instruction::Jump(offset) => self.handle_jump(current_pid, offset),
-                Instruction::JumpIf(offset) => self.handle_jump_if(current_pid, offset),
-                Instruction::Call => self.handle_call(current_pid),
-                Instruction::TailCall(recurse) => self.handle_tail_call(current_pid, recurse),
-                Instruction::Return => self.handle_return(current_pid),
-                Instruction::Function(function_index) => {
-                    self.handle_function(current_pid, function_index)
-                }
-                Instruction::Clear(count) => self.handle_clear(current_pid, count),
-                Instruction::Allocate(count) => self.handle_allocate(current_pid, count),
-                Instruction::Builtin(index) => self.handle_builtin(current_pid, index),
-                Instruction::Equal(count) => self.handle_equal(current_pid, count),
-                Instruction::Not => self.handle_not(current_pid),
-                Instruction::Spawn => self.handle_spawn(current_pid),
-                Instruction::Send => self.handle_send(current_pid),
-                Instruction::Self_ => self.handle_self(current_pid),
-                Instruction::Receive => self.handle_receive(current_pid),
-                Instruction::Acknowledge => self.handle_acknowledge(current_pid),
-            };
+            let step_result = self.execute_instruction(current_pid, instruction);
+
+            units_executed += 1;
 
             // Handle instruction result
             match step_result {
                 Ok(request) => {
-                    // Store routing request if present
-                    if request.is_some() {
-                        pending_request = request;
-                    }
+                    pending_request = request;
                 }
                 Err(error) => {
                     // Clear frames and set error result to complete the process
@@ -298,8 +260,7 @@ impl Executor {
                         process.result = Some(Err(error.clone()));
                     }
                     // Process is now completed with error - don't return error from step()
-                    // Break out of execution loop so process can be marked as finished
-                    break;
+                    return Ok(None);
                 }
             }
 
@@ -311,67 +272,49 @@ impl Executor {
             {
                 break;
             }
-
-            units_executed += 1;
         }
 
-        // Handle process completion or re-queueing
-        // Process should be re-queued if:
-        // 1. It didn't yield, AND it's not waiting (receiving/awaiting), OR
-        // 2. It yielded due to pending_routing, but it's NOT waiting (e.g., after Send)
-        let should_requeue =
-            !self.receiving.contains(&current_pid) && !self.awaiting.contains(&current_pid);
+        // Auto-pop any exhausted frames before checking if process is finished
+        if let Some(process) = self.get_process_mut(current_pid) {
+            while let Some(frame) = process.frames.last() {
+                if frame.counter >= frame.instructions.len() {
+                    // Frame exhausted - pop it without stack manipulation
+                    // (the result is already on the stack from the last instruction)
+                    let frame = process.frames.pop().unwrap();
 
-        if should_requeue {
-            // Auto-pop any exhausted frames before checking if process is finished
-            if let Some(process) = self.get_process_mut(current_pid) {
-                while let Some(frame) = process.frames.last() {
-                    if frame.counter >= frame.instructions.len() {
-                        // Frame exhausted - pop it without stack manipulation
-                        // (the result is already on the stack from the last instruction)
-                        let frame = process.frames.pop().unwrap();
-
-                        // Clear locals from the popped frame
-                        // BUT: for persistent processes, keep locals so variables persist across evaluations
-                        if !process.persistent {
-                            let locals_to_clear = process
+                    // Clear locals from the popped frame
+                    // BUT: for persistent processes, keep locals so variables persist across evaluations
+                    if !process.persistent {
+                        let locals_to_clear = process
+                            .locals
+                            .len()
+                            .saturating_sub(frame.locals_base + frame.captures_count);
+                        if locals_to_clear > 0 {
+                            process
                                 .locals
-                                .len()
-                                .saturating_sub(frame.locals_base + frame.captures_count);
-                            if locals_to_clear > 0 {
-                                process
-                                    .locals
-                                    .truncate(process.locals.len() - locals_to_clear);
-                            }
+                                .truncate(process.locals.len() - locals_to_clear);
                         }
-                    } else {
-                        break;
                     }
+                } else {
+                    break;
                 }
             }
+        }
 
-            let process = self.get_process(current_pid);
-            let finished = process.map(|p| p.frames.is_empty()).unwrap_or(false);
+        let process = self.get_process(current_pid);
+        let finished = process.map(|p| p.frames.is_empty()).unwrap_or(false);
 
-            if finished {
-                // Store result
-                if let Some(process) = self.get_process_mut(current_pid) {
-                    // Only set result if not already set (e.g., by an error or previous completion)
-                    // For persistent processes, update on each completion if no error occurred
-                    // For non-persistent, only set if not already set
-                    let should_set = match &process.result {
-                        Some(Err(_)) => false,                       // Don't overwrite errors
-                        Some(Ok(_)) if !process.persistent => false, // Don't overwrite non-persistent results
-                        _ => true, // Set result for: None, or persistent Ok results
-                    };
+        if finished {
+            // Store result
+            if let Some(process) = self.get_process_mut(current_pid) {
+                let result_value = process.stack.pop().unwrap_or_else(Value::nil);
+                process.result = Some(Ok(result_value));
+            }
+        } else {
+            let should_requeue =
+                !self.receiving.contains(&current_pid) && !self.awaiting.contains(&current_pid);
 
-                    if should_set {
-                        // If stack is empty, use nil as the result
-                        let result_value = process.stack.pop().unwrap_or_else(Value::nil);
-                        process.result = Some(Ok(result_value));
-                    }
-                }
-            } else {
+            if should_requeue {
                 // Process not finished - re-queue it so it can continue
                 // This handles both: time slice exhaustion AND yielding after routing (e.g., Send)
                 self.queue.push_back(current_pid);
@@ -380,6 +323,43 @@ impl Executor {
 
         // Return pending routing request if one was set, otherwise None
         Ok(pending_request)
+    }
+
+    fn execute_instruction(
+        &mut self,
+        pid: ProcessId,
+        instruction: Instruction,
+    ) -> Result<Option<Action>, Error> {
+        match instruction {
+            Instruction::Constant(index) => self.handle_constant(pid, index),
+            Instruction::Pop => self.handle_pop(pid),
+            Instruction::Duplicate => self.handle_duplicate(pid),
+            Instruction::Over => self.handle_over(pid),
+            Instruction::Swap => self.handle_swap(pid),
+            Instruction::Load(index) => self.handle_load(pid, index),
+            Instruction::Store(index) => self.handle_store(pid, index),
+            Instruction::Tuple(type_id) => self.handle_tuple(pid, type_id),
+            Instruction::Get(index) => self.handle_get(pid, index),
+            Instruction::IsInteger => self.handle_is_integer(pid),
+            Instruction::IsBinary => self.handle_is_binary(pid),
+            Instruction::IsTuple(type_id) => self.handle_is_tuple(pid, type_id),
+            Instruction::Jump(offset) => self.handle_jump(pid, offset),
+            Instruction::JumpIf(offset) => self.handle_jump_if(pid, offset),
+            Instruction::Call => self.handle_call(pid),
+            Instruction::TailCall(recurse) => self.handle_tail_call(pid, recurse),
+            Instruction::Return => self.handle_return(pid),
+            Instruction::Function(function_index) => self.handle_function(pid, function_index),
+            Instruction::Clear(count) => self.handle_clear(pid, count),
+            Instruction::Allocate(count) => self.handle_allocate(pid, count),
+            Instruction::Builtin(index) => self.handle_builtin(pid, index),
+            Instruction::Equal(count) => self.handle_equal(pid, count),
+            Instruction::Not => self.handle_not(pid),
+            Instruction::Spawn => self.handle_spawn(pid),
+            Instruction::Send => self.handle_send(pid),
+            Instruction::Self_ => self.handle_self(pid),
+            Instruction::Receive => self.handle_receive(pid),
+            Instruction::Acknowledge => self.handle_acknowledge(pid),
+        }
     }
 
     fn handle_constant(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
@@ -833,18 +813,13 @@ impl Executor {
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        let return_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
         let frame = process.frames.pop().ok_or(Error::FrameUnderflow)?;
 
         let locals_to_clear = process.locals.len() - frame.locals_base - frame.captures_count;
-
         if locals_to_clear > 0 {
             let new_len = process.locals.len() - locals_to_clear;
             process.locals.truncate(new_len);
         }
-
-        process.stack.push(return_value);
 
         // Increment counter of the frame we returned to (to move past the Call instruction)
         if let Some(frame) = process.frames.last_mut() {
