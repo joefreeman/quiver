@@ -195,8 +195,11 @@ impl Repl {
                 None
             }
             Some(RequestResult::RuntimeError(error)) => {
-                // Got a runtime error
+                // Got a runtime error - reset REPL state immediately
                 request.result_request_id = None;
+                self.repl_process_id = None; // Next eval will create new process
+                self.variable_map.clear();
+                self.last_result_type = Type::nil();
                 Some(Err(ReplError::Runtime(error)))
             }
             Some(_) => {

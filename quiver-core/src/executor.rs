@@ -172,10 +172,12 @@ impl Executor {
             ProcessStatus::Active
         } else if self.receiving.contains(&id) || self.awaiting.contains(&id) {
             ProcessStatus::Waiting
+        } else if matches!(&process.result, Some(Err(_))) {
+            ProcessStatus::Failed
         } else if process.persistent {
             ProcessStatus::Sleeping
         } else {
-            ProcessStatus::Terminated
+            ProcessStatus::Completed
         }
     }
 

@@ -16,6 +16,8 @@ pub enum EnvironmentError {
 
     // Process management
     ProcessNotFound(ProcessId),
+    ProcessNotSleeping(ProcessId),
+    ProcessFailed(ProcessId),
     FunctionNotFound(usize),
 
     // Data operations
@@ -43,6 +45,12 @@ impl std::fmt::Display for EnvironmentError {
         match self {
             EnvironmentError::Executor(e) => write!(f, "{:?}", e),
             EnvironmentError::ProcessNotFound(pid) => write!(f, "process {} not found", pid),
+            EnvironmentError::ProcessNotSleeping(pid) => {
+                write!(f, "process {} is not sleeping", pid)
+            }
+            EnvironmentError::ProcessFailed(pid) => {
+                write!(f, "process {} failed with an error", pid)
+            }
             EnvironmentError::FunctionNotFound(idx) => write!(f, "function {} not found", idx),
             EnvironmentError::LocalNotFound { process_id, index } => {
                 write!(

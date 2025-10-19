@@ -10,7 +10,8 @@ pub enum ProcessStatus {
     Active,
     Waiting,
     Sleeping,
-    Terminated,
+    Failed,
+    Completed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

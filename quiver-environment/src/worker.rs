@@ -3,7 +3,7 @@ use crate::messages::{Command, Event};
 use crate::transport::{CommandReceiver, EventSender};
 use quiver_core::bytecode::{Constant, Function};
 use quiver_core::executor::Executor;
-use quiver_core::process::{Action, ProcessId, ProcessStatus};
+use quiver_core::process::{Action, Frame, ProcessId, ProcessStatus};
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
 use std::collections::HashSet;
@@ -80,7 +80,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                     .map(|info| info.status);
                 let is_completed = matches!(
                     target_status,
-                    Some(ProcessStatus::Terminated) | Some(ProcessStatus::Sleeping)
+                    Some(ProcessStatus::Completed) | Some(ProcessStatus::Sleeping)
                 );
 
                 if is_completed {
@@ -296,27 +296,20 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             .get_process_mut(id)
             .ok_or_else(|| EnvironmentError::ProcessNotFound(id))?;
 
-        // Push the previous result (or nil) onto the stack for continuations
-        let parameter = match process.result.take() {
-            Some(Ok(value)) => value,
-            Some(Err(_)) | None => quiver_core::value::Value::nil(),
-        };
-        process.stack.push(parameter);
+        // Check if the process failed
+        if let Some(Err(_)) = &process.result {
+            return Err(EnvironmentError::ProcessFailed(id));
+        }
 
-        // For persistent processes (like REPL), always use locals_base=0
-        // This allows variables to persist across resume cycles
-        let locals_base = if process.persistent {
-            0
-        } else {
-            process.locals.len()
-        };
+        // Check that the process is sleeping (it's persistent and has a successful result)
+        if !process.persistent || !matches!(&process.result, Some(Ok(_))) {
+            return Err(EnvironmentError::ProcessNotSleeping(id));
+        }
 
-        // Push new frame with appropriate locals_base
-        process.frames.push(quiver_core::process::Frame::new(
-            instructions,
-            locals_base,
-            0,
-        ));
+        // Push the previous result onto the stack for continuations
+        let result_value = process.result.take().unwrap().unwrap();
+        process.stack.push(result_value);
+        process.frames.push(Frame::new(instructions, 0, 0));
 
         // Add back to queue
         self.executor.add_to_queue(id);
@@ -484,8 +477,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         let mut completed = Vec::new();
         for (&process_id, status) in &statuses {
             // If terminated (non-persistent) or sleeping (persistent), it's completed
-            let is_completed =
-                matches!(status, ProcessStatus::Terminated | ProcessStatus::Sleeping);
+            let is_completed = matches!(status, ProcessStatus::Completed | ProcessStatus::Sleeping);
 
             // Only process if completed and being awaited
             if is_completed && self.awaited.contains(&process_id) {
