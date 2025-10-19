@@ -170,24 +170,6 @@ impl Repl {
         }
     }
 
-    /// Wait for evaluation result (blocking)
-    #[wasm_bindgen]
-    pub fn wait_evaluate(&mut self, request_id: u64) -> Result<JsValue, String> {
-        let request = self
-            .pending_requests
-            .borrow_mut()
-            .remove(&request_id)
-            .ok_or_else(|| format!("Request {} not found", request_id))?;
-
-        let value = self
-            .inner
-            .wait_evaluate(request)
-            .map_err(|e| e.to_string())?;
-
-        serde_wasm_bindgen::to_value(&value)
-            .map_err(|e| format!("Failed to serialize value: {}", e))
-    }
-
     /// Get variable value by name
     #[wasm_bindgen]
     pub fn get_variable(&mut self, name: &str) -> Result<JsValue, String> {
