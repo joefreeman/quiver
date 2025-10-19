@@ -43,7 +43,7 @@ impl ReplCli {
 
     pub fn run(mut self) -> Result<(), ReadlineError> {
         if std::io::stdin().is_terminal() {
-            println!("Quiver v0.1.0");
+            println!("Quiver v{}", env!("CARGO_PKG_VERSION"));
             println!("Type \\? for help or \\q to exit");
             println!();
         }
