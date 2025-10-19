@@ -1,10 +1,9 @@
 use crate::environment::EnvironmentError;
 use crate::messages::{Command, Event};
 use crate::transport::{CommandReceiver, EventSender};
-use quiver_core::bytecode::{Constant, Function, TypeId};
+use quiver_core::bytecode::{Constant, Function};
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId, ProcessStatus};
-use quiver_core::program::Program;
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
 use std::collections::HashMap;
@@ -21,9 +20,8 @@ pub struct Worker<R: CommandReceiver, S: EventSender> {
 
 impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
     pub fn new(cmd_receiver: R, evt_sender: S) -> Self {
-        let program = Program::new();
         Self {
-            executor: Executor::new(&program),
+            executor: Executor::new(),
             awaiters_for: HashMap::new(),
             completed_sent: std::collections::HashSet::new(),
             cmd_receiver,
@@ -230,25 +228,8 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         types: Vec<TupleTypeInfo>,
         builtins: Vec<String>,
     ) -> Result<(), EnvironmentError> {
-        // Append new constants
-        for constant in constants {
-            self.executor.append_constant(constant);
-        }
-
-        // Append new functions
-        for function in functions {
-            self.executor.append_function(function);
-        }
-
-        // Register new types
-        for (index, info) in types.into_iter().enumerate() {
-            self.executor.register_type(TypeId(index), info);
-        }
-
-        // Append new builtins
-        for builtin in builtins {
-            self.executor.append_builtin(builtin);
-        }
+        self.executor
+            .update_program(constants, functions, types, builtins);
 
         Ok(())
     }

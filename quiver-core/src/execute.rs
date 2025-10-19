@@ -10,17 +10,20 @@ use crate::value::Value;
 /// a simple, blocking execution model without process management complexity.
 ///
 /// Creates a temporary executor, spawns a single process, executes the instructions,
-/// and returns both the result value from the stack and the executor (which may contain
+/// and returns both the result value and the executor (which may contain
 /// heap-allocated data that the value references).
 pub fn execute_instructions_sync(
     program: &Program,
     instructions: Vec<Instruction>,
-) -> Result<(Option<Value>, Executor), Error> {
-    let mut executor = Executor::new(program);
+) -> Result<(Value, Executor), Error> {
+    let mut executor = Executor::new();
+    executor.update_program(
+        program.get_constants().clone(),
+        program.get_functions().clone(),
+        program.get_types().clone(),
+        program.get_builtins().clone(),
+    );
 
-    if instructions.is_empty() {
-        return Ok((None, executor));
-    }
     let process_id = 0;
 
     // Spawn a process
@@ -51,20 +54,11 @@ pub fn execute_instructions_sync(
             .get_process(process_id)
             .ok_or(Error::InvalidArgument("Process disappeared".to_string()))?;
 
-        // Check if execution is complete
-        let is_complete = process
-            .frames
-            .last()
-            .map_or(true, |frame| frame.counter >= frame.instructions.len());
-
-        if is_complete {
-            if !process.stack.is_empty() {
-                // Get the result from the stack
-                let result = process.stack.last().cloned();
-                return Ok((result, executor));
-            } else {
-                // If the process completed with an empty stack, return None
-                return Ok((None, executor));
+        // Check if execution is complete by looking at process.result
+        if let Some(result) = &process.result {
+            match result {
+                Ok(value) => return Ok((value.clone(), executor)),
+                Err(e) => return Err(e.clone()),
             }
         }
     }

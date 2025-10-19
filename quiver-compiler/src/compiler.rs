@@ -1139,22 +1139,13 @@ impl<'a> Compiler<'a> {
         self.type_context.type_aliases = saved_type_aliases;
 
         // Execute the module instructions to get the result value
-        let (result, executor) =
+        let (module_value, executor) =
             quiver_core::execute_instructions_sync(&self.program, module_instructions).map_err(
                 |e| Error::ModuleExecution {
                     module_path: module_path.to_string(),
                     error: e,
                 },
             )?;
-
-        let Some(module_value) = result else {
-            return Err(Error::ModuleExecution {
-                module_path: module_path.to_string(),
-                error: quiver_core::error::Error::InvalidArgument(
-                    "Module returned no value".to_string(),
-                ),
-            });
-        };
 
         // Convert the runtime value back to instructions
         let (instructions, module_type) = self.value_to_instructions(&module_value, &executor)?;

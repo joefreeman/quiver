@@ -2,7 +2,6 @@ use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{Constant, Function, Instruction, TypeId};
 use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus};
-use crate::program::Program;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -77,18 +76,17 @@ impl Executor {
         Ok(Binary::Heap(index))
     }
 
-    pub fn new(program: &Program) -> Self {
+    pub fn new() -> Self {
         Self {
             processes: HashMap::new(),
             queue: VecDeque::new(),
             receiving: HashSet::new(),
             awaiting: HashSet::new(),
-            // Clone Program's data
-            constants: program.get_constants().clone(),
-            functions: program.get_functions().clone(),
-            builtins: program.get_builtins().clone(),
-            types: program.get_types().clone(),
-            heap: Vec::new(),
+            constants: vec![],
+            functions: vec![],
+            builtins: vec![],
+            types: vec![],
+            heap: vec![],
         }
     }
 
@@ -206,52 +204,17 @@ impl Executor {
         self.builtins.get(index)
     }
 
-    // Program data mutators (for runtime synchronization)
-    pub fn register_constant(&mut self, index: usize, constant: Constant) {
-        if index >= self.constants.len() {
-            self.constants.resize(index + 1, Constant::Integer(0));
-        }
-        self.constants[index] = constant;
-    }
-
-    pub fn append_constant(&mut self, constant: Constant) {
-        self.constants.push(constant);
-    }
-
-    pub fn register_function(&mut self, index: usize, function: Function) {
-        if index >= self.functions.len() {
-            self.functions.resize(
-                index + 1,
-                Function {
-                    instructions: vec![],
-                    function_type: None,
-                    captures: vec![],
-                },
-            );
-        }
-        self.functions[index] = function;
-    }
-
-    pub fn append_function(&mut self, function: Function) {
-        self.functions.push(function);
-    }
-
-    pub fn register_builtin(&mut self, index: usize, name: String) {
-        if index >= self.builtins.len() {
-            self.builtins.resize(index + 1, String::new());
-        }
-        self.builtins[index] = name;
-    }
-
-    pub fn append_builtin(&mut self, name: String) {
-        self.builtins.push(name);
-    }
-
-    pub fn register_type(&mut self, type_id: TypeId, info: TupleTypeInfo) {
-        if type_id.0 >= self.types.len() {
-            self.types.resize(type_id.0 + 1, (None, vec![]));
-        }
-        self.types[type_id.0] = info;
+    pub fn update_program(
+        &mut self,
+        mut constants: Vec<Constant>,
+        mut functions: Vec<Function>,
+        mut types: Vec<TupleTypeInfo>,
+        mut builtins: Vec<String>,
+    ) {
+        self.constants.append(&mut constants);
+        self.functions.append(&mut functions);
+        self.types.append(&mut types);
+        self.builtins.append(&mut builtins);
     }
 
     /// Execute up to max_units instruction units for a single process.
@@ -416,7 +379,7 @@ impl Executor {
 
                     if should_set {
                         // If stack is empty, use nil as the result
-                        let result_value = process.stack.last().cloned().unwrap_or_else(Value::nil);
+                        let result_value = process.stack.pop().unwrap_or_else(Value::nil);
                         process.result = Some(Ok(result_value));
                     }
                 }

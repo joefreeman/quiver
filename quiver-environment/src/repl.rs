@@ -1,6 +1,7 @@
 use crate::WorkerHandle;
 use crate::environment::{Environment, EnvironmentError, RequestResult};
 use quiver_compiler::modules::ModuleLoader;
+use quiver_core::bytecode::Function;
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
 use quiver_core::types::Type;
@@ -88,38 +89,16 @@ impl Repl {
             )
             .map_err(|e| ReplError::Compiler(e))?;
 
-        // Update variable map with new variables
-        self.variable_map = variables;
-
-        // Update last result type for next evaluation (supports continuations)
-        self.last_result_type = result_type;
-
         // Get only the NEW program data (not already sent)
         let old_constants_len = self.program.get_constants().len();
         let old_functions_len = self.program.get_functions().len();
+        let old_types_len = self.program.get_types().len();
         let old_builtins_len = self.program.get_builtins().len();
 
-        let all_constants = updated_program.get_constants();
-        let all_functions = updated_program.get_functions();
-        let all_builtins = updated_program.get_builtins();
-
-        let new_constants = all_constants[old_constants_len..].to_vec();
-        let new_functions = all_functions[old_functions_len..].to_vec();
-        let new_types = updated_program.get_types().clone();
-        let new_builtins = all_builtins[old_builtins_len..].to_vec();
-
-        // Update our local program reference
         self.program = updated_program;
+        self.variable_map = variables;
+        self.last_result_type = result_type;
 
-        // Send UpdateProgram to all workers (additive - only new items)
-        self.environment
-            .update_program(new_constants, new_functions, new_types, new_builtins)
-            .map_err(|e| ReplError::Environment(e))?;
-
-        // Wrap instructions in a function and register with program
-        // For continuations: Return stores the result in process.result,
-        // and resume_process pushes it back onto the stack
-        use quiver_core::bytecode::Function;
         let function = Function {
             instructions,
             function_type: None,
@@ -127,10 +106,19 @@ impl Repl {
         };
         let function_index = self.program.register_function(function);
 
-        // Send the new function to all workers
-        let new_functions = vec![self.program.get_functions()[function_index].clone()];
+        let all_constants = self.program.get_constants();
+        let all_functions = self.program.get_functions();
+        let all_types = self.program.get_types();
+        let all_builtins = self.program.get_builtins();
+
+        let new_constants = all_constants[old_constants_len..].to_vec();
+        let new_functions = all_functions[old_functions_len..].to_vec();
+        let new_types = all_types[old_types_len..].to_vec();
+        let new_builtins = all_builtins[old_builtins_len..].to_vec();
+
+        // Send UpdateProgram to all workers (additive - only new items)
         self.environment
-            .update_program(vec![], new_functions, vec![], vec![])
+            .update_program(new_constants, new_functions, new_types, new_builtins)
             .map_err(|e| ReplError::Environment(e))?;
 
         // Create or resume the REPL process

@@ -117,7 +117,7 @@ fn compile_command(
 
     // Extract the entry function from the result
     let entry = match result {
-        Some(Value::Function(func_index, captures)) => {
+        Value::Function(func_index, captures) => {
             if !captures.is_empty() {
                 // Inject captures into the program to create a new function
                 Some(program.inject_function_captures(func_index, captures, &executor))
@@ -125,8 +125,7 @@ fn compile_command(
                 Some(func_index)
             }
         }
-        Some(_) => None, // Program didn't evaluate to a function
-        None => None,    // No result
+        _ => None, // Program didn't evaluate to a function
     };
 
     let mut bytecode = program.to_bytecode(entry);
@@ -213,7 +212,7 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
 
     // Extract the entry function from the result
     let entry = match result {
-        Some(Value::Function(func_index, captures)) => {
+        Value::Function(func_index, captures) => {
             if !captures.is_empty() {
                 // Inject captures into the program to create a new function
                 Some(program.inject_function_captures(func_index, captures, &executor))
@@ -221,8 +220,7 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
                 Some(func_index)
             }
         }
-        Some(_) => None, // Program didn't evaluate to a function
-        None => None,    // No result
+        _ => None, // Program didn't evaluate to a function
     };
 
     let bytecode = program.to_bytecode(entry);
@@ -249,21 +247,19 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
             bytecode::Instruction::Call,
         ];
 
-        let (result, _executor) = quiver_core::execute_instructions_sync(&program, instructions)
+        let (value, _executor) = quiver_core::execute_instructions_sync(&program, instructions)
             .map_err(|e| format!("Execution error: {:?}", e))?;
 
-        if let Some(value) = result {
-            // Check if result is NIL tuple (exit with error)
-            if matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::NIL) {
-                std::process::exit(1);
-            }
+        // Check if result is NIL tuple (exit with error)
+        if matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::NIL) {
+            std::process::exit(1);
+        }
 
-            // Print result unless quiet or OK/NIL
-            if !quiet
-                && !matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::OK || type_id == TypeId::NIL)
-            {
-                println!("{}", format::format_value(&value, &[], &program));
-            }
+        // Print result unless quiet or OK/NIL
+        if !quiet
+            && !matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::OK || type_id == TypeId::NIL)
+        {
+            println!("{}", format::format_value(&value, &[], &program));
         }
     }
 
