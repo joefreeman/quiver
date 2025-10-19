@@ -2,6 +2,10 @@
 name = "quiver-web"
 version.workspace = true
 edition.workspace = true
+description = "WebAssembly bindings for the Quiver language"
+repository = "https://github.com/joefreeman/quiver"
+license = "MIT"
+keywords = ["wasm", "quiver", "language"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
