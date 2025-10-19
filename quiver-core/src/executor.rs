@@ -223,11 +223,11 @@ impl Executor {
 
     /// Execute up to max_units instruction units for a single process.
     /// Returns None to continue, or Some(request) for a routing request that needs to be handled by the scheduler.
-    pub fn step(&mut self, max_units: usize) -> Result<Option<Action>, Error> {
+    pub fn step(&mut self, max_units: usize) -> Option<Action> {
         // Pop process from queue
         let current_pid = match self.queue.pop_front() {
             Some(pid) => pid,
-            None => return Ok(None),
+            None => return None,
         };
 
         let mut units_executed = 0;
@@ -254,13 +254,10 @@ impl Executor {
                     pending_request = request;
                 }
                 Err(error) => {
-                    // Clear frames and set error result to complete the process
                     if let Some(process) = self.get_process_mut(current_pid) {
-                        process.frames.clear();
                         process.result = Some(Err(error.clone()));
                     }
-                    // Process is now completed with error - don't return error from step()
-                    return Ok(None);
+                    return None;
                 }
             }
 
@@ -329,7 +326,7 @@ impl Executor {
         }
 
         // Return pending routing request if one was set, otherwise None
-        Ok(pending_request)
+        pending_request
     }
 
     fn execute_instruction(

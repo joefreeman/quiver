@@ -47,7 +47,7 @@ pub fn execute_instructions_sync(
     loop {
         // Step with a reasonable batch size
         // TODO: check step result
-        let _step_result = executor.step(1000)?;
+        let _step_result = executor.step(1000);
 
         // Check if the process has completed
         let process = executor

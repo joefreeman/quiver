@@ -41,17 +41,9 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         }
 
         // Execute one step
-        match self.executor.step(MAX_UNITS) {
-            Ok(Some(action)) => {
-                self.handle_action(action)?;
-                did_work = true;
-            }
-            Ok(None) => {
-                // No work, idle
-            }
-            Err(err) => {
-                return Err(EnvironmentError::Executor(err));
-            }
+        if let Some(action) = self.executor.step(MAX_UNITS) {
+            self.handle_action(action)?;
+            did_work = true;
         }
 
         // Check for newly completed processes
