@@ -8,7 +8,7 @@ Quiver is a statically-typed functional programming language with structural typ
 
 All values in Quiver are immutable. The language supports:
 
-- **Integers**: `42`, `-17`
+- **Integers**: `42`, `-17`, `0xff`, `0b1010`
 - **Binaries**: `'0a1b2c'` (hexadecimal bytes)
 - **Tuples**: Collections of values with optional names and field labels
 

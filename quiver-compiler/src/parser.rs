@@ -2,7 +2,7 @@ use crate::ast::*;
 use nom::{
     IResult,
     branch::alt,
-    bytes::complete::{tag, take_while},
+    bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, digit1, multispace0, multispace1, satisfy},
     combinator::{map, map_res, not, opt, peek, recognize, value as nom_value, verify},
     multi::{many0, separated_list0, separated_list1},
@@ -109,9 +109,35 @@ fn tuple_name(input: &str) -> IResult<&str, String> {
 // Literal parsers
 
 fn integer_literal(input: &str) -> IResult<&str, Literal> {
-    map_res(recognize(pair(opt(char('-')), digit1)), |s: &str| {
-        s.parse::<i64>().map(Literal::Integer)
-    })(input)
+    map(
+        pair(
+            opt(char('-')),
+            alt((
+                // Hexadecimal: 0x...
+                map_res(
+                    preceded(tag("0x"), take_while1(|c: char| c.is_ascii_hexdigit())),
+                    |s: &str| {
+                        i64::from_str_radix(s, 16)
+                            .map_err(|_| Error::IntegerMalformed(format!("0x{}", s)))
+                    },
+                ),
+                // Binary: 0b...
+                map_res(
+                    preceded(tag("0b"), take_while1(|c: char| c == '0' || c == '1')),
+                    |s: &str| {
+                        i64::from_str_radix(s, 2)
+                            .map_err(|_| Error::IntegerMalformed(format!("0b{}", s)))
+                    },
+                ),
+                // Decimal
+                map_res(digit1, |s: &str| {
+                    s.parse::<i64>()
+                        .map_err(|_| Error::IntegerMalformed(s.to_string()))
+                }),
+            )),
+        ),
+        |(sign, value)| Literal::Integer(if sign.is_some() { -value } else { value }),
+    )(input)
 }
 
 fn binary_literal(input: &str) -> IResult<&str, Literal> {

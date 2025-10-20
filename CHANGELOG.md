@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Hexadecimal (`0x...`) and binary (`0b...`) integer literal notation.
+
 ## [0.1.0] - 2025-10-20
 
 ### Added
