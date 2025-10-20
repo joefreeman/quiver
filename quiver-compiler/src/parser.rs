@@ -283,7 +283,7 @@ fn type_cycle(input: &str) -> IResult<&str, Type> {
             char('&'),
             opt(map_res(digit1, |s: &str| s.parse::<usize>())),
         ),
-        |depth| Type::Cycle(depth),
+        Type::Cycle,
     )(input)
 }
 
@@ -669,16 +669,16 @@ fn match_pattern(input: &str) -> IResult<&str, Match> {
         // Try string literals first (before tuples and literals)
         match_string,
         // Try match tuple (handles both [..] and Name[..])
-        map(match_tuple, |tuple| Match::Tuple(tuple)),
+        map(match_tuple, Match::Tuple),
         // Then try partial patterns (must come before identifier)
-        map(partial_pattern_inner, |partial| Match::Partial(partial)),
+        map(partial_pattern_inner, Match::Partial),
         // Then try literals
-        map(literal, |lit| Match::Literal(lit)),
+        map(literal, Match::Literal),
         // Star and placeholder
         map(char('*'), |_| Match::Star),
         map(char('_'), |_| Match::Placeholder),
         // Identifier must come last (since it's more general)
-        map(identifier, |id| Match::Identifier(id)),
+        map(identifier, Match::Identifier),
     ))(input)
 }
 

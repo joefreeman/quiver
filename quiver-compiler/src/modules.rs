@@ -50,6 +50,12 @@ impl ModuleLoader for InMemoryModuleLoader {
 
 pub struct FileSystemModuleLoader {}
 
+impl Default for FileSystemModuleLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileSystemModuleLoader {
     pub fn new() -> Self {
         Self {}

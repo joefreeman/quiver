@@ -12,6 +12,12 @@ pub struct ModuleCache {
     pub import_stack: Vec<String>,
 }
 
+impl Default for ModuleCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModuleCache {
     pub fn new() -> Self {
         Self {

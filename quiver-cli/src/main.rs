@@ -98,18 +98,20 @@ fn compile_command(
     let empty_program = Program::new();
 
     let ast = parse(&source).map_err(|e| format!("Parse error: {:?}", e))?;
-    let (instructions, _result_type, _variables, mut program, _type_aliases, _module_cache) =
-        Compiler::compile(
-            ast,
-            HashMap::new(),
-            ModuleCache::new(),
-            &module_loader,
-            &empty_program,
-            module_path,
-            None,
-            Type::nil(),
-        )
-        .map_err(|e| format!("Compile error: {:?}", e))?;
+    let result = Compiler::compile(
+        ast,
+        HashMap::new(),
+        ModuleCache::new(),
+        &module_loader,
+        &empty_program,
+        module_path,
+        None,
+        Type::nil(),
+    )
+    .map_err(|e| format!("Compile error: {:?}", e))?;
+
+    let instructions = result.instructions;
+    let mut program = result.program;
 
     // Execute the instructions synchronously to get the function value
     let (result, executor) = quiver_core::execute_instructions_sync(&program, instructions)
@@ -193,18 +195,20 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
     let empty_program = Program::new();
 
     let ast = parse(source).map_err(|e| format!("Parse error: {:?}", e))?;
-    let (instructions, _result_type, _variables, mut program, _type_aliases, _module_cache) =
-        Compiler::compile(
-            ast,
-            HashMap::new(),
-            ModuleCache::new(),
-            &module_loader,
-            &empty_program,
-            module_path,
-            None,
-            Type::nil(),
-        )
-        .map_err(|e| format!("Compile error: {:?}", e))?;
+    let compilation_result = Compiler::compile(
+        ast,
+        HashMap::new(),
+        ModuleCache::new(),
+        &module_loader,
+        &empty_program,
+        module_path,
+        None,
+        Type::nil(),
+    )
+    .map_err(|e| format!("Compile error: {:?}", e))?;
+
+    let instructions = compilation_result.instructions;
+    let mut program = compilation_result.program;
 
     // Execute the instructions synchronously to get the function value
     let (result, executor) = quiver_core::execute_instructions_sync(&program, instructions)

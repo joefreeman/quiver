@@ -22,7 +22,7 @@ impl<'a> Compiler<'a> {
         let (source_name, source_fields) = self
             .program
             .lookup_type(&source_type_id)
-            .ok_or_else(|| Error::TypeNotInRegistry {
+            .ok_or(Error::TypeNotInRegistry {
                 type_id: source_type_id,
             })?
             .clone();

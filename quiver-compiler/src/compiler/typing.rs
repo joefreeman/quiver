@@ -52,7 +52,7 @@ impl TypeContext {
     fn ast_contains_cycle(typ: &ast::Type) -> bool {
         match typ {
             ast::Type::Cycle(_) => true,
-            ast::Type::Union(union) => union.types.iter().any(|v| Self::ast_contains_cycle(v)),
+            ast::Type::Union(union) => union.types.iter().any(Self::ast_contains_cycle),
             ast::Type::Tuple(tuple) => tuple
                 .fields
                 .iter()
@@ -191,7 +191,7 @@ impl TypeContext {
     ) -> Result<(usize, Type), Error> {
         let tuple_type = type_lookup
             .lookup_type(type_id)
-            .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+            .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
         let (index, (_, field_type)) = tuple_type
             .1
             .iter()
@@ -212,7 +212,7 @@ impl TypeContext {
     ) -> Result<Type, Error> {
         let tuple_type = type_lookup
             .lookup_type(type_id)
-            .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+            .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
         if position >= tuple_type.1.len() {
             return Err(Error::PositionalAccessOnNonTuple { index: position });
         }

@@ -9,6 +9,12 @@ use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// Type aliases for complex types
+pub type ValueWithHeap = (Value, Vec<Vec<u8>>);
+pub type RuntimeResult = Result<Value, quiver_core::error::Error>;
+pub type CompletedResult = (RuntimeResult, Vec<Vec<u8>>);
+pub type LocalsResult = Result<Vec<ValueWithHeap>, EnvironmentError>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EnvironmentError {
     // From worker/executor
@@ -83,11 +89,11 @@ impl std::error::Error for EnvironmentError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestResult {
-    Result(Result<(Value, Vec<Vec<u8>>), quiver_core::error::Error>),
+    Result(Result<ValueWithHeap, quiver_core::error::Error>),
     // RuntimeError(quiver_core::error::Error),
     Statuses(HashMap<ProcessId, ProcessStatus>),
     ProcessInfo(Option<ProcessInfo>),
-    Locals(Vec<(Value, Vec<Vec<u8>>)>),
+    Locals(Vec<ValueWithHeap>),
 }
 
 pub struct Environment {
@@ -219,7 +225,7 @@ impl Environment {
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
+            .ok_or(EnvironmentError::ProcessNotFound(pid))?;
 
         self.workers[*worker_id]
             .send(Command::ResumeProcess {
@@ -237,7 +243,7 @@ impl Environment {
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
+            .ok_or(EnvironmentError::ProcessNotFound(pid))?;
 
         self.workers[*worker_id]
             .send(Command::GetResult {
@@ -295,7 +301,7 @@ impl Environment {
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
+            .ok_or(EnvironmentError::ProcessNotFound(pid))?;
 
         self.workers[*worker_id]
             .send(Command::GetProcessInfo {
@@ -318,7 +324,7 @@ impl Environment {
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
+            .ok_or(EnvironmentError::ProcessNotFound(pid))?;
 
         self.workers[*worker_id]
             .send(Command::GetLocals {
@@ -341,7 +347,7 @@ impl Environment {
         let worker_id = self
             .process_router
             .get(&pid)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(pid))?;
+            .ok_or(EnvironmentError::ProcessNotFound(pid))?;
 
         self.workers[*worker_id]
             .send(Command::CompactLocals {
@@ -425,7 +431,7 @@ impl Environment {
     fn handle_process_completed(
         &mut self,
         process_id: ProcessId,
-        result: Result<Value, quiver_core::error::Error>,
+        result: RuntimeResult,
         heap: Vec<Vec<u8>>,
     ) -> Result<(), EnvironmentError> {
         // Look up awaiters and remove the entry
@@ -436,7 +442,7 @@ impl Environment {
             let worker_id = self
                 .process_router
                 .get(&awaiter)
-                .ok_or_else(|| EnvironmentError::ProcessNotFound(awaiter))?;
+                .ok_or(EnvironmentError::ProcessNotFound(awaiter))?;
 
             self.workers[*worker_id]
                 .send(Command::NotifyResult {
@@ -479,7 +485,7 @@ impl Environment {
         let caller_worker = self
             .process_router
             .get(&caller)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(caller))?;
+            .ok_or(EnvironmentError::ProcessNotFound(caller))?;
 
         self.workers[*caller_worker]
             .send(Command::NotifySpawn {
@@ -500,7 +506,7 @@ impl Environment {
         let worker_id = self
             .process_router
             .get(&target)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(target))?;
+            .ok_or(EnvironmentError::ProcessNotFound(target))?;
 
         self.workers[*worker_id]
             .send(Command::DeliverMessage {
@@ -524,7 +530,7 @@ impl Environment {
         let target_worker = self
             .process_router
             .get(&target)
-            .ok_or_else(|| EnvironmentError::ProcessNotFound(target))?;
+            .ok_or(EnvironmentError::ProcessNotFound(target))?;
 
         self.workers[*target_worker]
             .send(Command::RegisterAwaiter {
@@ -539,7 +545,7 @@ impl Environment {
     fn handle_result_response(
         &mut self,
         request_id: u64,
-        result: Result<(Value, Vec<Vec<u8>>), quiver_core::error::Error>,
+        result: Result<ValueWithHeap, quiver_core::error::Error>,
     ) -> Result<(), EnvironmentError> {
         self.pending_requests
             .insert(request_id, Some(RequestResult::Result(result)));
@@ -571,10 +577,8 @@ impl Environment {
                 if worker_requests.values().all(|v| v.is_some()) {
                     // Merge all results into a single HashMap
                     let mut merged = HashMap::new();
-                    for worker_statuses in worker_requests.values() {
-                        if let Some(stats) = worker_statuses {
-                            merged.extend(stats.clone());
-                        }
+                    for stats in worker_requests.values().flatten() {
+                        merged.extend(stats.clone());
                     }
 
                     // Store the aggregated result
@@ -615,7 +619,7 @@ impl Environment {
     fn handle_locals_response(
         &mut self,
         request_id: u64,
-        result: Result<Vec<(Value, Vec<Vec<u8>>)>, EnvironmentError>,
+        result: LocalsResult,
     ) -> Result<(), EnvironmentError> {
         let locals = result?;
         self.pending_requests

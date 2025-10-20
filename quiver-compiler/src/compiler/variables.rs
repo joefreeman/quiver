@@ -69,7 +69,7 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_match_pattern(pattern);
             }
             ast::Term::Block(block) => {
-                self.visit_block(&block);
+                self.visit_block(block);
             }
             ast::Term::Function(func) => {
                 self.visit_block(&func.body);

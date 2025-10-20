@@ -5,6 +5,12 @@ pub struct InstructionBuilder {
     pub instructions: Vec<Instruction>,
 }
 
+impl Default for InstructionBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InstructionBuilder {
     pub fn new() -> Self {
         Self {

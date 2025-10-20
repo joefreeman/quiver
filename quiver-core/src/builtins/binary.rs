@@ -343,9 +343,8 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &mut Executor) -> Result
 
                     if bit_shift == 0 {
                         // Simple byte-aligned shift
-                        for i in byte_shift..bytes.len() {
-                            result[i] = bytes[i - byte_shift];
-                        }
+                        result[byte_shift..bytes.len()]
+                            .copy_from_slice(&bytes[..(bytes.len() - byte_shift)]);
                     } else {
                         // Bit-level shift
                         let mut carry = 0u8;
@@ -674,9 +673,7 @@ pub fn builtin_binary_set_u64(arg: &Value, program: &mut Executor) -> Result<Val
                     let mut result = bytes.to_vec();
                     let value_bytes = (*value as u64).to_be_bytes();
 
-                    for i in 0..8 {
-                        result[offset + i] = value_bytes[i];
-                    }
+                    result[offset..(8 + offset)].copy_from_slice(&value_bytes);
 
                     let binary = program.allocate_binary(result)?;
                     Ok(Value::Binary(binary))

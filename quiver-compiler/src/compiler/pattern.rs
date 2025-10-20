@@ -9,6 +9,10 @@ use quiver_core::{
 
 use super::{Error, codegen::InstructionBuilder, typing::TypeContext};
 
+// Type aliases for complex pattern matching types
+type PatternAnalysisResult = (MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>);
+type TupleMatchResult = Vec<(TypeId, Vec<(usize, usize)>)>;
+
 /// Represents the certainty of a pattern match
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchCertainty {
@@ -80,7 +84,7 @@ pub fn analyze_pattern(
     value_type: &Type,
     mode: PatternMode,
     variables: &HashSet<String>,
-) -> Result<(MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>), Error> {
+) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
     let binding_sets = analyze_match_pattern(
         type_context,
@@ -242,6 +246,7 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_match_pattern(
     type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
@@ -303,6 +308,7 @@ fn analyze_match_pattern(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_match_tuple_pattern(
     type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
@@ -319,7 +325,7 @@ fn analyze_match_tuple_pattern(
     let matching_types = find_matching_match_tuple_types(type_lookup, tuple, value_type)?;
 
     // For each matching type, create binding sets
-    for (_idx, (type_id, field_mappings)) in matching_types.iter().enumerate() {
+    for (type_id, field_mappings) in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         // For a single variant, use the parent's identifiers directly
         let mut variant_identifiers_storage;
@@ -334,7 +340,7 @@ fn analyze_match_tuple_pattern(
         let tuple_fields: Vec<Type> = {
             let tuple_info = type_lookup
                 .lookup_type(type_id)
-                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
             tuple_info.1.iter().map(|(_, t)| t.clone()).collect()
         };
 
@@ -425,7 +431,7 @@ fn find_matching_match_tuple_types(
     type_lookup: &impl TypeLookup,
     tuple: &ast::MatchTuple,
     value_type: &Type,
-) -> Result<Vec<(TypeId, Vec<(usize, usize)>)>, Error> {
+) -> Result<TupleMatchResult, Error> {
     let mut matching_types = Vec::new();
 
     let types_to_check = match value_type {
@@ -434,10 +440,10 @@ fn find_matching_match_tuple_types(
     };
 
     for typ in types_to_check {
-        if let Type::Tuple(type_id) = typ {
-            if let Some(field_mappings) = check_match_tuple_match(type_lookup, tuple, *type_id)? {
-                matching_types.push((*type_id, field_mappings));
-            }
+        if let Type::Tuple(type_id) = typ
+            && let Some(field_mappings) = check_match_tuple_match(type_lookup, tuple, *type_id)?
+        {
+            matching_types.push((*type_id, field_mappings));
         }
     }
 
@@ -451,7 +457,7 @@ fn check_match_tuple_match(
 ) -> Result<Option<Vec<(usize, usize)>>, Error> {
     let tuple_info = type_lookup
         .lookup_type(&type_id)
-        .ok_or_else(|| Error::TypeNotInRegistry { type_id })?;
+        .ok_or(Error::TypeNotInRegistry { type_id })?;
 
     if tuple.name.as_ref() != tuple_info.0.as_ref() || tuple.fields.len() != tuple_info.1.len() {
         return Ok(None);
@@ -572,7 +578,7 @@ fn analyze_partial_pattern(
     )?;
 
     // Create a binding set for each matching type
-    for (_idx, (type_id, field_indices)) in matching_types.iter().enumerate() {
+    for (type_id, field_indices) in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         let mut variant_identifiers_storage;
         let variant_identifiers = if matching_types.len() > 1 {
@@ -593,7 +599,7 @@ fn analyze_partial_pattern(
 
         let tuple_info = type_lookup
             .lookup_type(type_id)
-            .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+            .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
         let mut bindings = Vec::new();
         for (i, field_name) in partial_pattern.fields.iter().enumerate() {
@@ -648,7 +654,7 @@ fn analyze_star_pattern(
 
     // Create a binding set for each tuple type
     let mut binding_sets = vec![];
-    for (_idx, type_id) in tuple_types.iter().enumerate() {
+    for type_id in &tuple_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         let mut variant_identifiers_storage;
         let variant_identifiers = if tuple_types.len() > 1 {
@@ -660,7 +666,7 @@ fn analyze_star_pattern(
 
         let tuple_info = type_lookup
             .lookup_type(type_id)
-            .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+            .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
         // Add type check if there are multiple tuple types
         let mut requirements = vec![];
@@ -730,13 +736,13 @@ fn find_types_with_fields_and_name(
         if let Type::Tuple(type_id) = typ {
             let tuple_info = type_lookup
                 .lookup_type(type_id)
-                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
             // Check if tuple name matches (if specified)
-            if let Some(expected_name) = tuple_name {
-                if tuple_info.0.as_ref() != Some(expected_name) {
-                    continue; // Skip this type if name doesn't match
-                }
+            if let Some(expected_name) = tuple_name
+                && tuple_info.0.as_ref() != Some(expected_name)
+            {
+                continue; // Skip this type if name doesn't match
             }
 
             if let Some(indices) = find_field_indices(field_names, &tuple_info.1) {

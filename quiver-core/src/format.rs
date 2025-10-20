@@ -66,7 +66,7 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
 
                 if let Some(type_name) = name {
                     if field_strs.is_empty() {
-                        format!("{}", type_name)
+                        type_name.to_string()
                     } else {
                         format!("{}[{}]", type_name, field_strs.join(", "))
                     }
@@ -163,14 +163,12 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
         Value::Pid(process_id) => format!("@{}", process_id),
         Value::Tuple(type_id, elements) => {
             if let Some((name, fields)) = program.lookup_type(type_id) {
-                if name.as_deref() == Some("Str") {
-                    if let [Value::Binary(binary)] = elements.as_slice() {
-                        if let Ok(bytes) = get_binary_bytes(binary, heap, constants) {
-                            if let Some(formatted) = try_format_as_string(&bytes) {
-                                return formatted;
-                            }
-                        }
-                    }
+                if name.as_deref() == Some("Str")
+                    && let [Value::Binary(binary)] = elements.as_slice()
+                    && let Ok(bytes) = get_binary_bytes(binary, heap, constants)
+                    && let Some(formatted) = try_format_as_string(&bytes)
+                {
+                    return formatted;
                 }
 
                 if elements.is_empty() {

@@ -1,3 +1,4 @@
+use crate::environment::{LocalsResult, RuntimeResult, ValueWithHeap};
 use quiver_core::bytecode::{Constant, Function};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::types::TupleTypeInfo;
@@ -40,7 +41,7 @@ pub enum Command {
     /// Notify a process with a result it was awaiting
     NotifyResult {
         process_id: ProcessId,
-        result: Result<Value, quiver_core::error::Error>,
+        result: RuntimeResult,
         heap: Vec<Vec<u8>>,
     },
 
@@ -92,7 +93,7 @@ pub enum Event {
     /// Process completed with result
     Completed {
         process_id: ProcessId,
-        result: Result<Value, quiver_core::error::Error>,
+        result: RuntimeResult,
         heap: Vec<Vec<u8>>,
     },
 
@@ -120,7 +121,7 @@ pub enum Event {
     /// Response to GetResult (only sent when process completes)
     ResultResponse {
         request_id: u64,
-        result: Result<(Value, Vec<Vec<u8>>), quiver_core::error::Error>,
+        result: Result<ValueWithHeap, quiver_core::error::Error>,
     },
 
     /// Response to GetStatuses
@@ -138,7 +139,7 @@ pub enum Event {
     /// Response to GetLocals
     LocalsResponse {
         request_id: u64,
-        result: Result<Vec<(Value, Vec<Vec<u8>>)>, crate::environment::EnvironmentError>,
+        result: LocalsResult,
     },
 
     /// Worker encountered an unrecoverable error

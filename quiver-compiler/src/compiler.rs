@@ -134,6 +134,16 @@ pub enum Error {
     },
 }
 
+/// Result of compilation containing all outputs
+pub struct CompilationResult {
+    pub instructions: Vec<Instruction>,
+    pub result_type: Type,
+    pub variables: HashMap<String, (Type, usize)>,
+    pub program: Program,
+    pub type_aliases: HashMap<String, Type>,
+    pub module_cache: ModuleCache,
+}
+
 struct Scope {
     variables: HashMap<String, (Type, usize)>,
     parameter: Option<(Type, usize)>,
@@ -169,6 +179,7 @@ pub struct Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn compile(
         program: ast::Program,
         type_aliases: HashMap<String, Type>,
@@ -178,17 +189,7 @@ impl<'a> Compiler<'a> {
         module_path: Option<PathBuf>,
         existing_variables: Option<&HashMap<String, (Type, usize)>>,
         parameter_type: Type,
-    ) -> Result<
-        (
-            Vec<Instruction>,
-            Type,
-            HashMap<String, (Type, usize)>,
-            Program,
-            HashMap<String, Type>,
-            ModuleCache,
-        ),
-        Error,
-    > {
+    ) -> Result<CompilationResult, Error> {
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
             type_context: TypeContext::new(type_aliases),
@@ -271,14 +272,14 @@ impl<'a> Compiler<'a> {
             .map(|(name, (var_type, index))| (name.clone(), (var_type.clone(), *index)))
             .collect();
 
-        Ok((
-            compiler.codegen.instructions,
+        Ok(CompilationResult {
+            instructions: compiler.codegen.instructions,
             result_type,
             variables,
-            compiler.program,
-            compiler.type_context.into_type_aliases(),
-            compiler.module_cache,
-        ))
+            program: compiler.program,
+            type_aliases: compiler.type_context.into_type_aliases(),
+            module_cache: compiler.module_cache,
+        })
     }
 
     fn compile_statement(&mut self, statement: ast::Statement) -> Result<Type, Error> {
@@ -356,19 +357,24 @@ impl<'a> Compiler<'a> {
 
         // Check if this is a tuple merge (value present, no ripples)
         let contains_ripple = Self::tuple_contains_ripple(&fields);
-        if value_type.is_some() && !contains_ripple {
-            return self.compile_tuple_merge(tuple_name, fields, value_type.unwrap());
+        if let Some(val_type) = value_type.clone()
+            && !contains_ripple
+        {
+            return self.compile_tuple_merge(tuple_name, fields, val_type);
         }
 
         // Allocate ripple variable if this tuple contains ripples and we have a value
-        let ripple_index = if contains_ripple && value_type.is_some() {
-            let val_type = value_type.unwrap();
-            let ripple_var_name = format!("~{}", self.ripple_depth);
-            self.ripple_depth += 1;
-            let index = self.define_variable(&ripple_var_name, &[], val_type);
-            self.codegen.add_instruction(Instruction::Allocate(1));
-            self.codegen.add_instruction(Instruction::Store(index));
-            Some(index)
+        let ripple_index = if contains_ripple {
+            if let Some(val_type) = value_type {
+                let ripple_var_name = format!("~{}", self.ripple_depth);
+                self.ripple_depth += 1;
+                let index = self.define_variable(&ripple_var_name, &[], val_type);
+                self.codegen.add_instruction(Instruction::Allocate(1));
+                self.codegen.add_instruction(Instruction::Store(index));
+                Some(index)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1003,10 +1009,10 @@ impl<'a> Compiler<'a> {
             });
 
             // If last_type is NIL, subsequent chains are unreachable - break early
-            if let Some(ref last_type) = last_type {
-                if last_type.as_concrete() == Some(&Type::nil()) {
-                    break;
-                }
+            if let Some(ref last_type) = last_type
+                && last_type.as_concrete() == Some(&Type::nil())
+            {
+                break;
             }
 
             if i < expression.chains.len() - 1 {
@@ -1313,9 +1319,9 @@ impl<'a> Compiler<'a> {
                                 Ok(accessed_type)
                             }
                         } else {
-                            return Err(Error::FeatureUnsupported(
+                            Err(Error::FeatureUnsupported(
                                 "Field/positional access requires a value".to_string(),
-                            ));
+                            ))
                         }
                     }
                     Some(name) => {
@@ -1368,12 +1374,8 @@ impl<'a> Compiler<'a> {
                 // If there's an argument, compile it first (may contain ripples using value_type)
                 let arg_type = if let Some(args) = &tail_call.argument {
                     Some(self.compile_tuple(args.name.clone(), args.fields.clone(), value_type)?)
-                } else if let Some(val_type) = value_type {
-                    // No argument but have piped value - use it as the argument
-                    Some(val_type)
                 } else {
-                    // No argument and no piped value
-                    None
+                    value_type
                 };
 
                 self.compile_tail_call(
@@ -1538,20 +1540,20 @@ impl<'a> Compiler<'a> {
                 if !matches!(called_receive_type, Type::Union(v) if v.is_empty()) {
                     // Called function has receives - verify current context matches
                     // Check if current context is never (empty union = can't receive)
-                    if let Type::Union(variants) = &self.current_receive_type {
-                        if variants.is_empty() {
-                            // Current context can't receive - can't call a receiving function
-                            return Err(Error::TypeMismatch {
-                                expected: "function without receive type".to_string(),
-                                found: format!(
-                                    "function with receive type {}",
-                                    quiver_core::format::format_type(
-                                        &self.program,
-                                        called_receive_type
-                                    )
-                                ),
-                            });
-                        }
+                    if let Type::Union(variants) = &self.current_receive_type
+                        && variants.is_empty()
+                    {
+                        // Current context can't receive - can't call a receiving function
+                        return Err(Error::TypeMismatch {
+                            expected: "function without receive type".to_string(),
+                            found: format!(
+                                "function with receive type {}",
+                                quiver_core::format::format_type(
+                                    &self.program,
+                                    called_receive_type
+                                )
+                            ),
+                        });
                     }
 
                     // Check compatibility
@@ -1717,8 +1719,8 @@ impl<'a> Compiler<'a> {
         for type_id in &tuple_types {
             let (_, fields) = self
                 .program
-                .lookup_type(&type_id)
-                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+                .lookup_type(type_id)
+                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
             let field_count = fields.len();
 
@@ -1739,7 +1741,7 @@ impl<'a> Compiler<'a> {
             } else {
                 common_field_count = Some(field_count);
                 // Collect first field types for return type
-                if let Some((_, first_field_type)) = fields.get(0) {
+                if let Some((_, first_field_type)) = fields.first() {
                     first_field_types.push(first_field_type.clone());
                 }
             }
@@ -1841,15 +1843,14 @@ impl<'a> Compiler<'a> {
         accessors: Vec<ast::AccessPath>,
     ) -> Result<Type, Error> {
         // Check if we have a capture for the full path (base + accessors)
-        if !accessors.is_empty() {
-            if let Some((capture_type, capture_index)) =
+        if !accessors.is_empty()
+            && let Some((capture_type, capture_index)) =
                 self.lookup_variable(&self.scopes, target, &accessors)
-            {
-                // We have a pre-evaluated capture for this exact path
-                self.codegen
-                    .add_instruction(Instruction::Load(capture_index));
-                return Ok(capture_type);
-            }
+        {
+            // We have a pre-evaluated capture for this exact path
+            self.codegen
+                .add_instruction(Instruction::Load(capture_index));
+            return Ok(capture_type);
         }
 
         // No pre-evaluated capture, use standard member access
@@ -1922,10 +1923,10 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), Error> {
         let mut seen_names = HashSet::new();
         for field in fields {
-            if let Some(field_name) = get_name(field) {
-                if !seen_names.insert(field_name.clone()) {
-                    return Err(Error::FieldDuplicated(field_name.clone()));
-                }
+            if let Some(field_name) = get_name(field)
+                && !seen_names.insert(field_name.clone())
+            {
+                return Err(Error::FieldDuplicated(field_name.clone()));
             }
         }
         Ok(())
@@ -1944,7 +1945,7 @@ impl<'a> Compiler<'a> {
             let (_, fields) = self
                 .program
                 .lookup_type(type_id)
-                .ok_or_else(|| Error::TypeNotInRegistry { type_id: *type_id })?;
+                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
             if let Some((_, field_type)) = fields.get(position) {
                 field_types.push(field_type.clone());

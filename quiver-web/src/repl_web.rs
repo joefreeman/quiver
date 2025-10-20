@@ -129,14 +129,13 @@ impl Repl {
 
                         let mut pending = pending_commands.borrow_mut();
                         while let Some(command) = pending.pop_front() {
-                            if let Ok(json) = serde_json::to_string(&command) {
-                                if let Err(e) = worker_for_ready
+                            if let Ok(json) = serde_json::to_string(&command)
+                                && let Err(e) = worker_for_ready
                                     .post_message(&wasm_bindgen::JsValue::from_str(&json))
-                                {
-                                    web_sys::console::error_1(
-                                        &format!("Failed to flush command: {:?}", e).into(),
-                                    );
-                                }
+                            {
+                                web_sys::console::error_1(
+                                    &format!("Failed to flush command: {:?}", e).into(),
+                                );
                             }
                         }
                         return;

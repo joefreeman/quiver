@@ -69,18 +69,22 @@ impl Repl {
             Some(&self.variable_map)
         };
 
-        let (instructions, result_type, variables, updated_program, _type_aliases, _module_cache) =
-            Compiler::compile(
-                parsed,
-                HashMap::new(), // type_aliases
-                ModuleCache::new(),
-                self.module_loader.as_ref(),
-                &self.program,
-                None, // module_path
-                existing_vars,
-                self.last_result_type.clone(), // parameter_type - use previous result type for continuations
-            )
-            .map_err(|e| ReplError::Compiler(e))?;
+        let result = Compiler::compile(
+            parsed,
+            HashMap::new(), // type_aliases
+            ModuleCache::new(),
+            self.module_loader.as_ref(),
+            &self.program,
+            None, // module_path
+            existing_vars,
+            self.last_result_type.clone(), // parameter_type - use previous result type for continuations
+        )
+        .map_err(ReplError::Compiler)?;
+
+        let instructions = result.instructions;
+        let result_type = result.result_type;
+        let variables = result.variables;
+        let updated_program = result.program;
 
         // Get only the NEW program data (not already sent)
         let old_constants_len = self.program.get_constants().len();
@@ -112,7 +116,7 @@ impl Repl {
         // Send UpdateProgram to all workers (additive - only new items)
         self.environment
             .update_program(new_constants, new_functions, new_types, new_builtins)
-            .map_err(|e| ReplError::Environment(e))?;
+            .map_err(ReplError::Environment)?;
 
         // Create or resume the REPL process
         let repl_process_id = match self.repl_process_id {
@@ -121,7 +125,7 @@ impl Repl {
                 // resume_process will push the previous result from process.result onto the stack
                 self.environment
                     .resume_process(pid, function_index)
-                    .map_err(|e| ReplError::Environment(e))?;
+                    .map_err(ReplError::Environment)?;
                 pid
             }
             None => {
@@ -129,7 +133,7 @@ impl Repl {
                 let pid = self
                     .environment
                     .start_process(function_index, true)
-                    .map_err(|e| ReplError::Environment(e))?;
+                    .map_err(ReplError::Environment)?;
                 self.repl_process_id = Some(pid);
                 pid
             }
@@ -139,7 +143,7 @@ impl Repl {
         let request_id = self
             .environment
             .request_result(repl_process_id)
-            .map_err(|e| ReplError::Environment(e))?;
+            .map_err(ReplError::Environment)?;
 
         Ok(request_id)
     }
@@ -179,7 +183,7 @@ impl Repl {
 
         let repl_process_id = self
             .repl_process_id
-            .ok_or_else(|| EnvironmentError::NoReplProcess)?;
+            .ok_or(EnvironmentError::NoReplProcess)?;
 
         self.environment
             .request_locals(repl_process_id, vec![*local_index])
@@ -197,7 +201,7 @@ impl Repl {
     fn compact(&mut self) -> Result<(), EnvironmentError> {
         let repl_process_id = self
             .repl_process_id
-            .ok_or_else(|| EnvironmentError::NoReplProcess)?;
+            .ok_or(EnvironmentError::NoReplProcess)?;
 
         // Keep all variables currently in the variable map
         // Sort indices to ensure consistent ordering
@@ -215,7 +219,7 @@ impl Repl {
         for (_, idx) in self.variable_map.values_mut() {
             *idx = *index_mapping
                 .get(idx)
-                .ok_or_else(|| EnvironmentError::InvalidVariableIndex(*idx))?;
+                .ok_or(EnvironmentError::InvalidVariableIndex(*idx))?;
         }
 
         // Compact the locals on the worker

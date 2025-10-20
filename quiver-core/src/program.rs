@@ -24,6 +24,12 @@ impl TypeLookup for Program {
     }
 }
 
+impl Default for Program {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Program {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)

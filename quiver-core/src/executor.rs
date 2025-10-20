@@ -26,6 +26,12 @@ impl TypeLookup for Executor {
     }
 }
 
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Executor {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
@@ -110,37 +116,37 @@ impl Executor {
 
     /// Notify a process that spawned a new process with the new PID
     pub fn notify_spawn(&mut self, id: ProcessId, pid: Value) {
-        if self.awaiting.remove(&id) {
-            if let Some(process) = self.processes.get_mut(&id) {
-                // For spawn notifications, just push the PID onto the stack and increment counter
-                process.stack.push(pid);
+        if self.awaiting.remove(&id)
+            && let Some(process) = self.processes.get_mut(&id)
+        {
+            // For spawn notifications, just push the PID onto the stack and increment counter
+            process.stack.push(pid);
 
-                if let Some(frame) = process.frames.last_mut() {
-                    frame.counter += 1;
-                }
-
-                self.queue.push_back(id);
+            if let Some(frame) = process.frames.last_mut() {
+                frame.counter += 1;
             }
+
+            self.queue.push_back(id);
         }
     }
 
     /// Notify a process that was awaiting a result with the result value
     pub fn notify_result(&mut self, id: ProcessId, result: Value) {
-        if self.awaiting.remove(&id) {
-            if let Some(process) = self.processes.get_mut(&id) {
-                // When awaiting on a PID, the stack has [parameter, pid]
-                // We need to pop both and push the result, then increment counter
-                process.stack.pop(); // Pop pid
-                process.stack.pop(); // Pop parameter (ignored for await)
-                process.stack.push(result);
+        if self.awaiting.remove(&id)
+            && let Some(process) = self.processes.get_mut(&id)
+        {
+            // When awaiting on a PID, the stack has [parameter, pid]
+            // We need to pop both and push the result, then increment counter
+            process.stack.pop(); // Pop pid
+            process.stack.pop(); // Pop parameter (ignored for await)
+            process.stack.push(result);
 
-                // Increment counter to move past the Call instruction
-                if let Some(frame) = process.frames.last_mut() {
-                    frame.counter += 1;
-                }
-
-                self.queue.push_back(id);
+            // Increment counter to move past the Call instruction
+            if let Some(frame) = process.frames.last_mut() {
+                frame.counter += 1;
             }
+
+            self.queue.push_back(id);
         }
     }
 
@@ -227,10 +233,7 @@ impl Executor {
     /// Returns None to continue, or Some(request) for a routing request that needs to be handled by the scheduler.
     pub fn step(&mut self, max_units: usize) -> Option<Action> {
         // Pop process from queue
-        let current_pid = match self.queue.pop_front() {
-            Some(pid) => pid,
-            None => return None,
-        };
+        let current_pid = self.queue.pop_front()?;
 
         let mut units_executed = 0;
         let mut pending_request = None;
@@ -628,12 +631,12 @@ impl Executor {
     }
 
     fn handle_jump(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action>, Error> {
-        if let Some(process) = self.get_process_mut(pid) {
-            if let Some(frame) = process.frames.last_mut() {
-                // Jump modifies counter directly
-                // Add 1 to offset because in the old code, Jump got the centralized increment
-                frame.counter = frame.counter.wrapping_add_signed(offset + 1);
-            }
+        if let Some(process) = self.get_process_mut(pid)
+            && let Some(frame) = process.frames.last_mut()
+        {
+            // Jump modifies counter directly
+            // Add 1 to offset because in the old code, Jump got the centralized increment
+            frame.counter = frame.counter.wrapping_add_signed(offset + 1);
         }
         Ok(None)
     }
@@ -873,7 +876,7 @@ impl Executor {
 
         process
             .locals
-            .extend(std::iter::repeat(Value::nil()).take(count));
+            .extend(std::iter::repeat_n(Value::nil(), count));
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -1183,14 +1186,10 @@ impl Executor {
         }
 
         // Remap heap indices in the value
-        self.inject_value_recursive(value, &remap)
+        Self::inject_value_recursive(value, &remap)
     }
 
-    fn inject_value_recursive(
-        &self,
-        value: Value,
-        remap: &HashMap<usize, usize>,
-    ) -> Result<Value, Error> {
+    fn inject_value_recursive(value: Value, remap: &HashMap<usize, usize>) -> Result<Value, Error> {
         match value {
             Value::Binary(Binary::Heap(old_index)) => {
                 // Remap to new heap index
@@ -1207,7 +1206,7 @@ impl Executor {
                 // Recursively remap all tuple elements
                 let remapped_elements = elements
                     .into_iter()
-                    .map(|elem| self.inject_value_recursive(elem, remap))
+                    .map(|elem| Self::inject_value_recursive(elem, remap))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::Tuple(type_id, remapped_elements))
             }
@@ -1215,7 +1214,7 @@ impl Executor {
                 // Recursively remap all captures
                 let remapped_captures = captures
                     .into_iter()
-                    .map(|cap| self.inject_value_recursive(cap, remap))
+                    .map(|cap| Self::inject_value_recursive(cap, remap))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::Function(func_index, remapped_captures))
             }

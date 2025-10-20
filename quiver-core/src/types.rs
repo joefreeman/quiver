@@ -113,9 +113,7 @@ impl Type {
     pub fn is_compatible<T: TypeLookup>(&self, pattern: &Type, type_lookup: &T) -> bool {
         let mut assumptions = HashSet::new();
         let mut type_stack = Vec::new();
-        let result =
-            self.is_compatible_with_impl(pattern, type_lookup, &mut assumptions, &mut type_stack);
-        result
+        self.is_compatible_with_impl(pattern, type_lookup, &mut assumptions, &mut type_stack)
     }
 
     /// Internal implementation of type compatibility checking.
