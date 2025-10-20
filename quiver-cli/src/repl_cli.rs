@@ -3,7 +3,7 @@ use quiver_cli::spawn_worker;
 use quiver_compiler::FileSystemModuleLoader;
 use quiver_core::bytecode::TypeId;
 use quiver_core::program::Program;
-use quiver_environment::{Repl, ReplError, WorkerHandle};
+use quiver_environment::{Repl, ReplError, RequestResult, WorkerHandle};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::io::IsTerminal;
@@ -152,6 +152,20 @@ impl ReplCli {
         true
     }
 
+    fn wait_for_result(
+        &mut self,
+        request_id: u64,
+    ) -> Result<RequestResult, quiver_environment::EnvironmentError> {
+        loop {
+            self.repl.step()?;
+
+            match self.repl.poll_request(request_id)? {
+                Some(result) => return Ok(result),
+                None => std::thread::sleep(std::time::Duration::from_micros(10)),
+            }
+        }
+    }
+
     fn list_variables(&self) {
         let vars = self.repl.get_variables();
         if vars.is_empty() {
@@ -169,8 +183,19 @@ impl ReplCli {
     }
 
     fn list_processes(&mut self) {
-        match self.repl.get_process_statuses() {
-            Ok(statuses) => {
+        let request_id = match self.repl.request_process_statuses() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    format!("Error requesting process statuses: {}", e).red()
+                );
+                return;
+            }
+        };
+
+        match self.wait_for_result(request_id) {
+            Ok(RequestResult::Statuses(statuses)) => {
                 if statuses.is_empty() {
                     println!("{}", "No processes".bright_black());
                 } else {
@@ -182,15 +207,22 @@ impl ReplCli {
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("{}", format!("Error listing processes: {}", e).red());
-            }
+            Ok(_) => eprintln!("{}", "Unexpected result type".red()),
+            Err(e) => eprintln!("{}", format!("Error getting statuses: {}", e).red()),
         }
     }
 
     fn inspect_process(&mut self, id: usize) {
-        match self.repl.get_process_info(id) {
-            Ok(Some(info)) => {
+        let request_id = match self.repl.request_process_info(id) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("{}", format!("Error requesting process info: {}", e).red());
+                return;
+            }
+        };
+
+        match self.wait_for_result(request_id) {
+            Ok(RequestResult::ProcessInfo(Some(info))) => {
                 println!("{}", format!("Process {}:", id).bright_black());
                 println!("{}", format!("  Status: {:?}", info.status).bright_black());
                 println!(
@@ -221,18 +253,17 @@ impl ReplCli {
                     println!("{}", "  Result: ―".bright_black());
                 }
             }
-            Ok(None) => {
+            Ok(RequestResult::ProcessInfo(None)) => {
                 eprintln!("{}", format!("Process {} not found", id).red());
             }
-            Err(e) => {
-                eprintln!("{}", format!("Error inspecting process: {}", e).red());
-            }
+            Ok(_) => eprintln!("{}", "Unexpected result type".red()),
+            Err(e) => eprintln!("{}", format!("Error inspecting process: {}", e).red()),
         }
     }
 
     fn evaluate(&mut self, line: &str) {
-        let request = match self.repl.evaluate(line) {
-            Ok(req) => req,
+        let request_id = match self.repl.evaluate(line) {
+            Ok(id) => id,
             Err(e) => {
                 self.last_was_nil = false;
                 eprintln!("{}", self.format_error(e).red());
@@ -240,8 +271,8 @@ impl ReplCli {
             }
         };
 
-        match self.repl.wait_evaluate(request) {
-            Ok((value, heap)) => {
+        match self.wait_for_result(request_id) {
+            Ok(RequestResult::Result(Ok((value, heap)))) => {
                 // Track if result was nil for colored prompt
                 self.last_was_nil = matches!(
                     &value,
@@ -254,9 +285,17 @@ impl ReplCli {
                     println!("{}", self.repl.format_value(&value, &heap));
                 }
             }
+            Ok(RequestResult::Result(Err(e))) => {
+                self.last_was_nil = false;
+                eprintln!("{}", self.format_error(ReplError::Runtime(e)).red());
+            }
+            Ok(_) => {
+                self.last_was_nil = false;
+                eprintln!("{}", "Unexpected result type".red());
+            }
             Err(e) => {
                 self.last_was_nil = false;
-                eprintln!("{}", self.format_error(e).red());
+                eprintln!("{}", self.format_error(ReplError::Environment(e)).red());
             }
         }
     }

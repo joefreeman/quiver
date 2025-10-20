@@ -6,7 +6,7 @@ mod worker;
 
 pub use environment::{Environment, EnvironmentError, RequestResult};
 pub use messages::{Command, Event};
-pub use repl::{EvaluateRequest, Repl, ReplError};
+pub use repl::{Repl, ReplError};
 pub use transport::{CommandReceiver, EventSender, WorkerHandle};
 pub use worker::Worker;
 

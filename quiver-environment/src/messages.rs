@@ -117,10 +117,10 @@ pub enum Event {
         target: ProcessId,
     },
 
-    /// Response to GetResult
+    /// Response to GetResult (only sent when process completes)
     ResultResponse {
         request_id: u64,
-        result: Result<Option<(Value, Vec<Vec<u8>>)>, quiver_core::error::Error>,
+        result: Result<(Value, Vec<Vec<u8>>), quiver_core::error::Error>,
     },
 
     /// Response to GetStatuses

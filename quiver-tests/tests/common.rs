@@ -57,10 +57,36 @@ impl TestBuilder {
 
         // Evaluate source
         let result = match repl.evaluate(source) {
-            Ok(request) => match repl.wait_evaluate(request) {
-                Ok((value, heap)) => Ok(Some((value, heap))),
-                Err(e) => Err(e),
-            },
+            Ok(request_id) => {
+                // Poll for result with timeout
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(5);
+
+                loop {
+                    repl.step().ok();
+
+                    match repl.poll_request(request_id) {
+                        Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap))))) => {
+                            break Ok(Some((value, heap)));
+                        }
+                        Ok(Some(quiver_environment::RequestResult::Result(Err(e)))) => {
+                            break Err(ReplError::Runtime(e));
+                        }
+                        Ok(Some(_)) => {
+                            panic!("Unexpected result type for evaluation request");
+                        }
+                        Ok(None) => {
+                            if start.elapsed() > timeout {
+                                break Err(ReplError::Environment(
+                                    quiver_environment::EnvironmentError::Timeout(timeout),
+                                ));
+                            }
+                            std::thread::sleep(std::time::Duration::from_micros(10));
+                        }
+                        Err(e) => break Err(ReplError::Environment(e)),
+                    }
+                }
+            }
             Err(e) => Err(e),
         };
 

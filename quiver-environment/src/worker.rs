@@ -6,13 +6,14 @@ use quiver_core::executor::Executor;
 use quiver_core::process::{Action, Frame, ProcessId, ProcessStatus};
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const MAX_STEP_UNITS: usize = 1000;
 
 pub struct Worker<R: CommandReceiver, S: EventSender> {
     executor: Executor,
     awaited: HashSet<ProcessId>,
+    pending_result_requests: HashMap<ProcessId, Vec<u64>>, // process_id -> list of request_ids
     receiver: R,
     sender: S,
 }
@@ -22,6 +23,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Self {
             executor: Executor::new(),
             awaited: HashSet::new(),
+            pending_result_requests: HashMap::new(),
             receiver,
             sender,
         }
@@ -363,26 +365,42 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         request_id: u64,
         process_id: ProcessId,
     ) -> Result<(), EnvironmentError> {
-        let result = match self.executor.get_process(process_id) {
-            Some(process) => match &process.result {
-                Some(Ok(value)) => {
-                    let (extracted_value, heap) = self
-                        .executor
-                        .extract_heap_data(value)
-                        .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                    Ok(Some((extracted_value, heap)))
-                }
-                Some(Err(error)) => Err(error.clone()),
-                None => Ok(None),
-            },
-            None => {
-                // Process not found - this shouldn't happen in normal operation
-                return Err(EnvironmentError::ProcessNotFound(process_id));
-            }
-        };
+        // Check if process exists
+        let process = self
+            .executor
+            .get_process(process_id)
+            .ok_or_else(|| EnvironmentError::ProcessNotFound(process_id))?;
 
-        self.sender
-            .send(Event::ResultResponse { request_id, result })?;
+        // Check if process has a result
+        match &process.result {
+            Some(Ok(value)) => {
+                // Process completed successfully - send response immediately
+                let (extracted_value, heap) = self
+                    .executor
+                    .extract_heap_data(value)
+                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
+
+                self.sender.send(Event::ResultResponse {
+                    request_id,
+                    result: Ok((extracted_value, heap)),
+                })?;
+            }
+            Some(Err(error)) => {
+                // Process failed - send error response immediately
+                self.sender.send(Event::ResultResponse {
+                    request_id,
+                    result: Err(error.clone()),
+                })?;
+            }
+            None => {
+                // Process not done yet - register the request
+                self.pending_result_requests
+                    .entry(process_id)
+                    .or_insert_with(Vec::new)
+                    .push(request_id);
+            }
+        }
+
         Ok(())
     }
 
@@ -473,14 +491,17 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         // Get all process statuses
         let statuses = self.executor.get_process_statuses();
 
-        // Find newly completed processes that are being awaited
+        // Find newly completed processes
         let mut completed = Vec::new();
-        for (&process_id, status) in &statuses {
-            // If terminated (non-persistent) or sleeping (persistent), it's completed
-            let is_completed = matches!(status, ProcessStatus::Completed | ProcessStatus::Sleeping);
+        let mut result_responses = Vec::new();
 
-            // Only process if completed and being awaited
-            if is_completed && self.awaited.contains(&process_id) {
+        for (&process_id, status) in &statuses {
+            let is_completed = matches!(
+                status,
+                ProcessStatus::Completed | ProcessStatus::Failed | ProcessStatus::Sleeping
+            );
+
+            if is_completed {
                 if let Some(process) = self.executor.get_process(process_id) {
                     if let Some(result) = &process.result {
                         let (extracted_result, heap) = match result {
@@ -494,7 +515,22 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                             Err(error) => (Err(error.clone()), vec![]),
                         };
 
-                        completed.push((process_id, extracted_result, heap));
+                        // Send Completed event if being awaited
+                        if self.awaited.contains(&process_id) {
+                            completed.push((process_id, extracted_result.clone(), heap.clone()));
+                        }
+
+                        // Send ResultResponse events for any pending result requests
+                        if let Some(request_ids) = self.pending_result_requests.remove(&process_id)
+                        {
+                            for request_id in request_ids {
+                                result_responses.push((
+                                    request_id,
+                                    extracted_result.clone(),
+                                    heap.clone(),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -508,6 +544,17 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                 heap,
             })?;
             self.awaited.remove(&process_id);
+        }
+
+        // Send result response events
+        for (request_id, result, heap) in result_responses {
+            self.sender.send(Event::ResultResponse {
+                request_id,
+                result: match result {
+                    Ok(value) => Ok((value, heap)),
+                    Err(error) => Err(error),
+                },
+            })?;
         }
 
         Ok(())

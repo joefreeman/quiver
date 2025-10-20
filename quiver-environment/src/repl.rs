@@ -1,8 +1,10 @@
 use crate::WorkerHandle;
 use crate::environment::{Environment, EnvironmentError, RequestResult};
+use quiver_compiler::Compiler;
+use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
-use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
+use quiver_core::process::ProcessId;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
 use quiver_core::value::Value;
@@ -36,12 +38,6 @@ pub struct Repl {
     module_loader: Box<dyn ModuleLoader>,
 }
 
-#[derive(Clone, Copy)]
-pub struct EvaluateRequest {
-    process_id: ProcessId,
-    result_request_id: Option<u64>, // Track the request ID for getting the result
-}
-
 impl Repl {
     pub fn new(
         workers: Vec<Box<dyn WorkerHandle>>,
@@ -61,11 +57,8 @@ impl Repl {
     }
 
     /// Compile and evaluate an expression
-    /// Returns a request that can be polled for the result
-    pub fn evaluate(&mut self, source: &str) -> Result<EvaluateRequest, ReplError> {
-        use quiver_compiler::Compiler;
-        use quiver_compiler::compiler::ModuleCache;
-
+    /// Returns a request ID that can be polled for the result
+    pub fn evaluate(&mut self, source: &str) -> Result<u64, ReplError> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
@@ -142,103 +135,43 @@ impl Repl {
             }
         };
 
-        // Return immediately - poll_evaluate() will handle waiting for completion
-        Ok(EvaluateRequest {
-            process_id: repl_process_id,
-            result_request_id: None, // Will be set on first poll
-        })
+        // Request the result
+        let request_id = self
+            .environment
+            .request_result(repl_process_id)
+            .map_err(|e| ReplError::Environment(e))?;
+
+        Ok(request_id)
     }
 
-    /// Poll for evaluation result (non-blocking)
-    pub fn poll_evaluate(
+    /// Poll for a request result (non-blocking)
+    /// Returns None if not ready, Some(Ok(...)) on success, Some(Err(...)) on error
+    /// Handles all request types (evaluation results, statuses, info, locals, etc.)
+    pub fn poll_request(
         &mut self,
-        request: &mut EvaluateRequest,
-    ) -> Option<Result<(Value, Vec<Vec<u8>>), ReplError>> {
-        // Step the environment to process events from workers
-        let _ = self.environment.step();
-
-        // Make request only on first poll, reuse thereafter
-        let req_id = match request.result_request_id {
-            Some(id) => id,
-            None => {
-                // First poll - make the request
-                let id = match self.environment.request_result(request.process_id) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        return Some(Err(ReplError::Environment(e)));
-                    }
-                };
-                request.result_request_id = Some(id);
-                id
+        request_id: u64,
+    ) -> Result<Option<RequestResult>, EnvironmentError> {
+        match self.environment.poll_request(request_id)? {
+            None => Ok(None),
+            Some(RequestResult::Result(Ok((value, heap)))) => {
+                self.compact()?;
+                Ok(Some(RequestResult::Result(Ok((value, heap)))))
             }
-        };
-
-        // Step again to process the result request/response
-        let _ = self.environment.step();
-
-        // Poll for the result
-        match self.environment.poll_request(req_id) {
-            Some(RequestResult::Result(Some((value, heap)))) => {
-                // Got a result! Clear the request ID for next evaluation
-                request.result_request_id = None;
-
-                // Compact locals to remove unused variables
-                if let Err(e) = self.compact() {
-                    return Some(Err(ReplError::Environment(e)));
-                }
-
-                Some(Ok((value, heap)))
-            }
-            Some(RequestResult::Result(None)) => {
-                // Process not done yet, make a new request on next poll
-                request.result_request_id = None;
-                None
-            }
-            Some(RequestResult::RuntimeError(error)) => {
-                // Got a runtime error - reset REPL state immediately
-                request.result_request_id = None;
+            Some(RequestResult::Result(Err(error))) => {
+                // Got a runtime error - reset REPL state
                 self.repl_process_id = None; // Next eval will create new process
                 self.variable_map.clear();
                 self.last_result_type = Type::nil();
-                Some(Err(ReplError::Runtime(error)))
+                Ok(Some(RequestResult::Result(Err(error))))
             }
-            Some(_) => {
-                request.result_request_id = None;
-                Some(Err(ReplError::Environment(
-                    EnvironmentError::UnexpectedResultType,
-                )))
-            }
-            None => {
-                // Request not ready yet - keep polling with same request ID
-                None
-            }
+            result => Ok(result),
         }
     }
 
-    /// Wait for evaluation result (blocking)
-    pub fn wait_evaluate(
-        &mut self,
-        mut request: EvaluateRequest,
-    ) -> Result<(Value, Vec<Vec<u8>>), ReplError> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(5);
-
-        loop {
-            if let Some(result) = self.poll_evaluate(&mut request) {
-                return result;
-            }
-
-            if start.elapsed() > timeout {
-                return Err(ReplError::Environment(EnvironmentError::Timeout(timeout)));
-            }
-
-            // Brief sleep to avoid spinning
-            std::thread::sleep(std::time::Duration::from_micros(10));
-        }
-    }
-
-    /// Get variable value by name
-    pub fn get_variable(&mut self, name: &str) -> Result<Value, EnvironmentError> {
+    /// Request a variable value by name
+    /// Returns a request ID that can be polled with poll_request()
+    /// The result will be RequestResult::Locals containing the variable value
+    pub fn request_variable(&mut self, name: &str) -> Result<u64, EnvironmentError> {
         let (_, local_index) = self
             .variable_map
             .get(name)
@@ -248,24 +181,8 @@ impl Repl {
             .repl_process_id
             .ok_or_else(|| EnvironmentError::NoReplProcess)?;
 
-        let request_id = self
-            .environment
-            .request_locals(repl_process_id, vec![*local_index])?;
-
-        let result = self.environment.wait_for_request(request_id)?;
-        match result {
-            RequestResult::Locals(mut locals) => {
-                let (value, _heap) =
-                    locals
-                        .pop()
-                        .ok_or_else(|| EnvironmentError::LocalNotFound {
-                            process_id: repl_process_id,
-                            index: *local_index,
-                        })?;
-                Ok(value)
-            }
-            _ => Err(EnvironmentError::UnexpectedResultType),
-        }
+        self.environment
+            .request_locals(repl_process_id, vec![*local_index])
     }
 
     /// Get all variable names and their types
@@ -313,35 +230,18 @@ impl Repl {
         self.environment.step()
     }
 
-    /// Get all process statuses across all workers
-    pub fn get_process_statuses(
-        &mut self,
-    ) -> Result<HashMap<ProcessId, ProcessStatus>, EnvironmentError> {
-        let request_ids = self.environment.request_statuses()?;
-
-        // Collect results from all workers
-        let mut all_statuses = HashMap::new();
-        for request_id in request_ids {
-            let result = self.environment.wait_for_request(request_id)?;
-            if let RequestResult::Statuses(statuses) = result {
-                all_statuses.extend(statuses);
-            }
-        }
-        Ok(all_statuses)
+    /// Request all process statuses across all workers
+    /// Returns a single request ID that will aggregate results from all workers
+    /// The result will be RequestResult::Statuses containing all processes
+    pub fn request_process_statuses(&mut self) -> Result<u64, EnvironmentError> {
+        self.environment.request_statuses()
     }
 
-    /// Get process info for a specific process
-    pub fn get_process_info(
-        &mut self,
-        pid: ProcessId,
-    ) -> Result<Option<ProcessInfo>, EnvironmentError> {
-        let request_id = self.environment.request_process_info(pid)?;
-        let result = self.environment.wait_for_request(request_id)?;
-
-        match result {
-            RequestResult::Info(info) => Ok(info),
-            _ => Err(EnvironmentError::UnexpectedResultType),
-        }
+    /// Request process info for a specific process
+    /// Returns a request ID that can be polled with poll_request()
+    /// The result will be RequestResult::Info
+    pub fn request_process_info(&mut self, pid: ProcessId) -> Result<u64, EnvironmentError> {
+        self.environment.request_process_info(pid)
     }
 
     /// Format a value for display

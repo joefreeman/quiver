@@ -30,6 +30,7 @@ pub enum EnvironmentError {
 
     // Request handling
     UnexpectedResultType,
+    RequestNotFound(u64),
 
     // Timeouts
     Timeout(std::time::Duration),
@@ -65,6 +66,7 @@ impl std::fmt::Display for EnvironmentError {
             }
             EnvironmentError::ChannelDisconnected => write!(f, "channel disconnected"),
             EnvironmentError::UnexpectedResultType => write!(f, "unexpected result type"),
+            EnvironmentError::RequestNotFound(id) => write!(f, "request {} not found", id),
             EnvironmentError::Timeout(duration) => {
                 write!(f, "operation timed out after {:?}", duration)
             }
@@ -81,10 +83,10 @@ impl std::error::Error for EnvironmentError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestResult {
-    Result(Option<(Value, Vec<Vec<u8>>)>),
-    RuntimeError(quiver_core::error::Error),
+    Result(Result<(Value, Vec<Vec<u8>>), quiver_core::error::Error>),
+    // RuntimeError(quiver_core::error::Error),
     Statuses(HashMap<ProcessId, ProcessStatus>),
-    Info(Option<ProcessInfo>),
+    ProcessInfo(Option<ProcessInfo>),
     Locals(Vec<(Value, Vec<Vec<u8>>)>),
 }
 
@@ -93,6 +95,8 @@ pub struct Environment {
     process_router: HashMap<ProcessId, WorkerId>,
     awaiters_for: HashMap<ProcessId, Vec<ProcessId>>,
     pending_requests: HashMap<u64, Option<RequestResult>>,
+    // Maps aggregation_id -> worker_request_id -> Option<statuses>
+    status_aggregations: HashMap<u64, HashMap<u64, Option<HashMap<ProcessId, ProcessStatus>>>>,
     next_request_id: u64,
     next_process_id: ProcessId,
     num_workers: usize,
@@ -110,12 +114,14 @@ impl Environment {
             process_router: HashMap::new(),
             awaiters_for: HashMap::new(),
             pending_requests: HashMap::new(),
+            status_aggregations: HashMap::new(),
             next_request_id: 0,
             next_process_id: 0,
             num_workers,
         };
 
         // Send initial program to all workers
+        // Note: Web Workers use a ready handshake to ensure this message isn't lost
         let update_cmd = Command::UpdateProgram {
             constants: program.get_constants().clone(),
             functions: program.get_functions().clone(),
@@ -245,25 +251,42 @@ impl Environment {
     }
 
     /// Request all process statuses
-    pub fn request_statuses(&mut self) -> Result<Vec<u64>, EnvironmentError> {
-        let mut request_ids = Vec::new();
+    /// Returns a single aggregation ID that will collect results from all workers
+    pub fn request_statuses(&mut self) -> Result<u64, EnvironmentError> {
         let num_workers = self.workers.len();
 
-        // Allocate all request IDs first
+        // Create aggregation ID
+        let aggregation_id = self.allocate_request_id();
+
+        // Allocate all request IDs into a Vec (to preserve ordering)
+        let mut request_ids = Vec::new();
         for _ in 0..num_workers {
             request_ids.push(self.allocate_request_id());
         }
 
-        // Send requests to workers
+        // Create aggregation map with all worker requests marked as pending (None)
+        let mut worker_requests = HashMap::new();
+        for &request_id in &request_ids {
+            worker_requests.insert(request_id, None);
+            self.pending_requests.insert(request_id, None);
+        }
+
+        // Store aggregation state
+        self.status_aggregations
+            .insert(aggregation_id, worker_requests);
+
+        // Mark aggregation as pending
+        self.pending_requests.insert(aggregation_id, None);
+
+        // Send requests to workers (using ordered Vec)
         for (i, worker) in self.workers.iter_mut().enumerate() {
             let request_id = request_ids[i];
             worker
                 .send(Command::GetStatuses { request_id })
                 .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
-            self.pending_requests.insert(request_id, None);
         }
 
-        Ok(request_ids)
+        Ok(aggregation_id)
     }
 
     /// Request process info
@@ -331,27 +354,24 @@ impl Environment {
     }
 
     /// Check if a request has completed (non-blocking)
-    pub fn poll_request(&mut self, request_id: u64) -> Option<RequestResult> {
-        self.pending_requests
-            .get(&request_id)
-            .and_then(|opt| opt.as_ref())
-            .map(|result| match result {
-                RequestResult::Result(r) => RequestResult::Result(r.clone()),
-                RequestResult::RuntimeError(e) => RequestResult::RuntimeError(e.clone()),
-                RequestResult::Statuses(s) => RequestResult::Statuses(s.clone()),
-                RequestResult::Info(i) => RequestResult::Info(i.clone()),
-                RequestResult::Locals(l) => RequestResult::Locals(l.clone()),
-            })
-    }
-
-    /// Blocking wait for request
-    pub fn wait_for_request(&mut self, request_id: u64) -> Result<RequestResult, EnvironmentError> {
-        loop {
-            if let Some(result) = self.poll_request(request_id) {
+    /// Automatically removes the request from pending_requests when returning a final result
+    pub fn poll_request(
+        &mut self,
+        request_id: u64,
+    ) -> Result<Option<RequestResult>, EnvironmentError> {
+        match self.pending_requests.get(&request_id).cloned() {
+            None => {
                 self.pending_requests.remove(&request_id);
-                return Ok(result);
+                Err(EnvironmentError::RequestNotFound(request_id))
             }
-            self.step()?;
+            Some(None) => {
+                // No response from worker yet
+                Ok(None)
+            }
+            Some(Some(result)) => {
+                self.pending_requests.remove(&request_id);
+                Ok(Some(result))
+            }
         }
     }
 
@@ -519,14 +539,10 @@ impl Environment {
     fn handle_result_response(
         &mut self,
         request_id: u64,
-        result: Result<Option<(Value, Vec<Vec<u8>>)>, quiver_core::error::Error>,
+        result: Result<(Value, Vec<Vec<u8>>), quiver_core::error::Error>,
     ) -> Result<(), EnvironmentError> {
-        let request_result = match result {
-            Ok(value) => RequestResult::Result(value),
-            Err(error) => RequestResult::RuntimeError(error),
-        };
         self.pending_requests
-            .insert(request_id, Some(request_result));
+            .insert(request_id, Some(RequestResult::Result(result)));
         Ok(())
     }
 
@@ -536,8 +552,52 @@ impl Environment {
         result: Result<HashMap<ProcessId, ProcessStatus>, EnvironmentError>,
     ) -> Result<(), EnvironmentError> {
         let statuses = result?;
-        self.pending_requests
-            .insert(request_id, Some(RequestResult::Statuses(statuses)));
+
+        // Check if this request is part of an aggregation
+        let mut aggregation_id = None;
+        for (agg_id, worker_requests) in &self.status_aggregations {
+            if worker_requests.contains_key(&request_id) {
+                aggregation_id = Some(*agg_id);
+                break;
+            }
+        }
+
+        if let Some(agg_id) = aggregation_id {
+            // This is part of an aggregation - store the result
+            if let Some(worker_requests) = self.status_aggregations.get_mut(&agg_id) {
+                worker_requests.insert(request_id, Some(statuses));
+
+                // Check if all results are collected
+                if worker_requests.values().all(|v| v.is_some()) {
+                    // Merge all results into a single HashMap
+                    let mut merged = HashMap::new();
+                    for worker_statuses in worker_requests.values() {
+                        if let Some(stats) = worker_statuses {
+                            merged.extend(stats.clone());
+                        }
+                    }
+
+                    // Store the aggregated result
+                    self.pending_requests
+                        .insert(agg_id, Some(RequestResult::Statuses(merged)));
+
+                    // Clean up aggregation and individual worker requests
+                    let worker_req_ids: Vec<u64> = worker_requests.keys().copied().collect();
+                    self.status_aggregations.remove(&agg_id);
+                    for worker_req_id in worker_req_ids {
+                        self.pending_requests.remove(&worker_req_id);
+                    }
+                } else {
+                    // Still waiting for more results - mark this individual request as complete
+                    self.pending_requests.remove(&request_id);
+                }
+            }
+        } else {
+            // Not part of an aggregation - store directly
+            self.pending_requests
+                .insert(request_id, Some(RequestResult::Statuses(statuses)));
+        }
+
         Ok(())
     }
 
@@ -548,7 +608,7 @@ impl Environment {
     ) -> Result<(), EnvironmentError> {
         let info = result?;
         self.pending_requests
-            .insert(request_id, Some(RequestResult::Info(info)));
+            .insert(request_id, Some(RequestResult::ProcessInfo(info)));
         Ok(())
     }
 

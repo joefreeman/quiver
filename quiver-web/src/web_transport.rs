@@ -45,6 +45,8 @@ impl EventSender for WebEventSender {
 pub struct WebWorkerHandle {
     worker: Worker,
     event_queue: Rc<RefCell<VecDeque<Event>>>,
+    ready: Rc<RefCell<bool>>,
+    pending_commands: Rc<RefCell<VecDeque<Command>>>,
 }
 
 impl WebWorkerHandle {
@@ -52,23 +54,42 @@ impl WebWorkerHandle {
         Self {
             worker,
             event_queue,
+            ready: Rc::new(RefCell::new(false)),
+            pending_commands: Rc::new(RefCell::new(VecDeque::new())),
         }
+    }
+
+    /// Get a handle to the ready flag
+    pub fn ready(&self) -> Rc<RefCell<bool>> {
+        self.ready.clone()
+    }
+
+    /// Get a handle to the pending commands queue
+    pub fn pending_commands(&self) -> Rc<RefCell<VecDeque<Command>>> {
+        self.pending_commands.clone()
     }
 }
 
 impl WorkerHandle for WebWorkerHandle {
     fn send(&mut self, command: Command) -> Result<(), EnvironmentError> {
-        // Serialize command to JSON
-        let json = serde_json::to_string(&command).map_err(|e| {
-            EnvironmentError::WorkerCommunication(format!("Failed to serialize command: {}", e))
-        })?;
-
-        // Send via postMessage
-        self.worker
-            .post_message(&JsValue::from_str(&json))
-            .map_err(|e| {
-                EnvironmentError::WorkerCommunication(format!("Failed to post message: {:?}", e))
+        if *self.ready.borrow() {
+            // Worker is ready - send immediately
+            let json = serde_json::to_string(&command).map_err(|e| {
+                EnvironmentError::WorkerCommunication(format!("Failed to serialize command: {}", e))
             })?;
+
+            self.worker
+                .post_message(&JsValue::from_str(&json))
+                .map_err(|e| {
+                    EnvironmentError::WorkerCommunication(format!(
+                        "Failed to post message: {:?}",
+                        e
+                    ))
+                })?;
+        } else {
+            // Worker not ready yet - queue the command
+            self.pending_commands.borrow_mut().push_back(command);
+        }
 
         Ok(())
     }

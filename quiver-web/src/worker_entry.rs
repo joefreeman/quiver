@@ -35,7 +35,12 @@ pub fn worker_main() {
         Ok(())
     });
 
-    let evt_sender = WebEventSender::new(post_message_fn);
+    let evt_sender = WebEventSender::new(post_message_fn.clone());
+
+    // Signal that worker is ready to receive commands
+    global
+        .post_message(&JsValue::from_str("ready"))
+        .expect("Failed to send ready signal");
 
     // Set up message handler for commands
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
