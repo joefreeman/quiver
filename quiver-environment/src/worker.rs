@@ -487,74 +487,59 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         Ok(())
     }
 
-    fn check_completed_processes(&mut self) -> Result<(), EnvironmentError> {
-        // Get all process statuses
-        let statuses = self.executor.get_process_statuses();
-
-        // Find newly completed processes
-        let mut completed = Vec::new();
-        let mut result_responses = Vec::new();
-
-        for (&process_id, status) in &statuses {
-            let is_completed = matches!(
-                status,
-                ProcessStatus::Completed | ProcessStatus::Failed | ProcessStatus::Sleeping
-            );
-
-            if is_completed {
-                if let Some(process) = self.executor.get_process(process_id) {
-                    if let Some(result) = &process.result {
-                        let (extracted_result, heap) = match result {
-                            Ok(value) => {
-                                let (extracted, heap) = self
-                                    .executor
-                                    .extract_heap_data(value)
-                                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                                (Ok(extracted), heap)
-                            }
-                            Err(error) => (Err(error.clone()), vec![]),
-                        };
-
-                        // Send Completed event if being awaited
-                        if self.awaited.contains(&process_id) {
-                            completed.push((process_id, extracted_result.clone(), heap.clone()));
-                        }
-
-                        // Send ResultResponse events for any pending result requests
-                        if let Some(request_ids) = self.pending_result_requests.remove(&process_id)
-                        {
-                            for request_id in request_ids {
-                                result_responses.push((
-                                    request_id,
-                                    extracted_result.clone(),
-                                    heap.clone(),
-                                ));
-                            }
-                        }
+    fn extract_completed_result(
+        &mut self,
+        process_id: ProcessId,
+    ) -> Result<Option<(Result<Value, quiver_core::error::Error>, Vec<Vec<u8>>)>, EnvironmentError>
+    {
+        if let Some(process) = self.executor.get_process(process_id) {
+            if let Some(result) = &process.result {
+                let (extracted_result, heap) = match result {
+                    Ok(value) => {
+                        let (extracted, heap) = self
+                            .executor
+                            .extract_heap_data(value)
+                            .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
+                        (Ok(extracted), heap)
                     }
-                }
+                    Err(error) => (Err(error.clone()), vec![]),
+                };
+                return Ok(Some((extracted_result, heap)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn check_completed_processes(&mut self) -> Result<(), EnvironmentError> {
+        // Check awaited processes for completion
+        let awaited_pids: Vec<ProcessId> = self.awaited.iter().copied().collect();
+        for process_id in awaited_pids {
+            if let Some((result, heap)) = self.extract_completed_result(process_id)? {
+                self.sender.send(Event::Completed {
+                    process_id,
+                    result,
+                    heap,
+                })?;
+                self.awaited.remove(&process_id);
             }
         }
 
-        // Send completion events and remove from awaited set
-        for (process_id, result, heap) in completed {
-            self.sender.send(Event::Completed {
-                process_id,
-                result,
-                heap,
-            })?;
-            self.awaited.remove(&process_id);
-        }
-
-        // Send result response events
-        for (request_id, result, heap) in result_responses {
-            self.sender.send(Event::ResultResponse {
-                request_id,
-                result: match result {
-                    Ok(value) => Ok((value, heap)),
-                    Err(error) => Err(error),
-                },
-            })?;
+        // Check processes with pending result requests
+        let pending_pids: Vec<ProcessId> = self.pending_result_requests.keys().copied().collect();
+        for process_id in pending_pids {
+            if let Some((result, heap)) = self.extract_completed_result(process_id)? {
+                if let Some(request_ids) = self.pending_result_requests.remove(&process_id) {
+                    for request_id in request_ids {
+                        self.sender.send(Event::ResultResponse {
+                            request_id,
+                            result: match &result {
+                                Ok(value) => Ok((value.clone(), heap.clone())),
+                                Err(error) => Err(error.clone()),
+                            },
+                        })?;
+                    }
+                }
+            }
         }
 
         Ok(())
