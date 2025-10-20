@@ -1,6 +1,7 @@
 <div align="center">
     <img src="logo.svg" alt="Quiver" width="300" />
     <p><em>A statically-typed functional programming language with structural typing, pattern matching, lightweight processes, typed message passing, and postfix-based syntax.</em></p>
+    <a href="https://quiver.run">Try Quiver in the online REPL</a>
     <br />
     <br />
     <br />
@@ -29,7 +30,7 @@ xs = Cons[1, Cons[2, Cons[3, Nil]]],
 xs ~> sum  // 6
 ```
 
-> Run the example above in the REPL (`quiv repl`), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
+> Run the example above in the REPL (`quiv repl`, or at [quiver.run](https://quiver.run)), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
 
 <br />
 
