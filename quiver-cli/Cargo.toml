@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "quiver"
+name = "quiv"
 path = "src/main.rs"
 
 [dependencies]

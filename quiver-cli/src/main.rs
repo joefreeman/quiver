@@ -14,7 +14,7 @@ mod repl_cli;
 use repl_cli::ReplCli;
 
 #[derive(Parser)]
-#[command(name = "quiver")]
+#[command(name = "quiv", version, about = "Quiver CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

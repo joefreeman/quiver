@@ -48,7 +48,7 @@ See [docs/spec.md](docs/spec.md) for the complete language specification.
 
 ### Building from source
 
-Quiver requires Rust 2024 edition or later. Clone the repository and build:
+Clone the repository and build:
 
 ```bash
 git clone https://github.com/joefreeman/quiver.git

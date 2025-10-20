@@ -6,9 +6,11 @@ on:
       - "v*"
 
 jobs:
-  verify-and-publish:
-    name: Verify and publish to npm
+  verify-version:
+    name: Verify version matches tag
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.cargo_version.outputs.cargo_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +38,56 @@ jobs:
           fi
           echo "Versions match: ${{ steps.cargo_version.outputs.cargo_version }}"
 
+      - name: Check Unreleased section is empty
+        run: |
+          # Extract content between [Unreleased] and the next version section
+          UNRELEASED=$(awk '/^## \[Unreleased\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md | grep -v '^$' | wc -l)
+
+          if [ "$UNRELEASED" -gt 0 ]; then
+            echo "ERROR: CHANGELOG.md has unreleased changes!"
+            echo "Please move unreleased changes to the [${{ steps.cargo_version.outputs.cargo_version }}] section before releasing."
+            exit 1
+          fi
+
+          echo "Unreleased section is empty ✓"
+
+  build-cli:
+    name: Build CLI binary (Linux)
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI
+        run: cargo build --release --bin quiv
+
+      - name: Create tarball
+        run: |
+          cd target/release
+          tar czf quiv-${{ needs.verify-version.outputs.version }}-linux-x86_64.tar.gz quiv
+          sha256sum quiv-${{ needs.verify-version.outputs.version }}-linux-x86_64.tar.gz > quiv-${{ needs.verify-version.outputs.version }}-linux-x86_64.tar.gz.sha256
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: |
+            target/release/quiv-${{ needs.verify-version.outputs.version }}-linux-x86_64.tar.gz
+            target/release/quiv-${{ needs.verify-version.outputs.version }}-linux-x86_64.tar.gz.sha256
+
+  publish-npm:
+    name: Publish to npm
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,7 +100,7 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build WASM
-        run: cd quiver-web && ./build.sh
+        run: ./quiver-web/build.sh
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -62,3 +114,46 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  create-release:
+    name: Create GitHub release
+    needs: [verify-version, build-cli, publish-npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-binary
+          path: artifacts
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ needs.verify-version.outputs.version }}"
+
+          # Extract the section for this version from CHANGELOG.md
+          awk "/^## \[$VERSION\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md > release_notes.md
+
+          # Append npm package link
+          echo "" >> release_notes.md
+          echo "---" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "**npm package:** https://www.npmjs.com/package/quiver-web/v/$VERSION" >> release_notes.md
+
+          # Output for debugging
+          echo "Release notes:"
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: |
+            artifacts/quiv-${{ needs.verify-version.outputs.version }}-linux-x86_64.tar.gz
+            artifacts/quiv-${{ needs.verify-version.outputs.version }}-linux-x86_64.tar.gz.sha256
+          draft: false
+          prerelease: false
