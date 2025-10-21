@@ -3,15 +3,19 @@ use common::*;
 
 #[test]
 fn test_simple_type_definition() {
-    quiver()
-        .evaluate("type circle = Circle[r: int]")
-        .expect("[]");
+    quiver().evaluate("circle :: Circle[r: int]").expect("[]");
 }
 
 #[test]
 fn test_union_type_definition() {
     quiver()
-        .evaluate("type shape = Circle[r: int] | Rectangle[w: int, h: int]")
+        .evaluate(
+            r#"
+            shape ::
+              | Circle[r: int]
+              | Rectangle[w: int, h: int]
+            "#,
+        )
         .expect("[]");
 }
 
@@ -20,11 +24,15 @@ fn test_function_with_type_pattern() {
     quiver()
         .evaluate(
             r#"
-            type shape = Circle[r: int] | Rectangle[w: int, h: int];
+            shape ::
+              | Circle[r: int]
+              | Rectangle[w: int, h: int];
+
             area = #shape {
               | ~> =Circle[r: r] => [r, r] ~> <multiply>
               | ~> =Rectangle[w: w, h: h] => [w, h] ~> <multiply>
             },
+
             a1 = Circle[r: 5] ~> area,
             a2 = Rectangle[w: 4, h: 3] ~> area,
             [a1, a2] ~> <add>
@@ -38,7 +46,7 @@ fn test_recursive_list_type() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
             xs = Cons[1, Cons[2, Cons[3, Nil]]],
             [xs.1.0, xs.1.1.0] ~> <add>
             "#,
@@ -51,7 +59,7 @@ fn test_cycle_ref_with_pattern_matching() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
             get_head = #list {
               | ~> =Cons[h, _] => h
               | ~> =Nil => 0
@@ -67,7 +75,7 @@ fn test_cycle_ref_nested_depth() {
     quiver()
         .evaluate(
             r#"
-            type json = True | False | Array[(Nil | Cons[&0, &1])];
+            json :: True | False | Array[(Nil | Cons[&0, &1])];
             f = #json { ~> =Array[Cons[a, Cons[b, Nil]]] => [a, b] },
             Array[Cons[False, Cons[True, Nil]]] ~> f
             "#,
@@ -79,9 +87,7 @@ fn test_cycle_ref_nested_depth() {
 fn test_cycle_ref_error_no_union() {
     // Should fail: cycle without enclosing union
     let result = std::panic::catch_unwind(|| {
-        quiver()
-            .evaluate("type bad = Bad[&]")
-            .expect("should error");
+        quiver().evaluate("bad :: Bad[&]").expect("should error");
     });
     assert!(result.is_err(), "Expected error for cycle without union");
 }
@@ -91,7 +97,7 @@ fn test_cycle_ref_error_no_base_case() {
     // Should fail: union without base case
     let result = std::panic::catch_unwind(|| {
         quiver()
-            .evaluate("type bad = A[&] | B[&]")
+            .evaluate("bad :: A[&] | B[&]")
             .expect("should error");
     });
     assert!(
@@ -105,7 +111,7 @@ fn test_cycle_ref_error_no_base_case_nested() {
     // Should fail: cycle nested in tuple field, but no base case in union
     let result = std::panic::catch_unwind(|| {
         quiver()
-            .evaluate("type bad = A[x: int, next: &] | B[y: int, next: &]")
+            .evaluate("bad :: A[x: int, next: &] | B[y: int, next: &]")
             .expect("should error");
     });
     assert!(
@@ -119,7 +125,7 @@ fn test_nested_union_pattern_matching_in_block() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
 
             Cons[10, Cons[20, Cons[30, Nil]]] ~> {
               | ~> =Cons[_, Cons[h, _]] => h
@@ -135,7 +141,7 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
 
             // Test extracting second element with nested pattern
             get_second = #list {
@@ -151,7 +157,7 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
 
             get_first_two = #list {
               | ~> =Cons[first, Cons[second, _]] => [first, second]
@@ -166,7 +172,7 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
 
             get_third = #list {
               | ~> =Cons[_, Cons[_, Cons[h, _]]] => h
@@ -186,7 +192,7 @@ fn test_multiple_runtime_type_checks_with_nested_patterns() {
     quiver()
         .evaluate(
             r#"
-            type tree = Leaf[int] | Node[&, &];
+            tree :: Leaf[int] | Node[&, &];
 
             // Function with multiple nested patterns requiring runtime checks
             extract_left_leaf = #tree {
@@ -214,7 +220,7 @@ fn test_recursive_type_as_function_parameter() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
             get_head = #list {
               | ~> =Cons[h, _] => h
               | ~> =Nil => 0
@@ -230,7 +236,7 @@ fn test_recursive_tree_type() {
     quiver()
         .evaluate(
             r#"
-            type tree = Node[left: &, right: &] | Leaf[int];
+            tree :: Node[left: &, right: &] | Leaf[int];
             t = Node[
               left: Node[
                 left: Leaf[1],
@@ -259,7 +265,7 @@ fn test_recursive_type_with_cycle() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
             prepend = #list { ~> =x => Cons[10, x] },
             Cons[20, Cons[30, Nil]] ~> prepend ~> .0
             "#,
@@ -277,7 +283,7 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            type t = Empty | Full[&];
+            t :: Empty | Full[&];
 
             // This function matches on a tuple where the first element is a recursive type
             // The bug would occur when the pattern compiler tried to access field 0 of Empty
@@ -305,7 +311,7 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            type tree = Leaf[int] | Node[&, &];
+            tree :: Leaf[int] | Node[&, &];
 
             // Function that matches on first element of tuple
             match_first = #[tree, int] {
@@ -325,7 +331,7 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            type list = Nil | Cons[int, &];
+            list :: Nil | Cons[int, &];
 
             // Pattern matching that would trigger the bug
             process_list = #[list, int] {
@@ -349,7 +355,7 @@ fn test_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            type t = Empty | Full[&];
+            t :: Empty | Full[&];
             f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
@@ -362,7 +368,7 @@ fn test_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            type t = Empty | Full[&];
+            t :: Empty | Full[&];
             f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
@@ -378,7 +384,7 @@ fn test_recursive_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            type t = Empty | Full[&];
+            t :: Empty | Full[&];
             f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => &[rest, 0]
@@ -459,7 +465,7 @@ fn test_nested_partial_type() {
     quiver()
         .evaluate(
             r#"
-            type container = (value: (x: int, y: int));
+            container :: (value: (x: int, y: int));
             f = #container { ~> =c => [c.value.x, c.value.y] },
             f[value: [x: 1, y: 2, z: 3], extra: 42]
             "#,
@@ -508,7 +514,7 @@ fn test_union_partial_type() {
 #[test]
 fn test_invalid_partial_type() {
     quiver()
-        .evaluate("type bad = (int, y: int)")
+        .evaluate("bad :: (int, y: int)")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "All fields in a partial type must be named".to_string(),
         ));

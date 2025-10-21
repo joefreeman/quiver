@@ -457,8 +457,17 @@ fn type_definition(input: &str) -> IResult<&str, Type> {
     alt((
         function_type,
         map(
-            separated_list1(tuple((ws1, char('|'), ws1)), base_type),
-            |types| {
+            tuple((
+                // Optional leading | for multi-line union types
+                opt(tuple((wsc, char('|'), wsc))),
+                // First type
+                base_type,
+                // Remaining types separated by |
+                many0(preceded(tuple((wsc, char('|'), wsc)), base_type)),
+            )),
+            |(_, first, rest)| {
+                let mut types = vec![first];
+                types.extend(rest);
                 if types.len() == 1 {
                     types.into_iter().next().unwrap()
                 } else {
@@ -904,8 +913,8 @@ fn expression(input: &str) -> IResult<&str, Expression> {
 fn type_alias(input: &str) -> IResult<&str, Statement> {
     map(
         tuple((
-            preceded(pair(tag("type"), ws1), identifier),
-            preceded(tuple((ws1, char('='), ws1)), type_definition),
+            identifier,
+            preceded(tuple((ws0, tag("::"), ws0)), type_definition),
         )),
         |(name, type_definition)| Statement::TypeAlias {
             name,
@@ -934,8 +943,8 @@ fn type_import_pattern(input: &str) -> IResult<&str, TypeImportPattern> {
 fn type_import(input: &str) -> IResult<&str, Statement> {
     map(
         tuple((
-            preceded(pair(tag("type"), ws1), type_import_pattern),
-            preceded(tuple((ws1, char('='), ws1)), import),
+            type_import_pattern,
+            preceded(tuple((ws0, tag("::"), ws0)), import),
         )),
         |(pattern, module_path)| Statement::TypeImport {
             pattern,

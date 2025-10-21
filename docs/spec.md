@@ -25,7 +25,7 @@ Quiver uses postfix notation where data flows left-to-right through transformati
 Pattern matching allows destructuring values and branching based on their structure. Matches can test literal values, extract components, and control program flow.
 
 ```
-type response = Success[bin] | Error[code: int];
+response :: Success[bin] | Error[code: int];
 
 handle_response = #response {
   | ~> =Success[content] => content
@@ -86,16 +86,18 @@ Point()                  // Empty named partial - matches any tuple named 'Point
 ### Type aliases
 
 ```
-type point = Point[x: int, y: int];
-type adder = #int -> int;
-type writer = (write: (#bin -> Ok));
+point :: Point[x: int, y: int];
+adder :: #int -> int;
+writer :: (write: (#bin -> Ok));
 ```
 
 ### Union types
 
 ```
-type shape = Circle[radius: int] | Rectangle[width: int, height: int];
-type bool = True | False;
+shape ::
+  | Circle[radius: int]
+  | Rectangle[width: int, height: int];
+bool :: True | False;
 ```
 
 ### Recursive types
@@ -103,9 +105,14 @@ type bool = True | False;
 Use `&` to refer back to the root of the types, or `&1`/`&2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
 
 ```
-type list = Nil | Cons[int, &];
-type tree = Leaf[int] | Node[&, &];
-type json = Null | True | False | int | Str[bin] | Array[(Nil | Cons[&, &1])];
+list :: Nil | Cons[int, &];
+tree :: Leaf[int] | Node[&, &];
+json ::
+  | Null
+  | bool
+  | int
+  | Str[bin]
+  | Array[(Nil | Cons[&, &1])];
 ```
 
 ### Strings
@@ -430,8 +437,8 @@ utils = %"./utils.qv"            // Import local file
 Import types from modules using patterns:
 
 ```
-type (circle, rectangle) = %"./shapes.qv";  // Import specific types
-type * = %"./geometry.qv";                  // Import all types
+(circle, rectangle) :: %"./shapes.qv";  // Import specific types
+* :: %"./geometry.qv";                  // Import all types
 ```
 
 ## Standard library
@@ -467,7 +474,7 @@ add[x, y] ~> mul[~, 2] ~> sub[~, 1]
 ### Working with tuples
 
 ```
-type point = Point[x: int, y: int];
+point :: Point[x: int, y: int];
 
 math = %"math",
 
@@ -490,7 +497,7 @@ add_points[p1, p2]   // Point[x: 10, y: 7]
 ### Pattern matching
 
 ```
-type list = Nil | Cons[int, &];
+list :: Nil | Cons[int, &];
 
 // Determine whether a list contains an item
 contains? = #[list, int] {
@@ -523,7 +530,7 @@ clamp = #int {
 
 ```
 // shapes.qv
-type shape = Circle[radius: int] | Rectangle[width: int, height: int];
+shape :: Circle[radius: int] | Rectangle[width: int, height: int];
 
 math = %"math",
 
