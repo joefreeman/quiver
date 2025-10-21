@@ -7,6 +7,10 @@
 - Hexadecimal (`0x...`) and binary (`0b...`) integer literal notation.
 - Support for partial type definitions.
 
+### Changed
+
+- Replaced tuple update syntax with spread operator (`...`) for more flexible/intuitive merging/updating of tuples.
+
 ## [0.1.0] - 2025-10-20
 
 ### Added

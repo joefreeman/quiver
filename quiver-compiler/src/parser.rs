@@ -532,6 +532,19 @@ fn tuple_field(input: &str) -> IResult<&str, TupleField> {
                 value: FieldValue::Chain(chain_value),
             },
         ),
+        // Spread with identifier: ...identifier
+        map(
+            preceded(tag("..."), identifier),
+            |id| TupleField {
+                name: None,
+                value: FieldValue::Spread(Some(id)),
+            },
+        ),
+        // Spread chained value: ...
+        map(tag("..."), |_| TupleField {
+            name: None,
+            value: FieldValue::Spread(None),
+        }),
         // Unnamed ripple: ~
         map(char('~'), |_| TupleField {
             name: None,

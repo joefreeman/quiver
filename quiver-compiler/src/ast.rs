@@ -81,6 +81,7 @@ pub struct Tuple {
 pub enum FieldValue {
     Chain(Chain),
     Ripple,
+    Spread(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

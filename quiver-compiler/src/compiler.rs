@@ -6,6 +6,7 @@ use std::{
 mod codegen;
 mod modules;
 mod pattern;
+mod spread;
 mod typing;
 mod variables;
 
@@ -352,6 +353,14 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
+        // Check if this tuple contains spreads
+        let contains_spread = Self::tuple_contains_spread(&fields);
+
+        if contains_spread {
+            // Use specialized compilation for tuples with spreads
+            return spread::compile_tuple_with_spread(self, tuple_name, fields, value_type);
+        }
+
         let contains_ripple = Self::tuple_contains_ripple(&fields);
 
         // If this tuple has a value piped into it and contains ripples, push the ripple type
@@ -380,6 +389,9 @@ impl<'a> Compiler<'a> {
                         .add_instruction(Instruction::Pick(fields_compiled));
                     ripple_type.clone()
                 }
+                ast::FieldValue::Spread(_) => {
+                    unreachable!("Spread should be handled by compile_tuple_with_spread")
+                }
             };
             field_types.push((field.name.clone(), field_type));
         }
@@ -398,6 +410,13 @@ impl<'a> Compiler<'a> {
         Ok(Type::Tuple(type_id))
     }
 
+    // Helper function to check if tuple fields contain spread operations
+    fn tuple_contains_spread(fields: &[ast::TupleField]) -> bool {
+        fields
+            .iter()
+            .any(|field| matches!(field.value, ast::FieldValue::Spread(_)))
+    }
+
     // Helper function to check if tuple fields contain ripple operations (recursively)
     fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
         fields.iter().any(|field| {
@@ -413,6 +432,7 @@ impl<'a> Compiler<'a> {
                         }
                     })
                 }
+                ast::FieldValue::Spread(_) => false,
             }
         })
     }
@@ -1250,8 +1270,11 @@ impl<'a> Compiler<'a> {
                 self.compile_literal(literal)
             }
             ast::Term::Tuple(tuple) => {
-                // Tuples without ripples when a value is present should use assignment patterns
-                if value_type.is_some() && !Self::tuple_contains_ripple(&tuple.fields) {
+                // Tuples without ripples or spreads when a value is present should use assignment patterns
+                if value_type.is_some()
+                    && !Self::tuple_contains_ripple(&tuple.fields)
+                    && !Self::tuple_contains_spread(&tuple.fields)
+                {
                     return Err(Error::FeatureUnsupported(
                         "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])"
                             .to_string(),

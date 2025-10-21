@@ -54,6 +54,24 @@ Point[x: int, y: int]    // Named tuple
 A[b: B[c: C[bin]]]       // Nested tuples
 ```
 
+#### Spread operator
+
+Tuples can be constructed by spreading existing tuples using the `...` operator. This creates new tuples by merging fields from existing ones:
+
+```
+a = [x: 1, y: 2]
+[...a, y: 3]             // [x: 1, y: 3] - replaces y
+[...a, z: 4]             // [x: 1, y: 2, z: 4] - adds z
+[w: 0, ...a]             // [w: 0, x: 1, y: 2] - prepends w
+
+// Multiple spreads
+b = [z: 5]
+[...a, ...b]             // [x: 1, y: 2, z: 5]
+
+// Spread chained value with ...
+[x: 1, y: 2] ~> [z: 3, ...]   // [z: 3, x: 1, y: 2]
+```
+
 ### Partial types
 
 Partial types define structural constraints on tuples without specifying all fields. They use parentheses instead of brackets and require all fields to be named:
@@ -454,9 +472,9 @@ type point = Point[x: int, y: int];
 math = %"math",
 
 // Define points
-p0 = Point[x: 2, y: 3]
-p1 = p0 ~> [x: 5],
-p2 = p1 ~> [y: 4],
+p0 = Point[x: 2, y: 3],
+p1 = Point[...p0, x: 5],
+p2 = Point[...p1, y: 4],
 
 // Function to add points
 add_points = #[point, point] {
