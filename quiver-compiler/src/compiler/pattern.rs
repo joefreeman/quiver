@@ -459,7 +459,9 @@ fn check_match_tuple_match(
         .lookup_type(&type_id)
         .ok_or(Error::TypeNotInRegistry { type_id })?;
 
-    if tuple.name.as_ref() != tuple_info.name.as_ref() || tuple.fields.len() != tuple_info.fields.len() {
+    if tuple.name.as_ref() != tuple_info.name.as_ref()
+        || tuple.fields.len() != tuple_info.fields.len()
+    {
         return Ok(None);
     }
 

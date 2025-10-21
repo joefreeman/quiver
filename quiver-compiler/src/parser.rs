@@ -301,7 +301,8 @@ fn partial_type(input: &str) -> IResult<&str, Type> {
                 ),
                 |tuple_type: &TupleType| {
                     // Empty partial types are allowed, or at least one field must be named
-                    tuple_type.fields.is_empty() || tuple_type.fields.iter().any(|f| f.name.is_some())
+                    tuple_type.fields.is_empty()
+                        || tuple_type.fields.iter().any(|f| f.name.is_some())
                 },
             ),
         )),
@@ -420,7 +421,7 @@ fn function_type(input: &str) -> IResult<&str, Type> {
 
 fn function_input_type(input: &str) -> IResult<&str, Type> {
     alt((
-        partial_type,  // Must come before grouping parentheses
+        partial_type, // Must come before grouping parentheses
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
@@ -431,7 +432,7 @@ fn function_input_type(input: &str) -> IResult<&str, Type> {
 
 fn function_output_type(input: &str) -> IResult<&str, Type> {
     alt((
-        partial_type,  // Must come before grouping parentheses
+        partial_type, // Must come before grouping parentheses
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
@@ -443,7 +444,7 @@ fn function_output_type(input: &str) -> IResult<&str, Type> {
 fn base_type(input: &str) -> IResult<&str, Type> {
     alt((
         tuple_type,
-        partial_type,  // Must come before grouping parentheses to have priority
+        partial_type, // Must come before grouping parentheses to have priority
         primitive_type,
         type_cycle,
         process_type,
@@ -533,13 +534,10 @@ fn tuple_field(input: &str) -> IResult<&str, TupleField> {
             },
         ),
         // Spread with identifier: ...identifier
-        map(
-            preceded(tag("..."), identifier),
-            |id| TupleField {
-                name: None,
-                value: FieldValue::Spread(Some(id)),
-            },
-        ),
+        map(preceded(tag("..."), identifier), |id| TupleField {
+            name: None,
+            value: FieldValue::Spread(Some(id)),
+        }),
         // Spread chained value: ...
         map(tag("..."), |_| TupleField {
             name: None,

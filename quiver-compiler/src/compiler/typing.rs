@@ -105,7 +105,8 @@ impl TypeContext {
                 }
 
                 // Register the tuple type with the is_partial flag
-                let type_id = program.register_type_with_partial(tuple.name, fields, tuple.is_partial);
+                let type_id =
+                    program.register_type_with_partial(tuple.name, fields, tuple.is_partial);
 
                 // Return Type::Partial for partial types, Type::Tuple for concrete types
                 if tuple.is_partial {

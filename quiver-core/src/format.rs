@@ -54,7 +54,8 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
         Type::Tuple(type_id) | Type::Partial(type_id) => {
             let is_partial = matches!(type_def, Type::Partial(_));
             if let Some(type_info) = program.lookup_type(type_id) {
-                let field_strs: Vec<String> = type_info.fields
+                let field_strs: Vec<String> = type_info
+                    .fields
                     .iter()
                     .map(|(field_name, field_type)| {
                         if let Some(field_name) = field_name {
@@ -71,7 +72,13 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
                     if field_strs.is_empty() {
                         type_name.to_string()
                     } else {
-                        format!("{}{}{}{}", type_name, bracket.0, field_strs.join(", "), bracket.1)
+                        format!(
+                            "{}{}{}{}",
+                            type_name,
+                            bracket.0,
+                            field_strs.join(", "),
+                            bracket.1
+                        )
                     }
                 } else {
                     format!("{}{}{}", bracket.0, field_strs.join(", "), bracket.1)
