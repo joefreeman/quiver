@@ -123,30 +123,6 @@ The value in a chain can be 'expanded' using the `~` ('ripple') operator. This a
 
 ```
 
-### Tuple updates
-
-Tuples can be merged to update specific named fields while preserving others. When a tuple receives another tuple, the receiving tuple's named fields update the source:
-
-```
-Point[x: 1, y: 2] ~> [x: 3]         // Point[x: 3, y: 2]
-Point[x: 1, y: 2] ~> [y: 10]        // Point[x: 1, y: 10]
-```
-
-Named tuples can be merged with name validation - the merge succeeds only if names match:
-
-```
-p = Point[x: 1, y: 2],
-p ~> Point[x: 3]         // Point[x: 3, y: 2] (names match)
-p ~> Other[x: 3]         // [] (names don't match)
-```
-
-Merging works recursively for nested tuples:
-
-```
-data = Outer[Inner[x: 1, y: 2], 3],
-data ~> [[x: 5]]         // Outer[Inner[x: 5, y: 2], 3]
-```
-
 ## Identifiers
 
 Identifiers (for variables and tuple field names) start with a lowercase letter, followed by alphanumeric characters or underscores. Optional suffixes: `?`, `!`, `'` (in order).

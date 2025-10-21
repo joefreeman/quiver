@@ -4,7 +4,6 @@ use std::{
 };
 
 mod codegen;
-mod merge;
 mod modules;
 mod pattern;
 mod typing;
@@ -353,13 +352,7 @@ impl<'a> Compiler<'a> {
     ) -> Result<Type, Error> {
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
-        // Check if this is a tuple merge (value present, no ripples)
         let contains_ripple = Self::tuple_contains_ripple(&fields);
-        if let Some(val_type) = value_type.clone()
-            && !contains_ripple
-        {
-            return self.compile_tuple_merge(tuple_name, fields, val_type);
-        }
 
         // Allocate ripple variable if this tuple contains ripples and we have a value
         let ripple_index = if contains_ripple {
@@ -1272,7 +1265,16 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_literal(literal)
             }
-            ast::Term::Tuple(tuple) => self.compile_tuple(tuple.name, tuple.fields, value_type),
+            ast::Term::Tuple(tuple) => {
+                // Tuples without ripples when a value is present should use assignment patterns
+                if value_type.is_some() && !Self::tuple_contains_ripple(&tuple.fields) {
+                    return Err(Error::FeatureUnsupported(
+                        "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])"
+                            .to_string(),
+                    ));
+                }
+                self.compile_tuple(tuple.name, tuple.fields, value_type)
+            }
             ast::Term::Block(block) => {
                 // Blocks take their input as a parameter
                 let block_parameter = value_type.clone().unwrap_or_else(Type::nil);
