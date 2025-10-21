@@ -263,7 +263,12 @@ impl ReplCli {
 
     fn evaluate(&mut self, line: &str) {
         let request_id = match self.repl.evaluate(line) {
-            Ok(id) => id,
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                // No executable code (e.g., only type definitions)
+                self.last_was_nil = false;
+                return;
+            }
             Err(e) => {
                 self.last_was_nil = false;
                 eprintln!("{}", self.format_error(e).red());
@@ -279,11 +284,7 @@ impl ReplCli {
                     quiver_core::value::Value::Tuple(type_id, _) if *type_id == TypeId::NIL
                 );
 
-                // Don't print OK or NIL tuples
-                if !matches!(value, quiver_core::value::Value::Tuple(type_id, _) if type_id == TypeId::NIL || type_id == TypeId::OK)
-                {
-                    println!("{}", self.repl.format_value(&value, &heap));
-                }
+                println!("{}", self.repl.format_value(&value, &heap));
             }
             Ok(RequestResult::Result(Err(e))) => {
                 self.last_was_nil = false;

@@ -57,7 +57,7 @@ impl TestBuilder {
 
         // Evaluate source
         let result = match repl.evaluate(source) {
-            Ok(request_id) => {
+            Ok(Some(request_id)) => {
                 // Poll for result with timeout
                 let start = std::time::Instant::now();
                 let timeout = std::time::Duration::from_secs(5);
@@ -86,6 +86,10 @@ impl TestBuilder {
                         Err(e) => break Err(ReplError::Environment(e)),
                     }
                 }
+            }
+            Ok(None) => {
+                // No executable code (e.g., only type definitions)
+                Ok(None)
             }
             Err(e) => Err(e),
         };
@@ -119,12 +123,11 @@ impl TestResult {
                 );
             }
             Ok(None) => {
-                // None is treated as nil/empty tuple
-                let actual = "[]";
+                // No executable code (e.g., only type definitions) - treat as []
                 assert_eq!(
-                    actual, expected,
-                    "Expected '{}', got None (displayed as '{}') for source: {}",
-                    expected, actual, self.source
+                    "[]", expected,
+                    "Expected '{}', got no result (type definitions only) for source: {}",
+                    expected, self.source
                 );
             }
             Err(e) => {

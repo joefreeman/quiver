@@ -219,32 +219,30 @@ impl<'a> Compiler<'a> {
                 .unwrap_or(0);
         }
 
-        // Prepare parameter (always allocate slot)
-        let param_local = compiler.local_count;
-        compiler.local_count += 1;
-        let scope_parameter = Some((parameter_type, param_local));
+        // Only allocate parameter slot if we have expressions
+        // (Type definitions and imports don't need parameters)
+        let has_expressions = program
+            .statements
+            .iter()
+            .any(|s| matches!(s, ast::Statement::Expression(_)));
 
-        // Initialize scope with variables and parameter
-        compiler.scopes = vec![Scope::new(scope_variables, scope_parameter.clone())];
+        let scope_parameter = if has_expressions {
+            let param_local = compiler.local_count;
+            compiler.local_count += 1;
 
-        // Always emit instructions for parameter slot
-        compiler.codegen.add_instruction(Instruction::Allocate(1));
-        compiler
-            .codegen
-            .add_instruction(Instruction::Store(param_local));
+            compiler.codegen.add_instruction(Instruction::Allocate(1));
+            compiler
+                .codegen
+                .add_instruction(Instruction::Store(param_local));
 
-        // Phase 1: Pre-register all type aliases as placeholders
-        for statement in &program.statements {
-            if let ast::Statement::TypeAlias { name, .. } = statement {
-                // Register placeholder for forward references
-                compiler.type_context.type_aliases.insert(
-                    name.clone(),
-                    Type::from_types(vec![]), // Empty placeholder
-                );
-            }
-        }
+            Some((parameter_type, param_local))
+        } else {
+            None
+        };
 
-        // Phase 2: Compile all statements (now forward references work)
+        // Initialize scope with variables and optional parameter
+        compiler.scopes = vec![Scope::new(scope_variables, scope_parameter)];
+
         let num_statements = program.statements.len();
         let mut result_type = Type::nil();
         for (i, statement) in program.statements.into_iter().enumerate() {

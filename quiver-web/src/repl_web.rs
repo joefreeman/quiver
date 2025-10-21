@@ -177,12 +177,24 @@ impl Repl {
     /// Evaluate an expression with a callback
     #[wasm_bindgen(skip_typescript)]
     pub fn evaluate(&self, source: &str, callback: js_sys::Function) -> Result<(), String> {
-        let request_id = self
+        match self
             .inner
             .borrow_mut()
             .evaluate(source)
-            .map_err(|e| format!("{:?}", e))?;
-        self.callbacks.borrow_mut().insert(request_id, callback);
+            .map_err(|e| format!("{:?}", e))?
+        {
+            Some(request_id) => {
+                self.callbacks.borrow_mut().insert(request_id, callback);
+            }
+            None => {
+                // No executable code (e.g., only type definitions)
+                // Call callback immediately with null result (success, no value)
+                let this = JsValue::NULL;
+                callback
+                    .call2(&this, &JsValue::NULL, &JsValue::NULL)
+                    .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
+            }
+        }
         Ok(())
     }
 

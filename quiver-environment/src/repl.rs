@@ -34,8 +34,8 @@ pub struct Repl {
     repl_process_id: Option<ProcessId>,
     program: Program,
     variable_map: HashMap<String, (Type, usize)>, // variable name -> (type, local index)
-    type_aliases: HashMap<String, Type>, // type alias name -> resolved type
-    module_cache: ModuleCache, // persistent module cache across evaluations
+    type_aliases: HashMap<String, Type>,          // type alias name -> resolved type
+    module_cache: ModuleCache,                    // persistent module cache across evaluations
     last_result_type: Type, // Type of the last evaluated result, for continuations
     module_loader: Box<dyn ModuleLoader>,
 }
@@ -62,7 +62,8 @@ impl Repl {
 
     /// Compile and evaluate an expression
     /// Returns a request ID that can be polled for the result
-    pub fn evaluate(&mut self, source: &str) -> Result<u64, ReplError> {
+    /// Returns None if the source only contains type definitions (no executable code)
+    pub fn evaluate(&mut self, source: &str) -> Result<Option<u64>, ReplError> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
@@ -104,13 +105,19 @@ impl Repl {
         self.module_cache = module_cache;
         self.last_result_type = result_type;
 
-        let function = Function {
-            instructions,
-            function_type: None,
-            captures: vec![],
+        // Only create function wrapper if we have instructions to execute
+        let function_index = if !instructions.is_empty() {
+            let function = Function {
+                instructions,
+                function_type: None,
+                captures: vec![],
+            };
+            Some(self.program.register_function(function))
+        } else {
+            None
         };
-        let function_index = self.program.register_function(function);
 
+        // Send program updates to workers (includes types and optionally the function wrapper)
         let all_constants = self.program.get_constants();
         let all_functions = self.program.get_functions();
         let all_types = self.program.get_types();
@@ -121,10 +128,14 @@ impl Repl {
         let new_types = all_types[old_types_len..].to_vec();
         let new_builtins = all_builtins[old_builtins_len..].to_vec();
 
-        // Send UpdateProgram to all workers (additive - only new items)
         self.environment
             .update_program(new_constants, new_functions, new_types, new_builtins)
             .map_err(ReplError::Environment)?;
+
+        // If no function was created (type definitions only), we're done
+        let Some(function_index) = function_index else {
+            return Ok(None);
+        };
 
         // Create or resume the REPL process
         let repl_process_id = match self.repl_process_id {
@@ -153,7 +164,7 @@ impl Repl {
             .request_result(repl_process_id)
             .map_err(ReplError::Environment)?;
 
-        Ok(request_id)
+        Ok(Some(request_id))
     }
 
     /// Poll for a request result (non-blocking)
