@@ -54,11 +54,23 @@ Point[x: int, y: int]    // Named tuple
 A[b: B[c: C[bin]]]       // Nested tuples
 ```
 
+### Partial types
+
+Partial types define structural constraints on tuples without specifying all fields. They use parentheses instead of brackets and require all fields to be named:
+
+```
+(x: int, y: int)         // Unnamed partial - matches any tuple with 'x' and 'y' integer fields
+Point(x: int)            // Named partial - matches tuples named 'Point' with an 'x' integer field
+()                       // Empty unnamed partial - matches any tuple
+Point()                  // Empty named partial - matches any tuple named 'Point'
+```
+
 ### Type aliases
 
 ```
 type point = Point[x: int, y: int];
 type adder = #int -> int;
+type writer = (write: (#bin -> Ok));
 ```
 
 ### Union types
@@ -168,7 +180,8 @@ Extract values from tuples:
 ```
 Point[x, y] = Point[10, 20]              // Bind both fields
 [x: a, y: b] = Point[x: 10, y: 20]       // Rename during binding
-(x, y) = Point[x: 10, y: 20, z: 30]      // Partial (named fields only)
+(x, y) = Point[x: 10, y: 20, z: 30]      // Partial pattern (for named fields)
+Point(x, y) = Point[x: 1, y: 2, z: 3]    // Named partial pattern
 * = Config[host: "localhost", port: 80]  // Star (all named fields)
 [x, _] = Point[10, 20]                   // Placeholder (ignore value)
 ```

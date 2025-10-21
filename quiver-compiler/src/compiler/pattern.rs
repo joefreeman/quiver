@@ -341,7 +341,7 @@ fn analyze_match_tuple_pattern(
             let tuple_info = type_lookup
                 .lookup_type(type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
-            tuple_info.1.iter().map(|(_, t)| t.clone()).collect()
+            tuple_info.fields.iter().map(|(_, t)| t.clone()).collect()
         };
 
         // Start with a binding set for this type
@@ -459,13 +459,13 @@ fn check_match_tuple_match(
         .lookup_type(&type_id)
         .ok_or(Error::TypeNotInRegistry { type_id })?;
 
-    if tuple.name.as_ref() != tuple_info.0.as_ref() || tuple.fields.len() != tuple_info.1.len() {
+    if tuple.name.as_ref() != tuple_info.name.as_ref() || tuple.fields.len() != tuple_info.fields.len() {
         return Ok(None);
     }
 
     let mut field_mappings = Vec::new();
     for (pattern_idx, field) in tuple.fields.iter().enumerate() {
-        let tuple_field = &tuple_info.1[pattern_idx];
+        let tuple_field = &tuple_info.fields[pattern_idx];
         if field.name.as_ref() != tuple_field.0.as_ref() {
             return Ok(None);
         }
@@ -604,7 +604,7 @@ fn analyze_partial_pattern(
         let mut bindings = Vec::new();
         for (i, field_name) in partial_pattern.fields.iter().enumerate() {
             let idx = field_indices[i];
-            let field_type = &tuple_info.1[idx].1;
+            let field_type = &tuple_info.fields[idx].1;
             let mut field_path = path.clone();
             field_path.push(idx);
 
@@ -678,7 +678,7 @@ fn analyze_star_pattern(
         }
 
         let mut bindings = Vec::new();
-        for (idx, (name, field_type)) in tuple_info.1.iter().enumerate() {
+        for (idx, (name, field_type)) in tuple_info.fields.iter().enumerate() {
             if let Some(field_name) = name {
                 let mut field_path = path.clone();
                 field_path.push(idx);
@@ -733,19 +733,19 @@ fn find_types_with_fields_and_name(
     };
 
     for typ in types_to_check {
-        if let Type::Tuple(type_id) = typ {
+        if let Type::Tuple(type_id) | Type::Partial(type_id) = typ {
             let tuple_info = type_lookup
                 .lookup_type(type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
             // Check if tuple name matches (if specified)
             if let Some(expected_name) = tuple_name
-                && tuple_info.0.as_ref() != Some(expected_name)
+                && tuple_info.name.as_ref() != Some(expected_name)
             {
                 continue; // Skip this type if name doesn't match
             }
 
-            if let Some(indices) = find_field_indices(field_names, &tuple_info.1) {
+            if let Some(indices) = find_field_indices(field_names, &tuple_info.fields) {
                 matching_types.push((*type_id, indices));
             }
         }

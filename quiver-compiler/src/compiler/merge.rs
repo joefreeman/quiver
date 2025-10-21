@@ -19,13 +19,15 @@ impl<'a> Compiler<'a> {
 
         // For now, handle single type (unions would need more complex logic)
         let source_type_id = source_type_ids[0];
-        let (source_name, source_fields) = self
+        let source_type_info = self
             .program
             .lookup_type(&source_type_id)
             .ok_or(Error::TypeNotInRegistry {
                 type_id: source_type_id,
             })?
             .clone();
+        let source_name = source_type_info.name;
+        let source_fields = source_type_info.fields;
 
         // If merge tuple has a name, check compatibility
         let needs_name_check = if let Some(ref merge_name) = merge_name {
@@ -133,10 +135,10 @@ impl<'a> Compiler<'a> {
                 continue;
             }
 
-            let Some((field_tuple_name, _)) = self.program.lookup_type(&field_type_ids[0]) else {
+            let Some(field_type_info) = self.program.lookup_type(&field_type_ids[0]) else {
                 continue;
             };
-            let Some(ftn) = field_tuple_name else {
+            let Some(ftn) = &field_type_info.name else {
                 continue;
             };
 

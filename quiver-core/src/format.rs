@@ -51,9 +51,10 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
             }
             (None, None) => "@".to_string(),
         },
-        Type::Tuple(type_id) => {
-            if let Some((name, fields)) = program.lookup_type(type_id) {
-                let field_strs: Vec<String> = fields
+        Type::Tuple(type_id) | Type::Partial(type_id) => {
+            let is_partial = matches!(type_def, Type::Partial(_));
+            if let Some(type_info) = program.lookup_type(type_id) {
+                let field_strs: Vec<String> = type_info.fields
                     .iter()
                     .map(|(field_name, field_type)| {
                         if let Some(field_name) = field_name {
@@ -64,14 +65,16 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
                     })
                     .collect();
 
-                if let Some(type_name) = name {
+                let bracket = if is_partial { ('(', ')') } else { ('[', ']') };
+
+                if let Some(type_name) = &type_info.name {
                     if field_strs.is_empty() {
                         type_name.to_string()
                     } else {
-                        format!("{}[{}]", type_name, field_strs.join(", "))
+                        format!("{}{}{}{}", type_name, bracket.0, field_strs.join(", "), bracket.1)
                     }
                 } else {
-                    format!("[{}]", field_strs.join(", "))
+                    format!("{}{}{}", bracket.0, field_strs.join(", "), bracket.1)
                 }
             } else {
                 format!("Type{}", type_id.0)
@@ -162,8 +165,8 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
         Value::Binary(binary) => format_binary(binary, heap, constants),
         Value::Pid(process_id) => format!("@{}", process_id),
         Value::Tuple(type_id, elements) => {
-            if let Some((name, fields)) = program.lookup_type(type_id) {
-                if name.as_deref() == Some("Str")
+            if let Some(type_info) = program.lookup_type(type_id) {
+                if type_info.name.as_deref() == Some("Str")
                     && let [Value::Binary(binary)] = elements.as_slice()
                     && let Ok(bytes) = get_binary_bytes(binary, heap, constants)
                     && let Some(formatted) = try_format_as_string(&bytes)
@@ -172,14 +175,14 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
                 }
 
                 if elements.is_empty() {
-                    name.as_deref().unwrap_or("[]").to_string()
+                    type_info.name.as_deref().unwrap_or("[]").to_string()
                 } else {
                     let formatted_elements = elements
                         .iter()
                         .enumerate()
                         .map(|(i, elem)| {
                             let formatted = format_value(elem, heap, program);
-                            match fields.get(i).and_then(|(name, _)| name.as_ref()) {
+                            match type_info.fields.get(i).and_then(|(name, _)| name.as_ref()) {
                                 Some(name) => format!("{}: {}", name, formatted),
                                 None => formatted,
                             }
@@ -187,7 +190,7 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
                         .collect::<Vec<_>>()
                         .join(", ");
 
-                    match name.as_deref() {
+                    match type_info.name.as_deref() {
                         Some(n) => format!("{}[{}]", n, formatted_elements),
                         None => format!("[{}]", formatted_elements),
                     }

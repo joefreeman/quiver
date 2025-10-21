@@ -1717,10 +1717,11 @@ impl<'a> Compiler<'a> {
         let mut first_field_types = Vec::new();
 
         for type_id in &tuple_types {
-            let (_, fields) = self
+            let type_info = self
                 .program
                 .lookup_type(type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+            let fields = &type_info.fields;
 
             let field_count = fields.len();
 
@@ -1942,10 +1943,11 @@ impl<'a> Compiler<'a> {
         let mut field_types = Vec::new();
 
         for type_id in tuple_types {
-            let (_, fields) = self
+            let type_info = self
                 .program
                 .lookup_type(type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+            let fields = &type_info.fields;
 
             if let Some((_, field_type)) = fields.get(position) {
                 field_types.push(field_type.clone());

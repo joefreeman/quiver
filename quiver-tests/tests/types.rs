@@ -388,3 +388,128 @@ fn test_recursive_union_pattern() {
         )
         .expect("100");
 }
+
+#[test]
+fn test_unnamed_partial_type() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #(x: int, y: int) { ~> =(x, y) => [x, y] },
+            a = [x: 1, y: 2] ~> f,
+            b = [x: 3, y: 4, z: 5] ~> f,
+            c = Point[x: 6, y: 7] ~> f,
+            d = Point[x: 8, y: 9, z: 10] ~> f,
+            [a, b, c, d]
+            "#,
+        )
+        .expect("[[1, 2], [3, 4], [6, 7], [8, 9]]");
+
+    quiver()
+        .evaluate(
+            r#"
+            f = #(x: int, y: int) { ~> =(x, y) => [x, y] },
+            [x: 1, z: 3] ~> f
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with (x: int, y: int)".to_string(),
+            found: "[x: int, z: int]".to_string(),
+        });
+}
+
+#[test]
+fn test_named_partial_type() {
+    quiver()
+        .evaluate("f = #Point(x: int) { ~> .x }, Point[x: 1] ~> f")
+        .expect("1");
+
+    quiver()
+        .evaluate("f = #Point(x: int) { ~> .x }, [x: 1] ~> f")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with Point(x: int)".to_string(),
+            found: "[x: int]".to_string(),
+        });
+
+    quiver()
+        .evaluate("f = #Point(x: int) { ~> .x }, Other[x: 1] ~> f")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with Point(x: int)".to_string(),
+            found: "Other[x: int]".to_string(),
+        });
+}
+
+#[test]
+fn test_empty_partial_type() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #() { ~> },
+            a = [1, 2, 3] ~> f,
+            b = [x: 4, y: 5] ~> f,
+            c = Point[x: 6, y: 7] ~> f,
+            d = Point ~> f,
+            [a, b, c, d]
+            "#,
+        )
+        .expect("[[1, 2, 3], [x: 4, y: 5], Point[x: 6, y: 7], Point]");
+}
+
+#[test]
+fn test_nested_partial_type() {
+    quiver()
+        .evaluate(
+            r#"
+            type container = (value: (x: int, y: int));
+            f = #container { ~> =c => [c.value.x, c.value.y] },
+            f[value: [x: 1, y: 2, z: 3], extra: 42]
+            "#,
+        )
+        .expect("[1, 2]");
+}
+
+#[test]
+fn test_union_partial_type() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A(x: int) | B(x: int)) { ~> .x },
+            a = A[x: 10, y: 20] ~> f,
+            b = B[x: 42, z: 99] ~> f,
+            [a, b]
+            "#,
+        )
+        .expect("[10, 42]");
+
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A(x: int) | B(x: int)) { ~> .x },
+            C[x: 10] ~> f
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with (A(x: int) | B(x: int))".to_string(),
+            found: "C[x: int]".to_string(),
+        });
+
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A(x: int) | B(x: int)) { ~> .x },
+            B[y: 10] ~> f
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with (A(x: int) | B(x: int))".to_string(),
+            found: "B[y: int]".to_string(),
+        });
+}
+
+#[test]
+fn test_invalid_partial_type() {
+    quiver()
+        .evaluate("type bad = (int, y: int)")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "All fields in a partial type must be named".to_string(),
+        ));
+}

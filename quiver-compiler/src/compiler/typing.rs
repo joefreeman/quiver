@@ -92,9 +92,27 @@ impl TypeContext {
                     fields.push((field.name, field_type));
                 }
 
-                // Register the tuple type with potentially union field types
-                let type_id = program.register_type(tuple.name, fields);
-                Ok(Type::Tuple(type_id))
+                // Validate partial types
+                if tuple.is_partial {
+                    // All fields must be named
+                    for (field_name, _) in &fields {
+                        if field_name.is_none() {
+                            return Err(Error::TypeUnresolved(
+                                "All fields in a partial type must be named".to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                // Register the tuple type with the is_partial flag
+                let type_id = program.register_type_with_partial(tuple.name, fields, tuple.is_partial);
+
+                // Return Type::Partial for partial types, Type::Tuple for concrete types
+                if tuple.is_partial {
+                    Ok(Type::Partial(type_id))
+                } else {
+                    Ok(Type::Tuple(type_id))
+                }
             }
             ast::Type::Function(function) => {
                 let input_type = self.resolve_ast_type(*function.input, program)?;
@@ -193,7 +211,7 @@ impl TypeContext {
             .lookup_type(type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
         let (index, (_, field_type)) = tuple_type
-            .1
+            .fields
             .iter()
             .enumerate()
             .find(|(_, field)| field.0.as_deref() == Some(field_name))
@@ -213,9 +231,9 @@ impl TypeContext {
         let tuple_type = type_lookup
             .lookup_type(type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
-        if position >= tuple_type.1.len() {
+        if position >= tuple_type.fields.len() {
             return Err(Error::PositionalAccessOnNonTuple { index: position });
         }
-        Ok(tuple_type.1[position].1.clone())
+        Ok(tuple_type.fields[position].1.clone())
     }
 }

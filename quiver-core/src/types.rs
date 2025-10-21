@@ -13,8 +13,13 @@ pub trait TypeLookup {
 /// Type alias for tuple field information: (optional name, field type)
 pub type TupleField = (Option<String>, Type);
 
-/// Type alias for tuple type information: (optional tuple name, field definitions)
-pub type TupleTypeInfo = (Option<String>, Vec<TupleField>);
+/// Tuple type information: name, field definitions, and whether it's a partial type
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TupleTypeInfo {
+    pub name: Option<String>,
+    pub fields: Vec<TupleField>,
+    pub is_partial: bool,
+}
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct CallableType {
@@ -37,6 +42,8 @@ pub enum Type {
     Binary,
     #[serde(rename = "tuple")]
     Tuple(TypeId),
+    #[serde(rename = "partial")]
+    Partial(TypeId),
     #[serde(rename = "fn")]
     Callable(Box<CallableType>),
     #[serde(rename = "cycle")]
@@ -63,9 +70,9 @@ impl Type {
         Type::Union(vec![])
     }
 
-    /// Check if this type is concrete (not a union or cycle)
+    /// Check if this type is concrete (not a union, cycle, or partial)
     pub fn is_concrete(&self) -> bool {
-        !matches!(self, Type::Union(_) | Type::Cycle(_))
+        !matches!(self, Type::Union(_) | Type::Cycle(_) | Type::Partial(_))
     }
 
     /// Get the concrete type if this is not a union
@@ -100,11 +107,11 @@ impl Type {
             Type::Union(types) => types
                 .iter()
                 .filter_map(|t| match t {
-                    Type::Tuple(id) => Some(*id),
+                    Type::Tuple(id) | Type::Partial(id) => Some(*id),
                     _ => None,
                 })
                 .collect(),
-            Type::Tuple(id) => vec![*id],
+            Type::Tuple(id) | Type::Partial(id) => vec![*id],
             _ => vec![],
         }
     }
@@ -168,17 +175,17 @@ impl Type {
                 }
 
                 // Look up both tuple types
-                let Some((name1, fields1)) = type_lookup.lookup_type(id1) else {
+                let Some(info1) = type_lookup.lookup_type(id1) else {
                     return false;
                 };
-                let Some((name2, fields2)) = type_lookup.lookup_type(id2) else {
+                let Some(info2) = type_lookup.lookup_type(id2) else {
                     return false;
                 };
 
                 // Names must match and same number of fields required
-                name1 == name2
-                    && fields1.len() == fields2.len()
-                    && fields1.iter().zip(fields2.iter()).all(
+                info1.name == info2.name
+                    && info1.fields.len() == info2.fields.len()
+                    && info1.fields.iter().zip(info2.fields.iter()).all(
                         |((fname1, ftype1), (fname2, ftype2))| {
                             fname1 == fname2
                                 && ftype1.is_compatible_with_impl(
@@ -275,6 +282,42 @@ impl Type {
             (Type::Union(variants), pattern_type) => variants.iter().any(|variant| {
                 variant.is_compatible_with_impl(pattern_type, type_lookup, assumptions, type_stack)
             }),
+
+            // Concrete tuple vs partial type: check if concrete satisfies partial constraint
+            (Type::Tuple(concrete_id), Type::Partial(partial_id)) => {
+                let Some(concrete_info) = type_lookup.lookup_type(concrete_id) else {
+                    return false;
+                };
+                let Some(partial_info) = type_lookup.lookup_type(partial_id) else {
+                    return false;
+                };
+
+                // If partial has a name, concrete must match it
+                if let Some(partial_name) = &partial_info.name {
+                    if concrete_info.name.as_ref() != Some(partial_name) {
+                        return false;
+                    }
+                }
+
+                // Check that all partial fields exist in concrete with compatible types
+                partial_info.fields.iter().all(|(partial_fname, partial_ftype)| {
+                    // Partial types must have all fields named (enforced during type resolution)
+                    let Some(partial_fname) = partial_fname else {
+                        return false;
+                    };
+
+                    // Find matching field in concrete type
+                    concrete_info.fields.iter().any(|(concrete_fname, concrete_ftype)| {
+                        concrete_fname.as_ref() == Some(partial_fname)
+                            && concrete_ftype.is_compatible_with_impl(
+                                partial_ftype,
+                                type_lookup,
+                                assumptions,
+                                type_stack,
+                            )
+                    })
+                })
+            }
 
             _ => false,
         }

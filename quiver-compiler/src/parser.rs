@@ -273,6 +273,42 @@ fn field_type_list(input: &str) -> IResult<&str, Vec<FieldType>> {
     )(input)
 }
 
+fn partial_type(input: &str) -> IResult<&str, Type> {
+    map(
+        alt((
+            // Named partial: Name(field: type, ...)
+            map(
+                tuple((
+                    tuple_name,
+                    delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
+                )),
+                |(name, fields)| TupleType {
+                    name: Some(name),
+                    fields,
+                    is_partial: true,
+                },
+            ),
+            // Unnamed partial: (field: type, ...)
+            // Need to verify it's empty OR contains at least one named field to distinguish from grouping
+            verify(
+                map(
+                    delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
+                    |fields| TupleType {
+                        name: None,
+                        fields,
+                        is_partial: true,
+                    },
+                ),
+                |tuple_type: &TupleType| {
+                    // Empty partial types are allowed, or at least one field must be named
+                    tuple_type.fields.is_empty() || tuple_type.fields.iter().any(|f| f.name.is_some())
+                },
+            ),
+        )),
+        Type::Tuple,
+    )(input)
+}
+
 fn tuple_type(input: &str) -> IResult<&str, Type> {
     map(
         alt((
@@ -284,16 +320,29 @@ fn tuple_type(input: &str) -> IResult<&str, Type> {
                 |(name, fields)| TupleType {
                     name: Some(name),
                     fields,
+                    is_partial: false,
                 },
             ),
             map(
                 delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
-                |fields| TupleType { name: None, fields },
+                |fields| TupleType {
+                    name: None,
+                    fields,
+                    is_partial: false,
+                },
             ),
-            map(tuple_name, |name| TupleType {
-                name: Some(name),
-                fields: vec![],
-            }),
+            // Only parse bare tuple name if not followed by '(' (which would indicate a partial type)
+            map(
+                tuple((
+                    tuple_name,
+                    peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
+                )),
+                |(name, _)| TupleType {
+                    name: Some(name),
+                    fields: vec![],
+                    is_partial: false,
+                },
+            ),
         )),
         Type::Tuple,
     )(input)
@@ -371,6 +420,7 @@ fn function_type(input: &str) -> IResult<&str, Type> {
 
 fn function_input_type(input: &str) -> IResult<&str, Type> {
     alt((
+        partial_type,  // Must come before grouping parentheses
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
@@ -381,6 +431,7 @@ fn function_input_type(input: &str) -> IResult<&str, Type> {
 
 fn function_output_type(input: &str) -> IResult<&str, Type> {
     alt((
+        partial_type,  // Must come before grouping parentheses
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
@@ -392,6 +443,7 @@ fn function_output_type(input: &str) -> IResult<&str, Type> {
 fn base_type(input: &str) -> IResult<&str, Type> {
     alt((
         tuple_type,
+        partial_type,  // Must come before grouping parentheses to have priority
         primitive_type,
         type_cycle,
         process_type,

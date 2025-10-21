@@ -495,14 +495,14 @@ impl Executor {
     }
 
     fn handle_tuple(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
-        let (_, fields) = self
+        let type_info = self
             .types
             .get(type_id.0)
             .ok_or_else(|| Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
                 found: format!("unknown TypeId({:?})", type_id),
             })?;
-        let size = fields.len();
+        let size = type_info.fields.len();
 
         let process = self
             .get_process_mut(pid)
@@ -609,7 +609,12 @@ impl Executor {
             } else {
                 // Use Type::is_compatible for structural checking
                 let actual_type = Type::Tuple(*actual_type_id);
-                let expected_type = Type::Tuple(type_id);
+                // Check if type_id refers to a partial type
+                let expected_type = if self.lookup_type(&type_id).map_or(false, |info| info.is_partial) {
+                    Type::Partial(type_id)
+                } else {
+                    Type::Tuple(type_id)
+                };
                 actual_type.is_compatible(&expected_type, self)
             }
         } else {

@@ -178,6 +178,7 @@ pub enum PrimitiveType {
 pub struct TupleType {
     pub name: Option<String>,
     pub fields: Vec<FieldType>,
+    pub is_partial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

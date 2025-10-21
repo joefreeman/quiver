@@ -160,15 +160,32 @@ impl Program {
         name: Option<String>,
         fields: Vec<(Option<String>, Type)>,
     ) -> TypeId {
+        // For backwards compatibility, always create concrete types (is_partial = false)
+        self.register_type_with_partial(name, fields, false)
+    }
+
+    pub fn register_type_with_partial(
+        &mut self,
+        name: Option<String>,
+        fields: Vec<(Option<String>, Type)>,
+        is_partial: bool,
+    ) -> TypeId {
         // Check if type already exists
         for (index, existing_type) in self.types.iter().enumerate() {
-            if existing_type.0 == name && existing_type.1 == fields {
+            if existing_type.name == name
+                && existing_type.fields == fields
+                && existing_type.is_partial == is_partial
+            {
                 return TypeId(index);
             }
         }
 
         let type_id = TypeId(self.types.len());
-        self.types.push((name, fields));
+        self.types.push(TupleTypeInfo {
+            name,
+            fields,
+            is_partial,
+        });
         type_id
     }
 
