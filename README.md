@@ -94,7 +94,8 @@ Within the REPL:
 - `\q` - Exit the REPL
 - `\!` - Reset the environment
 - `\v` - List all variables
-- `\t` - List all type aliases
+- `\p` - List all processes
+- `\p X` - Inspect process with ID `X`
 
 ## License
 
