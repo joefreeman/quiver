@@ -143,3 +143,25 @@ fn test_function_call_field_access() {
         .evaluate("math = %\"math\", math ~> .add[1, 2]")
         .expect("3");
 }
+
+#[test]
+fn test_function_result_covariance() {
+    quiver().evaluate(
+        r#"
+        f = #(#bin -> (Ok | [])) { ~> },
+        g = #bin { [] },
+        g ~> f
+        "#,
+    );
+}
+
+#[test]
+fn test_function_parameter_contravariance() {
+    quiver().evaluate(
+        r#"
+        f = #(#[] -> bin) { ~> },
+        g = #(Ok | []) { '00' },
+        g ~> f
+        "#,
+    );
+}

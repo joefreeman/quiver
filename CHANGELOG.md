@@ -11,6 +11,10 @@
 
 - Replaced tuple update syntax with spread operator (`...`) for more flexible/intuitive merging/updating of tuples.
 
+### Fixed
+
+- Function type compatibility now supports variance (covariant results, contravariant parameters).
+
 ## [0.1.0] - 2025-10-20
 
 ### Added

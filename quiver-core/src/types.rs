@@ -142,6 +142,9 @@ impl Type {
         assumptions.insert(key);
 
         match (self, pattern) {
+            // Empty union (never type) is bottom type - compatible with anything
+            (Type::Union(variants), _) if variants.is_empty() => true,
+
             // Basic types must match exactly
             (Type::Integer, Type::Integer) => true,
             (Type::Binary, Type::Binary) => true,
@@ -255,11 +258,27 @@ impl Type {
                 }
             }
 
-            // Function types
             (Type::Callable(f1), Type::Callable(f2)) => {
-                // For functions, parameters are contravariant and results are covariant
-                // But for simplicity, we'll just check exact match for now
-                f1 == f2
+                // For functions:
+                // - Parameters are contravariant (pattern's param must be compatible with self's param)
+                // - Results are covariant (self's result must be compatible with pattern's result)
+                // - Receive types are contravariant (pattern's receive must be compatible with self's receive)
+                f2.parameter.is_compatible_with_impl(
+                    &f1.parameter,
+                    type_lookup,
+                    assumptions,
+                    type_stack,
+                ) && f1.result.is_compatible_with_impl(
+                    &f2.result,
+                    type_lookup,
+                    assumptions,
+                    type_stack,
+                ) && f2.receive.is_compatible_with_impl(
+                    &f1.receive,
+                    type_lookup,
+                    assumptions,
+                    type_stack,
+                )
             }
 
             // When self is concrete and pattern is a union, check if self matches any variant
@@ -294,28 +313,35 @@ impl Type {
 
                 // If partial has a name, concrete must match it
                 if let Some(partial_name) = &partial_info.name
-                    && concrete_info.name.as_ref() != Some(partial_name) {
-                        return false;
-                    }
+                    && concrete_info.name.as_ref() != Some(partial_name)
+                {
+                    return false;
+                }
 
                 // Check that all partial fields exist in concrete with compatible types
-                partial_info.fields.iter().all(|(partial_fname, partial_ftype)| {
-                    // Partial types must have all fields named (enforced during type resolution)
-                    let Some(partial_fname) = partial_fname else {
-                        return false;
-                    };
+                partial_info
+                    .fields
+                    .iter()
+                    .all(|(partial_fname, partial_ftype)| {
+                        // Partial types must have all fields named (enforced during type resolution)
+                        let Some(partial_fname) = partial_fname else {
+                            return false;
+                        };
 
-                    // Find matching field in concrete type
-                    concrete_info.fields.iter().any(|(concrete_fname, concrete_ftype)| {
-                        concrete_fname.as_ref() == Some(partial_fname)
-                            && concrete_ftype.is_compatible_with_impl(
-                                partial_ftype,
-                                type_lookup,
-                                assumptions,
-                                type_stack,
-                            )
+                        // Find matching field in concrete type
+                        concrete_info
+                            .fields
+                            .iter()
+                            .any(|(concrete_fname, concrete_ftype)| {
+                                concrete_fname.as_ref() == Some(partial_fname)
+                                    && concrete_ftype.is_compatible_with_impl(
+                                        partial_ftype,
+                                        type_lookup,
+                                        assumptions,
+                                        type_stack,
+                                    )
+                            })
                     })
-                })
             }
 
             _ => false,
