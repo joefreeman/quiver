@@ -343,7 +343,7 @@ impl Executor {
             Instruction::Constant(index) => self.handle_constant(pid, index),
             Instruction::Pop => self.handle_pop(pid),
             Instruction::Duplicate => self.handle_duplicate(pid),
-            Instruction::Over => self.handle_over(pid),
+            Instruction::Pick(n) => self.handle_pick(pid, n),
             Instruction::Swap => self.handle_swap(pid),
             Instruction::Load(index) => self.handle_load(pid, index),
             Instruction::Store(index) => self.handle_store(pid, index),
@@ -415,15 +415,15 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_over(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_pick(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        if process.stack.len() < 2 {
+        if process.stack.len() <= n {
             return Err(Error::StackUnderflow);
         }
-        let index = process.stack.len() - 2;
+        let index = process.stack.len() - 1 - n;
         let value = process.stack[index].clone();
         process.stack.push(value);
 

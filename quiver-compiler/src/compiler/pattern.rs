@@ -158,7 +158,7 @@ pub fn generate_pattern_code(
                     for &index in &requirement.path {
                         codegen.add_instruction(Instruction::Get(index));
                     }
-                    codegen.add_instruction(Instruction::Over);
+                    codegen.add_instruction(Instruction::Pick(1));
                     for &index in other_path {
                         codegen.add_instruction(Instruction::Get(index));
                     }
