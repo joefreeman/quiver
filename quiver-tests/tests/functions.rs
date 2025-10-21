@@ -165,3 +165,10 @@ fn test_function_parameter_contravariance() {
         "#,
     );
 }
+
+#[test]
+fn test_apply_value_to_inline_function() {
+    quiver()
+        .evaluate("5 ~> #int { ~> [~, 2] ~> <add> }")
+        .expect("7");
+}

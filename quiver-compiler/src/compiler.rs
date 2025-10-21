@@ -1293,12 +1293,15 @@ impl<'a> Compiler<'a> {
                 self.compile_block(block, block_parameter, None)
             }
             ast::Term::Function(func) => {
-                if value_type.is_some() {
-                    return Err(Error::FeatureUnsupported(
-                        "Function cannot be applied to value".to_string(),
-                    ));
+                // Compile the function itself
+                let function_type = self.compile_function(func)?;
+
+                // If a value is being piped to it, apply the value
+                if let Some(val_type) = value_type {
+                    self.apply_value_to_type(function_type, val_type)
+                } else {
+                    Ok(function_type)
                 }
-                self.compile_function(func)
             }
             ast::Term::Access(access) => {
                 match &access.identifier {
