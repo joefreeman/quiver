@@ -5,6 +5,8 @@ use quiver_core::value::Value;
 use quiver_environment::{Repl, ReplError, WorkerHandle};
 use std::collections::HashMap;
 
+type ReplResult = Result<Option<(Value, Vec<Vec<u8>>)>, ReplError>;
+
 macro_rules! load_stdlib_modules {
     ($($name:literal),* $(,)?) => {{
         let mut modules = HashMap::new();
@@ -24,11 +26,18 @@ pub struct TestBuilder {
 }
 
 #[allow(dead_code)]
-impl TestBuilder {
-    pub fn new() -> Self {
+impl Default for TestBuilder {
+    fn default() -> Self {
         Self {
             modules: load_stdlib_modules!("math", "list"),
         }
+    }
+}
+
+#[allow(dead_code)]
+impl TestBuilder {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_modules(mut self, mut modules: HashMap<String, String>) -> Self {
@@ -104,7 +113,7 @@ impl TestBuilder {
 
 #[allow(dead_code)]
 pub struct TestResult {
-    result: Result<Option<(Value, Vec<Vec<u8>>)>, ReplError>,
+    result: ReplResult,
     source: String,
     repl: Repl,
 }

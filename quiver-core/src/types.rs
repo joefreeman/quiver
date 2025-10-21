@@ -293,11 +293,10 @@ impl Type {
                 };
 
                 // If partial has a name, concrete must match it
-                if let Some(partial_name) = &partial_info.name {
-                    if concrete_info.name.as_ref() != Some(partial_name) {
+                if let Some(partial_name) = &partial_info.name
+                    && concrete_info.name.as_ref() != Some(partial_name) {
                         return false;
                     }
-                }
 
                 // Check that all partial fields exist in concrete with compatible types
                 partial_info.fields.iter().all(|(partial_fname, partial_ftype)| {

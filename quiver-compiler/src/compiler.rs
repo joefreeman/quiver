@@ -170,8 +170,8 @@ pub struct Compiler<'a> {
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
 
-    // Counter for nested ripple contexts in tuple construction
-    ripple_depth: usize,
+    // Track active ripple contexts (stack of ripple types)
+    ripple_types: Vec<Type>,
 
     // Track the receive type of the function currently being compiled
     current_receive_type: Type,
@@ -198,7 +198,7 @@ impl<'a> Compiler<'a> {
             program: base_program.clone(),
             module_loader,
             module_path,
-            ripple_depth: 0,
+            ripple_types: vec![],
             current_receive_type: Type::never(),
         };
 
@@ -354,61 +354,45 @@ impl<'a> Compiler<'a> {
 
         let contains_ripple = Self::tuple_contains_ripple(&fields);
 
-        // Allocate ripple variable if this tuple contains ripples and we have a value
-        let ripple_index = if contains_ripple {
-            if let Some(val_type) = value_type {
-                let ripple_var_name = format!("~{}", self.ripple_depth);
-                self.ripple_depth += 1;
-                let index = self.define_variable(&ripple_var_name, &[], val_type);
-                self.codegen.add_instruction(Instruction::Allocate(1));
-                self.codegen.add_instruction(Instruction::Store(index));
-                Some(index)
-            } else {
-                None
-            }
+        // If this tuple has a value piped into it and contains ripples, push the ripple type
+        let has_ripple_value = if contains_ripple && value_type.is_some() {
+            self.ripple_types.push(value_type.clone().unwrap());
+            true
         } else {
-            None
+            false
         };
 
         // Compile field values and collect their types
         let mut field_types = Vec::new();
-        for field in &fields {
+        for (fields_compiled, field) in fields.iter().enumerate() {
             let field_type = match &field.value {
                 ast::FieldValue::Chain(chain) => self.compile_chain(chain.clone(), None)?,
                 ast::FieldValue::Ripple => {
-                    // Check if we're in a ripple context
-                    if self.ripple_depth == 0 {
-                        return Err(Error::FeatureUnsupported(
+                    // Check if we're in any ripple context
+                    let ripple_type = self.ripple_types.last().ok_or_else(|| {
+                        Error::FeatureUnsupported(
                             "Ripple cannot be used outside of an operation context".to_string(),
-                        ));
-                    }
-                    // Load the ripple value
-                    let ripple_var_name = format!("~{}", self.ripple_depth - 1);
-                    let (ripple_type, ripple_idx) = self
-                        .lookup_variable(&self.scopes, &ripple_var_name, &[])
-                        .ok_or_else(|| Error::InternalError {
-                            message: "Ripple value not found in scope".to_string(),
-                        })?;
-                    self.codegen.add_instruction(Instruction::Load(ripple_idx));
-                    ripple_type
+                        )
+                    })?;
+                    // Emit Pick instruction to copy the ripple value from the stack
+                    // The ripple value is at depth `fields_compiled`
+                    self.codegen
+                        .add_instruction(Instruction::Pick(fields_compiled));
+                    ripple_type.clone()
                 }
             };
             field_types.push((field.name.clone(), field_type));
-        }
-
-        // Clean up ripple context if we allocated one
-        if ripple_index.is_some() {
-            self.ripple_depth -= 1;
         }
 
         // Register the tuple type and emit instruction
         let type_id = self.program.register_type(tuple_name, field_types);
         self.codegen.add_instruction(Instruction::Tuple(type_id));
 
-        // Clear the ripple local if we allocated one
-        if ripple_index.is_some() {
-            self.codegen.add_instruction(Instruction::Clear(1));
-            self.local_count -= 1;
+        // If this tuple established a ripple context, clean up
+        if has_ripple_value {
+            self.codegen.add_instruction(Instruction::Swap);
+            self.codegen.add_instruction(Instruction::Pop);
+            self.ripple_types.pop();
         }
 
         Ok(Type::Tuple(type_id))

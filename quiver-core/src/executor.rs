@@ -610,7 +610,7 @@ impl Executor {
                 // Use Type::is_compatible for structural checking
                 let actual_type = Type::Tuple(*actual_type_id);
                 // Check if type_id refers to a partial type
-                let expected_type = if self.lookup_type(&type_id).map_or(false, |info| info.is_partial) {
+                let expected_type = if self.lookup_type(&type_id).is_some_and(|info| info.is_partial) {
                     Type::Partial(type_id)
                 } else {
                     Type::Tuple(type_id)
