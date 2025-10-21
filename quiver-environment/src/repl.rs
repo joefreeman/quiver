@@ -34,6 +34,8 @@ pub struct Repl {
     repl_process_id: Option<ProcessId>,
     program: Program,
     variable_map: HashMap<String, (Type, usize)>, // variable name -> (type, local index)
+    type_aliases: HashMap<String, Type>, // type alias name -> resolved type
+    module_cache: ModuleCache, // persistent module cache across evaluations
     last_result_type: Type, // Type of the last evaluated result, for continuations
     module_loader: Box<dyn ModuleLoader>,
 }
@@ -51,6 +53,8 @@ impl Repl {
             repl_process_id: None,
             program,
             variable_map: HashMap::new(),
+            type_aliases: HashMap::new(),
+            module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
             module_loader,
         })
@@ -71,8 +75,8 @@ impl Repl {
 
         let result = Compiler::compile(
             parsed,
-            HashMap::new(), // type_aliases
-            ModuleCache::new(),
+            self.type_aliases.clone(),
+            self.module_cache.clone(),
             self.module_loader.as_ref(),
             &self.program,
             None, // module_path
@@ -84,6 +88,8 @@ impl Repl {
         let instructions = result.instructions;
         let result_type = result.result_type;
         let variables = result.variables;
+        let type_aliases = result.type_aliases;
+        let module_cache = result.module_cache;
         let updated_program = result.program;
 
         // Get only the NEW program data (not already sent)
@@ -94,6 +100,8 @@ impl Repl {
 
         self.program = updated_program;
         self.variable_map = variables;
+        self.type_aliases = type_aliases;
+        self.module_cache = module_cache;
         self.last_result_type = result_type;
 
         let function = Function {
@@ -165,6 +173,8 @@ impl Repl {
                 // Got a runtime error - reset REPL state
                 self.repl_process_id = None; // Next eval will create new process
                 self.variable_map.clear();
+                self.type_aliases.clear();
+                self.module_cache = ModuleCache::new();
                 self.last_result_type = Type::nil();
                 Ok(Some(RequestResult::Result(Err(error))))
             }
