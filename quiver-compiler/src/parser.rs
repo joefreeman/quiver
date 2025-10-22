@@ -699,7 +699,25 @@ fn tail_call(input: &str) -> IResult<&str, Term> {
 }
 
 fn builtin(input: &str) -> IResult<&str, String> {
-    delimited(char('<'), identifier, char('>'))(input)
+    // Parse opening __
+    let (input, _) = tag("__")(input)?;
+
+    // Parse identifier with potential trailing underscores
+    let (_remaining, result) = recognize(tuple((
+        satisfy(|c: char| c.is_ascii_lowercase()),
+        take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
+    )))(input)?;
+
+    // Trim trailing underscores from the result
+    let trimmed = result.trim_end_matches('_');
+
+    // Adjust the remaining input to include the trimmed underscores
+    let input = &input[trimmed.len()..];
+
+    // Parse closing __
+    let (input, _) = tag("__")(input)?;
+
+    Ok((input, trimmed.to_string()))
 }
 
 fn equality(input: &str) -> IResult<&str, Term> {

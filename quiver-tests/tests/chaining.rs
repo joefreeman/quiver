@@ -4,7 +4,7 @@ use common::*;
 #[test]
 fn test_operation_chaining() {
     quiver()
-        .evaluate("[1, 2] ~> <add> ~> [~, 2] ~> <multiply>")
+        .evaluate("[1, 2] ~> __add__ ~> [~, 2] ~> __multiply__")
         .expect("6");
 }
 

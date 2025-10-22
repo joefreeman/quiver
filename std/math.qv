@@ -3,19 +3,19 @@
 
 [
   // Basic arithmetic operations on [int, int] tuples
-  add: <add>,
-  sub: <subtract>,
-  mul: <multiply>,
-  div: <divide>,
-  mod: <modulo>,
+  add: __add__,
+  sub: __subtract__,
+  mul: __multiply__,
+  div: __divide__,
+  mod: __modulo__,
 
   // Comparison operations on [int, int] tuples
-  lt: #[int, int] { ~> =[a, b] => [a, b] ~> <compare> ~> =-1 },
-  le: #[int, int] { ~> =[a, b] => [a, b] ~> <compare> ~> { ~> =-1 | ~> =0 } },
-  gt: #[int, int] { ~> =[a, b] => [a, b] ~> <compare> ~> { ~> =1 } },
-  ge: #[int, int] { ~> =[a, b] => [a, b] ~> <compare> ~> { ~> =0 | ~> =1 } },
+  lt: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> =-1 },
+  le: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> { ~> =-1 | ~> =0 } },
+  gt: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> { ~> =1 } },
+  ge: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> { ~> =0 | ~> =1 } },
 
   // Single-argument math functions
-  abs: <abs>,
-  sqrt: <sqrt>
+  abs: __abs__,
+  sqrt: __sqrt__
 ]

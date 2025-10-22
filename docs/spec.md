@@ -468,11 +468,11 @@ The following standard library modules are available:
 
 ## Built-in functions
 
-Built-in functions can be accessed using angle brackets, although access via the standard library should be preferred.
+Built-in functions can be accessed using double underscores, although access via the standard library should be preferred.
 
 ```
-sum = [3, 4] ~> <add>               // Built-in addition
-doubled = [x, 2] ~> <multiply>      // Built-in multiplication
+sum = [3, 4] ~> __add__               // Built-in addition
+doubled = [x, 2] ~> __multiply__      // Built-in multiplication
 ```
 
 ## Examples
@@ -609,7 +609,7 @@ echo = #[] {
   $Str[bin] {
     | ~> ="" => []           // Stop on empty string
     | ~> =s => {
-      s ~> <println>,        // (not implemented!)
+      s ~> __println__,        // (not implemented!)
       [] ~> &                // Continue receiving
     }
   }

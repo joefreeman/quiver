@@ -5,7 +5,7 @@ use std::collections::HashMap;
 #[test]
 fn test_module_import() {
     let mut modules = HashMap::new();
-    modules.insert("./math.qv".to_string(), "[add: <add>]".to_string());
+    modules.insert("./math.qv".to_string(), "[add: __add__]".to_string());
 
     quiver()
         .with_modules(modules)
@@ -23,7 +23,7 @@ fn test_destructured_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./math.qv".to_string(),
-        r#"[add: <add>, sub: <subtract>]"#.to_string(),
+        r#"[add: __add__, sub: __subtract__]"#.to_string(),
     );
 
     quiver()
@@ -40,7 +40,7 @@ fn test_destructured_import() {
 #[test]
 fn test_star_import() {
     let mut modules = HashMap::new();
-    modules.insert("./math.qv".to_string(), "[add: <add>]".to_string());
+    modules.insert("./math.qv".to_string(), "[add: __add__]".to_string());
 
     quiver()
         .with_modules(modules)
@@ -53,7 +53,7 @@ fn test_import_function_with_capture() {
     let mut modules = HashMap::new();
     modules.insert(
         "./capture.qv".to_string(),
-        "x = 42, #{ [x, 2] ~> <multiply> }".to_string(),
+        "x = 42, #{ [x, 2] ~> __multiply__ }".to_string(),
     );
 
     quiver()
@@ -69,8 +69,8 @@ fn test_import_nested_function_captures() {
         "./nested.qv".to_string(),
         r#"
         x = 10,
-        inner = #{ [x, 1] ~> <add> },
-        #{ inner[] ~> [~, 2] ~> <multiply> }
+        inner = #{ [x, 1] ~> __add__ },
+        #{ inner[] ~> [~, 2] ~> __multiply__ }
         "#
         .to_string(),
     );
@@ -86,7 +86,7 @@ fn test_import_tuple_with_captured_function() {
     let mut modules = HashMap::new();
     modules.insert(
         "./tuple_capture.qv".to_string(),
-        "x = 5, y = 3, [x, #{ [x, y] ~> <add> }, y]".to_string(),
+        "x = 5, y = 3, [x, #{ [x, y] ~> __add__ }, y]".to_string(),
     );
 
     quiver()
@@ -100,14 +100,14 @@ fn test_multi_level_import_with_captures() {
     let mut modules = HashMap::new();
     modules.insert(
         "./level1.qv".to_string(),
-        "base = 100, #{ [base, 1] ~> <add> }".to_string(),
+        "base = 100, #{ [base, 1] ~> __add__ }".to_string(),
     );
     modules.insert(
         "./level2.qv".to_string(),
         r#"
         f = %"./level1.qv",
         x = 3,
-        #{ f[] ~> [~, x] ~> <multiply> }
+        #{ f[] ~> [~, x] ~> __multiply__ }
         "#
         .to_string(),
     );
@@ -116,7 +116,7 @@ fn test_multi_level_import_with_captures() {
         r#"
         g = %"./level2.qv",
         x = 5,
-        [g, #{ g[] ~> [~, x] ~> <add> }]
+        [g, #{ g[] ~> [~, x] ~> __add__ }]
         "#
         .to_string(),
     );
@@ -144,7 +144,7 @@ fn test_partial_type_import() {
         .evaluate(
             r#"
             (ok, err) :: %"./types.qv";
-            double = #ok { ~> =Ok[x] => [x, 2] ~> <multiply> },
+            double = #ok { ~> =Ok[x] => [x, 2] ~> __multiply__ },
             Ok[21] ~> double
             "#,
         )

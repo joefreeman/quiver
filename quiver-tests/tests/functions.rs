@@ -14,7 +14,7 @@ fn test_nil_function() {
 #[test]
 fn test_function_with_parameter() {
     quiver()
-        .evaluate("inc = #int { ~> =x => [x, 1] ~> <add> }, 3 ~> inc")
+        .evaluate("inc = #int { ~> =x => [x, 1] ~> __add__ }, 3 ~> inc")
         .expect("4");
 }
 
@@ -31,7 +31,7 @@ fn test_function_with_tuple_parameter() {
         .evaluate(
             r#"
             f = #Point[x: int, y: int] {
-              ~> =Point[x: x, y: y] => [x, y] ~> <add>
+              ~> =Point[x: x, y: y] => [x, y] ~> __add__
             },
             Point[x: 1, y: 2] ~> f
             "#,
@@ -52,7 +52,7 @@ fn test_higher_order_function() {
         .evaluate(
             r#"
             apply = #[#int -> int, int] { ~> =[f, x] => x ~> f },
-            double = #int { ~> =x => [x, 2] ~> <multiply> },
+            double = #int { ~> =x => [x, 2] ~> __multiply__ },
             [double, 5] ~> apply
             "#,
         )
@@ -65,7 +65,7 @@ fn test_nested_function_return() {
         .evaluate(
             r#"
             f = #int {
-              ~> =x => #int { ~> =y => [x, y] ~> <add> }
+              ~> =x => #int { ~> =y => [x, y] ~> __add__ }
             },
             3 ~> f ~> =g,
             5 ~> g
@@ -169,6 +169,6 @@ fn test_function_parameter_contravariance() {
 #[test]
 fn test_apply_value_to_inline_function() {
     quiver()
-        .evaluate("5 ~> #int { ~> [~, 2] ~> <add> }")
+        .evaluate("5 ~> #int { ~> [~, 2] ~> __add__ }")
         .expect("7");
 }

@@ -203,7 +203,7 @@ fn test_generic_function_pattern_matching() {
             r#"
             list<t> :: Nil | Cons[t, &];
             sum_first_two = #list<int> {
-              | ~> =Cons[a, Cons[b, _]] => [a, b] ~> <add>
+              | ~> =Cons[a, Cons[b, _]] => [a, b] ~> __add__
               | 0
             },
             Cons[10, Cons[20, Cons[30, Nil]]] ~> sum_first_two

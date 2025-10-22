@@ -107,28 +107,28 @@ fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
     }
 }
 
-/// Builtin function: <add>
+/// Builtin function: __add__
 /// Adds two integers from a tuple
 pub fn builtin_add(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     Ok(Value::Integer(a + b))
 }
 
-/// Builtin function: <subtract>
+/// Builtin function: __subtract__
 /// Subtracts two integers from a tuple
 pub fn builtin_subtract(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     Ok(Value::Integer(a - b))
 }
 
-/// Builtin function: <multiply>
+/// Builtin function: __multiply__
 /// Multiplies two integers from a tuple
 pub fn builtin_multiply(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
     Ok(Value::Integer(a * b))
 }
 
-/// Builtin function: <divide>
+/// Builtin function: __divide__
 /// Divides two integers from a tuple
 pub fn builtin_divide(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
@@ -138,7 +138,7 @@ pub fn builtin_divide(arg: &Value, _program: &mut Executor) -> Result<Value, Err
     Ok(Value::Integer(a / b))
 }
 
-/// Builtin function: <modulo>
+/// Builtin function: __modulo__
 /// Takes modulo of two integers from a tuple
 pub fn builtin_modulo(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;
@@ -148,7 +148,7 @@ pub fn builtin_modulo(arg: &Value, _program: &mut Executor) -> Result<Value, Err
     Ok(Value::Integer(a % b))
 }
 
-/// Builtin function: <compare>
+/// Builtin function: __compare__
 /// Compares two integers and returns -1, 0, or 1
 pub fn builtin_compare(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
     let (a, b) = extract_two_integers(arg)?;

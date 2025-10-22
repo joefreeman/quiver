@@ -29,13 +29,13 @@ fn test_function_with_type_pattern() {
               | Rectangle[w: int, h: int];
 
             area = #shape {
-              | ~> =Circle[r: r] => [r, r] ~> <multiply>
-              | ~> =Rectangle[w: w, h: h] => [w, h] ~> <multiply>
+              | ~> =Circle[r: r] => [r, r] ~> __multiply__
+              | ~> =Rectangle[w: w, h: h] => [w, h] ~> __multiply__
             },
 
             a1 = Circle[r: 5] ~> area,
             a2 = Rectangle[w: 4, h: 3] ~> area,
-            [a1, a2] ~> <add>
+            [a1, a2] ~> __add__
             "#,
         )
         .expect("37")
@@ -52,7 +52,7 @@ fn test_recursive_list_type() {
             r#"
             list :: Nil | Cons[int, &];
             xs = Cons[1, Cons[2, Cons[3, Nil]]],
-            [xs.1.0, xs.1.1.0] ~> <add>
+            [xs.1.0, xs.1.1.0] ~> __add__
             "#,
         )
         .expect("5")
@@ -296,7 +296,7 @@ fn test_recursive_type_pattern_matching_bug() {
             // (which has no fields) when matching the pattern [Full[rest], n]
             match_recursive = #[t, int] {
               | ~> =[Empty, n] => n
-              | ~> =[Full[rest], n] => [n, 100] ~> <add>
+              | ~> =[Full[rest], n] => [n, 100] ~> __add__
             },
 
             // Test with Empty - should return n
@@ -321,7 +321,7 @@ fn test_recursive_type_pattern_matching_bug() {
 
             // Function that matches on first element of tuple
             match_first = #[tree, int] {
-              | ~> =[Leaf[x], n] => [x, n] ~> <add>
+              | ~> =[Leaf[x], n] => [x, n] ~> __add__
               | ~> =[Node[l, r], n] => n
             },
 
@@ -342,7 +342,7 @@ fn test_recursive_type_pattern_matching_bug() {
             // Pattern matching that would trigger the bug
             process_list = #[list, int] {
               | ~> =[Nil, x] => x
-              | ~> =[Cons[head, tail], x] => [head, x] ~> <add>
+              | ~> =[Cons[head, tail], x] => [head, x] ~> __add__
             },
 
             // These should all work without FieldAccessInvalid errors

@@ -11,7 +11,7 @@ fn test_await_simple_process() {
 #[test]
 fn test_await_returns_process_result() {
     quiver()
-        .evaluate("f = #{ [1, 2] ~> <add> }; p = @f; p ~> !")
+        .evaluate("f = #{ [1, 2] ~> __add__ }; p = @f; p ~> !")
         .expect("3");
 }
 
