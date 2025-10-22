@@ -64,7 +64,9 @@ fn test_binary_not() {
     quiver().evaluate("'ff' ~> __binary_not__").expect("'00'");
 
     // Test multi-byte NOT
-    quiver().evaluate("'f00f' ~> __binary_not__").expect("'0ff0'");
+    quiver()
+        .evaluate("'f00f' ~> __binary_not__")
+        .expect("'0ff0'");
 }
 
 #[test]
