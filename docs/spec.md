@@ -48,7 +48,7 @@ Tuples are the primary composite type. They can optionally have a name, and have
 ```
 []                       // Empty tuple ('nil')
 Blue                     // Named, empty tuple
-[int, int]               // Unnamed tuple wiht unnamed fields
+[int, int]               // Unnamed tuple with unnamed fields
 [x: int, y: int]         // Named fields
 Point[x: int, y: int]    // Named tuple
 A[b: B[c: C[bin]]]       // Nested tuples
@@ -122,7 +122,7 @@ Type aliases can be extended using the spread operator `...` to compose new type
 // Compose types from reusable pieces
 entity :: [id: int, created_at: int];
 updateable :: (updated_at: int);
-post :: Post[...entity, title: Str[bin], ...updatable];  // Post[id: int, created_at: int, title: Str[bin], updated_at: int]
+post :: Post[...entity, title: Str[bin], ...updateable];  // Post[id: int, created_at: int, title: Str[bin], updated_at: int]
 
 // Field override - later fields override earlier ones
 v1 :: User[id: int, name: Str[bin]];
@@ -134,8 +134,6 @@ When spreading a union type, the spread is distributed across all variants:
 ```
 event :: Created[id: int] | Updated | Deleted;
 logged :: event[..., timestamp: int] // Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int];
-
-// Expands to: Traced[value: bin, request_id: bin] | Traced[message: bin, request_id: bin]
 ```
 
 ### Strings
