@@ -34,9 +34,9 @@ pub struct Repl {
     repl_process_id: Option<ProcessId>,
     program: Program,
     variable_map: HashMap<String, (Type, usize)>, // variable name -> (type, local index)
-    type_aliases: HashMap<String, Type>,          // type alias name -> resolved type
-    module_cache: ModuleCache,                    // persistent module cache across evaluations
-    last_result_type: Type, // Type of the last evaluated result, for continuations
+    type_aliases: HashMap<String, quiver_compiler::compiler::TypeAliasDef>, // type definitions persisted across sessions
+    module_cache: ModuleCache, // persistent module cache across evaluations
+    last_result_type: Type,    // Type of the last evaluated result, for continuations
     module_loader: Box<dyn ModuleLoader>,
 }
 

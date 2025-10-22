@@ -3,8 +3,8 @@ use common::*;
 
 #[test]
 fn test_comments() {
-    quiver().evaluate("// comment").expect("[]");
-    quiver().evaluate("//comment").expect("[]");
+    quiver().evaluate("// comment").expect("");
+    quiver().evaluate("//comment").expect("");
     quiver().evaluate("5 // comment").expect("5");
     quiver()
         .evaluate(

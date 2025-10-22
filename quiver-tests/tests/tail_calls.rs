@@ -11,7 +11,7 @@ fn test_tail_call() {
             1 ~> f
             "#,
         )
-        .expect("4")
+        .expect("4");
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn test_tail_call_with_arguments() {
             1 ~> f
             "#,
         )
-        .expect("4")
+        .expect("4");
 }
 
 #[test]

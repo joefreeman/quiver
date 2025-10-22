@@ -349,8 +349,30 @@ fn tuple_type(input: &str) -> IResult<&str, Type> {
     )(input)
 }
 
+fn type_parameter(input: &str) -> IResult<&str, Type> {
+    map(delimited(char('<'), identifier, char('>')), |name| {
+        Type::Identifier {
+            name,
+            arguments: vec![],
+        }
+    })(input)
+}
+
 fn type_identifier(input: &str) -> IResult<&str, Type> {
-    map(identifier, Type::Identifier)(input)
+    map(
+        pair(
+            identifier,
+            opt(delimited(
+                char('<'),
+                separated_list1(tuple((ws0, char(','), ws0)), type_definition),
+                char('>'),
+            )),
+        ),
+        |(name, arguments)| Type::Identifier {
+            name,
+            arguments: arguments.unwrap_or_default(),
+        },
+    )(input)
 }
 
 fn type_cycle(input: &str) -> IResult<&str, Type> {
@@ -448,6 +470,7 @@ fn base_type(input: &str) -> IResult<&str, Type> {
         primitive_type,
         type_cycle,
         process_type,
+        type_parameter, // Must come before type_identifier to match <t> before trying identifier
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         type_identifier,
     ))(input)
@@ -633,9 +656,18 @@ fn function(input: &str) -> IResult<&str, Function> {
     map(
         preceded(
             char('#'),
-            pair(opt(terminated(function_input_type, ws1)), block),
+            tuple((
+                opt(delimited(
+                    char('<'),
+                    separated_list1(tuple((ws0, char(','), ws0)), identifier),
+                    char('>'),
+                )),
+                opt(terminated(function_input_type, ws1)),
+                block,
+            )),
         ),
-        |(parameter_type, body)| Function {
+        |(type_parameters, parameter_type, body)| Function {
+            type_parameters: type_parameters.unwrap_or_default(),
             parameter_type,
             body,
         },
@@ -914,10 +946,16 @@ fn type_alias(input: &str) -> IResult<&str, Statement> {
     map(
         tuple((
             identifier,
+            opt(delimited(
+                char('<'),
+                separated_list1(tuple((ws0, char(','), ws0)), identifier),
+                char('>'),
+            )),
             preceded(tuple((ws0, tag("::"), ws0)), type_definition),
         )),
-        |(name, type_definition)| Statement::TypeAlias {
+        |(name, type_parameters, type_definition)| Statement::TypeAlias {
             name,
+            type_parameters: type_parameters.unwrap_or_default(),
             type_definition,
         },
     )(input)

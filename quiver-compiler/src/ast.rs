@@ -7,6 +7,7 @@ pub struct Program {
 pub enum Statement {
     TypeAlias {
         name: String,
+        type_parameters: Vec<String>,
         type_definition: Type,
     },
     TypeImport {
@@ -92,6 +93,7 @@ pub struct TupleField {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
+    pub type_parameters: Vec<String>,
     pub parameter_type: Option<Type>,
     pub body: Block,
 }
@@ -158,7 +160,7 @@ pub enum Type {
     Tuple(TupleType),
     Function(FunctionType),
     Union(UnionType),
-    Identifier(String),
+    Identifier { name: String, arguments: Vec<Type> },
     Cycle(Option<usize>),
     Process(ProcessType),
 }

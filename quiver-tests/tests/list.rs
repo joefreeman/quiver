@@ -10,7 +10,7 @@ fn test_new() {
             list.new[]
             "#,
         )
-        .expect("Nil")
+        .expect("Nil");
 }
 
 #[test]

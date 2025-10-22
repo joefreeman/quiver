@@ -91,13 +91,30 @@ adder :: #int -> int;
 writer :: (write: (#bin -> Ok));
 ```
 
+### Parameterised types
+
+Type aliases and functions can be parameterised with type parameters using angle brackets:
+
+```
+pair<a, b> :: Pair[first: a, second: b];
+```
+
+Functions can also declare type parameters:
+
+```
+id = #<t>t { ~> }
+map = #<t, u>[list<t>, #t -> u] { ... }
+```
+
+Type parameters are inferred from usage. When a function with type parameters is called with different argument types, the type variables are unified (i.e., widened) to find the most general type that satisfies all constraints.
+
 ### Union types
 
 ```
+bool :: True | False;
 shape ::
   | Circle[radius: int]
   | Rectangle[width: int, height: int];
-bool :: True | False;
 ```
 
 ### Recursive types
@@ -105,8 +122,8 @@ bool :: True | False;
 Use `&` to refer back to the root of the types, or `&1`/`&2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
 
 ```
-list :: Nil | Cons[int, &];
-tree :: Leaf[int] | Node[&, &];
+list<t> :: Nil | Cons[t, &];
+tree<t> :: Leaf[t] | Node[&, &];
 json ::
   | Null
   | bool
@@ -497,10 +514,10 @@ add_points[p1, p2]   // Point[x: 10, y: 7]
 ### Pattern matching
 
 ```
-list :: Nil | Cons[int, &];
+list<t> :: Nil | Cons[t, &];
 
 // Determine whether a list contains an item
-contains? = #[list, int] {
+contains? = #<t>[list<t>, t] {
   | ~> =[Nil, _] => []
   | ~> =[Cons[^value, _], ^value] => Ok
   | ~> =[Cons[_, tail], value] => &[tail, value]
@@ -530,7 +547,9 @@ clamp = #int {
 
 ```
 // shapes.qv
-shape :: Circle[radius: int] | Rectangle[width: int, height: int];
+shape ::
+  | Circle[radius: int]
+  | Rectangle[width: int, height: int];
 
 math = %"math",
 

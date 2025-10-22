@@ -121,7 +121,7 @@ pub struct TestResult {
 #[allow(dead_code)]
 impl TestResult {
     /// Expect a value matching the given Quiver syntax string representation
-    pub fn expect(self, expected: &str) {
+    pub fn expect(self, expected: &str) -> Self {
         match self.result {
             Ok(Some((ref value, ref heap_data))) => {
                 let actual = self.repl.format_value(value, heap_data);
@@ -132,9 +132,9 @@ impl TestResult {
                 );
             }
             Ok(None) => {
-                // No executable code (e.g., only type definitions) - treat as []
+                // No executable code (e.g., only type definitions)
                 assert_eq!(
-                    "[]", expected,
+                    "", expected,
                     "Expected '{}', got no result (type definitions only) for source: {}",
                     expected, self.source
                 );
@@ -146,6 +146,7 @@ impl TestResult {
                 );
             }
         }
+        self
     }
 
     pub fn expect_runtime_error(self, expected: quiver_core::error::Error) {
@@ -219,6 +220,35 @@ impl TestResult {
                 );
             }
         }
+    }
+
+    pub fn expect_type(self, variable_name: &str, expected: &str) -> Self {
+        // Get variable type from the repl
+        let variables = self.repl.get_variables();
+        let variable_type = variables
+            .iter()
+            .find(|(name, _)| name == variable_name)
+            .map(|(_, ty)| ty);
+
+        match variable_type {
+            Some(ty) => {
+                let actual = self.repl.format_type(ty);
+                assert_eq!(
+                    actual, expected,
+                    "Expected variable '{}' to have type '{}', but got '{}' for source: {}",
+                    variable_name, expected, actual, self.source
+                );
+            }
+            None => {
+                panic!(
+                    "Variable '{}' not found. Available variables: {:?} for source: {}",
+                    variable_name,
+                    variables.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+                    self.source
+                );
+            }
+        }
+        self
     }
 }
 

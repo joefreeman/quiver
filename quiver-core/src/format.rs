@@ -118,6 +118,7 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
                 format!("({})", type_strs.join(" | "))
             }
         }
+        Type::Variable(name) => name.to_string(),
     }
 }
 

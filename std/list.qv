@@ -1,38 +1,38 @@
 
-list :: Nil | Cons[int, &];
+list<t> :: Nil | Cons[t, &];
 
 math = %"math",
 
-length' = #[list, int] {
+length' = #<t>[list<t>, int] {
   | ~> =[Nil, x] => x
   | ~> =[Cons[_, rest], x] => math.add[x, 1] ~> &[rest, ~]
 },
 
-reverse' = #[list, list] {
+reverse' = #<t>[list<t>, list<t>] {
   | ~> =[Nil, xs] => xs
   | ~> =[Cons[head, tail], xs] => Cons[head, xs] ~> &[tail, ~]
 },
 
-concat' = #[list, list, list] {
+concat' = #<t>[list<t>, list<t>, list<t>] {
   | ~> =[Nil, a, b] => [b, a] ~> reverse'
   | ~> =[Cons[head, tail], a, b] => Cons[head, b] ~> &[tail, a, ~]
 },
 
-map' = #[list, #int -> int, list] {
+map' = #<t, u>[list<t>, #t -> u, list<u>] {
   | ~> =[Nil, _, acc] => [acc, Nil] ~> reverse'
   | ~> =[Cons[head, tail], f, acc] => {
     head ~> f ~> Cons[~, acc] ~> &[tail, f, ~]
   }
 },
 
-filter' = #[list, #int -> (Ok | []), list] {
+filter' = #<t>[list<t>, #t -> (Ok | []), list<t>] {
   | ~> =[Nil, _, acc] => [acc, Nil] ~> reverse'
   | ~> =[Cons[head, tail], pred, acc], head ~> pred =>
     [tail, pred, Cons[head, acc]] ~> &
   | ~> =[Cons[_, tail], pred, acc] => &[tail, pred, acc]
 },
 
-take' = #[list, int, list] {
+take' = #<t>[list<t>, int, list<t>] {
   | ~> =[Nil, _, acc] => [acc, Nil] ~> reverse'
   | ~> =[_, 0, acc] => [acc, Nil] ~> reverse'
   | ~> =[Cons[head, tail], n, acc] => {
@@ -43,77 +43,77 @@ take' = #[list, int, list] {
 [
   new: #{ Nil },
 
-  head: #list {
+  head: #<t>list<t> {
     ~> =Cons[head, _] => head
   },
 
-  tail: #list {
+  tail: #<t>list<t> {
     ~> =Cons[_, tail] => tail
   },
 
-  empty?: #list { ~> =Nil => Ok },
+  empty?: #<t>list<t> { ~> =Nil => Ok },
 
-  prepend: #[list, int] {
+  prepend: #<t>[list<t>, t] {
     ~> =[xs, x] => Cons[x, xs]
   },
 
-  append: #[list, int] {
+  append: #<t>[list<t>, t] {
     ~> =[xs, x] => {
       reversed = [xs, Nil] ~> reverse',
       [Cons[x, reversed], Nil] ~> reverse'
     }
   },
 
-  concat: #[list, list] {
+  concat: #<t>[list<t>, list<t>] {
     ~> =[xs, ys] => concat'[xs, ys, Nil]
   },
 
-  length: #list {
+  length: #<t>list<t> {
     ~> =xs => [xs, 0] ~> length'
   },
 
-  reverse: #list {
+  reverse: #<t>list<t> {
     ~> =xs => [xs, Nil] ~> reverse'
   },
 
-  at: #[list, int] {
+  at: #<t>[list<t>, int] {
     | ~> =[Nil, _] => []
     | ~> =[Cons[h, _], 0] => h
     | ~> =[Cons[_, t], n] => math.sub[n, 1] ~> &[t, ~]
   },
 
-  map: #[list, #int -> int] {
+  map: #<t, u>[list<t>, #t -> u] {
     ~> =[xs, f] => map'[xs, f, Nil]
   },
 
-  filter: #[list, #int -> (Ok | [])] {
+  filter: #<t>[list<t>, #t -> (Ok | [])] {
     ~> =[xs, f] => filter'[xs, f, Nil]
   },
 
-  drop: #[list, int] {
+  drop: #<t>[list<t>, int] {
     | ~> =[Nil, _] => Nil
     | ~> =[xs, 0] => xs
     | ~> =[Cons[_, tail], n] =>
       math.sub[n, 1] ~> &[tail, ~]
   },
 
-  take: #[list, int] {
+  take: #<t>[list<t>, int] {
     ~> =[xs, x] => take'[xs, x, Nil]
   },
 
-  contains?: #[list, int] {
+  contains?: #<t>[list<t>, t] {
     | ~> =[Nil, _] => []
     | ~> =[Cons[^value, _], ^value] => Ok
     | ~> =[Cons[_, tail], value] => &[tail, value]
   },
 
-  all?: #[list, #int -> (Ok | [])] {
+  all?: #<t>[list<t>, #t -> (Ok | [])] {
     | ~> =[Nil, _] => Ok
     | ~> =[Cons[head, tail], pred], head ~> pred => &[tail, pred]
     | ~> =[Cons[_, _], _] => []
   },
 
-  any?: #[list, #int -> (Ok | [])] {
+  any?: #<t>[list<t>, #t -> (Ok | [])] {
     | ~> =[Nil, _] => []
     | ~> =[Cons[head, tail], pred], head ~> pred => Ok
     | ~> =[Cons[_, tail], pred] => &[tail, pred]

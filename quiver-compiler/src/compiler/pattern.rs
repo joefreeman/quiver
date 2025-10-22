@@ -7,7 +7,7 @@ use quiver_core::{
     types::{Type, TypeLookup},
 };
 
-use super::{Error, codegen::InstructionBuilder, typing::TypeContext};
+use super::{Error, codegen::InstructionBuilder};
 
 // Type aliases for complex pattern matching types
 type PatternAnalysisResult = (MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>);
@@ -78,7 +78,6 @@ pub struct BindingSet {
 
 /// Analyze pattern without generating code
 pub fn analyze_pattern(
-    type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
     pattern: &ast::Match,
     value_type: &Type,
@@ -87,7 +86,6 @@ pub fn analyze_pattern(
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
     let binding_sets = analyze_match_pattern(
-        type_context,
         type_lookup,
         pattern,
         value_type,
@@ -248,7 +246,6 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
 
 #[allow(clippy::too_many_arguments)]
 fn analyze_match_pattern(
-    type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
     pattern: &ast::Match,
     value_type: &Type,
@@ -268,7 +265,6 @@ fn analyze_match_pattern(
         ),
         ast::Match::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
         ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
-            type_context,
             type_lookup,
             tuple,
             value_type,
@@ -286,7 +282,6 @@ fn analyze_match_pattern(
             bindings: vec![],
         }]),
         ast::Match::Pin(inner) => analyze_match_pattern(
-            type_context,
             type_lookup,
             inner,
             value_type,
@@ -296,7 +291,6 @@ fn analyze_match_pattern(
             variables,
         ),
         ast::Match::Bind(inner) => analyze_match_pattern(
-            type_context,
             type_lookup,
             inner,
             value_type,
@@ -310,7 +304,6 @@ fn analyze_match_pattern(
 
 #[allow(clippy::too_many_arguments)]
 fn analyze_match_tuple_pattern(
-    type_context: &TypeContext,
     type_lookup: &impl TypeLookup,
     tuple: &ast::MatchTuple,
     value_type: &Type,
@@ -376,7 +369,6 @@ fn analyze_match_tuple_pattern(
 
             // Recursively analyze the field pattern
             let field_binding_sets = analyze_match_pattern(
-                type_context,
                 type_lookup,
                 &field.pattern,
                 &field_type,

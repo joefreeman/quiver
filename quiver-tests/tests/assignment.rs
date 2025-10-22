@@ -28,7 +28,7 @@ fn test_named_field_assignment() {
         .expect("[]");
     quiver().evaluate("A[a: 1] ~> =A[x: a], a").expect("[]");
     quiver().evaluate("A[a: 1] ~> =A[a], a").expect("[]");
-    quiver().evaluate("A[a: a] = A[a: 5]; a").expect("5")
+    quiver().evaluate("A[a: a] = A[a: 5]; a").expect("5");
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn test_union_match_with_literals() {
             }
             "#,
         )
-        .expect("200")
+        .expect("200");
 }
 #[test]
 fn test_union_match_with_tuples() {
@@ -153,7 +153,7 @@ fn test_union_match_with_tuples() {
             }
             "#,
         )
-        .expect("4")
+        .expect("4");
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn test_match_union_in_nested_tuple() {
             [Some[5], 2] ~> f
             "#,
         )
-        .expect("7")
+        .expect("7");
 }
 
 #[test]

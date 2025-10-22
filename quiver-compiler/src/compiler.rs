@@ -13,7 +13,7 @@ mod variables;
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::MatchCertainty;
-pub use typing::{TupleAccessor, union_types};
+pub use typing::{TupleAccessor, TypeAliasDef, union_types};
 
 use crate::{
     ast,
@@ -28,8 +28,6 @@ use quiver_core::{
     types::{CallableType, ProcessType, Type, TypeLookup},
     value::Value,
 };
-
-use typing::TypeContext;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -140,7 +138,7 @@ pub struct CompilationResult {
     pub result_type: Type,
     pub variables: HashMap<String, (Type, usize)>,
     pub program: Program,
-    pub type_aliases: HashMap<String, Type>,
+    pub type_aliases: HashMap<String, typing::TypeAliasDef>,
     pub module_cache: ModuleCache,
 }
 
@@ -161,7 +159,7 @@ impl Scope {
 pub struct Compiler<'a> {
     // Core components
     codegen: InstructionBuilder,
-    type_context: TypeContext,
+    type_aliases: HashMap<String, typing::TypeAliasDef>,
     module_cache: ModuleCache,
 
     // State management
@@ -182,7 +180,7 @@ impl<'a> Compiler<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn compile(
         program: ast::Program,
-        type_aliases: HashMap<String, Type>,
+        type_aliases: HashMap<String, typing::TypeAliasDef>,
         module_cache: ModuleCache,
         module_loader: &'a dyn ModuleLoader,
         base_program: &Program,
@@ -192,7 +190,7 @@ impl<'a> Compiler<'a> {
     ) -> Result<CompilationResult, Error> {
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
-            type_context: TypeContext::new(type_aliases),
+            type_aliases,
             module_cache,
             scopes: vec![],
             local_count: 0,
@@ -275,7 +273,7 @@ impl<'a> Compiler<'a> {
             result_type,
             variables,
             program: compiler.program,
-            type_aliases: compiler.type_context.into_type_aliases(),
+            type_aliases: compiler.type_aliases,
             module_cache: compiler.module_cache,
         })
     }
@@ -284,9 +282,10 @@ impl<'a> Compiler<'a> {
         match statement {
             ast::Statement::TypeAlias {
                 name,
+                type_parameters,
                 type_definition,
             } => {
-                self.compile_type_alias(&name, type_definition)?;
+                self.compile_type_alias(&name, type_parameters, type_definition)?;
                 Ok(Type::nil())
             }
             ast::Statement::TypeImport {
@@ -300,15 +299,68 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn compile_type_alias(&mut self, name: &str, type_definition: ast::Type) -> Result<(), Error> {
-        let resolved_type = self
-            .type_context
-            .resolve_ast_type(type_definition, &mut self.program)?;
+    fn compile_type_alias(
+        &mut self,
+        name: &str,
+        type_parameters: Vec<String>,
+        type_definition: ast::Type,
+    ) -> Result<(), Error> {
+        // Validate the AST before storing (even though we won't resolve it yet)
+        Self::validate_type_ast(&type_definition)?;
 
-        self.type_context
-            .type_aliases
-            .insert(name.to_string(), resolved_type);
+        // Store all type aliases (with 0+ parameters)
+        self.type_aliases
+            .insert(name.to_string(), (type_parameters, type_definition));
         Ok(())
+    }
+
+    fn validate_type_ast(ast_type: &ast::Type) -> Result<(), Error> {
+        match ast_type {
+            ast::Type::Tuple(tuple) => {
+                // Validate partial types have all named fields
+                if tuple.is_partial {
+                    let has_unnamed = tuple.fields.iter().any(|f| f.name.is_none());
+                    let has_named = tuple.fields.iter().any(|f| f.name.is_some());
+
+                    if has_unnamed && has_named {
+                        return Err(Error::TypeUnresolved(
+                            "All fields in a partial type must be named".to_string(),
+                        ));
+                    }
+                }
+                // Recursively validate field types
+                for field in &tuple.fields {
+                    Self::validate_type_ast(&field.type_def)?;
+                }
+                Ok(())
+            }
+            ast::Type::Function(func) => {
+                Self::validate_type_ast(&func.input)?;
+                Self::validate_type_ast(&func.output)
+            }
+            ast::Type::Process(proc) => {
+                if let Some(receive) = &proc.receive_type {
+                    Self::validate_type_ast(receive)?;
+                }
+                if let Some(returns) = &proc.return_type {
+                    Self::validate_type_ast(returns)?;
+                }
+                Ok(())
+            }
+            ast::Type::Union(union) => {
+                for variant in &union.types {
+                    Self::validate_type_ast(variant)?;
+                }
+                Ok(())
+            }
+            ast::Type::Identifier { arguments, .. } => {
+                for arg in arguments {
+                    Self::validate_type_ast(arg)?;
+                }
+                Ok(())
+            }
+            ast::Type::Primitive(_) | ast::Type::Cycle(_) => Ok(()),
+        }
     }
 
     fn compile_type_import(
@@ -322,7 +374,7 @@ impl<'a> Compiler<'a> {
             &mut self.module_cache,
             self.module_loader,
             self.module_path.as_ref(),
-            &mut self.type_context,
+            &mut self.type_aliases,
             &mut self.program,
         )
     }
@@ -502,9 +554,11 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), Error> {
         match term {
             ast::Term::Receive(receive) => {
-                let message_type = self
-                    .type_context
-                    .resolve_ast_type(receive.type_def.clone(), &mut self.program)?;
+                let message_type = typing::resolve_ast_type(
+                    &self.type_aliases,
+                    receive.type_def.clone(),
+                    &mut self.program,
+                )?;
                 receive_types.push(message_type);
                 // Also check nested receives in the receive block
                 if let Some(block) = &receive.block {
@@ -599,10 +653,14 @@ impl<'a> Compiler<'a> {
             }
         }
 
+        // Resolve parameter type with declared type parameters
         let parameter_type = match &function.parameter_type {
-            Some(t) => self
-                .type_context
-                .resolve_ast_type(t.clone(), &mut self.program)?,
+            Some(t) => typing::resolve_function_parameter_type(
+                &self.type_aliases,
+                t.clone(),
+                &function.type_parameters,
+                &mut self.program,
+            )?,
             None => Type::nil(),
         };
 
@@ -677,9 +735,11 @@ impl<'a> Compiler<'a> {
         if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
                 if let Some(field_name) = &field.name {
-                    let field_type = self
-                        .type_context
-                        .resolve_ast_type(field.type_def.clone(), &mut self.program)?;
+                    let field_type = typing::resolve_ast_type(
+                        &self.type_aliases,
+                        field.type_def.clone(),
+                        &mut self.program,
+                    )?;
                     parameter_fields.insert(field_name.clone(), (field_index, field_type));
                 }
             }
@@ -741,7 +801,6 @@ impl<'a> Compiler<'a> {
 
         // Analyze pattern to get bindings without generating code yet
         let (certainty, bindings, binding_sets) = pattern::analyze_pattern(
-            &self.type_context,
             &self.program,
             &pattern,
             &value_type,
@@ -1118,12 +1177,12 @@ impl<'a> Compiler<'a> {
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_local_count = self.local_count;
-        let saved_type_aliases = self.type_context.type_aliases.clone();
+        let saved_type_aliases = self.type_aliases.clone();
 
         // Reset to clean state for module compilation
         self.scopes = vec![Scope::new(HashMap::new(), None)];
         self.local_count = 0;
-        self.type_context.type_aliases.clear();
+        self.type_aliases.clear();
 
         for statement in parsed.statements {
             self.compile_statement(statement)?;
@@ -1136,7 +1195,7 @@ impl<'a> Compiler<'a> {
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
-        self.type_context.type_aliases = saved_type_aliases;
+        self.type_aliases = saved_type_aliases;
 
         // Execute the module instructions to get the result value
         let (module_value, executor) =
@@ -1487,9 +1546,11 @@ impl<'a> Compiler<'a> {
                 Ok(Type::Process(Box::new(process_type)))
             }
             ast::Term::Receive(receive) => {
-                let message_type = self
-                    .type_context
-                    .resolve_ast_type(receive.type_def.clone(), &mut self.program)?;
+                let message_type = typing::resolve_ast_type(
+                    &self.type_aliases,
+                    receive.type_def.clone(),
+                    &mut self.program,
+                )?;
 
                 if let Some(block) = receive.block.clone() {
                     // Receive with block - pattern matching logic
@@ -1532,16 +1593,41 @@ impl<'a> Compiler<'a> {
         match target_type {
             Type::Callable(func_type) => {
                 // Function call
-                // Check parameter compatibility
-                if !value_type.is_compatible(&func_type.parameter, &self.program) {
-                    return Err(Error::TypeMismatch {
-                        expected: format!(
-                            "function parameter compatible with {}",
-                            quiver_core::format::format_type(&self.program, &func_type.parameter)
-                        ),
-                        found: quiver_core::format::format_type(&self.program, &value_type),
-                    });
-                }
+
+                // Check if function has type variables - if so, perform unification
+                let has_vars_param =
+                    typing::contains_variables(&func_type.parameter, &self.program);
+                let has_vars_result = typing::contains_variables(&func_type.result, &self.program);
+
+                let result_type = if has_vars_param || has_vars_result {
+                    // Perform unification to bind type variables
+                    let mut bindings = HashMap::new();
+
+                    typing::unify(
+                        &mut bindings,
+                        &func_type.parameter,
+                        &value_type,
+                        &self.program,
+                    )?;
+
+                    // Substitute bindings in the result type
+                    typing::substitute(&func_type.result, &bindings, &mut self.program)
+                } else {
+                    // No type variables - just check compatibility
+                    if !value_type.is_compatible(&func_type.parameter, &self.program) {
+                        return Err(Error::TypeMismatch {
+                            expected: format!(
+                                "function parameter compatible with {}",
+                                quiver_core::format::format_type(
+                                    &self.program,
+                                    &func_type.parameter
+                                )
+                            ),
+                            found: quiver_core::format::format_type(&self.program, &value_type),
+                        });
+                    }
+                    func_type.result.clone()
+                };
 
                 // Check receive type compatibility
                 let called_receive_type = &func_type.receive;
@@ -1590,7 +1676,7 @@ impl<'a> Compiler<'a> {
 
                 // Execute the call
                 self.codegen.add_instruction(Instruction::Call);
-                Ok(func_type.result)
+                Ok(result_type)
             }
             Type::Process(process_type) => {
                 // Message send
@@ -1980,11 +2066,20 @@ impl<'a> Compiler<'a> {
         let mut common_index = None;
 
         for type_id in tuple_types {
-            let (index, field_type) = self.type_context.get_tuple_field_type_by_name(
-                type_id,
-                field_name,
-                &self.program,
-            )?;
+            // Look up the field in this tuple type
+            let tuple_type = self
+                .program
+                .lookup_type(type_id)
+                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+            let (index, (_, field_type)) = tuple_type
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, field)| field.0.as_deref() == Some(field_name))
+                .ok_or(Error::FieldNotFound {
+                    field_name: field_name.to_string(),
+                    type_name: format!("{:?}", type_id),
+                })?;
 
             // Verify all tuples have the field at the same index
             if let Some(prev_index) = common_index {
@@ -1998,7 +2093,7 @@ impl<'a> Compiler<'a> {
                 common_index = Some(index);
             }
 
-            results.push((index, field_type));
+            results.push((index, field_type.clone()));
         }
 
         Ok(results)

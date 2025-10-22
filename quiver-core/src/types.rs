@@ -52,6 +52,8 @@ pub enum Type {
     Union(Vec<Type>),
     #[serde(rename = "process")]
     Process(Box<ProcessType>),
+    #[serde(rename = "var")]
+    Variable(String),
 }
 
 impl Type {
@@ -343,6 +345,9 @@ impl Type {
                             })
                     })
             }
+
+            // Type variables are compatible with anything (they're placeholders)
+            (Type::Variable(_), _) | (_, Type::Variable(_)) => true,
 
             _ => false,
         }

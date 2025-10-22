@@ -10,20 +10,20 @@
 
 ```quiver
 // Define a recursive list type
-list :: Nil | Cons[int, &];
+list<t> :: Nil | Cons[t, &];
 
 // Import standard library
 math = %"math",
 
 // Compute the sum of a list using tail recursion
-sum' = #[list, int] {
+sum' = #[list<int>, int] {
   | ~> =[Nil, acc] => acc
   | ~> =[Cons[head, tail], acc] => {
      math.add[head, acc] ~> &[tail, ~]
   }
 },
 
-sum = #list { ~> sum'[~, 0] },
+sum = #list<int> { ~> sum'[~, 0] },
 
 // Build and sum a list
 xs = Cons[1, Cons[2, Cons[3, Nil]]],

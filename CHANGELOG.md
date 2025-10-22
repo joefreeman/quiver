@@ -6,6 +6,7 @@
 
 - Hexadecimal (`0x...`) and binary (`0b...`) integer literal notation.
 - Support for partial type definitions.
+- Parameterised types for type aliases and functions (e.g., `list<t>`, `#<t>t -> t`).
 
 ### Changed
 
