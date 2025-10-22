@@ -10,7 +10,7 @@
 
 ### Changed
 
-- Replaced tuple update syntax with spread operator (`...`) for more flexible/intuitive merging/updating of tuples.
+- Replaced tuple update syntax with spread operator (`...`) for more flexible/intuitive merging/updating of tuples for both values and types.
 - Replaced `type` keyword with `::` syntax (e.g., `point :: Point[x: int, y: int]`).
 - Changed syntax for calling built-ins to `__add__`.
 

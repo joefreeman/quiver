@@ -73,8 +73,18 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TupleName {
+    /// Explicit tuple name like Point[x: 1]
+    Literal(String),
+    /// Inherit name from variable like a[..., y: 2]
+    Identifier(String),
+    /// Unnamed tuple like [x: 1]
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tuple {
-    pub name: Option<String>,
+    pub name: TupleName,
     pub fields: Vec<TupleField>,
 }
 
@@ -179,15 +189,21 @@ pub enum PrimitiveType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleType {
-    pub name: Option<String>,
+    pub name: TupleName,
     pub fields: Vec<FieldType>,
     pub is_partial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FieldType {
-    pub name: Option<String>,
-    pub type_def: Type,
+pub enum FieldType {
+    Field {
+        name: Option<String>,
+        type_def: Type,
+    },
+    Spread {
+        identifier: Option<String>,
+        type_arguments: Vec<Type>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

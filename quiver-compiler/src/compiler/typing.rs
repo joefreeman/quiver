@@ -84,7 +84,10 @@ fn ast_contains_cycle(typ: &ast::Type) -> bool {
     match typ {
         ast::Type::Cycle(_) => true,
         ast::Type::Union(union) => union.types.iter().any(ast_contains_cycle),
-        ast::Type::Tuple(tuple) => tuple.fields.iter().any(|f| ast_contains_cycle(&f.type_def)),
+        ast::Type::Tuple(tuple) => tuple.fields.iter().any(|f| match f {
+            ast::FieldType::Field { type_def, .. } => ast_contains_cycle(type_def),
+            ast::FieldType::Spread { .. } => false,
+        }),
         ast::Type::Identifier { arguments, .. } => arguments.iter().any(ast_contains_cycle),
         // Function and process types are boundaries - cycles inside them don't count
         // as structural recursion
@@ -132,6 +135,238 @@ pub fn resolve_function_parameter_type(
     resolve_ast_type_impl(&mut union_depth, type_aliases, ast_type, program, &bindings)
 }
 
+/// Resolve a type alias for display purposes (e.g., in tests or REPL).
+/// Type parameters are resolved to Type::Variable placeholders.
+/// This allows formatting of parameterized types like `point<t> :: Point[x: t, y: t]`
+/// as `Point[x: t, y: t]` where `t` is a type variable.
+pub fn resolve_type_alias_for_display(
+    type_aliases: &HashMap<String, TypeAliasDef>,
+    alias_name: &str,
+    program: &mut Program,
+) -> Result<Type, Error> {
+    let (type_params, ast_type) = type_aliases
+        .get(alias_name)
+        .ok_or_else(|| Error::TypeAliasMissing(alias_name.to_string()))?;
+
+    // Create Variable bindings for all type parameters
+    let mut bindings = HashMap::new();
+    for param in type_params {
+        bindings.insert(param.clone(), Type::Variable(param.clone()));
+    }
+
+    let mut union_depth = 0;
+    resolve_ast_type_impl(
+        &mut union_depth,
+        type_aliases,
+        ast_type.clone(),
+        program,
+        &bindings,
+    )
+}
+
+/// Resolve tuple name when using identifier spread syntax (e.g., t1[..., y: int])
+fn resolve_tuple_name(
+    name: ast::TupleName,
+    type_aliases: &HashMap<String, TypeAliasDef>,
+    _program: &Program,
+) -> Result<Option<String>, Error> {
+    match name {
+        ast::TupleName::Literal(s) => Ok(Some(s)),
+        ast::TupleName::None => Ok(None),
+        ast::TupleName::Identifier(identifier) => {
+            // Look up the type alias to get its tuple name
+            let (type_params, type_def) = type_aliases
+                .get(&identifier)
+                .ok_or_else(|| Error::TypeAliasMissing(identifier.to_string()))?;
+
+            // Type parameters must be empty for name inheritance (for now)
+            if !type_params.is_empty() {
+                return Err(Error::FeatureUnsupported(format!(
+                    "Type alias '{}' has type parameters - name inheritance from parameterized types requires explicit instantiation",
+                    identifier
+                )));
+            }
+
+            // Resolve the type to get the actual tuple name
+            // We need to resolve it to extract the name, but we do a simpler check
+            // by looking at the AST directly
+            match type_def {
+                ast::Type::Tuple(tuple_type) => {
+                    resolve_tuple_name(tuple_type.name.clone(), type_aliases, _program)
+                }
+                ast::Type::Union(_) => {
+                    // For unions, don't try to extract a single name
+                    // The spread mechanism will handle each variant individually
+                    Ok(None)
+                }
+                _ => Err(Error::TypeUnresolved(format!(
+                    "Type alias '{}' must resolve to a tuple or union type for identifier spread syntax",
+                    identifier
+                ))),
+            }
+        }
+    }
+}
+
+type FieldSet = Vec<(Option<String>, Type)>;
+type NamedFieldVariants = Vec<(Option<String>, FieldSet)>; // (tuple_name, fields)
+
+/// Resolve tuple fields that contain spreads
+/// Returns a vector of (name, field_set) pairs - multiple pairs if spreading creates union variants
+fn resolve_tuple_fields_with_spread(
+    union_depth: &mut usize,
+    type_aliases: &HashMap<String, TypeAliasDef>,
+    fields: &[ast::FieldType],
+    program: &mut Program,
+    type_bindings: &HashMap<String, Type>,
+) -> Result<NamedFieldVariants, Error> {
+    // Track all possible field combinations with their names (for union distribution)
+    // Each variant is (tuple_name, fields)
+    let mut variants: NamedFieldVariants = vec![(None, Vec::new())];
+
+    // Process fields left to right
+    for field in fields {
+        match field {
+            ast::FieldType::Field { name, type_def } => {
+                // Resolve the field type
+                let field_type = resolve_ast_type_impl(
+                    union_depth,
+                    type_aliases,
+                    type_def.clone(),
+                    program,
+                    type_bindings,
+                )?;
+
+                // Add this field to all variants
+                for (_tuple_name, variant_fields) in &mut variants {
+                    // Check if we should replace an existing field
+                    if let Some(pos) = name.as_ref().and_then(|n| {
+                        variant_fields
+                            .iter()
+                            .position(|(field_name, _)| field_name.as_ref() == Some(n))
+                    }) {
+                        variant_fields[pos].1 = field_type.clone();
+                        continue;
+                    }
+                    variant_fields.push((name.clone(), field_type.clone()));
+                }
+            }
+            ast::FieldType::Spread {
+                identifier,
+                type_arguments,
+            } => {
+                // Identifier must be specified (parser transforms `...` in `identifier[...]` to `...identifier`)
+                let spread_id = identifier.as_ref().ok_or_else(|| {
+                    Error::TypeUnresolved(
+                        "Spread without identifier is only allowed in `identifier[..., fields]` syntax"
+                            .to_string(),
+                    )
+                })?;
+
+                // Look up the spread type
+                let (type_params, type_def) = type_aliases
+                    .get(spread_id)
+                    .ok_or_else(|| Error::TypeAliasMissing(spread_id.clone()))?;
+
+                // Check type parameter count matches
+                if type_params.len() != type_arguments.len() {
+                    return Err(Error::TypeUnresolved(format!(
+                        "Type alias '{}' expects {} type parameters, got {}",
+                        spread_id,
+                        type_params.len(),
+                        type_arguments.len()
+                    )));
+                }
+
+                // Create type bindings for the spread type
+                let mut spread_bindings = type_bindings.clone();
+                for (param, arg) in type_params.iter().zip(type_arguments.iter()) {
+                    let arg_type = resolve_ast_type_impl(
+                        union_depth,
+                        type_aliases,
+                        arg.clone(),
+                        program,
+                        type_bindings,
+                    )?;
+                    spread_bindings.insert(param.clone(), arg_type);
+                }
+
+                // Resolve the spread type with the bindings
+                let spread_type = resolve_ast_type_impl(
+                    union_depth,
+                    type_aliases,
+                    type_def.clone(),
+                    program,
+                    &spread_bindings,
+                )?;
+
+                // Extract tuple types with names from the spread (handling unions)
+                let spread_named_types =
+                    extract_tuple_types_from_type_with_names(&spread_type, program)?;
+
+                // For each existing variant, create new variants for each spread type
+                let mut new_variants = Vec::new();
+                for (existing_name, existing_fields) in &variants {
+                    for (spread_name, spread_fields) in &spread_named_types {
+                        let mut new_variant_fields = existing_fields.clone();
+                        // Use spread name if existing name is None, otherwise keep existing
+                        let new_name = existing_name.clone().or_else(|| spread_name.clone());
+
+                        // Merge spread fields into variant fields
+                        for (spread_field_name, spread_field_type) in spread_fields {
+                            // Check if we should replace an existing field
+                            if let Some(pos) = spread_field_name.as_ref().and_then(|n| {
+                                new_variant_fields
+                                    .iter()
+                                    .position(|(field_name, _)| field_name.as_ref() == Some(n))
+                            }) {
+                                new_variant_fields[pos].1 = spread_field_type.clone();
+                                continue;
+                            }
+                            new_variant_fields
+                                .push((spread_field_name.clone(), spread_field_type.clone()));
+                        }
+
+                        new_variants.push((new_name, new_variant_fields));
+                    }
+                }
+                variants = new_variants;
+            }
+        }
+    }
+
+    // Return all variants - caller will decide if this should be a union
+    Ok(variants)
+}
+
+/// Extract tuple field definitions with names from a type, handling unions
+fn extract_tuple_types_from_type_with_names(
+    typ: &Type,
+    program: &Program,
+) -> Result<NamedFieldVariants, Error> {
+    match typ {
+        Type::Tuple(type_id) | Type::Partial(type_id) => {
+            let tuple_info = program
+                .lookup_type(type_id)
+                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+            Ok(vec![(tuple_info.name.clone(), tuple_info.fields.clone())])
+        }
+        Type::Union(variants) => {
+            let mut all_named_fields = Vec::new();
+            for variant in variants {
+                let variant_named_fields =
+                    extract_tuple_types_from_type_with_names(variant, program)?;
+                all_named_fields.extend(variant_named_fields);
+            }
+            Ok(all_named_fields)
+        }
+        _ => Err(Error::TypeMismatch {
+            expected: "tuple or partial".to_string(),
+            found: format!("{:?}", typ),
+        }),
+    }
+}
+
 fn resolve_ast_type_impl(
     union_depth: &mut usize,
     type_aliases: &HashMap<String, TypeAliasDef>,
@@ -144,17 +379,82 @@ fn resolve_ast_type_impl(
         ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(Type::Binary),
         ast::Type::Tuple(tuple) => {
             // Resolve field types without distributing unions
-            let mut fields = Vec::new();
+            // Check if there are any spreads
+            let has_spread = tuple
+                .fields
+                .iter()
+                .any(|f| matches!(f, ast::FieldType::Spread { .. }));
 
-            for field in tuple.fields {
-                let field_type = resolve_ast_type_impl(
+            if has_spread {
+                // Handle spreads - may create multiple variants
+                let field_variants = resolve_tuple_fields_with_spread(
                     union_depth,
                     type_aliases,
-                    field.type_def,
+                    &tuple.fields,
                     program,
                     type_bindings,
                 )?;
-                fields.push((field.name, field_type));
+
+                // Determine if this should be a partial type based solely on the AST syntax
+                // [...] produces a tuple, (...) produces a partial
+                let is_partial = tuple.is_partial;
+
+                // Process all variants (may be 1 or many)
+                let mut variant_types = Vec::new();
+                for (variant_name, fields) in field_variants {
+                    // Validate partial types
+                    if is_partial {
+                        for (field_name, _) in &fields {
+                            if field_name.is_none() {
+                                return Err(Error::TypeUnresolved(
+                                    "All fields in a partial type must be named".to_string(),
+                                ));
+                            }
+                        }
+                    }
+
+                    // Determine the final tuple name based on the name mode:
+                    // - TupleName::Literal -> use the literal name
+                    // - TupleName::Identifier -> use the variant name from spread
+                    // - TupleName::None -> use None (unnamed)
+                    let final_name = match &tuple.name {
+                        ast::TupleName::Literal(_) | ast::TupleName::None => {
+                            resolve_tuple_name(tuple.name.clone(), type_aliases, program)?
+                        }
+                        ast::TupleName::Identifier(_) => {
+                            // Use variant name from spread (inherits from source)
+                            variant_name
+                        }
+                    };
+
+                    let type_id = program.register_type(final_name, fields);
+                    variant_types.push(if is_partial {
+                        Type::Partial(type_id)
+                    } else {
+                        Type::Tuple(type_id)
+                    });
+                }
+
+                // Return single type or union based on variant count
+                return Ok(Type::from_types(variant_types));
+            }
+
+            // No spreads - process fields normally
+            let mut fields = Vec::new();
+            for field in tuple.fields {
+                match field {
+                    ast::FieldType::Field { name, type_def } => {
+                        let field_type = resolve_ast_type_impl(
+                            union_depth,
+                            type_aliases,
+                            type_def,
+                            program,
+                            type_bindings,
+                        )?;
+                        fields.push((name, field_type));
+                    }
+                    ast::FieldType::Spread { .. } => unreachable!(),
+                }
             }
 
             // Validate partial types
@@ -169,8 +469,12 @@ fn resolve_ast_type_impl(
                 }
             }
 
+            // Resolve tuple name (may inherit from identifier spread)
+            let resolved_name = resolve_tuple_name(tuple.name, type_aliases, program)?;
+
             // Register the tuple type with the is_partial flag
-            let type_id = program.register_type_with_partial(tuple.name, fields, tuple.is_partial);
+            let type_id =
+                program.register_type_with_partial(resolved_name, fields, tuple.is_partial);
 
             // Return Type::Partial for partial types, Type::Tuple for concrete types
             if tuple.is_partial {

@@ -13,7 +13,7 @@ mod variables;
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::MatchCertainty;
-pub use typing::{TupleAccessor, TypeAliasDef, union_types};
+pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_types};
 
 use crate::{
     ast,
@@ -319,8 +319,14 @@ impl<'a> Compiler<'a> {
             ast::Type::Tuple(tuple) => {
                 // Validate partial types have all named fields
                 if tuple.is_partial {
-                    let has_unnamed = tuple.fields.iter().any(|f| f.name.is_none());
-                    let has_named = tuple.fields.iter().any(|f| f.name.is_some());
+                    let has_unnamed = tuple
+                        .fields
+                        .iter()
+                        .any(|f| matches!(f, ast::FieldType::Field { name: None, .. }));
+                    let has_named = tuple
+                        .fields
+                        .iter()
+                        .any(|f| matches!(f, ast::FieldType::Field { name: Some(_), .. }));
 
                     if has_unnamed && has_named {
                         return Err(Error::TypeUnresolved(
@@ -330,7 +336,9 @@ impl<'a> Compiler<'a> {
                 }
                 // Recursively validate field types
                 for field in &tuple.fields {
-                    Self::validate_type_ast(&field.type_def)?;
+                    if let ast::FieldType::Field { type_def, .. } = field {
+                        Self::validate_type_ast(type_def)?;
+                    }
                 }
                 Ok(())
             }
@@ -399,7 +407,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_tuple(
         &mut self,
-        tuple_name: Option<String>,
+        tuple_name: ast::TupleName,
         fields: Vec<ast::TupleField>,
         value_type: Option<Type>,
     ) -> Result<Type, Error> {
@@ -409,57 +417,38 @@ impl<'a> Compiler<'a> {
         let contains_spread = Self::tuple_contains_spread(&fields);
 
         if contains_spread {
-            // Special handling for identifier[..., fields] and ~[..., fields] syntax:
-            // If tuple name matches a spread identifier, use the source type's name
-            let resolved_tuple_name = if let Some(ref name) = tuple_name {
-                // Check if any spread field references this name
-                let has_matching_spread = fields.iter().any(|f| {
-                    matches!(
-                        &f.value,
-                        ast::FieldValue::Spread(Some(id)) if id == name
-                    )
-                });
-
-                if has_matching_spread {
-                    if name == "~" {
+            // Resolve tuple name based on the TupleName variant
+            let resolved_tuple_name = match tuple_name {
+                ast::TupleName::Literal(name) => Some(name),
+                ast::TupleName::None => None,
+                ast::TupleName::Identifier(id) => {
+                    if id == "~" {
                         // Ripple spread: ~[..., fields]
                         // Get the ripple type from value_type (the piped value)
-                        if let Some(ref ripple_type) = value_type {
+                        value_type.as_ref().and_then(|ripple_type| {
                             if let Type::Tuple(type_id) = ripple_type {
-                                if let Some(type_info) = self.program.lookup_type(type_id) {
-                                    type_info.name.clone()
-                                } else {
-                                    None
-                                }
+                                self.program
+                                    .lookup_type(type_id)
+                                    .and_then(|type_info| type_info.name.clone())
                             } else {
                                 None
                             }
-                        } else {
-                            None
-                        }
+                        })
                     } else {
                         // Identifier spread: identifier[..., fields]
                         // Look up the variable's type
-                        if let Some((var_type, _)) = self.lookup_variable(&self.scopes, name, &[]) {
-                            // If it's a tuple type, use its name
-                            if let Type::Tuple(type_id) = var_type {
-                                if let Some(type_info) = self.program.lookup_type(&type_id) {
-                                    type_info.name.clone()
+                        self.lookup_variable(&self.scopes, &id, &[])
+                            .and_then(|(var_type, _)| {
+                                if let Type::Tuple(type_id) = var_type {
+                                    self.program
+                                        .lookup_type(&type_id)
+                                        .and_then(|type_info| type_info.name.clone())
                                 } else {
-                                    tuple_name
+                                    None
                                 }
-                            } else {
-                                tuple_name
-                            }
-                        } else {
-                            tuple_name
-                        }
+                            })
                     }
-                } else {
-                    tuple_name
                 }
-            } else {
-                None
             };
 
             // Use specialized compilation for tuples with spreads
@@ -507,7 +496,16 @@ impl<'a> Compiler<'a> {
         }
 
         // Register the tuple type and emit instruction
-        let type_id = self.program.register_type(tuple_name, field_types);
+        let resolved_name = match tuple_name {
+            ast::TupleName::Literal(name) => Some(name),
+            ast::TupleName::None => None,
+            ast::TupleName::Identifier(_) => {
+                // Parser enforces that identifier syntax requires spreads,
+                // so this path only executes when there are spreads (handled above)
+                unreachable!("TupleName::Identifier without spreads should be rejected by parser")
+            }
+        };
+        let type_id = self.program.register_type(resolved_name, field_types);
         self.codegen.add_instruction(Instruction::Tuple(type_id));
 
         // If this tuple established a ripple context, clean up
@@ -647,7 +645,11 @@ impl<'a> Compiler<'a> {
 
         if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
             for field in &tuple_type.fields {
-                if let Some(field_name) = &field.name {
+                if let ast::FieldType::Field {
+                    name: Some(field_name),
+                    ..
+                } = field
+                {
                     function_params.insert(field_name.clone());
                 }
             }
@@ -792,10 +794,14 @@ impl<'a> Compiler<'a> {
         let mut parameter_fields = HashMap::new();
         if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
-                if let Some(field_name) = &field.name {
+                if let ast::FieldType::Field {
+                    name: Some(field_name),
+                    type_def,
+                } = field
+                {
                     let field_type = typing::resolve_ast_type(
                         &self.type_aliases,
-                        field.type_def.clone(),
+                        type_def.clone(),
                         &mut self.program,
                     )?;
                     parameter_fields.insert(field_name.clone(), (field_index, field_type));

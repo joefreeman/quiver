@@ -3,7 +3,9 @@ use common::*;
 
 #[test]
 fn test_simple_type_definition() {
-    quiver().evaluate("circle :: Circle[r: int]").expect("");
+    quiver()
+        .evaluate("circle :: Circle[r: int]")
+        .expect_alias("circle", "Circle[r: int]");
 }
 
 #[test]
@@ -16,7 +18,7 @@ fn test_union_type_definition() {
               | Rectangle[w: int, h: int]
             "#,
         )
-        .expect("");
+        .expect_alias("shape", "(Circle[r: int] | Rectangle[w: int, h: int])");
 }
 
 #[test]
@@ -479,7 +481,8 @@ fn test_nested_partial_type() {
             f[value: [x: 1, y: 2, z: 3], extra: 42]
             "#,
         )
-        .expect("[1, 2]");
+        .expect("[1, 2]")
+        .expect_alias("container", "(value: (x: int, y: int))");
 }
 
 #[test]
@@ -527,4 +530,347 @@ fn test_invalid_partial_type() {
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "All fields in a partial type must be named".to_string(),
         ));
+}
+
+#[test]
+fn test_type_spread_basic() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int];
+            extended :: Extended[...base, y: int]
+            "#,
+        )
+        .expect_alias("extended", "Extended[x: int, y: int]");
+}
+
+#[test]
+fn test_type_spread_field_override() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int, y: int];
+            modified :: Modified[...base, y: bin]
+            "#,
+        )
+        .expect_alias("modified", "Modified[x: int, y: bin]");
+}
+
+#[test]
+fn test_type_spread_union_distribution() {
+    quiver()
+        .evaluate(
+            r#"
+            shape :: Circle[r: int] | Square[s: int];
+            colored :: Colored[...shape, color: bin]
+            "#,
+        )
+        .expect_alias(
+            "colored",
+            "(Colored[r: int, color: bin] | Colored[s: int, color: bin])",
+        );
+}
+
+#[test]
+fn test_type_spread_unnamed() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int];
+            extended :: [...base, y: int]
+            "#,
+        )
+        .expect_alias("extended", "[x: int, y: int]");
+}
+
+#[test]
+fn test_type_spread_name_modes() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int];
+            unnamed :: [...base, y: int];
+            renamed :: Renamed[...base, y: int]
+            "#,
+        )
+        .expect_alias("unnamed", "[x: int, y: int]")
+        .expect_alias("renamed", "Renamed[x: int, y: int]");
+}
+
+#[test]
+fn test_type_spread_multiple_fields() {
+    quiver()
+        .evaluate(
+            r#"
+            point2d :: Point2D[x: int, y: int];
+            point3d :: Point3D[...point2d, z: int, color: bin]
+            "#,
+        )
+        .expect_alias("point3d", "Point3D[x: int, y: int, z: int, color: bin]");
+}
+
+#[test]
+fn test_type_spread_union_with_override() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: A[x: int, y: int] | B[x: int, z: int];
+            modified :: Modified[...base, y: bin]
+            "#,
+        )
+        .expect_alias(
+            "modified",
+            "(Modified[x: int, y: bin] | Modified[x: int, z: int, y: bin])",
+        );
+}
+
+#[test]
+fn test_type_spread_empty_base() {
+    quiver()
+        .evaluate(
+            r#"
+            empty :: Empty[];
+            extended :: Extended[...empty, x: int]
+            "#,
+        )
+        .expect_alias("extended", "Extended[x: int]");
+}
+
+#[test]
+fn test_type_spread_identifier_preserves_name() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Point[x: int];
+            extended :: base[...base, y: int]
+            "#,
+        )
+        .expect_alias("extended", "Point[x: int, y: int]");
+}
+
+#[test]
+fn test_type_spread_in_generic_definition() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int, y: int];
+            extended<t> :: Extended[...base, z: t]
+            "#,
+        )
+        .expect_alias("extended", "Extended[x: int, y: int, z: t]");
+}
+
+#[test]
+fn test_type_spread_with_generic_fields() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int];
+            extended<t, u> :: Extended[...base, y: t, z: u]
+            "#,
+        )
+        .expect_alias("extended", "Extended[x: int, y: t, z: u]");
+}
+
+#[test]
+fn test_type_spread_in_generic_union() {
+    quiver()
+        .evaluate(
+            r#"
+            shape :: Circle[r: int] | Square[s: int];
+            colored<t> :: Colored[...shape, color: t]
+            "#,
+        )
+        .expect_alias(
+            "colored",
+            "(Colored[r: int, color: t] | Colored[s: int, color: t])",
+        );
+}
+
+#[test]
+fn test_type_spread_with_parameterized_type() {
+    quiver()
+        .evaluate(
+            r#"
+            point<t> :: Point[x: t, y: t];
+            point3d<t> :: Point3D[...point<t>, z: t]
+            "#,
+        )
+        .expect_alias("point3d", "Point3D[x: t, y: t, z: t]");
+}
+
+#[test]
+fn test_type_spread_with_mixed_parameters() {
+    quiver()
+        .evaluate(
+            r#"
+            base<t> :: Base[value: t];
+            extended<t, u> :: Extended[...base<t>, extra: u]
+            "#,
+        )
+        .expect_alias("extended", "Extended[value: t, extra: u]");
+}
+
+#[test]
+fn test_type_spread_parameterized_union() {
+    quiver()
+        .evaluate(
+            r#"
+            result<t, e> :: Ok[value: t] | Err[error: e];
+            tagged<t, e> :: Tagged[...result<t, e>, tag: bin]
+            "#,
+        )
+        .expect_alias(
+            "tagged",
+            "(Tagged[value: t, tag: bin] | Tagged[error: e, tag: bin])",
+        );
+}
+
+#[test]
+fn test_expect_alias_simple() {
+    quiver()
+        .evaluate(
+            r#"
+            point :: Point[x: int, y: int]
+            "#,
+        )
+        .expect_alias("point", "Point[x: int, y: int]");
+}
+
+#[test]
+fn test_expect_alias_with_parameters() {
+    quiver()
+        .evaluate(
+            r#"
+            point<t> :: Point[x: t, y: t]
+            "#,
+        )
+        .expect_alias("point", "Point[x: t, y: t]");
+}
+
+#[test]
+fn test_expect_alias_union() {
+    quiver()
+        .evaluate(
+            r#"
+            shape :: Circle[r: int] | Square[s: int]
+            "#,
+        )
+        .expect_alias("shape", "(Circle[r: int] | Square[s: int])");
+}
+
+#[test]
+fn test_expect_alias_with_spread() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int];
+            extended :: Extended[...base, y: int]
+            "#,
+        )
+        .expect_alias("extended", "Extended[x: int, y: int]");
+}
+
+#[test]
+fn test_expect_alias_parameterized_with_spread() {
+    quiver()
+        .evaluate(
+            r#"
+            base<t> :: Base[x: t];
+            extended<t> :: Extended[...base<t>, y: t]
+            "#,
+        )
+        .expect_alias("extended", "Extended[x: t, y: t]");
+}
+
+#[test]
+fn test_spread_partial_type_basic() {
+    quiver()
+        .evaluate(
+            r#"
+            entity :: (id: int);
+            user :: User[...entity, name: bin]
+            "#,
+        )
+        .expect_alias("user", "User[id: int, name: bin]");
+}
+
+#[test]
+fn test_spread_multiple_partials() {
+    quiver()
+        .evaluate(
+            r#"
+            entity :: (id: int);
+            metadata :: (updated_at: int, created_at: int);
+            user :: User[...entity, name: bin, ...metadata]
+            "#,
+        )
+        .expect_alias(
+            "user",
+            "User[id: int, name: bin, updated_at: int, created_at: int]",
+        );
+}
+
+#[test]
+fn test_spread_partial_with_override() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: (x: int, y: int);
+            extended :: Extended[...base, y: bin, z: int]
+            "#,
+        )
+        .expect_alias("extended", "Extended[x: int, y: bin, z: int]");
+}
+
+#[test]
+fn test_spread_partial_and_tuple() {
+    quiver()
+        .evaluate(
+            r#"
+            partial :: (x: int);
+            tuple :: Tuple[y: int];
+            combined :: Combined[...partial, ...tuple, z: int]
+            "#,
+        )
+        .expect_alias("combined", "Combined[x: int, y: int, z: int]");
+}
+
+#[test]
+fn test_identifier_spread_syntax_basic() {
+    quiver()
+        .evaluate(
+            r#"
+            base :: Base[x: int];
+            extended :: base[..., y: int]
+            "#,
+        )
+        .expect_alias("extended", "Base[x: int, y: int]");
+}
+
+#[test]
+fn test_identifier_spread_syntax_union() {
+    quiver()
+        .evaluate(
+            r#"
+            event :: Created[id: int] | Updated | Deleted;
+            logged :: event[..., timestamp: int]
+            "#,
+        )
+        .expect_alias(
+            "logged",
+            "(Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int])",
+        );
+}
+
+#[test]
+fn test_identifier_spread_syntax_partial() {
+    quiver()
+        .evaluate(
+            r#"
+            entity :: (id: int);
+            timestamped :: entity[..., created_at: int]
+            "#,
+        )
+        .expect_alias("timestamped", "[id: int, created_at: int]");
 }

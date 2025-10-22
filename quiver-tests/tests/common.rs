@@ -250,6 +250,26 @@ impl TestResult {
         }
         self
     }
+
+    pub fn expect_alias(mut self, alias_name: &str, expected: &str) -> Self {
+        match self.repl.resolve_type_alias(alias_name) {
+            Ok(ty) => {
+                let actual = self.repl.format_type(&ty);
+                assert_eq!(
+                    actual, expected,
+                    "Expected type alias '{}' to resolve to '{}', but got '{}' for source: {}",
+                    alias_name, expected, actual, self.source
+                );
+            }
+            Err(e) => {
+                panic!(
+                    "Failed to resolve type alias '{}': {} for source: {}",
+                    alias_name, e, self.source
+                );
+            }
+        }
+        self
+    }
 }
 
 #[allow(dead_code)]

@@ -278,4 +278,16 @@ impl Repl {
     pub fn format_type(&self, ty: &Type) -> String {
         quiver_core::format::format_type(&self.program, ty)
     }
+
+    /// Resolve a type alias and return the resolved Type.
+    /// Type parameters are resolved to Type::Variable placeholders.
+    /// This is useful for testing and displaying type aliases.
+    pub fn resolve_type_alias(&mut self, alias_name: &str) -> Result<Type, String> {
+        quiver_compiler::compiler::resolve_type_alias_for_display(
+            &self.type_aliases,
+            alias_name,
+            &mut self.program,
+        )
+        .map_err(|e| format!("{:?}", e))
+    }
 }

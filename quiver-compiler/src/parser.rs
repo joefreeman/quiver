@@ -163,7 +163,7 @@ fn string_term(input: &str) -> IResult<&str, Term> {
             let bytes = s.into_bytes();
             // Create a Str tuple with the binary as its single field
             Term::Tuple(Tuple {
-                name: Some("Str".to_string()),
+                name: TupleName::Literal("Str".to_string()),
                 fields: vec![TupleField {
                     name: None,
                     value: FieldValue::Chain(Chain {
@@ -252,14 +252,43 @@ fn primitive_type(input: &str) -> IResult<&str, Type> {
 
 fn field_type(input: &str) -> IResult<&str, FieldType> {
     alt((
+        // Spread with optional identifier and optional type arguments: ... or ...identifier or ...identifier<type, type>
+        map(
+            preceded(
+                tag("..."),
+                opt(pair(
+                    identifier,
+                    opt(delimited(
+                        char('<'),
+                        separated_list1(tuple((ws0, char(','), ws0)), type_definition),
+                        char('>'),
+                    )),
+                )),
+            ),
+            |id_and_args| {
+                if let Some((id, type_args)) = id_and_args {
+                    FieldType::Spread {
+                        identifier: Some(id),
+                        type_arguments: type_args.unwrap_or_default(),
+                    }
+                } else {
+                    FieldType::Spread {
+                        identifier: None,
+                        type_arguments: vec![],
+                    }
+                }
+            },
+        ),
+        // Named field: name: type
         map(
             separated_pair(identifier, tuple((char(':'), ws1)), type_definition),
-            |(name, type_def)| FieldType {
+            |(name, type_def)| FieldType::Field {
                 name: Some(name),
                 type_def,
             },
         ),
-        map(type_definition, |type_def| FieldType {
+        // Unnamed field: type
+        map(type_definition, |type_def| FieldType::Field {
             name: None,
             type_def,
         }),
@@ -283,7 +312,7 @@ fn partial_type(input: &str) -> IResult<&str, Type> {
                     delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
                 )),
                 |(name, fields)| TupleType {
-                    name: Some(name),
+                    name: TupleName::Literal(name),
                     fields,
                     is_partial: true,
                 },
@@ -294,7 +323,7 @@ fn partial_type(input: &str) -> IResult<&str, Type> {
                 map(
                     delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
                     |fields| TupleType {
-                        name: None,
+                        name: TupleName::None,
                         fields,
                         is_partial: true,
                     },
@@ -302,7 +331,10 @@ fn partial_type(input: &str) -> IResult<&str, Type> {
                 |tuple_type: &TupleType| {
                     // Empty partial types are allowed, or at least one field must be named
                     tuple_type.fields.is_empty()
-                        || tuple_type.fields.iter().any(|f| f.name.is_some())
+                        || tuple_type
+                            .fields
+                            .iter()
+                            .any(|f| matches!(f, FieldType::Field { name: Some(_), .. }))
                 },
             ),
         )),
@@ -319,15 +351,48 @@ fn tuple_type(input: &str) -> IResult<&str, Type> {
                     delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
                 )),
                 |(name, fields)| TupleType {
-                    name: Some(name),
+                    name: TupleName::Literal(name),
                     fields,
                     is_partial: false,
+                },
+            ),
+            // identifier[...] - inherit name from type alias and auto-spread
+            verify(
+                map(
+                    tuple((
+                        identifier,
+                        delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
+                    )),
+                    |(id, mut fields)| {
+                        // Transform unspecified spread (...) into identifier spread (...identifier)
+                        // This allows event[..., timestamp: int] to mean "spread event and add timestamp"
+                        for field in &mut fields {
+                            if let FieldType::Spread {
+                                identifier: spread_id,
+                                ..
+                            } = field
+                                && spread_id.is_none()
+                            {
+                                *spread_id = Some(id.clone());
+                            }
+                        }
+                        TupleType {
+                            name: TupleName::Identifier(id),
+                            fields,
+                            is_partial: false,
+                        }
+                    },
+                ),
+                |tup: &TupleType| {
+                    tup.fields
+                        .iter()
+                        .any(|f| matches!(f, FieldType::Spread { .. }))
                 },
             ),
             map(
                 delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
                 |fields| TupleType {
-                    name: None,
+                    name: TupleName::None,
                     fields,
                     is_partial: false,
                 },
@@ -339,7 +404,7 @@ fn tuple_type(input: &str) -> IResult<&str, Type> {
                     peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
                 )),
                 |(name, _)| TupleType {
-                    name: Some(name),
+                    name: TupleName::Literal(name),
                     fields: vec![],
                     is_partial: false,
                 },
@@ -524,7 +589,10 @@ fn access(input: &str) -> IResult<&str, Access> {
             |(identifier, accessors, argument)| Access {
                 identifier,
                 accessors,
-                argument: argument.map(|fields| Tuple { name: None, fields }),
+                argument: argument.map(|fields| Tuple {
+                    name: TupleName::None,
+                    fields,
+                }),
             },
         ),
         |ma| ma.identifier.is_some() || !ma.accessors.is_empty(),
@@ -604,7 +672,7 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                 delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
             )),
             |(name, fields)| Tuple {
-                name: Some(name),
+                name: TupleName::Literal(name),
                 fields,
             },
         ),
@@ -635,7 +703,7 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                 },
             ),
             |(name, fields)| Tuple {
-                name: Some(name),
+                name: TupleName::Identifier(name),
                 fields,
             },
         ),
@@ -665,14 +733,17 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                 },
             ),
             |fields| Tuple {
-                name: Some("~".to_string()), // Special marker for ripple
+                name: TupleName::Identifier("~".to_string()), // Special marker for ripple
                 fields,
             },
         ),
         // [...] - unnamed tuple with fields
         map(
             delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-            |fields| Tuple { name: None, fields },
+            |fields| Tuple {
+                name: TupleName::None,
+                fields,
+            },
         ),
         // TupleName - bare tuple name without fields
         // Only parse if not followed by '(' (which would indicate a partial pattern)
@@ -682,7 +753,7 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                 peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
             )),
             |(name, _)| Tuple {
-                name: Some(name),
+                name: TupleName::Literal(name),
                 fields: vec![],
             },
         ),
@@ -757,7 +828,10 @@ fn tail_call(input: &str) -> IResult<&str, Term> {
         Term::TailCall(TailCall {
             identifier: ident,
             accessors,
-            argument: argument.map(|fields| Tuple { name: None, fields }),
+            argument: argument.map(|fields| Tuple {
+                name: TupleName::None,
+                fields,
+            }),
         }),
     ))
 }

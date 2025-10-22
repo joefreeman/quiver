@@ -114,6 +114,30 @@ json ::
   | Array[(Nil | Cons[&, &1])];
 ```
 
+### Type spreads
+
+Type aliases can be extended using the spread operator `...` to compose new types from existing ones:
+
+```
+// Compose types from reusable pieces
+entity :: [id: int, created_at: int];
+updateable :: (updated_at: int);
+post :: Post[...entity, title: Str[bin], ...updatable];  // Post[id: int, created_at: int, title: Str[bin], updated_at: int]
+
+// Field override - later fields override earlier ones
+v1 :: User[id: int, name: Str[bin]];
+v2 :: v1[..., id: bin];  // User[id: bin, name: Str[bin]]
+```
+
+When spreading a union type, the spread is distributed across all variants:
+
+```
+event :: Created[id: int] | Updated | Deleted;
+logged :: event[..., timestamp: int] // Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int];
+
+// Expands to: Traced[value: bin, request_id: bin] | Traced[message: bin, request_id: bin]
+```
+
 ### Strings
 
 The compiler converts UTF-8 strings, defined with `"..."` into binaries, wrapped in a `Str` tuple (`Str['...']`).
