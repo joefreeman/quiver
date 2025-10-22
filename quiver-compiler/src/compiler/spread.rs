@@ -14,9 +14,11 @@ pub fn compile_tuple_with_spread(
     value_type: Option<Type>,
 ) -> Result<Type, Error> {
     let contains_ripple = Compiler::tuple_contains_ripple(&fields);
-    let has_chained_spread = fields
-        .iter()
-        .any(|f| matches!(f.value, ast::FieldValue::Spread(None)));
+    let has_chained_spread = fields.iter().any(|f| match &f.value {
+        ast::FieldValue::Spread(None) => true,
+        ast::FieldValue::Spread(Some(id)) if id == "~" => true,
+        _ => false,
+    });
 
     if has_chained_spread && value_type.is_none() {
         return Err(Error::FeatureUnsupported(
@@ -88,14 +90,27 @@ pub fn compile_tuple_with_spread(
             ast::FieldValue::Spread(identifier) => {
                 // Get the type of the value to spread
                 let spread_type = if let Some(id) = identifier {
-                    // Spread a variable
-                    let (var_type, var_index) = compiler
-                        .lookup_variable(&compiler.scopes, id, &[])
-                        .ok_or_else(|| Error::VariableUndefined(id.clone()))?;
-                    compiler
-                        .codegen
-                        .add_instruction(Instruction::Load(var_index));
-                    var_type
+                    if id == "~" {
+                        // Spread the ripple value (~)
+                        let ripple_type = compiler.ripple_types.last().ok_or_else(|| {
+                            Error::FeatureUnsupported(
+                                "Ripple spread (~) requires a piped value".to_string(),
+                            )
+                        })?;
+                        compiler
+                            .codegen
+                            .add_instruction(Instruction::Pick(stack_size));
+                        ripple_type.clone()
+                    } else {
+                        // Spread a variable
+                        let (var_type, var_index) = compiler
+                            .lookup_variable(&compiler.scopes, id, &[])
+                            .ok_or_else(|| Error::VariableUndefined(id.clone()))?;
+                        compiler
+                            .codegen
+                            .add_instruction(Instruction::Load(var_index));
+                        var_type
+                    }
                 } else {
                     // Spread the chained value (...)
                     let ripple_type = compiler.ripple_types.last().ok_or_else(|| {

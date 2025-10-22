@@ -130,3 +130,59 @@ fn test_spread_same_fields_different_sources() {
         )
         .expect("[[x: 2, y: 3], [x: 4, y: 5]]");
 }
+
+#[test]
+fn test_identifier_spread_preserves_name() {
+    quiver()
+        .evaluate("a = A[x: 1], a[..., y: 2]")
+        .expect("A[x: 1, y: 2]");
+}
+
+#[test]
+fn test_identifier_spread_field_override() {
+    quiver()
+        .evaluate("a = A[x: 1, y: 2], a[..., y: 99]")
+        .expect("A[x: 1, y: 99]");
+}
+
+#[test]
+fn test_identifier_spread_unnamed_tuple() {
+    quiver()
+        .evaluate("a = [x: 1], a[..., y: 2]")
+        .expect("[x: 1, y: 2]");
+}
+
+#[test]
+fn test_identifier_spread_multiple_fields() {
+    quiver()
+        .evaluate("p = Point[x: 10, y: 20], p[..., z: 30, color: 'ff']")
+        .expect("Point[x: 10, y: 20, z: 30, color: 'ff']");
+}
+
+#[test]
+fn test_ripple_spread_preserves_name() {
+    quiver()
+        .evaluate("A[x: 1] ~> ~[..., y: 2]")
+        .expect("A[x: 1, y: 2]");
+}
+
+#[test]
+fn test_ripple_spread_field_override() {
+    quiver()
+        .evaluate("A[x: 1, y: 2] ~> ~[..., y: 99]")
+        .expect("A[x: 1, y: 99]");
+}
+
+#[test]
+fn test_ripple_spread_unnamed_tuple() {
+    quiver()
+        .evaluate("[x: 1] ~> ~[..., y: 2]")
+        .expect("[x: 1, y: 2]");
+}
+
+#[test]
+fn test_ripple_spread_multiple_fields() {
+    quiver()
+        .evaluate("Point[x: 10, y: 20] ~> ~[..., z: 30, color: 'ff']")
+        .expect("Point[x: 10, y: 20, z: 30, color: 'ff']");
+}

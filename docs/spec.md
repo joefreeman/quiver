@@ -54,24 +54,6 @@ Point[x: int, y: int]    // Named tuple
 A[b: B[c: C[bin]]]       // Nested tuples
 ```
 
-#### Spread operator
-
-Tuples can be constructed by spreading existing tuples using the `...` operator. This creates new tuples by merging fields from existing ones:
-
-```
-a = [x: 1, y: 2]
-[...a, y: 3]             // [x: 1, y: 3] - replaces y
-[...a, z: 4]             // [x: 1, y: 2, z: 4] - adds z
-[w: 0, ...a]             // [w: 0, x: 1, y: 2] - prepends w
-
-// Multiple spreads
-b = [z: 5]
-[...a, ...b]             // [x: 1, y: 2, z: 5]
-
-// Spread chained value with ...
-[x: 1, y: 2] ~> [z: 3, ...]   // [z: 3, x: 1, y: 2]
-```
-
 ### Partial types
 
 Partial types define structural constraints on tuples without specifying all fields. They use parentheses instead of brackets and require all fields to be named:
@@ -155,14 +137,37 @@ Chains in a sequence are executed one at a time, unless a chain evaluates to nil
 
 See 'blocks' below for further details about control flow.
 
-### Value expansion
+### Ripple operator
 
 The value in a chain can be 'expanded' using the `~` ('ripple') operator. This allows the value to be wrapped in a tuple:
 
 ```
 5 ~> [~, 1]               // [5, 1]
 0 ~> Point[x: ~, y: ~]    // Point[x: 0, y: 0]
+```
 
+### Spread operator
+
+Tuples can be extended by spreading existing tuples using the `...` operator:
+
+```
+a = A[x: 1, y: 2]
+a[..., y: 3]             // A[x: 1, y: 3] - preserves name, replaces y
+a[..., z: 4]             // A[x: 1, y: 2, z: 4] - adds z
+
+// Replace tuple name
+[...a, y: 3]             // [x: 1, y: 3] - removes name
+B[...a, y: 3]            // B[x: 1, y: 3] - sets name to B
+
+// Multiple spreads and ordering
+b = [z: 5]
+[...a, ...b]             // [x: 1, y: 2, z: 5]
+[w: 0, ...a]             // [w: 0, x: 1, y: 2] - prepends w
+
+// Spread chained value
+A[x: 1] ~> [..., y: 2]   // [x: 1, y: 2] - removes name
+A[x: 1] ~> ~[..., y: 2]  // A[x: 1, y: 2] - preserves name
+A[x: 1] ~> B[...]        // B[x: 1] - replaces name
 ```
 
 ## Identifiers

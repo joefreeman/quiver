@@ -409,8 +409,66 @@ impl<'a> Compiler<'a> {
         let contains_spread = Self::tuple_contains_spread(&fields);
 
         if contains_spread {
+            // Special handling for identifier[..., fields] and ~[..., fields] syntax:
+            // If tuple name matches a spread identifier, use the source type's name
+            let resolved_tuple_name = if let Some(ref name) = tuple_name {
+                // Check if any spread field references this name
+                let has_matching_spread = fields.iter().any(|f| {
+                    matches!(
+                        &f.value,
+                        ast::FieldValue::Spread(Some(id)) if id == name
+                    )
+                });
+
+                if has_matching_spread {
+                    if name == "~" {
+                        // Ripple spread: ~[..., fields]
+                        // Get the ripple type from value_type (the piped value)
+                        if let Some(ref ripple_type) = value_type {
+                            if let Type::Tuple(type_id) = ripple_type {
+                                if let Some(type_info) = self.program.lookup_type(type_id) {
+                                    type_info.name.clone()
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        // Identifier spread: identifier[..., fields]
+                        // Look up the variable's type
+                        if let Some((var_type, _)) = self.lookup_variable(&self.scopes, name, &[]) {
+                            // If it's a tuple type, use its name
+                            if let Type::Tuple(type_id) = var_type {
+                                if let Some(type_info) = self.program.lookup_type(&type_id) {
+                                    type_info.name.clone()
+                                } else {
+                                    tuple_name
+                                }
+                            } else {
+                                tuple_name
+                            }
+                        } else {
+                            tuple_name
+                        }
+                    }
+                } else {
+                    tuple_name
+                }
+            } else {
+                None
+            };
+
             // Use specialized compilation for tuples with spreads
-            return spread::compile_tuple_with_spread(self, tuple_name, fields, value_type);
+            return spread::compile_tuple_with_spread(
+                self,
+                resolved_tuple_name,
+                fields,
+                value_type,
+            );
         }
 
         let contains_ripple = Self::tuple_contains_ripple(&fields);

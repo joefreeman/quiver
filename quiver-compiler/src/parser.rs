@@ -597,6 +597,7 @@ fn tuple_field_list(input: &str) -> IResult<&str, Vec<TupleField>> {
 
 fn tuple_term(input: &str) -> IResult<&str, Tuple> {
     alt((
+        // TupleName[...] - uppercase named tuple with fields
         map(
             tuple((
                 tuple_name,
@@ -607,11 +608,74 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                 fields,
             },
         ),
+        // identifier[...] with spread - lowercase identifier (preserves name)
+        // This must come before unnamed tuple to catch lowercase names with spreads
+        map(
+            verify(
+                map(
+                    tuple((
+                        identifier,
+                        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
+                    )),
+                    |(name, mut fields)| {
+                        // Transform chained spread (...) into identifier spread (...identifier)
+                        // This allows a[..., y: 2] to mean "spread a and add y"
+                        for field in &mut fields {
+                            if matches!(field.value, FieldValue::Spread(None)) {
+                                field.value = FieldValue::Spread(Some(name.clone()));
+                            }
+                        }
+                        (name, fields)
+                    },
+                ),
+                |(_, fields)| {
+                    fields
+                        .iter()
+                        .any(|f| matches!(f.value, FieldValue::Spread(_)))
+                },
+            ),
+            |(name, fields)| Tuple {
+                name: Some(name),
+                fields,
+            },
+        ),
+        // ~[...] with spread - ripple with spread (preserves rippled name)
+        map(
+            verify(
+                map(
+                    preceded(
+                        char('~'),
+                        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
+                    ),
+                    |mut fields| {
+                        // Transform chained spread (...) to reference the ripple
+                        // We use "~" as a special marker that the compiler will recognize
+                        for field in &mut fields {
+                            if matches!(field.value, FieldValue::Spread(None)) {
+                                field.value = FieldValue::Spread(Some("~".to_string()));
+                            }
+                        }
+                        fields
+                    },
+                ),
+                |fields: &Vec<TupleField>| {
+                    fields
+                        .iter()
+                        .any(|f| matches!(f.value, FieldValue::Spread(_)))
+                },
+            ),
+            |fields| Tuple {
+                name: Some("~".to_string()), // Special marker for ripple
+                fields,
+            },
+        ),
+        // [...] - unnamed tuple with fields
         map(
             delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
             |fields| Tuple { name: None, fields },
         ),
-        // Only parse bare tuple name if not followed by '(' (which would indicate a partial pattern)
+        // TupleName - bare tuple name without fields
+        // Only parse if not followed by '(' (which would indicate a partial pattern)
         map(
             tuple((
                 tuple_name,
