@@ -17,17 +17,27 @@ pub fn execute_instructions_sync(
     instructions: Vec<Instruction>,
 ) -> Result<(Value, Executor), Error> {
     let mut executor = Executor::new();
+
+    // Register the instructions as a temporary function to get a function_index
+    let mut functions = program.get_functions().clone();
+    let function_index = functions.len();
+    functions.push(crate::bytecode::Function {
+        instructions,
+        function_type: None,
+        captures: vec![],
+    });
+
     executor.update_program(
         program.get_constants().clone(),
-        program.get_functions().clone(),
+        functions,
         program.get_types().clone(),
         program.get_builtins().clone(),
     );
 
     let process_id = 0;
 
-    // Spawn a process
-    executor.spawn_process(process_id, false);
+    // Spawn a process with the temporary function
+    executor.spawn_process(process_id, function_index, false);
 
     // Set up the process with the instructions
     {
@@ -38,8 +48,8 @@ pub fn execute_instructions_sync(
         // Push NIL as the initial parameter
         process.stack.push(Value::nil());
 
-        // Create a frame with the instructions
-        let frame = Frame::new(instructions, 0, 0);
+        // Create a frame with the function index
+        let frame = Frame::new(function_index, 0, 0);
         process.frames.push(frame);
     }
 
@@ -47,7 +57,8 @@ pub fn execute_instructions_sync(
     loop {
         // Step with a reasonable batch size
         // TODO: check step result
-        let _step_result = executor.step(1000);
+        // Use time 0 since compile-time execution doesn't need real time tracking
+        let _step_result = executor.step(1000, 0);
 
         // Check if the process has completed
         let process = executor

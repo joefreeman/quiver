@@ -62,8 +62,8 @@ pub enum Term {
     Not,
     Spawn(Box<Term>),
     Self_,
-    Receive(Receive),
-    Await,
+    Select(Select),
+    Ripple,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,7 +91,6 @@ pub struct Tuple {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
     Chain(Chain),
-    Ripple,
     Spread(Option<String>),
 }
 
@@ -105,7 +104,7 @@ pub struct TupleField {
 pub struct Function {
     pub type_parameters: Vec<String>,
     pub parameter_type: Option<Type>,
-    pub body: Block,
+    pub body: Option<Block>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,9 +134,8 @@ pub struct TailCall {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Receive {
-    pub type_def: Type,
-    pub block: Option<Block>,
+pub struct Select {
+    pub sources: Vec<Chain>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

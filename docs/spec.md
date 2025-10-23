@@ -341,6 +341,8 @@ Functions are defined with `#... { ... }` syntax, where the first `...` is the t
 
 Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
+Identity functions (that simply return their input unchanged) can be defined without a body: `#int` is equivalent to `#int { ~> }`.
+
 ```
 // Single parameter function
 double = #int { ~> math.mul[~, 2] }
@@ -356,6 +358,9 @@ area = #shape {
 
 // Shorthand for nil parameter
 #{ 42 }
+
+// Identity function
+f = #int
 ```
 
 ### Function application
@@ -416,29 +421,38 @@ Quiver supports lightweight concurrent processes inspired by Erlang. Processes c
 Spawn a process by applying the `@` operator to a function:
 
 ```
-worker = #int { ... },
-pid = @worker
+process = #{ ... },
+processor = @process
+```
+
+Processes can be initialised with an argument:
+
+```
+count = #int { ... }
+counter = @count
 ```
 
 ### Receiving messages
 
-Use `$type` (e.g., `$int`) to receive messages. The type after `$` defines the process's receive type.
+The select operator, `!`, can be used to receive messages by applying it to a function - for example, applying it to an identity function: `!#int`.
 
-Messages can be filtered by specifying a block - `$type { ... }` - the block will sequentially try to match messages in the mailbox, blocking until a message matches:
+The function's parameter type defines the message type to be received. And this in turn will define the receive type of the process spawned with the surrounding function:
 
 ```
-receiver = #{
-  $int {
-    | ~> =0 => "zero"
-    | "non-zero", [] ~> &
+// Spawn a process with an int receive type
+p1 = @#{
+  !#int ~> {
+    | ~> =0 => "done"
+    | &[]
   }
-},
-pid = @receiver
+}
 ```
 
-(Note that `$type ~> { ... }` would give subtly different behaviour - this would receive a message without filtering, and then evaluate the block to the received value.)
+#### Filtering messages
 
-Avoid side effects when testing messages in the block, since the block may be evaluated multiple times.
+The example above uses an identity function to specify the receive type. Alternatively a body can be specified to filter messages in the process's mailbox. When a body is specified, the function must return either nil (`[]`) or `Ok`. If the function evaluates to nil, the message will be skipped, but remain in the mailbox (to be received in future). If none of the messages in the mailbox match, the select will wait to receive a message that does match.
+
+It's important to avoid side effects in the receive function, since the block may be evaluated multiple times. Receive functions are not permitted to spawn processes, send messages or contain nested selects.
 
 ### Sending messages
 
@@ -450,11 +464,30 @@ Send a message to a process by applying a value to the process:
 
 ### Awaiting processes
 
-Await a process result using the `!` operator:
+The select operator (`!`) introduced above can also be used to await the result of a process:
 
 ```
 p = @f,
-p ~> !
+!p
+```
+
+### Advanced select usage
+
+As well as being used for receiving messages and awaiting the result of a single process, the select operator can specify multiple sources at once to 'race' them. And also for specifying timeouts.
+
+Timeouts are specified as integers, in milliseconds.
+
+For example, given two processes, `p1` and `p2`, the following select will wait for whichever finishes first (prioritising `p1` if both are already finished), or time out after 5 seconds:
+
+```
+// Wait for
+!(p1 | p2 | 5000)
+```
+
+A select operator can be used in a chain by including the ripple operator (`~`) to refer to the chained value. For example, to wait for a process, but timeout after one second:
+
+```
+p1 ~> !(~ | 1000)
 ```
 
 ### Referring to processes
@@ -633,11 +666,11 @@ next_year = person.age ~> math.add[~, 1],
 ```
 // Echo process that receives and prints messages
 echo = #[] {
-  $Str[bin] {
+  !#Str[bin] ~> {
     | ~> ="" => []           // Stop on empty string
     | ~> =s => {
-      s ~> __println__,        // (not implemented!)
-      [] ~> &                // Continue receiving
+      s ~> __println__,      // (not implemented!)
+      [] ~> &                // Receive another message
     }
   }
 },

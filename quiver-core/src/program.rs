@@ -1,4 +1,4 @@
-use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
+use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction, TypeId};
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
@@ -14,7 +14,7 @@ mod optimisation;
 pub struct Program {
     constants: Vec<Constant>,
     functions: Vec<Function>,
-    builtins: Vec<String>,
+    builtins: Vec<BuiltinInfo>,
     types: Vec<TupleTypeInfo>,
 }
 
@@ -138,20 +138,40 @@ impl Program {
         self.functions.get(index)
     }
 
-    pub fn register_builtin(&mut self, function: String) -> usize {
-        if let Some(index) = self.builtins.iter().position(|b| b == &function) {
-            index
-        } else {
-            self.builtins.push(function);
-            self.builtins.len() - 1
+    pub fn register_builtin(&mut self, name: String) -> usize {
+        // Check if builtin already exists
+        if let Some(index) = self.builtins.iter().position(|b| b.name == name) {
+            return index;
         }
+
+        // Look up type specs from the builtin registry and resolve them
+        let builtin_info = if let Some((param_spec, result_spec)) =
+            crate::builtins::BUILTIN_REGISTRY.get_specs(&name)
+        {
+            BuiltinInfo {
+                name: name.clone(),
+                parameter_type: param_spec.resolve(self),
+                result_type: result_spec.resolve(self),
+            }
+        } else {
+            // Builtin not found in registry - this shouldn't happen in well-formed programs
+            // Create a placeholder with bottom types
+            BuiltinInfo {
+                name,
+                parameter_type: Type::Union(vec![]),
+                result_type: Type::Union(vec![]),
+            }
+        };
+
+        self.builtins.push(builtin_info);
+        self.builtins.len() - 1
     }
 
-    pub fn get_builtins(&self) -> &Vec<String> {
+    pub fn get_builtins(&self) -> &Vec<BuiltinInfo> {
         &self.builtins
     }
 
-    pub fn get_builtin(&self, index: usize) -> Option<&String> {
+    pub fn get_builtin(&self, index: usize) -> Option<&BuiltinInfo> {
         self.builtins.get(index)
     }
 
@@ -282,7 +302,7 @@ impl Program {
                 let builtin_idx = self.register_builtin(name.clone());
                 vec![Instruction::Builtin(builtin_idx)]
             }
-            Value::Pid(_) => {
+            Value::Pid(_, _) => {
                 panic!("Cannot convert pid to instructions")
             }
         }

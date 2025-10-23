@@ -26,6 +26,9 @@ pub enum Error {
     // Tuple and structure errors
     TupleEmpty,
 
+    // Operation restrictions
+    OperationNotAllowed { operation: String, context: String },
+
     // Scope management errors
     ScopeCountInvalid { expected: usize, found: usize },
     ScopeUnderflow,

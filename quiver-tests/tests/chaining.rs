@@ -24,3 +24,35 @@ fn test_nested_ripple_contexts() {
         .evaluate("1 ~> [2 ~> [~, ~], ~]")
         .expect("[[2, 2], 1]");
 }
+
+#[test]
+fn test_standalone_ripple() {
+    quiver().evaluate("42 ~> ~").expect("42");
+}
+
+#[test]
+fn test_standalone_ripple_with_nested_chain() {
+    // The ripple in "5 ~> ~" refers to 5, not to the outer 10
+    // So the outer value 10 is unused - this should be an error
+    quiver().evaluate("10 ~> [5 ~> ~]").expect_compile_error(
+        quiver_compiler::compiler::Error::FeatureUnsupported(
+            "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])".to_string(),
+        ),
+    );
+}
+
+#[test]
+fn test_nested_chain_outer_value_used() {
+    // The first field uses the outer value, so this is OK
+    quiver().evaluate("10 ~> [~, 5 ~> ~]").expect("[10, 5]");
+}
+
+#[test]
+fn test_nested_chain_in_tuple_error() {
+    // Similar to test_standalone_ripple_with_nested_chain
+    quiver().evaluate("1 ~> [2, 3 ~> ~]").expect_compile_error(
+        quiver_compiler::compiler::Error::FeatureUnsupported(
+            "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])".to_string(),
+        ),
+    );
+}

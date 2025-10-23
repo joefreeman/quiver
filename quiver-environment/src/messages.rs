@@ -1,5 +1,5 @@
-use crate::environment::{LocalsResult, RuntimeResult, ValueWithHeap};
-use quiver_core::bytecode::{Constant, Function};
+use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
+use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
@@ -14,7 +14,7 @@ pub enum Command {
         constants: Vec<Constant>,
         functions: Vec<Function>,
         types: Vec<TupleTypeInfo>,
-        builtins: Vec<String>,
+        builtins: Vec<BuiltinInfo>,
     },
 
     /// Start a new process
@@ -32,17 +32,19 @@ pub enum Command {
         function_index: usize,
     },
 
-    /// Register that a process is awaiting another process
-    RegisterAwaiter {
-        target: ProcessId,
+    /// Query process states and register as awaiter
+    /// Worker should check each target, respond with current states,
+    /// and register awaiter for incomplete processes
+    QueryAndAwait {
         awaiter: ProcessId,
+        targets: Vec<ProcessId>,
     },
 
-    /// Notify a process with a result it was awaiting
-    NotifyResult {
-        process_id: ProcessId,
-        result: RuntimeResult,
-        heap: Vec<Vec<u8>>,
+    /// Update awaiter with process results (initial snapshot or later completions)
+    /// None means process not yet completed, Some means completed with result
+    UpdateAwaitResults {
+        awaiter: ProcessId,
+        results: ProcessResultsMap,
     },
 
     /// Deliver a message to a process
@@ -56,6 +58,7 @@ pub enum Command {
     NotifySpawn {
         process_id: ProcessId,
         spawned_pid: ProcessId,
+        function_index: usize,
     },
 
     /// Request process result
@@ -85,18 +88,15 @@ pub enum Command {
         process_id: ProcessId,
         keep_indices: Vec<usize>,
     },
+
+    /// Set virtual time (for testing)
+    /// Workers will use this time instead of system time
+    SetTime { time_ms: u64 },
 }
 
 /// Events sent from Workers to Environment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    /// Process completed with result
-    Completed {
-        process_id: ProcessId,
-        result: RuntimeResult,
-        heap: Vec<Vec<u8>>,
-    },
-
     /// Action: Spawn new process
     SpawnAction {
         caller: ProcessId,
@@ -112,10 +112,17 @@ pub enum Event {
         heap: Vec<Vec<u8>>,
     },
 
-    /// Action: Await result
+    /// Action: Await multiple processes
     AwaitAction {
-        caller: ProcessId,
-        target: ProcessId,
+        awaiter: ProcessId,
+        targets: Vec<ProcessId>,
+    },
+
+    /// Process results (initial snapshot or later completions)
+    /// None means process not yet completed, Some means completed with result
+    ProcessResults {
+        awaiter: ProcessId,
+        results: ProcessResultsMap,
     },
 
     /// Response to GetResult (only sent when process completes)

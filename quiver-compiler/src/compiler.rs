@@ -156,6 +156,17 @@ impl Scope {
     }
 }
 
+/// Context for ripple operator (~) usage
+/// Tracks the value being rippled and where it is on the stack
+struct RippleContext {
+    /// Type of the value being rippled
+    value_type: Type,
+    /// Stack offset where the ripple value is located
+    stack_offset: usize,
+    /// Whether this context owns the value and must clean it up
+    owns_value: bool,
+}
+
 pub struct Compiler<'a> {
     // Core components
     codegen: InstructionBuilder,
@@ -168,9 +179,6 @@ pub struct Compiler<'a> {
     program: Program,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
-
-    // Track active ripple contexts (stack of ripple types)
-    ripple_types: Vec<Type>,
 
     // Track the receive type of the function currently being compiled
     current_receive_type: Type,
@@ -197,7 +205,6 @@ impl<'a> Compiler<'a> {
             program: base_program.clone(),
             module_loader,
             module_path,
-            ripple_types: vec![],
             current_receive_type: Type::never(),
         };
 
@@ -409,7 +416,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         tuple_name: ast::TupleName,
         fields: Vec<ast::TupleField>,
-        value_type: Option<Type>,
+        ripple_context: Option<&RippleContext>,
     ) -> Result<Type, Error> {
         Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
@@ -424,8 +431,9 @@ impl<'a> Compiler<'a> {
                 ast::TupleName::Identifier(id) => {
                     if id == "~" {
                         // Ripple spread: ~[..., fields]
-                        // Get the ripple type from value_type (the piped value)
-                        value_type.as_ref().and_then(|ripple_type| {
+                        // Get the ripple type from ripple_context
+                        ripple_context.and_then(|ctx| {
+                            let ripple_type = &ctx.value_type;
                             if let Type::Tuple(type_id) = ripple_type {
                                 self.program
                                     .lookup_type(type_id)
@@ -456,37 +464,29 @@ impl<'a> Compiler<'a> {
                 self,
                 resolved_tuple_name,
                 fields,
-                value_type,
+                ripple_context,
             );
         }
-
-        let contains_ripple = Self::tuple_contains_ripple(&fields);
-
-        // If this tuple has a value piped into it and contains ripples, push the ripple type
-        let has_ripple_value = if contains_ripple && value_type.is_some() {
-            self.ripple_types.push(value_type.clone().unwrap());
-            true
-        } else {
-            false
-        };
 
         // Compile field values and collect their types
         let mut field_types = Vec::new();
         for (fields_compiled, field) in fields.iter().enumerate() {
             let field_type = match &field.value {
-                ast::FieldValue::Chain(chain) => self.compile_chain(chain.clone(), None)?,
-                ast::FieldValue::Ripple => {
-                    // Check if we're in any ripple context
-                    let ripple_type = self.ripple_types.last().ok_or_else(|| {
-                        Error::FeatureUnsupported(
-                            "Ripple cannot be used outside of an operation context".to_string(),
-                        )
-                    })?;
-                    // Emit Pick instruction to copy the ripple value from the stack
-                    // The ripple value is at depth `fields_compiled`
-                    self.codegen
-                        .add_instruction(Instruction::Pick(fields_compiled));
-                    ripple_type.clone()
+                ast::FieldValue::Chain(chain) => {
+                    // Pass ripple_context to chains, incrementing offset for each field compiled
+                    // Set owns_value=false since we're passing it through, not owning it
+                    let ripple_context_value;
+                    let ripple_context_param = if let Some(ctx) = ripple_context {
+                        ripple_context_value = RippleContext {
+                            value_type: ctx.value_type.clone(),
+                            stack_offset: ctx.stack_offset + fields_compiled,
+                            owns_value: false,
+                        };
+                        Some(&ripple_context_value)
+                    } else {
+                        None
+                    };
+                    self.compile_chain(chain.clone(), None, ripple_context_param)?
                 }
                 ast::FieldValue::Spread(_) => {
                     unreachable!("Spread should be handled by compile_tuple_with_spread")
@@ -508,14 +508,59 @@ impl<'a> Compiler<'a> {
         let type_id = self.program.register_type(resolved_name, field_types);
         self.codegen.add_instruction(Instruction::Tuple(type_id));
 
-        // If this tuple established a ripple context, clean up
-        if has_ripple_value {
-            self.codegen.add_instruction(Instruction::Swap);
+        // Clean up ripple value if we own it
+        if let Some(ctx) = ripple_context
+            && ctx.owns_value
+        {
+            self.codegen.add_instruction(Instruction::Rotate(2));
             self.codegen.add_instruction(Instruction::Pop);
-            self.ripple_types.pop();
         }
 
         Ok(Type::Tuple(type_id))
+    }
+
+    fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
+        fields.iter().any(|f| match &f.value {
+            ast::FieldValue::Chain(chain) => Self::chain_contains_ripple(chain),
+            ast::FieldValue::Spread(_) => false,
+        })
+    }
+
+    fn select_contains_ripple(sources: &[ast::Chain]) -> bool {
+        sources.iter().any(Self::chain_contains_ripple)
+    }
+
+    fn chain_contains_ripple(chain: &ast::Chain) -> bool {
+        for term in &chain.terms {
+            match term {
+                ast::Term::Ripple => return true,
+                ast::Term::BindMatch(_) | ast::Term::PinMatch(_) => continue,
+                ast::Term::Tuple(tuple) => return Self::tuple_contains_ripple(&tuple.fields),
+                ast::Term::Block(block) => return Self::block_contains_ripple(block),
+                ast::Term::Function(func) => {
+                    return func.body.as_ref().is_some_and(Self::block_contains_ripple);
+                }
+                ast::Term::Select(select) => {
+                    return Self::select_contains_ripple(&select.sources);
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn block_contains_ripple(block: &ast::Block) -> bool {
+        block.branches.iter().any(|branch| {
+            branch
+                .condition
+                .chains
+                .iter()
+                .any(Self::chain_contains_ripple)
+                || branch
+                    .consequence
+                    .as_ref()
+                    .is_some_and(|expr| expr.chains.iter().any(Self::chain_contains_ripple))
+        })
     }
 
     // Helper function to check if tuple fields contain spread operations
@@ -525,29 +570,11 @@ impl<'a> Compiler<'a> {
             .any(|field| matches!(field.value, ast::FieldValue::Spread(_)))
     }
 
-    // Helper function to check if tuple fields contain ripple operations (recursively)
-    fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
-        fields.iter().any(|field| {
-            match &field.value {
-                ast::FieldValue::Ripple => true,
-                ast::FieldValue::Chain(chain) => {
-                    // Check for nested tuples that contain ripples
-                    chain.terms.iter().any(|term| {
-                        if let ast::Term::Tuple(nested_tuple) = term {
-                            Self::tuple_contains_ripple(&nested_tuple.fields)
-                        } else {
-                            false
-                        }
-                    })
-                }
-                ast::FieldValue::Spread(_) => false,
-            }
-        })
-    }
-
-    fn extract_receive_type(&mut self, block: &ast::Block) -> Result<Type, Error> {
+    fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<Type, Error> {
         let mut receive_types = Vec::new();
-        self.collect_receive_types(block, &mut receive_types)?;
+        if let Some(block) = block {
+            self.collect_receive_types(block, &mut receive_types)?;
+        }
 
         if receive_types.is_empty() {
             return Ok(Type::never());
@@ -597,8 +624,12 @@ impl<'a> Compiler<'a> {
         chain: &ast::Chain,
         receive_types: &mut Vec<Type>,
     ) -> Result<(), Error> {
+        // Track the chained type as we traverse the chain
+        let mut chained_type: Option<Type> = None;
+
         for term in &chain.terms {
-            self.collect_receive_types_from_term(term, receive_types)?;
+            chained_type =
+                self.collect_receive_types_from_term(term, chained_type, receive_types)?;
         }
         Ok(())
     }
@@ -606,26 +637,58 @@ impl<'a> Compiler<'a> {
     fn collect_receive_types_from_term(
         &mut self,
         term: &ast::Term,
+        chained_type: Option<Type>,
         receive_types: &mut Vec<Type>,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<Type>, Error> {
         match term {
-            ast::Term::Receive(receive) => {
-                let message_type = typing::resolve_ast_type(
-                    &self.type_aliases,
-                    receive.type_def.clone(),
-                    &mut self.program,
-                )?;
-                receive_types.push(message_type);
-                // Also check nested receives in the receive block
-                if let Some(block) = &receive.block {
-                    self.collect_receive_types(block, receive_types)?;
+            ast::Term::Select(select) => {
+                // For a single select with multiple sources, collect all types
+                // and create a union if they differ
+                let mut select_sources = Vec::new();
+                for source in &select.sources {
+                    self.extract_receive_type_from_source(
+                        source,
+                        chained_type.as_ref(),
+                        &mut select_sources,
+                    )?;
+                }
+
+                // If this select has receive sources, add the unified type
+                if !select_sources.is_empty() {
+                    if select_sources.len() == 1 {
+                        receive_types.push(select_sources[0].clone());
+                    } else {
+                        // Multiple sources in same select - create union
+                        receive_types.push(Type::Union(select_sources));
+                    }
+                }
+                // Select doesn't produce a chainable type for receive extraction
+                Ok(None)
+            }
+            ast::Term::Access(access) => {
+                // Try to resolve the access to get its type
+                if let Some(identifier) = &access.identifier {
+                    let var_type = self
+                        .lookup_variable(&self.scopes, identifier, &access.accessors)
+                        .map(|(t, _)| t)
+                        .or_else(|| {
+                            let (base_type, _) =
+                                self.lookup_variable(&self.scopes, identifier, &[])?;
+                            self.resolve_accessor_type(base_type, &access.accessors, identifier)
+                                .ok()
+                        });
+                    Ok(var_type)
+                } else {
+                    Ok(None)
                 }
             }
             ast::Term::Block(block) => {
                 self.collect_receive_types(block, receive_types)?;
+                Ok(None)
             }
             ast::Term::Function(_) => {
                 // Don't recurse into nested function definitions - they have their own receive types
+                Ok(None)
             }
             ast::Term::Tuple(tuple) => {
                 // Check tuple fields
@@ -634,8 +697,75 @@ impl<'a> Compiler<'a> {
                         self.collect_receive_types_from_chain(chain, receive_types)?;
                     }
                 }
+                Ok(None)
             }
-            _ => {}
+            _ => Ok(None),
+        }
+    }
+
+    fn extract_receive_type_from_source(
+        &mut self,
+        source: &ast::Chain,
+        chained_type: Option<&Type>,
+        receive_types: &mut Vec<Type>,
+    ) -> Result<(), Error> {
+        // A source can be:
+        // 1. A function literal: #int { ... } -> extract int
+        // 2. A variable reference: r1 -> look up and extract parameter type
+        // 3. A ripple: ~ -> use the chained type
+        // 4. Something else (process, timeout) -> ignore
+
+        for term in &source.terms {
+            match term {
+                ast::Term::Ripple => {
+                    // Ripple refers to the chained value - extract its receive type
+                    if let Some(Type::Callable(callable)) = chained_type {
+                        receive_types.push(callable.parameter.clone());
+                    }
+                }
+                ast::Term::Function(func) => {
+                    // Inline function definition - extract parameter type
+                    if let Some(param_type) = &func.parameter_type {
+                        let resolved_type = typing::resolve_ast_type(
+                            &self.type_aliases,
+                            param_type.clone(),
+                            &mut self.program,
+                        )?;
+                        receive_types.push(resolved_type);
+                    }
+                }
+                ast::Term::Access(access) => {
+                    // Variable reference - look up its type
+                    // Skip function calls (only handle bare references)
+                    if access.argument.is_some() {
+                        continue;
+                    }
+
+                    let Some(identifier) = &access.identifier else {
+                        continue;
+                    };
+
+                    // Resolve variable type: try full path first, then base + accessor resolution
+                    let var_type = self
+                        .lookup_variable(&self.scopes, identifier, &access.accessors)
+                        .map(|(t, _)| t)
+                        .or_else(|| {
+                            // Full path not found - try resolving accessors through type system
+                            let (base_type, _) =
+                                self.lookup_variable(&self.scopes, identifier, &[])?;
+                            self.resolve_accessor_type(base_type, &access.accessors, identifier)
+                                .ok()
+                        });
+
+                    if let Some(Type::Callable(callable)) = var_type {
+                        receive_types.push(callable.parameter.clone());
+                    }
+                }
+                _ => {
+                    // Recursively check nested structures
+                    self.collect_receive_types_from_term(term, None, receive_types)?;
+                }
+            }
         }
         Ok(())
     }
@@ -656,7 +786,7 @@ impl<'a> Compiler<'a> {
         }
 
         let captures = variables::collect_free_variables(
-            &function.body,
+            function.body.as_ref(),
             &function_params,
             &|name, accessors| {
                 // Check if the full path (base + accessors) is defined, or just the base
@@ -725,7 +855,7 @@ impl<'a> Compiler<'a> {
         };
 
         // Extract receive type from function body
-        let receive_type = self.extract_receive_type(&function.body)?;
+        let receive_type = self.extract_receive_type(function.body.as_ref())?;
 
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
@@ -808,7 +938,15 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let body_type = self.compile_block(function.body, parameter_type.clone(), None)?;
+        let body_type = match function.body {
+            Some(body) => self.compile_block(body, parameter_type.clone(), None)?,
+            None => {
+                // Identity function: just return the parameter
+                // The calling convention puts the parameter on the stack,
+                // so we don't need any instructions - just leave it there
+                parameter_type.clone()
+            }
+        };
 
         let func_type = CallableType {
             parameter: parameter_type,
@@ -1102,7 +1240,7 @@ impl<'a> Compiler<'a> {
         let mut end_jumps = Vec::new();
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            let chain_type = self.compile_chain(chain.clone(), on_no_match)?;
+            let chain_type = self.compile_chain(chain.clone(), on_no_match, None)?;
 
             // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil = if i > 0 {
@@ -1153,6 +1291,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         chain: ast::Chain,
         on_no_match: Option<usize>,
+        ripple_context: Option<&RippleContext>,
     ) -> Result<Type, Error> {
         // If this is a continuation chain (starts with ~>), load the parameter
         let mut current_type = if chain.continuation {
@@ -1165,7 +1304,8 @@ impl<'a> Compiler<'a> {
         };
 
         for term in chain.terms {
-            current_type = Some(self.compile_term(term, current_type, on_no_match)?);
+            current_type =
+                Some(self.compile_term(term, current_type, on_no_match, ripple_context)?);
         }
 
         let result_type = current_type.ok_or_else(|| Error::InternalError {
@@ -1370,9 +1510,217 @@ impl<'a> Compiler<'a> {
                     Err(Error::BuiltinUndefined(name.to_string()))
                 }
             }
-            Value::Pid(_) => Err(Error::FeatureUnsupported(
+            Value::Pid(_, _) => Err(Error::FeatureUnsupported(
                 "Cannot use Pid in constant context".to_string(),
             )),
+        }
+    }
+
+    /// Validate that a receive function in a select has the correct return type
+    fn validate_receive_function(
+        &self,
+        source: &ast::Chain,
+        source_type: &Type,
+    ) -> Result<(), Error> {
+        // Only validate if this is a callable (receive function)
+        let Type::Callable(callable) = source_type else {
+            return Ok(());
+        };
+
+        // Identity functions (no body) and variable references are always allowed
+        if !source
+            .terms
+            .iter()
+            .any(|term| matches!(term, ast::Term::Function(func) if func.body.is_some()))
+        {
+            return Ok(());
+        }
+
+        // For functions with bodies, the result type must be nil, Ok, or a union of them
+        let is_valid = match &callable.result {
+            Type::Tuple(type_id) => *type_id == TypeId::NIL || *type_id == TypeId::OK,
+            Type::Union(variants) => variants
+                .iter()
+                .all(|v| matches!(v, Type::Tuple(id) if *id == TypeId::NIL || *id == TypeId::OK)),
+            _ => false,
+        };
+
+        if !is_valid {
+            return Err(Error::TypeMismatch {
+                expected: "receive function with body must return [] or Ok".to_string(),
+                found: quiver_core::format::format_type(&self.program, &callable.result),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Compile select sources and return their types
+    fn compile_select_sources(
+        &mut self,
+        sources: &[ast::Chain],
+        value_type: Option<&Type>,
+    ) -> Result<Vec<Type>, Error> {
+        let mut source_types = Vec::new();
+
+        for (i, source) in sources.iter().enumerate() {
+            // Pass ripple_context if there's a chained value
+            // Chained value is at offset i (number of sources compiled so far)
+            // Set owns_value=false since we'll clean it up manually after all sources
+            let ripple_ctx;
+            let ripple_param = if let Some(val_type) = value_type {
+                ripple_ctx = RippleContext {
+                    value_type: val_type.clone(),
+                    stack_offset: i,
+                    owns_value: false,
+                };
+                Some(&ripple_ctx)
+            } else {
+                None
+            };
+
+            let source_type = self.compile_chain(source.clone(), None, ripple_param)?;
+
+            // Validate receive functions
+            self.validate_receive_function(source, &source_type)?;
+
+            source_types.push(source_type);
+        }
+
+        Ok(source_types)
+    }
+
+    /// Compile chained spawn: `value ~> @function`
+    /// Creates a wrapper function that captures the argument and target, then spawns it
+    fn compile_chained_spawn(&mut self, term: ast::Term, arg_type: Type) -> Result<Type, Error> {
+        // Compile the target function
+        let target_type = self.compile_term(term, None, None, None)?;
+
+        let (target_param, target_receive, target_result) =
+            if let Type::Callable(callable) = &target_type {
+                (
+                    callable.parameter.clone(),
+                    callable.receive.clone(),
+                    callable.result.clone(),
+                )
+            } else {
+                return Err(Error::FeatureUnsupported(
+                    "Can only spawn functions".to_string(),
+                ));
+            };
+
+        // Type check: argument must be compatible with function parameter
+        if !arg_type.is_compatible(&target_param, &self.program) {
+            return Err(Error::TypeMismatch {
+                expected: format!(
+                    "value compatible with {}",
+                    quiver_core::format::format_type(&self.program, &target_param)
+                ),
+                found: quiver_core::format::format_type(&self.program, &arg_type),
+            });
+        }
+
+        // Stack is now: [argument, target_function]
+        // We need to create a wrapper function that captures both and calls target with argument
+
+        // Save both to locals (allocate 2 slots, store target then argument)
+        let wrapper_locals_base = self.local_count;
+        self.codegen.add_instruction(Instruction::Allocate(2));
+        self.codegen
+            .add_instruction(Instruction::Store(wrapper_locals_base + 1)); // target function
+        self.codegen
+            .add_instruction(Instruction::Store(wrapper_locals_base)); // argument
+
+        // Create wrapper function that takes nil and calls target with captured argument
+        let wrapper_instructions = vec![
+            Instruction::Load(0), // Load captured argument (from wrapper's captures[0])
+            Instruction::Load(1), // Load captured target function (from wrapper's captures[1])
+            Instruction::Call,    // Call target with argument
+        ];
+
+        let wrapper_func_index = self.program.register_function(Function {
+            instructions: wrapper_instructions,
+            function_type: Some(CallableType {
+                parameter: Type::nil(),
+                result: target_result.clone(),
+                receive: target_receive.clone(),
+            }),
+            captures: vec![wrapper_locals_base, wrapper_locals_base + 1],
+        });
+
+        // Emit function reference with captures
+        self.codegen
+            .add_instruction(Instruction::Function(wrapper_func_index));
+
+        // Clean up locals (the function has captured them)
+        self.codegen.add_instruction(Instruction::Clear(2));
+
+        // Spawn the wrapper
+        self.codegen.add_instruction(Instruction::Spawn);
+
+        Ok(Type::Process(Box::new(ProcessType {
+            receive: Some(Box::new(target_receive)),
+            returns: Some(Box::new(target_result)),
+        })))
+    }
+
+    /// Compute the return type of a select operation from source types
+    fn compute_select_return_type(&self, source_types: &[Type]) -> Result<Type, Error> {
+        let mut result_types = Vec::new();
+        let mut has_timeout = false;
+
+        for source_type in source_types {
+            match source_type {
+                Type::Process(process_type) => {
+                    // Awaiting process - get its return type
+                    if let Some(return_type) = &process_type.returns {
+                        result_types.push((**return_type).clone());
+                    } else {
+                        return Err(Error::TypeMismatch {
+                            expected: "process with return type (awaitable)".to_string(),
+                            found: "process without return type (cannot await)".to_string(),
+                        });
+                    }
+                }
+                Type::Callable(callable) => {
+                    // Receive function - use its result type
+                    result_types.push(callable.result.clone());
+                }
+                Type::Integer => {
+                    // Timeout source
+                    has_timeout = true;
+                }
+                _ => {
+                    return Err(Error::TypeMismatch {
+                        expected: "process, function, or integer (timeout)".to_string(),
+                        found: quiver_core::format::format_type(&self.program, source_type),
+                    });
+                }
+            }
+        }
+
+        if result_types.is_empty() && !has_timeout {
+            return Err(Error::FeatureUnsupported(
+                "Select requires at least one source".to_string(),
+            ));
+        }
+
+        // Determine final return type
+        let base_type = if result_types.is_empty() {
+            // Only timeout sources - returns nil
+            Type::Tuple(TypeId::NIL)
+        } else if result_types.len() == 1 {
+            result_types[0].clone()
+        } else {
+            // Multiple different return types - create union
+            Type::Union(result_types)
+        };
+
+        // If there's a timeout, union with nil
+        if has_timeout {
+            Ok(Type::Union(vec![base_type, Type::Tuple(TypeId::NIL)]))
+        } else {
+            Ok(base_type)
         }
     }
 
@@ -1381,6 +1729,7 @@ impl<'a> Compiler<'a> {
         term: ast::Term,
         value_type: Option<Type>,
         on_no_match: Option<usize>,
+        ripple_context: Option<&RippleContext>,
     ) -> Result<Type, Error> {
         match term {
             ast::Term::Literal(literal) => {
@@ -1403,7 +1752,22 @@ impl<'a> Compiler<'a> {
                             .to_string(),
                     ));
                 }
-                self.compile_tuple(tuple.name, tuple.fields, value_type)
+
+                // Convert value_type to ripple_context if present, otherwise use existing ripple_context
+                // Set owns_value=true when converting from value_type (we own it and must clean up)
+                let ripple_context_value;
+                let ripple_context_param = if let Some(vt) = value_type.as_ref() {
+                    ripple_context_value = RippleContext {
+                        value_type: vt.clone(),
+                        stack_offset: 0,
+                        owns_value: true,
+                    };
+                    Some(&ripple_context_value)
+                } else {
+                    ripple_context
+                };
+
+                self.compile_tuple(tuple.name, tuple.fields, ripple_context_param)
             }
             ast::Term::Block(block) => {
                 // Blocks take their input as a parameter
@@ -1436,7 +1800,7 @@ impl<'a> Compiler<'a> {
                                 self.compile_accessor(val_type, access.accessors, "value")?;
 
                             if let Some(args) = &access.argument {
-                                // Compile argument - no ripples allowed (pass None as value_type)
+                                // Compile argument - no ripples allowed (pass None as ripple_context)
                                 let arg_type = self.compile_tuple(
                                     args.name.clone(),
                                     args.fields.clone(),
@@ -1444,7 +1808,7 @@ impl<'a> Compiler<'a> {
                                 )?;
 
                                 // Now we have: [function, tuple] on stack, but we need [tuple, function]
-                                self.codegen.add_instruction(Instruction::Swap);
+                                self.codegen.add_instruction(Instruction::Rotate(2));
 
                                 // Apply argument to the accessed function
                                 self.apply_value_to_type(accessed_type, arg_type)
@@ -1461,10 +1825,24 @@ impl<'a> Compiler<'a> {
                         // If there's an argument, compile it first (before loading the function)
                         // so that ripples in the argument can access the piped value on the stack
                         let arg_type = if let Some(args) = &access.argument {
+                            // Convert value_type to ripple_context if present
+                            // Set owns_value=true when converting from value_type (we own it and must clean up)
+                            let ripple_context_value;
+                            let ripple_context_param = if let Some(vt) = value_type.as_ref() {
+                                ripple_context_value = RippleContext {
+                                    value_type: vt.clone(),
+                                    stack_offset: 0,
+                                    owns_value: true,
+                                };
+                                Some(&ripple_context_value)
+                            } else {
+                                ripple_context
+                            };
+
                             Some(self.compile_tuple(
                                 args.name.clone(),
                                 args.fields.clone(),
-                                value_type.clone(),
+                                ripple_context_param,
                             )?)
                         } else {
                             None
@@ -1506,7 +1884,25 @@ impl<'a> Compiler<'a> {
             ast::Term::TailCall(tail_call) => {
                 // If there's an argument, compile it first (may contain ripples using value_type)
                 let arg_type = if let Some(args) = &tail_call.argument {
-                    Some(self.compile_tuple(args.name.clone(), args.fields.clone(), value_type)?)
+                    // Convert value_type to ripple_context if present
+                    // Set owns_value=true when converting from value_type (we own it and must clean up)
+                    let ripple_context_value;
+                    let ripple_context_param = if let Some(vt) = value_type.as_ref() {
+                        ripple_context_value = RippleContext {
+                            value_type: vt.clone(),
+                            stack_offset: 0,
+                            owns_value: true,
+                        };
+                        Some(&ripple_context_value)
+                    } else {
+                        ripple_context
+                    };
+
+                    Some(self.compile_tuple(
+                        args.name.clone(),
+                        args.fields.clone(),
+                        ripple_context_param,
+                    )?)
                 } else {
                     value_type
                 };
@@ -1544,55 +1940,89 @@ impl<'a> Compiler<'a> {
                 self.compile_match(pattern, val_type, on_no_match, pattern::PatternMode::Pin)
             }
             ast::Term::Spawn(term) => {
-                // Spawn should not receive a value - it spawns the term
-                if value_type.is_some() {
-                    return Err(Error::FeatureUnsupported(
-                        "Spawn cannot be applied to a value".to_string(),
-                    ));
-                }
-                // Compile the term to get the function value
-                let term_type = self.compile_term(*term, None, None)?;
+                // Spawn a function, optionally with an argument: @f or 42 ~> @f
 
-                // Extract the receive and return types from the function
-                let (receive_type, return_type) = if let Type::Callable(callable) = &term_type {
-                    (callable.receive.clone(), callable.result.clone())
+                if let Some(arg_type) = value_type {
+                    // Chained spawn: value ~> @function
+                    self.compile_chained_spawn(*term, arg_type)
                 } else {
-                    return Err(Error::FeatureUnsupported(
-                        "Can only spawn functions".to_string(),
-                    ));
-                };
+                    // Direct spawn: @function (no argument)
+                    // Compile the term to get the function value
+                    let term_type = self.compile_term(*term, None, None, None)?;
 
-                // Emit spawn instruction (pops function, pushes Process)
-                self.codegen.add_instruction(Instruction::Spawn);
+                    // Extract the parameter, receive and return types from the function
+                    let (param_type, receive_type, return_type) =
+                        if let Type::Callable(callable) = &term_type {
+                            (
+                                callable.parameter.clone(),
+                                callable.receive.clone(),
+                                callable.result.clone(),
+                            )
+                        } else {
+                            return Err(Error::FeatureUnsupported(
+                                "Can only spawn functions".to_string(),
+                            ));
+                        };
 
-                Ok(Type::Process(Box::new(ProcessType {
-                    receive: Some(Box::new(receive_type)),
-                    returns: Some(Box::new(return_type)),
-                })))
-            }
-            ast::Term::Await => {
-                // Await expects a process value on the stack
-                let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Await requires a value (process)".to_string())
-                })?;
-
-                // Type check: ensure the value is a Process with a return type
-                if let Type::Process(process_type) = &val_type {
-                    if let Some(return_type) = &process_type.returns {
-                        self.codegen.add_instruction(Instruction::Call);
-                        Ok((**return_type).clone())
-                    } else {
-                        Err(Error::TypeMismatch {
-                            expected: "process with return type (awaitable)".to_string(),
-                            found: "process without return type (cannot await)".to_string(),
-                        })
+                    // Type check: function must take nil as parameter
+                    if !Type::nil().is_compatible(&param_type, &self.program) {
+                        return Err(Error::TypeMismatch {
+                            expected: "function with nil parameter (use 'value ~> @function' to pass an argument)".to_string(),
+                            found: format!("function with parameter {}",
+                                quiver_core::format::format_type(&self.program, &param_type)),
+                        });
                     }
-                } else {
-                    Err(Error::TypeMismatch {
-                        expected: "process".to_string(),
-                        found: quiver_core::format::format_type(&self.program, &val_type),
-                    })
+
+                    // Emit spawn instruction (pops function, pushes Process)
+                    self.codegen.add_instruction(Instruction::Spawn);
+
+                    Ok(Type::Process(Box::new(ProcessType {
+                        receive: Some(Box::new(receive_type)),
+                        returns: Some(Box::new(return_type)),
+                    })))
                 }
+            }
+            ast::Term::Select(select) => {
+                // Select operation: !(p1 | p2 | ...) or p ~> !(~) or p ~> !(sources)
+                // When chained (p ~> !...), sources can reference the chained value via ripple (~)
+                // Note: The parser transforms bare `!` into `!(~)` automatically
+
+                let sources = select.sources.clone();
+
+                if sources.is_empty() {
+                    return Err(Error::FeatureUnsupported(
+                        "Select requires at least one source".to_string(),
+                    ));
+                }
+
+                // If there's a chained value, check that it's used (via ripple) in at least one source
+                if value_type.is_some() && !Self::select_contains_ripple(&sources) {
+                    return Err(Error::FeatureUnsupported(
+                        "Chained value must be used in select sources (use ripple operator ~)"
+                            .to_string(),
+                    ));
+                }
+
+                // Compile all sources
+                let source_types = self.compile_select_sources(&sources, value_type.as_ref())?;
+
+                // If there was a chained value, remove it from the bottom of the stack
+                // Stack is currently: [chained_value | src0 | src1 | ... | src(n-1)]
+                // We want: [src0 | src1 | ... | src(n-1)]
+                // Use Rotate to move chained_value to top, then Pop it
+                if value_type.is_some() {
+                    let n = sources.len();
+                    // Rotate(n+1) moves the item at depth n (the chained value) to the top
+                    self.codegen.add_instruction(Instruction::Rotate(n + 1));
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+
+                // Emit Select(n) instruction
+                self.codegen
+                    .add_instruction(Instruction::Select(sources.len()));
+
+                // Compute and return the select return type
+                self.compute_select_return_type(&source_types)
             }
             ast::Term::Self_ => {
                 if value_type.is_some() {
@@ -1609,45 +2039,24 @@ impl<'a> Compiler<'a> {
                 };
                 Ok(Type::Process(Box::new(process_type)))
             }
-            ast::Term::Receive(receive) => {
-                let message_type = typing::resolve_ast_type(
-                    &self.type_aliases,
-                    receive.type_def.clone(),
-                    &mut self.program,
-                )?;
-
-                if let Some(block) = receive.block.clone() {
-                    // Receive with block - pattern matching logic
-                    let loop_start = self.codegen.instructions.len();
-                    self.codegen.add_instruction(Instruction::Receive);
-
-                    // We'll create the retry cleanup code after the success path
-                    // Use a placeholder jump to skip over it
-                    let skip_retry = self.codegen.emit_jump_placeholder();
-
-                    // Retry cleanup code: pop nil, clear parameter local, jump back
-                    let retry_addr = self.codegen.instructions.len();
-                    self.codegen.add_instruction(Instruction::Pop);
-                    self.codegen.add_instruction(Instruction::Clear(1)); // Clear parameter local
-                    let offset =
-                        (loop_start as isize) - (self.codegen.instructions.len() as isize) - 1;
-                    self.codegen.add_instruction(Instruction::Jump(offset));
-
-                    // Patch the skip jump to land here (after retry code)
-                    self.codegen.patch_jump_to_here(skip_retry);
-
-                    // Compile block with on_no_match pointing to retry_addr
-                    let result_type = self.compile_block(block, message_type, Some(retry_addr))?;
-
-                    // If we get here, a pattern matched - acknowledge the message
-                    self.codegen.add_instruction(Instruction::Acknowledge);
-
-                    Ok(result_type)
+            ast::Term::Ripple => {
+                // Ripple evaluates to the chained value
+                // Prefer value_type (directly chained) over ripple_context (inherited from parent)
+                if let Some(val_type) = value_type {
+                    // Value was directly chained to this ripple - use it
+                    // The value is already on the stack, no need to Pick
+                    Ok(val_type)
+                } else if let Some(ctx) = ripple_context {
+                    // Inherit ripple context from parent tuple
+                    self.codegen
+                        .add_instruction(Instruction::Pick(ctx.stack_offset));
+                    Ok(ctx.value_type.clone())
                 } else {
-                    // Receive without block - just receive and acknowledge
-                    self.codegen.add_instruction(Instruction::Receive);
-                    self.codegen.add_instruction(Instruction::Acknowledge);
-                    Ok(message_type)
+                    // Neither value_type nor ripple_context available
+                    Err(Error::FeatureUnsupported(
+                        "Ripple placeholder (~) can only be used when a value is being chained"
+                            .to_string(),
+                    ))
                 }
             }
         }
@@ -1917,7 +2326,7 @@ impl<'a> Compiler<'a> {
                 }
                 self.codegen.add_instruction(Instruction::Get(i));
                 if i < field_count - 1 {
-                    self.codegen.add_instruction(Instruction::Swap);
+                    self.codegen.add_instruction(Instruction::Rotate(2));
                 }
             }
 
@@ -1946,6 +2355,50 @@ impl<'a> Compiler<'a> {
 
         // The Not instruction returns either Ok or NIL
         Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
+    }
+
+    fn resolve_accessor_type(
+        &self,
+        mut current_type: Type,
+        accessors: &[ast::AccessPath],
+        target_name: &str,
+    ) -> Result<Type, Error> {
+        for accessor in accessors {
+            let tuple_types = current_type.extract_tuple_types();
+
+            if tuple_types.is_empty() {
+                return Err(Error::MemberAccessOnNonTuple {
+                    target: target_name.to_string(),
+                });
+            }
+
+            let field_types = match accessor {
+                ast::AccessPath::Field(field_name) => {
+                    let results = self
+                        .get_field_types_by_name(&tuple_types, field_name)
+                        .map_err(|_| Error::MemberFieldNotFound {
+                            field_name: field_name.clone(),
+                            target: target_name.to_string(),
+                        })?;
+                    if results.is_empty() {
+                        return Err(Error::MemberFieldNotFound {
+                            field_name: field_name.clone(),
+                            target: target_name.to_string(),
+                        });
+                    }
+                    results.into_iter().map(|(_, t)| t).collect()
+                }
+                ast::AccessPath::Index(index) => self
+                    .get_field_types_at_position(&tuple_types, *index)
+                    .map_err(|_| Error::MemberAccessOnNonTuple {
+                        target: target_name.to_string(),
+                    })?,
+            };
+
+            current_type = Type::from_types(field_types);
+        }
+
+        Ok(current_type)
     }
 
     fn compile_accessor(

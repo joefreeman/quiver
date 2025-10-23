@@ -172,3 +172,39 @@ fn test_apply_value_to_inline_function() {
         .evaluate("5 ~> #int { ~> [~, 2] ~> __add__ }")
         .expect("7");
 }
+
+#[test]
+fn test_identity_function_int() {
+    quiver().evaluate("f = #int, 42 ~> f").expect("42");
+}
+
+#[test]
+fn test_identity_function_bin() {
+    quiver()
+        .evaluate("f = #bin, '0a1b2c' ~> f")
+        .expect("'0a1b2c'");
+}
+
+#[test]
+fn test_identity_function_tuple() {
+    quiver()
+        .evaluate("f = #Point[x: int, y: int], Point[x: 1, y: 2] ~> f")
+        .expect("Point[x: 1, y: 2]");
+}
+
+#[test]
+fn test_identity_function_inline() {
+    quiver().evaluate("42 ~> #int").expect("42");
+}
+
+#[test]
+fn test_identity_function_with_type_parameter() {
+    quiver()
+        .evaluate(
+            r#"
+            id = #<t>t,
+            42 ~> id
+            "#,
+        )
+        .expect("42");
+}

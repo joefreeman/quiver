@@ -8,10 +8,15 @@ pub struct Capture {
 }
 
 pub fn collect_free_variables(
-    block: &ast::Block,
+    block: Option<&ast::Block>,
     function_parameters: &HashSet<String>,
     defined_variables: &dyn Fn(&str, &[ast::AccessPath]) -> bool,
 ) -> Vec<Capture> {
+    let Some(block) = block else {
+        // Identity function has no captures
+        return Vec::new();
+    };
+
     let mut collector = FreeVariableCollector {
         function_parameters,
         defined_variables,
@@ -72,7 +77,9 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_block(block);
             }
             ast::Term::Function(func) => {
-                self.visit_block(&func.body);
+                if let Some(body) = &func.body {
+                    self.visit_block(body);
+                }
             }
             ast::Term::Access(access) => {
                 if let Some(name) = &access.identifier {
@@ -106,12 +113,12 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_term(term);
             }
             ast::Term::Self_ => {}
-            ast::Term::Receive(receive) => {
-                if let Some(block) = &receive.block {
-                    self.visit_block(block);
+            ast::Term::Select(select) => {
+                for source in &select.sources {
+                    self.visit_chain(source);
                 }
             }
-            ast::Term::Await => {}
+            ast::Term::Ripple => {}
         }
     }
 

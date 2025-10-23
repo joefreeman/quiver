@@ -51,7 +51,7 @@ impl TestBuilder {
 
     pub fn evaluate(self, source: &str) -> TestResult {
         // Create workers
-        let num_workers = 1; // Single worker for tests
+        let num_workers = 2;
         let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
         for _ in 0..num_workers {
             workers.push(Box::new(spawn_worker()));
@@ -64,6 +64,9 @@ impl TestBuilder {
         // Create REPL
         let mut repl = Repl::new(workers, program, module_loader).expect("Failed to create REPL");
 
+        // Initialize virtual time for testing
+        let mut virtual_time_ms: u64 = 0;
+
         // Evaluate source
         let result = match repl.evaluate(source) {
             Ok(Some(request_id)) => {
@@ -71,8 +74,16 @@ impl TestBuilder {
                 let start = std::time::Instant::now();
                 let timeout = std::time::Duration::from_secs(5);
 
+                repl.set_time(virtual_time_ms).ok();
+
                 loop {
-                    repl.step().ok();
+                    let did_work = repl.step().unwrap_or(false);
+
+                    // If idle, advance virtual time
+                    if !did_work {
+                        virtual_time_ms = virtual_time_ms.saturating_add(1);
+                        repl.set_time(virtual_time_ms).ok();
+                    }
 
                     match repl.poll_request(request_id) {
                         Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap))))) => {
@@ -107,6 +118,7 @@ impl TestBuilder {
             result,
             source: source.to_string(),
             repl,
+            virtual_time_ms,
         }
     }
 }
@@ -116,6 +128,7 @@ pub struct TestResult {
     result: ReplResult,
     source: String,
     repl: Repl,
+    virtual_time_ms: u64,
 }
 
 #[allow(dead_code)]
@@ -268,6 +281,18 @@ impl TestResult {
                 );
             }
         }
+        self
+    }
+
+    pub fn expect_duration(self, min_ms: u64, max_ms: u64) -> Self {
+        assert!(
+            self.virtual_time_ms >= min_ms && self.virtual_time_ms <= max_ms,
+            "Expected virtual time between {}ms and {}ms, but got {}ms for source: {}",
+            min_ms,
+            max_ms,
+            self.virtual_time_ms,
+            self.source
+        );
         self
     }
 }

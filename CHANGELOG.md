@@ -13,6 +13,8 @@
 - Replaced tuple update syntax with spread operator (`...`) for more flexible/intuitive merging/updating of tuples for both values and types.
 - Replaced `type` keyword with `::` syntax (e.g., `point :: Point[x: int, y: int]`).
 - Changed syntax for calling built-ins to `__add__`.
+- Replaced receive/await operators with a more general 'select' operation (`!(...)`) for awaiting multiple processes, receiving messages, and supporting timeouts.
+- Generalised support for using the ripple operator outside of tuple creation.
 
 ### Fixed
 

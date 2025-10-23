@@ -38,7 +38,7 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
         Type::Process(process_type) => match (&process_type.receive, &process_type.returns) {
             (Some(receive), Some(returns)) => {
                 format!(
-                    "(@{} -> {})",
+                    "@{} -> {}",
                     format_type(program, receive),
                     format_type(program, returns)
                 )
@@ -47,7 +47,7 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
                 format!("@{}", format_type(program, receive))
             }
             (None, Some(returns)) => {
-                format!("(@-> {})", format_type(program, returns))
+                format!("@-> {}", format_type(program, returns))
             }
             (None, None) => "@".to_string(),
         },
@@ -171,7 +171,7 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
         Value::Builtin(name) => format!("__{}__", name),
         Value::Integer(i) => i.to_string(),
         Value::Binary(binary) => format_binary(binary, heap, constants),
-        Value::Pid(process_id) => format!("@{}", process_id),
+        Value::Pid(process_id, _) => format!("@{}", process_id),
         Value::Tuple(type_id, elements) => {
             if let Some(type_info) = program.lookup_type(type_id) {
                 if type_info.name.as_deref() == Some("Str")

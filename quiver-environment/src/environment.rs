@@ -1,18 +1,20 @@
 use crate::WorkerId;
 use crate::messages::{Command, Event};
 use crate::transport::WorkerHandle;
-use quiver_core::bytecode::{Constant, Function};
+use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
 use quiver_core::types::TupleTypeInfo;
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // Type aliases for complex types
 pub type ValueWithHeap = (Value, Vec<Vec<u8>>);
 pub type RuntimeResult = Result<Value, quiver_core::error::Error>;
 pub type CompletedResult = (RuntimeResult, Vec<Vec<u8>>);
+pub type ProcessResultsMap = HashMap<ProcessId, Option<CompletedResult>>;
+pub type WorkerResponsesMap = HashMap<WorkerId, ProcessResultsMap>;
 pub type LocalsResult = Result<Vec<ValueWithHeap>, EnvironmentError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,10 +98,15 @@ pub enum RequestResult {
     Locals(Vec<ValueWithHeap>),
 }
 
+struct PendingAwait {
+    expected_workers: HashSet<WorkerId>,
+    responses: WorkerResponsesMap,
+}
+
 pub struct Environment {
     workers: Vec<Box<dyn WorkerHandle>>,
     process_router: HashMap<ProcessId, WorkerId>,
-    awaiters_for: HashMap<ProcessId, Vec<ProcessId>>,
+    pending_awaits: HashMap<ProcessId, PendingAwait>, // awaiter -> pending await state
     pending_requests: HashMap<u64, Option<RequestResult>>,
     // Maps aggregation_id -> worker_request_id -> Option<statuses>
     status_aggregations: HashMap<u64, HashMap<u64, Option<HashMap<ProcessId, ProcessStatus>>>>,
@@ -118,7 +125,7 @@ impl Environment {
         let mut env = Self {
             workers,
             process_router: HashMap::new(),
-            awaiters_for: HashMap::new(),
+            pending_awaits: HashMap::new(),
             pending_requests: HashMap::new(),
             status_aggregations: HashMap::new(),
             next_request_id: 0,
@@ -175,7 +182,7 @@ impl Environment {
         constants: Vec<Constant>,
         functions: Vec<Function>,
         types: Vec<TupleTypeInfo>,
-        builtins: Vec<String>,
+        builtins: Vec<BuiltinInfo>,
     ) -> Result<(), EnvironmentError> {
         let cmd = Command::UpdateProgram {
             constants,
@@ -359,6 +366,19 @@ impl Environment {
         Ok(())
     }
 
+    /// Set virtual time for all workers (for testing)
+    pub fn set_time(&mut self, time_ms: u64) -> Result<(), EnvironmentError> {
+        let cmd = Command::SetTime { time_ms };
+
+        for worker in &mut self.workers {
+            worker
+                .send(cmd.clone())
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
     /// Check if a request has completed (non-blocking)
     /// Automatically removes the request from pending_requests when returning a final result
     pub fn poll_request(
@@ -395,11 +415,6 @@ impl Environment {
 
     fn handle_event(&mut self, event: Event) -> Result<(), EnvironmentError> {
         match event {
-            Event::Completed {
-                process_id,
-                result,
-                heap,
-            } => self.handle_process_completed(process_id, result, heap),
             Event::SpawnAction {
                 caller,
                 function_index,
@@ -411,7 +426,12 @@ impl Environment {
                 message,
                 heap,
             } => self.handle_deliver(target, message, heap),
-            Event::AwaitAction { caller, target } => self.handle_await_result(caller, target),
+            Event::AwaitAction { awaiter, targets } => {
+                self.handle_await_processes(awaiter, targets)
+            }
+            Event::ProcessResults { awaiter, results } => {
+                self.handle_process_results(awaiter, results)
+            }
             Event::ResultResponse { request_id, result } => {
                 self.handle_result_response(request_id, result)
             }
@@ -428,28 +448,104 @@ impl Environment {
         }
     }
 
-    fn handle_process_completed(
+    fn handle_await_processes(
         &mut self,
-        process_id: ProcessId,
-        result: RuntimeResult,
-        heap: Vec<Vec<u8>>,
+        awaiter: ProcessId,
+        targets: Vec<ProcessId>,
     ) -> Result<(), EnvironmentError> {
-        // Look up awaiters and remove the entry
-        let awaiters = self.awaiters_for.remove(&process_id).unwrap_or_default();
+        use std::collections::HashSet;
 
-        // Notify all awaiters
-        for awaiter in awaiters {
+        // Group targets by worker
+        let mut targets_by_worker: HashMap<WorkerId, Vec<ProcessId>> = HashMap::new();
+        for target in &targets {
             let worker_id = self
+                .process_router
+                .get(target)
+                .ok_or(EnvironmentError::ProcessNotFound(*target))?;
+            targets_by_worker
+                .entry(*worker_id)
+                .or_default()
+                .push(*target);
+        }
+
+        // Track expected workers for this awaiter
+        let expected_workers: HashSet<WorkerId> = targets_by_worker.keys().copied().collect();
+        self.pending_awaits.insert(
+            awaiter,
+            PendingAwait {
+                expected_workers,
+                responses: HashMap::new(),
+            },
+        );
+
+        // Send QueryAndAwait command to each worker
+        for (worker_id, worker_targets) in targets_by_worker {
+            self.workers[worker_id]
+                .send(Command::QueryAndAwait {
+                    awaiter,
+                    targets: worker_targets,
+                })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_process_results(
+        &mut self,
+        awaiter: ProcessId,
+        results: ProcessResultsMap,
+    ) -> Result<(), EnvironmentError> {
+        // Get the worker ID that sent this response by looking up any process ID in results
+        // (works even if all results are None, since we still have the process IDs)
+        let sender_worker_id = results
+            .keys()
+            .next()
+            .and_then(|pid| self.process_router.get(pid))
+            .copied();
+
+        if let Some(pending) = self.pending_awaits.get_mut(&awaiter) {
+            // This is part of an initial await - collect the response
+            if let Some(worker_id) = sender_worker_id {
+                pending.responses.insert(worker_id, results.clone());
+                pending.expected_workers.remove(&worker_id);
+
+                // Check if all workers have responded
+                if pending.expected_workers.is_empty() {
+                    // Merge all results
+                    let all_results: ProcessResultsMap = pending
+                        .responses
+                        .values()
+                        .flat_map(|r| r.iter())
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect();
+
+                    // Clean up pending state
+                    self.pending_awaits.remove(&awaiter);
+
+                    // Send merged results to awaiter's worker
+                    let awaiter_worker = self
+                        .process_router
+                        .get(&awaiter)
+                        .ok_or(EnvironmentError::ProcessNotFound(awaiter))?;
+
+                    self.workers[*awaiter_worker]
+                        .send(Command::UpdateAwaitResults {
+                            awaiter,
+                            results: all_results,
+                        })
+                        .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+                }
+            }
+        } else {
+            // This is a later completion - forward directly to awaiter's worker
+            let awaiter_worker = self
                 .process_router
                 .get(&awaiter)
                 .ok_or(EnvironmentError::ProcessNotFound(awaiter))?;
 
-            self.workers[*worker_id]
-                .send(Command::NotifyResult {
-                    process_id: awaiter,
-                    result: result.clone(),
-                    heap: heap.clone(),
-                })
+            self.workers[*awaiter_worker]
+                .send(Command::UpdateAwaitResults { awaiter, results })
                 .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
 
@@ -491,6 +587,7 @@ impl Environment {
             .send(Command::NotifySpawn {
                 process_id: caller,
                 spawned_pid: new_pid,
+                function_index,
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
@@ -513,29 +610,6 @@ impl Environment {
                 target,
                 message,
                 heap,
-            })
-            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
-
-        Ok(())
-    }
-
-    fn handle_await_result(
-        &mut self,
-        caller: ProcessId,
-        target: ProcessId,
-    ) -> Result<(), EnvironmentError> {
-        // Record the awaiter relationship
-        self.awaiters_for.entry(target).or_default().push(caller);
-
-        let target_worker = self
-            .process_router
-            .get(&target)
-            .ok_or(EnvironmentError::ProcessNotFound(target))?;
-
-        self.workers[*target_worker]
-            .send(Command::RegisterAwaiter {
-                target,
-                awaiter: caller,
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 

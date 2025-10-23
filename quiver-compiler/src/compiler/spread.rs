@@ -5,35 +5,26 @@ use quiver_core::{
     types::{Type, TypeLookup},
 };
 
-use super::{Compiler, Error};
+use super::{Compiler, Error, RippleContext};
 
 pub fn compile_tuple_with_spread(
     compiler: &mut Compiler,
     tuple_name: Option<String>,
     fields: Vec<ast::TupleField>,
-    value_type: Option<Type>,
+    ripple_context: Option<&RippleContext>,
 ) -> Result<Type, Error> {
-    let contains_ripple = Compiler::tuple_contains_ripple(&fields);
     let has_chained_spread = fields.iter().any(|f| match &f.value {
         ast::FieldValue::Spread(None) => true,
         ast::FieldValue::Spread(Some(id)) if id == "~" => true,
         _ => false,
     });
 
-    if has_chained_spread && value_type.is_none() {
+    if has_chained_spread && ripple_context.is_none() {
         return Err(Error::FeatureUnsupported(
             "Chained spread (...) can only be used when a value is piped into the tuple"
                 .to_string(),
         ));
     }
-
-    // Set up ripple context if needed (for both ripples and chained spreads)
-    let has_ripple_value = if (contains_ripple || has_chained_spread) && value_type.is_some() {
-        compiler.ripple_types.push(value_type.clone().unwrap());
-        true
-    } else {
-        false
-    };
 
     // Step 1: Compile all field values and track their types
     #[derive(Debug)]
@@ -63,26 +54,23 @@ pub fn compile_tuple_with_spread(
     for field in &fields {
         match &field.value {
             ast::FieldValue::Chain(chain) => {
-                let ty = compiler.compile_chain(chain.clone(), None)?;
+                // Pass ripple_context with incremented offset
+                // Set owns_value=false since we're passing it through, not owning it
+                let ripple_context_value;
+                let ripple_context_param = if let Some(ctx) = ripple_context {
+                    ripple_context_value = RippleContext {
+                        value_type: ctx.value_type.clone(),
+                        stack_offset: ctx.stack_offset + stack_size,
+                        owns_value: false,
+                    };
+                    Some(&ripple_context_value)
+                } else {
+                    None
+                };
+                let ty = compiler.compile_chain(chain.clone(), None, ripple_context_param)?;
                 compiled_values.push(CompiledValue::Field {
                     name: field.name.clone(),
                     ty,
-                    stack_offset: stack_size,
-                });
-                stack_size += 1;
-            }
-            ast::FieldValue::Ripple => {
-                let ripple_type = compiler.ripple_types.last().ok_or_else(|| {
-                    Error::FeatureUnsupported(
-                        "Ripple cannot be used outside of an operation context".to_string(),
-                    )
-                })?;
-                compiler
-                    .codegen
-                    .add_instruction(Instruction::Pick(stack_size));
-                compiled_values.push(CompiledValue::Field {
-                    name: field.name.clone(),
-                    ty: ripple_type.clone(),
                     stack_offset: stack_size,
                 });
                 stack_size += 1;
@@ -92,15 +80,15 @@ pub fn compile_tuple_with_spread(
                 let spread_type = if let Some(id) = identifier {
                     if id == "~" {
                         // Spread the ripple value (~)
-                        let ripple_type = compiler.ripple_types.last().ok_or_else(|| {
+                        let ctx = ripple_context.ok_or_else(|| {
                             Error::FeatureUnsupported(
                                 "Ripple spread (~) requires a piped value".to_string(),
                             )
                         })?;
                         compiler
                             .codegen
-                            .add_instruction(Instruction::Pick(stack_size));
-                        ripple_type.clone()
+                            .add_instruction(Instruction::Pick(ctx.stack_offset + stack_size));
+                        ctx.value_type.clone()
                     } else {
                         // Spread a variable
                         let (var_type, var_index) = compiler
@@ -113,15 +101,15 @@ pub fn compile_tuple_with_spread(
                     }
                 } else {
                     // Spread the chained value (...)
-                    let ripple_type = compiler.ripple_types.last().ok_or_else(|| {
+                    let ctx = ripple_context.ok_or_else(|| {
                         Error::FeatureUnsupported(
                             "Chained spread (...) requires a piped value".to_string(),
                         )
                     })?;
                     compiler
                         .codegen
-                        .add_instruction(Instruction::Pick(stack_size));
-                    ripple_type.clone()
+                        .add_instruction(Instruction::Pick(ctx.stack_offset + stack_size));
+                    ctx.value_type.clone()
                 };
 
                 compiled_values.push(CompiledValue::Spread {
@@ -165,7 +153,7 @@ pub fn compile_tuple_with_spread(
 
     for field in &fields {
         match &field.value {
-            ast::FieldValue::Chain(_) | ast::FieldValue::Ripple => {
+            ast::FieldValue::Chain(_) => {
                 let compiled_idx = field_to_compiled[field_count];
                 field_count += 1;
 
@@ -375,7 +363,7 @@ pub fn compile_tuple_with_spread(
     // Helper to emit stack cleanup instructions
     let emit_stack_cleanup = |compiler: &mut Compiler, count: usize| {
         for _ in 0..count {
-            compiler.codegen.add_instruction(Instruction::Swap);
+            compiler.codegen.add_instruction(Instruction::Rotate(2));
             compiler.codegen.add_instruction(Instruction::Pop);
         }
     };
@@ -492,11 +480,12 @@ pub fn compile_tuple_with_spread(
         Type::from_types(union_types)
     };
 
-    // Clean up ripple context
-    if has_ripple_value {
-        compiler.codegen.add_instruction(Instruction::Swap);
+    // Clean up ripple value if we own it
+    if let Some(ctx) = ripple_context
+        && ctx.owns_value
+    {
+        compiler.codegen.add_instruction(Instruction::Rotate(2));
         compiler.codegen.add_instruction(Instruction::Pop);
-        compiler.ripple_types.pop();
     }
 
     Ok(result_type)

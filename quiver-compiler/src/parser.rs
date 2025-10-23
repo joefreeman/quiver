@@ -599,9 +599,44 @@ fn access(input: &str) -> IResult<&str, Access> {
     )(input)
 }
 
-// Parse await operator - a postfix '!' that awaits a process
-fn await_term(input: &str) -> IResult<&str, Term> {
-    nom_value(Term::Await, char('!'))(input)
+// Parse select operator - can be prefix !(p1 | p2) or postfix p ~> ! or p ~> !timeout
+fn select_term(input: &str) -> IResult<&str, Term> {
+    alt((
+        // Prefix form: !(alt1 | alt2 | ...)
+        map(
+            delimited(
+                pair(char('!'), pair(char('('), wsc)),
+                separated_list1(tuple((wsc, char('|'), wsc)), chain),
+                pair(wsc, char(')')),
+            ),
+            |sources| Term::Select(Select { sources }),
+        ),
+        // Postfix form: ! or !term
+        // Transform bare ! into !(~) - a select with a single ripple source
+        map(
+            pair(
+                char('!'),
+                opt(map(term, |t| Chain {
+                    match_pattern: None,
+                    terms: vec![t],
+                    continuation: false,
+                })),
+            ),
+            |(_, opt_chain)| {
+                let sources = if let Some(c) = opt_chain {
+                    vec![c]
+                } else {
+                    // Bare ! becomes !(~) - implicit ripple source
+                    vec![Chain {
+                        match_pattern: None,
+                        terms: vec![Term::Ripple],
+                        continuation: false,
+                    }]
+                };
+                Term::Select(Select { sources })
+            },
+        ),
+    ))(input)
 }
 
 fn import(input: &str) -> IResult<&str, String> {
@@ -617,14 +652,6 @@ fn import(input: &str) -> IResult<&str, String> {
 
 fn tuple_field(input: &str) -> IResult<&str, TupleField> {
     alt((
-        // Named field with ripple: name: ~
-        map(
-            separated_pair(identifier, tuple((char(':'), ws1)), char('~')),
-            |(name, _)| TupleField {
-                name: Some(name),
-                value: FieldValue::Ripple,
-            },
-        ),
         // Named field with chain: name: chain
         map(
             separated_pair(identifier, tuple((char(':'), ws1)), chain),
@@ -642,11 +669,6 @@ fn tuple_field(input: &str) -> IResult<&str, TupleField> {
         map(tag("..."), |_| TupleField {
             name: None,
             value: FieldValue::Spread(None),
-        }),
-        // Unnamed ripple: ~
-        map(char('~'), |_| TupleField {
-            name: None,
-            value: FieldValue::Ripple,
         }),
         // Unnamed chain: chain
         map(chain, |chain_value| TupleField {
@@ -797,8 +819,8 @@ fn function(input: &str) -> IResult<&str, Function> {
                     separated_list1(tuple((ws0, char(','), ws0)), identifier),
                     char('>'),
                 )),
-                opt(terminated(function_input_type, ws1)),
-                block,
+                opt(preceded(not(peek(char('{'))), function_input_type)),
+                opt(alt((preceded(ws1, block), block))),
             )),
         ),
         |(type_parameters, parameter_type, body)| Function {
@@ -883,16 +905,6 @@ fn self_term(input: &str) -> IResult<&str, Term> {
             )))),
         ),
         |_| Term::Self_,
-    )(input)
-}
-
-fn receive_term(input: &str) -> IResult<&str, Term> {
-    map(
-        pair(
-            preceded(char('$'), type_definition),
-            opt(preceded(ws0, block)),
-        ),
-        |(type_def, block)| Term::Receive(Receive { type_def, block }),
     )(input)
 }
 
@@ -1015,8 +1027,11 @@ fn term(input: &str) -> IResult<&str, Term> {
     alt((
         // String terms (before literals to handle quotes)
         string_term,
+        // Ripple placeholder (but not ~[...] which is tuple with ripple spread)
+        map(terminated(char('~'), peek(not(char('[')))), |_| {
+            Term::Ripple
+        }),
         // Process operations
-        receive_term,
         spawn_term,
         self_term,
         // Pin match and bind match (must be before literals and identifiers)
@@ -1037,7 +1052,7 @@ fn term(input: &str) -> IResult<&str, Term> {
         // Operations
         equality,
         not_term,
-        await_term,
+        select_term,
         tail_call,
     ))(input)
 }

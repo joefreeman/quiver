@@ -1,4 +1,4 @@
-use crate::bytecode::{Bytecode, Constant, Function, Instruction, TypeId};
+use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction, TypeId};
 use crate::types::{TupleTypeInfo, Type};
 use std::collections::HashMap;
 
@@ -37,8 +37,16 @@ fn mark_type_references(typ: &Type, used_types: &mut [bool], type_queue: &mut Ve
 /// Remap all TypeIds within a Type structure according to the provided remap table
 fn remap_type_ids(typ: Type, type_remap: &HashMap<TypeId, TypeId>) -> Type {
     match typ {
-        Type::Tuple(old_id) => Type::Tuple(*type_remap.get(&old_id).unwrap_or(&old_id)),
-        Type::Partial(old_id) => Type::Partial(*type_remap.get(&old_id).unwrap_or(&old_id)),
+        Type::Tuple(old_id) => Type::Tuple(
+            *type_remap
+                .get(&old_id)
+                .expect("Tuple type ID should be in remap table after tree shaking"),
+        ),
+        Type::Partial(old_id) => Type::Partial(
+            *type_remap
+                .get(&old_id)
+                .expect("Partial type ID should be in remap table after tree shaking"),
+        ),
         Type::Union(types_vec) => Type::Union(
             types_vec
                 .into_iter()
@@ -68,7 +76,7 @@ pub fn tree_shake(
     functions: &[Function],
     constants: &[Constant],
     types: &[TupleTypeInfo],
-    builtins: &[String],
+    builtins: &[BuiltinInfo],
     entry_fn: usize,
 ) -> Bytecode {
     // Mark phase: find all reachable functions, constants, types, and builtins
@@ -223,21 +231,31 @@ pub fn tree_shake(
                 .instructions
                 .into_iter()
                 .map(|instruction| match instruction {
-                    Instruction::Function(old_id) => {
-                        Instruction::Function(*function_remap.get(&old_id).unwrap_or(&old_id))
-                    }
-                    Instruction::Constant(old_id) => {
-                        Instruction::Constant(*constant_remap.get(&old_id).unwrap_or(&old_id))
-                    }
-                    Instruction::Builtin(old_id) => {
-                        Instruction::Builtin(*builtin_remap.get(&old_id).unwrap_or(&old_id))
-                    }
-                    Instruction::Tuple(old_type_id) => {
-                        Instruction::Tuple(*type_remap.get(&old_type_id).unwrap_or(&old_type_id))
-                    }
-                    Instruction::IsTuple(old_type_id) => {
-                        Instruction::IsTuple(*type_remap.get(&old_type_id).unwrap_or(&old_type_id))
-                    }
+                    Instruction::Function(old_id) => Instruction::Function(
+                        *function_remap
+                            .get(&old_id)
+                            .expect("Function ID should be in remap table after tree shaking"),
+                    ),
+                    Instruction::Constant(old_id) => Instruction::Constant(
+                        *constant_remap
+                            .get(&old_id)
+                            .expect("Constant ID should be in remap table after tree shaking"),
+                    ),
+                    Instruction::Builtin(old_id) => Instruction::Builtin(
+                        *builtin_remap
+                            .get(&old_id)
+                            .expect("Builtin ID should be in remap table after tree shaking"),
+                    ),
+                    Instruction::Tuple(old_type_id) => Instruction::Tuple(
+                        *type_remap
+                            .get(&old_type_id)
+                            .expect("Tuple type ID should be in remap table after tree shaking"),
+                    ),
+                    Instruction::IsTuple(old_type_id) => Instruction::IsTuple(
+                        *type_remap
+                            .get(&old_type_id)
+                            .expect("IsTuple type ID should be in remap table after tree shaking"),
+                    ),
                     other => other,
                 })
                 .collect();

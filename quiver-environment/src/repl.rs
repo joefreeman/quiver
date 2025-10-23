@@ -269,6 +269,11 @@ impl Repl {
         self.environment.request_process_info(pid)
     }
 
+    /// Set virtual time for all workers (for testing)
+    pub fn set_time(&mut self, time_ms: u64) -> Result<(), EnvironmentError> {
+        self.environment.set_time(time_ms)
+    }
+
     /// Format a value for display
     pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
         quiver_core::format::format_value(value, heap, &self.program)

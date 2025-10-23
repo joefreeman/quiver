@@ -186,3 +186,10 @@ fn test_ripple_spread_multiple_fields() {
         .evaluate("Point[x: 10, y: 20] ~> ~[..., z: 30, color: 'ff']")
         .expect("Point[x: 10, y: 20, z: 30, color: 'ff']");
 }
+
+#[test]
+fn test_nested_spread_with_ripple_context() {
+    quiver()
+        .evaluate("[1, 2, 3] ~> [outer: ~, nested: [inner: ~, ...]]")
+        .expect("[outer: [1, 2, 3], nested: [inner: [1, 2, 3], 1, 2, 3]]");
+}

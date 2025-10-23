@@ -18,11 +18,18 @@ pub struct Function {
     pub captures: Vec<usize>,
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct BuiltinInfo {
+    pub name: String,
+    pub parameter_type: types::Type,
+    pub result_type: types::Type,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bytecode {
     pub constants: Vec<Constant>,
     pub functions: Vec<Function>,
-    pub builtins: Vec<String>,
+    pub builtins: Vec<BuiltinInfo>,
     pub entry: Option<usize>,
     pub types: Vec<types::TupleTypeInfo>,
 }
@@ -61,7 +68,7 @@ pub enum Instruction {
     Pop,
     Duplicate,
     Pick(usize),
-    Swap,
+    Rotate(usize),
     Allocate(usize),
     Clear(usize),
     Load(usize),
@@ -82,6 +89,5 @@ pub enum Instruction {
     Spawn,
     Send,
     Self_,
-    Receive,
-    Acknowledge,
+    Select(usize),
 }

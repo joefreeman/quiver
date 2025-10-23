@@ -80,10 +80,11 @@ impl BuiltinRegistry {
             })
     }
 
-    /// Get the type signature for a builtin by function name (legacy, returns None)
-    pub fn get_signature(&self, _function: &str) -> Option<(Type, Type)> {
-        // This method is deprecated - use resolve_signature instead
-        None
+    /// Get the type specs for a builtin by function name (without resolving)
+    pub fn get_specs(&self, function: &str) -> Option<(&TypeSpec, &TypeSpec)> {
+        self.functions
+            .get(function)
+            .map(|(_, param_spec, result_spec)| (param_spec, result_spec))
     }
 
     /// Get all available function names

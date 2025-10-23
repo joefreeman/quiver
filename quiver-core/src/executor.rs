@@ -1,20 +1,19 @@
 use crate::builtins::BUILTIN_REGISTRY;
-use crate::bytecode::{Constant, Function, Instruction, TypeId};
+use crate::bytecode::{BuiltinInfo, Constant, Function, Instruction, TypeId};
 use crate::error::Error;
-use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus};
-use crate::types::{TupleTypeInfo, Type, TypeLookup};
+use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
+use crate::types::{CallableType, ProcessType, TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct Executor {
     processes: HashMap<ProcessId, Process>,
     queue: VecDeque<ProcessId>,
-    receiving: HashSet<ProcessId>,
-    awaiting: HashSet<ProcessId>,
+    waiting: HashSet<ProcessId>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
-    builtins: Vec<String>,
+    builtins: Vec<BuiltinInfo>,
     types: Vec<TupleTypeInfo>,
     // Heap for runtime-allocated binaries
     heap: Vec<Vec<u8>>,
@@ -86,8 +85,7 @@ impl Executor {
         Self {
             processes: HashMap::new(),
             queue: VecDeque::new(),
-            receiving: HashSet::new(),
-            awaiting: HashSet::new(),
+            waiting: HashSet::new(),
             constants: vec![],
             functions: vec![],
             builtins: vec![],
@@ -96,10 +94,21 @@ impl Executor {
         }
     }
 
-    pub fn spawn_process(&mut self, id: ProcessId, persistent: bool) {
-        let process = Process::new(persistent);
+    pub fn spawn_process(&mut self, id: ProcessId, function_index: usize, persistent: bool) {
+        let process = Process::new(function_index, persistent);
         self.processes.insert(id, process);
         self.queue.push_back(id);
+    }
+
+    fn get_current_instruction(&self, process_id: ProcessId) -> Option<Instruction> {
+        self.get_process(process_id)
+            .and_then(|p| p.frames.last())
+            .and_then(|f| {
+                self.functions[f.function_index]
+                    .instructions
+                    .get(f.counter)
+                    .cloned()
+            })
     }
 
     pub fn get_process(&self, id: ProcessId) -> Option<&Process> {
@@ -116,9 +125,9 @@ impl Executor {
 
     /// Notify a process that spawned a new process with the new PID
     pub fn notify_spawn(&mut self, id: ProcessId, pid: Value) {
-        if self.awaiting.remove(&id)
-            && let Some(process) = self.processes.get_mut(&id)
-        {
+        let was_waiting = self.waiting.remove(&id);
+
+        if let Some(process) = self.processes.get_mut(&id) {
             // For spawn notifications, just push the PID onto the stack and increment counter
             process.stack.push(pid);
 
@@ -126,47 +135,44 @@ impl Executor {
                 frame.counter += 1;
             }
 
-            self.queue.push_back(id);
+            // Only re-queue if it was actually waiting (not already queued by something else)
+            if was_waiting {
+                self.queue.push_back(id);
+            }
         }
     }
 
-    /// Notify a process that was awaiting a result with the result value
-    pub fn notify_result(&mut self, id: ProcessId, result: Value) {
-        if self.awaiting.remove(&id)
-            && let Some(process) = self.processes.get_mut(&id)
-        {
-            // When awaiting on a PID, the stack has [parameter, pid]
-            // We need to pop both and push the result, then increment counter
-            process.stack.pop(); // Pop pid
-            process.stack.pop(); // Pop parameter (ignored for await)
-            process.stack.push(result);
+    /// Notify a process that was waiting for a result with the result value
+    pub fn notify_result(&mut self, awaiter: ProcessId, awaited: ProcessId, result: Value) {
+        // Store the result in the process's awaiting map
+        if let Some(process) = self.get_process_mut(awaiter) {
+            process.awaiting.insert(awaited, Some(result));
+        }
 
-            // Increment counter to move past the Call instruction
-            if let Some(frame) = process.frames.last_mut() {
-                frame.counter += 1;
-            }
-
-            self.queue.push_back(id);
+        // Re-queue awaiter to retry its Select instruction
+        if self.waiting.remove(&awaiter) {
+            self.queue.push_back(awaiter);
         }
     }
 
     pub fn notify_message(&mut self, id: ProcessId, message: Value) {
         if let Some(process) = self.processes.get_mut(&id) {
             process.mailbox.push_back(message);
-            if self.receiving.remove(&id) {
+            if self.waiting.remove(&id) {
                 self.queue.push_back(id);
             }
         }
     }
 
-    pub fn mark_receiving(&mut self, id: ProcessId) {
-        self.receiving.insert(id);
+    pub fn mark_waiting(&mut self, id: ProcessId) {
+        self.waiting.insert(id);
         self.queue.retain(|&pid| pid != id);
     }
 
-    pub fn mark_awaiting(&mut self, id: ProcessId) {
-        self.awaiting.insert(id);
-        self.queue.retain(|&pid| pid != id);
+    pub fn mark_active(&mut self, id: ProcessId) {
+        if self.waiting.remove(&id) {
+            self.queue.push_back(id);
+        }
     }
 
     pub fn add_to_queue(&mut self, process_id: ProcessId) {
@@ -176,14 +182,20 @@ impl Executor {
     fn get_status(&self, id: ProcessId, process: &Process) -> ProcessStatus {
         if self.queue.contains(&id) {
             ProcessStatus::Active
-        } else if self.receiving.contains(&id) || self.awaiting.contains(&id) {
+        } else if self.waiting.contains(&id) {
             ProcessStatus::Waiting
         } else if matches!(&process.result, Some(Err(_))) {
             ProcessStatus::Failed
-        } else if process.persistent {
-            ProcessStatus::Sleeping
+        } else if matches!(&process.result, Some(Ok(_))) {
+            // Has a successful result
+            if process.persistent {
+                ProcessStatus::Sleeping
+            } else {
+                ProcessStatus::Completed
+            }
         } else {
-            ProcessStatus::Completed
+            // No result yet - must still be active
+            ProcessStatus::Active
         }
     }
 
@@ -212,7 +224,7 @@ impl Executor {
         self.functions.get(index)
     }
 
-    pub fn get_builtin(&self, index: usize) -> Option<&String> {
+    pub fn get_builtin(&self, index: usize) -> Option<&BuiltinInfo> {
         self.builtins.get(index)
     }
 
@@ -221,7 +233,7 @@ impl Executor {
         mut constants: Vec<Constant>,
         mut functions: Vec<Function>,
         mut types: Vec<TupleTypeInfo>,
-        mut builtins: Vec<String>,
+        mut builtins: Vec<BuiltinInfo>,
     ) {
         self.constants.append(&mut constants);
         self.functions.append(&mut functions);
@@ -231,7 +243,9 @@ impl Executor {
 
     /// Execute up to max_units instruction units for a single process.
     /// Returns None to continue, or Some(request) for a routing request that needs to be handled by the scheduler.
-    pub fn step(&mut self, max_units: usize) -> Option<Action> {
+    pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> Option<Action> {
+        // Check for expired timeouts before processing
+        self.check_expired_timeouts(current_time_ms);
         // Pop process from queue
         let current_pid = self.queue.pop_front()?;
 
@@ -240,16 +254,11 @@ impl Executor {
 
         // Execute instructions for current process
         while units_executed < max_units {
-            let instruction = self
-                .get_process(current_pid)
-                .and_then(|p| p.frames.last())
-                .and_then(|f| f.instructions.get(f.counter).cloned());
-
-            let Some(instruction) = instruction else {
+            let Some(instruction) = self.get_current_instruction(current_pid) else {
                 break; // Process finished or no more instructions in current frame
             };
 
-            let step_result = self.execute_instruction(current_pid, instruction);
+            let step_result = self.execute_instruction(current_pid, instruction, current_time_ms);
 
             units_executed += 1;
 
@@ -266,47 +275,68 @@ impl Executor {
                 }
             }
 
-            // Check if process should yield (moved to receiving or awaiting, or has pending request)
+            // Check if process should yield (moved to waiting, or has pending request)
             // Pending request check ensures only ONE routing request per step
-            if self.receiving.contains(&current_pid)
-                || self.awaiting.contains(&current_pid)
-                || pending_request.is_some()
-            {
+            if self.waiting.contains(&current_pid) || pending_request.is_some() {
                 break;
             }
         }
 
         // Auto-pop any exhausted frames before checking if process is finished
-        if let Some(process) = self.get_process_mut(current_pid) {
-            while let Some(frame) = process.frames.last() {
-                if frame.counter >= frame.instructions.len() {
-                    // Frame exhausted - pop it without stack manipulation
-                    // (the result is already on the stack from the last instruction)
-                    let frame = process.frames.pop().unwrap();
-                    let is_last_frame = process.frames.is_empty();
+        loop {
+            // Check if current instruction exists
+            if self.get_current_instruction(current_pid).is_some() {
+                break; // Current frame still has instructions to execute
+            }
 
-                    // Clear locals from the popped frame
-                    // For persistent processes, only keep locals if this was the last (top-level) frame
-                    let should_clear_locals = !process.persistent || !is_last_frame;
-                    if should_clear_locals {
-                        let locals_to_clear = process
-                            .locals
-                            .len()
-                            .saturating_sub(frame.locals_base + frame.captures_count);
-                        if locals_to_clear > 0 {
-                            process
-                                .locals
-                                .truncate(process.locals.len() - locals_to_clear);
-                        }
-                    }
+            // Check if there's a frame to pop
+            let has_frames = self
+                .get_process(current_pid)
+                .map(|p| !p.frames.is_empty())
+                .unwrap_or(false);
 
-                    // Increment counter of the calling frame (if there is one)
-                    if let Some(calling_frame) = process.frames.last_mut() {
-                        calling_frame.counter += 1;
-                    }
-                } else {
-                    break;
+            if !has_frames {
+                break; // No frames to pop
+            }
+
+            // Now get mutable borrow to modify process
+            let process = self
+                .get_process_mut(current_pid)
+                .expect("Process should exist");
+
+            // Frame exhausted - pop it without stack manipulation
+            // (the result is already on the stack from the last instruction)
+            let frame = process.frames.pop().unwrap();
+            let is_last_frame = process.frames.is_empty();
+
+            // Clear locals from the popped frame
+            // For persistent processes, only keep locals if this was the last (top-level) frame
+            let should_clear_locals = !process.persistent || !is_last_frame;
+            if should_clear_locals {
+                let locals_to_clear = process
+                    .locals
+                    .len()
+                    .saturating_sub(frame.locals_base + frame.captures_count);
+                if locals_to_clear > 0 {
+                    process
+                        .locals
+                        .truncate(process.locals.len() - locals_to_clear);
                 }
+            }
+
+            // Check if we're in an active select and returning to the select instruction
+            let should_skip_increment = if let Some(ref select_state) = process.select_state {
+                let current_frame = process.frames.len().saturating_sub(1);
+                let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+                select_state.frame == current_frame
+                    && select_state.instruction == current_instruction
+            } else {
+                false
+            };
+
+            // Increment counter of calling frame unless we're in an active select
+            if !should_skip_increment && let Some(calling_frame) = process.frames.last_mut() {
+                calling_frame.counter += 1;
             }
         }
 
@@ -315,13 +345,42 @@ impl Executor {
 
         if finished {
             // Store result
-            if let Some(process) = self.get_process_mut(current_pid) {
-                let result_value = process.stack.pop().unwrap_or_else(Value::nil);
-                process.result = Some(Ok(result_value));
+            let result_value = if let Some(process) = self.get_process_mut(current_pid) {
+                // If error is already set (during execution), use nil as placeholder
+                if let Some(Err(_)) = process.result {
+                    Value::nil()
+                } else {
+                    // No error yet - pop result from stack
+                    let Some(result) = process.stack.pop() else {
+                        // Stack underflow - process finished with no result on stack
+                        process.result = Some(Err(Error::StackUnderflow));
+                        return None;
+                    };
+                    process.result = Some(Ok(result.clone()));
+                    result
+                }
+            } else {
+                Value::nil()
+            };
+
+            // Notify any processes awaiting this one
+            let awaiters: Vec<ProcessId> = self
+                .processes
+                .iter()
+                .filter_map(|(pid, proc)| {
+                    if proc.awaiting.contains_key(&current_pid) {
+                        Some(*pid)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for awaiter in awaiters {
+                self.notify_result(awaiter, current_pid, result_value.clone());
             }
         } else {
-            let should_requeue =
-                !self.receiving.contains(&current_pid) && !self.awaiting.contains(&current_pid);
+            let should_requeue = !self.waiting.contains(&current_pid);
 
             if should_requeue {
                 // Process not finished - re-queue it so it can continue
@@ -338,13 +397,14 @@ impl Executor {
         &mut self,
         pid: ProcessId,
         instruction: Instruction,
+        current_time_ms: u64,
     ) -> Result<Option<Action>, Error> {
         match instruction {
             Instruction::Constant(index) => self.handle_constant(pid, index),
             Instruction::Pop => self.handle_pop(pid),
             Instruction::Duplicate => self.handle_duplicate(pid),
             Instruction::Pick(n) => self.handle_pick(pid, n),
-            Instruction::Swap => self.handle_swap(pid),
+            Instruction::Rotate(n) => self.handle_rotate(pid, n),
             Instruction::Load(index) => self.handle_load(pid, index),
             Instruction::Store(index) => self.handle_store(pid, index),
             Instruction::Tuple(type_id) => self.handle_tuple(pid, type_id),
@@ -365,8 +425,7 @@ impl Executor {
             Instruction::Spawn => self.handle_spawn(pid),
             Instruction::Send => self.handle_send(pid),
             Instruction::Self_ => self.handle_self(pid),
-            Instruction::Receive => self.handle_receive(pid),
-            Instruction::Acknowledge => self.handle_acknowledge(pid),
+            Instruction::Select(n) => self.handle_select(pid, n, current_time_ms),
         }
     }
 
@@ -433,16 +492,19 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_swap(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_rotate(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let len = process.stack.len();
-        if len < 2 {
+        if len < n {
             return Err(Error::StackUnderflow);
         }
-        process.stack.swap(len - 1, len - 2);
+        // Rotate the top n items: move item at depth (n-1) to the top
+        // Example: [a, b, c] with n=3 becomes [b, c, a]
+        let item = process.stack.remove(len - n);
+        process.stack.push(item);
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -686,10 +748,9 @@ impl Executor {
         match function_value {
             Value::Function(function_index, captures) => {
                 // Get function instructions before modifying process
-                let func = self
-                    .get_function(function_index)
+                // Verify function exists
+                self.get_function(function_index)
                     .ok_or(Error::FunctionUndefined(function_index))?;
-                let instructions = func.instructions.clone();
 
                 // Now modify process
                 let process = self
@@ -707,7 +768,7 @@ impl Executor {
 
                 process
                     .frames
-                    .push(Frame::new(instructions, locals_base, captures_count));
+                    .push(Frame::new(function_index, locals_base, captures_count));
 
                 // Don't increment counter - new frame starts at 0
                 Ok(None)
@@ -742,17 +803,6 @@ impl Executor {
 
                 Ok(None)
             }
-            Value::Pid(target_pid) => {
-                // Mark caller as awaiting result
-                self.mark_awaiting(pid);
-
-                // Return routing request for scheduler to handle
-                // Don't increment counter - will be incremented in notify_result
-                Ok(Some(Action::AwaitResult {
-                    target: target_pid,
-                    caller: pid,
-                }))
-            }
             _ => Err(Error::TypeMismatch {
                 expected: "function".to_string(),
                 found: function_value.type_name().to_string(),
@@ -770,14 +820,14 @@ impl Executor {
             let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
             let locals_base = frame.locals_base;
             let captures_count = frame.captures_count;
-            let instructions = frame.instructions.clone();
+            let function_index = frame.function_index;
 
             // Clear current frame's locals, but keep captures
             process.locals.truncate(locals_base + captures_count);
 
             process.stack.push(argument);
             *process.frames.last_mut().unwrap() =
-                Frame::new(instructions, locals_base, captures_count);
+                Frame::new(function_index, locals_base, captures_count);
 
             // Don't increment counter - frame was reset to 0
             Ok(None)
@@ -792,11 +842,10 @@ impl Executor {
             };
 
             match function_value {
-                Value::Function(function, captures) => {
-                    let func = self
-                        .get_function(function)
-                        .ok_or(Error::FunctionUndefined(function))?;
-                    let instructions = func.instructions.clone();
+                Value::Function(function_index, captures) => {
+                    // Verify function exists
+                    self.get_function(function_index)
+                        .ok_or(Error::FunctionUndefined(function_index))?;
 
                     let process = self
                         .get_process_mut(pid)
@@ -814,7 +863,7 @@ impl Executor {
 
                     process.stack.push(argument);
                     *process.frames.last_mut().unwrap() =
-                        Frame::new(instructions, locals_base, captures_count);
+                        Frame::new(function_index, locals_base, captures_count);
 
                     // Don't increment counter - frame was reset to 0
                     Ok(None)
@@ -896,6 +945,7 @@ impl Executor {
         let builtin_name = self
             .get_builtin(index)
             .ok_or(Error::BuiltinUndefined(index))?
+            .name
             .clone();
         let process = self
             .get_process_mut(pid)
@@ -975,6 +1025,20 @@ impl Executor {
     }
 
     fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+        // Check if we're inside a receive function
+        let is_receiving = self
+            .get_process(pid)
+            .and_then(|p| p.select_state.as_ref())
+            .and_then(|s| s.receiving.as_ref())
+            .is_some();
+
+        if is_receiving {
+            return Err(Error::OperationNotAllowed {
+                operation: "spawn".to_string(),
+                context: "receive function".to_string(),
+            });
+        }
+
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -991,8 +1055,8 @@ impl Executor {
             }
         };
 
-        // Mark caller as awaiting - will be notified with Value::Pid(new_pid)
-        self.mark_awaiting(pid);
+        // Mark caller as waiting - will be notified with Value::Pid(new_pid)
+        self.mark_waiting(pid);
 
         // Return routing request for scheduler to handle
         // Don't increment counter - will be incremented in notify_spawn
@@ -1004,6 +1068,20 @@ impl Executor {
     }
 
     fn handle_send(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+        // Check if we're inside a receive function
+        let is_receiving = self
+            .get_process(pid)
+            .and_then(|p| p.select_state.as_ref())
+            .and_then(|s| s.receiving.as_ref())
+            .is_some();
+
+        if is_receiving {
+            return Err(Error::OperationNotAllowed {
+                operation: "send".to_string(),
+                context: "receive function".to_string(),
+            });
+        }
+
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1012,7 +1090,7 @@ impl Executor {
         let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
         let target_pid = match pid_value {
-            Value::Pid(target) => target,
+            Value::Pid(target, _) => target,
             _ => {
                 return Err(Error::TypeMismatch {
                     expected: "pid".to_string(),
@@ -1043,7 +1121,8 @@ impl Executor {
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        process.stack.push(Value::Pid(pid));
+        let function_index = process.function_index;
+        process.stack.push(Value::Pid(pid, function_index));
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -1051,44 +1130,420 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_receive(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_select(
+        &mut self,
+        pid: ProcessId,
+        n: usize,
+        current_time_ms: u64,
+    ) -> Result<Option<Action>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        let cursor = process.cursor;
-        if cursor < process.mailbox.len() {
-            let message = process.mailbox[cursor].clone();
-            process.cursor = cursor + 1;
-            process.stack.push(message);
+        // Check if we're already processing a select
+        // Pop receive result early if needed (before processing sources)
+        let receive_result = if let Some(ref select_state) = process.select_state {
+            // Verify we're handling the same select instruction
+            let current_frame = process.frames.len().saturating_sub(1);
+            let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
 
-            // Increment counter to move past the Receive instruction
-            if let Some(frame) = process.frames.last_mut() {
-                frame.counter += 1;
+            if select_state.frame != current_frame
+                || select_state.instruction != current_instruction
+            {
+                return Err(Error::InvalidArgument(
+                    "Cannot nest select instructions (select in receive handler)".to_string(),
+                ));
+            }
+
+            // If we just finished executing a receive function, pop the result
+            if select_state.receiving.is_some() {
+                // Pop result but don't handle yet, leave receiving set
+                // (We'll handle it below when processing sources)
+                let process = self.get_process_mut(pid).unwrap();
+                Some(process.stack.pop().ok_or(Error::StackUnderflow)?)
+            } else {
+                None
             }
         } else {
-            self.mark_receiving(pid);
-            // Don't increment counter - will retry Receive when a message arrives
+            // First time running this select - initialize state
+            if process.stack.len() < n {
+                return Err(Error::InvalidArgument(format!(
+                    "Select requires {} sources on stack, found {}",
+                    n,
+                    process.stack.len()
+                )));
+            }
+
+            // Pop sources from stack
+            let start_idx = process.stack.len() - n;
+            let sources: Vec<Value> = process.stack.drain(start_idx..).collect();
+
+            // Count receive sources to initialize cursors
+            let receive_count = sources
+                .iter()
+                .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
+                .count();
+
+            // Scan for process sources to determine if we need to await
+            let pid_targets: Vec<ProcessId> = sources
+                .iter()
+                .filter_map(|s| {
+                    if let Value::Pid(p, _) = s {
+                        Some(*p)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let current_frame = process.frames.len().saturating_sub(1);
+            let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+
+            // If we have PIDs, defer start_time until await completes
+            let start_time = if pid_targets.is_empty() {
+                Some(current_time_ms)
+            } else {
+                None
+            };
+
+            process.select_state = Some(SelectState {
+                frame: current_frame,
+                instruction: current_instruction,
+                sources,
+                cursors: vec![0; receive_count],
+                start_time,
+                receiving: None,
+            });
+
+            // If we found PIDs, register awaits before processing sources
+            if !pid_targets.is_empty() {
+                // Register all PID targets in awaiting map
+                for target in &pid_targets {
+                    process.awaiting.insert(*target, None);
+                }
+
+                // Mark as waiting and return Await action
+                self.mark_waiting(pid);
+                return Ok(Some(Action::Await {
+                    targets: pid_targets,
+                    caller: pid,
+                }));
+            }
+
+            None // No receive result on first pass
+        };
+
+        // Now process sources in order
+        let select_state = self
+            .get_process(pid)
+            .and_then(|p| p.select_state.clone())
+            .ok_or(Error::InvalidArgument("Select state missing".to_string()))?;
+
+        // Lazily set start_time if not already set
+        let start_time = if let Some(t) = select_state.start_time {
+            t
+        } else {
+            // Set it now - awaits are complete, time to start evaluating
+            let process = self.get_process_mut(pid).unwrap();
+            if let Some(ref mut state) = process.select_state {
+                state.start_time = Some(current_time_ms);
+            }
+            current_time_ms
+        };
+
+        for (src_idx, source) in select_state.sources.iter().enumerate() {
+            match source {
+                // Timeout source
+                Value::Integer(timeout_ms) => {
+                    let elapsed = current_time_ms.saturating_sub(start_time);
+                    if elapsed >= (*timeout_ms).max(0) as u64 {
+                        // Complete with nil
+                        return self.complete_select(pid, Value::nil());
+                    }
+                }
+
+                // Process source
+                Value::Pid(target_pid, _) => {
+                    let process = self.get_process(pid).unwrap();
+
+                    // Check if result is available (we've already awaited upfront)
+                    if let Some(result_opt) = process.awaiting.get(target_pid)
+                        && let Some(result) = result_opt
+                    {
+                        // Complete with this result
+                        return self.complete_select(pid, result.clone());
+                    }
+                    // No result yet, continue to next source
+                    // If not in awaiting map, something went wrong
+                    // (should have been registered during initialization)
+                }
+
+                // Receive source
+                Value::Function(_, _) | Value::Builtin(_) => {
+                    // Calculate receive function index (count of receive sources before this one)
+                    let receive_idx = select_state.sources[..src_idx]
+                        .iter()
+                        .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
+                        .count();
+
+                    // Check if we just finished executing this receive function
+                    if let Some((idx, message_value)) = &select_state.receiving
+                        && *idx == receive_idx
+                    {
+                        // Use the result we popped earlier (before processing sources)
+                        // This unwrap is safe: if receiving is Some, receive_result must be Some
+                        let result = receive_result.as_ref().unwrap().clone();
+
+                        // Check if result is nil (the unnamed empty tuple)
+                        let is_nil = matches!(&result, Value::Tuple(type_id, fields)
+                            if type_id == &TypeId::NIL && fields.is_empty());
+
+                        // Check if result is Ok (the named empty tuple)
+                        let is_ok = matches!(&result, Value::Tuple(type_id, fields)
+                            if type_id == &TypeId::OK && fields.is_empty());
+
+                        if !is_nil && !is_ok {
+                            // Result must be either nil or Ok for receive functions with a body
+                            return Err(Error::InvalidArgument(
+                                "Receive function must return [] or Ok".to_string(),
+                            ));
+                        }
+
+                        if is_ok {
+                            // Ok result - remove message from mailbox and complete with original message value
+                            let msg_idx =
+                                select_state.cursors.get(receive_idx).copied().unwrap_or(0);
+                            let process = self.get_process_mut(pid).unwrap();
+                            if msg_idx < process.mailbox.len() {
+                                process.mailbox.remove(msg_idx);
+                            }
+                            return self.complete_select(pid, message_value.clone());
+                        } else {
+                            // Nil result - increment cursor and reset receiving
+                            let process = self.get_process_mut(pid).unwrap();
+                            if let Some(state) = &mut process.select_state {
+                                state.cursors[receive_idx] += 1;
+                                state.receiving = None;
+                            }
+                        }
+                    }
+
+                    // Get current cursor for this receive source (refetch to get the updated value)
+                    let mut cursor = self
+                        .get_process(pid)
+                        .and_then(|p| p.select_state.as_ref())
+                        .and_then(|s| s.cursors.get(receive_idx).copied())
+                        .unwrap_or(0);
+                    let process = self.get_process(pid).unwrap();
+
+                    // Loop through all messages starting from cursor to find a type-compatible one
+                    for (msg_idx, message) in process.mailbox.iter().enumerate().skip(cursor) {
+                        // Check if type is compatible
+                        let expected_type = match source {
+                            Value::Function(func_id, _) => self
+                                .functions
+                                .get(*func_id)
+                                .and_then(|f| f.function_type.as_ref())
+                                .map(|ft| &ft.parameter),
+                            Value::Builtin(name) => self
+                                .builtins
+                                .iter()
+                                .find(|b| &b.name == name)
+                                .map(|b| &b.parameter_type),
+                            _ => unreachable!(),
+                        };
+
+                        let message_type = self.value_to_type(message);
+                        let type_compatible = expected_type
+                            .map(|expected| message_type.is_compatible(expected, self))
+                            .unwrap_or(true);
+
+                        if type_compatible {
+                            // Found a compatible message
+                            let message = message.clone();
+
+                            // Check if this is an identity function (no body)
+                            let is_identity = match source {
+                                Value::Function(func_id, _) => self
+                                    .functions
+                                    .get(*func_id)
+                                    .map(|f| f.instructions.is_empty())
+                                    .unwrap_or(false),
+                                Value::Builtin(_) => false, // Builtins always have logic
+                                _ => unreachable!(),
+                            };
+
+                            if is_identity {
+                                // Identity function - skip calling, just complete with message
+                                let process = self.get_process_mut(pid).unwrap();
+                                if msg_idx < process.mailbox.len() {
+                                    process.mailbox.remove(msg_idx);
+                                }
+                                return self.complete_select(pid, message);
+                            } else {
+                                // Function has a body - set receiving state and call it
+                                let process = self.get_process_mut(pid).unwrap();
+
+                                if let Some(state) = &mut process.select_state {
+                                    state.receiving = Some((receive_idx, message.clone()));
+                                    state.cursors[receive_idx] = msg_idx;
+                                }
+
+                                process.stack.push(message);
+                                process.stack.push(source.clone());
+                                return self.handle_call(pid);
+                            }
+                        } else {
+                            // Type not compatible - update cursor to skip this message
+                            cursor = msg_idx + 1;
+                        }
+                    }
+
+                    // Update cursor to reflect all skipped messages
+                    if cursor > select_state.cursors.get(receive_idx).copied().unwrap_or(0) {
+                        let process = self.get_process_mut(pid).unwrap();
+                        if let Some(state) = &mut process.select_state
+                            && receive_idx < state.cursors.len()
+                        {
+                            state.cursors[receive_idx] = cursor;
+                        }
+                    }
+                    // No type-compatible messages, continue to next source
+                }
+
+                _ => {
+                    return Err(Error::InvalidArgument(format!(
+                        "Invalid select source: {:?}",
+                        source
+                    )));
+                }
+            }
+        }
+
+        // No sources ready - mark as waiting
+        self.mark_waiting(pid);
+        Ok(None)
+    }
+
+    /// Complete a select by cleaning up state and pushing result
+    fn complete_select(&mut self, pid: ProcessId, result: Value) -> Result<Option<Action>, Error> {
+        let process = self
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        // Clean up select state
+        process.select_state = None;
+
+        // Push result
+        process.stack.push(result);
+
+        // Increment frame counter
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
         }
 
         Ok(None)
     }
 
-    fn handle_acknowledge(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let cursor = process.cursor;
-        if 0 < cursor && cursor - 1 < process.mailbox.len() {
-            process.mailbox.remove(cursor - 1);
+    /// Convert a runtime Value to its Type representation
+    fn value_to_type(&self, value: &Value) -> Type {
+        match value {
+            Value::Integer(_) => Type::Integer,
+            Value::Binary(_) => Type::Binary,
+            Value::Tuple(type_id, _) => {
+                // Check if this is a partial type
+                if self
+                    .lookup_type(type_id)
+                    .is_some_and(|info| info.is_partial)
+                {
+                    Type::Partial(*type_id)
+                } else {
+                    Type::Tuple(*type_id)
+                }
+            }
+            Value::Function(func_idx, _) => {
+                // Get the function's type signature
+                if let Some(func_type) = self
+                    .functions
+                    .get(*func_idx)
+                    .and_then(|f| f.function_type.as_ref())
+                {
+                    Type::Callable(Box::new(func_type.clone()))
+                } else {
+                    // Function without type information - shouldn't happen in well-typed code
+                    // Return a generic callable type with unknown types
+                    Type::Callable(Box::new(CallableType {
+                        parameter: Type::Union(vec![]), // Bottom type (never)
+                        result: Type::Union(vec![]),
+                        receive: Type::Union(vec![]),
+                    }))
+                }
+            }
+            Value::Builtin(name) => {
+                // Look up builtin type from the resolved builtins list
+                let builtin_info = self
+                    .builtins
+                    .iter()
+                    .find(|b| &b.name == name)
+                    .expect("Builtin should be registered");
+                Type::Callable(Box::new(CallableType {
+                    parameter: builtin_info.parameter_type.clone(),
+                    result: builtin_info.result_type.clone(),
+                    receive: Type::Union(vec![]), // Builtins don't receive messages
+                }))
+            }
+            Value::Pid(_, function_idx) => {
+                // Get the process type from the function that spawned it
+                if let Some(func_type) = self
+                    .functions
+                    .get(*function_idx)
+                    .and_then(|f| f.function_type.as_ref())
+                {
+                    Type::Process(Box::new(ProcessType {
+                        receive: Some(Box::new(func_type.receive.clone())),
+                        returns: Some(Box::new(func_type.result.clone())),
+                    }))
+                } else {
+                    // Process without type information
+                    Type::Process(Box::new(ProcessType {
+                        receive: None,
+                        returns: None,
+                    }))
+                }
+            }
         }
-        process.cursor = 0;
+    }
 
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
+    fn check_expired_timeouts(&mut self, current_time_ms: u64) {
+        // Scan waiting processes for expired select timeouts
+        let expired: Vec<ProcessId> = self
+            .waiting
+            .iter()
+            .filter(|pid| {
+                if let Some(process) = self.get_process(**pid)
+                    && let Some(ref select_state) = process.select_state
+                    && let Some(start_time) = select_state.start_time
+                {
+                    // Check if any timeout sources have expired
+                    let elapsed = current_time_ms.saturating_sub(start_time);
+                    return select_state.sources.iter().any(|source| {
+                        if let Value::Integer(timeout_ms) = source {
+                            elapsed >= (*timeout_ms).max(0) as u64
+                        } else {
+                            false
+                        }
+                    });
+                }
+                false
+            })
+            .copied()
+            .collect();
+
+        // Re-queue expired processes to retry their Select instruction
+        for pid in expired {
+            self.queue.push_back(pid);
+            self.waiting.remove(&pid);
         }
-        Ok(None)
     }
 
     fn values_equal(&self, a: &Value, b: &Value) -> bool {
@@ -1117,7 +1572,7 @@ impl Executor {
                         .all(|(a, b)| self.values_equal(a, b))
             }
             (Value::Builtin(a), Value::Builtin(b)) => a == b,
-            (Value::Pid(a), Value::Pid(b)) => a == b,
+            (Value::Pid(a, func_a), Value::Pid(b, func_b)) => a == b && func_a == func_b,
             _ => false,
         }
     }
@@ -1175,7 +1630,7 @@ impl Executor {
                 Ok(Value::Function(*func_index, converted_captures))
             }
             // Other value types don't contain heap references
-            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_) => Ok(value.clone()),
+            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_, _) => Ok(value.clone()),
         }
     }
 
@@ -1227,7 +1682,7 @@ impl Executor {
                 Ok(Value::Function(func_index, remapped_captures))
             }
             // Other value types don't contain heap references
-            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_) => Ok(value),
+            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_, _) => Ok(value),
         }
     }
 }

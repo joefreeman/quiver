@@ -1,7 +1,6 @@
-use crate::bytecode::Instruction;
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 pub type ProcessId = usize;
 
@@ -36,25 +35,25 @@ pub enum Action {
     },
     /// Deliver a message to a target process
     Deliver { target: ProcessId, value: Value },
-    /// Request the result of a target process
-    AwaitResult {
-        target: ProcessId,
+    /// Request the result of one or more target processes
+    Await {
+        targets: Vec<ProcessId>,
         caller: ProcessId,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct Frame {
-    pub instructions: Vec<Instruction>,
+    pub function_index: usize,
     pub(crate) locals_base: usize,
     pub(crate) captures_count: usize,
     pub counter: usize,
 }
 
 impl Frame {
-    pub fn new(instructions: Vec<Instruction>, locals_base: usize, captures_count: usize) -> Self {
+    pub fn new(function_index: usize, locals_base: usize, captures_count: usize) -> Self {
         Self {
-            instructions,
+            function_index,
             locals_base,
             captures_count,
             counter: 0,
@@ -62,27 +61,47 @@ impl Frame {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SelectState {
+    /// The frame index where the select instruction is
+    pub frame: usize,
+    /// The instruction counter within that frame
+    pub instruction: usize,
+    /// The sources for this select (popped from stack)
+    pub sources: Vec<Value>,
+    /// Cursors for each receive source (indexed by receive function index)
+    pub cursors: Vec<usize>,
+    /// The clock time when select started evaluating sources (None until awaits complete)
+    pub start_time: Option<u64>,
+    /// The receive function being executed (index, message value), if any
+    pub receiving: Option<(usize, Value)>,
+}
+
 #[derive(Debug)]
 pub struct Process {
+    pub function_index: usize,
     pub stack: Vec<Value>,
     pub locals: Vec<Value>,
     pub frames: Vec<Frame>,
     pub mailbox: VecDeque<Value>,
     pub persistent: bool,
-    pub cursor: usize,
     pub result: Option<Result<Value, crate::error::Error>>,
+    pub select_state: Option<SelectState>,
+    pub awaiting: HashMap<ProcessId, Option<Value>>,
 }
 
 impl Process {
-    pub fn new(persistent: bool) -> Self {
+    pub fn new(function_index: usize, persistent: bool) -> Self {
         Self {
+            function_index,
             stack: Vec::new(),
             locals: Vec::new(),
             frames: Vec::new(),
             mailbox: VecDeque::new(),
             persistent,
-            cursor: 0,
             result: None,
+            select_state: None,
+            awaiting: HashMap::new(),
         }
     }
 }
