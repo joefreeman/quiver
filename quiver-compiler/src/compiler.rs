@@ -107,6 +107,7 @@ pub enum Error {
 
     // Compilation flow errors
     ChainValueUnused,
+    ValueIgnored(String),
 
     // Destructuring errors
     DestructuringOnNonTuple(String),
@@ -1740,8 +1741,8 @@ impl<'a> Compiler<'a> {
                     && !Self::tuple_contains_ripple(&tuple.fields)
                     && !Self::tuple_contains_spread(&tuple.fields)
                 {
-                    return Err(Error::FeatureUnsupported(
-                        "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])"
+                    return Err(Error::ValueIgnored(
+                        "Tuple construction ignores piped value; use ripple (e.g., [~, 2]) or assignment pattern (e.g., =[x, y])"
                             .to_string(),
                     ));
                 }
@@ -1818,6 +1819,17 @@ impl<'a> Compiler<'a> {
                         // If there's an argument, compile it first (before loading the function)
                         // so that ripples in the argument can access the piped value on the stack
                         let arg_type = if let Some(args) = &access.argument {
+                            // Check if argument would silently drop piped value
+                            if value_type.is_some()
+                                && !Self::tuple_contains_ripple(&args.fields)
+                                && !Self::tuple_contains_spread(&args.fields)
+                            {
+                                return Err(Error::ValueIgnored(
+                                    "Function argument ignores piped value; use ripple (e.g., f[~, 2])"
+                                        .to_string(),
+                                ));
+                            }
+
                             // Convert value_type to ripple_context if present
                             // Set owns_value=true when converting from value_type (we own it and must clean up)
                             let ripple_context_value;
@@ -1867,6 +1879,17 @@ impl<'a> Compiler<'a> {
                 // If there's an argument, compile it first (before loading the builtin)
                 // so that ripples in the argument can access the piped value on the stack
                 let arg_type = if let Some(args) = &builtin.argument {
+                    // Check if argument would silently drop piped value
+                    if value_type.is_some()
+                        && !Self::tuple_contains_ripple(&args.fields)
+                        && !Self::tuple_contains_spread(&args.fields)
+                    {
+                        return Err(Error::ValueIgnored(
+                            "Builtin argument ignores piped value; use ripple (e.g., __add__[~, 2])"
+                                .to_string(),
+                        ));
+                    }
+
                     // Convert value_type to ripple_context if present
                     // Set owns_value=true when converting from value_type (we own it and must clean up)
                     let ripple_context_value;

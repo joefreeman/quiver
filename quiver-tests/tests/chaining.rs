@@ -35,8 +35,8 @@ fn test_standalone_ripple_with_nested_chain() {
     // The ripple in "5 ~> ~" refers to 5, not to the outer 10
     // So the outer value 10 is unused - this should be an error
     quiver().evaluate("10 ~> [5 ~> ~]").expect_compile_error(
-        quiver_compiler::compiler::Error::FeatureUnsupported(
-            "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])".to_string(),
+        quiver_compiler::compiler::Error::ValueIgnored(
+            "Tuple construction ignores piped value; use ripple (e.g., [~, 2]) or assignment pattern (e.g., =[x, y])".to_string(),
         ),
     );
 }
@@ -51,8 +51,8 @@ fn test_nested_chain_outer_value_used() {
 fn test_nested_chain_in_tuple_error() {
     // Similar to test_standalone_ripple_with_nested_chain
     quiver().evaluate("1 ~> [2, 3 ~> ~]").expect_compile_error(
-        quiver_compiler::compiler::Error::FeatureUnsupported(
-            "Tuple cannot be used as pattern; use assignment pattern (e.g., =[x, y])".to_string(),
+        quiver_compiler::compiler::Error::ValueIgnored(
+            "Tuple construction ignores piped value; use ripple (e.g., [~, 2]) or assignment pattern (e.g., =[x, y])".to_string(),
         ),
     );
 }
