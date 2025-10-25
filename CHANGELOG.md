@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Using current time in WASM build.
+
 ## [0.2.0] - 2025-10-25
 
 ### Added

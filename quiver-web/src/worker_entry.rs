@@ -76,8 +76,11 @@ fn start_worker_loop(worker: Worker<WebCommandReceiver, WebEventSender>) {
     let closure_clone = closure.clone();
 
     *closure.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        // Get current time from JavaScript
+        let current_time_ms = js_sys::Date::now() as u64;
+
         // Step the worker
-        let should_continue = match worker_clone.borrow_mut().step() {
+        let should_continue = match worker_clone.borrow_mut().step(current_time_ms) {
             Ok(_work_done) => true,
             Err(_e) => {
                 // Worker will send WorkerError event to environment

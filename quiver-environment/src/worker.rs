@@ -17,7 +17,6 @@ pub struct Worker<R: CommandReceiver, S: EventSender> {
     pending_result_requests: HashMap<ProcessId, Vec<u64>>,   // process_id -> list of request_ids
     receiver: R,
     sender: S,
-    time_offset_ms: Option<u64>, // None = use system time, Some = virtual time for testing
 }
 
 impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
@@ -29,23 +28,12 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             pending_result_requests: HashMap::new(),
             receiver,
             sender,
-            time_offset_ms: None,
         }
-    }
-
-    fn current_time_ms(&self) -> u64 {
-        self.time_offset_ms.unwrap_or_else(|| {
-            // Use system time when no virtual time is set
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-        })
     }
 
     /// Process one iteration of the worker loop
     /// Returns true if work was done, false if idle
-    pub fn step(&mut self) -> Result<bool, EnvironmentError> {
+    pub fn step(&mut self, current_time_ms: u64) -> Result<bool, EnvironmentError> {
         let mut did_work = false;
 
         // Process commands (non-blocking)
@@ -55,7 +43,6 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         }
 
         // Execute one step
-        let current_time_ms = self.current_time_ms();
         if let Some(action) = self.executor.step(MAX_STEP_UNITS, current_time_ms) {
             self.handle_action(action)?;
             did_work = true;
@@ -137,9 +124,6 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                 keep_indices,
             } => {
                 self.compact_locals(process_id, keep_indices)?;
-            }
-            Command::SetTime { time_ms } => {
-                self.time_offset_ms = Some(time_ms);
             }
         }
         Ok(())

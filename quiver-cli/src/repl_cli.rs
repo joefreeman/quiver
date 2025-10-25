@@ -21,11 +21,16 @@ impl ReplCli {
         let mut editor = Editor::<(), rustyline::history::DefaultHistory>::new()?;
         let _ = editor.load_history(HISTORY_FILE);
 
-        // Create workers
+        // Create workers with system time
         let num_workers = 4;
         let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
         for _ in 0..num_workers {
-            workers.push(Box::new(spawn_worker()));
+            workers.push(Box::new(spawn_worker(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("System time before Unix epoch")
+                    .as_millis() as u64
+            })));
         }
 
         // Create REPL

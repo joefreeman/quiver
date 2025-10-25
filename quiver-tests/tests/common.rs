@@ -4,6 +4,8 @@ use quiver_core::program::Program;
 use quiver_core::value::Value;
 use quiver_environment::{Repl, ReplError, WorkerHandle};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 type ReplResult = Result<Option<(Value, Vec<Vec<u8>>)>, ReplError>;
 
@@ -50,11 +52,15 @@ impl TestBuilder {
     }
 
     pub fn evaluate(self, source: &str) -> TestResult {
-        // Create workers
+        // Initialize virtual time for testing
+        let virtual_time_ms = Arc::new(AtomicU64::new(0));
+
+        // Create workers with virtual time function
         let num_workers = 2;
         let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
         for _ in 0..num_workers {
-            workers.push(Box::new(spawn_worker()));
+            let time = virtual_time_ms.clone();
+            workers.push(Box::new(spawn_worker(move || time.load(Ordering::Relaxed))));
         }
 
         // Create program and module loader
@@ -64,9 +70,6 @@ impl TestBuilder {
         // Create REPL
         let mut repl = Repl::new(workers, program, module_loader).expect("Failed to create REPL");
 
-        // Initialize virtual time for testing
-        let mut virtual_time_ms: u64 = 0;
-
         // Evaluate source
         let result = match repl.evaluate(source) {
             Ok(Some(request_id)) => {
@@ -74,15 +77,12 @@ impl TestBuilder {
                 let start = std::time::Instant::now();
                 let timeout = std::time::Duration::from_secs(5);
 
-                repl.set_time(virtual_time_ms).ok();
-
                 loop {
                     let did_work = repl.step().unwrap_or(false);
 
                     // If idle, advance virtual time
                     if !did_work {
-                        virtual_time_ms = virtual_time_ms.saturating_add(1);
-                        repl.set_time(virtual_time_ms).ok();
+                        virtual_time_ms.fetch_add(1, Ordering::Relaxed);
                     }
 
                     match repl.poll_request(request_id) {
@@ -118,7 +118,7 @@ impl TestBuilder {
             result,
             source: source.to_string(),
             repl,
-            virtual_time_ms,
+            virtual_time_ms: virtual_time_ms.load(Ordering::Relaxed),
         }
     }
 }

@@ -55,8 +55,11 @@ impl WorkerHandle for NativeWorkerHandle {
     }
 }
 
-/// Spawn a native worker thread
-pub fn spawn_worker() -> NativeWorkerHandle {
+/// Spawn a native worker thread with a custom time function
+pub fn spawn_worker<F>(time_fn: F) -> NativeWorkerHandle
+where
+    F: Fn() -> u64 + Send + 'static,
+{
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
 
@@ -71,7 +74,10 @@ pub fn spawn_worker() -> NativeWorkerHandle {
 
         // Run the worker loop
         loop {
-            match worker.step() {
+            // Get current time from the provided function
+            let current_time_ms = time_fn();
+
+            match worker.step(current_time_ms) {
                 Ok(true) => {
                     // Work was done, continue immediately
                 }

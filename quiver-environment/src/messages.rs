@@ -88,10 +88,6 @@ pub enum Command {
         process_id: ProcessId,
         keep_indices: Vec<usize>,
     },
-
-    /// Set virtual time (for testing)
-    /// Workers will use this time instead of system time
-    SetTime { time_ms: u64 },
 }
 
 /// Events sent from Workers to Environment

@@ -366,19 +366,6 @@ impl Environment {
         Ok(())
     }
 
-    /// Set virtual time for all workers (for testing)
-    pub fn set_time(&mut self, time_ms: u64) -> Result<(), EnvironmentError> {
-        let cmd = Command::SetTime { time_ms };
-
-        for worker in &mut self.workers {
-            worker
-                .send(cmd.clone())
-                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
-        }
-
-        Ok(())
-    }
-
     /// Check if a request has completed (non-blocking)
     /// Automatically removes the request from pending_requests when returning a final result
     pub fn poll_request(
