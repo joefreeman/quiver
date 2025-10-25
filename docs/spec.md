@@ -471,6 +471,8 @@ p = @f,
 !p
 ```
 
+If a process has failed with a runtime error, that error will be propagated to the awaiting process.
+
 ### Advanced select usage
 
 As well as being used for receiving messages and awaiting the result of a single process, the select operator can specify multiple sources at once to 'race' them. And also for specifying timeouts.
