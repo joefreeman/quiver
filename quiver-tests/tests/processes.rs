@@ -447,7 +447,9 @@ fn test_mixed_process_and_receive() {
         .evaluate(
             r#"
             make_receiver = #{
-                !(#int | @#{ 99 })
+                fast = @#{ 99 },
+                !fast,
+                !(#int | fast)
             },
             receiver = @make_receiver,
             42 ~> receiver,
