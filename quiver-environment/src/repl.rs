@@ -210,12 +210,19 @@ impl Repl {
             .request_locals(repl_process_id, vec![*local_index])
     }
 
-    /// Get all variable names and their types
+    /// Get all variable names and their types, ordered by local index
     pub fn get_variables(&self) -> Vec<(String, Type)> {
-        self.variable_map
+        let mut vars: Vec<_> = self
+            .variable_map
             .iter()
-            .map(|(name, (ty, _))| (name.clone(), ty.clone()))
-            .collect()
+            .map(|(name, (ty, idx))| (name.clone(), ty.clone(), *idx))
+            .collect();
+
+        // Sort by local index to maintain definition order
+        vars.sort_by_key(|(_, _, idx)| *idx);
+
+        // Drop the index from the result
+        vars.into_iter().map(|(name, ty, _)| (name, ty)).collect()
     }
 
     /// Compact locals to remove unused variables (called automatically after evaluation)
