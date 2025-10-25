@@ -858,7 +858,7 @@ fn tail_call(input: &str) -> IResult<&str, Term> {
     ))
 }
 
-fn builtin(input: &str) -> IResult<&str, String> {
+fn builtin(input: &str) -> IResult<&str, Builtin> {
     // Parse opening __
     let (input, _) = tag("__")(input)?;
 
@@ -877,7 +877,22 @@ fn builtin(input: &str) -> IResult<&str, String> {
     // Parse closing __
     let (input, _) = tag("__")(input)?;
 
-    Ok((input, trimmed.to_string()))
+    // Parse optional argument [...] (same as access)
+    let (input, argument) = opt(preceded(
+        peek(char('[')),
+        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
+    ))(input)?;
+
+    Ok((
+        input,
+        Builtin {
+            name: trimmed.to_string(),
+            argument: argument.map(|fields| Tuple {
+                name: TupleName::None,
+                fields,
+            }),
+        },
+    ))
 }
 
 fn equality(input: &str) -> IResult<&str, Term> {

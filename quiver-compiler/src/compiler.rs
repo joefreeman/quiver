@@ -1863,12 +1863,40 @@ impl<'a> Compiler<'a> {
                 }
                 self.compile_import(&path)
             }
-            ast::Term::Builtin(name) => {
-                // Load the builtin
-                let builtin_type = self.compile_builtin(&name)?;
+            ast::Term::Builtin(builtin) => {
+                // If there's an argument, compile it first (before loading the builtin)
+                // so that ripples in the argument can access the piped value on the stack
+                let arg_type = if let Some(args) = &builtin.argument {
+                    // Convert value_type to ripple_context if present
+                    // Set owns_value=true when converting from value_type (we own it and must clean up)
+                    let ripple_context_value;
+                    let ripple_context_param = if let Some(vt) = value_type.as_ref() {
+                        ripple_context_value = RippleContext {
+                            value_type: vt.clone(),
+                            stack_offset: 0,
+                            owns_value: true,
+                        };
+                        Some(&ripple_context_value)
+                    } else {
+                        ripple_context
+                    };
 
-                // If we have a value, apply the loaded value based on its type
-                if let Some(val_type) = value_type {
+                    Some(self.compile_tuple(
+                        args.name.clone(),
+                        args.fields.clone(),
+                        ripple_context_param,
+                    )?)
+                } else {
+                    None
+                };
+
+                // Load the builtin
+                let builtin_type = self.compile_builtin(&builtin.name)?;
+
+                // Apply argument if present, otherwise apply piped value if present
+                if let Some(arg_type) = arg_type {
+                    self.apply_value_to_type(builtin_type, arg_type)
+                } else if let Some(val_type) = value_type {
                     self.apply_value_to_type(builtin_type, val_type)
                 } else {
                     Ok(builtin_type)

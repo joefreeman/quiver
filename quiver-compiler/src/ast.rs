@@ -56,7 +56,7 @@ pub enum Term {
     Function(Function),
     Access(Access),
     Import(String),
-    Builtin(String),
+    Builtin(Builtin),
     TailCall(TailCall),
     Equality,
     Not,
@@ -130,6 +130,12 @@ pub struct Access {
 pub enum AccessPath {
     Field(String),
     Index(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Builtin {
+    pub name: String,
+    pub argument: Option<Tuple>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
