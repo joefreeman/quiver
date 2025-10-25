@@ -19,7 +19,8 @@ enum SelectResult {
 pub struct Executor {
     processes: HashMap<ProcessId, Process>,
     queue: VecDeque<ProcessId>,
-    waiting: HashSet<ProcessId>,
+    spawning: HashSet<ProcessId>,
+    selecting: HashSet<ProcessId>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
@@ -95,7 +96,8 @@ impl Executor {
         Self {
             processes: HashMap::new(),
             queue: VecDeque::new(),
-            waiting: HashSet::new(),
+            spawning: HashSet::new(),
+            selecting: HashSet::new(),
             constants: vec![],
             functions: vec![],
             builtins: vec![],
@@ -135,7 +137,7 @@ impl Executor {
 
     /// Notify a process that spawned a new process with the new PID
     pub fn notify_spawn(&mut self, id: ProcessId, pid: Value) {
-        let was_waiting = self.waiting.remove(&id);
+        let was_spawning = self.spawning.remove(&id);
 
         if let Some(process) = self.processes.get_mut(&id) {
             // For spawn notifications, just push the PID onto the stack and increment counter
@@ -145,8 +147,8 @@ impl Executor {
                 frame.counter += 1;
             }
 
-            // Only re-queue if it was actually waiting (not already queued by something else)
-            if was_waiting {
+            // Only re-queue if it was actually spawning (not already queued by something else)
+            if was_spawning {
                 self.queue.push_back(id);
             }
         }
@@ -160,7 +162,7 @@ impl Executor {
         }
 
         // Re-queue awaiter to retry its Select instruction
-        if self.waiting.remove(&awaiter) {
+        if self.selecting.remove(&awaiter) {
             self.queue.push_back(awaiter);
         }
     }
@@ -168,19 +170,28 @@ impl Executor {
     pub fn notify_message(&mut self, id: ProcessId, message: Value) {
         if let Some(process) = self.processes.get_mut(&id) {
             process.mailbox.push_back(message);
-            if self.waiting.remove(&id) {
-                self.queue.push_back(id);
-            }
+        }
+
+        // Re-queue if the process is selecting (waiting for messages)
+        if self.selecting.remove(&id) {
+            self.queue.push_back(id);
         }
     }
 
-    pub fn mark_waiting(&mut self, id: ProcessId) {
-        self.waiting.insert(id);
+    pub fn mark_spawning(&mut self, id: ProcessId) {
+        self.spawning.insert(id);
+        self.queue.retain(|&pid| pid != id);
+    }
+
+    pub fn mark_selecting(&mut self, id: ProcessId) {
+        self.selecting.insert(id);
         self.queue.retain(|&pid| pid != id);
     }
 
     pub fn mark_active(&mut self, id: ProcessId) {
-        if self.waiting.remove(&id) {
+        let was_spawning = self.spawning.remove(&id);
+        let was_selecting = self.selecting.remove(&id);
+        if was_spawning || was_selecting {
             self.queue.push_back(id);
         }
     }
@@ -192,7 +203,7 @@ impl Executor {
     fn get_status(&self, id: ProcessId, process: &Process) -> ProcessStatus {
         if self.queue.contains(&id) {
             ProcessStatus::Active
-        } else if self.waiting.contains(&id) {
+        } else if self.spawning.contains(&id) || self.selecting.contains(&id) {
             ProcessStatus::Waiting
         } else if matches!(&process.result, Some(Err(_))) {
             ProcessStatus::Failed
@@ -286,9 +297,12 @@ impl Executor {
                 }
             }
 
-            // Check if process should yield (moved to waiting, or has pending request)
+            // Check if process should yield (moved to spawning/selecting, or has pending request)
             // Pending request check ensures only ONE routing request per step
-            if self.waiting.contains(&current_pid) || pending_request.is_some() {
+            if self.spawning.contains(&current_pid)
+                || self.selecting.contains(&current_pid)
+                || pending_request.is_some()
+            {
                 break;
             }
         }
@@ -391,7 +405,8 @@ impl Executor {
                 self.notify_result(awaiter, current_pid, result_value.clone());
             }
         } else {
-            let should_requeue = !self.waiting.contains(&current_pid);
+            let should_requeue =
+                !self.spawning.contains(&current_pid) && !self.selecting.contains(&current_pid);
 
             if should_requeue {
                 // Process not finished - re-queue it so it can continue
@@ -1058,8 +1073,8 @@ impl Executor {
             }
         };
 
-        // Mark caller as waiting - will be notified with Value::Pid(new_pid)
-        self.mark_waiting(pid);
+        // Mark caller as spawning - will be notified with Value::Pid(new_pid)
+        self.mark_spawning(pid);
 
         // Return routing request for scheduler to handle
         // Don't increment counter - will be incremented in notify_spawn
@@ -1231,7 +1246,7 @@ impl Executor {
                 process.awaiting.insert(*target, None);
             }
 
-            self.mark_waiting(pid);
+            self.mark_selecting(pid);
             return Ok(Some(Action::Await {
                 targets: pid_targets,
                 caller: pid,
@@ -1327,8 +1342,8 @@ impl Executor {
             }
         }
 
-        // No sources ready - mark as waiting
-        self.mark_waiting(pid);
+        // No sources ready - mark as selecting
+        self.mark_selecting(pid);
         Ok(None)
     }
 
@@ -1665,9 +1680,9 @@ impl Executor {
     }
 
     fn check_expired_timeouts(&mut self, current_time_ms: u64) {
-        // Scan waiting processes for expired select timeouts
+        // Scan selecting processes for expired select timeouts
         let expired: Vec<ProcessId> = self
-            .waiting
+            .selecting
             .iter()
             .filter(|pid| {
                 if let Some(process) = self.get_process(**pid)
@@ -1692,7 +1707,7 @@ impl Executor {
         // Re-queue expired processes to retry their Select instruction
         for pid in expired {
             self.queue.push_back(pid);
-            self.waiting.remove(&pid);
+            self.selecting.remove(&pid);
         }
     }
 

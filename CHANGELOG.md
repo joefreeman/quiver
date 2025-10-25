@@ -4,15 +4,16 @@
 
 ### Fixed
 
-- Using current time in WASM build.
+- Fixed using current time in WASM build.
+- Fixed race condition when message is received whilst spawning.
 
 ## [0.2.0] - 2025-10-25
 
 ### Added
 
-- Hexadecimal (`0x...`) and binary (`0b...`) integer literal notation.
-- Support for partial type definitions.
-- Parameterised types for type aliases and functions (e.g., `list<t>`, `#<t>t -> t`).
+- Added hexadecimal (`0x...`) and binary (`0b...`) integer literal notation.
+- Added support for partial type definitions.
+- Added parameterised types for type aliases and functions (e.g., `list<t>`, `#<t>t -> t`).
 
 ### Changed
 
