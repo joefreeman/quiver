@@ -1613,10 +1613,7 @@ impl<'a> Compiler<'a> {
         // Type check: argument must be compatible with function parameter
         if !arg_type.is_compatible(&target_param, &self.program) {
             return Err(Error::TypeMismatch {
-                expected: format!(
-                    "value compatible with {}",
-                    quiver_core::format::format_type(&self.program, &target_param)
-                ),
+                expected: quiver_core::format::format_type(&self.program, &target_param),
                 found: quiver_core::format::format_type(&self.program, &arg_type),
             });
         }
@@ -1968,9 +1965,11 @@ impl<'a> Compiler<'a> {
                     // Type check: function must take nil as parameter
                     if !Type::nil().is_compatible(&param_type, &self.program) {
                         return Err(Error::TypeMismatch {
-                            expected: "function with nil parameter (use 'value ~> @function' to pass an argument)".to_string(),
-                            found: format!("function with parameter {}",
-                                quiver_core::format::format_type(&self.program, &param_type)),
+                            expected: "function with nil parameter".to_string(),
+                            found: format!(
+                                "function with parameter {}",
+                                quiver_core::format::format_type(&self.program, &param_type)
+                            ),
                         });
                     }
 
@@ -2028,7 +2027,7 @@ impl<'a> Compiler<'a> {
             ast::Term::Self_ => {
                 if value_type.is_some() {
                     return Err(Error::FeatureUnsupported(
-                        "Self reference cannot be applied to value".to_string(),
+                        "Value cannot be applied to self reference".to_string(),
                     ));
                 }
                 self.codegen.add_instruction(Instruction::Self_);

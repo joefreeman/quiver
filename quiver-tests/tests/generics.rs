@@ -71,7 +71,7 @@ fn test_generic_function_with_same_type_param_widening() {
         )
         .expect("1")
         .expect_type("first", "#[t, t] -> t")
-        .expect_type("result", "(bin | int)");
+        .expect_type("result", "bin | int");
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn test_heterogeneous_list_via_widening() {
             "#,
         )
         .expect("[5, \"a\"]")
-        .expect_type("xs", "([] | Cons[(int | Str[bin]), μ1] | Nil)");
+        .expect_type("xs", "[] | Cons[(int | Str[bin]), μ1] | Nil");
 }
 
 #[test]

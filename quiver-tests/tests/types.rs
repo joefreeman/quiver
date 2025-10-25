@@ -18,7 +18,7 @@ fn test_union_type_definition() {
               | Rectangle[w: int, h: int]
             "#,
         )
-        .expect_alias("shape", "(Circle[r: int] | Rectangle[w: int, h: int])");
+        .expect_alias("shape", "Circle[r: int] | Rectangle[w: int, h: int]");
 }
 
 #[test]
@@ -506,7 +506,7 @@ fn test_union_partial_type() {
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with (A(x: int) | B(x: int))".to_string(),
+            expected: "function parameter compatible with A(x: int) | B(x: int)".to_string(),
             found: "C[x: int]".to_string(),
         });
 
@@ -518,7 +518,7 @@ fn test_union_partial_type() {
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with (A(x: int) | B(x: int))".to_string(),
+            expected: "function parameter compatible with A(x: int) | B(x: int)".to_string(),
             found: "B[y: int]".to_string(),
         });
 }
@@ -567,7 +567,7 @@ fn test_type_spread_union_distribution() {
         )
         .expect_alias(
             "colored",
-            "(Colored[r: int, color: bin] | Colored[s: int, color: bin])",
+            "Colored[r: int, color: bin] | Colored[s: int, color: bin]",
         );
 }
 
@@ -620,7 +620,7 @@ fn test_type_spread_union_with_override() {
         )
         .expect_alias(
             "modified",
-            "(Modified[x: int, y: bin] | Modified[x: int, z: int, y: bin])",
+            "Modified[x: int, y: bin] | Modified[x: int, z: int, y: bin]",
         );
 }
 
@@ -683,7 +683,7 @@ fn test_type_spread_in_generic_union() {
         )
         .expect_alias(
             "colored",
-            "(Colored[r: int, color: t] | Colored[s: int, color: t])",
+            "Colored[r: int, color: t] | Colored[s: int, color: t]",
         );
 }
 
@@ -722,7 +722,7 @@ fn test_type_spread_parameterized_union() {
         )
         .expect_alias(
             "tagged",
-            "(Tagged[value: t, tag: bin] | Tagged[error: e, tag: bin])",
+            "Tagged[value: t, tag: bin] | Tagged[error: e, tag: bin]",
         );
 }
 
@@ -756,7 +756,7 @@ fn test_expect_alias_union() {
             shape :: Circle[r: int] | Square[s: int]
             "#,
         )
-        .expect_alias("shape", "(Circle[r: int] | Square[s: int])");
+        .expect_alias("shape", "Circle[r: int] | Square[s: int]");
 }
 
 #[test]
@@ -859,7 +859,7 @@ fn test_identifier_spread_syntax_union() {
         )
         .expect_alias(
             "logged",
-            "(Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int])",
+            "Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int]",
         );
 }
 

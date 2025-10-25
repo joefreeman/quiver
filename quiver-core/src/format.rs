@@ -32,25 +32,37 @@ fn try_format_as_string(bytes: &[u8]) -> Option<String> {
 }
 
 pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String {
+    format_type_impl(program, type_def, false)
+}
+
+fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: bool) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
-        Type::Process(process_type) => match (&process_type.receive, &process_type.returns) {
-            (Some(receive), Some(returns)) => {
-                format!(
-                    "@{} -> {}",
-                    format_type(program, receive),
-                    format_type(program, returns)
-                )
+        Type::Process(process_type) => {
+            let formatted = match (&process_type.receive, &process_type.returns) {
+                (Some(receive), Some(returns)) => {
+                    format!(
+                        "@{} -> {}",
+                        format_type_impl(program, receive, true),
+                        format_type_impl(program, returns, true)
+                    )
+                }
+                (Some(receive), None) => {
+                    format!("@{}", format_type_impl(program, receive, true))
+                }
+                (None, Some(returns)) => {
+                    format!("@-> {}", format_type_impl(program, returns, true))
+                }
+                (None, None) => "@".to_string(),
+            };
+
+            if nested {
+                format!("({})", formatted)
+            } else {
+                formatted
             }
-            (Some(receive), None) => {
-                format!("@{}", format_type(program, receive))
-            }
-            (None, Some(returns)) => {
-                format!("@-> {}", format_type(program, returns))
-            }
-            (None, None) => "@".to_string(),
-        },
+        }
         Type::Tuple(type_id) | Type::Partial(type_id) => {
             let is_partial = matches!(type_def, Type::Partial(_));
             if let Some(type_info) = program.lookup_type(type_id) {
@@ -59,9 +71,13 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
                     .iter()
                     .map(|(field_name, field_type)| {
                         if let Some(field_name) = field_name {
-                            format!("{}: {}", field_name, format_type(program, field_type))
+                            format!(
+                                "{}: {}",
+                                field_name,
+                                format_type_impl(program, field_type, true)
+                            )
                         } else {
-                            format_type(program, field_type)
+                            format_type_impl(program, field_type, true)
                         }
                     })
                     .collect();
@@ -88,17 +104,15 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
             }
         }
         Type::Callable(func_type) => {
-            // Add parentheses around parameter if it's a function type
-            let param_str = match &func_type.parameter {
-                Type::Callable(_) => {
-                    format!("({})", format_type(program, &func_type.parameter))
-                }
-                _ => format_type(program, &func_type.parameter),
-            };
+            let param_str = format_type_impl(program, &func_type.parameter, true);
+            let result_str = format_type_impl(program, &func_type.result, true);
+            let formatted = format!("#{} -> {}", param_str, result_str);
 
-            // Result type already has parentheses if it's a union
-            let result_str = format_type(program, &func_type.result);
-            format!("#{} -> {}", param_str, result_str)
+            if nested {
+                format!("({})", formatted)
+            } else {
+                formatted
+            }
         }
         Type::Cycle(depth) => format!("μ{}", depth),
         Type::Union(types_list) => {
@@ -107,15 +121,14 @@ pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String
             } else {
                 let type_strs: Vec<String> = types_list
                     .iter()
-                    .map(|t| {
-                        match t {
-                            // Add parentheses around function types in unions for clarity
-                            Type::Callable(_) => format!("({})", format_type(program, t)),
-                            _ => format_type(program, t),
-                        }
-                    })
+                    .map(|t| format_type_impl(program, t, true))
                     .collect();
-                format!("({})", type_strs.join(" | "))
+
+                if nested {
+                    format!("({})", type_strs.join(" | "))
+                } else {
+                    type_strs.join(" | ")
+                }
             }
         }
         Type::Variable(name) => name.to_string(),

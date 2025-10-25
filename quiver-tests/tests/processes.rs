@@ -79,7 +79,7 @@ fn test_spawn_with_argument_type_mismatch() {
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "value compatible with int".to_string(),
+            expected: "int".to_string(),
             found: "bin".to_string(),
         });
 }
@@ -94,8 +94,7 @@ fn test_spawn_without_argument_requires_nil_parameter() {
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function with nil parameter (use 'value ~> @function' to pass an argument)"
-                .to_string(),
+            expected: "function with nil parameter".to_string(),
             found: "function with parameter int".to_string(),
         });
 }
