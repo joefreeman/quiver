@@ -6,6 +6,16 @@ use crate::types::{CallableType, ProcessType, TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// Result of processing a select source
+enum SelectResult {
+    /// Select should complete with this value
+    Complete(Value),
+    /// A receive function was called, return from handle_select to let it execute
+    CalledFunction,
+    /// Continue to the next source
+    Continue,
+}
+
 pub struct Executor {
     processes: HashMap<ProcessId, Process>,
     queue: VecDeque<ProcessId>,
@@ -1130,7 +1140,39 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_select(
+    /// Check if we're continuing from a receive function call and pop result if needed
+    fn handle_select_continuation(&mut self, pid: ProcessId) -> Result<Option<Value>, Error> {
+        let process = self
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        let Some(ref select_state) = process.select_state else {
+            return Ok(None); // Not a continuation
+        };
+
+        // Verify we're handling the same select instruction
+        let current_frame = process.frames.len().saturating_sub(1);
+        let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+
+        if select_state.frame != current_frame || select_state.instruction != current_instruction {
+            return Err(Error::InvalidArgument(
+                "Cannot nest select instructions (select in receive handler)".to_string(),
+            ));
+        }
+
+        // If we just finished executing a receive function, pop the result
+        if select_state.receiving.is_some() {
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            Ok(Some(process.stack.pop().ok_or(Error::StackUnderflow)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Initialize select state on first execution
+    fn initialize_select(
         &mut self,
         pid: ProcessId,
         n: usize,
@@ -1140,277 +1182,149 @@ impl Executor {
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        // Check if we're already processing a select
-        // Pop receive result early if needed (before processing sources)
-        let receive_result = if let Some(ref select_state) = process.select_state {
-            // Verify we're handling the same select instruction
-            let current_frame = process.frames.len().saturating_sub(1);
-            let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+        // Validate stack has enough sources
+        if process.stack.len() < n {
+            return Err(Error::InvalidArgument(format!(
+                "Select requires {} sources on stack, found {}",
+                n,
+                process.stack.len()
+            )));
+        }
 
-            if select_state.frame != current_frame
-                || select_state.instruction != current_instruction
-            {
-                return Err(Error::InvalidArgument(
-                    "Cannot nest select instructions (select in receive handler)".to_string(),
-                ));
-            }
+        // Pop sources from stack
+        let start_idx = process.stack.len() - n;
+        let sources: Vec<Value> = process.stack.drain(start_idx..).collect();
 
-            // If we just finished executing a receive function, pop the result
-            if select_state.receiving.is_some() {
-                // Pop result but don't handle yet, leave receiving set
-                // (We'll handle it below when processing sources)
-                let process = self.get_process_mut(pid).unwrap();
-                Some(process.stack.pop().ok_or(Error::StackUnderflow)?)
-            } else {
-                None
-            }
-        } else {
-            // First time running this select - initialize state
-            if process.stack.len() < n {
-                return Err(Error::InvalidArgument(format!(
-                    "Select requires {} sources on stack, found {}",
-                    n,
-                    process.stack.len()
-                )));
-            }
+        // Count receive sources to initialize cursors
+        let receive_count = sources
+            .iter()
+            .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
+            .count();
 
-            // Pop sources from stack
-            let start_idx = process.stack.len() - n;
-            let sources: Vec<Value> = process.stack.drain(start_idx..).collect();
-
-            // Count receive sources to initialize cursors
-            let receive_count = sources
-                .iter()
-                .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
-                .count();
-
-            // Scan for process sources to determine if we need to await
-            let pid_targets: Vec<ProcessId> = sources
-                .iter()
-                .filter_map(|s| {
-                    if let Value::Pid(p, _) = s {
-                        Some(*p)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            let current_frame = process.frames.len().saturating_sub(1);
-            let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
-
-            // If we have PIDs, defer start_time until await completes
-            let start_time = if pid_targets.is_empty() {
-                Some(current_time_ms)
-            } else {
-                None
-            };
-
-            process.select_state = Some(SelectState {
-                frame: current_frame,
-                instruction: current_instruction,
-                sources,
-                cursors: vec![0; receive_count],
-                start_time,
-                receiving: None,
-            });
-
-            // If we found PIDs, register awaits before processing sources
-            if !pid_targets.is_empty() {
-                // Register all PID targets in awaiting map
-                for target in &pid_targets {
-                    process.awaiting.insert(*target, None);
+        // Scan for process sources to determine if we need to await
+        let pid_targets: Vec<ProcessId> = sources
+            .iter()
+            .filter_map(|s| {
+                if let Value::Pid(p, _) = s {
+                    Some(*p)
+                } else {
+                    None
                 }
+            })
+            .collect();
 
-                // Mark as waiting and return Await action
-                self.mark_waiting(pid);
-                return Ok(Some(Action::Await {
-                    targets: pid_targets,
-                    caller: pid,
-                }));
-            }
+        let current_frame = process.frames.len().saturating_sub(1);
+        let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
 
-            None // No receive result on first pass
+        // If we have PIDs, defer start_time until await completes
+        let start_time = if pid_targets.is_empty() {
+            Some(current_time_ms)
+        } else {
+            None
         };
 
-        // Now process sources in order
+        process.select_state = Some(SelectState {
+            frame: current_frame,
+            instruction: current_instruction,
+            sources,
+            cursors: vec![0; receive_count],
+            start_time,
+            receiving: None,
+        });
+
+        // If we found PIDs, register awaits before processing sources
+        if !pid_targets.is_empty() {
+            for target in &pid_targets {
+                process.awaiting.insert(*target, None);
+            }
+
+            self.mark_waiting(pid);
+            return Ok(Some(Action::Await {
+                targets: pid_targets,
+                caller: pid,
+            }));
+        }
+
+        Ok(None)
+    }
+
+    /// Ensure select start time is set (lazily after awaits complete)
+    fn ensure_select_start_time(
+        &mut self,
+        pid: ProcessId,
+        current_time_ms: u64,
+    ) -> Result<u64, Error> {
+        let process = self
+            .get_process(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        let select_state = process
+            .select_state
+            .as_ref()
+            .ok_or(Error::InvalidArgument("Select state missing".to_string()))?;
+
+        if let Some(t) = select_state.start_time {
+            Ok(t)
+        } else {
+            // Set it now - awaits are complete, time to start evaluating
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            if let Some(ref mut state) = process.select_state {
+                state.start_time = Some(current_time_ms);
+            }
+            Ok(current_time_ms)
+        }
+    }
+
+    /// Process select sources in order, completing when a source is ready
+    fn process_select_sources(
+        &mut self,
+        pid: ProcessId,
+        receive_result: Option<Value>,
+        start_time: u64,
+        current_time_ms: u64,
+    ) -> Result<Option<Action>, Error> {
         let select_state = self
             .get_process(pid)
             .and_then(|p| p.select_state.clone())
             .ok_or(Error::InvalidArgument("Select state missing".to_string()))?;
 
-        // Lazily set start_time if not already set
-        let start_time = if let Some(t) = select_state.start_time {
-            t
-        } else {
-            // Set it now - awaits are complete, time to start evaluating
-            let process = self.get_process_mut(pid).unwrap();
-            if let Some(ref mut state) = process.select_state {
-                state.start_time = Some(current_time_ms);
-            }
-            current_time_ms
-        };
-
         for (src_idx, source) in select_state.sources.iter().enumerate() {
             match source {
-                // Timeout source
                 Value::Integer(timeout_ms) => {
-                    let elapsed = current_time_ms.saturating_sub(start_time);
-                    if elapsed >= (*timeout_ms).max(0) as u64 {
-                        // Complete with nil
-                        return self.complete_select(pid, Value::nil());
+                    if let Some(value) =
+                        self.handle_select_timeout(*timeout_ms, start_time, current_time_ms)?
+                    {
+                        return self.complete_select(pid, value);
                     }
                 }
-
-                // Process source
                 Value::Pid(target_pid, _) => {
-                    let process = self.get_process(pid).unwrap();
-
-                    // Check if result is available (we've already awaited upfront)
-                    if let Some(result_opt) = process.awaiting.get(target_pid)
-                        && let Some(result) = result_opt
-                    {
-                        // Complete with this result
-                        return self.complete_select(pid, result.clone());
+                    if let Some(value) = self.handle_select_process(pid, *target_pid)? {
+                        return self.complete_select(pid, value);
                     }
-                    // No result yet, continue to next source
-                    // If not in awaiting map, something went wrong
-                    // (should have been registered during initialization)
                 }
-
-                // Receive source
                 Value::Function(_, _) | Value::Builtin(_) => {
-                    // Calculate receive function index (count of receive sources before this one)
-                    let receive_idx = select_state.sources[..src_idx]
-                        .iter()
-                        .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
-                        .count();
-
-                    // Check if we just finished executing this receive function
-                    if let Some((idx, message_value)) = &select_state.receiving
-                        && *idx == receive_idx
-                    {
-                        // Use the result we popped earlier (before processing sources)
-                        // This unwrap is safe: if receiving is Some, receive_result must be Some
-                        let result = receive_result.as_ref().unwrap().clone();
-
-                        // Check if result is nil (the unnamed empty tuple)
-                        let is_nil = matches!(&result, Value::Tuple(type_id, fields)
-                            if type_id == &TypeId::NIL && fields.is_empty());
-
-                        // Check if result is Ok (the named empty tuple)
-                        let is_ok = matches!(&result, Value::Tuple(type_id, fields)
-                            if type_id == &TypeId::OK && fields.is_empty());
-
-                        if !is_nil && !is_ok {
-                            // Result must be either nil or Ok for receive functions with a body
-                            return Err(Error::InvalidArgument(
-                                "Receive function must return [] or Ok".to_string(),
-                            ));
+                    // Receive sources may complete, call a function, or continue to next source
+                    match self.handle_select_receive(
+                        pid,
+                        src_idx,
+                        source,
+                        &select_state,
+                        receive_result.as_ref(),
+                    )? {
+                        SelectResult::Complete(value) => {
+                            return self.complete_select(pid, value);
                         }
-
-                        if is_ok {
-                            // Ok result - remove message from mailbox and complete with original message value
-                            let msg_idx =
-                                select_state.cursors.get(receive_idx).copied().unwrap_or(0);
-                            let process = self.get_process_mut(pid).unwrap();
-                            if msg_idx < process.mailbox.len() {
-                                process.mailbox.remove(msg_idx);
-                            }
-                            return self.complete_select(pid, message_value.clone());
-                        } else {
-                            // Nil result - increment cursor and reset receiving
-                            let process = self.get_process_mut(pid).unwrap();
-                            if let Some(state) = &mut process.select_state {
-                                state.cursors[receive_idx] += 1;
-                                state.receiving = None;
-                            }
+                        SelectResult::CalledFunction => {
+                            // Receive function was called, return Ok(None) to let it execute
+                            return Ok(None);
+                        }
+                        SelectResult::Continue => {
+                            // No match, continue to next source
                         }
                     }
-
-                    // Get current cursor for this receive source (refetch to get the updated value)
-                    let mut cursor = self
-                        .get_process(pid)
-                        .and_then(|p| p.select_state.as_ref())
-                        .and_then(|s| s.cursors.get(receive_idx).copied())
-                        .unwrap_or(0);
-                    let process = self.get_process(pid).unwrap();
-
-                    // Loop through all messages starting from cursor to find a type-compatible one
-                    for (msg_idx, message) in process.mailbox.iter().enumerate().skip(cursor) {
-                        // Check if type is compatible
-                        let expected_type = match source {
-                            Value::Function(func_id, _) => self
-                                .functions
-                                .get(*func_id)
-                                .and_then(|f| f.function_type.as_ref())
-                                .map(|ft| &ft.parameter),
-                            Value::Builtin(name) => self
-                                .builtins
-                                .iter()
-                                .find(|b| &b.name == name)
-                                .map(|b| &b.parameter_type),
-                            _ => unreachable!(),
-                        };
-
-                        let message_type = self.value_to_type(message);
-                        let type_compatible = expected_type
-                            .map(|expected| message_type.is_compatible(expected, self))
-                            .unwrap_or(true);
-
-                        if type_compatible {
-                            // Found a compatible message
-                            let message = message.clone();
-
-                            // Check if this is an identity function (no body)
-                            let is_identity = match source {
-                                Value::Function(func_id, _) => self
-                                    .functions
-                                    .get(*func_id)
-                                    .map(|f| f.instructions.is_empty())
-                                    .unwrap_or(false),
-                                Value::Builtin(_) => false, // Builtins always have logic
-                                _ => unreachable!(),
-                            };
-
-                            if is_identity {
-                                // Identity function - skip calling, just complete with message
-                                let process = self.get_process_mut(pid).unwrap();
-                                if msg_idx < process.mailbox.len() {
-                                    process.mailbox.remove(msg_idx);
-                                }
-                                return self.complete_select(pid, message);
-                            } else {
-                                // Function has a body - set receiving state and call it
-                                let process = self.get_process_mut(pid).unwrap();
-
-                                if let Some(state) = &mut process.select_state {
-                                    state.receiving = Some((receive_idx, message.clone()));
-                                    state.cursors[receive_idx] = msg_idx;
-                                }
-
-                                process.stack.push(message);
-                                process.stack.push(source.clone());
-                                return self.handle_call(pid);
-                            }
-                        } else {
-                            // Type not compatible - update cursor to skip this message
-                            cursor = msg_idx + 1;
-                        }
-                    }
-
-                    // Update cursor to reflect all skipped messages
-                    if cursor > select_state.cursors.get(receive_idx).copied().unwrap_or(0) {
-                        let process = self.get_process_mut(pid).unwrap();
-                        if let Some(state) = &mut process.select_state
-                            && receive_idx < state.cursors.len()
-                        {
-                            state.cursors[receive_idx] = cursor;
-                        }
-                    }
-                    // No type-compatible messages, continue to next source
                 }
-
                 _ => {
                     return Err(Error::InvalidArgument(format!(
                         "Invalid select source: {:?}",
@@ -1423,6 +1337,273 @@ impl Executor {
         // No sources ready - mark as waiting
         self.mark_waiting(pid);
         Ok(None)
+    }
+
+    /// Check if timeout has elapsed, returning nil if so
+    fn handle_select_timeout(
+        &mut self,
+        timeout_ms: i64,
+        start_time: u64,
+        current_time_ms: u64,
+    ) -> Result<Option<Value>, Error> {
+        let elapsed = current_time_ms.saturating_sub(start_time);
+        if elapsed >= timeout_ms.max(0) as u64 {
+            Ok(Some(Value::nil()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Check if an awaited process has completed, returning its result if so
+    fn handle_select_process(
+        &mut self,
+        pid: ProcessId,
+        target_pid: ProcessId,
+    ) -> Result<Option<Value>, Error> {
+        let process = self
+            .get_process(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        // Check if result is available (we've already awaited upfront)
+        if let Some(result_opt) = process.awaiting.get(&target_pid)
+            && let Some(result) = result_opt
+        {
+            return Ok(Some(result.clone()));
+        }
+
+        Ok(None)
+    }
+
+    /// Handle a receive source, checking for completed receive or scanning mailbox
+    fn handle_select_receive(
+        &mut self,
+        pid: ProcessId,
+        src_idx: usize,
+        source: &Value,
+        select_state: &SelectState,
+        receive_result: Option<&Value>,
+    ) -> Result<SelectResult, Error> {
+        // Calculate receive function index (count of receive sources before this one)
+        let receive_idx = select_state.sources[..src_idx]
+            .iter()
+            .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
+            .count();
+
+        // Check if we just finished executing this receive function
+        if let Some((idx, message_value)) = &select_state.receiving
+            && *idx == receive_idx
+            && let Some(value) =
+                self.handle_receive_result(pid, receive_idx, message_value, receive_result)?
+        {
+            return Ok(SelectResult::Complete(value));
+        }
+
+        // Nil result - cursor was incremented, continue scanning mailbox
+        // Or we haven't checked this receive source yet
+        self.scan_mailbox_for_message(pid, receive_idx, source, select_state)
+    }
+
+    /// Handle the result from a just-executed receive function
+    fn handle_receive_result(
+        &mut self,
+        pid: ProcessId,
+        receive_idx: usize,
+        message_value: &Value,
+        receive_result: Option<&Value>,
+    ) -> Result<Option<Value>, Error> {
+        // Use the result we popped earlier (in handle_select_continuation)
+        let result = receive_result.ok_or(Error::InvalidArgument(
+            "Receive result should be present when receiving is set".to_string(),
+        ))?;
+
+        // Check if result is nil (the unnamed empty tuple)
+        let is_nil = matches!(result, Value::Tuple(type_id, fields)
+            if type_id == &TypeId::NIL && fields.is_empty());
+
+        // Check if result is Ok (the named empty tuple)
+        let is_ok = matches!(result, Value::Tuple(type_id, fields)
+            if type_id == &TypeId::OK && fields.is_empty());
+
+        if !is_nil && !is_ok {
+            return Err(Error::InvalidArgument(
+                "Receive function must return [] or Ok".to_string(),
+            ));
+        }
+
+        if is_ok {
+            // Ok result - remove message from mailbox and complete
+            let process = self
+                .get_process(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            let select_state = process
+                .select_state
+                .as_ref()
+                .ok_or(Error::InvalidArgument("Select state missing".to_string()))?;
+            let msg_idx = select_state.cursors.get(receive_idx).copied().unwrap_or(0);
+
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            if msg_idx < process.mailbox.len() {
+                process.mailbox.remove(msg_idx);
+            }
+            Ok(Some(message_value.clone()))
+        } else {
+            // Nil result - increment cursor and reset receiving
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            if let Some(state) = &mut process.select_state {
+                state.cursors[receive_idx] += 1;
+                state.receiving = None;
+            }
+            Ok(None)
+        }
+    }
+
+    /// Scan mailbox for a type-compatible message, calling receive function if found
+    fn scan_mailbox_for_message(
+        &mut self,
+        pid: ProcessId,
+        receive_idx: usize,
+        source: &Value,
+        select_state: &SelectState,
+    ) -> Result<SelectResult, Error> {
+        let mut cursor = self
+            .get_process(pid)
+            .and_then(|p| p.select_state.as_ref())
+            .and_then(|s| s.cursors.get(receive_idx).copied())
+            .unwrap_or(0);
+
+        let process = self
+            .get_process(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        // Loop through all messages starting from cursor
+        for (msg_idx, message) in process.mailbox.iter().enumerate().skip(cursor) {
+            // Check if type is compatible
+            let expected_type = match source {
+                Value::Function(func_id, _) => self
+                    .functions
+                    .get(*func_id)
+                    .and_then(|f| f.function_type.as_ref())
+                    .map(|ft| &ft.parameter),
+                Value::Builtin(name) => self
+                    .builtins
+                    .iter()
+                    .find(|b| &b.name == name)
+                    .map(|b| &b.parameter_type),
+                _ => unreachable!(),
+            };
+
+            let message_type = self.value_to_type(message);
+            let type_compatible = expected_type
+                .map(|expected| message_type.is_compatible(expected, self))
+                .unwrap_or(true);
+
+            if type_compatible {
+                // Found a compatible message
+                let message = message.clone();
+
+                // Check if this is an identity function (no body)
+                let is_identity = match source {
+                    Value::Function(func_id, _) => self
+                        .functions
+                        .get(*func_id)
+                        .map(|f| f.instructions.is_empty())
+                        .unwrap_or(false),
+                    Value::Builtin(_) => false,
+                    _ => unreachable!(),
+                };
+
+                if is_identity {
+                    // Identity function - skip calling, just complete with message
+                    let process = self
+                        .get_process_mut(pid)
+                        .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                    if msg_idx < process.mailbox.len() {
+                        process.mailbox.remove(msg_idx);
+                    }
+                    return Ok(SelectResult::Complete(message));
+                } else {
+                    // Function has a body - set receiving state and call it
+                    self.call_receive_function(pid, receive_idx, msg_idx, message, source)?;
+                    return Ok(SelectResult::CalledFunction);
+                }
+            } else {
+                // Type not compatible - update cursor to skip this message
+                cursor = msg_idx + 1;
+            }
+        }
+
+        // Update cursor to reflect all skipped messages
+        if cursor > select_state.cursors.get(receive_idx).copied().unwrap_or(0) {
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            if let Some(state) = &mut process.select_state
+                && receive_idx < state.cursors.len()
+            {
+                state.cursors[receive_idx] = cursor;
+            }
+        }
+
+        Ok(SelectResult::Continue)
+    }
+
+    /// Call a receive function and prepare for re-entry
+    fn call_receive_function(
+        &mut self,
+        pid: ProcessId,
+        receive_idx: usize,
+        msg_idx: usize,
+        message: Value,
+        source: &Value,
+    ) -> Result<(), Error> {
+        let process = self
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        if let Some(state) = &mut process.select_state {
+            state.receiving = Some((receive_idx, message.clone()));
+            state.cursors[receive_idx] = msg_idx;
+        }
+
+        process.stack.push(message);
+        process.stack.push(source.clone());
+
+        // Call the function - when it returns, handle_select will be called again
+        self.handle_call(pid)?;
+        Ok(())
+    }
+
+    fn handle_select(
+        &mut self,
+        pid: ProcessId,
+        n: usize,
+        current_time_ms: u64,
+    ) -> Result<Option<Action>, Error> {
+        // Phase 1: Check if we're continuing from a receive function call
+        let receive_result = self.handle_select_continuation(pid)?;
+
+        // Phase 2: Initialize if this is the first time
+        if receive_result.is_none() {
+            let has_select_state = self
+                .get_process(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?
+                .select_state
+                .is_some();
+
+            if !has_select_state {
+                return self.initialize_select(pid, n, current_time_ms);
+            }
+        }
+
+        // Phase 3: Ensure start time is set (lazily after awaits complete)
+        let start_time = self.ensure_select_start_time(pid, current_time_ms)?;
+
+        // Phase 4: Process sources by type
+        self.process_select_sources(pid, receive_result, start_time, current_time_ms)
     }
 
     /// Complete a select by cleaning up state and pushing result
