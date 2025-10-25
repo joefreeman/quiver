@@ -958,7 +958,7 @@ impl<'a> Compiler<'a> {
         let function_instructions = std::mem::take(&mut self.codegen.instructions);
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
-            function_type: Some(func_type.clone()),
+            function_type: func_type.clone(),
             captures: capture_locals,
         });
 
@@ -1387,8 +1387,10 @@ impl<'a> Compiler<'a> {
         self.local_count = 0;
         self.type_aliases.clear();
 
+        // Track the last statement's type for execute_instructions_sync
+        let mut last_type = Type::nil();
         for statement in parsed.statements {
-            self.compile_statement(statement)?;
+            last_type = self.compile_statement(statement)?;
         }
 
         // Get the compiled module instructions
@@ -1402,12 +1404,11 @@ impl<'a> Compiler<'a> {
 
         // Execute the module instructions to get the result value
         let (module_value, executor) =
-            quiver_core::execute_instructions_sync(&self.program, module_instructions).map_err(
-                |e| Error::ModuleExecution {
-                    module_path: module_path.to_string(),
-                    error: e,
-                },
-            )?;
+            quiver_core::execute_instructions_sync(&self.program, module_instructions, last_type)
+                .map_err(|e| Error::ModuleExecution {
+                module_path: module_path.to_string(),
+                error: e,
+            })?;
 
         // Convert the runtime value back to instructions
         let (instructions, module_type) = self.value_to_instructions(&module_value, &executor)?;
@@ -1486,9 +1487,7 @@ impl<'a> Compiler<'a> {
                     .program
                     .get_function(func_index)
                     .ok_or(Error::FunctionUndefined(func_index))?;
-                let function_type = func.function_type.clone().ok_or_else(|| {
-                    Error::TypeUnresolved(format!("Function {} has no type annotation", func_index))
-                })?;
+                let function_type = func.function_type.clone();
                 Ok((instructions, Type::Callable(Box::new(function_type))))
             }
             Value::Builtin(name) => {
@@ -1634,11 +1633,11 @@ impl<'a> Compiler<'a> {
 
         let wrapper_func_index = self.program.register_function(Function {
             instructions: wrapper_instructions,
-            function_type: Some(CallableType {
+            function_type: CallableType {
                 parameter: Type::nil(),
                 result: target_result.clone(),
                 receive: target_receive.clone(),
-            }),
+            },
             captures: vec![wrapper_locals_base, wrapper_locals_base + 1],
         });
 

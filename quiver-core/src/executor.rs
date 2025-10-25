@@ -1471,8 +1471,7 @@ impl Executor {
                 Value::Function(func_id, _) => self
                     .functions
                     .get(*func_id)
-                    .and_then(|f| f.function_type.as_ref())
-                    .map(|ft| &ft.parameter),
+                    .map(|f| &f.function_type.parameter),
                 Value::Builtin(name) => self
                     .builtins
                     .iter()
@@ -1629,21 +1628,12 @@ impl Executor {
             }
             Value::Function(func_idx, _) => {
                 // Get the function's type signature
-                if let Some(func_type) = self
+                let func_type = &self
                     .functions
                     .get(*func_idx)
-                    .and_then(|f| f.function_type.as_ref())
-                {
-                    Type::Callable(Box::new(func_type.clone()))
-                } else {
-                    // Function without type information - shouldn't happen in well-typed code
-                    // Return a generic callable type with unknown types
-                    Type::Callable(Box::new(CallableType {
-                        parameter: Type::Union(vec![]), // Bottom type (never)
-                        result: Type::Union(vec![]),
-                        receive: Type::Union(vec![]),
-                    }))
-                }
+                    .expect("Function should exist")
+                    .function_type;
+                Type::Callable(Box::new(func_type.clone()))
             }
             Value::Builtin(name) => {
                 // Look up builtin type from the resolved builtins list
@@ -1660,22 +1650,15 @@ impl Executor {
             }
             Value::Process(_, function_idx) => {
                 // Get the process type from the function that spawned it
-                if let Some(func_type) = self
+                let func_type = &self
                     .functions
                     .get(*function_idx)
-                    .and_then(|f| f.function_type.as_ref())
-                {
-                    Type::Process(Box::new(ProcessType {
-                        receive: Some(Box::new(func_type.receive.clone())),
-                        returns: Some(Box::new(func_type.result.clone())),
-                    }))
-                } else {
-                    // Process without type information
-                    Type::Process(Box::new(ProcessType {
-                        receive: None,
-                        returns: None,
-                    }))
-                }
+                    .expect("Function should exist")
+                    .function_type;
+                Type::Process(Box::new(ProcessType {
+                    receive: Some(Box::new(func_type.receive.clone())),
+                    returns: Some(Box::new(func_type.result.clone())),
+                }))
             }
         }
     }

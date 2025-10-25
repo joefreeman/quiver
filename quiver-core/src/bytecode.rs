@@ -12,8 +12,8 @@ pub enum Constant {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Function {
     pub instructions: Vec<Instruction>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub function_type: Option<types::CallableType>,
+    #[serde(rename = "type")]
+    pub function_type: types::CallableType,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub captures: Vec<usize>,
 }
@@ -40,26 +40,6 @@ pub struct TypeId(pub usize);
 impl TypeId {
     pub const NIL: TypeId = TypeId(0);
     pub const OK: TypeId = TypeId(1);
-}
-
-impl Bytecode {
-    pub fn without_debug_info(&self) -> Self {
-        Self {
-            constants: self.constants.clone(),
-            functions: self
-                .functions
-                .iter()
-                .map(|f| Function {
-                    instructions: f.instructions.clone(),
-                    function_type: None,
-                    captures: f.captures.clone(),
-                })
-                .collect(),
-            builtins: self.builtins.clone(),
-            entry: self.entry,
-            types: self.types.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

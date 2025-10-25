@@ -103,13 +103,17 @@ impl Repl {
         self.variable_map = variables;
         self.type_aliases = type_aliases;
         self.module_cache = module_cache;
-        self.last_result_type = result_type;
+        self.last_result_type = result_type.clone();
 
         // Only create function wrapper if we have instructions to execute
         let function_index = if !instructions.is_empty() {
             let function = Function {
                 instructions,
-                function_type: None,
+                function_type: quiver_core::types::CallableType {
+                    parameter: self.last_result_type.clone(),
+                    result: result_type.clone(),
+                    receive: Type::Union(vec![]), // Bottom type (never)
+                },
                 captures: vec![],
             };
             Some(self.program.register_function(function))

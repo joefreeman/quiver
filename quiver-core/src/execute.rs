@@ -15,6 +15,7 @@ use crate::value::Value;
 pub fn execute_instructions_sync(
     program: &Program,
     instructions: Vec<Instruction>,
+    result_type: crate::types::Type,
 ) -> Result<(Value, Executor), Error> {
     let mut executor = Executor::new();
 
@@ -23,7 +24,11 @@ pub fn execute_instructions_sync(
     let function_index = functions.len();
     functions.push(crate::bytecode::Function {
         instructions,
-        function_type: None,
+        function_type: crate::types::CallableType {
+            parameter: crate::types::Type::nil(),
+            result: result_type,
+            receive: crate::types::Type::Union(vec![]), // Bottom type (never)
+        },
         captures: vec![],
     });
 

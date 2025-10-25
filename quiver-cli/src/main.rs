@@ -31,9 +31,6 @@ enum Commands {
         output: Option<String>,
 
         #[arg(short, long)]
-        debug: bool,
-
-        #[arg(short, long)]
         eval: Option<String>,
     },
 
@@ -59,9 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Compile {
             input,
             output,
-            debug,
             eval,
-        }) => compile_command(input, output, debug, eval)?,
+        }) => compile_command(input, output, eval)?,
         Some(Commands::Run { input, eval, quiet }) => run_command(input, eval, quiet)?,
         Some(Commands::Inspect { input }) => inspect_command(input)?,
         None => run_repl()?,
@@ -79,7 +75,6 @@ fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
 fn compile_command(
     input: Option<String>,
     output: Option<String>,
-    debug: bool,
     eval: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = if let Some(code) = eval {
@@ -111,11 +106,13 @@ fn compile_command(
     .map_err(|e| format!("Compile error: {:?}", e))?;
 
     let instructions = result.instructions;
+    let result_type = result.result_type;
     let mut program = result.program;
 
     // Execute the instructions synchronously to get the function value
-    let (result, executor) = quiver_core::execute_instructions_sync(&program, instructions)
-        .map_err(|e| format!("Execution error: {:?}", e))?;
+    let (result, executor) =
+        quiver_core::execute_instructions_sync(&program, instructions, result_type)
+            .map_err(|e| format!("Execution error: {:?}", e))?;
 
     // Extract the entry function from the result
     let entry = match result {
@@ -130,17 +127,8 @@ fn compile_command(
         _ => None, // Program didn't evaluate to a function
     };
 
-    let mut bytecode = program.to_bytecode(entry);
-
-    if !debug {
-        bytecode = bytecode.without_debug_info();
-    }
-
-    let json = if debug {
-        serde_json::to_string_pretty(&bytecode)?
-    } else {
-        serde_json::to_string(&bytecode)?
-    };
+    let bytecode = program.to_bytecode(entry);
+    let json = serde_json::to_string_pretty(&bytecode)?;
 
     if let Some(output_path) = output {
         fs::write(output_path, json)?;
@@ -208,11 +196,13 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
     .map_err(|e| format!("Compile error: {:?}", e))?;
 
     let instructions = compilation_result.instructions;
+    let result_type = compilation_result.result_type;
     let mut program = compilation_result.program;
 
     // Execute the instructions synchronously to get the function value
-    let (result, executor) = quiver_core::execute_instructions_sync(&program, instructions)
-        .map_err(|e| format!("Execution error: {:?}", e))?;
+    let (result, executor) =
+        quiver_core::execute_instructions_sync(&program, instructions, result_type)
+            .map_err(|e| format!("Execution error: {:?}", e))?;
 
     // Extract the entry function from the result
     let entry = match result {
@@ -251,8 +241,15 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
             bytecode::Instruction::Call,
         ];
 
-        let (value, _executor) = quiver_core::execute_instructions_sync(&program, instructions)
-            .map_err(|e| format!("Execution error: {:?}", e))?;
+        // Get the result type from the entry function
+        let result_type = program
+            .get_function(entry_idx)
+            .map(|f| f.function_type.result.clone())
+            .unwrap_or_else(|| Type::Union(vec![])); // Top type as fallback
+
+        let (value, _executor) =
+            quiver_core::execute_instructions_sync(&program, instructions, result_type)
+                .map_err(|e| format!("Execution error: {:?}", e))?;
 
         // Check if result is NIL tuple (exit with error)
         if value.is_nil() {
