@@ -118,15 +118,25 @@ impl ReplCli {
                 return false;
             }
 
-            ["!"] => match Self::new() {
-                Ok(new_repl) => {
-                    *self = new_repl;
-                    println!("{}", "Environment reset".bright_black());
+            ["!"] => {
+                // Save history before resetting
+                if let Err(e) = self.editor.save_history(HISTORY_FILE) {
+                    eprintln!(
+                        "{}",
+                        format!("Warning: Failed to save history: {}", e).bright_black()
+                    );
                 }
-                Err(e) => {
-                    eprintln!("{}", format!("Error resetting environment: {}", e).red());
+
+                match Self::new() {
+                    Ok(new_repl) => {
+                        *self = new_repl;
+                        println!("{}", "Environment reset".bright_black());
+                    }
+                    Err(e) => {
+                        eprintln!("{}", format!("Error resetting environment: {}", e).red());
+                    }
                 }
-            },
+            }
 
             ["v"] => {
                 self.list_variables();
