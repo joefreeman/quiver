@@ -34,6 +34,16 @@ impl Value {
         Value::Tuple(TypeId::OK, vec![])
     }
 
+    /// Check if this value is NIL
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Value::Tuple(TypeId::NIL, fields) if fields.is_empty())
+    }
+
+    /// Check if this value is OK
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Value::Tuple(TypeId::OK, fields) if fields.is_empty())
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Integer(_) => "integer",

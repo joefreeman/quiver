@@ -255,14 +255,12 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
             .map_err(|e| format!("Execution error: {:?}", e))?;
 
         // Check if result is NIL tuple (exit with error)
-        if matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::NIL) {
+        if value.is_nil() {
             std::process::exit(1);
         }
 
         // Print result unless quiet or OK/NIL
-        if !quiet
-            && !matches!(value, Value::Tuple(type_id, _) if type_id == TypeId::OK || type_id == TypeId::NIL)
-        {
+        if !quiet && !value.is_ok() && !value.is_nil() {
             println!("{}", format::format_value(&value, &[], &program));
         }
     }

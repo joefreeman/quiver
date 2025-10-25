@@ -1165,9 +1165,8 @@ impl<'a> Compiler<'a> {
                 // the block can also return nil (when condition fails)
                 if is_last_branch {
                     let condition_can_be_nil = match &condition_type {
-                        Type::Union(types) => types.iter().any(|t| t == &Type::nil()),
-                        Type::Tuple(id) if *id == TypeId::NIL => true,
-                        _ => false,
+                        Type::Union(types) => types.iter().any(Type::is_nil),
+                        t => t.is_nil(),
                     };
 
                     if condition_can_be_nil {
@@ -1247,9 +1246,8 @@ impl<'a> Compiler<'a> {
             let should_propagate_nil = if i > 0 {
                 if let Some(ref prev_type) = last_type {
                     match prev_type {
-                        Type::Union(types) => types.iter().any(|t| t == &Type::nil()),
-                        Type::Tuple(id) if *id == TypeId::NIL => true,
-                        _ => false,
+                        Type::Union(types) => types.iter().any(Type::is_nil),
+                        t => t.is_nil(),
                     }
                 } else {
                     false
@@ -1539,10 +1537,8 @@ impl<'a> Compiler<'a> {
 
         // For functions with bodies, the result type must be nil, Ok, or a union of them
         let is_valid = match &callable.result {
-            Type::Tuple(type_id) => *type_id == TypeId::NIL || *type_id == TypeId::OK,
-            Type::Union(variants) => variants
-                .iter()
-                .all(|v| matches!(v, Type::Tuple(id) if *id == TypeId::NIL || *id == TypeId::OK)),
+            t if t.is_nil() || t.is_ok() => true,
+            Type::Union(variants) => variants.iter().all(|v| v.is_nil() || v.is_ok()),
             _ => false,
         };
 
@@ -1963,7 +1959,7 @@ impl<'a> Compiler<'a> {
                         };
 
                     // Type check: function must take nil as parameter
-                    if !Type::nil().is_compatible(&param_type, &self.program) {
+                    if param_type != Type::nil() {
                         return Err(Error::TypeMismatch {
                             expected: "function with nil parameter".to_string(),
                             found: format!(

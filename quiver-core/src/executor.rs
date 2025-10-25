@@ -728,10 +728,7 @@ impl Executor {
 
         let condition = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        let should_jump = match &condition {
-            Value::Tuple(type_id, fields) => !(type_id == &TypeId::NIL && fields.is_empty()),
-            _ => true,
-        };
+        let should_jump = !condition.is_nil();
 
         if let Some(frame) = process.frames.last_mut() {
             if should_jump {
@@ -1015,15 +1012,10 @@ impl Executor {
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        let result = match &value {
-            Value::Tuple(type_id, fields) => {
-                if type_id == &TypeId::NIL && fields.is_empty() {
-                    Value::ok()
-                } else {
-                    Value::nil()
-                }
-            }
-            _ => Value::nil(),
+        let result = if value.is_nil() {
+            Value::ok()
+        } else {
+            Value::nil()
         };
 
         process.stack.push(result);
@@ -1416,21 +1408,14 @@ impl Executor {
             "Receive result should be present when receiving is set".to_string(),
         ))?;
 
-        // Check if result is nil (the unnamed empty tuple)
-        let is_nil = matches!(result, Value::Tuple(type_id, fields)
-            if type_id == &TypeId::NIL && fields.is_empty());
-
-        // Check if result is Ok (the named empty tuple)
-        let is_ok = matches!(result, Value::Tuple(type_id, fields)
-            if type_id == &TypeId::OK && fields.is_empty());
-
-        if !is_nil && !is_ok {
+        // Check if result is nil or Ok
+        if !result.is_nil() && !result.is_ok() {
             return Err(Error::InvalidArgument(
                 "Receive function must return [] or Ok".to_string(),
             ));
         }
 
-        if is_ok {
+        if result.is_ok() {
             // Ok result - remove message from mailbox and complete
             let process = self
                 .get_process(pid)

@@ -72,6 +72,16 @@ impl Type {
         Type::Union(vec![])
     }
 
+    /// Check if this type is NIL
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Type::Tuple(TypeId::NIL))
+    }
+
+    /// Check if this type is OK
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Type::Tuple(TypeId::OK))
+    }
+
     /// Check if this type is concrete (not a union, cycle, or partial)
     pub fn is_concrete(&self) -> bool {
         !matches!(self, Type::Union(_) | Type::Cycle(_) | Type::Partial(_))

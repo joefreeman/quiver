@@ -1,7 +1,6 @@
 use colored::Colorize;
 use quiver_cli::spawn_worker;
 use quiver_compiler::FileSystemModuleLoader;
-use quiver_core::bytecode::TypeId;
 use quiver_core::program::Program;
 use quiver_environment::{Repl, ReplError, RequestResult, WorkerHandle};
 use rustyline::Editor;
@@ -279,10 +278,7 @@ impl ReplCli {
         match self.wait_for_result(request_id) {
             Ok(RequestResult::Result(Ok((value, heap)))) => {
                 // Track if result was nil for colored prompt
-                self.last_was_nil = matches!(
-                    &value,
-                    quiver_core::value::Value::Tuple(type_id, _) if *type_id == TypeId::NIL
-                );
+                self.last_was_nil = value.is_nil();
 
                 println!("{}", self.repl.format_value(&value, &heap));
             }
