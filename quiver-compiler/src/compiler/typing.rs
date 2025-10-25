@@ -173,6 +173,12 @@ fn resolve_tuple_name(
     match name {
         ast::TupleName::Literal(s) => Ok(Some(s)),
         ast::TupleName::None => Ok(None),
+        ast::TupleName::Ripple => {
+            // Ripple is only valid in value context, not type context
+            Err(Error::FeatureUnsupported(
+                "Ripple (~) cannot be used in type definitions".to_string(),
+            ))
+        }
         ast::TupleName::Identifier(identifier) => {
             // Look up the type alias to get its tuple name
             let (type_params, type_def) = type_aliases
@@ -416,6 +422,7 @@ fn resolve_ast_type_impl(
                     // Determine the final tuple name based on the name mode:
                     // - TupleName::Literal -> use the literal name
                     // - TupleName::Identifier -> use the variant name from spread
+                    // - TupleName::Ripple -> error (ripple only valid in value context)
                     // - TupleName::None -> use None (unnamed)
                     let final_name = match &tuple.name {
                         ast::TupleName::Literal(_) | ast::TupleName::None => {
@@ -424,6 +431,11 @@ fn resolve_ast_type_impl(
                         ast::TupleName::Identifier(_) => {
                             // Use variant name from spread (inherits from source)
                             variant_name
+                        }
+                        ast::TupleName::Ripple => {
+                            return Err(Error::FeatureUnsupported(
+                                "Ripple (~) cannot be used in type definitions".to_string(),
+                            ));
                         }
                     };
 

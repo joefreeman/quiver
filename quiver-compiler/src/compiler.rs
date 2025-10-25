@@ -428,34 +428,33 @@ impl<'a> Compiler<'a> {
             let resolved_tuple_name = match tuple_name {
                 ast::TupleName::Literal(name) => Some(name),
                 ast::TupleName::None => None,
+                ast::TupleName::Ripple => {
+                    // Ripple spread: ~[..., fields]
+                    // Get the ripple type from ripple_context
+                    ripple_context.and_then(|ctx| {
+                        let ripple_type = &ctx.value_type;
+                        if let Type::Tuple(type_id) = ripple_type {
+                            self.program
+                                .lookup_type(type_id)
+                                .and_then(|type_info| type_info.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                }
                 ast::TupleName::Identifier(id) => {
-                    if id == "~" {
-                        // Ripple spread: ~[..., fields]
-                        // Get the ripple type from ripple_context
-                        ripple_context.and_then(|ctx| {
-                            let ripple_type = &ctx.value_type;
-                            if let Type::Tuple(type_id) = ripple_type {
+                    // Identifier spread: identifier[..., fields]
+                    // Look up the variable's type
+                    self.lookup_variable(&self.scopes, &id, &[])
+                        .and_then(|(var_type, _)| {
+                            if let Type::Tuple(type_id) = var_type {
                                 self.program
-                                    .lookup_type(type_id)
+                                    .lookup_type(&type_id)
                                     .and_then(|type_info| type_info.name.clone())
                             } else {
                                 None
                             }
                         })
-                    } else {
-                        // Identifier spread: identifier[..., fields]
-                        // Look up the variable's type
-                        self.lookup_variable(&self.scopes, &id, &[])
-                            .and_then(|(var_type, _)| {
-                                if let Type::Tuple(type_id) = var_type {
-                                    self.program
-                                        .lookup_type(&type_id)
-                                        .and_then(|type_info| type_info.name.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                    }
                 }
             };
 
@@ -499,10 +498,12 @@ impl<'a> Compiler<'a> {
         let resolved_name = match tuple_name {
             ast::TupleName::Literal(name) => Some(name),
             ast::TupleName::None => None,
-            ast::TupleName::Identifier(_) => {
-                // Parser enforces that identifier syntax requires spreads,
+            ast::TupleName::Identifier(_) | ast::TupleName::Ripple => {
+                // Parser enforces that identifier/ripple syntax requires spreads,
                 // so this path only executes when there are spreads (handled above)
-                unreachable!("TupleName::Identifier without spreads should be rejected by parser")
+                unreachable!(
+                    "TupleName::Identifier/Ripple without spreads should be rejected by parser"
+                )
             }
         };
         let type_id = self.program.register_type(resolved_name, field_types);

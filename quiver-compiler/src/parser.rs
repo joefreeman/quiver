@@ -663,12 +663,12 @@ fn tuple_field(input: &str) -> IResult<&str, TupleField> {
         // Spread with identifier: ...identifier
         map(preceded(tag("..."), identifier), |id| TupleField {
             name: None,
-            value: FieldValue::Spread(Some(id)),
+            value: FieldValue::Spread(SpreadSource::Identifier(id)),
         }),
         // Spread chained value: ...
         map(tag("..."), |_| TupleField {
             name: None,
-            value: FieldValue::Spread(None),
+            value: FieldValue::Spread(SpreadSource::Chained),
         }),
         // Unnamed chain: chain
         map(chain, |chain_value| TupleField {
@@ -711,8 +711,9 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                         // Transform chained spread (...) into identifier spread (...identifier)
                         // This allows a[..., y: 2] to mean "spread a and add y"
                         for field in &mut fields {
-                            if matches!(field.value, FieldValue::Spread(None)) {
-                                field.value = FieldValue::Spread(Some(name.clone()));
+                            if matches!(field.value, FieldValue::Spread(SpreadSource::Chained)) {
+                                field.value =
+                                    FieldValue::Spread(SpreadSource::Identifier(name.clone()));
                             }
                         }
                         (name, fields)
@@ -739,10 +740,9 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                     ),
                     |mut fields| {
                         // Transform chained spread (...) to reference the ripple
-                        // We use "~" as a special marker that the compiler will recognize
                         for field in &mut fields {
-                            if matches!(field.value, FieldValue::Spread(None)) {
-                                field.value = FieldValue::Spread(Some("~".to_string()));
+                            if matches!(field.value, FieldValue::Spread(SpreadSource::Chained)) {
+                                field.value = FieldValue::Spread(SpreadSource::Ripple);
                             }
                         }
                         fields
@@ -755,7 +755,7 @@ fn tuple_term(input: &str) -> IResult<&str, Tuple> {
                 },
             ),
             |fields| Tuple {
-                name: TupleName::Identifier("~".to_string()), // Special marker for ripple
+                name: TupleName::Ripple,
                 fields,
             },
         ),

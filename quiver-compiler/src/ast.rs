@@ -78,6 +78,8 @@ pub enum TupleName {
     Literal(String),
     /// Inherit name from variable like a[..., y: 2]
     Identifier(String),
+    /// Inherit name from ripple like ~[..., y: 2]
+    Ripple,
     /// Unnamed tuple like [x: 1]
     None,
 }
@@ -89,9 +91,19 @@ pub struct Tuple {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum SpreadSource {
+    /// Bare spread (...) - will be filled in based on context
+    Chained,
+    /// Identifier spread (...identifier)
+    Identifier(String),
+    /// Ripple spread - spreads the rippled value
+    Ripple,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
     Chain(Chain),
-    Spread(Option<String>),
+    Spread(SpreadSource),
 }
 
 #[derive(Debug, Clone, PartialEq)]
