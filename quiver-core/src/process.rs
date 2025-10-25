@@ -17,6 +17,7 @@ pub enum ProcessStatus {
 pub struct ProcessInfo {
     pub id: ProcessId,
     pub status: ProcessStatus,
+    pub function_index: usize,
     pub stack_size: usize,
     pub locals_size: usize,
     pub frames_count: usize,

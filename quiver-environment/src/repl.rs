@@ -6,7 +6,7 @@ use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
 use quiver_core::process::ProcessId;
 use quiver_core::program::Program;
-use quiver_core::types::Type;
+use quiver_core::types::{ProcessType, Type};
 use quiver_core::value::Value;
 use std::collections::HashMap;
 
@@ -293,6 +293,16 @@ impl Repl {
     /// Format a type for display
     pub fn format_type(&self, ty: &Type) -> String {
         quiver_core::format::format_type(&self.program, ty)
+    }
+
+    /// Get the formatted type for a process given its function index
+    pub fn format_process_type(&self, function_index: usize) -> Option<String> {
+        let function = self.program.get_function(function_index)?;
+        let process_type = Type::Process(Box::new(ProcessType {
+            receive: Some(Box::new(function.function_type.receive.clone())),
+            returns: Some(Box::new(function.function_type.result.clone())),
+        }));
+        Some(self.format_type(&process_type))
     }
 
     /// Convert a runtime Value to its Type representation

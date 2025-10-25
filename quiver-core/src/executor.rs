@@ -220,6 +220,7 @@ impl Executor {
         self.processes.get(&id).map(|process| ProcessInfo {
             id,
             status: self.get_status(id, process),
+            function_index: process.function_index,
             stack_size: process.stack.len(),
             locals_size: process.locals.len(),
             frames_count: process.frames.len(),

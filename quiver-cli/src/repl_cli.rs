@@ -224,11 +224,19 @@ impl ReplCli {
         match self.wait_for_result(request_id) {
             Ok(RequestResult::ProcessInfo(Some(info))) => {
                 println!("{}", format!("Process {}:", id).bright_black());
-                println!("{}", format!("  Status: {:?}", info.status).bright_black());
-                println!(
-                    "{}",
-                    format!("  Persistent: {}", info.persistent).bright_black()
-                );
+
+                // Show type
+                if let Some(type_str) = self.repl.format_process_type(info.function_index) {
+                    println!("{}", format!("  Type: {}", type_str).bright_black());
+                }
+
+                // Show status with persistent annotation
+                let status_line = if info.persistent {
+                    format!("  Status: {:?} (persistent)", info.status)
+                } else {
+                    format!("  Status: {:?}", info.status)
+                };
+                println!("{}", status_line.bright_black());
                 println!("{}", format!("  Stack: {}", info.stack_size).bright_black());
                 println!(
                     "{}",
