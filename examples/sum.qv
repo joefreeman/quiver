@@ -5,7 +5,7 @@ list<t> :: Nil | Cons[t, &];
 math = %"math",
 
 // Compute the sum of a list using tail recursion
-sum' = #[list<int>, t] {
+sum' = #[list<int>, int] {
   | ~> =[Nil, acc] => acc
   | ~> =[Cons[head, tail], acc] => {
     [head, acc]
