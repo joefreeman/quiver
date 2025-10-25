@@ -108,7 +108,7 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
                 function_index,
             } => {
                 self.executor
-                    .notify_spawn(process_id, Value::Pid(spawned_pid, function_index));
+                    .notify_spawn(process_id, Value::Process(spawned_pid, function_index));
             }
             Command::GetResult {
                 request_id,

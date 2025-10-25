@@ -20,7 +20,7 @@ pub enum Value {
     Tuple(TypeId, Vec<Value>),
     Function(usize, Vec<Value>),
     Builtin(String),
-    Pid(ProcessId, usize),
+    Process(ProcessId, usize),
 }
 
 impl Value {
@@ -51,7 +51,7 @@ impl Value {
             Value::Tuple(_, _) => "tuple",
             Value::Function(_, _) => "function",
             Value::Builtin(_) => "builtin",
-            Value::Pid(_, _) => "pid",
+            Value::Process(_, _) => "process",
         }
     }
 }

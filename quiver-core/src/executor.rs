@@ -1092,7 +1092,7 @@ impl Executor {
         let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
         let target_pid = match pid_value {
-            Value::Pid(target, _) => target,
+            Value::Process(target, _) => target,
             _ => {
                 return Err(Error::TypeMismatch {
                     expected: "pid".to_string(),
@@ -1124,7 +1124,7 @@ impl Executor {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let function_index = process.function_index;
-        process.stack.push(Value::Pid(pid, function_index));
+        process.stack.push(Value::Process(pid, function_index));
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -1197,7 +1197,7 @@ impl Executor {
         let pid_targets: Vec<ProcessId> = sources
             .iter()
             .filter_map(|s| {
-                if let Value::Pid(p, _) = s {
+                if let Value::Process(p, _) = s {
                     Some(*p)
                 } else {
                     None
@@ -1291,7 +1291,7 @@ impl Executor {
                         return self.complete_select(pid, value);
                     }
                 }
-                Value::Pid(target_pid, _) => {
+                Value::Process(target_pid, _) => {
                     if let Some(value) = self.handle_select_process(pid, *target_pid)? {
                         return self.complete_select(pid, value);
                     }
@@ -1658,7 +1658,7 @@ impl Executor {
                     receive: Type::Union(vec![]), // Builtins don't receive messages
                 }))
             }
-            Value::Pid(_, function_idx) => {
+            Value::Process(_, function_idx) => {
                 // Get the process type from the function that spawned it
                 if let Some(func_type) = self
                     .functions
@@ -1738,7 +1738,7 @@ impl Executor {
                         .all(|(a, b)| self.values_equal(a, b))
             }
             (Value::Builtin(a), Value::Builtin(b)) => a == b,
-            (Value::Pid(a, func_a), Value::Pid(b, func_b)) => a == b && func_a == func_b,
+            (Value::Process(a, func_a), Value::Process(b, func_b)) => a == b && func_a == func_b,
             _ => false,
         }
     }
@@ -1796,7 +1796,7 @@ impl Executor {
                 Ok(Value::Function(*func_index, converted_captures))
             }
             // Other value types don't contain heap references
-            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_, _) => Ok(value.clone()),
+            Value::Integer(_) | Value::Builtin(_) | Value::Process(_, _) => Ok(value.clone()),
         }
     }
 
@@ -1848,7 +1848,7 @@ impl Executor {
                 Ok(Value::Function(func_index, remapped_captures))
             }
             // Other value types don't contain heap references
-            Value::Integer(_) | Value::Builtin(_) | Value::Pid(_, _) => Ok(value),
+            Value::Integer(_) | Value::Builtin(_) | Value::Process(_, _) => Ok(value),
         }
     }
 }

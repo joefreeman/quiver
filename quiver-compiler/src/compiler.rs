@@ -1509,8 +1509,8 @@ impl<'a> Compiler<'a> {
                     Err(Error::BuiltinUndefined(name.to_string()))
                 }
             }
-            Value::Pid(_, _) => Err(Error::FeatureUnsupported(
-                "Cannot use Pid in constant context".to_string(),
+            Value::Process(_, _) => Err(Error::FeatureUnsupported(
+                "Cannot use process in constant context".to_string(),
             )),
         }
     }

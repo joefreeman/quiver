@@ -302,7 +302,7 @@ impl Program {
                 let builtin_idx = self.register_builtin(name.clone());
                 vec![Instruction::Builtin(builtin_idx)]
             }
-            Value::Pid(_, _) => {
+            Value::Process(_, _) => {
                 panic!("Cannot convert pid to instructions")
             }
         }

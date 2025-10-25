@@ -184,7 +184,7 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
         Value::Builtin(name) => format!("__{}__", name),
         Value::Integer(i) => i.to_string(),
         Value::Binary(binary) => format_binary(binary, heap, constants),
-        Value::Pid(process_id, _) => format!("@{}", process_id),
+        Value::Process(process_id, _) => format!("@{}", process_id),
         Value::Tuple(type_id, elements) => {
             if let Some(type_info) = program.lookup_type(type_id) {
                 if type_info.name.as_deref() == Some("Str")
