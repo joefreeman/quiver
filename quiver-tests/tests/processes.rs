@@ -681,3 +681,30 @@ fn test_process_spawns_and_receives_reply() {
         )
         .expect("@1");
 }
+
+#[test]
+fn test_send_to_self() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #{ 10 ~> ., !(#int) },
+            p = @f,
+            p ~> !
+            "#,
+        )
+        .expect("10");
+}
+
+#[test]
+fn test_send_to_self_with_receive_type_check() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #{ '00' ~> ., !(#int) }
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "int".to_string(),
+            found: "bin".to_string(),
+        });
+}

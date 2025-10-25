@@ -2079,11 +2079,6 @@ impl<'a> Compiler<'a> {
                 self.compute_select_return_type(&source_types)
             }
             ast::Term::Self_ => {
-                if value_type.is_some() {
-                    return Err(Error::FeatureUnsupported(
-                        "Value cannot be applied to self reference".to_string(),
-                    ));
-                }
                 self.codegen.add_instruction(Instruction::Self_);
                 // Return a process type with the current function's receive type
                 // Return type is None since a process can't know its own return type
@@ -2091,7 +2086,14 @@ impl<'a> Compiler<'a> {
                     receive: Some(Box::new(self.current_receive_type.clone())),
                     returns: None,
                 };
-                Ok(Type::Process(Box::new(process_type)))
+                let self_type = Type::Process(Box::new(process_type));
+
+                // Apply value if present (for message sends like `10 ~> .`)
+                if let Some(val_type) = value_type {
+                    self.apply_value_to_type(self_type, val_type)
+                } else {
+                    Ok(self_type)
+                }
             }
             ast::Term::Ripple => {
                 // Ripple evaluates to the chained value
