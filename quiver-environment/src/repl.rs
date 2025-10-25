@@ -295,6 +295,47 @@ impl Repl {
         quiver_core::format::format_type(&self.program, ty)
     }
 
+    /// Convert a runtime Value to its Type representation
+    pub fn value_to_type(&self, value: &Value) -> Type {
+        match value {
+            Value::Integer(_) => Type::Integer,
+            Value::Binary(_) => Type::Binary,
+            Value::Tuple(type_id, _) => Type::Tuple(*type_id),
+            Value::Function(func_idx, _) => {
+                let func_type = &self
+                    .program
+                    .get_function(*func_idx)
+                    .expect("Function should exist")
+                    .function_type;
+                Type::Callable(Box::new(func_type.clone()))
+            }
+            Value::Builtin(name) => {
+                let builtin_info = self
+                    .program
+                    .get_builtins()
+                    .iter()
+                    .find(|b| &b.name == name)
+                    .expect("Builtin should be registered");
+                Type::Callable(Box::new(quiver_core::types::CallableType {
+                    parameter: builtin_info.parameter_type.clone(),
+                    result: builtin_info.result_type.clone(),
+                    receive: Type::Union(vec![]),
+                }))
+            }
+            Value::Process(_, function_idx) => {
+                let func_type = &self
+                    .program
+                    .get_function(*function_idx)
+                    .expect("Function should exist")
+                    .function_type;
+                Type::Process(Box::new(quiver_core::types::ProcessType {
+                    receive: Some(Box::new(func_type.receive.clone())),
+                    returns: Some(Box::new(func_type.result.clone())),
+                }))
+            }
+        }
+    }
+
     /// Resolve a type alias and return the resolved Type.
     /// Type parameters are resolved to Type::Variable placeholders.
     /// This is useful for testing and displaying type aliases.

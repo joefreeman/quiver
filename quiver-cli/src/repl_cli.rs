@@ -2,6 +2,7 @@ use colored::Colorize;
 use quiver_cli::spawn_worker;
 use quiver_compiler::FileSystemModuleLoader;
 use quiver_core::program::Program;
+use quiver_core::value::Value;
 use quiver_environment::{Repl, ReplError, RequestResult, WorkerHandle};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
@@ -280,7 +281,23 @@ impl ReplCli {
                 // Track if result was nil for colored prompt
                 self.last_was_nil = value.is_nil();
 
-                println!("{}", self.repl.format_value(&value, &heap));
+                let formatted_value = self.repl.format_value(&value, &heap);
+
+                // Show type for functions, builtins, and processes
+                let output = match &value {
+                    Value::Function(_, _) | Value::Builtin(_) | Value::Process(_, _) => {
+                        let value_type = self.repl.value_to_type(&value);
+                        let formatted_type = self.repl.format_type(&value_type);
+                        format!(
+                            "{} {}",
+                            formatted_value,
+                            format!("({})", formatted_type).bright_black()
+                        )
+                    }
+                    _ => formatted_value,
+                };
+
+                println!("{}", output);
             }
             Ok(RequestResult::Result(Err(e))) => {
                 self.last_was_nil = false;
