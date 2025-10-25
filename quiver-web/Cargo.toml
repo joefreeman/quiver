@@ -16,9 +16,11 @@ quiver-compiler = { path = "../quiver-compiler" }
 quiver-environment = { path = "../quiver-environment" }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
+tsify = "0.4"
 js-sys = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
+console_error_panic_hook = "0.1"
 
 [dependencies.web-sys]
 version = "0.3"

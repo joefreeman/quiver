@@ -1,7 +1,12 @@
 mod repl_web;
+mod types;
 mod web_transport;
 mod worker_entry;
 
+// Re-export types for use in TypeScript
+pub use types::*;
+
+// Re-export main API
 pub use repl_web::Repl;
 pub use worker_entry::worker_main;
 

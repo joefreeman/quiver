@@ -1,159 +1,185 @@
-use quiver_compiler::InMemoryModuleLoader;
+use crate::types::*;
+use crate::web_transport::WebWorkerHandle;
+use quiver_compiler::modules::InMemoryModuleLoader;
 use quiver_core::program::Program;
-use quiver_environment::WorkerHandle;
+use quiver_environment::{RequestResult, WorkerHandle};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
+use web_sys::Worker;
 
-use crate::web_transport;
-
-/// Load standard library modules at compile time
-fn create_stdlib_loader() -> InMemoryModuleLoader {
-    let mut modules = HashMap::new();
-
-    // Include standard library modules
-    modules.insert(
-        "list".to_string(),
-        include_str!("../../std/list.qv").to_string(),
-    );
-    modules.insert(
-        "math".to_string(),
-        include_str!("../../std/math.qv").to_string(),
-    );
-
-    InMemoryModuleLoader::new(modules)
-}
-
-/// WASM-bindgen wrapper for Repl
-#[wasm_bindgen]
-pub struct Repl {
-    inner: RefCell<quiver_environment::Repl>,
-    callbacks: Rc<RefCell<HashMap<u64, js_sys::Function>>>,
-}
-
-// TypeScript callback type definitions
+// Define TypeScript types for callbacks and the Repl class
 #[wasm_bindgen(typescript_custom_section)]
-const TS_APPEND_CONTENT: &'static str = r#"
-/**
- * Callback for evaluation results
- * @param result - The evaluation result with value and heap, or null if error
- * @param error - Error message if evaluation failed, or null if successful
- */
-export type EvaluateCallback = (
-    result: { value: any; heap: number[][] } | null,
-    error: string | null
-) => void;
+const TS_DEFINITIONS: &'static str = r#"
+export type WorkerFactory = () => Worker;
+export type EvaluateCallback = (result: JsResult<JsEvaluationResult | null>) => void;
+export type VariablesCallback = (result: JsResult<JsVariable[]>) => void;
+export type ProcessStatusesCallback = (result: JsResult<JsProcess[]>) => void;
+export type ProcessInfoCallback = (result: JsResult<JsProcessInfo | null>) => void;
 
-/**
- * Callback for variable value requests
- * @param result - Array of variable values with their heaps, or null if error
- * @param error - Error message if request failed, or null if successful
- */
-export type VariableCallback = (
-    result: Array<{ value: any; heap: number[][] }> | null,
-    error: string | null
-) => void;
+export class Repl {
+  free(): void;
+  [Symbol.dispose](): void;
 
-/**
- * Callback for process status requests
- * @param result - Process status information, or null if error
- * @param error - Error message if request failed, or null if successful
- */
-export type StatusesCallback = (
-    result: any | null,
-    error: string | null
-) => void;
+  /**
+   * Create a new REPL with the specified number of workers
+   * @param num_workers - Number of worker threads to create
+   * @param worker_factory - Factory function that returns a new Worker
+   */
+  constructor(num_workers: number, worker_factory: WorkerFactory);
 
-/**
- * Callback for process info requests
- * @param result - Process information, or null if error
- * @param error - Error message if request failed, or null if successful
- */
-export type ProcessInfoCallback = (
-    result: any | null,
-    error: string | null
-) => void;
+  /**
+   * Start the event loop
+   */
+  start(): void;
+
+  /**
+   * Stop the event loop
+   */
+  stop(): void;
+
+  /**
+   * Evaluate source code and invoke callback when result is ready
+   * @param source - Quiver source code to evaluate
+   * @param callback - Callback invoked with the evaluation result
+   */
+  evaluate(source: string, callback: EvaluateCallback): void;
+
+  /**
+   * Get all variables defined in the REPL
+   * @param callback - Callback invoked with the list of variables
+   */
+  get_variables(callback: VariablesCallback): void;
+
+  /**
+   * Get all process statuses
+   * @param callback - Callback invoked with process statuses
+   */
+  get_process_statuses(callback: ProcessStatusesCallback): void;
+
+  /**
+   * Get info for a specific process
+   * @param pid - Process ID
+   * @param callback - Callback invoked with process info (or null if not found)
+   */
+  get_process_info(pid: number, callback: ProcessInfoCallback): void;
+
+  /**
+   * Format a value for display
+   * @param value - Value to format
+   * @param heap - Heap data
+   * @returns Formatted string representation
+   */
+  format_value(value: QuiverValue, heap: number[][]): string;
+
+  /**
+   * Format a type for display (derives type from value)
+   * @param value - Value to derive type from
+   * @returns Formatted string representation
+   */
+  format_type(value: QuiverValue): string;
+}
 "#;
+
+// Embed standard library files at compile time
+const STD_MATH: &str = include_str!("../../std/math.qv");
+const STD_LIST: &str = include_str!("../../std/list.qv");
+
+/// Create a module loader with the standard library pre-loaded
+fn create_std_module_loader() -> Box<InMemoryModuleLoader> {
+    let mut modules = HashMap::new();
+    modules.insert("math".to_string(), STD_MATH.to_string());
+    modules.insert("list".to_string(), STD_LIST.to_string());
+    Box::new(InMemoryModuleLoader::new(modules))
+}
+
+/// Callback wrapper to store JS callbacks
+struct CallbackHandle {
+    callback: js_sys::Function,
+}
+
+impl CallbackHandle {
+    fn new(callback: js_sys::Function) -> Self {
+        Self { callback }
+    }
+
+    fn invoke<T: serde::Serialize>(&self, result: JsResult<T>) {
+        let js_value = serde_wasm_bindgen::to_value(&result).unwrap();
+        let _ = self.callback.call1(&JsValue::NULL, &js_value);
+    }
+}
+
+#[wasm_bindgen(skip_typescript)]
+pub struct Repl {
+    repl: Rc<RefCell<quiver_environment::Repl>>,
+    running: Rc<RefCell<bool>>,
+    event_loop_closure: Rc<RefCell<Option<Closure<dyn FnMut()>>>>,
+    pending_callbacks: Rc<RefCell<HashMap<u64, CallbackHandle>>>,
+}
 
 #[wasm_bindgen]
 impl Repl {
     /// Create a new REPL with the specified number of workers
-    /// Accepts either:
-    /// - A string URL (e.g., "./worker.js")
-    /// - A factory function that creates Workers (e.g., () => new Worker(...))
+    /// worker_factory: A JavaScript function that returns a new Worker
     #[wasm_bindgen(constructor)]
-    pub fn new(num_workers: usize, worker_url_or_factory: JsValue) -> Result<Repl, String> {
-        // Create workers
+    pub fn new(num_workers: usize, worker_factory: JsValue) -> Result<Repl, JsValue> {
+        let worker_factory: js_sys::Function = worker_factory.into();
+        // Set up panic hook for better error messages
+        console_error_panic_hook::set_once();
+
+        // Create workers by calling the factory function
         let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
-
         for _ in 0..num_workers {
-            // Check if it's a factory function or a string URL
-            let worker = if worker_url_or_factory.is_function() {
-                // It's a factory function - call it to get a Worker
-                let factory = js_sys::Function::from(worker_url_or_factory.clone());
-                let worker_value = factory
-                    .call0(&JsValue::NULL)
-                    .map_err(|e| format!("Worker factory function failed: {:?}", e))?;
-                Worker::from(worker_value)
-            } else if let Some(worker_url_str) = worker_url_or_factory.as_string() {
-                // It's a string URL - create worker ourselves
-                let worker_options = WorkerOptions::new();
-                worker_options.set_type(WorkerType::Module);
+            let worker = worker_factory
+                .call0(&JsValue::NULL)
+                .map_err(|e| JsValue::from_str(&format!("Failed to create worker: {:?}", e)))?;
 
-                Worker::new_with_options(&worker_url_str, &worker_options)
-                    .map_err(|e| format!("Failed to create worker: {:?}", e))?
-            } else {
-                return Err(
-                    "worker_url_or_factory must be a string or factory function".to_string()
-                );
-            };
+            let worker: Worker = worker
+                .dyn_into()
+                .map_err(|_| JsValue::from_str("Worker factory must return a Worker"))?;
 
             // Create event queue for this worker
-            let event_queue: Rc<RefCell<VecDeque<quiver_environment::Event>>> =
-                Rc::new(RefCell::new(VecDeque::new()));
-            let event_queue_clone = event_queue.clone();
+            let event_queue = Rc::new(RefCell::new(std::collections::VecDeque::new()));
 
-            let handle = web_transport::WebWorkerHandle::new(worker.clone(), event_queue);
-            let ready = handle.ready();
+            // Create the handle first so we can use its shared state
+            let handle = WebWorkerHandle::new(worker.clone(), event_queue.clone());
+
+            // Get shared references from the handle
+            let ready_flag = handle.ready();
             let pending_commands = handle.pending_commands();
-            let worker_for_ready = worker.clone();
+            let event_queue_for_closure = event_queue.clone();
+            let worker_for_closure = worker.clone();
 
-            // Set up message handler
-            let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
+            // Set up message handler for worker events
+            let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
                 if let Some(text) = event.data().as_string() {
-                    // Check for ready signal
                     if text == "ready" {
-                        *ready.borrow_mut() = true;
+                        // Worker is ready - mark it and flush pending commands
+                        *ready_flag.borrow_mut() = true;
 
-                        let mut pending = pending_commands.borrow_mut();
-                        while let Some(command) = pending.pop_front() {
-                            if let Ok(json) = serde_json::to_string(&command)
-                                && let Err(e) = worker_for_ready
-                                    .post_message(&wasm_bindgen::JsValue::from_str(&json))
-                            {
+                        // Send all pending commands
+                        while let Some(cmd) = pending_commands.borrow_mut().pop_front() {
+                            if let Ok(json) = serde_json::to_string(&cmd) {
+                                let _ = worker_for_closure.post_message(&JsValue::from_str(&json));
+                            }
+                        }
+                    } else {
+                        // Parse as Event
+                        match serde_json::from_str::<quiver_environment::Event>(&text) {
+                            Ok(event) => {
+                                event_queue_for_closure.borrow_mut().push_back(event);
+                            }
+                            Err(e) => {
                                 web_sys::console::error_1(
-                                    &format!("Failed to flush command: {:?}", e).into(),
+                                    &format!("Failed to parse event: {}", e).into(),
                                 );
                             }
                         }
-                        return;
-                    }
-
-                    // Parse as Event
-                    match serde_json::from_str::<quiver_environment::Event>(&text) {
-                        Ok(evt) => {
-                            event_queue_clone.borrow_mut().push_back(evt);
-                        }
-                        Err(e) => {
-                            web_sys::console::error_1(
-                                &format!("Failed to parse event: {}", e).into(),
-                            );
-                        }
                     }
                 }
-            }) as Box<dyn FnMut(MessageEvent)>);
+            }) as Box<dyn FnMut(web_sys::MessageEvent)>);
 
             worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
             onmessage.forget(); // Keep closure alive
@@ -161,255 +187,279 @@ impl Repl {
             workers.push(Box::new(handle));
         }
 
-        // Create module loader with embedded standard library
-        let module_loader = Box::new(create_stdlib_loader());
-
+        // Create REPL
         let program = Program::new();
-        let inner = quiver_environment::Repl::new(workers, program, module_loader)
-            .map_err(|e| e.to_string())?;
+        let module_loader = create_std_module_loader();
+        let repl = quiver_environment::Repl::new(workers, program, module_loader)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
 
-        Ok(Repl {
-            inner: RefCell::new(inner),
-            callbacks: Rc::new(RefCell::new(HashMap::new())),
+        Ok(Self {
+            repl: Rc::new(RefCell::new(repl)),
+            running: Rc::new(RefCell::new(false)),
+            event_loop_closure: Rc::new(RefCell::new(None)),
+            pending_callbacks: Rc::new(RefCell::new(HashMap::new())),
         })
     }
 
-    /// Evaluate an expression with a callback
-    #[wasm_bindgen(skip_typescript)]
-    pub fn evaluate(&self, source: &str, callback: js_sys::Function) -> Result<(), String> {
-        match self
-            .inner
-            .borrow_mut()
-            .evaluate(source)
-            .map_err(|e| format!("{:?}", e))?
-        {
-            Some(request_id) => {
-                self.callbacks.borrow_mut().insert(request_id, callback);
-            }
-            None => {
-                // No executable code (e.g., only type definitions)
-                // Call callback immediately with null result (success, no value)
-                let this = JsValue::NULL;
-                callback
-                    .call2(&this, &JsValue::NULL, &JsValue::NULL)
-                    .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
-            }
+    /// Start the event loop
+    pub fn start(&mut self) {
+        if *self.running.borrow() {
+            return; // Already running
         }
-        Ok(())
-    }
 
-    /// Request a variable value by name with a callback
-    #[wasm_bindgen(skip_typescript)]
-    pub fn get_variable(&self, name: &str, callback: js_sys::Function) -> Result<(), String> {
-        let request_id = self
-            .inner
-            .borrow_mut()
-            .request_variable(name)
-            .map_err(|e| e.to_string())?;
-        self.callbacks.borrow_mut().insert(request_id, callback);
-        Ok(())
-    }
+        *self.running.borrow_mut() = true;
 
-    /// Get all variable names and their types
-    /// Throws exception on serialization failure
-    #[wasm_bindgen]
-    pub fn get_variables(&self) -> Result<JsValue, String> {
-        let variables = self.inner.borrow().get_variables();
-        serde_wasm_bindgen::to_value(&variables)
-            .map_err(|e| format!("Failed to serialize variables: {}", e))
-    }
+        let repl = self.repl.clone();
+        let running = self.running.clone();
+        let pending_callbacks = self.pending_callbacks.clone();
 
-    /// Request all process statuses across all workers with a callback
-    #[wasm_bindgen(skip_typescript)]
-    pub fn get_process_statuses(&self, callback: js_sys::Function) -> Result<(), String> {
-        let request_id = self
-            .inner
-            .borrow_mut()
-            .request_process_statuses()
-            .map_err(|e| e.to_string())?;
-        self.callbacks.borrow_mut().insert(request_id, callback);
-        Ok(())
-    }
+        // Use self.event_loop_closure as the holder directly
+        let closure_holder = self.event_loop_closure.clone();
 
-    /// Request process info for a specific process with a callback
-    #[wasm_bindgen(skip_typescript)]
-    pub fn get_process_info(&self, pid: usize, callback: js_sys::Function) -> Result<(), String> {
-        let request_id = self
-            .inner
-            .borrow_mut()
-            .request_process_info(pid)
-            .map_err(|e| e.to_string())?;
-        self.callbacks.borrow_mut().insert(request_id, callback);
-        Ok(())
-    }
+        // Create the closure that captures the closure holder
+        let tick_fn = Closure::wrap(Box::new(move || {
+            if !*running.borrow() {
+                return; // Stop the loop
+            }
 
-    /// Step the environment (process events) and drive callbacks
-    #[wasm_bindgen]
-    pub fn step(&self) -> Result<bool, String> {
-        let did_work = self.inner.borrow_mut().step().map_err(|e| e.to_string())?;
+            // Step the REPL
+            let _ = repl.borrow_mut().step();
 
-        // Poll all pending requests and invoke callbacks when ready
-        let request_ids: Vec<u64> = self.callbacks.borrow().keys().cloned().collect();
-        for request_id in request_ids {
-            // Explicitly separate the borrow from the match to ensure it's dropped
-            let poll_result = self.inner.borrow_mut().poll_request(request_id);
-            match poll_result {
-                Ok(None) => {
-                    // Still pending - keep waiting
-                }
-                Ok(Some(result)) => {
-                    // Got a result - invoke callback and remove it
-                    if let Some(callback) = self.callbacks.borrow_mut().remove(&request_id) {
-                        self.invoke_callback(&callback, result)?;
-                    }
-                }
-                Err(e) => {
-                    // Error - invoke callback with error and remove it
-                    if let Some(callback) = self.callbacks.borrow_mut().remove(&request_id) {
-                        let this = JsValue::NULL;
-                        let error = JsValue::from_str(&e.to_string());
-                        callback
-                            .call2(&this, &JsValue::NULL, &error)
-                            .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
+            // Process pending callbacks
+            let mut callbacks_to_invoke = Vec::new();
+            {
+                let mut callbacks = pending_callbacks.borrow_mut();
+                let request_ids: Vec<u64> = callbacks.keys().copied().collect();
+
+                for request_id in request_ids {
+                    match repl.borrow_mut().poll_request(request_id) {
+                        Ok(Some(result)) => {
+                            if let Some(callback) = callbacks.remove(&request_id) {
+                                callbacks_to_invoke.push((callback, result));
+                            }
+                        }
+                        Ok(None) => {
+                            // Not ready yet
+                        }
+                        Err(e) => {
+                            // Error polling request
+                            if let Some(callback) = callbacks.remove(&request_id) {
+                                callback.invoke::<()>(JsResult::err(e.to_string()));
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        Ok(did_work)
+            // Invoke callbacks outside of the borrow
+            for (callback, result) in callbacks_to_invoke {
+                Self::handle_result(&repl.borrow(), callback, result);
+            }
+
+            // Schedule next tick if still running
+            if *running.borrow() {
+                let window = js_sys::global();
+                let set_timeout = js_sys::Reflect::get(&window, &JsValue::from_str("setTimeout"))
+                    .expect("setTimeout not found");
+                let set_timeout: js_sys::Function = set_timeout.dyn_into().unwrap();
+
+                // Get reference to self from the holder
+                let closure_ref = closure_holder.borrow();
+                if let Some(ref callback) = *closure_ref {
+                    let _ = set_timeout.call2(
+                        &window,
+                        callback.as_ref().unchecked_ref(),
+                        &JsValue::from_f64(0.0),
+                    );
+                }
+            }
+        }) as Box<dyn FnMut()>);
+
+        // Store the closure in the holder
+        *self.event_loop_closure.borrow_mut() = Some(tick_fn);
+
+        // Start the loop with the first tick
+        let window = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&window, &JsValue::from_str("setTimeout"))
+            .expect("setTimeout not found");
+        let set_timeout: js_sys::Function = set_timeout.dyn_into().unwrap();
+
+        let closure_ref = self.event_loop_closure.borrow();
+        if let Some(ref cb) = *closure_ref {
+            let _ = set_timeout.call2(
+                &window,
+                cb.as_ref().unchecked_ref(),
+                &JsValue::from_f64(0.0),
+            );
+        }
     }
 
-    /// Helper to invoke callbacks with the appropriate result type
-    fn invoke_callback(
-        &self,
-        callback: &js_sys::Function,
-        result: quiver_environment::RequestResult,
-    ) -> Result<(), String> {
-        use quiver_environment::RequestResult;
+    /// Stop the event loop
+    pub fn stop(&mut self) {
+        *self.running.borrow_mut() = false;
+    }
 
-        let this = JsValue::NULL;
+    /// Evaluate source code and invoke callback when result is ready
+    pub fn evaluate(&mut self, source: String, callback: JsValue) {
+        let callback: js_sys::Function = callback.into();
+        let result = self.repl.borrow_mut().evaluate(&source);
 
         match result {
-            RequestResult::Result(Ok((value, heap))) => {
-                // Create result object with value and heap
-                let result_obj = js_sys::Object::new();
-                js_sys::Reflect::set(
-                    &result_obj,
-                    &"value".into(),
-                    &serde_wasm_bindgen::to_value(&value)
-                        .map_err(|e| format!("Failed to serialize value: {}", e))?,
-                )
-                .map_err(|e| format!("Failed to set value: {:?}", e))?;
-                js_sys::Reflect::set(
-                    &result_obj,
-                    &"heap".into(),
-                    &serde_wasm_bindgen::to_value(&heap)
-                        .map_err(|e| format!("Failed to serialize heap: {}", e))?,
-                )
-                .map_err(|e| format!("Failed to set heap: {:?}", e))?;
-
-                callback
-                    .call2(&this, &result_obj, &JsValue::NULL)
-                    .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
+            Ok(Some(request_id)) => {
+                // Store callback for later
+                self.pending_callbacks
+                    .borrow_mut()
+                    .insert(request_id, CallbackHandle::new(callback));
             }
-            RequestResult::Result(Err(error)) => {
-                let error_str = JsValue::from_str(&format!("{:?}", error));
-                callback
-                    .call2(&this, &JsValue::NULL, &error_str)
-                    .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
+            Ok(None) => {
+                // No executable code (e.g., only type definitions)
+                let cb = CallbackHandle::new(callback);
+                cb.invoke(JsResult::ok(None::<JsEvaluationResult>));
             }
-            RequestResult::Statuses(statuses) => {
-                let statuses_value = serde_wasm_bindgen::to_value(&statuses)
-                    .map_err(|e| format!("Failed to serialize statuses: {}", e))?;
-                callback
-                    .call2(&this, &statuses_value, &JsValue::NULL)
-                    .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
-            }
-            RequestResult::ProcessInfo(info) => {
-                let info_value = serde_wasm_bindgen::to_value(&info)
-                    .map_err(|e| format!("Failed to serialize process info: {}", e))?;
-                callback
-                    .call2(&this, &info_value, &JsValue::NULL)
-                    .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
-            }
-            RequestResult::Locals(locals) => {
-                // Convert locals to array of {value, heap} objects
-                let array = js_sys::Array::new();
-                for (value, heap) in locals {
-                    let obj = js_sys::Object::new();
-                    js_sys::Reflect::set(
-                        &obj,
-                        &"value".into(),
-                        &serde_wasm_bindgen::to_value(&value)
-                            .map_err(|e| format!("Failed to serialize value: {}", e))?,
-                    )
-                    .map_err(|e| format!("Failed to set value: {:?}", e))?;
-                    js_sys::Reflect::set(
-                        &obj,
-                        &"heap".into(),
-                        &serde_wasm_bindgen::to_value(&heap)
-                            .map_err(|e| format!("Failed to serialize heap: {}", e))?,
-                    )
-                    .map_err(|e| format!("Failed to set heap: {:?}", e))?;
-                    array.push(&obj);
-                }
-                callback
-                    .call2(&this, &array, &JsValue::NULL)
-                    .map_err(|e| format!("Failed to invoke callback: {:?}", e))?;
+            Err(e) => {
+                let cb = CallbackHandle::new(callback);
+                cb.invoke::<JsEvaluationResult>(JsResult::err(format!("{}", e)));
             }
         }
+    }
 
-        Ok(())
+    /// Get all variables (synchronous)
+    pub fn get_variables(&self, callback: JsValue) {
+        let callback: js_sys::Function = callback.into();
+        let repl = self.repl.borrow();
+        let vars = repl.get_variables();
+        let js_vars: Vec<JsVariable> = vars
+            .into_iter()
+            .map(|(name, ty)| JsVariable {
+                name,
+                var_type: repl.format_type(&ty),
+            })
+            .collect();
+
+        let cb = CallbackHandle::new(callback);
+        cb.invoke(JsResult::ok(js_vars));
+    }
+
+    /// Get all process statuses
+    pub fn get_process_statuses(&mut self, callback: JsValue) {
+        let callback: js_sys::Function = callback.into();
+        match self.repl.borrow_mut().request_process_statuses() {
+            Ok(request_id) => {
+                self.pending_callbacks
+                    .borrow_mut()
+                    .insert(request_id, CallbackHandle::new(callback));
+            }
+            Err(e) => {
+                let cb = CallbackHandle::new(callback);
+                cb.invoke::<Vec<JsProcess>>(JsResult::err(e.to_string()));
+            }
+        }
+    }
+
+    /// Get info for a specific process
+    pub fn get_process_info(&mut self, pid: usize, callback: JsValue) {
+        let callback: js_sys::Function = callback.into();
+        match self.repl.borrow_mut().request_process_info(pid) {
+            Ok(request_id) => {
+                self.pending_callbacks
+                    .borrow_mut()
+                    .insert(request_id, CallbackHandle::new(callback));
+            }
+            Err(e) => {
+                let cb = CallbackHandle::new(callback);
+                cb.invoke::<Option<JsProcessInfo>>(JsResult::err(e.to_string()));
+            }
+        }
     }
 
     /// Format a value for display
-    #[wasm_bindgen]
-    pub fn format_value(&self, value: JsValue, heap: JsValue) -> Result<String, String> {
-        let value: quiver_core::value::Value = serde_wasm_bindgen::from_value(value)
-            .map_err(|e| format!("Failed to deserialize value: {}", e))?;
-        let heap: Vec<Vec<u8>> = serde_wasm_bindgen::from_value(heap)
-            .map_err(|e| format!("Failed to deserialize heap: {}", e))?;
-        Ok(self.inner.borrow().format_value(&value, &heap))
+    pub fn format_value(
+        &self,
+        value: wasm_bindgen::JsValue,
+        heap: wasm_bindgen::JsValue,
+    ) -> Result<String, wasm_bindgen::JsValue> {
+        let value: crate::types::QuiverValue = serde_wasm_bindgen::from_value(value)?;
+        let heap: Vec<Vec<u8>> = serde_wasm_bindgen::from_value(heap)?;
+        let value: quiver_core::value::Value = value.into();
+        Ok(self.repl.borrow().format_value(&value, &heap))
     }
 
-    /// Format a type for display
-    #[wasm_bindgen]
-    pub fn format_type(&self, ty: JsValue) -> Result<String, String> {
-        let ty: quiver_core::types::Type = serde_wasm_bindgen::from_value(ty)
-            .map_err(|e| format!("Failed to deserialize type: {}", e))?;
-        Ok(self.inner.borrow().format_type(&ty))
+    /// Format a type for display (derives type from value)
+    pub fn format_type(
+        &self,
+        value: wasm_bindgen::JsValue,
+    ) -> Result<String, wasm_bindgen::JsValue> {
+        let value: crate::types::QuiverValue = serde_wasm_bindgen::from_value(value)?;
+        let value: quiver_core::value::Value = value.into();
+        let ty = self.repl.borrow().value_to_type(&value);
+        Ok(self.repl.borrow().format_type(&ty))
+    }
+
+    // Helper to convert RequestResult to appropriate callback invocation
+    fn handle_result(
+        repl: &quiver_environment::Repl,
+        callback: CallbackHandle,
+        result: RequestResult,
+    ) {
+        match result {
+            RequestResult::Result(Ok((value, heap))) => {
+                callback.invoke(JsResult::ok(Some(JsEvaluationResult {
+                    value: value.into(),
+                    heap: heap,
+                })));
+            }
+            RequestResult::Result(Err(e)) => {
+                callback
+                    .invoke::<JsEvaluationResult>(JsResult::err(format!("Runtime error: {:?}", e)));
+            }
+            RequestResult::Statuses(statuses) => {
+                let mut processes: Vec<JsProcess> = statuses
+                    .into_iter()
+                    .map(|(id, status)| JsProcess {
+                        id,
+                        status: status.into(),
+                    })
+                    .collect();
+                processes.sort_by_key(|p| p.id);
+
+                callback.invoke(JsResult::ok(processes));
+            }
+            RequestResult::ProcessInfo(info_opt) => {
+                let js_info = info_opt.map(|info| {
+                    // Get the formatted process type
+                    let process_type = repl.format_process_type(info.function_index);
+
+                    let result = info.result.map(|r| match r {
+                        Ok(value) => JsResult::Ok {
+                            value: JsEvaluationResult {
+                                value: value.into(),
+                                heap: vec![],
+                            },
+                        },
+                        Err(e) => JsResult::Err {
+                            error: format!("{:?}", e),
+                        },
+                    });
+
+                    JsProcessInfo {
+                        id: info.id,
+                        status: info.status.into(),
+                        process_type,
+                        stack_size: info.stack_size,
+                        locals_size: info.locals_size,
+                        frames_count: info.frames_count,
+                        mailbox_size: info.mailbox_size,
+                        persistent: info.persistent,
+                        result,
+                    }
+                });
+
+                callback.invoke(JsResult::ok(js_info));
+            }
+            RequestResult::Locals(_) => {
+                // Not used in the web API
+                callback.invoke::<()>(JsResult::err("Unexpected result type: Locals"));
+            }
+        }
     }
 }
-
-// Merge typed callback signatures with auto-generated class using interface merging
-#[wasm_bindgen(typescript_custom_section)]
-const TS_METHOD_SIGNATURES: &'static str = r#"
-export interface Repl {
-    /**
-     * Evaluate an expression with a callback
-     * @param source - The Quiver source code to evaluate
-     * @param callback - Callback invoked when evaluation completes
-     */
-    evaluate(source: string, callback: EvaluateCallback): void;
-
-    /**
-     * Request a variable value by name with a callback
-     * @param name - The variable name to retrieve
-     * @param callback - Callback invoked when the variable value is available
-     */
-    get_variable(name: string, callback: VariableCallback): void;
-
-    /**
-     * Request all process statuses across all workers with a callback
-     * @param callback - Callback invoked once with aggregated status from all workers
-     */
-    get_process_statuses(callback: StatusesCallback): void;
-
-    /**
-     * Request process info for a specific process with a callback
-     * @param pid - The process ID to get information for
-     * @param callback - Callback invoked when process info is available
-     */
-    get_process_info(pid: number, callback: ProcessInfoCallback): void;
-}
-"#;
