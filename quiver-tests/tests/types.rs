@@ -874,3 +874,21 @@ fn test_identifier_spread_syntax_partial() {
         )
         .expect_alias("timestamped", "[id: int, created_at: int]");
 }
+
+#[test]
+fn test_primitive_type_alias_int() {
+    quiver()
+        .evaluate("int :: Int[x: int]")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot redefine primitive type 'int'".to_string(),
+        ));
+}
+
+#[test]
+fn test_primitive_type_alias_bin() {
+    quiver()
+        .evaluate("bin :: Bin[x: int]")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot redefine primitive type 'bin'".to_string(),
+        ));
+}

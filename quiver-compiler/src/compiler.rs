@@ -313,6 +313,14 @@ impl<'a> Compiler<'a> {
         type_parameters: Vec<String>,
         type_definition: ast::Type,
     ) -> Result<(), Error> {
+        // Prevent shadowing primitive types
+        if matches!(name, "int" | "bin") {
+            return Err(Error::TypeUnresolved(format!(
+                "Cannot redefine primitive type '{}'",
+                name
+            )));
+        }
+
         // Validate the AST before storing (even though we won't resolve it yet)
         Self::validate_type_ast(&type_definition)?;
 

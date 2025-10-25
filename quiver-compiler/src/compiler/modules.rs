@@ -81,6 +81,14 @@ pub fn compile_type_import(
     match &pattern {
         ast::TypeImportPattern::Star => {
             for (name, type_parameters, type_definition) in found_aliases {
+                // Prevent shadowing primitive types
+                if matches!(name.as_str(), "int" | "bin") {
+                    return Err(Error::TypeUnresolved(format!(
+                        "Cannot redefine primitive type '{}'",
+                        name
+                    )));
+                }
+
                 // Store all types as type aliases (with 0+ parameters)
                 type_aliases.insert(
                     name.to_string(),
@@ -90,6 +98,14 @@ pub fn compile_type_import(
         }
         ast::TypeImportPattern::Partial(requested_names) => {
             for requested_name in requested_names {
+                // Prevent shadowing primitive types
+                if matches!(requested_name.as_str(), "int" | "bin") {
+                    return Err(Error::TypeUnresolved(format!(
+                        "Cannot redefine primitive type '{}'",
+                        requested_name
+                    )));
+                }
+
                 if let Some((name, type_parameters, type_definition)) = found_aliases
                     .iter()
                     .find(|alias| alias.0.as_str() == *requested_name)
