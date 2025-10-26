@@ -240,7 +240,7 @@ Point[x: 0, y] = Point[0, 10]    // Succeeds if x=0, binds y to 10
 Point[x: 0, y] = Point[1, 10]    // Fails (evaluates to [])
 
 5 ~> =x, x ~> =5                 // Bind then compare
-"admin" ~> =role                 // String matching
+role ~> ="admin"                 // String matching
 ```
 
 ### Pinning
@@ -277,7 +277,7 @@ A block may contain multiple branches, separated by `|`. If a sequence evaluates
 
 ```
 // If item is valid, try to process it, otherwise show error
-item ~> { ~> is_valid? ~> process | [] ~> show_error }
+item ~> { ~> is_valid? ~> process | show_error[] }
 
 // Try multiple sources with fallback
 value = id ~> {
