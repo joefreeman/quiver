@@ -2,7 +2,7 @@ use quiver::spawn_worker;
 use quiver_compiler::modules::InMemoryModuleLoader;
 use quiver_core::program::Program;
 use quiver_core::value::Value;
-use quiver_environment::{Repl, ReplError, WorkerHandle};
+use quiver_environment::{Environment, Repl, ReplError, WorkerHandle};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,29 +63,28 @@ impl TestBuilder {
             workers.push(Box::new(spawn_worker(move || time.load(Ordering::Relaxed))));
         }
 
-        // Create program and module loader
+        // Create environment and REPL
+        let mut environment = Environment::new(workers);
         let program = Program::new();
         let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
-
-        // Create REPL
-        let mut repl = Repl::new(workers, program, module_loader);
+        let mut repl = Repl::new(program, module_loader);
 
         // Evaluate source
-        let result = match repl.evaluate(source) {
+        let result = match repl.evaluate(&mut environment, source) {
             Ok(Some(request_id)) => {
                 // Poll for result with timeout
                 let start = std::time::Instant::now();
                 let timeout = std::time::Duration::from_secs(5);
 
                 loop {
-                    let did_work = repl.step().unwrap_or(false);
+                    let did_work = environment.step().unwrap_or(false);
 
                     // If idle, advance virtual time
                     if !did_work {
                         virtual_time_ms.fetch_add(1, Ordering::Relaxed);
                     }
 
-                    match repl.poll_request(request_id) {
+                    match repl.poll_request(&mut environment, request_id) {
                         Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap))))) => {
                             break Ok(Some((value, heap)));
                         }
@@ -117,6 +116,7 @@ impl TestBuilder {
         TestResult {
             result,
             source: source.to_string(),
+            environment,
             repl,
             virtual_time_ms: virtual_time_ms.load(Ordering::Relaxed),
         }
@@ -127,6 +127,7 @@ impl TestBuilder {
 pub struct TestResult {
     result: ReplResult,
     source: String,
+    environment: Environment,
     repl: Repl,
     virtual_time_ms: u64,
 }
@@ -137,7 +138,7 @@ impl TestResult {
     pub fn expect(self, expected: &str) -> Self {
         match self.result {
             Ok(Some((ref value, ref heap_data))) => {
-                let actual = self.repl.format_value(value, heap_data);
+                let actual = self.environment.format_value(value, heap_data);
                 assert_eq!(
                     actual, expected,
                     "Expected '{}', got '{}' for source: {}",
@@ -245,7 +246,7 @@ impl TestResult {
 
         match variable_type {
             Some(ty) => {
-                let actual = self.repl.format_type(ty);
+                let actual = self.environment.format_type(ty);
                 assert_eq!(
                     actual, expected,
                     "Expected variable '{}' to have type '{}', but got '{}' for source: {}",
@@ -265,9 +266,12 @@ impl TestResult {
     }
 
     pub fn expect_alias(mut self, alias_name: &str, expected: &str) -> Self {
-        match self.repl.resolve_type_alias(alias_name) {
+        match self
+            .repl
+            .resolve_type_alias(&mut self.environment, alias_name)
+        {
             Ok(ty) => {
-                let actual = self.repl.format_type(&ty);
+                let actual = self.environment.format_type(&ty);
                 assert_eq!(
                     actual, expected,
                     "Expected type alias '{}' to resolve to '{}', but got '{}' for source: {}",

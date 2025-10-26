@@ -1,4 +1,3 @@
-use crate::WorkerHandle;
 use crate::environment::{Environment, EnvironmentError, RequestResult};
 use quiver_compiler::Compiler;
 use quiver_compiler::compiler::ModuleCache;
@@ -7,7 +6,6 @@ use quiver_core::bytecode::Function;
 use quiver_core::process::ProcessId;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
-use quiver_core::value::Value;
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -30,7 +28,6 @@ impl std::fmt::Display for ReplError {
 }
 
 pub struct Repl {
-    environment: Environment,
     repl_process_id: Option<ProcessId>,
     types: Vec<quiver_core::types::TupleTypeInfo>, // Accumulated types across evaluations
     variable_map: HashMap<String, (Type, usize)>,  // variable name -> (type, local index)
@@ -41,16 +38,10 @@ pub struct Repl {
 }
 
 impl Repl {
-    pub fn new(
-        workers: Vec<Box<dyn WorkerHandle>>,
-        program: Program,
-        module_loader: Box<dyn ModuleLoader>,
-    ) -> Self {
-        let environment = Environment::new(workers);
+    pub fn new(program: Program, module_loader: Box<dyn ModuleLoader>) -> Self {
         let types = program.get_types().to_vec();
 
         Self {
-            environment,
             repl_process_id: None,
             types,
             variable_map: HashMap::new(),
@@ -64,7 +55,11 @@ impl Repl {
     /// Compile and evaluate an expression
     /// Returns a request ID that can be polled for the result
     /// Returns None if the source only contains type definitions (no executable code)
-    pub fn evaluate(&mut self, source: &str) -> Result<Option<u64>, ReplError> {
+    pub fn evaluate(
+        &mut self,
+        env: &mut Environment,
+        source: &str,
+    ) -> Result<Option<u64>, ReplError> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
@@ -134,15 +129,13 @@ impl Repl {
             Some(pid) => {
                 // Resume existing process with new function
                 // resume_process will push the previous result from process.result onto the stack
-                self.environment
-                    .resume_process(pid, bytecode)
+                env.resume_process(pid, bytecode)
                     .map_err(ReplError::Environment)?;
                 pid
             }
             None => {
                 // Create the persistent REPL process on first evaluation
-                let pid = self
-                    .environment
+                let pid = env
                     .start_process(bytecode)
                     .map_err(ReplError::Environment)?;
                 self.repl_process_id = Some(pid);
@@ -151,8 +144,7 @@ impl Repl {
         };
 
         // Request the result
-        let request_id = self
-            .environment
+        let request_id = env
             .request_result(repl_process_id)
             .map_err(ReplError::Environment)?;
 
@@ -164,12 +156,13 @@ impl Repl {
     /// Handles all request types (evaluation results, statuses, info, locals, etc.)
     pub fn poll_request(
         &mut self,
+        env: &mut Environment,
         request_id: u64,
     ) -> Result<Option<RequestResult>, EnvironmentError> {
-        match self.environment.poll_request(request_id)? {
+        match env.poll_request(request_id)? {
             None => Ok(None),
             Some(RequestResult::Result(Ok((value, heap)))) => {
-                self.compact()?;
+                self.compact(env)?;
                 Ok(Some(RequestResult::Result(Ok((value, heap)))))
             }
             Some(RequestResult::Result(Err(error))) => {
@@ -188,7 +181,11 @@ impl Repl {
     /// Request a variable value by name
     /// Returns a request ID that can be polled with poll_request()
     /// The result will be RequestResult::Locals containing the variable value
-    pub fn request_variable(&mut self, name: &str) -> Result<u64, EnvironmentError> {
+    pub fn request_variable(
+        &mut self,
+        env: &mut Environment,
+        name: &str,
+    ) -> Result<u64, EnvironmentError> {
         let (_, local_index) = self
             .variable_map
             .get(name)
@@ -198,8 +195,7 @@ impl Repl {
             .repl_process_id
             .ok_or(EnvironmentError::NoReplProcess)?;
 
-        self.environment
-            .request_locals(repl_process_id, vec![*local_index])
+        env.request_locals(repl_process_id, vec![*local_index])
     }
 
     /// Get all variable names and their types, ordered by local index
@@ -218,7 +214,7 @@ impl Repl {
     }
 
     /// Compact locals to remove unused variables (called automatically after evaluation)
-    fn compact(&mut self) -> Result<(), EnvironmentError> {
+    fn compact(&mut self, env: &mut Environment) -> Result<(), EnvironmentError> {
         let repl_process_id = self
             .repl_process_id
             .ok_or(EnvironmentError::NoReplProcess)?;
@@ -243,56 +239,19 @@ impl Repl {
         }
 
         // Compact the locals on the worker
-        self.environment
-            .compact_locals(repl_process_id, keep_indices)?;
+        env.compact_locals(repl_process_id, keep_indices)?;
 
         Ok(())
-    }
-
-    /// Step the environment (process events)
-    pub fn step(&mut self) -> Result<bool, EnvironmentError> {
-        self.environment.step()
-    }
-
-    /// Request all process statuses across all workers
-    /// Returns a single request ID that will aggregate results from all workers
-    /// The result will be RequestResult::Statuses containing all processes
-    pub fn request_process_statuses(&mut self) -> Result<u64, EnvironmentError> {
-        self.environment.request_statuses()
-    }
-
-    /// Request process info for a specific process
-    /// Returns a request ID that can be polled with poll_request()
-    /// The result will be RequestResult::Info
-    pub fn request_process_info(&mut self, pid: ProcessId) -> Result<u64, EnvironmentError> {
-        self.environment.request_process_info(pid)
-    }
-
-    /// Format a value for display
-    pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
-        self.environment.format_value(value, heap)
-    }
-
-    /// Format a type for display
-    pub fn format_type(&self, ty: &Type) -> String {
-        self.environment.format_type(ty)
-    }
-
-    /// Get the formatted type for a process given its function index
-    pub fn format_process_type(&self, function_index: usize) -> Option<String> {
-        self.environment.format_process_type(function_index)
-    }
-
-    /// Convert a runtime Value to its Type representation
-    pub fn value_to_type(&self, value: &Value) -> Type {
-        self.environment.value_to_type(value)
     }
 
     /// Resolve a type alias and return the resolved Type.
     /// Type parameters are resolved to Type::Variable placeholders.
     /// This is useful for testing and displaying type aliases.
-    pub fn resolve_type_alias(&mut self, alias_name: &str) -> Result<Type, String> {
-        self.environment
-            .resolve_type_alias(&self.type_aliases, alias_name)
+    pub fn resolve_type_alias(
+        &mut self,
+        env: &mut Environment,
+        alias_name: &str,
+    ) -> Result<Type, String> {
+        env.resolve_type_alias(&self.type_aliases, alias_name)
     }
 }

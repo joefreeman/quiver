@@ -115,6 +115,7 @@ type EventLoopClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
 #[wasm_bindgen(skip_typescript)]
 pub struct Repl {
+    environment: Rc<RefCell<quiver_environment::Environment>>,
     repl: Rc<RefCell<quiver_environment::Repl>>,
     running: Rc<RefCell<bool>>,
     event_loop_closure: EventLoopClosure,
@@ -189,12 +190,14 @@ impl Repl {
             workers.push(Box::new(handle));
         }
 
-        // Create REPL
+        // Create environment and REPL
+        let environment = quiver_environment::Environment::new(workers);
         let program = Program::new();
         let module_loader = create_std_module_loader();
-        let repl = quiver_environment::Repl::new(workers, program, module_loader);
+        let repl = quiver_environment::Repl::new(program, module_loader);
 
         Ok(Self {
+            environment: Rc::new(RefCell::new(environment)),
             repl: Rc::new(RefCell::new(repl)),
             running: Rc::new(RefCell::new(false)),
             event_loop_closure: Rc::new(RefCell::new(None)),
@@ -210,6 +213,7 @@ impl Repl {
 
         *self.running.borrow_mut() = true;
 
+        let environment = self.environment.clone();
         let repl = self.repl.clone();
         let running = self.running.clone();
         let pending_callbacks = self.pending_callbacks.clone();
@@ -223,8 +227,8 @@ impl Repl {
                 return; // Stop the loop
             }
 
-            // Step the REPL
-            let _ = repl.borrow_mut().step();
+            // Step the environment
+            let _ = environment.borrow_mut().step();
 
             // Process pending callbacks
             let mut callbacks_to_invoke = Vec::new();
@@ -233,7 +237,10 @@ impl Repl {
                 let request_ids: Vec<u64> = callbacks.keys().copied().collect();
 
                 for request_id in request_ids {
-                    match repl.borrow_mut().poll_request(request_id) {
+                    match repl
+                        .borrow_mut()
+                        .poll_request(&mut environment.borrow_mut(), request_id)
+                    {
                         Ok(Some(result)) => {
                             if let Some(callback) = callbacks.remove(&request_id) {
                                 callbacks_to_invoke.push((callback, result));
@@ -254,7 +261,7 @@ impl Repl {
 
             // Invoke callbacks outside of the borrow
             for (callback, result) in callbacks_to_invoke {
-                Self::handle_result(&repl.borrow(), callback, result);
+                Self::handle_result(&environment.borrow(), callback, result);
             }
 
             // Schedule next tick if still running
@@ -303,7 +310,10 @@ impl Repl {
     /// Evaluate source code and invoke callback when result is ready
     pub fn evaluate(&mut self, source: String, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
-        let result = self.repl.borrow_mut().evaluate(&source);
+        let result = self
+            .repl
+            .borrow_mut()
+            .evaluate(&mut self.environment.borrow_mut(), &source);
 
         match result {
             Ok(Some(request_id)) => {
@@ -327,13 +337,14 @@ impl Repl {
     /// Get all variables (synchronous)
     pub fn get_variables(&self, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
+        let environment = self.environment.borrow();
         let repl = self.repl.borrow();
         let vars = repl.get_variables();
         let js_vars: Vec<JsVariable> = vars
             .into_iter()
             .map(|(name, ty)| JsVariable {
                 name,
-                var_type: repl.format_type(&ty),
+                var_type: environment.format_type(&ty),
             })
             .collect();
 
@@ -344,7 +355,7 @@ impl Repl {
     /// Get all process statuses
     pub fn get_process_statuses(&mut self, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
-        match self.repl.borrow_mut().request_process_statuses() {
+        match self.environment.borrow_mut().request_statuses() {
             Ok(request_id) => {
                 self.pending_callbacks
                     .borrow_mut()
@@ -360,7 +371,7 @@ impl Repl {
     /// Get info for a specific process
     pub fn get_process_info(&mut self, pid: usize, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
-        match self.repl.borrow_mut().request_process_info(pid) {
+        match self.environment.borrow_mut().request_process_info(pid) {
             Ok(request_id) => {
                 self.pending_callbacks
                     .borrow_mut()
@@ -382,7 +393,7 @@ impl Repl {
         let value: crate::types::QuiverValue = serde_wasm_bindgen::from_value(value)?;
         let heap: Vec<Vec<u8>> = serde_wasm_bindgen::from_value(heap)?;
         let value: quiver_core::value::Value = value.into();
-        Ok(self.repl.borrow().format_value(&value, &heap))
+        Ok(self.environment.borrow().format_value(&value, &heap))
     }
 
     /// Format a type for display (derives type from value)
@@ -392,13 +403,13 @@ impl Repl {
     ) -> Result<String, wasm_bindgen::JsValue> {
         let value: crate::types::QuiverValue = serde_wasm_bindgen::from_value(value)?;
         let value: quiver_core::value::Value = value.into();
-        let ty = self.repl.borrow().value_to_type(&value);
-        Ok(self.repl.borrow().format_type(&ty))
+        let ty = self.environment.borrow().value_to_type(&value);
+        Ok(self.environment.borrow().format_type(&ty))
     }
 
     // Helper to convert RequestResult to appropriate callback invocation
     fn handle_result(
-        repl: &quiver_environment::Repl,
+        env: &quiver_environment::Environment,
         callback: CallbackHandle,
         result: RequestResult,
     ) {
@@ -428,7 +439,7 @@ impl Repl {
             RequestResult::ProcessInfo(info_opt) => {
                 let js_info = info_opt.map(|info| {
                     // Get the formatted process type
-                    let process_type = repl.format_process_type(info.function_index);
+                    let process_type = env.format_process_type(info.function_index);
 
                     let result = info.result.map(|r| match r {
                         Ok(value) => JsResult::Ok {

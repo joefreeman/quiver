@@ -3,7 +3,7 @@ use quiver_cli::spawn_worker;
 use quiver_compiler::FileSystemModuleLoader;
 use quiver_core::program::Program;
 use quiver_core::value::Value;
-use quiver_environment::{Repl, ReplError, RequestResult, WorkerHandle};
+use quiver_environment::{Environment, Repl, ReplError, RequestResult, WorkerHandle};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::io::IsTerminal;
@@ -12,6 +12,7 @@ const HISTORY_FILE: &str = ".quiv_history";
 
 pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
+    environment: Environment,
     repl: Repl,
     last_was_nil: bool,
 }
@@ -33,13 +34,15 @@ impl ReplCli {
             })));
         }
 
-        // Create REPL
+        // Create environment and REPL
+        let environment = Environment::new(workers);
         let program = Program::new();
         let module_loader = Box::new(FileSystemModuleLoader::new());
-        let repl = Repl::new(workers, program, module_loader);
+        let repl = Repl::new(program, module_loader);
 
         Ok(Self {
             editor,
+            environment,
             repl,
             last_was_nil: false,
         })
@@ -171,9 +174,9 @@ impl ReplCli {
         request_id: u64,
     ) -> Result<RequestResult, quiver_environment::EnvironmentError> {
         loop {
-            self.repl.step()?;
+            self.environment.step()?;
 
-            match self.repl.poll_request(request_id)? {
+            match self.repl.poll_request(&mut self.environment, request_id)? {
                 Some(result) => return Ok(result),
                 None => std::thread::sleep(std::time::Duration::from_micros(10)),
             }
@@ -187,7 +190,7 @@ impl ReplCli {
         } else {
             println!("{}", "Variables:".bright_black());
             for (name, ty) in vars {
-                let formatted_type = self.repl.format_type(&ty);
+                let formatted_type = self.environment.format_type(&ty);
                 println!(
                     "{}",
                     format!("  {}: {}", name, formatted_type).bright_black()
@@ -197,7 +200,7 @@ impl ReplCli {
     }
 
     fn list_processes(&mut self) {
-        let request_id = match self.repl.request_process_statuses() {
+        let request_id = match self.environment.request_statuses() {
             Ok(id) => id,
             Err(e) => {
                 eprintln!(
@@ -227,7 +230,7 @@ impl ReplCli {
     }
 
     fn inspect_process(&mut self, id: usize) {
-        let request_id = match self.repl.request_process_info(id) {
+        let request_id = match self.environment.request_process_info(id) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("{}", format!("Error requesting process info: {}", e).red());
@@ -240,7 +243,7 @@ impl ReplCli {
                 println!("{}", format!("Process {}:", id).bright_black());
 
                 // Show type
-                if let Some(type_str) = self.repl.format_process_type(info.function_index) {
+                if let Some(type_str) = self.environment.format_process_type(info.function_index) {
                     println!("{}", format!("  Type: {}", type_str).bright_black());
                 }
 
@@ -267,7 +270,8 @@ impl ReplCli {
                 if let Some(Ok(ref result)) = info.result {
                     println!(
                         "{}",
-                        format!("  Result: {}", self.repl.format_value(result, &[])).bright_black()
+                        format!("  Result: {}", self.environment.format_value(result, &[]))
+                            .bright_black()
                     );
                 } else if let Some(Err(ref err)) = info.result {
                     println!("{}", format!("  Result: Error({:?})", err).bright_black());
@@ -284,7 +288,7 @@ impl ReplCli {
     }
 
     fn evaluate(&mut self, line: &str) {
-        let request_id = match self.repl.evaluate(line) {
+        let request_id = match self.repl.evaluate(&mut self.environment, line) {
             Ok(Some(id)) => id,
             Ok(None) => {
                 // No executable code (e.g., only type definitions)
@@ -303,13 +307,13 @@ impl ReplCli {
                 // Track if result was nil for colored prompt
                 self.last_was_nil = value.is_nil();
 
-                let formatted_value = self.repl.format_value(&value, &heap);
+                let formatted_value = self.environment.format_value(&value, &heap);
 
                 // Show type for functions, builtins, and processes
                 let output = match &value {
                     Value::Function(_, _) | Value::Builtin(_) | Value::Process(_, _) => {
-                        let value_type = self.repl.value_to_type(&value);
-                        let formatted_type = self.repl.format_type(&value_type);
+                        let value_type = self.environment.value_to_type(&value);
+                        let formatted_type = self.environment.format_type(&value_type);
                         format!(
                             "{} {}",
                             formatted_value,
