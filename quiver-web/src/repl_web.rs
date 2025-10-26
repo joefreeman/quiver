@@ -111,11 +111,13 @@ impl CallbackHandle {
     }
 }
 
+type EventLoopClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
+
 #[wasm_bindgen(skip_typescript)]
 pub struct Repl {
     repl: Rc<RefCell<quiver_environment::Repl>>,
     running: Rc<RefCell<bool>>,
-    event_loop_closure: Rc<RefCell<Option<Closure<dyn FnMut()>>>>,
+    event_loop_closure: EventLoopClosure,
     pending_callbacks: Rc<RefCell<HashMap<u64, CallbackHandle>>>,
 }
 
@@ -405,7 +407,7 @@ impl Repl {
             RequestResult::Result(Ok((value, heap))) => {
                 callback.invoke(JsResult::ok(Some(JsEvaluationResult {
                     value: value.into(),
-                    heap: heap,
+                    heap,
                 })));
             }
             RequestResult::Result(Err(e)) => {
