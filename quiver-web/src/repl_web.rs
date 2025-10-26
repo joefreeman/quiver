@@ -192,8 +192,7 @@ impl Repl {
         // Create REPL
         let program = Program::new();
         let module_loader = create_std_module_loader();
-        let repl = quiver_environment::Repl::new(workers, program, module_loader)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
+        let repl = quiver_environment::Repl::new(workers, program, module_loader);
 
         Ok(Self {
             repl: Rc::new(RefCell::new(repl)),

@@ -90,7 +90,6 @@ fn compile_command(
     // Compile source to bytecode
     let module_loader = FileSystemModuleLoader::new();
     let module_path = std::env::current_dir().ok();
-    let empty_program = Program::new();
 
     let ast = parse(&source).map_err(|e| format!("Parse error: {:?}", e))?;
     let result = Compiler::compile(
@@ -98,7 +97,7 @@ fn compile_command(
         HashMap::new(),
         ModuleCache::new(),
         &module_loader,
-        &empty_program,
+        vec![],
         module_path,
         None,
         Type::nil(),
@@ -180,7 +179,6 @@ fn run_command(
 fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let module_loader = FileSystemModuleLoader::new();
     let module_path = std::env::current_dir().ok();
-    let empty_program = Program::new();
 
     let ast = parse(source).map_err(|e| format!("Parse error: {:?}", e))?;
     let compilation_result = Compiler::compile(
@@ -188,7 +186,7 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
         HashMap::new(),
         ModuleCache::new(),
         &module_loader,
-        &empty_program,
+        vec![],
         module_path,
         None,
         Type::nil(),

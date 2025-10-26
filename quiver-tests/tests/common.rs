@@ -68,7 +68,7 @@ impl TestBuilder {
         let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
 
         // Create REPL
-        let mut repl = Repl::new(workers, program, module_loader).expect("Failed to create REPL");
+        let mut repl = Repl::new(workers, program, module_loader);
 
         // Evaluate source
         let result = match repl.evaluate(source) {

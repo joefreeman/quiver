@@ -90,6 +90,37 @@ impl Program {
         program
     }
 
+    /// Create a new Program seeded with existing types
+    /// If types is empty or doesn't include NIL/OK, they will be added automatically
+    pub fn with_types(types: Vec<TupleTypeInfo>) -> Self {
+        // Ensure NIL and OK are at indices 0 and 1
+        if types.is_empty() {
+            // Start from scratch
+            return Self::new();
+        }
+
+        // Validate that NIL and OK are at the expected indices if types are provided
+        assert!(
+            types.len() >= 2,
+            "Types must include NIL and OK at indices 0 and 1"
+        );
+        assert_eq!(types[0].name, None, "Type at index 0 must be NIL (unnamed)");
+        assert_eq!(types[0].fields.len(), 0, "NIL type must have no fields");
+        assert_eq!(
+            types[1].name,
+            Some("Ok".to_string()),
+            "Type at index 1 must be OK"
+        );
+        assert_eq!(types[1].fields.len(), 0, "OK type must have no fields");
+
+        Self {
+            constants: Vec::new(),
+            functions: Vec::new(),
+            builtins: Vec::new(),
+            types,
+        }
+    }
+
     pub fn from_bytecode(bytecode: Bytecode) -> Self {
         Self {
             constants: bytecode.constants,

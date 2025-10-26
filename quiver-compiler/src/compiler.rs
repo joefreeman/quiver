@@ -188,22 +188,24 @@ pub struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn compile(
-        program: ast::Program,
+        ast_program: ast::Program,
         type_aliases: HashMap<String, typing::TypeAliasDef>,
         module_cache: ModuleCache,
         module_loader: &'a dyn ModuleLoader,
-        base_program: &Program,
+        base_types: Vec<quiver_core::types::TupleTypeInfo>,
         module_path: Option<PathBuf>,
         existing_variables: Option<&HashMap<String, (Type, usize)>>,
         parameter_type: Type,
     ) -> Result<CompilationResult, Error> {
+        let program = Program::with_types(base_types);
+
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
             type_aliases,
             module_cache,
             scopes: vec![],
             local_count: 0,
-            program: base_program.clone(),
+            program,
             module_loader,
             module_path,
             current_receive_type: Type::never(),
@@ -227,7 +229,7 @@ impl<'a> Compiler<'a> {
 
         // Only allocate parameter slot if we have expressions
         // (Type definitions and imports don't need parameters)
-        let has_expressions = program
+        let has_expressions = ast_program
             .statements
             .iter()
             .any(|s| matches!(s, ast::Statement::Expression(_)));
@@ -249,9 +251,9 @@ impl<'a> Compiler<'a> {
         // Initialize scope with variables and optional parameter
         compiler.scopes = vec![Scope::new(scope_variables, scope_parameter)];
 
-        let num_statements = program.statements.len();
+        let num_statements = ast_program.statements.len();
         let mut result_type = Type::nil();
-        for (i, statement) in program.statements.into_iter().enumerate() {
+        for (i, statement) in ast_program.statements.into_iter().enumerate() {
             let is_last = i == num_statements - 1;
             let is_expression = matches!(&statement, ast::Statement::Expression(_));
 

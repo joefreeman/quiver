@@ -32,10 +32,18 @@ pub fn execute_instructions_sync(
         captures: vec![],
     });
 
+    // Skip the built-in types (NIL and OK at indices 0 and 1) since Executor::new() already has them
+    let types = program.get_types();
+    let types_to_send = if types.len() > 2 {
+        types[2..].to_vec()
+    } else {
+        vec![]
+    };
+
     executor.update_program(
         program.get_constants().clone(),
         functions,
-        program.get_types().clone(),
+        types_to_send,
         program.get_builtins().clone(),
     );
 

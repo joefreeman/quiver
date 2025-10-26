@@ -64,14 +64,16 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             } => {
                 self.update_program(constants, functions, types, builtins)?;
             }
-            Command::StartProcess {
+            Command::StartProcess { id, function_index } => {
+                self.start_process(id, function_index)?;
+            }
+            Command::SpawnProcess {
                 id,
                 function_index,
                 captures,
                 heap_data,
-                persistent,
             } => {
-                self.start_process(id, function_index, captures, heap_data, persistent)?;
+                self.spawn_process(id, function_index, captures, heap_data)?;
             }
             Command::ResumeProcess { id, function_index } => {
                 self.resume_process(id, function_index)?;
@@ -196,12 +198,50 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         &mut self,
         id: ProcessId,
         function_index: usize,
+    ) -> Result<(), EnvironmentError> {
+        // Validate function exists
+        if self.executor.get_function(function_index).is_none() {
+            return Err(EnvironmentError::FunctionNotFound(function_index));
+        }
+
+        // Spawn the persistent process
+        self.executor.spawn_process(id, function_index, true);
+
+        // Push nil parameter onto stack
+        let process = self
+            .executor
+            .get_process_mut(id)
+            .ok_or(EnvironmentError::ProcessNotFound(id))?;
+        process.stack.push(quiver_core::value::Value::nil());
+
+        // Push initial frame with function index (no captures)
+        let process = self
+            .executor
+            .get_process_mut(id)
+            .ok_or(EnvironmentError::ProcessNotFound(id))?;
+        process.frames.push(quiver_core::process::Frame::new(
+            function_index,
+            0,
+            0, // no captures
+        ));
+
+        Ok(())
+    }
+
+    fn spawn_process(
+        &mut self,
+        id: ProcessId,
+        function_index: usize,
         captures: Vec<Value>,
         heap_data: Vec<Vec<u8>>,
-        persistent: bool,
     ) -> Result<(), EnvironmentError> {
-        // Spawn the process with the function index
-        self.executor.spawn_process(id, function_index, persistent);
+        // Validate function exists
+        if self.executor.get_function(function_index).is_none() {
+            return Err(EnvironmentError::FunctionNotFound(function_index));
+        }
+
+        // Spawn the process (non-persistent)
+        self.executor.spawn_process(id, function_index, false);
 
         // Inject heap data and populate locals with captures
         let captures_count = captures.len();
@@ -230,7 +270,6 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             .executor
             .get_process_mut(id)
             .ok_or(EnvironmentError::ProcessNotFound(id))?;
-
         process.frames.push(quiver_core::process::Frame::new(
             function_index,
             0,

@@ -6,7 +6,7 @@ use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
 use quiver_core::process::ProcessId;
 use quiver_core::program::Program;
-use quiver_core::types::{ProcessType, Type};
+use quiver_core::types::Type;
 use quiver_core::value::Value;
 use std::collections::HashMap;
 
@@ -32,8 +32,8 @@ impl std::fmt::Display for ReplError {
 pub struct Repl {
     environment: Environment,
     repl_process_id: Option<ProcessId>,
-    program: Program,
-    variable_map: HashMap<String, (Type, usize)>, // variable name -> (type, local index)
+    types: Vec<quiver_core::types::TupleTypeInfo>, // Accumulated types across evaluations
+    variable_map: HashMap<String, (Type, usize)>,  // variable name -> (type, local index)
     type_aliases: HashMap<String, quiver_compiler::compiler::TypeAliasDef>, // type definitions persisted across sessions
     module_cache: ModuleCache, // persistent module cache across evaluations
     last_result_type: Type,    // Type of the last evaluated result, for continuations
@@ -45,19 +45,20 @@ impl Repl {
         workers: Vec<Box<dyn WorkerHandle>>,
         program: Program,
         module_loader: Box<dyn ModuleLoader>,
-    ) -> Result<Self, EnvironmentError> {
-        let environment = Environment::new(workers, &program)?;
+    ) -> Self {
+        let environment = Environment::new(workers);
+        let types = program.get_types().to_vec();
 
-        Ok(Self {
+        Self {
             environment,
             repl_process_id: None,
-            program,
+            types,
             variable_map: HashMap::new(),
             type_aliases: HashMap::new(),
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
             module_loader,
-        })
+        }
     }
 
     /// Compile and evaluate an expression
@@ -79,7 +80,7 @@ impl Repl {
             self.type_aliases.clone(),
             self.module_cache.clone(),
             self.module_loader.as_ref(),
-            &self.program,
+            self.types.clone(),
             None, // module_path
             existing_vars,
             self.last_result_type.clone(), // parameter_type - use previous result type for continuations
@@ -91,15 +92,9 @@ impl Repl {
         let variables = result.variables;
         let type_aliases = result.type_aliases;
         let module_cache = result.module_cache;
-        let updated_program = result.program;
+        let mut program = result.program;
 
-        // Get only the NEW program data (not already sent)
-        let old_constants_len = self.program.get_constants().len();
-        let old_functions_len = self.program.get_functions().len();
-        let old_types_len = self.program.get_types().len();
-        let old_builtins_len = self.program.get_builtins().len();
-
-        self.program = updated_program;
+        // Update REPL state
         self.variable_map = variables;
         self.type_aliases = type_aliases;
         self.module_cache = module_cache;
@@ -116,30 +111,23 @@ impl Repl {
                 },
                 captures: vec![],
             };
-            Some(self.program.register_function(function))
+            Some(program.register_function(function))
         } else {
             None
         };
 
-        // Send program updates to workers (includes types and optionally the function wrapper)
-        let all_constants = self.program.get_constants();
-        let all_functions = self.program.get_functions();
-        let all_types = self.program.get_types();
-        let all_builtins = self.program.get_builtins();
-
-        let new_constants = all_constants[old_constants_len..].to_vec();
-        let new_functions = all_functions[old_functions_len..].to_vec();
-        let new_types = all_types[old_types_len..].to_vec();
-        let new_builtins = all_builtins[old_builtins_len..].to_vec();
-
-        self.environment
-            .update_program(new_constants, new_functions, new_types, new_builtins)
-            .map_err(ReplError::Environment)?;
+        // Store types for next iteration
+        self.types = program.get_types().to_vec();
 
         // If no function was created (type definitions only), we're done
         let Some(function_index) = function_index else {
             return Ok(None);
         };
+
+        // Create bytecode from the program (without tree-shaking to preserve module imports)
+        let mut bytecode = program.to_bytecode(None);
+        // Set the entry function
+        bytecode.entry = Some(function_index);
 
         // Create or resume the REPL process
         let repl_process_id = match self.repl_process_id {
@@ -147,7 +135,7 @@ impl Repl {
                 // Resume existing process with new function
                 // resume_process will push the previous result from process.result onto the stack
                 self.environment
-                    .resume_process(pid, function_index)
+                    .resume_process(pid, bytecode)
                     .map_err(ReplError::Environment)?;
                 pid
             }
@@ -155,7 +143,7 @@ impl Repl {
                 // Create the persistent REPL process on first evaluation
                 let pid = self
                     .environment
-                    .start_process(function_index, true)
+                    .start_process(bytecode)
                     .map_err(ReplError::Environment)?;
                 self.repl_process_id = Some(pid);
                 pid
@@ -282,74 +270,29 @@ impl Repl {
 
     /// Format a value for display
     pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
-        quiver_core::format::format_value(value, heap, &self.program)
+        self.environment.format_value(value, heap)
     }
 
     /// Format a type for display
     pub fn format_type(&self, ty: &Type) -> String {
-        quiver_core::format::format_type(&self.program, ty)
+        self.environment.format_type(ty)
     }
 
     /// Get the formatted type for a process given its function index
     pub fn format_process_type(&self, function_index: usize) -> Option<String> {
-        let function = self.program.get_function(function_index)?;
-        let process_type = Type::Process(Box::new(ProcessType {
-            receive: Some(Box::new(function.function_type.receive.clone())),
-            returns: Some(Box::new(function.function_type.result.clone())),
-        }));
-        Some(self.format_type(&process_type))
+        self.environment.format_process_type(function_index)
     }
 
     /// Convert a runtime Value to its Type representation
     pub fn value_to_type(&self, value: &Value) -> Type {
-        match value {
-            Value::Integer(_) => Type::Integer,
-            Value::Binary(_) => Type::Binary,
-            Value::Tuple(type_id, _) => Type::Tuple(*type_id),
-            Value::Function(func_idx, _) => {
-                let func_type = &self
-                    .program
-                    .get_function(*func_idx)
-                    .expect("Function should exist")
-                    .function_type;
-                Type::Callable(Box::new(func_type.clone()))
-            }
-            Value::Builtin(name) => {
-                let builtin_info = self
-                    .program
-                    .get_builtins()
-                    .iter()
-                    .find(|b| &b.name == name)
-                    .expect("Builtin should be registered");
-                Type::Callable(Box::new(quiver_core::types::CallableType {
-                    parameter: builtin_info.parameter_type.clone(),
-                    result: builtin_info.result_type.clone(),
-                    receive: Type::Union(vec![]),
-                }))
-            }
-            Value::Process(_, function_idx) => {
-                let func_type = &self
-                    .program
-                    .get_function(*function_idx)
-                    .expect("Function should exist")
-                    .function_type;
-                Type::Process(Box::new(quiver_core::types::ProcessType {
-                    receive: Some(Box::new(func_type.receive.clone())),
-                    returns: Some(Box::new(func_type.result.clone())),
-                }))
-            }
-        }
+        self.environment.value_to_type(value)
     }
 
     /// Resolve a type alias and return the resolved Type.
     /// Type parameters are resolved to Type::Variable placeholders.
     /// This is useful for testing and displaying type aliases.
     pub fn resolve_type_alias(&mut self, alias_name: &str) -> Result<Type, String> {
-        quiver_compiler::compiler::resolve_type_alias_for_display(
-            &self.type_aliases,
-            alias_name,
-            &mut self.program,
-        )
-        .map_err(|e| format!("{:?}", e))
+        self.environment
+            .resolve_type_alias(&self.type_aliases, alias_name)
     }
 }

@@ -17,13 +17,18 @@ pub enum Command {
         builtins: Vec<BuiltinInfo>,
     },
 
-    /// Start a new process
+    /// Start a new persistent process (e.g., from REPL)
     StartProcess {
+        id: ProcessId,
+        function_index: usize,
+    },
+
+    /// Spawn a new process (from another process)
+    SpawnProcess {
         id: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
         heap_data: Vec<Vec<u8>>,
-        persistent: bool,
     },
 
     /// Resume a sleeping persistent process

@@ -1,13 +1,80 @@
 use crate::WorkerId;
 use crate::messages::{Command, Event};
 use crate::transport::WorkerHandle;
-use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
+use quiver_core::bytecode::{Bytecode, Function, Instruction, TypeId};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
-use quiver_core::types::TupleTypeInfo;
+use quiver_core::types::{CallableType, ProcessType, Type};
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+/// Remap a Type's TypeIds according to the remap table
+fn remap_type(ty: Type, type_remap: &HashMap<TypeId, TypeId>) -> Type {
+    match ty {
+        Type::Tuple(old_id) => Type::Tuple(*type_remap.get(&old_id).unwrap_or(&old_id)),
+        Type::Partial(old_id) => Type::Partial(*type_remap.get(&old_id).unwrap_or(&old_id)),
+        Type::Union(types) => Type::Union(
+            types
+                .into_iter()
+                .map(|t| remap_type(t, type_remap))
+                .collect(),
+        ),
+        Type::Callable(callable) => Type::Callable(Box::new(CallableType {
+            parameter: remap_type(callable.parameter, type_remap),
+            result: remap_type(callable.result, type_remap),
+            receive: remap_type(callable.receive, type_remap),
+        })),
+        Type::Process(process) => Type::Process(Box::new(ProcessType {
+            receive: process
+                .receive
+                .map(|t| Box::new(remap_type(*t, type_remap))),
+            returns: process
+                .returns
+                .map(|t| Box::new(remap_type(*t, type_remap))),
+        })),
+        other => other,
+    }
+}
+
+/// Remap a Function's indices according to the remap tables
+fn remap_function(
+    function: Function,
+    constant_remap: &HashMap<usize, usize>,
+    function_remap: &HashMap<usize, usize>,
+    type_remap: &HashMap<TypeId, TypeId>,
+    builtin_remap: &HashMap<usize, usize>,
+) -> Function {
+    let remapped_instructions: Vec<Instruction> = function
+        .instructions
+        .into_iter()
+        .map(|inst| match inst {
+            Instruction::Constant(idx) => {
+                Instruction::Constant(*constant_remap.get(&idx).unwrap_or(&idx))
+            }
+            Instruction::Function(idx) => {
+                Instruction::Function(*function_remap.get(&idx).unwrap_or(&idx))
+            }
+            Instruction::Builtin(idx) => {
+                Instruction::Builtin(*builtin_remap.get(&idx).unwrap_or(&idx))
+            }
+            Instruction::Tuple(type_id) => {
+                Instruction::Tuple(*type_remap.get(&type_id).unwrap_or(&type_id))
+            }
+            other => other,
+        })
+        .collect();
+
+    Function {
+        instructions: remapped_instructions,
+        function_type: CallableType {
+            parameter: remap_type(function.function_type.parameter, type_remap),
+            result: remap_type(function.function_type.result, type_remap),
+            receive: remap_type(function.function_type.receive, type_remap),
+        },
+        captures: function.captures,
+    }
+}
 
 // Type aliases for complex types
 pub type ValueWithHeap = (Value, Vec<Vec<u8>>);
@@ -105,6 +172,7 @@ struct PendingAwait {
 
 pub struct Environment {
     workers: Vec<Box<dyn WorkerHandle>>,
+    program: Program,
     process_router: HashMap<ProcessId, WorkerId>,
     pending_awaits: HashMap<ProcessId, PendingAwait>, // awaiter -> pending await state
     pending_requests: HashMap<u64, Option<RequestResult>>,
@@ -112,43 +180,22 @@ pub struct Environment {
     status_aggregations: HashMap<u64, HashMap<u64, Option<HashMap<ProcessId, ProcessStatus>>>>,
     next_request_id: u64,
     next_process_id: ProcessId,
-    num_workers: usize,
 }
 
 impl Environment {
-    pub fn new(
-        workers: Vec<Box<dyn WorkerHandle>>,
-        program: &Program,
-    ) -> Result<Self, EnvironmentError> {
-        let num_workers = workers.len();
+    pub fn new(workers: Vec<Box<dyn WorkerHandle>>) -> Self {
+        let program = Program::new();
 
-        let mut env = Self {
+        Self {
             workers,
+            program: program.clone(),
             process_router: HashMap::new(),
             pending_awaits: HashMap::new(),
             pending_requests: HashMap::new(),
             status_aggregations: HashMap::new(),
             next_request_id: 0,
             next_process_id: 0,
-            num_workers,
-        };
-
-        // Send initial program to all workers
-        // Note: Web Workers use a ready handshake to ensure this message isn't lost
-        let update_cmd = Command::UpdateProgram {
-            constants: program.get_constants().clone(),
-            functions: program.get_functions().clone(),
-            types: program.get_types().clone(),
-            builtins: program.get_builtins().clone(),
-        };
-
-        for worker in &mut env.workers {
-            worker
-                .send(update_cmd.clone())
-                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
-
-        Ok(env)
     }
 
     /// Process events from workers, route actions
@@ -176,47 +223,19 @@ impl Environment {
         Ok(did_work)
     }
 
-    /// Update program (additive only)
-    pub fn update_program(
-        &mut self,
-        constants: Vec<Constant>,
-        functions: Vec<Function>,
-        types: Vec<TupleTypeInfo>,
-        builtins: Vec<BuiltinInfo>,
-    ) -> Result<(), EnvironmentError> {
-        let cmd = Command::UpdateProgram {
-            constants,
-            functions,
-            types,
-            builtins,
-        };
+    /// Start a new persistent process, returns assigned ProcessId
+    pub fn start_process(&mut self, bytecode: Bytecode) -> Result<ProcessId, EnvironmentError> {
+        // Merge bytecode into program and get remapped function index
+        let function_index = self.merge_bytecode(bytecode)?;
 
-        for worker in &mut self.workers {
-            worker
-                .send(cmd.clone())
-                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
-        }
-
-        Ok(())
-    }
-
-    /// Start a new process, returns assigned ProcessId
-    pub fn start_process(
-        &mut self,
-        function_index: usize,
-        persistent: bool,
-    ) -> Result<ProcessId, EnvironmentError> {
         let pid = self.allocate_process_id();
-        let worker_id = pid % self.num_workers; // Round-robin
+        let worker_id = pid % self.workers.len(); // Round-robin
 
         self.process_router.insert(pid, worker_id);
         self.workers[worker_id]
             .send(Command::StartProcess {
                 id: pid,
                 function_index,
-                captures: vec![],
-                heap_data: vec![],
-                persistent,
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
@@ -227,8 +246,11 @@ impl Environment {
     pub fn resume_process(
         &mut self,
         pid: ProcessId,
-        function_index: usize,
+        bytecode: Bytecode,
     ) -> Result<(), EnvironmentError> {
+        // Merge bytecode into program and get remapped function index
+        let function_index = self.merge_bytecode(bytecode)?;
+
         let worker_id = self
             .process_router
             .get(&pid)
@@ -400,6 +422,104 @@ impl Environment {
         id
     }
 
+    /// Merge bytecode into the environment's program with deduplication
+    /// Returns the remapped entry function index
+    fn merge_bytecode(&mut self, bytecode: Bytecode) -> Result<usize, EnvironmentError> {
+        // Track old program sizes
+        let old_constants_len = self.program.get_constants().len();
+        let old_functions_len = self.program.get_functions().len();
+        let old_types_len = self.program.get_types().len();
+        let old_builtins_len = self.program.get_builtins().len();
+
+        // Build remapping tables
+        let mut constant_remap: HashMap<usize, usize> = HashMap::new();
+        let mut function_remap: HashMap<usize, usize> = HashMap::new();
+        let mut type_remap: HashMap<TypeId, TypeId> = HashMap::new();
+        let mut builtin_remap: HashMap<usize, usize> = HashMap::new();
+
+        // Merge constants (register_constant handles deduplication)
+        for (old_idx, constant) in bytecode.constants.iter().enumerate() {
+            let new_idx = self.program.register_constant(constant.clone());
+            constant_remap.insert(old_idx, new_idx);
+        }
+
+        // Merge types (register_type handles deduplication after we remap TypeIds in fields)
+        for (old_idx, type_info) in bytecode.types.iter().enumerate() {
+            let old_type_id = TypeId(old_idx);
+
+            // Remap TypeIds in the type's fields before registering
+            let remapped_fields: Vec<_> = type_info
+                .fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), remap_type(ty.clone(), &type_remap)))
+                .collect();
+
+            // register_type_with_partial will deduplicate based on name, fields, and is_partial
+            let new_type_id = self.program.register_type_with_partial(
+                type_info.name.clone(),
+                remapped_fields,
+                type_info.is_partial,
+            );
+            type_remap.insert(old_type_id, new_type_id);
+        }
+
+        // Merge builtins (register_builtin handles deduplication by name)
+        for (old_idx, builtin_info) in bytecode.builtins.iter().enumerate() {
+            let new_idx = self.program.register_builtin(builtin_info.name.clone());
+            builtin_remap.insert(old_idx, new_idx);
+        }
+
+        // Merge functions (register_function handles deduplication after we remap indices)
+        for (old_idx, function) in bytecode.functions.iter().enumerate() {
+            // Remap all indices in the function before registering
+            let remapped_function = remap_function(
+                function.clone(),
+                &constant_remap,
+                &function_remap,
+                &type_remap,
+                &builtin_remap,
+            );
+
+            // register_function will deduplicate if the function already exists
+            let new_idx = self.program.register_function(remapped_function);
+            function_remap.insert(old_idx, new_idx);
+        }
+
+        // Get new program data to send to workers
+        let new_constants: Vec<_> = self.program.get_constants()[old_constants_len..].to_vec();
+        let new_functions: Vec<_> = self.program.get_functions()[old_functions_len..].to_vec();
+        let new_types: Vec<_> = self.program.get_types()[old_types_len..].to_vec();
+        let new_builtins: Vec<_> = self.program.get_builtins()[old_builtins_len..].to_vec();
+
+        // Send updates to workers
+        if !new_constants.is_empty()
+            || !new_functions.is_empty()
+            || !new_types.is_empty()
+            || !new_builtins.is_empty()
+        {
+            let update_cmd = Command::UpdateProgram {
+                constants: new_constants,
+                functions: new_functions,
+                types: new_types,
+                builtins: new_builtins,
+            };
+
+            for worker in &mut self.workers {
+                worker
+                    .send(update_cmd.clone())
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+            }
+        }
+
+        // Return remapped entry function index
+        let entry_idx = bytecode
+            .entry
+            .expect("Bytecode must have an entry function");
+        Ok(*function_remap
+            .get(&entry_idx)
+            .expect("Entry function should be in remap table"))
+    }
+
     fn handle_event(&mut self, event: Event) -> Result<(), EnvironmentError> {
         match event {
             Event::SpawnAction {
@@ -440,8 +560,6 @@ impl Environment {
         awaiter: ProcessId,
         targets: Vec<ProcessId>,
     ) -> Result<(), EnvironmentError> {
-        use std::collections::HashSet;
-
         // Group targets by worker
         let mut targets_by_worker: HashMap<WorkerId, Vec<ProcessId>> = HashMap::new();
         for target in &targets {
@@ -550,17 +668,16 @@ impl Environment {
         let new_pid = self.allocate_process_id();
 
         // Choose worker (round-robin)
-        let worker_id = new_pid % self.num_workers;
+        let worker_id = new_pid % self.workers.len();
         self.process_router.insert(new_pid, worker_id);
 
-        // Start process on chosen worker with function and captures
+        // Spawn process on chosen worker with function and captures
         self.workers[worker_id]
-            .send(Command::StartProcess {
+            .send(Command::SpawnProcess {
                 id: new_pid,
                 function_index,
                 captures,
                 heap_data: heap.clone(),
-                persistent: false,
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
@@ -693,5 +810,82 @@ impl Environment {
         // In the future, we could track which worker failed and handle it more gracefully
         eprintln!("Worker error: {}", error);
         Ok(())
+    }
+
+    /// Format a value for display
+    pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
+        quiver_core::format::format_value(value, heap, &self.program)
+    }
+
+    /// Format a type for display
+    pub fn format_type(&self, ty: &Type) -> String {
+        quiver_core::format::format_type(&self.program, ty)
+    }
+
+    /// Get the formatted type for a process given its function index
+    pub fn format_process_type(&self, function_index: usize) -> Option<String> {
+        let function = self.program.get_function(function_index)?;
+        let process_type = Type::Process(Box::new(ProcessType {
+            receive: Some(Box::new(function.function_type.receive.clone())),
+            returns: Some(Box::new(function.function_type.result.clone())),
+        }));
+        Some(self.format_type(&process_type))
+    }
+
+    /// Convert a runtime Value to its Type representation
+    pub fn value_to_type(&self, value: &Value) -> Type {
+        match value {
+            Value::Integer(_) => Type::Integer,
+            Value::Binary(_) => Type::Binary,
+            Value::Tuple(type_id, _) => Type::Tuple(*type_id),
+            Value::Function(func_idx, _) => {
+                let func_type = &self
+                    .program
+                    .get_function(*func_idx)
+                    .expect("Function should exist")
+                    .function_type;
+                Type::Callable(Box::new(func_type.clone()))
+            }
+            Value::Builtin(name) => {
+                let builtin_info = self
+                    .program
+                    .get_builtins()
+                    .iter()
+                    .find(|b| &b.name == name)
+                    .expect("Builtin should be registered");
+                Type::Callable(Box::new(CallableType {
+                    parameter: builtin_info.parameter_type.clone(),
+                    result: builtin_info.result_type.clone(),
+                    receive: Type::Union(vec![]),
+                }))
+            }
+            Value::Process(_, function_idx) => {
+                let func_type = &self
+                    .program
+                    .get_function(*function_idx)
+                    .expect("Function should exist")
+                    .function_type;
+                Type::Process(Box::new(ProcessType {
+                    receive: Some(Box::new(func_type.receive.clone())),
+                    returns: Some(Box::new(func_type.result.clone())),
+                }))
+            }
+        }
+    }
+
+    /// Resolve a type alias and return the resolved Type.
+    /// Type parameters are resolved to Type::Variable placeholders.
+    /// This is useful for testing and displaying type aliases.
+    pub fn resolve_type_alias(
+        &mut self,
+        type_aliases: &std::collections::HashMap<String, quiver_compiler::compiler::TypeAliasDef>,
+        alias_name: &str,
+    ) -> Result<Type, String> {
+        quiver_compiler::compiler::resolve_type_alias_for_display(
+            type_aliases,
+            alias_name,
+            &mut self.program,
+        )
+        .map_err(|e| format!("{:?}", e))
     }
 }

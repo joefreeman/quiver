@@ -36,8 +36,7 @@ impl ReplCli {
         // Create REPL
         let program = Program::new();
         let module_loader = Box::new(FileSystemModuleLoader::new());
-        let repl = Repl::new(workers, program, module_loader)
-            .map_err(|e| format!("Failed to create REPL: {}", e))?;
+        let repl = Repl::new(workers, program, module_loader);
 
         Ok(Self {
             editor,

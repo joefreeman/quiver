@@ -93,6 +93,20 @@ impl Executor {
     }
 
     pub fn new() -> Self {
+        // Create NIL type (index 0)
+        let nil_type = TupleTypeInfo {
+            name: None,
+            fields: vec![],
+            is_partial: false,
+        };
+
+        // Create OK type (index 1)
+        let ok_type = TupleTypeInfo {
+            name: Some("Ok".to_string()),
+            fields: vec![],
+            is_partial: false,
+        };
+
         Self {
             processes: HashMap::new(),
             queue: VecDeque::new(),
@@ -101,7 +115,7 @@ impl Executor {
             constants: vec![],
             functions: vec![],
             builtins: vec![],
-            types: vec![],
+            types: vec![nil_type, ok_type],
             heap: vec![],
         }
     }
