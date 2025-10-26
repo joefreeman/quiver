@@ -710,3 +710,61 @@ fn test_send_to_self_with_receive_type_check() {
             found: "bin".to_string(),
         });
 }
+
+#[test]
+fn test_receive_type_in_function_argument() {
+    // Test that receive type is correctly inferred when used in function call arguments
+    quiver()
+        .evaluate(
+            r#"
+            math = %"math",
+            p = 20 ~> @#int { ~> math.div[~, !#int] },
+            2 ~> p,
+            p ~> !
+            "#,
+        )
+        .expect("10");
+}
+
+#[test]
+fn test_receive_type_in_tuple_argument() {
+    // Test that receive type is correctly inferred when used in tuple constructor arguments
+    quiver()
+        .evaluate(
+            r#"
+            p = 10 ~> @#int { ~> [~, !#int] },
+            32 ~> p,
+            p ~> !
+            "#,
+        )
+        .expect("[10, 32]");
+}
+
+#[test]
+fn test_receive_type_in_builtin_argument() {
+    // Test that receive type is correctly inferred when used in builtin call arguments
+    quiver()
+        .evaluate(
+            r#"
+            p = 10 ~> @#int { ~> __add__[~, !#int] },
+            32 ~> p,
+            p ~> !
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_receive_type_in_tail_call_argument() {
+    // Test that receive type is correctly inferred when used in tail call arguments
+    quiver()
+        .evaluate(
+            r#"
+            f = #[int, int] { ~> __add__ },
+            p = 10 ~> @#int { ~> &f[~, !#int] },
+            32 ~> p,
+            p ~> !
+            "#,
+        )
+        .expect("42");
+}

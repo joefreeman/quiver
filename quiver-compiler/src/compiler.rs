@@ -676,6 +676,15 @@ impl<'a> Compiler<'a> {
                 Ok(None)
             }
             ast::Term::Access(access) => {
+                // Check argument tuple for receive types (e.g., math.div[~, !#int])
+                if let Some(arg_tuple) = &access.argument {
+                    for field in &arg_tuple.fields {
+                        if let ast::FieldValue::Chain(chain) = &field.value {
+                            self.collect_receive_types_from_chain(chain, receive_types)?;
+                        }
+                    }
+                }
+
                 // Try to resolve the access to get its type
                 if let Some(identifier) = &access.identifier {
                     let var_type = self
@@ -705,6 +714,28 @@ impl<'a> Compiler<'a> {
                 for field in &tuple.fields {
                     if let ast::FieldValue::Chain(chain) = &field.value {
                         self.collect_receive_types_from_chain(chain, receive_types)?;
+                    }
+                }
+                Ok(None)
+            }
+            ast::Term::Builtin(builtin) => {
+                // Check argument tuple for receive types (e.g., __add__[!#int, 5])
+                if let Some(arg_tuple) = &builtin.argument {
+                    for field in &arg_tuple.fields {
+                        if let ast::FieldValue::Chain(chain) = &field.value {
+                            self.collect_receive_types_from_chain(chain, receive_types)?;
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            ast::Term::TailCall(tail_call) => {
+                // Check argument tuple for receive types (e.g., &f[!#int, 5])
+                if let Some(arg_tuple) = &tail_call.argument {
+                    for field in &arg_tuple.fields {
+                        if let ast::FieldValue::Chain(chain) = &field.value {
+                            self.collect_receive_types_from_chain(chain, receive_types)?;
+                        }
                     }
                 }
                 Ok(None)
