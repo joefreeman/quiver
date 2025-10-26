@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "colored",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-compiler"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hex",
  "nom",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "hex",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-environment"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "quiver-compiler",
  "quiver-core",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-tests"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "quiver-cli",
  "quiver-compiler",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-web"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
