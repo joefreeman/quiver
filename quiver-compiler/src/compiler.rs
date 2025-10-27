@@ -1182,8 +1182,9 @@ impl<'a> Compiler<'a> {
             let condition_type = self.compile_expression(branch.condition.clone(), on_no_match)?;
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
-            if condition_type.as_concrete() == Some(&Type::nil()) {
-                // Don't add to branch_types, continue to next branch
+            if condition_type.is_nil() {
+                // Continue to next branch
+                branch_types.push(condition_type);
                 continue;
             }
 
@@ -1307,7 +1308,7 @@ impl<'a> Compiler<'a> {
 
             // If last_type is NIL, subsequent chains are unreachable - break early
             if let Some(ref last_type) = last_type
-                && last_type.as_concrete() == Some(&Type::nil())
+                && last_type.is_nil()
             {
                 break;
             }
@@ -1702,7 +1703,6 @@ impl<'a> Compiler<'a> {
     /// Compute the return type of a select operation from source types
     fn compute_select_return_type(&self, source_types: &[Type]) -> Result<Type, Error> {
         let mut result_types = Vec::new();
-        let mut has_timeout = false;
 
         for source_type in source_types {
             match source_type {
@@ -1723,7 +1723,7 @@ impl<'a> Compiler<'a> {
                 }
                 Type::Integer => {
                     // Timeout source
-                    has_timeout = true;
+                    result_types.push(Type::Tuple(TypeId::NIL))
                 }
                 _ => {
                     return Err(Error::TypeMismatch {
@@ -1734,29 +1734,13 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        if result_types.is_empty() && !has_timeout {
+        if result_types.is_empty() {
             return Err(Error::FeatureUnsupported(
                 "Select requires at least one source".to_string(),
             ));
         }
 
-        // Determine final return type
-        let base_type = if result_types.is_empty() {
-            // Only timeout sources - returns nil
-            Type::Tuple(TypeId::NIL)
-        } else if result_types.len() == 1 {
-            result_types[0].clone()
-        } else {
-            // Multiple different return types - create union
-            Type::Union(result_types)
-        };
-
-        // If there's a timeout, union with nil
-        if has_timeout {
-            Ok(Type::Union(vec![base_type, Type::Tuple(TypeId::NIL)]))
-        } else {
-            Ok(base_type)
-        }
+        return Ok(union_types(result_types));
     }
 
     fn compile_term(

@@ -82,20 +82,6 @@ impl Type {
         matches!(self, Type::Tuple(TypeId::OK))
     }
 
-    /// Check if this type is concrete (not a union, cycle, or partial)
-    pub fn is_concrete(&self) -> bool {
-        !matches!(self, Type::Union(_) | Type::Cycle(_) | Type::Partial(_))
-    }
-
-    /// Get the concrete type if this is not a union
-    pub fn as_concrete(&self) -> Option<&Type> {
-        match self {
-            Type::Union(types) if types.len() == 1 => types.first(),
-            Type::Union(_) => None,
-            t => Some(t),
-        }
-    }
-
     /// Create a Type from a vector of types
     /// Returns a single type if the vector has one element, otherwise a Union
     pub fn from_types(mut types: Vec<Type>) -> Type {

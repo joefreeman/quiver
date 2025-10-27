@@ -491,16 +491,6 @@ fn analyze_identifier_pattern(
     identifiers: &mut HashMap<String, Indentifier>,
     variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
-    // Empty Type should never happen - it indicates an internal error
-    if matches!(&value_type, Type::Union(types) if types.is_empty()) {
-        return Err(Error::InternalError {
-            message: format!(
-                "analyze_identifier_pattern received empty Type for identifier '{}'",
-                name
-            ),
-        });
-    }
-
     // Check if we've seen this identifier before
     if let Some(info) = identifiers.get_mut(&name) {
         // Second or later occurrence - mark as repeated and create Path requirement
