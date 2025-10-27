@@ -13,6 +13,34 @@ use super::{Error, codegen::InstructionBuilder};
 type PatternAnalysisResult = (MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>);
 type TupleMatchResult = Vec<(TypeId, Vec<(usize, usize)>)>;
 
+/// Helper for managing identifiers across variants
+/// Clones identifiers when processing multiple variants to avoid cross-contamination
+enum IdentifierScope<'a> {
+    /// Borrowed reference to parent identifiers (single variant case)
+    Borrowed(&'a mut HashMap<String, Identifier>),
+    /// Owned clone (multiple variants case)
+    Owned(HashMap<String, Identifier>),
+}
+
+impl<'a> IdentifierScope<'a> {
+    /// Create an appropriate scope based on whether we have multiple variants
+    fn new(identifiers: &'a mut HashMap<String, Identifier>, has_multiple_variants: bool) -> Self {
+        if has_multiple_variants {
+            Self::Owned(identifiers.clone())
+        } else {
+            Self::Borrowed(identifiers)
+        }
+    }
+
+    /// Get mutable access to the identifier map
+    fn get_mut(&mut self) -> &mut HashMap<String, Identifier> {
+        match self {
+            Self::Borrowed(map) => map,
+            Self::Owned(map) => map,
+        }
+    }
+}
+
 /// Represents the certainty of a pattern match
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchCertainty {
@@ -321,13 +349,9 @@ fn analyze_match_tuple_pattern(
     for (type_id, field_mappings) in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         // For a single variant, use the parent's identifiers directly
-        let mut variant_identifiers_storage;
-        let variant_identifiers = if matching_types.len() > 1 {
-            variant_identifiers_storage = identifiers.clone();
-            &mut variant_identifiers_storage
-        } else {
-            &mut *identifiers
-        };
+        let mut variant_identifiers_scope =
+            IdentifierScope::new(identifiers, matching_types.len() > 1);
+        let variant_identifiers = variant_identifiers_scope.get_mut();
 
         // Get tuple info and extract field types upfront to avoid borrow issues
         let tuple_fields: Vec<Type> = {
@@ -564,13 +588,9 @@ fn analyze_partial_pattern(
     // Create a binding set for each matching type
     for (type_id, field_indices) in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
-        let mut variant_identifiers_storage;
-        let variant_identifiers = if matching_types.len() > 1 {
-            variant_identifiers_storage = identifiers.clone();
-            &mut variant_identifiers_storage
-        } else {
-            &mut *identifiers
-        };
+        let mut variant_identifiers_scope =
+            IdentifierScope::new(identifiers, matching_types.len() > 1);
+        let variant_identifiers = variant_identifiers_scope.get_mut();
 
         let mut requirements = vec![];
 
@@ -640,13 +660,9 @@ fn analyze_star_pattern(
     let mut binding_sets = vec![];
     for type_id in &tuple_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
-        let mut variant_identifiers_storage;
-        let variant_identifiers = if tuple_types.len() > 1 {
-            variant_identifiers_storage = identifiers.clone();
-            &mut variant_identifiers_storage
-        } else {
-            &mut *identifiers
-        };
+        let mut variant_identifiers_scope =
+            IdentifierScope::new(identifiers, tuple_types.len() > 1);
+        let variant_identifiers = variant_identifiers_scope.get_mut();
 
         let tuple_info = type_lookup
             .lookup_type(type_id)
