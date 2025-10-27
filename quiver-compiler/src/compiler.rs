@@ -2021,7 +2021,10 @@ impl<'a> Compiler<'a> {
                                 expected: "function with nil parameter".to_string(),
                                 found: format!(
                                     "function with parameter {}",
-                                    quiver_core::format::format_type(&self.program, &callable.parameter)
+                                    quiver_core::format::format_type(
+                                        &self.program,
+                                        &callable.parameter
+                                    )
                                 ),
                             });
                         }
@@ -2246,7 +2249,7 @@ impl<'a> Compiler<'a> {
                 self.codegen.add_instruction(Instruction::Call);
                 Ok(result_type)
             }
-            Type::Process(process_type) => {
+            Type::Process(ref process_type) => {
                 // Message send
                 // Type check: ensure the process has a receive type and message type matches
                 if let Some(expected_msg_type) = &process_type.receive {
@@ -2277,8 +2280,8 @@ impl<'a> Compiler<'a> {
 
                 // Emit send instruction (expects [message, pid] on stack)
                 self.codegen.add_instruction(Instruction::Send);
-                // Send returns Ok (like assignment)
-                Ok(Type::ok())
+
+                Ok(target_type)
             }
             _ => Err(Error::TypeMismatch {
                 expected: "function or process".to_string(),

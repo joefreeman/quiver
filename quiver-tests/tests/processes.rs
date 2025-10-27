@@ -13,27 +13,13 @@ fn test_spawn_simple_function() {
 
 #[test]
 fn test_send_to_process() {
-    quiver()
-        .evaluate(
-            r#"
-            f = #{ !(#int) },
-            p = @f,
-            42 ~> p
-        "#,
-        )
-        .expect("Ok");
+    quiver().evaluate("p = @#{ !#int }, 42 ~> p").expect("@1");
 }
 
 #[test]
 fn test_process_without_receive_rejects_send() {
     quiver()
-        .evaluate(
-            r#"
-            f = #{ [] },
-            p = @f,
-            42 ~> p
-        "#,
-        )
+        .evaluate("p = @#{ [] }, 42 ~> p")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "process with receive type".to_string(),
             found: "process without receive type (cannot send messages)".to_string(),
@@ -45,8 +31,7 @@ fn test_process_type_checking_send() {
     quiver()
         .evaluate(
             r#"
-            f = #{ !(#int) },
-            p = @f,
+            p = @#{ !(#int) },
             '00' ~> p
         "#,
         )
@@ -59,25 +44,14 @@ fn test_process_type_checking_send() {
 #[test]
 fn test_spawn_with_argument() {
     quiver()
-        .evaluate(
-            r#"
-            f = #int { ~> },
-            p = 42 ~> @f,
-            p ~> !
-            "#,
-        )
+        .evaluate("p = 42 ~> @#int { ~> }, p ~> !")
         .expect("42");
 }
 
 #[test]
 fn test_spawn_with_argument_type_mismatch() {
     quiver()
-        .evaluate(
-            r#"
-            f = #int { ~> },
-            p = '00' ~> @f
-            "#,
-        )
+        .evaluate("'00' ~> @#int { ~> }")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "int".to_string(),
             found: "bin".to_string(),
@@ -86,43 +60,23 @@ fn test_spawn_with_argument_type_mismatch() {
 
 #[test]
 fn test_spawn_without_argument_requires_nil_parameter() {
-    quiver()
-        .evaluate(
-            r#"
-            f = #int { ~> },
-            @f
-            "#,
-        )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+    quiver().evaluate("@#int { ~> }").expect_compile_error(
+        quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function with nil parameter".to_string(),
             found: "function with parameter int".to_string(),
-        });
+        },
+    );
 }
 
 #[test]
 fn test_spawn_postfix_syntax() {
-    quiver()
-        .evaluate(
-            r#"
-            f = #{ 42 },
-            p = f ~> @,
-            p ~> !
-            "#,
-        )
-        .expect("42");
+    quiver().evaluate("#{ 42 } ~> @ ~> !").expect("42");
 }
 
 #[test]
 fn test_receive_simple() {
     quiver()
-        .evaluate(
-            r#"
-            f = #{ !(#int) },
-            p = @f,
-            42 ~> p,
-            p ~> !
-            "#,
-        )
+        .evaluate("p = @#{ !#int }, 42 ~> p ~> !")
         .expect("42");
 }
 
@@ -131,11 +85,8 @@ fn test_receive_waits_until_match() {
     quiver()
         .evaluate(
             r#"
-            f = #{ !#int { ~> =42 => Ok } },
-            p = @f,
-            10 ~> p,
-            20 ~> p,
-            42 ~> p,
+            p = @#{ !#int { ~> =42 => Ok } },
+            10 ~> p, 20 ~> p, 42 ~> p,
             !p
             "#,
         )
@@ -147,8 +98,7 @@ fn test_receive_function_must_return_ok_or_nil() {
     quiver()
         .evaluate(
             r#"
-            f = #{ !#int { ~> =x => 99 } },
-            p = @f,
+            p = @#{ !#int { ~> =x => 99 } },
             42 ~> p,
             !p
             "#,
@@ -164,8 +114,7 @@ fn test_receive_filter_returns_original_message() {
     quiver()
         .evaluate(
             r#"
-            f = #{ !(#int { ~> =x => Ok }) ~> =result => result },
-            p = @f,
+            p = @#{ !(#int { ~> =x => Ok }) ~> =result => result },
             42 ~> p,
             !p
             "#,
@@ -208,61 +157,35 @@ fn test_receive_function_cannot_send() {
 
 #[test]
 fn test_multiple_receives_same_type() {
-    quiver()
-        .evaluate(
-            r#"
-            f = #{
-                !(#int),
-                !(#int)
-            },
-            @f
-        "#,
-        )
-        .expect("@1");
+    quiver().evaluate("@#{ !#int, !#int }").expect("@1");
 }
 
 #[test]
 fn test_multiple_receives_different_types_error() {
-    quiver()
-        .evaluate(
-            r#"
-            f = #{
-                !(#int),
-                !(#bin)
-            }
-        "#,
-        )
-        .expect_compile_error(quiver_compiler::compiler::Error::ReceiveTypeMismatch {
+    quiver().evaluate("#{ !#int, !#bin }").expect_compile_error(
+        quiver_compiler::compiler::Error::ReceiveTypeMismatch {
             first: "Integer".to_string(),
             second: "Binary".to_string(),
-        });
+        },
+    );
 }
 
 #[test]
 fn test_await_simple() {
-    quiver()
-        .evaluate("f = #{ 42 }, p = @f, p ~> !")
-        .expect("42");
+    quiver().evaluate("@#{ 42 } ~> !").expect("42");
 }
 
 #[test]
 fn test_await_returns_process_result() {
     quiver()
-        .evaluate("f = #{ [1, 2] ~> __add__ }, p = @f, p ~> !")
+        .evaluate("@#{ [1, 2] ~> __add__ } ~> !")
         .expect("3");
 }
 
 #[test]
 fn test_await_with_captures() {
     quiver()
-        .evaluate(
-            r#"
-            x = 10,
-            f = #{ [x, 32] ~> __add__ },
-            p = @f,
-            p ~> !
-            "#,
-        )
+        .evaluate("x = 10, @#{ [x, 32] ~> __add__ } ~> !")
         .expect("42");
 }
 
@@ -282,13 +205,7 @@ fn test_await_process_type_checking() {
 #[test]
 fn test_self_reference_cannot_be_awaited() {
     quiver()
-        .evaluate(
-            r#"
-            f = #{ !(#int) ~> =x => . ~> =self_pid, self_pid ~> ! },
-            p = @f,
-            42 ~> p
-            "#,
-        )
+        .evaluate("42 ~> @#{ !(#int) ~> =x => . ~> =self_pid, self_pid ~> ! }")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "process with return type (awaitable)".to_string(),
             found: "process without return type (cannot await)".to_string(),
@@ -297,15 +214,7 @@ fn test_self_reference_cannot_be_awaited() {
 
 #[test]
 fn test_select_single_process() {
-    quiver()
-        .evaluate(
-            r#"
-            f = #{ 42 },
-            p = @f,
-            !(p)
-            "#,
-        )
-        .expect("42");
+    quiver().evaluate("!@#{ 42 }").expect("42");
 }
 
 #[test]
@@ -344,10 +253,8 @@ fn test_select_single_receive() {
     quiver()
         .evaluate(
             r#"
-            f = #{ !(#int) },
-            p = @f,
-            42 ~> p,
-            p ~> !
+            p = @#{ !(#int) },
+            42 ~> p ~> !
             "#,
         )
         .expect("42");
@@ -358,10 +265,8 @@ fn test_select_multiple_receive_patterns() {
     quiver()
         .evaluate(
             r#"
-            f = #{ !(#int | #bin) },
-            p = @f,
-            42 ~> p,
-            p ~> !
+            p = @#{ !(#int | #bin) },
+            42 ~> p ~> !
             "#,
         )
         .expect("42");
@@ -394,7 +299,7 @@ fn test_select_receive_waits_for_match() {
                 10 ~> self_pid,
                 42 ~> self_pid,
                 99 ~> self_pid,
-                !(#int)
+                !#int
             },
             @f ~> !
             "#,
@@ -408,8 +313,7 @@ fn test_timeout_fires() {
         .evaluate(
             r#"
             slow = #{ !(#int) },
-            p = @slow,
-            !(p | 1000)
+            !(@slow | 1000)
             "#,
         )
         .expect("[]");
@@ -421,8 +325,7 @@ fn test_timeout_process_completes_first() {
         .evaluate(
             r#"
             fast = #{ 42 },
-            p = @fast,
-            !(p | 1000)
+            !(@fast | 1000)
             "#,
         )
         .expect("42");
@@ -434,8 +337,7 @@ fn test_timeout_zero() {
         .evaluate(
             r#"
             slow = #{ !(#int) },
-            p = @slow,
-            !(p | 0)
+            !(@slow | 0)
             "#,
         )
         .expect("[]");
@@ -465,8 +367,7 @@ fn test_mixed_process_and_receive() {
                 !(#int | fast)
             },
             receiver = @make_receiver,
-            42 ~> receiver,
-            receiver ~> !
+            42 ~> receiver ~> !
             "#,
         )
         .expect("42");
@@ -481,8 +382,7 @@ fn test_mixed_all_three_types_receive_wins() {
                 slow = @#{ !(#bin) },
                 !(#int | slow | 1000)
             },
-            42 ~> receiver,
-            receiver ~> !
+            42 ~> receiver ~> !
             "#,
         )
         .expect("42");
@@ -493,11 +393,10 @@ fn test_mixed_all_three_types_process_wins() {
     quiver()
         .evaluate(
             r#"
-            f = #{
+            @#{
                 fast = @#{ 99 },
                 !(#int | fast | 1000)
-            },
-            @f ~> !
+            } ~> !
             "#,
         )
         .expect("99");
@@ -508,11 +407,10 @@ fn test_mixed_all_three_types_timeout_wins() {
     quiver()
         .evaluate(
             r#"
-            f = #{
+            @#{
                 slow = @#{ !(#bin) },
                 !(#int | slow | 500)
-            },
-            @f ~> !
+            } ~> !
             "#,
         )
         .expect("[]");
@@ -524,8 +422,7 @@ fn test_select_with_ripple() {
         .evaluate(
             r#"
             fast = #{ 42 },
-            p = @fast,
-            p ~> !(~ | 1000)
+            @fast ~> !(~ | 1000)
             "#,
         )
         .expect("42");
@@ -537,8 +434,7 @@ fn test_select_ripple_timeout_wins() {
         .evaluate(
             r#"
             slow = #{ !(#int) },
-            p = @slow,
-            p ~> !(~ | 100)
+            @slow ~> !(~ | 100)
             "#,
         )
         .expect("[]");
@@ -550,8 +446,7 @@ fn test_select_unused_chained_value_error() {
         .evaluate(
             r#"
             fast = #{ 42 },
-            p = @fast,
-            p ~> !(1000)
+            @fast ~> !1000
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::FeatureUnsupported(
@@ -565,8 +460,7 @@ fn test_select_nested_chain_outer_used() {
         .evaluate(
             r#"
             fast = #{ 42 },
-            p = @fast,
-            p ~> !(~ | 3 ~> ~)
+            @fast ~> !(~ | 3 ~> ~)
             "#,
         )
         .expect("42");
@@ -586,8 +480,7 @@ fn test_receive_type_from_variable() {
             r#"
             receiver_func = #int,
             p = @#{ !(receiver_func) ~> [~, 100] ~> __add__ },
-            42 ~> p,
-            p ~> !
+            42 ~> p ~> !
             "#,
         )
         .expect("142");
@@ -600,8 +493,7 @@ fn test_receive_type_from_module_builtin() {
             r#"
             math = %"math",
             p1 = @#{ !math.add },
-            [10, 32] ~> p1,
-            p1 ~> !
+            [10, 32] ~> p1 ~> !
             "#,
         )
         .expect("42");
@@ -613,11 +505,8 @@ fn test_postfix_select_with_function() {
         .evaluate(
             r#"
             receiver = #int,
-            p = @#{
-              receiver ~> !
-            },
-            42 ~> p,
-            p ~> !
+            p = @#{ receiver ~> ! },
+            42 ~> p ~> !
             "#,
         )
         .expect("42");
@@ -625,16 +514,7 @@ fn test_postfix_select_with_function() {
 
 #[test]
 fn test_postfix_select_with_timeout() {
-    quiver()
-        .evaluate(
-            r#"
-            p = @#{
-              1 ~> !
-            },
-            p ~> !
-            "#,
-        )
-        .expect("[]");
+    quiver().evaluate("@#{ 1 ~> ! } ~> !").expect("[]");
 }
 
 #[test]
@@ -657,9 +537,7 @@ fn test_nested_select() {
     quiver()
         .evaluate(
             r#"
-            inner = #{
-                !(#int | 500)
-            },
+            inner = #{ !(#int | 500) },
             p = @inner,
             42 ~> p,
             !(p | 1000)
@@ -673,12 +551,11 @@ fn test_continuation_after_timeout() {
     quiver()
         .evaluate(
             r#"
-            f = #{
+            @#{
                 slow = @#{ !(#int) },
                 result = !(slow | 100) ~> /,
                 [result, 42]
-            },
-            @f ~> !
+            } ~> !
             "#,
         )
         .expect("[Ok, 42]");
@@ -700,24 +577,14 @@ fn test_process_spawns_and_receives_reply() {
 #[test]
 fn test_send_to_self() {
     quiver()
-        .evaluate(
-            r#"
-            f = #{ 10 ~> ., !(#int) },
-            p = @f,
-            p ~> !
-            "#,
-        )
+        .evaluate("@#{ 10 ~> ., !(#int) } ~> !")
         .expect("10");
 }
 
 #[test]
 fn test_send_to_self_with_receive_type_check() {
     quiver()
-        .evaluate(
-            r#"
-            f = #{ '00' ~> ., !(#int) }
-            "#,
-        )
+        .evaluate("#{ '00' ~> ., !(#int) }")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "int".to_string(),
             found: "bin".to_string(),
@@ -732,8 +599,7 @@ fn test_receive_type_in_function_argument() {
             r#"
             math = %"math",
             p = 20 ~> @#int { ~> math.div[~, !#int] },
-            2 ~> p,
-            p ~> !
+            2 ~> p ~> !
             "#,
         )
         .expect("10");
@@ -746,8 +612,7 @@ fn test_receive_type_in_tuple_argument() {
         .evaluate(
             r#"
             p = 10 ~> @#int { ~> [~, !#int] },
-            32 ~> p,
-            p ~> !
+            32 ~> p ~> !
             "#,
         )
         .expect("[10, 32]");
@@ -760,8 +625,7 @@ fn test_receive_type_in_builtin_argument() {
         .evaluate(
             r#"
             p = 10 ~> @#int { ~> __add__[~, !#int] },
-            32 ~> p,
-            p ~> !
+            32 ~> p ~> !
             "#,
         )
         .expect("42");
@@ -775,8 +639,7 @@ fn test_receive_type_in_tail_call_argument() {
             r#"
             f = #[int, int] { ~> __add__ },
             p = 10 ~> @#int { ~> &f[~, !#int] },
-            32 ~> p,
-            p ~> !
+            32 ~> p ~> !
             "#,
         )
         .expect("42");

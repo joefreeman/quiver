@@ -339,7 +339,7 @@ fn test_map_empty_list() {
             r#"
             list = %"list"
             math = %"math"
-            double = #int { ~> =x => math.mul[x, 2] },
+            double = #int { ~> math.mul[~, 2] },
             list.new[] ~> list.map[~, double]
             "#,
         )
@@ -353,7 +353,7 @@ fn test_map_single_element() {
             r#"
             list = %"list"
             math = %"math",
-            double = #int { ~> =x => math.mul[x, 2] },
+            double = #int { ~> math.mul[~, 2] },
             list.new[]
             ~> list.prepend[~, 5]
             ~> list.map[~, double]
@@ -369,7 +369,7 @@ fn test_map_multiple_elements() {
             r#"
             list = %"list"
             math = %"math",
-            double = #int { ~> =x => math.mul[x, 2] },
+            double = #int { ~> math.mul[~, 2] },
             list.new[]
             ~> list.prepend[~, 1]
             ~> list.prepend[~, 2]
@@ -387,7 +387,7 @@ fn test_map_increment() {
             r#"
             list = %"list"
             math = %"math",
-            inc = #int { ~> =x => math.add[x, 1] },
+            inc = #int { ~> math.add[~, 1] },
             list.new[]
             ~> list.prepend[~, 10]
             ~> list.prepend[~, 20]
@@ -421,7 +421,7 @@ fn test_map_square() {
             r#"
             list = %"list"
             math = %"math",
-            square = #int { ~> =x => math.mul[x, x] },
+            square = #int { ~> math.mul[~, ~] },
             list.new[]
             ~> list.prepend[~, 2]
             ~> list.prepend[~, 3]
@@ -439,7 +439,7 @@ fn test_filter_empty_list() {
             r#"
             list = %"list"
             math = %"math",
-            even? = #int { ~> =x => math.mod[x, 2] ~> =0 },
+            even? = #int { ~> math.mod[~, 2] ~> =0 },
             list.new[] ~> list.filter[~, even?]
             "#,
         )
@@ -453,7 +453,7 @@ fn test_filter_no_matches() {
             r#"
             list = %"list"
             math = %"math"
-            negative? = #int { ~> =x => math.lt[x, 0] }
+            negative? = #int { ~> math.lt[~, 0] }
             list.new[]
             ~> list.prepend[~, 1]
             ~> list.prepend[~, 2]
@@ -471,7 +471,7 @@ fn test_filter_all_match() {
             r#"
             list = %"list"
             math = %"math"
-            positive? = #int { ~> =x => math.gt[x, 0] }
+            positive? = #int { ~> math.gt[~, 0] }
             list.new[]
             ~> list.prepend[~, 1]
             ~> list.prepend[~, 2]
@@ -489,7 +489,7 @@ fn test_filter_even_numbers() {
             r#"
             list = %"list"
             math = %"math"
-            even? = #int { ~> =x => math.mod[x, 2] ~> =0 }
+            even? = #int { ~> math.mod[~, 2] ~> =0 }
             list.new[]
             ~> list.prepend[~, 1]
             ~> list.prepend[~, 2]
@@ -510,7 +510,7 @@ fn test_filter_greater_than() {
             r#"
             list = %"list"
             math = %"math"
-            gt_10? = #int { ~> =x => math.gt[x, 10] }
+            gt_10? = #int { ~> math.gt[~, 10] }
             list.new[]
             ~> list.prepend[~, 5]
             ~> list.prepend[~, 10]
@@ -529,7 +529,7 @@ fn test_filter_single_match() {
         .evaluate(
             r#"
             list = %"list"
-            eq_5? = #int { ~> =x, [x, 5] ~> == => Ok },
+            eq_5? = #int { ~> [~, 5] ~> == },
             list.new[]
             ~> list.prepend[~, 1]
             ~> list.prepend[~, 5]
@@ -823,7 +823,7 @@ fn test_all_empty_list() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[] ~> list.all?[~, positive?]
             "#,
         )
@@ -837,7 +837,7 @@ fn test_all_single_true() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, 5]
             ~> list.all?[~, positive?]
@@ -853,7 +853,7 @@ fn test_all_single_false() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, -5]
             ~> list.all?[~, positive?]
@@ -869,7 +869,7 @@ fn test_all_multiple_all_true() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, 1]
             ~> list.prepend[~, 2]
@@ -887,7 +887,7 @@ fn test_all_multiple_some_false() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, 1]
             ~> list.prepend[~, -2]
@@ -905,7 +905,7 @@ fn test_all_even_numbers() {
             r#"
             list = %"list"
             math = %"math",
-            even? = #int { ~> =x => math.mod[x, 2] ~> =0 },
+            even? = #int { ~> math.mod[~, 2] ~> =0 },
             list.new[]
             ~> list.prepend[~, 2]
             ~> list.prepend[~, 4]
@@ -920,7 +920,7 @@ fn test_all_even_numbers() {
             r#"
             list = %"list"
             math = %"math",
-            even? = #int { ~> =x => math.mod[x, 2] ~> =0 },
+            even? = #int { ~> math.mod[~, 2] ~> =0 },
             list.new[]
             ~> list.prepend[~, 2]
             ~> list.prepend[~, 3]
@@ -938,7 +938,7 @@ fn test_any_empty_list() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[] ~> list.any?[~, positive?]
             "#,
         )
@@ -952,7 +952,7 @@ fn test_any_single_true() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, 5]
             ~> list.any?[~, positive?]
@@ -968,7 +968,7 @@ fn test_any_single_false() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, -5]
             ~> list.any?[~, positive?]
@@ -984,7 +984,7 @@ fn test_any_multiple_all_false() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, -1]
             ~> list.prepend[~, -2]
@@ -1002,7 +1002,7 @@ fn test_any_multiple_some_true() {
             r#"
             list = %"list"
             math = %"math",
-            positive? = #int { ~> =x => math.gt[x, 0] },
+            positive? = #int { ~> math.gt[~, 0] },
             list.new[]
             ~> list.prepend[~, -1]
             ~> list.prepend[~, 2]
@@ -1020,7 +1020,7 @@ fn test_any_first_matches() {
             r#"
             list = %"list"
             math = %"math",
-            even? = #int { ~> =x => math.mod[x, 2] ~> =0 },
+            even? = #int { ~> math.mod[~, 2] ~> =0 },
             list.new[]
             ~> list.prepend[~, 3]
             ~> list.prepend[~, 5]
@@ -1038,7 +1038,7 @@ fn test_any_last_matches() {
             r#"
             list = %"list"
             math = %"math",
-            even? = #int { ~> =x => math.mod[x, 2] ~> =0 },
+            even? = #int { ~> math.mod[~, 2] ~> =0 },
             list.new[]
             ~> list.prepend[~, 2]
             ~> list.prepend[~, 3]

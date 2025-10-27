@@ -317,8 +317,8 @@ fn test_recursive_destructuring() {
 
 #[test]
 fn test_comparison_with_literal() {
-    quiver().evaluate("10 ~> =x, x ~> =10").expect("10");
-    quiver().evaluate("10 ~> =x, x ~> =5").expect("[]");
+    quiver().evaluate("10 ~> =10").expect("10");
+    quiver().evaluate("10 ~> =5").expect("[]");
 }
 
 #[test]

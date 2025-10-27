@@ -206,7 +206,7 @@ is_valid?!'    // Combined
 
 ## Pattern matching
 
-Pattern matching binds variables and tests values. Patterns can appear before a chain (`x = ...`) or within a chain (`... ~> =x`).
+Pattern matching binds variables and tests values. Patterns can appear before a chain (`x = ...`) or within a chain (`... ~> =x`). The expression evaluates to the value being matched, or nil (`[]`) if the expression doesn't match.
 
 ### Binding
 
@@ -239,7 +239,7 @@ Mix literals with bindings to test and extract:
 Point[x: 0, y] = Point[0, 10]    // Succeeds if x=0, binds y to 10
 Point[x: 0, y] = Point[1, 10]    // Fails (evaluates to [])
 
-5 ~> =x, x ~> =5                 // Bind then compare
+5 ~> =x ~> =5                    // Bind then compare
 role ~> ="admin"                 // String matching
 ```
 
@@ -302,7 +302,7 @@ value ~> {
 This allows 'guard'-style checks to be added to a condition:
 
 ```
-{ ~> =x, math.gt[x, 10] => "large" | "small" }
+{ ~> =Square[x] ~> math.gt[x, 10] => "large" | "small" }
 ```
 
 ## Field access
@@ -597,7 +597,7 @@ contains?[xs, 4]    // []
 clamp = #int {
   | ~> math.gt[~, 100] => 100
   | ~> math.lt[~, 0] => 0
-  | ~> =x => x
+  | ~>
 },
 
 150 ~> clamp,   // 100

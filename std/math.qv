@@ -10,10 +10,10 @@
   mod: __modulo__,
 
   // Comparison operations on [int, int] tuples
-  lt: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> =-1 },
-  le: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> { ~> =-1 | ~> =0 } },
-  gt: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> { ~> =1 } },
-  ge: #[int, int] { ~> =[a, b] => [a, b] ~> __compare__ ~> { ~> =0 | ~> =1 } },
+  lt: #[int, int] { ~> __compare__ ~> =-1 },
+  le: #[int, int] { ~> __compare__ ~> { ~> =-1 | ~> =0 } },
+  gt: #[int, int] { ~> __compare__ ~> { ~> =1 } },
+  ge: #[int, int] { ~> __compare__ ~> { ~> =0 | ~> =1 } },
 
   // Single-argument math functions
   abs: __abs__,

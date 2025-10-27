@@ -1135,7 +1135,7 @@ impl Executor {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-        process.stack.push(Value::ok());
+        process.stack.push(pid_value);
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
