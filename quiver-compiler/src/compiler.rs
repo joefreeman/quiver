@@ -7,13 +7,16 @@ mod codegen;
 mod helpers;
 mod modules;
 mod pattern;
+mod scopes;
 mod spread;
+mod type_queries;
 mod typing;
 mod variables;
 
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::MatchCertainty;
+pub use scopes::Scope;
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_types};
 
 use crate::{
@@ -142,20 +145,6 @@ pub struct CompilationResult {
     pub program: Program,
     pub type_aliases: HashMap<String, typing::TypeAliasDef>,
     pub module_cache: ModuleCache,
-}
-
-struct Scope {
-    variables: HashMap<String, (Type, usize)>,
-    parameter: Option<(Type, usize)>,
-}
-
-impl Scope {
-    fn new(variables: HashMap<String, (Type, usize)>, parameter: Option<(Type, usize)>) -> Self {
-        Self {
-            variables,
-            parameter,
-        }
-    }
 }
 
 /// Context for ripple operator (~) usage
@@ -457,16 +446,15 @@ impl<'a> Compiler<'a> {
                 ast::TupleName::Identifier(id) => {
                     // Identifier spread: identifier[..., fields]
                     // Look up the variable's type
-                    self.lookup_variable(&self.scopes, &id, &[])
-                        .and_then(|(var_type, _)| {
-                            if let Type::Tuple(type_id) = var_type {
-                                self.program
-                                    .lookup_type(&type_id)
-                                    .and_then(|type_info| type_info.name.clone())
-                            } else {
-                                None
-                            }
-                        })
+                    scopes::lookup_variable(&self.scopes, &id, &[]).and_then(|(var_type, _)| {
+                        if let Type::Tuple(type_id) = var_type {
+                            self.program
+                                .lookup_type(&type_id)
+                                .and_then(|type_info| type_info.name.clone())
+                        } else {
+                            None
+                        }
+                    })
                 }
             };
 
@@ -639,15 +627,20 @@ impl<'a> Compiler<'a> {
 
                 // Try to resolve the access to get its type
                 if let Some(identifier) = &access.identifier {
-                    let var_type = self
-                        .lookup_variable(&self.scopes, identifier, &access.accessors)
-                        .map(|(t, _)| t)
-                        .or_else(|| {
-                            let (base_type, _) =
-                                self.lookup_variable(&self.scopes, identifier, &[])?;
-                            self.resolve_accessor_type(base_type, &access.accessors, identifier)
+                    let var_type =
+                        scopes::lookup_variable(&self.scopes, identifier, &access.accessors)
+                            .map(|(t, _)| t)
+                            .or_else(|| {
+                                let (base_type, _) =
+                                    scopes::lookup_variable(&self.scopes, identifier, &[])?;
+                                type_queries::resolve_accessor_type(
+                                    &self.program,
+                                    base_type,
+                                    &access.accessors,
+                                    identifier,
+                                )
                                 .ok()
-                        });
+                            });
                     Ok(var_type)
                 } else {
                     Ok(None)
@@ -739,16 +732,21 @@ impl<'a> Compiler<'a> {
                     };
 
                     // Resolve variable type: try full path first, then base + accessor resolution
-                    let var_type = self
-                        .lookup_variable(&self.scopes, identifier, &access.accessors)
-                        .map(|(t, _)| t)
-                        .or_else(|| {
-                            // Full path not found - try resolving accessors through type system
-                            let (base_type, _) =
-                                self.lookup_variable(&self.scopes, identifier, &[])?;
-                            self.resolve_accessor_type(base_type, &access.accessors, identifier)
+                    let var_type =
+                        scopes::lookup_variable(&self.scopes, identifier, &access.accessors)
+                            .map(|(t, _)| t)
+                            .or_else(|| {
+                                // Full path not found - try resolving accessors through type system
+                                let (base_type, _) =
+                                    scopes::lookup_variable(&self.scopes, identifier, &[])?;
+                                type_queries::resolve_accessor_type(
+                                    &self.program,
+                                    base_type,
+                                    &access.accessors,
+                                    identifier,
+                                )
                                 .ok()
-                        });
+                            });
 
                     if let Some(Type::Callable(callable)) = var_type {
                         receive_types.push(callable.parameter.clone());
@@ -783,9 +781,8 @@ impl<'a> Compiler<'a> {
             &function_params,
             &|name, accessors| {
                 // Check if the full path (base + accessors) is defined, or just the base
-                self.lookup_variable(&self.scopes, name, accessors)
-                    .is_some()
-                    || self.lookup_variable(&self.scopes, name, &[]).is_some()
+                scopes::lookup_variable(&self.scopes, name, accessors).is_some()
+                    || scopes::lookup_variable(&self.scopes, name, &[]).is_some()
             },
         );
 
@@ -805,12 +802,12 @@ impl<'a> Compiler<'a> {
         for capture in &unique_captures {
             // First check if the full path is available (for nested captures)
             if let Some((_full_type, full_index)) =
-                self.lookup_variable(&self.scopes, &capture.base, &capture.accessors)
+                scopes::lookup_variable(&self.scopes, &capture.base, &capture.accessors)
             {
                 // The full path is already captured, just reuse it
                 capture_locals.push(full_index);
             } else if let Some((var_type, base_index)) =
-                self.lookup_variable(&self.scopes, &capture.base, &[])
+                scopes::lookup_variable(&self.scopes, &capture.base, &[])
             {
                 if capture.accessors.is_empty() {
                     // Simple capture - just reference the existing local
@@ -865,13 +862,14 @@ impl<'a> Compiler<'a> {
             // Determine the type of the captured value
             // First check if the full path is already available (for nested captures)
             let capture_type = if let Some((full_type, _)) =
-                self.lookup_variable(&saved_scopes, &capture.base, &capture.accessors)
+                scopes::lookup_variable(&saved_scopes, &capture.base, &capture.accessors)
             {
                 // The full path is already available from parent, use its type
                 full_type
             } else if capture.accessors.is_empty() {
                 // Simple capture - use the base variable's type
-                if let Some((var_type, _)) = self.lookup_variable(&saved_scopes, &capture.base, &[])
+                if let Some((var_type, _)) =
+                    scopes::lookup_variable(&saved_scopes, &capture.base, &[])
                 {
                     var_type
                 } else {
@@ -879,7 +877,8 @@ impl<'a> Compiler<'a> {
                 }
             } else {
                 // Capture with accessors - need to compute the accessed type
-                if let Some((var_type, _)) = self.lookup_variable(&saved_scopes, &capture.base, &[])
+                if let Some((var_type, _)) =
+                    scopes::lookup_variable(&saved_scopes, &capture.base, &[])
                 {
                     // Use compile_accessor logic to determine type
                     // We need to compute this without generating bytecode
@@ -889,7 +888,11 @@ impl<'a> Compiler<'a> {
                         let tuple_types = last_type.extract_tuple_types();
                         let field_types = match accessor {
                             ast::AccessPath::Field(field_name) => {
-                                match self.get_field_types_by_name(&tuple_types, field_name) {
+                                match type_queries::get_field_types_by_name(
+                                    &self.program,
+                                    &tuple_types,
+                                    field_name,
+                                ) {
                                     Ok(results) if !results.is_empty() => {
                                         results.into_iter().map(|(_, t)| t).collect()
                                     }
@@ -897,7 +900,11 @@ impl<'a> Compiler<'a> {
                                 }
                             }
                             ast::AccessPath::Index(index) => {
-                                match self.get_field_types_at_position(&tuple_types, *index) {
+                                match type_queries::get_field_types_at_position(
+                                    &self.program,
+                                    &tuple_types,
+                                    *index,
+                                ) {
                                     Ok(types) => types,
                                     _ => continue,
                                 }
@@ -911,7 +918,13 @@ impl<'a> Compiler<'a> {
                 }
             };
 
-            self.define_variable(&capture.base, &capture.accessors, capture_type);
+            scopes::define_variable(
+                &mut self.scopes,
+                &mut self.local_count,
+                &capture.base,
+                &capture.accessors,
+                capture_type,
+            );
         }
 
         let mut parameter_fields = HashMap::new();
@@ -1282,7 +1295,7 @@ impl<'a> Compiler<'a> {
         // If this is a continuation chain (starts with ~>), load the parameter
         let mut current_type = if chain.continuation {
             // Continuation chains explicitly use the parameter from scope
-            let (parameter_type, param_local) = self.get_parameter()?;
+            let (parameter_type, param_local) = scopes::get_parameter(&self.scopes)?;
             self.codegen.add_instruction(Instruction::Load(param_local));
             Some(parameter_type)
         } else {
@@ -2272,7 +2285,7 @@ impl<'a> Compiler<'a> {
 
             let func_type = if accessors.is_empty() {
                 // Simple identifier lookup
-                match self.lookup_variable(&self.scopes, name, &[]) {
+                match scopes::lookup_variable(&self.scopes, name, &[]) {
                     Some((func_type, index)) => {
                         self.codegen.add_instruction(Instruction::Load(index));
                         func_type
@@ -2405,50 +2418,6 @@ impl<'a> Compiler<'a> {
         Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
     }
 
-    fn resolve_accessor_type(
-        &self,
-        mut current_type: Type,
-        accessors: &[ast::AccessPath],
-        target_name: &str,
-    ) -> Result<Type, Error> {
-        for accessor in accessors {
-            let tuple_types = current_type.extract_tuple_types();
-
-            if tuple_types.is_empty() {
-                return Err(Error::MemberAccessOnNonTuple {
-                    target: target_name.to_string(),
-                });
-            }
-
-            let field_types = match accessor {
-                ast::AccessPath::Field(field_name) => {
-                    let results = self
-                        .get_field_types_by_name(&tuple_types, field_name)
-                        .map_err(|_| Error::MemberFieldNotFound {
-                            field_name: field_name.clone(),
-                            target: target_name.to_string(),
-                        })?;
-                    if results.is_empty() {
-                        return Err(Error::MemberFieldNotFound {
-                            field_name: field_name.clone(),
-                            target: target_name.to_string(),
-                        });
-                    }
-                    results.into_iter().map(|(_, t)| t).collect()
-                }
-                ast::AccessPath::Index(index) => self
-                    .get_field_types_at_position(&tuple_types, *index)
-                    .map_err(|_| Error::MemberAccessOnNonTuple {
-                        target: target_name.to_string(),
-                    })?,
-            };
-
-            current_type = Type::from_types(field_types);
-        }
-
-        Ok(current_type)
-    }
-
     fn compile_accessor(
         &mut self,
         mut last_type: Type,
@@ -2466,12 +2435,15 @@ impl<'a> Compiler<'a> {
 
             let (index, field_types) = match accessor {
                 ast::AccessPath::Field(field_name) => {
-                    let results = self
-                        .get_field_types_by_name(&tuple_types, &field_name)
-                        .map_err(|_| Error::MemberFieldNotFound {
-                            field_name: field_name.clone(),
-                            target: target_name.to_string(),
-                        })?;
+                    let results = type_queries::get_field_types_by_name(
+                        &self.program,
+                        &tuple_types,
+                        &field_name,
+                    )
+                    .map_err(|_| Error::MemberFieldNotFound {
+                        field_name: field_name.clone(),
+                        target: target_name.to_string(),
+                    })?;
                     if results.is_empty() {
                         return Err(Error::MemberFieldNotFound {
                             field_name,
@@ -2483,11 +2455,14 @@ impl<'a> Compiler<'a> {
                     (index, field_types)
                 }
                 ast::AccessPath::Index(index) => {
-                    let field_types = self
-                        .get_field_types_at_position(&tuple_types, index)
-                        .map_err(|_| Error::MemberAccessOnNonTuple {
-                            target: target_name.to_string(),
-                        })?;
+                    let field_types = type_queries::get_field_types_at_position(
+                        &self.program,
+                        &tuple_types,
+                        index,
+                    )
+                    .map_err(|_| Error::MemberAccessOnNonTuple {
+                        target: target_name.to_string(),
+                    })?;
                     (index, field_types)
                 }
             };
@@ -2507,7 +2482,7 @@ impl<'a> Compiler<'a> {
         // Check if we have a capture for the full path (base + accessors)
         if !accessors.is_empty()
             && let Some((capture_type, capture_index)) =
-                self.lookup_variable(&self.scopes, target, &accessors)
+                scopes::lookup_variable(&self.scopes, target, &accessors)
         {
             // We have a pre-evaluated capture for this exact path
             self.codegen
@@ -2516,120 +2491,10 @@ impl<'a> Compiler<'a> {
         }
 
         // No pre-evaluated capture, use standard member access
-        let (last_type, index) = self
-            .lookup_variable(&self.scopes, target, &[])
+        let (last_type, index) = scopes::lookup_variable(&self.scopes, target, &[])
             .ok_or(Error::VariableUndefined(target.to_string()))?;
         self.codegen.add_instruction(Instruction::Load(index));
 
         self.compile_accessor(last_type, accessors, target)
-    }
-
-    fn define_variable(
-        &mut self,
-        name: &str,
-        accessors: &[ast::AccessPath],
-        var_type: Type,
-    ) -> usize {
-        let full_name = helpers::make_capture_name(name, accessors);
-        let index = self.local_count;
-        self.local_count += 1;
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.variables.insert(full_name, (var_type, index));
-        }
-        index
-    }
-
-    fn lookup_variable(
-        &self,
-        scopes: &[Scope],
-        name: &str,
-        accessors: &[ast::AccessPath],
-    ) -> Option<(Type, usize)> {
-        let full_name = helpers::make_capture_name(name, accessors);
-        for scope in scopes.iter().rev() {
-            if let Some(&(ref variable_type, index)) = scope.variables.get(&full_name) {
-                return Some((variable_type.clone(), index));
-            }
-        }
-        None
-    }
-
-    fn get_parameter(&self) -> Result<(Type, usize), Error> {
-        self.scopes
-            .last()
-            .and_then(|scope| scope.parameter.clone())
-            .ok_or_else(|| Error::InternalError {
-                message: "No parameter in current scope".to_string(),
-            })
-    }
-
-    /// Get field type at the given position for all tuple types in the list
-    /// Returns error if any tuple doesn't have the field or if tuples have different structures
-    fn get_field_types_at_position(
-        &self,
-        tuple_types: &[TypeId],
-        position: usize,
-    ) -> Result<Vec<Type>, Error> {
-        let mut field_types = Vec::new();
-
-        for type_id in tuple_types {
-            let type_info = self
-                .program
-                .lookup_type(type_id)
-                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
-            let fields = &type_info.fields;
-
-            if let Some((_, field_type)) = fields.get(position) {
-                field_types.push(field_type.clone());
-            } else {
-                return Err(Error::PositionalIndexOutOfBounds { index: position });
-            }
-        }
-
-        Ok(field_types)
-    }
-
-    /// Get field type by name for all tuple types in the list
-    /// Returns error if any tuple doesn't have the field
-    fn get_field_types_by_name(
-        &self,
-        tuple_types: &[TypeId],
-        field_name: &str,
-    ) -> Result<Vec<(usize, Type)>, Error> {
-        let mut results = Vec::new();
-        let mut common_index = None;
-
-        for type_id in tuple_types {
-            // Look up the field in this tuple type
-            let tuple_type = self
-                .program
-                .lookup_type(type_id)
-                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
-            let (index, (_, field_type)) = tuple_type
-                .fields
-                .iter()
-                .enumerate()
-                .find(|(_, field)| field.0.as_deref() == Some(field_name))
-                .ok_or(Error::FieldNotFound {
-                    field_name: field_name.to_string(),
-                    type_name: format!("{:?}", type_id),
-                })?;
-
-            // Verify all tuples have the field at the same index
-            if let Some(prev_index) = common_index {
-                if prev_index != index {
-                    return Err(Error::MemberFieldNotFound {
-                        field_name: field_name.to_string(),
-                        target: "multiple tuple types".to_string(),
-                    });
-                }
-            } else {
-                common_index = Some(index);
-            }
-
-            results.push((index, field_type.clone()));
-        }
-
-        Ok(results)
     }
 }

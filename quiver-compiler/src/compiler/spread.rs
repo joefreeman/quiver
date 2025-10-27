@@ -89,9 +89,9 @@ fn compile_field_values(
                         ctx.value_type.clone()
                     }
                     ast::SpreadSource::Identifier(id) => {
-                        let (var_type, var_index) = compiler
-                            .lookup_variable(&compiler.scopes, id, &[])
-                            .ok_or_else(|| Error::VariableUndefined(id.clone()))?;
+                        let (var_type, var_index) =
+                            super::scopes::lookup_variable(&compiler.scopes, id, &[])
+                                .ok_or_else(|| Error::VariableUndefined(id.clone()))?;
                         compiler
                             .codegen
                             .add_instruction(Instruction::Load(var_index));
