@@ -5,6 +5,8 @@
 ### Changed
 
 - The value of a match expression (`... ~> =x` or `x = ...`) now returns the value itself if the match is successful (and nil otherwise).
+- Added support for multiple REPL instances for an environment.
+- Various updates to the web API.
 
 ## [0.2.1] - 2025-10-25
 
