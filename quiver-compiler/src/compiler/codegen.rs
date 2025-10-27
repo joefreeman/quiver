@@ -1,4 +1,4 @@
-use quiver_core::bytecode::Instruction;
+use quiver_core::bytecode::{Instruction, TypeId};
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {
@@ -67,5 +67,27 @@ impl InstructionBuilder {
         let jump_addr = self.emit_jump_if_placeholder();
         self.add_instruction(Instruction::Pop);
         jump_addr
+    }
+
+    /// Emits Pick followed by Get - common pattern for accessing nested fields
+    pub fn emit_pick_and_get(&mut self, depth: usize, index: usize) {
+        self.add_instruction(Instruction::Pick(depth));
+        self.add_instruction(Instruction::Get(index));
+    }
+
+    /// Emits Rotate followed by Pop - common pattern for cleaning up stack values
+    pub fn emit_rotate_pop(&mut self, rotate_count: usize) {
+        self.add_instruction(Instruction::Rotate(rotate_count));
+        self.add_instruction(Instruction::Pop);
+    }
+
+    /// Emits type check and branch pattern: Pick -> IsTuple -> Not -> JumpIf
+    /// Returns the jump address for patching later
+    /// Used when branching based on tuple type matching
+    pub fn emit_type_check_branch(&mut self, depth: usize, type_id: TypeId) -> usize {
+        self.add_instruction(Instruction::Pick(depth));
+        self.add_instruction(Instruction::IsTuple(type_id));
+        self.add_instruction(Instruction::Not);
+        self.emit_jump_if_placeholder()
     }
 }

@@ -4,6 +4,7 @@ use std::{
 };
 
 mod codegen;
+mod helpers;
 mod modules;
 mod pattern;
 mod spread;
@@ -429,10 +430,10 @@ impl<'a> Compiler<'a> {
         fields: Vec<ast::TupleField>,
         ripple_context: Option<&RippleContext>,
     ) -> Result<Type, Error> {
-        Self::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
+        helpers::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
         // Check if this tuple contains spreads
-        let contains_spread = Self::tuple_contains_spread(&fields);
+        let contains_spread = helpers::tuple_contains_spread(&fields);
 
         if contains_spread {
             // Resolve tuple name based on the TupleName variant
@@ -529,57 +530,6 @@ impl<'a> Compiler<'a> {
         }
 
         Ok(Type::Tuple(type_id))
-    }
-
-    fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
-        fields.iter().any(|f| match &f.value {
-            ast::FieldValue::Chain(chain) => Self::chain_contains_ripple(chain),
-            ast::FieldValue::Spread(_) => false,
-        })
-    }
-
-    fn select_contains_ripple(sources: &[ast::Chain]) -> bool {
-        sources.iter().any(Self::chain_contains_ripple)
-    }
-
-    fn chain_contains_ripple(chain: &ast::Chain) -> bool {
-        for term in &chain.terms {
-            match term {
-                ast::Term::Ripple => return true,
-                ast::Term::BindMatch(_) | ast::Term::PinMatch(_) => continue,
-                ast::Term::Tuple(tuple) => return Self::tuple_contains_ripple(&tuple.fields),
-                ast::Term::Block(block) => return Self::block_contains_ripple(block),
-                ast::Term::Function(func) => {
-                    return func.body.as_ref().is_some_and(Self::block_contains_ripple);
-                }
-                ast::Term::Select(select) => {
-                    return Self::select_contains_ripple(&select.sources);
-                }
-                _ => return false,
-            }
-        }
-        false
-    }
-
-    fn block_contains_ripple(block: &ast::Block) -> bool {
-        block.branches.iter().any(|branch| {
-            branch
-                .condition
-                .chains
-                .iter()
-                .any(Self::chain_contains_ripple)
-                || branch
-                    .consequence
-                    .as_ref()
-                    .is_some_and(|expr| expr.chains.iter().any(Self::chain_contains_ripple))
-        })
-    }
-
-    // Helper function to check if tuple fields contain spread operations
-    fn tuple_contains_spread(fields: &[ast::TupleField]) -> bool {
-        fields
-            .iter()
-            .any(|field| matches!(field.value, ast::FieldValue::Spread(_)))
     }
 
     fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<Type, Error> {
@@ -1757,8 +1707,8 @@ impl<'a> Compiler<'a> {
             ast::Term::Tuple(tuple) => {
                 // Tuples without ripples or spreads when a value is present should use assignment patterns
                 if value_type.is_some()
-                    && !Self::tuple_contains_ripple(&tuple.fields)
-                    && !Self::tuple_contains_spread(&tuple.fields)
+                    && !helpers::tuple_contains_ripple(&tuple.fields)
+                    && !helpers::tuple_contains_spread(&tuple.fields)
                 {
                     return Err(Error::ValueIgnored(
                         "Tuple construction ignores piped value; use ripple (e.g., [~, 2]) or assignment pattern (e.g., =[x, y])"
@@ -1840,8 +1790,8 @@ impl<'a> Compiler<'a> {
                         let arg_type = if let Some(args) = &access.argument {
                             // Check if argument would silently drop piped value
                             if value_type.is_some()
-                                && !Self::tuple_contains_ripple(&args.fields)
-                                && !Self::tuple_contains_spread(&args.fields)
+                                && !helpers::tuple_contains_ripple(&args.fields)
+                                && !helpers::tuple_contains_spread(&args.fields)
                             {
                                 return Err(Error::ValueIgnored(
                                     "Function argument ignores piped value; use ripple (e.g., f[~, 2])"
@@ -1900,8 +1850,8 @@ impl<'a> Compiler<'a> {
                 let arg_type = if let Some(args) = &builtin.argument {
                     // Check if argument would silently drop piped value
                     if value_type.is_some()
-                        && !Self::tuple_contains_ripple(&args.fields)
-                        && !Self::tuple_contains_spread(&args.fields)
+                        && !helpers::tuple_contains_ripple(&args.fields)
+                        && !helpers::tuple_contains_spread(&args.fields)
                     {
                         return Err(Error::ValueIgnored(
                             "Builtin argument ignores piped value; use ripple (e.g., __add__[~, 2])"
@@ -2092,7 +2042,7 @@ impl<'a> Compiler<'a> {
                 }
 
                 // If there's a chained value, check that it's used (via ripple) in at least one source
-                if value_type.is_some() && !Self::select_contains_ripple(&sources) {
+                if value_type.is_some() && !helpers::select_contains_ripple(&sources) {
                     return Err(Error::FeatureUnsupported(
                         "Chained value must be used in select sources (use ripple operator ~)"
                             .to_string(),
@@ -2574,29 +2524,13 @@ impl<'a> Compiler<'a> {
         self.compile_accessor(last_type, accessors, target)
     }
 
-    fn make_capture_name(&self, base: &str, accessors: &[ast::AccessPath]) -> String {
-        if accessors.is_empty() {
-            base.to_string()
-        } else {
-            let accessor_suffix = accessors
-                .iter()
-                .map(|acc| match acc {
-                    ast::AccessPath::Field(name) => name.clone(),
-                    ast::AccessPath::Index(idx) => idx.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(".");
-            format!("{}.{}", base, accessor_suffix)
-        }
-    }
-
     fn define_variable(
         &mut self,
         name: &str,
         accessors: &[ast::AccessPath],
         var_type: Type,
     ) -> usize {
-        let full_name = self.make_capture_name(name, accessors);
+        let full_name = helpers::make_capture_name(name, accessors);
         let index = self.local_count;
         self.local_count += 1;
         if let Some(scope) = self.scopes.last_mut() {
@@ -2611,7 +2545,7 @@ impl<'a> Compiler<'a> {
         name: &str,
         accessors: &[ast::AccessPath],
     ) -> Option<(Type, usize)> {
-        let full_name = self.make_capture_name(name, accessors);
+        let full_name = helpers::make_capture_name(name, accessors);
         for scope in scopes.iter().rev() {
             if let Some(&(ref variable_type, index)) = scope.variables.get(&full_name) {
                 return Some((variable_type.clone(), index));
@@ -2627,21 +2561,6 @@ impl<'a> Compiler<'a> {
             .ok_or_else(|| Error::InternalError {
                 message: "No parameter in current scope".to_string(),
             })
-    }
-
-    fn check_field_name_duplicates<T>(
-        fields: &[T],
-        get_name: impl Fn(&T) -> Option<&String>,
-    ) -> Result<(), Error> {
-        let mut seen_names = HashSet::new();
-        for field in fields {
-            if let Some(field_name) = get_name(field)
-                && !seen_names.insert(field_name.clone())
-            {
-                return Err(Error::FieldDuplicated(field_name.clone()));
-            }
-        }
-        Ok(())
     }
 
     /// Get field type at the given position for all tuple types in the list
