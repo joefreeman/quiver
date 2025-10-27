@@ -3,6 +3,14 @@ use std::collections::HashSet;
 
 use super::Error;
 
+/// Reserved primitive type names that cannot be used as variable or type alias names
+pub const RESERVED_NAMES: &[&str] = &["int", "bin"];
+
+/// Check if a name is reserved and cannot be used as a variable or type alias
+pub fn is_reserved_name(name: &str) -> bool {
+    RESERVED_NAMES.contains(&name)
+}
+
 /// Check if a tuple contains ripple operations (~) in any of its field values
 pub fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
     fields.iter().any(|f| match &f.value {

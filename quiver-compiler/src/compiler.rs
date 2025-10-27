@@ -306,7 +306,7 @@ impl<'a> Compiler<'a> {
         type_definition: ast::Type,
     ) -> Result<(), Error> {
         // Prevent shadowing primitive types
-        if matches!(name, "int" | "bin") {
+        if helpers::is_reserved_name(name) {
             return Err(Error::TypeUnresolved(format!(
                 "Cannot redefine primitive type '{}'",
                 name
@@ -937,7 +937,7 @@ impl<'a> Compiler<'a> {
                 &capture.base,
                 &capture.accessors,
                 capture_type,
-            );
+            )?;
         }
 
         let mut parameter_fields = HashMap::new();
@@ -1043,6 +1043,14 @@ impl<'a> Compiler<'a> {
                 let mut bindings_map = HashMap::new();
 
                 for (variable_name, variable_type) in &bindings {
+                    // Check for reserved primitive type names
+                    if helpers::is_reserved_name(variable_name) {
+                        return Err(Error::TypeUnresolved(format!(
+                            "Cannot use reserved primitive type '{}' as a variable name",
+                            variable_name
+                        )));
+                    }
+
                     let local_index = self.local_count;
                     self.local_count += 1;
                     bindings_map.insert(variable_name.clone(), local_index);

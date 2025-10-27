@@ -43,7 +43,15 @@ pub fn define_variable(
     name: &str,
     accessors: &[ast::AccessPath],
     var_type: Type,
-) -> usize {
+) -> Result<usize, Error> {
+    // Only check base name (not captured field paths like "foo.x")
+    if accessors.is_empty() && helpers::is_reserved_name(name) {
+        return Err(Error::TypeUnresolved(format!(
+            "Cannot use reserved primitive type '{}' as a variable name",
+            name
+        )));
+    }
+
     let full_name = helpers::make_capture_name(name, accessors);
     let index = *local_count;
     *local_count += 1;
@@ -56,7 +64,7 @@ pub fn define_variable(
             },
         );
     }
-    index
+    Ok(index)
 }
 
 /// Define a new type alias in the current scope

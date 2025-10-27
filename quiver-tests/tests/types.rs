@@ -892,3 +892,62 @@ fn test_primitive_type_alias_bin() {
             "Cannot redefine primitive type 'bin'".to_string(),
         ));
 }
+
+#[test]
+fn test_reserved_name_int_as_variable() {
+    quiver().evaluate("#{ 42 ~> =int }").expect_compile_error(
+        quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
+        ),
+    );
+}
+
+#[test]
+fn test_reserved_name_bin_as_variable() {
+    quiver().evaluate("#{ '0a' ~> =bin }").expect_compile_error(
+        quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
+        ),
+    );
+}
+
+#[test]
+fn test_reserved_name_int_in_destructuring() {
+    quiver()
+        .evaluate("#{ [1, 2] ~> =[int, y] }")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
+        ));
+}
+
+#[test]
+fn test_reserved_name_bin_in_destructuring() {
+    quiver()
+        .evaluate("#{ ['0a', '0b'] ~> =[bin, y] }")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
+        ));
+}
+
+#[test]
+fn test_reserved_name_int_in_nested_pattern() {
+    quiver()
+        .evaluate("#{ [1, [2, 3]] ~> =[x, [y, int]] }")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
+        ));
+}
+
+#[test]
+fn test_reserved_names_allowed_as_field_names() {
+    quiver()
+        .evaluate("Config[int: 42, bin: 99]")
+        .expect("Config[int: 42, bin: 99]");
+}
+
+#[test]
+fn test_reserved_names_allowed_in_type_definitions() {
+    quiver()
+        .evaluate("data :: Data[int: int, bin: int]; Data[int: 42, bin: 99]")
+        .expect("Data[int: 42, bin: 99]");
+}
