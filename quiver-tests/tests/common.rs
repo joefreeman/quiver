@@ -84,7 +84,7 @@ impl TestBuilder {
                         virtual_time_ms.fetch_add(1, Ordering::Relaxed);
                     }
 
-                    match repl.poll_request(&mut environment, request_id) {
+                    match environment.poll_request(request_id) {
                         Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap))))) => {
                             break Ok(Some((value, heap)));
                         }

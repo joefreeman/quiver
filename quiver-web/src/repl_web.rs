@@ -10,7 +10,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::Worker;
 
-// Define TypeScript types for callbacks and the Repl class
+// Define TypeScript types for callbacks and classes
 #[wasm_bindgen(typescript_custom_section)]
 const TS_DEFINITIONS: &'static str = r#"
 export type WorkerFactory = () => Worker;
@@ -19,12 +19,12 @@ export type VariablesCallback = (result: JsResult<JsVariable[]>) => void;
 export type ProcessStatusesCallback = (result: JsResult<JsProcess[]>) => void;
 export type ProcessInfoCallback = (result: JsResult<JsProcessInfo | null>) => void;
 
-export class Repl {
+export class Environment {
   free(): void;
   [Symbol.dispose](): void;
 
   /**
-   * Create a new REPL with the specified number of workers
+   * Create a new environment with the specified number of workers
    * @param num_workers - Number of worker threads to create
    * @param worker_factory - Factory function that returns a new Worker
    */
@@ -39,19 +39,6 @@ export class Repl {
    * Stop the event loop
    */
   stop(): void;
-
-  /**
-   * Evaluate source code and invoke callback when result is ready
-   * @param source - Quiver source code to evaluate
-   * @param callback - Callback invoked with the evaluation result
-   */
-  evaluate(source: string, callback: EvaluateCallback): void;
-
-  /**
-   * Get all variables defined in the REPL
-   * @param callback - Callback invoked with the list of variables
-   */
-  get_variables(callback: VariablesCallback): void;
 
   /**
    * Get all process statuses
@@ -80,6 +67,35 @@ export class Repl {
    * @returns Formatted string representation
    */
   format_type(value: QuiverValue): string;
+}
+
+export class Repl {
+  free(): void;
+  [Symbol.dispose](): void;
+
+  /**
+   * Create a new REPL using the given environment
+   * @param environment - Environment instance to use
+   */
+  constructor(environment: Environment);
+
+  /**
+   * Evaluate source code and invoke callback when result is ready
+   * @param source - Quiver source code to evaluate
+   * @param callback - Callback invoked with the evaluation result
+   */
+  evaluate(source: string, callback: EvaluateCallback): void;
+
+  /**
+   * Get all variables defined in the REPL
+   * @param callback - Callback invoked with the list of variables
+   */
+  get_variables(callback: VariablesCallback): void;
+
+  /**
+   * Compact locals to remove unused variables.
+   */
+  compact(): void;
 }
 "#;
 
@@ -114,20 +130,19 @@ impl CallbackHandle {
 type EventLoopClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
 #[wasm_bindgen(skip_typescript)]
-pub struct Repl {
+pub struct Environment {
     environment: Rc<RefCell<quiver_environment::Environment>>,
-    repl: Rc<RefCell<quiver_environment::Repl>>,
     running: Rc<RefCell<bool>>,
     event_loop_closure: EventLoopClosure,
     pending_callbacks: Rc<RefCell<HashMap<u64, CallbackHandle>>>,
 }
 
 #[wasm_bindgen]
-impl Repl {
-    /// Create a new REPL with the specified number of workers
+impl Environment {
+    /// Create a new environment with the specified number of workers
     /// worker_factory: A JavaScript function that returns a new Worker
     #[wasm_bindgen(constructor)]
-    pub fn new(num_workers: usize, worker_factory: JsValue) -> Result<Repl, JsValue> {
+    pub fn new(num_workers: usize, worker_factory: JsValue) -> Result<Environment, JsValue> {
         let worker_factory: js_sys::Function = worker_factory.into();
         // Set up panic hook for better error messages
         console_error_panic_hook::set_once();
@@ -190,19 +205,27 @@ impl Repl {
             workers.push(Box::new(handle));
         }
 
-        // Create environment and REPL
+        // Create environment
         let environment = quiver_environment::Environment::new(workers);
-        let program = Program::new();
-        let module_loader = create_std_module_loader();
-        let repl = quiver_environment::Repl::new(program, module_loader);
+        let environment_rc = Rc::new(RefCell::new(environment));
+        let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
 
         Ok(Self {
-            environment: Rc::new(RefCell::new(environment)),
-            repl: Rc::new(RefCell::new(repl)),
+            environment: environment_rc,
             running: Rc::new(RefCell::new(false)),
             event_loop_closure: Rc::new(RefCell::new(None)),
-            pending_callbacks: Rc::new(RefCell::new(HashMap::new())),
+            pending_callbacks,
         })
+    }
+
+    /// Get shared state for Repl instances (internal use)
+    fn get_shared_state(
+        &self,
+    ) -> (
+        Rc<RefCell<quiver_environment::Environment>>,
+        Rc<RefCell<HashMap<u64, CallbackHandle>>>,
+    ) {
+        (self.environment.clone(), self.pending_callbacks.clone())
     }
 
     /// Start the event loop
@@ -214,7 +237,6 @@ impl Repl {
         *self.running.borrow_mut() = true;
 
         let environment = self.environment.clone();
-        let repl = self.repl.clone();
         let running = self.running.clone();
         let pending_callbacks = self.pending_callbacks.clone();
 
@@ -237,10 +259,7 @@ impl Repl {
                 let request_ids: Vec<u64> = callbacks.keys().copied().collect();
 
                 for request_id in request_ids {
-                    match repl
-                        .borrow_mut()
-                        .poll_request(&mut environment.borrow_mut(), request_id)
-                    {
+                    match environment.borrow_mut().poll_request(request_id) {
                         Ok(Some(result)) => {
                             if let Some(callback) = callbacks.remove(&request_id) {
                                 callbacks_to_invoke.push((callback, result));
@@ -305,51 +324,6 @@ impl Repl {
     /// Stop the event loop
     pub fn stop(&mut self) {
         *self.running.borrow_mut() = false;
-    }
-
-    /// Evaluate source code and invoke callback when result is ready
-    pub fn evaluate(&mut self, source: String, callback: JsValue) {
-        let callback: js_sys::Function = callback.into();
-        let result = self
-            .repl
-            .borrow_mut()
-            .evaluate(&mut self.environment.borrow_mut(), &source);
-
-        match result {
-            Ok(Some(request_id)) => {
-                // Store callback for later
-                self.pending_callbacks
-                    .borrow_mut()
-                    .insert(request_id, CallbackHandle::new(callback));
-            }
-            Ok(None) => {
-                // No executable code (e.g., only type definitions)
-                let cb = CallbackHandle::new(callback);
-                cb.invoke(JsResult::ok(None::<JsEvaluationResult>));
-            }
-            Err(e) => {
-                let cb = CallbackHandle::new(callback);
-                cb.invoke::<JsEvaluationResult>(JsResult::err(format!("{}", e)));
-            }
-        }
-    }
-
-    /// Get all variables (synchronous)
-    pub fn get_variables(&self, callback: JsValue) {
-        let callback: js_sys::Function = callback.into();
-        let environment = self.environment.borrow();
-        let repl = self.repl.borrow();
-        let vars = repl.get_variables();
-        let js_vars: Vec<JsVariable> = vars
-            .into_iter()
-            .map(|(name, ty)| JsVariable {
-                name,
-                var_type: environment.format_type(&ty),
-            })
-            .collect();
-
-        let cb = CallbackHandle::new(callback);
-        cb.invoke(JsResult::ok(js_vars));
     }
 
     /// Get all process statuses
@@ -473,5 +447,88 @@ impl Repl {
                 callback.invoke::<()>(JsResult::err("Unexpected result type: Locals"));
             }
         }
+    }
+}
+
+#[wasm_bindgen(skip_typescript)]
+pub struct Repl {
+    environment: Rc<RefCell<quiver_environment::Environment>>,
+    pending_callbacks: Rc<RefCell<HashMap<u64, CallbackHandle>>>,
+    repl: Rc<RefCell<quiver_environment::Repl>>,
+}
+
+#[wasm_bindgen]
+impl Repl {
+    /// Create a new REPL using the given environment
+    #[wasm_bindgen(constructor)]
+    pub fn new(environment: &Environment) -> Result<Repl, JsValue> {
+        // Set up panic hook for better error messages
+        console_error_panic_hook::set_once();
+
+        // Get shared state from environment
+        let (env_rc, callbacks_rc) = environment.get_shared_state();
+
+        // Create REPL
+        let program = Program::new();
+        let module_loader = create_std_module_loader();
+        let repl = quiver_environment::Repl::new(program, module_loader);
+
+        Ok(Self {
+            environment: env_rc,
+            pending_callbacks: callbacks_rc,
+            repl: Rc::new(RefCell::new(repl)),
+        })
+    }
+
+    /// Evaluate source code and invoke callback when result is ready
+    pub fn evaluate(&mut self, source: String, callback: JsValue) {
+        let callback: js_sys::Function = callback.into();
+        let result = self
+            .repl
+            .borrow_mut()
+            .evaluate(&mut self.environment.borrow_mut(), &source);
+
+        match result {
+            Ok(Some(request_id)) => {
+                // Store callback for later
+                self.pending_callbacks
+                    .borrow_mut()
+                    .insert(request_id, CallbackHandle::new(callback));
+            }
+            Ok(None) => {
+                // No executable code (e.g., only type definitions)
+                let cb = CallbackHandle::new(callback);
+                cb.invoke(JsResult::ok(None::<JsEvaluationResult>));
+            }
+            Err(e) => {
+                let cb = CallbackHandle::new(callback);
+                cb.invoke::<JsEvaluationResult>(JsResult::err(format!("{}", e)));
+            }
+        }
+    }
+
+    /// Compact locals to remove unused variables (optimization, safe to skip)
+    pub fn compact(&mut self) {
+        self.repl
+            .borrow_mut()
+            .compact(&mut self.environment.borrow_mut());
+    }
+
+    /// Get all variables (synchronous)
+    pub fn get_variables(&self, callback: JsValue) {
+        let callback: js_sys::Function = callback.into();
+        let environment = self.environment.borrow();
+        let repl = self.repl.borrow();
+        let vars = repl.get_variables();
+        let js_vars: Vec<JsVariable> = vars
+            .into_iter()
+            .map(|(name, ty)| JsVariable {
+                name,
+                var_type: environment.format_type(&ty),
+            })
+            .collect();
+
+        let cb = CallbackHandle::new(callback);
+        cb.invoke(JsResult::ok(js_vars));
     }
 }

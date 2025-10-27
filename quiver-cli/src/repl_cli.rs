@@ -176,7 +176,7 @@ impl ReplCli {
         loop {
             self.environment.step()?;
 
-            match self.repl.poll_request(&mut self.environment, request_id)? {
+            match self.environment.poll_request(request_id)? {
                 Some(result) => return Ok(result),
                 None => std::thread::sleep(std::time::Duration::from_micros(10)),
             }
@@ -304,6 +304,9 @@ impl ReplCli {
 
         match self.wait_for_result(request_id) {
             Ok(RequestResult::Result(Ok((value, heap)))) => {
+                // Compact locals after successful evaluation (optimization)
+                self.repl.compact(&mut self.environment);
+
                 // Track if result was nil for colored prompt
                 self.last_was_nil = value.is_nil();
 
@@ -326,6 +329,10 @@ impl ReplCli {
                 println!("{}", output);
             }
             Ok(RequestResult::Result(Err(e))) => {
+                // Create a new REPL after runtime error
+                let program = Program::new();
+                let module_loader = Box::new(FileSystemModuleLoader::new());
+                self.repl = Repl::new(program, module_loader);
                 self.last_was_nil = false;
                 eprintln!("{}", self.format_error(ReplError::Runtime(e)).red());
             }

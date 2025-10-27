@@ -1,4 +1,4 @@
-use crate::environment::{Environment, EnvironmentError, RequestResult};
+use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::modules::ModuleLoader;
@@ -151,33 +151,6 @@ impl Repl {
         Ok(Some(request_id))
     }
 
-    /// Poll for a request result (non-blocking)
-    /// Returns None if not ready, Some(Ok(...)) on success, Some(Err(...)) on error
-    /// Handles all request types (evaluation results, statuses, info, locals, etc.)
-    pub fn poll_request(
-        &mut self,
-        env: &mut Environment,
-        request_id: u64,
-    ) -> Result<Option<RequestResult>, EnvironmentError> {
-        match env.poll_request(request_id)? {
-            None => Ok(None),
-            Some(RequestResult::Result(Ok((value, heap)))) => {
-                self.compact(env)?;
-                Ok(Some(RequestResult::Result(Ok((value, heap)))))
-            }
-            Some(RequestResult::Result(Err(error))) => {
-                // Got a runtime error - reset REPL state
-                self.repl_process_id = None; // Next eval will create new process
-                self.variable_map.clear();
-                self.type_aliases.clear();
-                self.module_cache = ModuleCache::new();
-                self.last_result_type = Type::nil();
-                Ok(Some(RequestResult::Result(Err(error))))
-            }
-            result => Ok(result),
-        }
-    }
-
     /// Request a variable value by name
     /// Returns a request ID that can be polled with poll_request()
     /// The result will be RequestResult::Locals containing the variable value
@@ -213,11 +186,12 @@ impl Repl {
         vars.into_iter().map(|(name, ty, _)| (name, ty)).collect()
     }
 
-    /// Compact locals to remove unused variables (called automatically after evaluation)
-    fn compact(&mut self, env: &mut Environment) -> Result<(), EnvironmentError> {
-        let repl_process_id = self
-            .repl_process_id
-            .ok_or(EnvironmentError::NoReplProcess)?;
+    /// Compact locals to remove unused variables (optimization, safe to skip)
+    pub fn compact(&mut self, env: &mut Environment) {
+        // Silently ignore if no REPL process exists yet
+        let Some(repl_process_id) = self.repl_process_id else {
+            return;
+        };
 
         // Keep all variables currently in the variable map
         // Sort indices to ensure consistent ordering
@@ -233,15 +207,14 @@ impl Repl {
 
         // Update variable_map with new indices
         for (_, idx) in self.variable_map.values_mut() {
-            *idx = *index_mapping
+            *idx = index_mapping
                 .get(idx)
-                .ok_or(EnvironmentError::InvalidVariableIndex(*idx))?;
+                .copied()
+                .expect("Invalid variable index");
         }
 
-        // Compact the locals on the worker
-        env.compact_locals(repl_process_id, keep_indices)?;
-
-        Ok(())
+        // Compact the locals on the worker (ignore errors - this is just an optimization)
+        let _ = env.compact_locals(repl_process_id, keep_indices);
     }
 
     /// Resolve a type alias and return the resolved Type.
