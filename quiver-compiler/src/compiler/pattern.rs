@@ -55,7 +55,7 @@ type AccessPath = Vec<usize>;
 
 /// Tracks information about identifiers encountered during pattern analysis
 #[derive(Debug, Clone)]
-struct Indentifier {
+struct Identifier {
     first_path: AccessPath,
     is_pin_mode: bool,
     is_repeated: bool,
@@ -251,7 +251,7 @@ fn analyze_match_pattern(
     value_type: &Type,
     path: AccessPath,
     mode: PatternMode,
-    identifiers: &mut HashMap<String, Indentifier>,
+    identifiers: &mut HashMap<String, Identifier>,
     variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     match pattern {
@@ -309,7 +309,7 @@ fn analyze_match_tuple_pattern(
     value_type: &Type,
     path: AccessPath,
     mode: PatternMode,
-    identifiers: &mut HashMap<String, Indentifier>,
+    identifiers: &mut HashMap<String, Identifier>,
     variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
@@ -488,7 +488,7 @@ fn analyze_identifier_pattern(
     value_type: Type,
     path: AccessPath,
     mode: PatternMode,
-    identifiers: &mut HashMap<String, Indentifier>,
+    identifiers: &mut HashMap<String, Identifier>,
     variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     // Check if we've seen this identifier before
@@ -506,7 +506,7 @@ fn analyze_identifier_pattern(
         // First occurrence - record it
         identifiers.insert(
             name.clone(),
-            Indentifier {
+            Identifier {
                 first_path: path.clone(),
                 is_pin_mode: mode == PatternMode::Pin,
                 is_repeated: false,
@@ -549,7 +549,7 @@ fn analyze_partial_pattern(
     partial_pattern: &ast::PartialPattern,
     value_type: &Type,
     path: AccessPath,
-    identifiers: &mut HashMap<String, Indentifier>,
+    identifiers: &mut HashMap<String, Identifier>,
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
 
@@ -604,7 +604,7 @@ fn analyze_partial_pattern(
                 // First occurrence - record it and create binding
                 variant_identifiers.insert(
                     field_name.clone(),
-                    Indentifier {
+                    Identifier {
                         first_path: field_path.clone(),
                         is_pin_mode: false,
                         is_repeated: false,
@@ -631,7 +631,7 @@ fn analyze_star_pattern(
     type_lookup: &impl TypeLookup,
     value_type: &Type,
     path: AccessPath,
-    identifiers: &mut HashMap<String, Indentifier>,
+    identifiers: &mut HashMap<String, Identifier>,
 ) -> Result<Vec<BindingSet>, Error> {
     // Collect all tuple types
     let tuple_types = value_type.extract_tuple_types();
@@ -679,7 +679,7 @@ fn analyze_star_pattern(
                     // First occurrence - record it and create binding
                     variant_identifiers.insert(
                         field_name.clone(),
-                        Indentifier {
+                        Identifier {
                             first_path: field_path.clone(),
                             is_pin_mode: false,
                             is_repeated: false,
