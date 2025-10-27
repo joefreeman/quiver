@@ -904,8 +904,10 @@ fn not_term(input: &str) -> IResult<&str, Term> {
 }
 
 fn spawn_term(input: &str) -> IResult<&str, Term> {
-    // Match @ followed by a term
-    map(preceded(char('@'), term), |t| Term::Spawn(Box::new(t)))(input)
+    // Match @ followed by optional term (bare @ becomes @~)
+    map(preceded(char('@'), opt(term)), |opt_t| {
+        Term::Spawn(Box::new(opt_t.unwrap_or(Term::Ripple)))
+    })(input)
 }
 
 fn self_term(input: &str) -> IResult<&str, Term> {

@@ -2006,8 +2006,36 @@ impl<'a> Compiler<'a> {
                 // Spawn a function, optionally with an argument: @f or 42 ~> @f
 
                 if let Some(arg_type) = value_type {
-                    // Chained spawn: value ~> @function
-                    self.compile_chained_spawn(*term, arg_type)
+                    // Check if this is the simple case: f ~> @ (spawn the piped function)
+                    if matches!(*term, ast::Term::Ripple) {
+                        // The function is already on the stack (from piping), just spawn it
+                        let Type::Callable(callable) = &arg_type else {
+                            return Err(Error::FeatureUnsupported(
+                                "Can only spawn functions".to_string(),
+                            ));
+                        };
+
+                        // Type check: function must take nil as parameter
+                        if callable.parameter != Type::nil() {
+                            return Err(Error::TypeMismatch {
+                                expected: "function with nil parameter".to_string(),
+                                found: format!(
+                                    "function with parameter {}",
+                                    quiver_core::format::format_type(&self.program, &callable.parameter)
+                                ),
+                            });
+                        }
+
+                        self.codegen.add_instruction(Instruction::Spawn);
+
+                        Ok(Type::Process(Box::new(ProcessType {
+                            receive: Some(Box::new(callable.receive.clone())),
+                            returns: Some(Box::new(callable.result.clone())),
+                        })))
+                    } else {
+                        // Chained spawn with explicit function: arg ~> @f
+                        self.compile_chained_spawn(*term, arg_type)
+                    }
                 } else {
                     // Direct spawn: @function (no argument)
                     // Compile the term to get the function value

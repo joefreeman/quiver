@@ -100,6 +100,19 @@ fn test_spawn_without_argument_requires_nil_parameter() {
 }
 
 #[test]
+fn test_spawn_postfix_syntax() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #{ 42 },
+            p = f ~> @,
+            p ~> !
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
 fn test_receive_simple() {
     quiver()
         .evaluate(
