@@ -65,6 +65,8 @@ pub enum PatternMode {
 #[derive(Debug, Clone)]
 enum RuntimeCheck {
     TupleType(TypeId),
+    Integer,
+    Binary,
     Literal(ast::Literal),
     Variable(String),
     Path(AccessPath),
@@ -111,6 +113,7 @@ pub fn analyze_pattern(
     value_type: &Type,
     mode: PatternMode,
     variables: &HashSet<String>,
+    scopes: &[super::scopes::Scope],
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
     let binding_sets = analyze_match_pattern(
@@ -121,6 +124,7 @@ pub fn analyze_pattern(
         mode,
         &mut identifiers,
         variables,
+        scopes,
     )?;
 
     if binding_sets.is_empty() {
@@ -192,7 +196,15 @@ pub fn generate_pattern_code(
                 }
                 RuntimeCheck::TupleType(type_id) => {
                     generate_value_access(codegen, &requirement.path);
-                    codegen.add_instruction(Instruction::IsTuple(*type_id));
+                    codegen.add_instruction(Instruction::IsType(*type_id));
+                }
+                RuntimeCheck::Integer => {
+                    generate_value_access(codegen, &requirement.path);
+                    codegen.add_instruction(Instruction::IsInteger);
+                }
+                RuntimeCheck::Binary => {
+                    generate_value_access(codegen, &requirement.path);
+                    codegen.add_instruction(Instruction::IsBinary);
                 }
                 RuntimeCheck::Literal(literal) => {
                     generate_value_access(codegen, &requirement.path);
@@ -281,15 +293,18 @@ fn analyze_match_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     variables: &HashSet<String>,
+    scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
     match pattern {
         ast::Match::Identifier(name) => analyze_identifier_pattern(
+            type_lookup,
             name.clone(),
             value_type.clone(),
             path,
             mode,
             identifiers,
             variables,
+            scopes,
         ),
         ast::Match::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
         ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
@@ -300,6 +315,7 @@ fn analyze_match_pattern(
             mode,
             identifiers,
             variables,
+            scopes,
         ),
         ast::Match::Partial(partial) => {
             analyze_partial_pattern(type_lookup, partial, value_type, path, identifiers)
@@ -317,6 +333,7 @@ fn analyze_match_pattern(
             PatternMode::Pin,
             identifiers,
             variables,
+            scopes,
         ),
         ast::Match::Bind(inner) => analyze_match_pattern(
             type_lookup,
@@ -326,6 +343,7 @@ fn analyze_match_pattern(
             PatternMode::Bind,
             identifiers,
             variables,
+            scopes,
         ),
     }
 }
@@ -339,6 +357,7 @@ fn analyze_match_tuple_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     variables: &HashSet<String>,
+    scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
 
@@ -400,6 +419,7 @@ fn analyze_match_tuple_pattern(
                 mode,
                 variant_identifiers,
                 variables,
+                scopes,
             )?;
 
             if field_binding_sets.is_empty() {
@@ -507,14 +527,66 @@ fn analyze_literal_pattern(
     }])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_identifier_pattern(
+    _type_lookup: &impl TypeLookup,
     name: String,
     value_type: Type,
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     variables: &HashSet<String>,
+    scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
+    // In pin mode, check for type names FIRST (before recording as identifier)
+    if mode == PatternMode::Pin {
+        // Check if this is a primitive type name
+        if name == "int" {
+            // Type narrowing for integer type - don't record as identifier
+            return Ok(vec![BindingSet {
+                requirements: vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Integer,
+                }],
+                bindings: vec![],
+            }]);
+        }
+
+        if name == "bin" {
+            // Type narrowing for binary type - don't record as identifier
+            return Ok(vec![BindingSet {
+                requirements: vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Binary,
+                }],
+                bindings: vec![],
+            }]);
+        }
+
+        // Check for type alias (monomorphic only for Phase 1)
+        if let Some((type_params, _ast_type)) = super::scopes::lookup_type_alias(scopes, &name) {
+            if !type_params.is_empty() {
+                return Err(Error::InternalError {
+                    message: format!(
+                        "Cannot use parameterized type alias '{}' in pattern - parameterized types are not yet supported",
+                        name
+                    ),
+                });
+            }
+
+            // Resolve the ast::Type to a Type - we need the program to do this
+            // but we don't have access to it here in the pattern module
+            // For now, we'll need to add a Program parameter or find another approach
+            // TODO: Implement type alias resolution for pattern matching
+            return Err(Error::InternalError {
+                message: format!(
+                    "Type alias matching not yet fully implemented for '{}'",
+                    name
+                ),
+            });
+        }
+    }
+
     // Check if we've seen this identifier before
     if let Some(info) = identifiers.get_mut(&name) {
         // Second or later occurrence - mark as repeated and create Path requirement
@@ -550,6 +622,7 @@ fn analyze_identifier_pattern(
                 }])
             }
             PatternMode::Pin => {
+                // Not a type - treat as variable pin
                 // In pin mode, only create Variable requirement if variable exists in scope
                 // If it doesn't exist and this is the only occurrence, we'll error later
                 let mut requirements = vec![];

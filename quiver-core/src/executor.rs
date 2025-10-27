@@ -451,7 +451,7 @@ impl Executor {
             Instruction::Get(index) => self.handle_get(pid, index),
             Instruction::IsInteger => self.handle_is_integer(pid),
             Instruction::IsBinary => self.handle_is_binary(pid),
-            Instruction::IsTuple(type_id) => self.handle_is_tuple(pid, type_id),
+            Instruction::IsType(type_id) => self.handle_is_type(pid, type_id),
             Instruction::Jump(offset) => self.handle_jump(pid, offset),
             Instruction::JumpIf(offset) => self.handle_jump_if(pid, offset),
             Instruction::Call => self.handle_call(pid),
@@ -693,11 +693,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_is_tuple(
-        &mut self,
-        pid: ProcessId,
-        type_id: TypeId,
-    ) -> Result<Option<Action>, Error> {
+    fn handle_is_type(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;

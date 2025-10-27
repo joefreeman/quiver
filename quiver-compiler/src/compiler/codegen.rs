@@ -81,12 +81,12 @@ impl InstructionBuilder {
         self.add_instruction(Instruction::Pop);
     }
 
-    /// Emits type check and branch pattern: Pick -> IsTuple -> Not -> JumpIf
+    /// Emits type check and branch pattern: Pick -> IsType -> Not -> JumpIf
     /// Returns the jump address for patching later
-    /// Used when branching based on tuple type matching
+    /// Used when branching based on type matching
     pub fn emit_type_check_branch(&mut self, depth: usize, type_id: TypeId) -> usize {
         self.add_instruction(Instruction::Pick(depth));
-        self.add_instruction(Instruction::IsTuple(type_id));
+        self.add_instruction(Instruction::IsType(type_id));
         self.add_instruction(Instruction::Not);
         self.emit_jump_if_placeholder()
     }

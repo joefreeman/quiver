@@ -477,7 +477,7 @@ fn emit_multi_variant_tuples(
                 compiler.codegen.add_instruction(Instruction::Pick(depth));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::IsTuple(spread_type_id));
+                    .add_instruction(Instruction::IsType(spread_type_id));
                 compiler.codegen.add_instruction(Instruction::Not);
 
                 let fail_jump = compiler.codegen.emit_jump_if_placeholder();

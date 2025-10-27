@@ -437,3 +437,87 @@ fn test_pin_mixed_repeated_and_single() {
             message: "Pin variable 'y' not found in scope".to_string(),
         });
 }
+
+// Type narrowing tests
+
+#[test]
+fn test_pin_int_type() {
+    quiver().evaluate("42 ~> ^int").expect("42");
+    quiver().evaluate("'ff' ~> ^int").expect("[]");
+}
+
+#[test]
+fn test_pin_bin_type() {
+    quiver().evaluate("'abcd' ~> ^bin").expect("'abcd'");
+    quiver().evaluate("42 ~> ^bin").expect("[]");
+}
+
+#[test]
+fn test_type_narrowing_in_blocks() {
+    // Test type narrowing for int
+    quiver()
+        .evaluate("value = 42, value ~> { ~> ^int => \"is_int\" | \"is_bin\" }")
+        .expect("\"is_int\"");
+
+    // Test type narrowing for bin
+    quiver()
+        .evaluate("value = 'abcd', value ~> { ~> ^bin => \"is_bin\" | \"is_int\" }")
+        .expect("\"is_bin\"");
+
+    // Test type narrowing failure falls through
+    quiver()
+        .evaluate("value = 42, value ~> { ~> ^bin => \"is_bin\" | \"not_bin\" }")
+        .expect("\"not_bin\"");
+}
+
+#[test]
+fn test_type_narrowing_in_tuples() {
+    // Type narrowing on tuple field
+    quiver()
+        .evaluate("data = Data[42], data ~> =Data[^int], Ok")
+        .expect("Ok");
+
+    quiver()
+        .evaluate("data = Data['abcd'], data ~> =Data[^int]")
+        .expect("[]");
+
+    quiver()
+        .evaluate("data = Data['abcd'], data ~> =Data[^bin], Ok")
+        .expect("Ok");
+}
+
+#[test]
+fn test_type_narrowing_mixed_list() {
+    // Test type narrowing on mixed int/bin values
+    quiver()
+        .evaluate("value = 42, value ~> { ~> ^int => value | 0 }")
+        .expect("42");
+
+    quiver()
+        .evaluate("value = 'abcd', value ~> { ~> ^int => value | 0 }")
+        .expect("0");
+
+    quiver()
+        .evaluate("value = 'abcd', value ~> { ~> ^bin => value | 'ff' }")
+        .expect("'abcd'");
+
+    quiver()
+        .evaluate("value = 42, value ~> { ~> ^bin => value | 'ff' }")
+        .expect("'ff'");
+}
+
+#[test]
+fn test_reserved_names_still_reserved_in_bind_mode() {
+    // int and bin should still be reserved as variable names
+    quiver().evaluate("int = 42").expect_compile_error(
+        quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
+        ),
+    );
+
+    quiver().evaluate("bin = 'abcd'").expect_compile_error(
+        quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
+        ),
+    );
+}

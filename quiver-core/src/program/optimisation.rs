@@ -123,7 +123,7 @@ pub fn tree_shake(
                             used_constants[*id] = true;
                         }
                     }
-                    Instruction::Tuple(type_id) | Instruction::IsTuple(type_id) => {
+                    Instruction::Tuple(type_id) | Instruction::IsType(type_id) => {
                         if type_id.0 < used_types.len() && !used_types[type_id.0] {
                             type_queue.push(*type_id);
                         }
@@ -251,10 +251,10 @@ pub fn tree_shake(
                             .get(&old_type_id)
                             .expect("Tuple type ID should be in remap table after tree shaking"),
                     ),
-                    Instruction::IsTuple(old_type_id) => Instruction::IsTuple(
+                    Instruction::IsType(old_type_id) => Instruction::IsType(
                         *type_remap
                             .get(&old_type_id)
-                            .expect("IsTuple type ID should be in remap table after tree shaking"),
+                            .expect("IsType type ID should be in remap table after tree shaking"),
                     ),
                     other => other,
                 })

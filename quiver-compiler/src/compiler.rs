@@ -1029,6 +1029,7 @@ impl<'a> Compiler<'a> {
             &value_type,
             mode,
             &available_variables,
+            &self.scopes,
         )?;
 
         match certainty {

@@ -57,7 +57,7 @@ pub enum Instruction {
     Get(usize),
     IsInteger,
     IsBinary,
-    IsTuple(TypeId),
+    IsType(TypeId),
     Jump(isize),
     JumpIf(isize),
     Call,
