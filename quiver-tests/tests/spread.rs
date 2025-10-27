@@ -52,7 +52,7 @@ fn test_spread_with_new_name() {
 
 #[test]
 fn test_spread_empty_tuple() {
-    quiver().evaluate("a = [], [...a, x: 1]").expect("[x: 1]");
+    quiver().evaluate("a = []; [...a, x: 1]").expect("[x: 1]");
 }
 
 #[test]

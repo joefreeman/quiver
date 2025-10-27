@@ -14,7 +14,7 @@ pub enum TupleAccessor {
     Position(usize),
 }
 
-pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
+pub fn union_types(types: Vec<Type>) -> Type {
     let mut flattened = Vec::new();
     for typ in types {
         match typ {
@@ -24,9 +24,9 @@ pub fn union_types(types: Vec<Type>) -> Result<Type, Error> {
     }
 
     if flattened.is_empty() {
-        Ok(Type::never())
+        Type::never()
     } else {
-        Ok(Type::from_types(flattened))
+        Type::from_types(flattened)
     }
 }
 

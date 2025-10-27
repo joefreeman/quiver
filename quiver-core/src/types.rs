@@ -89,10 +89,7 @@ impl Type {
         types.sort_by_key(|t| format!("{:?}", t));
         types.dedup();
 
-        if types.is_empty() {
-            // This shouldn't happen in normal operation, but return NIL as a safe default
-            Type::nil()
-        } else if types.len() == 1 {
+        if types.len() == 1 {
             types.into_iter().next().unwrap()
         } else {
             Type::Union(types)

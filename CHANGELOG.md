@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The value of a match expression (`... ~> =x` or `x = ...`) now returns the value itself if the match is successful (and nil otherwise).
+
 ## [0.2.1] - 2025-10-25
 
 ### Fixed

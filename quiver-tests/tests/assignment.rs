@@ -59,9 +59,9 @@ fn test_named_partial_pattern_with_union() {
         .evaluate(
             r#"
             union :: A[x: int, y: int] | B[x: int, z: int];
-            #union { ~> =A(x) => x } ~> =f,
-            A[x: 1, y: 2] ~> f ~> =a,
-            B[x: 3, z: 4] ~> f ~> =b,
+            #union { ~> =A(x) => x } ~> =f;
+            A[x: 1, y: 2] ~> f ~> =a;
+            B[x: 3, z: 4] ~> f ~> =b;
             [a, b]
             "#,
         )
@@ -96,8 +96,8 @@ fn test_star_assignment() {
 #[test]
 fn test_ignore_placeholder() {
     quiver().evaluate("[1, 2] ~> =[a, _], a").expect("1");
-    quiver().evaluate("[1, 2] ~> =_").expect("Ok");
-    quiver().evaluate("_ = [1, 2]").expect("Ok");
+    quiver().evaluate("[1, 2] ~> =_").expect("[1, 2]");
+    quiver().evaluate("_ = [1, 2]").expect("[1, 2]");
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            #[a: int, b: int] { ~> =(a, b) => [a, b] } ~> =f,
+            #[a: int, b: int] { ~> =(a, b) => [a, b] } ~> =f;
             [a: 1, b: 2] ~> f
             "#,
         )
@@ -171,9 +171,9 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             union :: [a: int, b: int] | [x: int];
-            #union { ~> =(a, b) => [a, b] } ~> =f,
-            [a: 1, b: 2] ~> f ~> =b1,
-            [x: 3] ~> f ~> =b2,
+            #union { ~> =(a, b) => [a, b] } ~> =f;
+            [a: 1, b: 2] ~> f ~> =b1;
+            [x: 3] ~> f ~> =b2;
             [b1, b2]
             "#,
         )
@@ -183,9 +183,9 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             union :: [a: int, b: int] | [b: int, c: int];
-            #union { ~> =(b) => b } ~> =f,
-            [a: 1, b: 2] ~> f ~> =b1,
-            [b: 3, c: 4] ~> f ~> =b2,
+            #union { ~> =(b) => b } ~> =f;
+            [a: 1, b: 2] ~> f ~> =b1;
+            [b: 3, c: 4] ~> f ~> =b2;
             [b1, b2]
             "#,
         )
@@ -195,9 +195,9 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             union :: [a: int, b: int] | [b: int, c: int];
-            #union { ~> =(a, b) => [a, b] } ~> =f,
-            [a: 1, b: 2] ~> f ~> =b1,
-            [b: 3, c: 4] ~> f ~> =b2,
+            #union { ~> =(a, b) => [a, b] } ~> =f;
+            [a: 1, b: 2] ~> f ~> =b1;
+            [b: 3, c: 4] ~> f ~> =b2;
             [b1, b2]
             "#,
         )
@@ -242,7 +242,7 @@ fn test_deeply_nested_tuple_pattern() {
 
 #[test]
 fn test_empty_tuple_pattern() {
-    quiver().evaluate("[] ~> =[]").expect("Ok");
+    quiver().evaluate("[] ~> =[]").expect("[]");
     quiver().evaluate("[1] ~> =[]").expect("[]");
 }
 
@@ -317,18 +317,18 @@ fn test_recursive_destructuring() {
 
 #[test]
 fn test_comparison_with_literal() {
-    quiver().evaluate("10 ~> =x, x ~> =10").expect("Ok");
+    quiver().evaluate("10 ~> =x, x ~> =10").expect("10");
     quiver().evaluate("10 ~> =x, x ~> =5").expect("[]");
 }
 
 #[test]
 fn test_wildcard() {
-    quiver().evaluate("42 ~> =_").expect("Ok");
+    quiver().evaluate("42 ~> =_").expect("42");
 }
 
 #[test]
 fn test_pin_simple() {
-    quiver().evaluate("y = 2, 2 ~> ^y").expect("Ok");
+    quiver().evaluate("y = 2, 2 ~> ^y").expect("2");
     quiver().evaluate("y = 2, 3 ~> ^y").expect("[]");
 }
 
@@ -373,7 +373,7 @@ fn test_nested_pin_and_bind() {
 fn test_pin_multiple_variables() {
     quiver()
         .evaluate("x = 1, y = 2, [1, 2] ~> ^[x, y]")
-        .expect("Ok");
+        .expect("[1, 2]");
     quiver()
         .evaluate("x = 1, y = 2, [1, 3] ~> ^[x, y]")
         .expect("[]");
@@ -389,7 +389,7 @@ fn test_repeated_identifier_bind() {
 #[test]
 fn test_repeated_identifier_pin() {
     // Repeated identifier in pin mode - checks equality
-    quiver().evaluate("[5, 5] ~> ^[x, x]").expect("Ok");
+    quiver().evaluate("[5, 5] ~> ^[x, x]").expect("[5, 5]");
     quiver().evaluate("[5, 6] ~> ^[x, x]").expect("[]");
 }
 
@@ -412,7 +412,9 @@ fn test_repeated_identifier_multiple_times() {
 #[test]
 fn test_pin_with_variable_and_repetition() {
     // When variable exists and identifier is repeated, check both Variable and FieldEquality
-    quiver().evaluate("x = 5, [5, 5] ~> ^[x, x]").expect("Ok");
+    quiver()
+        .evaluate("x = 5, [5, 5] ~> ^[x, x]")
+        .expect("[5, 5]");
     quiver().evaluate("x = 5, [5, 6] ~> ^[x, x]").expect("[]"); // Fails field equality
     quiver().evaluate("x = 5, [4, 4] ~> ^[x, x]").expect("[]"); // Fails variable check
 }

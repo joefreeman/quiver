@@ -25,7 +25,7 @@ map' = #<t, u>[list<t>, #t -> u, list<u>] {
   }
 },
 
-filter' = #<t>[list<t>, #t -> (Ok | []), list<t>] {
+filter' = #<t>[list<t>, #t -> (t | []), list<t>] {
   | ~> =[Nil, _, acc] => [acc, Nil] ~> reverse'
   | ~> =[Cons[head, tail], pred, acc], head ~> pred =>
     [tail, pred, Cons[head, acc]] ~> &
@@ -86,7 +86,7 @@ take' = #<t>[list<t>, int, list<t>] {
     ~> =[xs, f] => map'[xs, f, Nil]
   },
 
-  filter: #<t>[list<t>, #t -> (Ok | [])] {
+  filter: #<t>[list<t>, #t -> (t | [])] {
     ~> =[xs, f] => filter'[xs, f, Nil]
   },
 
@@ -107,13 +107,13 @@ take' = #<t>[list<t>, int, list<t>] {
     | ~> =[Cons[_, tail], value] => &[tail, value]
   },
 
-  all?: #<t>[list<t>, #t -> (Ok | [])] {
+  all?: #<t>[list<t>, #t -> (t | [])] {
     | ~> =[Nil, _] => Ok
     | ~> =[Cons[head, tail], pred], head ~> pred => &[tail, pred]
     | ~> =[Cons[_, _], _] => []
   },
 
-  any?: #<t>[list<t>, #t -> (Ok | [])] {
+  any?: #<t>[list<t>, #t -> (t | [])] {
     | ~> =[Nil, _] => []
     | ~> =[Cons[head, tail], pred], head ~> pred => Ok
     | ~> =[Cons[_, tail], pred] => &[tail, pred]

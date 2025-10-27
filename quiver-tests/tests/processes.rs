@@ -629,10 +629,10 @@ fn test_postfix_select_equivalence_timeout() {
     quiver()
         .evaluate(
             r#"
-            p1 = @#{ 1 ~> ! },
-            p2 = @#{ !(1) },
-            result1 = p1 ~> !,
-            result2 = p2 ~> !,
+            p1 = @#{ 1 ~> ! };
+            p2 = @#{ !(1) };
+            result1 = p1 ~> !;
+            result2 = p2 ~> !;
             [result1, result2]
             "#,
         )
@@ -662,13 +662,13 @@ fn test_continuation_after_timeout() {
             r#"
             f = #{
                 slow = @#{ !(#int) },
-                result = !(slow | 100),
+                result = !(slow | 100) ~> /,
                 [result, 42]
             },
             @f ~> !
             "#,
         )
-        .expect("[[], 42]");
+        .expect("[Ok, 42]");
 }
 
 #[test]

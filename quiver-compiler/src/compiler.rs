@@ -1105,14 +1105,14 @@ impl<'a> Compiler<'a> {
                     fail_target,
                 )?;
 
-                self.codegen.add_instruction(Instruction::Pop);
-                self.codegen.add_instruction(Instruction::Tuple(TypeId::OK));
+                // Success path: leave the value on the stack
                 let success_jump_addr = self.codegen.emit_jump_placeholder();
 
                 // Only patch fail_jump_addr if we didn't use on_no_match
                 if on_no_match.is_none() {
                     self.codegen.patch_jump_to_here(fail_jump_addr);
                 }
+                // Failure path: pop the value and push nil
                 self.codegen.add_instruction(Instruction::Pop);
                 self.codegen
                     .add_instruction(Instruction::Tuple(TypeId::NIL));
@@ -1120,9 +1120,9 @@ impl<'a> Compiler<'a> {
                 self.codegen.patch_jump_to_here(success_jump_addr);
 
                 if certainty == MatchCertainty::WillMatch {
-                    Ok(Type::ok())
+                    Ok(value_type)
                 } else {
-                    Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
+                    Ok(union_types(vec![value_type, Type::nil()]))
                 }
             }
         }
@@ -1265,13 +1265,7 @@ impl<'a> Compiler<'a> {
             self.codegen.patch_jump_to_addr(jump_addr, end_addr);
         }
 
-        if branch_types.is_empty() {
-            // If no branches produced types (e.g., all were compile-time NIL),
-            // return NIL as the block type
-            Ok(Type::nil())
-        } else {
-            union_types(branch_types)
-        }
+        Ok(union_types(branch_types))
     }
 
     fn compile_expression(
@@ -1301,7 +1295,7 @@ impl<'a> Compiler<'a> {
 
             // If previous type could be nil and we're past the first chain, propagate nil possibility
             last_type = Some(if should_propagate_nil {
-                Type::from_types(vec![chain_type, Type::nil()])
+                union_types(vec![chain_type, Type::nil()])
             } else {
                 chain_type
             });
