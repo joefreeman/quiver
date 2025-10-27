@@ -128,13 +128,15 @@ impl CallbackHandle {
 }
 
 type EventLoopClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
+type SharedEnvironment = Rc<RefCell<quiver_environment::Environment>>;
+type SharedCallbacks = Rc<RefCell<HashMap<u64, CallbackHandle>>>;
 
 #[wasm_bindgen(skip_typescript)]
 pub struct Environment {
-    environment: Rc<RefCell<quiver_environment::Environment>>,
+    environment: SharedEnvironment,
     running: Rc<RefCell<bool>>,
     event_loop_closure: EventLoopClosure,
-    pending_callbacks: Rc<RefCell<HashMap<u64, CallbackHandle>>>,
+    pending_callbacks: SharedCallbacks,
 }
 
 #[wasm_bindgen]
@@ -222,12 +224,7 @@ impl Environment {
     }
 
     /// Get shared state for Repl instances (internal use)
-    fn get_shared_state(
-        &self,
-    ) -> (
-        Rc<RefCell<quiver_environment::Environment>>,
-        Rc<RefCell<HashMap<u64, CallbackHandle>>>,
-    ) {
+    fn get_shared_state(&self) -> (SharedEnvironment, SharedCallbacks) {
         (self.environment.clone(), self.pending_callbacks.clone())
     }
 
@@ -461,8 +458,8 @@ impl Environment {
 
 #[wasm_bindgen(skip_typescript)]
 pub struct Repl {
-    environment: Rc<RefCell<quiver_environment::Environment>>,
-    pending_callbacks: Rc<RefCell<HashMap<u64, CallbackHandle>>>,
+    environment: SharedEnvironment,
+    pending_callbacks: SharedCallbacks,
     repl: Rc<RefCell<quiver_environment::Repl>>,
 }
 
