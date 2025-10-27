@@ -14,10 +14,10 @@ use web_sys::Worker;
 #[wasm_bindgen(typescript_custom_section)]
 const TS_DEFINITIONS: &'static str = r#"
 export type WorkerFactory = () => Worker;
-export type EvaluateCallback = (result: JsResult<JsEvaluationResult | null>) => void;
-export type VariablesCallback = (result: JsResult<JsVariable[]>) => void;
-export type ProcessStatusesCallback = (result: JsResult<JsProcess[]>) => void;
-export type ProcessInfoCallback = (result: JsResult<JsProcessInfo | null>) => void;
+export type EvaluateCallback = (result: Result<EvaluationResult | null>) => void;
+export type VariablesCallback = (result: Result<Variable[]>) => void;
+export type ProcessStatusesCallback = (result: Result<Process[]>) => void;
+export type ProcessInfoCallback = (result: Result<ProcessInfo | null>) => void;
 
 export class Environment {
   free(): void;
@@ -44,14 +44,14 @@ export class Environment {
    * Get all process statuses
    * @param callback - Callback invoked with process statuses
    */
-  get_process_statuses(callback: ProcessStatusesCallback): void;
+  getProcessStatuses(callback: ProcessStatusesCallback): void;
 
   /**
    * Get info for a specific process
    * @param pid - Process ID
    * @param callback - Callback invoked with process info (or null if not found)
    */
-  get_process_info(pid: number, callback: ProcessInfoCallback): void;
+  getProcessInfo(pid: number, callback: ProcessInfoCallback): void;
 
   /**
    * Format a value for display
@@ -59,14 +59,14 @@ export class Environment {
    * @param heap - Heap data
    * @returns Formatted string representation
    */
-  format_value(value: QuiverValue, heap: number[][]): string;
+  formatValue(value: Value, heap: number[][]): string;
 
   /**
    * Format a type for display (derives type from value)
    * @param value - Value to derive type from
    * @returns Formatted string representation
    */
-  format_type(value: QuiverValue): string;
+  formatType(value: Value): string;
 }
 
 export class Repl {
@@ -90,10 +90,10 @@ export class Repl {
    * Get all variables defined in the REPL
    * @param callback - Callback invoked with the list of variables
    */
-  get_variables(callback: VariablesCallback): void;
+  getVariables(callback: VariablesCallback): void;
 
   /**
-   * Compact locals to remove unused variables.
+   * Compact locals to remove unused variables (optimization, safe to skip)
    */
   compact(): void;
 }
@@ -121,7 +121,7 @@ impl CallbackHandle {
         Self { callback }
     }
 
-    fn invoke<T: serde::Serialize>(&self, result: JsResult<T>) {
+    fn invoke<T: serde::Serialize>(&self, result: crate::types::Result<T>) {
         let js_value = serde_wasm_bindgen::to_value(&result).unwrap();
         let _ = self.callback.call1(&JsValue::NULL, &js_value);
     }
@@ -142,7 +142,10 @@ impl Environment {
     /// Create a new environment with the specified number of workers
     /// worker_factory: A JavaScript function that returns a new Worker
     #[wasm_bindgen(constructor)]
-    pub fn new(num_workers: usize, worker_factory: JsValue) -> Result<Environment, JsValue> {
+    pub fn new(
+        num_workers: usize,
+        worker_factory: JsValue,
+    ) -> std::result::Result<Environment, JsValue> {
         let worker_factory: js_sys::Function = worker_factory.into();
         // Set up panic hook for better error messages
         console_error_panic_hook::set_once();
@@ -271,7 +274,7 @@ impl Environment {
                         Err(e) => {
                             // Error polling request
                             if let Some(callback) = callbacks.remove(&request_id) {
-                                callback.invoke::<()>(JsResult::err(e.to_string()));
+                                callback.invoke::<()>(crate::types::Result::err(e.to_string()));
                             }
                         }
                     }
@@ -327,6 +330,7 @@ impl Environment {
     }
 
     /// Get all process statuses
+    #[wasm_bindgen(js_name = "getProcessStatuses")]
     pub fn get_process_statuses(&mut self, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
         match self.environment.borrow_mut().request_statuses() {
@@ -337,12 +341,13 @@ impl Environment {
             }
             Err(e) => {
                 let cb = CallbackHandle::new(callback);
-                cb.invoke::<Vec<JsProcess>>(JsResult::err(e.to_string()));
+                cb.invoke::<Vec<Process>>(crate::types::Result::err(e.to_string()));
             }
         }
     }
 
     /// Get info for a specific process
+    #[wasm_bindgen(js_name = "getProcessInfo")]
     pub fn get_process_info(&mut self, pid: usize, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
         match self.environment.borrow_mut().request_process_info(pid) {
@@ -353,29 +358,31 @@ impl Environment {
             }
             Err(e) => {
                 let cb = CallbackHandle::new(callback);
-                cb.invoke::<Option<JsProcessInfo>>(JsResult::err(e.to_string()));
+                cb.invoke::<Option<ProcessInfo>>(crate::types::Result::err(e.to_string()));
             }
         }
     }
 
     /// Format a value for display
+    #[wasm_bindgen(js_name = "formatValue")]
     pub fn format_value(
         &self,
         value: wasm_bindgen::JsValue,
         heap: wasm_bindgen::JsValue,
-    ) -> Result<String, wasm_bindgen::JsValue> {
-        let value: crate::types::QuiverValue = serde_wasm_bindgen::from_value(value)?;
+    ) -> std::result::Result<String, wasm_bindgen::JsValue> {
+        let value: crate::types::Value = serde_wasm_bindgen::from_value(value)?;
         let heap: Vec<Vec<u8>> = serde_wasm_bindgen::from_value(heap)?;
         let value: quiver_core::value::Value = value.into();
         Ok(self.environment.borrow().format_value(&value, &heap))
     }
 
     /// Format a type for display (derives type from value)
+    #[wasm_bindgen(js_name = "formatType")]
     pub fn format_type(
         &self,
         value: wasm_bindgen::JsValue,
-    ) -> Result<String, wasm_bindgen::JsValue> {
-        let value: crate::types::QuiverValue = serde_wasm_bindgen::from_value(value)?;
+    ) -> std::result::Result<String, wasm_bindgen::JsValue> {
+        let value: crate::types::Value = serde_wasm_bindgen::from_value(value)?;
         let value: quiver_core::value::Value = value.into();
         let ty = self.environment.borrow().value_to_type(&value);
         Ok(self.environment.borrow().format_type(&ty))
@@ -389,26 +396,28 @@ impl Environment {
     ) {
         match result {
             RequestResult::Result(Ok((value, heap))) => {
-                callback.invoke(JsResult::ok(Some(JsEvaluationResult {
+                callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
                     value: value.into(),
                     heap,
                 })));
             }
             RequestResult::Result(Err(e)) => {
-                callback
-                    .invoke::<JsEvaluationResult>(JsResult::err(format!("Runtime error: {:?}", e)));
+                callback.invoke::<EvaluationResult>(crate::types::Result::err(format!(
+                    "Runtime error: {:?}",
+                    e
+                )));
             }
             RequestResult::Statuses(statuses) => {
-                let mut processes: Vec<JsProcess> = statuses
+                let mut processes: Vec<Process> = statuses
                     .into_iter()
-                    .map(|(id, status)| JsProcess {
+                    .map(|(id, status)| Process {
                         id,
                         status: status.into(),
                     })
                     .collect();
                 processes.sort_by_key(|p| p.id);
 
-                callback.invoke(JsResult::ok(processes));
+                callback.invoke(crate::types::Result::ok(processes));
             }
             RequestResult::ProcessInfo(info_opt) => {
                 let js_info = info_opt.map(|info| {
@@ -416,23 +425,23 @@ impl Environment {
                     let process_type = env.format_process_type(info.function_index);
 
                     let result = info.result.map(|r| match r {
-                        Ok(value) => JsResult::Ok {
-                            value: JsEvaluationResult {
+                        Ok(value) => crate::types::Result::Ok {
+                            value: EvaluationResult {
                                 value: value.into(),
                                 heap: vec![],
                             },
                         },
-                        Err(e) => JsResult::Err {
+                        Err(e) => crate::types::Result::Err {
                             error: format!("{:?}", e),
                         },
                     });
 
-                    JsProcessInfo {
+                    ProcessInfo {
                         id: info.id,
                         status: info.status.into(),
                         process_type,
                         stack_size: info.stack_size,
-                        locals_size: info.locals_size,
+                        locals_count: info.locals_count,
                         frames_count: info.frames_count,
                         mailbox_size: info.mailbox_size,
                         persistent: info.persistent,
@@ -440,11 +449,11 @@ impl Environment {
                     }
                 });
 
-                callback.invoke(JsResult::ok(js_info));
+                callback.invoke(crate::types::Result::ok(js_info));
             }
             RequestResult::Locals(_) => {
                 // Not used in the web API
-                callback.invoke::<()>(JsResult::err("Unexpected result type: Locals"));
+                callback.invoke::<()>(crate::types::Result::err("Unexpected result type: Locals"));
             }
         }
     }
@@ -461,7 +470,7 @@ pub struct Repl {
 impl Repl {
     /// Create a new REPL using the given environment
     #[wasm_bindgen(constructor)]
-    pub fn new(environment: &Environment) -> Result<Repl, JsValue> {
+    pub fn new(environment: &Environment) -> std::result::Result<Repl, JsValue> {
         // Set up panic hook for better error messages
         console_error_panic_hook::set_once();
 
@@ -498,11 +507,11 @@ impl Repl {
             Ok(None) => {
                 // No executable code (e.g., only type definitions)
                 let cb = CallbackHandle::new(callback);
-                cb.invoke(JsResult::ok(None::<JsEvaluationResult>));
+                cb.invoke(crate::types::Result::ok(None::<EvaluationResult>));
             }
             Err(e) => {
                 let cb = CallbackHandle::new(callback);
-                cb.invoke::<JsEvaluationResult>(JsResult::err(format!("{}", e)));
+                cb.invoke::<EvaluationResult>(crate::types::Result::err(format!("{}", e)));
             }
         }
     }
@@ -515,20 +524,21 @@ impl Repl {
     }
 
     /// Get all variables (synchronous)
+    #[wasm_bindgen(js_name = "getVariables")]
     pub fn get_variables(&self, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
         let environment = self.environment.borrow();
         let repl = self.repl.borrow();
         let vars = repl.get_variables();
-        let js_vars: Vec<JsVariable> = vars
+        let js_vars: Vec<Variable> = vars
             .into_iter()
-            .map(|(name, ty)| JsVariable {
+            .map(|(name, ty)| Variable {
                 name,
                 var_type: environment.format_type(&ty),
             })
             .collect();
 
         let cb = CallbackHandle::new(callback);
-        cb.invoke(JsResult::ok(js_vars));
+        cb.invoke(crate::types::Result::ok(js_vars));
     }
 }

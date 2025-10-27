@@ -257,7 +257,7 @@ impl ReplCli {
                 println!("{}", format!("  Stack: {}", info.stack_size).bright_black());
                 println!(
                     "{}",
-                    format!("  Locals: {}", info.locals_size).bright_black()
+                    format!("  Locals: {}", info.locals_count).bright_black()
                 );
                 println!(
                     "{}",

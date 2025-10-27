@@ -19,7 +19,7 @@ pub struct ProcessInfo {
     pub status: ProcessStatus,
     pub function_index: usize,
     pub stack_size: usize,
-    pub locals_size: usize,
+    pub locals_count: usize,
     pub frames_count: usize,
     pub mailbox_size: usize,
     pub persistent: bool,

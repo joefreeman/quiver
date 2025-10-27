@@ -6,8 +6,8 @@ use tsify::Tsify;
 
 #[derive(Serialize, Deserialize, Tsify, Clone)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum QuiverValue {
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Value {
     Integer {
         value: i64,
     },
@@ -18,42 +18,42 @@ pub enum QuiverValue {
         index: usize,
     },
     Tuple {
+        #[serde(rename = "typeId")]
         type_id: usize,
-        values: Vec<QuiverValue>,
+        values: Vec<Value>,
     },
     Function {
         index: usize,
-        captures: Vec<QuiverValue>,
+        captures: Vec<Value>,
     },
     Builtin {
         name: String,
     },
     Process {
         pid: usize,
+        #[serde(rename = "functionIndex")]
         function_index: usize,
     },
 }
 
-impl From<quiver_core::value::Value> for QuiverValue {
+impl From<quiver_core::value::Value> for Value {
     fn from(value: quiver_core::value::Value) -> Self {
         match value {
-            quiver_core::value::Value::Integer(i) => QuiverValue::Integer { value: i },
+            quiver_core::value::Value::Integer(i) => Value::Integer { value: i },
             quiver_core::value::Value::Binary(b) => match b {
-                quiver_core::value::Binary::Constant(index) => {
-                    QuiverValue::BinaryConstant { index }
-                }
-                quiver_core::value::Binary::Heap(index) => QuiverValue::BinaryHeap { index },
+                quiver_core::value::Binary::Constant(index) => Value::BinaryConstant { index },
+                quiver_core::value::Binary::Heap(index) => Value::BinaryHeap { index },
             },
-            quiver_core::value::Value::Tuple(type_id, values) => QuiverValue::Tuple {
+            quiver_core::value::Value::Tuple(type_id, values) => Value::Tuple {
                 type_id: type_id.0,
                 values: values.into_iter().map(Into::into).collect(),
             },
-            quiver_core::value::Value::Function(index, captures) => QuiverValue::Function {
+            quiver_core::value::Value::Function(index, captures) => Value::Function {
                 index,
                 captures: captures.into_iter().map(Into::into).collect(),
             },
-            quiver_core::value::Value::Builtin(name) => QuiverValue::Builtin { name },
-            quiver_core::value::Value::Process(pid, function_index) => QuiverValue::Process {
+            quiver_core::value::Value::Builtin(name) => Value::Builtin { name },
+            quiver_core::value::Value::Process(pid, function_index) => Value::Process {
                 pid,
                 function_index,
             },
@@ -61,26 +61,26 @@ impl From<quiver_core::value::Value> for QuiverValue {
     }
 }
 
-impl From<QuiverValue> for quiver_core::value::Value {
-    fn from(value: QuiverValue) -> Self {
+impl From<Value> for quiver_core::value::Value {
+    fn from(value: Value) -> Self {
         match value {
-            QuiverValue::Integer { value } => quiver_core::value::Value::Integer(value),
-            QuiverValue::BinaryConstant { index } => {
+            Value::Integer { value } => quiver_core::value::Value::Integer(value),
+            Value::BinaryConstant { index } => {
                 quiver_core::value::Value::Binary(quiver_core::value::Binary::Constant(index))
             }
-            QuiverValue::BinaryHeap { index } => {
+            Value::BinaryHeap { index } => {
                 quiver_core::value::Value::Binary(quiver_core::value::Binary::Heap(index))
             }
-            QuiverValue::Tuple { type_id, values } => quiver_core::value::Value::Tuple(
+            Value::Tuple { type_id, values } => quiver_core::value::Value::Tuple(
                 quiver_core::bytecode::TypeId(type_id),
                 values.into_iter().map(Into::into).collect(),
             ),
-            QuiverValue::Function { index, captures } => quiver_core::value::Value::Function(
+            Value::Function { index, captures } => quiver_core::value::Value::Function(
                 index,
                 captures.into_iter().map(Into::into).collect(),
             ),
-            QuiverValue::Builtin { name } => quiver_core::value::Value::Builtin(name),
-            QuiverValue::Process {
+            Value::Builtin { name } => quiver_core::value::Value::Builtin(name),
+            Value::Process {
                 pid,
                 function_index,
             } => quiver_core::value::Value::Process(pid, function_index),
@@ -91,20 +91,20 @@ impl From<QuiverValue> for quiver_core::value::Value {
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
 #[serde(tag = "type")]
-pub enum JsResult<T> {
+pub enum Result<T> {
     #[serde(rename = "ok")]
     Ok { value: T },
     #[serde(rename = "error")]
     Err { error: String },
 }
 
-impl<T> JsResult<T> {
+impl<T> Result<T> {
     pub fn ok(value: T) -> Self {
-        JsResult::Ok { value }
+        Result::Ok { value }
     }
 
     pub fn err(error: impl ToString) -> Self {
-        JsResult::Err {
+        Result::Err {
             error: error.to_string(),
         }
     }
@@ -113,7 +113,7 @@ impl<T> JsResult<T> {
 /// Variable with name and formatted type
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
-pub struct JsVariable {
+pub struct Variable {
     pub name: String,
     #[serde(rename = "type")]
     pub var_type: String,
@@ -122,8 +122,8 @@ pub struct JsVariable {
 /// Process status
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
-#[serde(rename_all = "snake_case")]
-pub enum JsProcessStatus {
+#[serde(rename_all = "camelCase")]
+pub enum ProcessStatus {
     Active,
     Waiting,
     Sleeping,
@@ -131,14 +131,14 @@ pub enum JsProcessStatus {
     Completed,
 }
 
-impl From<quiver_core::process::ProcessStatus> for JsProcessStatus {
+impl From<quiver_core::process::ProcessStatus> for ProcessStatus {
     fn from(status: quiver_core::process::ProcessStatus) -> Self {
         match status {
-            quiver_core::process::ProcessStatus::Active => JsProcessStatus::Active,
-            quiver_core::process::ProcessStatus::Waiting => JsProcessStatus::Waiting,
-            quiver_core::process::ProcessStatus::Sleeping => JsProcessStatus::Sleeping,
-            quiver_core::process::ProcessStatus::Failed => JsProcessStatus::Failed,
-            quiver_core::process::ProcessStatus::Completed => JsProcessStatus::Completed,
+            quiver_core::process::ProcessStatus::Active => ProcessStatus::Active,
+            quiver_core::process::ProcessStatus::Waiting => ProcessStatus::Waiting,
+            quiver_core::process::ProcessStatus::Sleeping => ProcessStatus::Sleeping,
+            quiver_core::process::ProcessStatus::Failed => ProcessStatus::Failed,
+            quiver_core::process::ProcessStatus::Completed => ProcessStatus::Completed,
         }
     }
 }
@@ -146,30 +146,34 @@ impl From<quiver_core::process::ProcessStatus> for JsProcessStatus {
 /// Process info for inspection
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
-pub struct JsProcessInfo {
+pub struct ProcessInfo {
     pub id: usize,
-    pub status: JsProcessStatus,
+    pub status: ProcessStatus,
     #[serde(rename = "type")]
     pub process_type: Option<String>,
+    #[serde(rename = "stackSize")]
     pub stack_size: usize,
-    pub locals_size: usize,
+    #[serde(rename = "localsCount")]
+    pub locals_count: usize,
+    #[serde(rename = "framesCount")]
     pub frames_count: usize,
+    #[serde(rename = "mailboxSize")]
     pub mailbox_size: usize,
     pub persistent: bool,
-    pub result: Option<JsResult<JsEvaluationResult>>,
+    pub result: Option<Result<EvaluationResult>>,
 }
 
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
-pub struct JsProcess {
+pub struct Process {
     pub id: usize,
-    pub status: JsProcessStatus,
+    pub status: ProcessStatus,
 }
 
 /// Evaluation result with value and heap
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
-pub struct JsEvaluationResult {
-    pub value: QuiverValue,
+pub struct EvaluationResult {
+    pub value: Value,
     pub heap: Vec<Vec<u8>>,
 }

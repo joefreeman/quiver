@@ -247,7 +247,7 @@ impl Executor {
             status: self.get_status(id, process),
             function_index: process.function_index,
             stack_size: process.stack.len(),
-            locals_size: process.locals.len(),
+            locals_count: process.locals.len(),
             frames_count: process.frames.len(),
             mailbox_size: process.mailbox.len(),
             persistent: process.persistent,
