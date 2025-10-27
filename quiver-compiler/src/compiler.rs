@@ -16,7 +16,7 @@ mod variables;
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use pattern::MatchCertainty;
-pub use scopes::Scope;
+pub use scopes::{Binding, Scope};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_types};
 
 use crate::{
@@ -141,9 +141,8 @@ pub enum Error {
 pub struct CompilationResult {
     pub instructions: Vec<Instruction>,
     pub result_type: Type,
-    pub variables: HashMap<String, (Type, usize)>,
+    pub bindings: HashMap<String, Binding>,
     pub program: Program,
-    pub type_aliases: HashMap<String, typing::TypeAliasDef>,
     pub module_cache: ModuleCache,
 }
 
@@ -161,7 +160,6 @@ struct RippleContext {
 pub struct Compiler<'a> {
     // Core components
     codegen: InstructionBuilder,
-    type_aliases: HashMap<String, typing::TypeAliasDef>,
     module_cache: ModuleCache,
 
     // State management
@@ -176,22 +174,19 @@ pub struct Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub fn compile(
         ast_program: ast::Program,
-        type_aliases: HashMap<String, typing::TypeAliasDef>,
+        existing_bindings: &HashMap<String, Binding>,
         module_cache: ModuleCache,
         module_loader: &'a dyn ModuleLoader,
         base_types: Vec<quiver_core::types::TupleTypeInfo>,
         module_path: Option<PathBuf>,
-        existing_variables: Option<&HashMap<String, (Type, usize)>>,
         parameter_type: Type,
     ) -> Result<CompilationResult, Error> {
         let program = Program::with_types(base_types);
 
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
-            type_aliases,
             module_cache,
             scopes: vec![],
             local_count: 0,
@@ -201,21 +196,27 @@ impl<'a> Compiler<'a> {
             current_receive_type: Type::never(),
         };
 
-        // Prepare scope variables from existing variables
-        let mut scope_variables = HashMap::new();
-        if let Some(variables) = existing_variables {
-            for (name, (var_type, index)) in variables {
-                scope_variables.insert(name.clone(), (var_type.clone(), *index));
-            }
+        // Prepare scope bindings from existing bindings
+        let mut scope_bindings = HashMap::new();
 
-            compiler.local_count = variables
-                .values()
-                .map(|(_, index)| index)
-                .copied()
-                .max()
-                .map(|max_index| max_index + 1)
-                .unwrap_or(0);
+        // Clone all existing bindings
+        for (name, binding) in existing_bindings {
+            scope_bindings.insert(name.clone(), binding.clone());
         }
+
+        // Calculate local_count from variables
+        compiler.local_count = existing_bindings
+            .values()
+            .filter_map(|binding| {
+                if let Binding::Variable { index, .. } = binding {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .map(|max_index| max_index + 1)
+            .unwrap_or(0);
 
         // Only allocate parameter slot if we have expressions
         // (Type definitions and imports don't need parameters)
@@ -238,8 +239,8 @@ impl<'a> Compiler<'a> {
             None
         };
 
-        // Initialize scope with variables and optional parameter
-        compiler.scopes = vec![Scope::new(scope_variables, scope_parameter)];
+        // Initialize scope with bindings and optional parameter
+        compiler.scopes = vec![Scope::new(scope_bindings, scope_parameter)];
 
         let num_statements = ast_program.statements.len();
         let mut result_type = Type::nil();
@@ -260,20 +261,19 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Extract variables with types, excluding internal ones (like ripple variables ~0, ~1, etc.)
-        let variables = compiler.scopes[0]
-            .variables
+        // Extract bindings from the global scope
+        let bindings: HashMap<String, Binding> = compiler.scopes[0]
+            .bindings
             .iter()
-            .filter(|(name, _)| !name.starts_with('~'))
-            .map(|(name, (var_type, index))| (name.clone(), (var_type.clone(), *index)))
+            .filter(|(name, _)| !name.starts_with('~')) // Exclude internal variables
+            .map(|(name, binding)| (name.clone(), binding.clone()))
             .collect();
 
         Ok(CompilationResult {
             instructions: compiler.codegen.instructions,
             result_type,
-            variables,
+            bindings,
             program: compiler.program,
-            type_aliases: compiler.type_aliases,
             module_cache: compiler.module_cache,
         })
     }
@@ -316,9 +316,12 @@ impl<'a> Compiler<'a> {
         // Validate the AST before storing (even though we won't resolve it yet)
         Self::validate_type_ast(&type_definition)?;
 
-        // Store all type aliases (with 0+ parameters)
-        self.type_aliases
-            .insert(name.to_string(), (type_parameters, type_definition));
+        // Store type alias in the current scope
+        scopes::define_type_alias(
+            &mut self.scopes,
+            name.to_string(),
+            (type_parameters, type_definition),
+        );
         Ok(())
     }
 
@@ -390,7 +393,7 @@ impl<'a> Compiler<'a> {
             &mut self.module_cache,
             self.module_loader,
             self.module_path.as_ref(),
-            &mut self.type_aliases,
+            &mut self.scopes,
             &mut self.program,
         )
     }
@@ -713,7 +716,7 @@ impl<'a> Compiler<'a> {
                     // Inline function definition - extract parameter type
                     if let Some(param_type) = &func.parameter_type {
                         let resolved_type = typing::resolve_ast_type(
-                            &self.type_aliases,
+                            &self.scopes,
                             param_type.clone(),
                             &mut self.program,
                         )?;
@@ -836,7 +839,7 @@ impl<'a> Compiler<'a> {
         // Resolve parameter type with declared type parameters
         let parameter_type = match &function.parameter_type {
             Some(t) => typing::resolve_function_parameter_type(
-                &self.type_aliases,
+                &self.scopes,
                 t.clone(),
                 &function.type_parameters,
                 &mut self.program,
@@ -852,7 +855,17 @@ impl<'a> Compiler<'a> {
         let saved_local_count = self.local_count;
         let saved_receive_type = self.current_receive_type.clone();
 
-        self.scopes = vec![Scope::new(HashMap::new(), None)];
+        // Extract type aliases from parent scopes to preserve in function scope
+        let mut function_scope_bindings = HashMap::new();
+        for scope in &saved_scopes {
+            for (name, binding) in &scope.bindings {
+                if let Binding::TypeAlias(_) = binding {
+                    function_scope_bindings.insert(name.clone(), binding.clone());
+                }
+            }
+        }
+
+        self.scopes = vec![Scope::new(function_scope_bindings, None)];
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
         self.current_receive_type = receive_type.clone();
@@ -936,7 +949,7 @@ impl<'a> Compiler<'a> {
                 } = field
                 {
                     let field_type = typing::resolve_ast_type(
-                        &self.type_aliases,
+                        &self.scopes,
                         type_def.clone(),
                         &mut self.program,
                     )?;
@@ -1002,8 +1015,10 @@ impl<'a> Compiler<'a> {
         // Build available variables set from current scope for pin patterns
         let mut available_variables = HashSet::new();
         if let Some(scope) = self.scopes.last() {
-            for (name, (_type, _index)) in &scope.variables {
-                available_variables.insert(name.clone());
+            for (name, binding) in &scope.bindings {
+                if let Binding::Variable { .. } = binding {
+                    available_variables.insert(name.clone());
+                }
             }
         }
 
@@ -1034,9 +1049,13 @@ impl<'a> Compiler<'a> {
 
                     // Register in scope
                     if let Some(scope) = self.scopes.last_mut() {
-                        scope
-                            .variables
-                            .insert(variable_name.clone(), (variable_type.clone(), local_index));
+                        scope.bindings.insert(
+                            variable_name.clone(),
+                            Binding::Variable {
+                                ty: variable_type.clone(),
+                                index: local_index,
+                            },
+                        );
                     }
                 }
 
@@ -1050,8 +1069,10 @@ impl<'a> Compiler<'a> {
                 // Build variables map from current scope for pin patterns
                 let mut variables = HashMap::new();
                 if let Some(scope) = self.scopes.last() {
-                    for (name, (_type, index)) in &scope.variables {
-                        variables.insert(name.clone(), *index);
+                    for (name, binding) in &scope.bindings {
+                        if let Binding::Variable { ty: _, index } = binding {
+                            variables.insert(name.clone(), *index);
+                        }
                     }
                 }
 
@@ -1137,7 +1158,7 @@ impl<'a> Compiler<'a> {
                     .ok_or_else(|| Error::InternalError {
                         message: "No scope available when compiling block branch".to_string(),
                     })?
-                    .variables
+                    .bindings
                     .clear();
             }
 
@@ -1380,12 +1401,10 @@ impl<'a> Compiler<'a> {
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_local_count = self.local_count;
-        let saved_type_aliases = self.type_aliases.clone();
 
         // Reset to clean state for module compilation
-        self.scopes = vec![Scope::new(HashMap::new(), None)];
+        self.scopes = vec![Scope::empty()];
         self.local_count = 0;
-        self.type_aliases.clear();
 
         // Track the last statement's type for execute_instructions_sync
         let mut last_type = Type::nil();
@@ -1400,7 +1419,6 @@ impl<'a> Compiler<'a> {
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
-        self.type_aliases = saved_type_aliases;
 
         // Execute the module instructions to get the result value
         let (module_value, executor) =
@@ -1697,7 +1715,7 @@ impl<'a> Compiler<'a> {
             ));
         }
 
-        return Ok(union_types(result_types));
+        Ok(union_types(result_types))
     }
 
     fn compile_term(

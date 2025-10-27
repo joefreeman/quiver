@@ -6,7 +6,7 @@ use quiver_core::{
     types::{CallableType, ProcessType, Type, TypeLookup},
 };
 
-use super::Error;
+use super::{Error, Scope, scopes};
 
 #[derive(Debug, Clone)]
 pub enum TupleAccessor {
@@ -35,22 +35,20 @@ pub type TypeAliasDef = (Vec<String>, ast::Type);
 
 fn instantiate_generic_type(
     union_depth: &mut usize,
-    type_aliases: &HashMap<String, TypeAliasDef>,
+    scopes_ref: &[Scope],
     name: &str,
     arguments: Vec<ast::Type>,
     program: &mut Program,
     type_bindings: &HashMap<String, Type>,
 ) -> Result<Type, Error> {
     // Look up generic definition
-    let type_def = type_aliases
-        .get(name)
-        .ok_or_else(|| Error::TypeAliasMissing(name.to_string()))?
-        .clone();
+    let type_def = scopes::lookup_type_alias(scopes_ref, name)
+        .ok_or_else(|| Error::TypeAliasMissing(name.to_string()))?;
 
     // Resolve all type arguments
     let resolved_args: Vec<Type> = arguments
         .into_iter()
-        .map(|arg| resolve_ast_type_impl(union_depth, type_aliases, arg, program, type_bindings))
+        .map(|arg| resolve_ast_type_impl(union_depth, scopes_ref, arg, program, type_bindings))
         .collect::<Result<_, _>>()?;
 
     // Validate argument count
@@ -70,13 +68,7 @@ fn instantiate_generic_type(
     }
 
     // Resolve the body with parameter bindings
-    resolve_ast_type_impl(
-        union_depth,
-        type_aliases,
-        type_def.1,
-        program,
-        &new_bindings,
-    )
+    resolve_ast_type_impl(union_depth, scopes_ref, type_def.1, program, &new_bindings)
 }
 
 /// Check if an AST type contains any cycle references
@@ -108,19 +100,19 @@ fn validate_union_has_base_case(variants: &[ast::Type]) -> Result<(), Error> {
 }
 
 pub fn resolve_ast_type(
-    type_aliases: &HashMap<String, TypeAliasDef>,
+    scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
 ) -> Result<Type, Error> {
     let bindings = HashMap::new();
     let mut union_depth = 0;
-    resolve_ast_type_impl(&mut union_depth, type_aliases, ast_type, program, &bindings)
+    resolve_ast_type_impl(&mut union_depth, scopes_ref, ast_type, program, &bindings)
 }
 
 /// Resolve a function parameter type with explicitly declared type parameters.
 /// Type parameters are resolved to Type::Variable, while undefined types cause errors.
 pub fn resolve_function_parameter_type(
-    type_aliases: &HashMap<String, TypeAliasDef>,
+    scopes_ref: &[Scope],
     ast_type: ast::Type,
     type_parameters: &[String],
     program: &mut Program,
@@ -132,7 +124,7 @@ pub fn resolve_function_parameter_type(
     }
 
     let mut union_depth = 0;
-    resolve_ast_type_impl(&mut union_depth, type_aliases, ast_type, program, &bindings)
+    resolve_ast_type_impl(&mut union_depth, scopes_ref, ast_type, program, &bindings)
 }
 
 /// Resolve a type alias for display purposes (e.g., in tests or REPL).
@@ -140,24 +132,23 @@ pub fn resolve_function_parameter_type(
 /// This allows formatting of parameterized types like `point<t> :: Point[x: t, y: t]`
 /// as `Point[x: t, y: t]` where `t` is a type variable.
 pub fn resolve_type_alias_for_display(
-    type_aliases: &HashMap<String, TypeAliasDef>,
+    scopes_ref: &[Scope],
     alias_name: &str,
     program: &mut Program,
 ) -> Result<Type, Error> {
-    let (type_params, ast_type) = type_aliases
-        .get(alias_name)
+    let (type_params, ast_type) = scopes::lookup_type_alias(scopes_ref, alias_name)
         .ok_or_else(|| Error::TypeAliasMissing(alias_name.to_string()))?;
 
     // Create Variable bindings for all type parameters
     let mut bindings = HashMap::new();
-    for param in type_params {
+    for param in &type_params {
         bindings.insert(param.clone(), Type::Variable(param.clone()));
     }
 
     let mut union_depth = 0;
     resolve_ast_type_impl(
         &mut union_depth,
-        type_aliases,
+        scopes_ref,
         ast_type.clone(),
         program,
         &bindings,
@@ -167,7 +158,7 @@ pub fn resolve_type_alias_for_display(
 /// Resolve tuple name when using identifier spread syntax (e.g., t1[..., y: int])
 fn resolve_tuple_name(
     name: ast::TupleName,
-    type_aliases: &HashMap<String, TypeAliasDef>,
+    scopes_ref: &[Scope],
     _program: &Program,
 ) -> Result<Option<String>, Error> {
     match name {
@@ -181,8 +172,7 @@ fn resolve_tuple_name(
         }
         ast::TupleName::Identifier(identifier) => {
             // Look up the type alias to get its tuple name
-            let (type_params, type_def) = type_aliases
-                .get(&identifier)
+            let (type_params, type_def) = scopes::lookup_type_alias(scopes_ref, &identifier)
                 .ok_or_else(|| Error::TypeAliasMissing(identifier.to_string()))?;
 
             // Type parameters must be empty for name inheritance (for now)
@@ -198,7 +188,7 @@ fn resolve_tuple_name(
             // by looking at the AST directly
             match type_def {
                 ast::Type::Tuple(tuple_type) => {
-                    resolve_tuple_name(tuple_type.name.clone(), type_aliases, _program)
+                    resolve_tuple_name(tuple_type.name.clone(), scopes_ref, _program)
                 }
                 ast::Type::Union(_) => {
                     // For unions, don't try to extract a single name
@@ -221,7 +211,7 @@ type NamedFieldVariants = Vec<(Option<String>, FieldSet)>; // (tuple_name, field
 /// Returns a vector of (name, field_set) pairs - multiple pairs if spreading creates union variants
 fn resolve_tuple_fields_with_spread(
     union_depth: &mut usize,
-    type_aliases: &HashMap<String, TypeAliasDef>,
+    scopes_ref: &[Scope],
     fields: &[ast::FieldType],
     program: &mut Program,
     type_bindings: &HashMap<String, Type>,
@@ -237,7 +227,7 @@ fn resolve_tuple_fields_with_spread(
                 // Resolve the field type
                 let field_type = resolve_ast_type_impl(
                     union_depth,
-                    type_aliases,
+                    scopes_ref,
                     type_def.clone(),
                     program,
                     type_bindings,
@@ -270,8 +260,7 @@ fn resolve_tuple_fields_with_spread(
                 })?;
 
                 // Look up the spread type
-                let (type_params, type_def) = type_aliases
-                    .get(spread_id)
+                let (type_params, type_def) = scopes::lookup_type_alias(scopes_ref, spread_id)
                     .ok_or_else(|| Error::TypeAliasMissing(spread_id.clone()))?;
 
                 // Check type parameter count matches
@@ -289,7 +278,7 @@ fn resolve_tuple_fields_with_spread(
                 for (param, arg) in type_params.iter().zip(type_arguments.iter()) {
                     let arg_type = resolve_ast_type_impl(
                         union_depth,
-                        type_aliases,
+                        scopes_ref,
                         arg.clone(),
                         program,
                         type_bindings,
@@ -300,7 +289,7 @@ fn resolve_tuple_fields_with_spread(
                 // Resolve the spread type with the bindings
                 let spread_type = resolve_ast_type_impl(
                     union_depth,
-                    type_aliases,
+                    scopes_ref,
                     type_def.clone(),
                     program,
                     &spread_bindings,
@@ -375,7 +364,7 @@ fn extract_tuple_types_from_type_with_names(
 
 fn resolve_ast_type_impl(
     union_depth: &mut usize,
-    type_aliases: &HashMap<String, TypeAliasDef>,
+    scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
     type_bindings: &HashMap<String, Type>,
@@ -395,7 +384,7 @@ fn resolve_ast_type_impl(
                 // Handle spreads - may create multiple variants
                 let field_variants = resolve_tuple_fields_with_spread(
                     union_depth,
-                    type_aliases,
+                    scopes_ref,
                     &tuple.fields,
                     program,
                     type_bindings,
@@ -426,7 +415,7 @@ fn resolve_ast_type_impl(
                     // - TupleName::None -> use None (unnamed)
                     let final_name = match &tuple.name {
                         ast::TupleName::Literal(_) | ast::TupleName::None => {
-                            resolve_tuple_name(tuple.name.clone(), type_aliases, program)?
+                            resolve_tuple_name(tuple.name.clone(), scopes_ref, program)?
                         }
                         ast::TupleName::Identifier(_) => {
                             // Use variant name from spread (inherits from source)
@@ -458,7 +447,7 @@ fn resolve_ast_type_impl(
                     ast::FieldType::Field { name, type_def } => {
                         let field_type = resolve_ast_type_impl(
                             union_depth,
-                            type_aliases,
+                            scopes_ref,
                             type_def,
                             program,
                             type_bindings,
@@ -482,7 +471,7 @@ fn resolve_ast_type_impl(
             }
 
             // Resolve tuple name (may inherit from identifier spread)
-            let resolved_name = resolve_tuple_name(tuple.name, type_aliases, program)?;
+            let resolved_name = resolve_tuple_name(tuple.name, scopes_ref, program)?;
 
             // Register the tuple type with the is_partial flag
             let type_id =
@@ -498,14 +487,14 @@ fn resolve_ast_type_impl(
         ast::Type::Function(function) => {
             let input_type = resolve_ast_type_impl(
                 union_depth,
-                type_aliases,
+                scopes_ref,
                 *function.input,
                 program,
                 type_bindings,
             )?;
             let output_type = resolve_ast_type_impl(
                 union_depth,
-                type_aliases,
+                scopes_ref,
                 *function.output,
                 program,
                 type_bindings,
@@ -533,7 +522,7 @@ fn resolve_ast_type_impl(
             for member_type in union.types {
                 let member_type = resolve_ast_type_impl(
                     union_depth,
-                    type_aliases,
+                    scopes_ref,
                     member_type,
                     program,
                     type_bindings,
@@ -581,7 +570,7 @@ fn resolve_ast_type_impl(
                 .map(|receive_type| {
                     resolve_ast_type_impl(
                         union_depth,
-                        type_aliases,
+                        scopes_ref,
                         *receive_type,
                         program,
                         type_bindings,
@@ -594,7 +583,7 @@ fn resolve_ast_type_impl(
                 .map(|return_type| {
                     resolve_ast_type_impl(
                         union_depth,
-                        type_aliases,
+                        scopes_ref,
                         *return_type,
                         program,
                         type_bindings,
@@ -616,7 +605,7 @@ fn resolve_ast_type_impl(
             // Instantiate the type (works for both bare identifiers and parameterized types)
             instantiate_generic_type(
                 union_depth,
-                type_aliases,
+                scopes_ref,
                 &name,
                 arguments,
                 program,

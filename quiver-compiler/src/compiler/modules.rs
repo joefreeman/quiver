@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf};
 use crate::{ast, modules::ModuleLoader, parser};
 use quiver_core::{bytecode::Instruction, program::Program};
 
-use super::{Error, typing::TypeAliasDef};
+use super::{Error, Scope, scopes};
 
 #[derive(Clone)]
 pub struct ModuleCache {
@@ -59,7 +59,7 @@ pub fn compile_type_import(
     module_cache: &mut ModuleCache,
     module_loader: &dyn ModuleLoader,
     current_module_path: Option<&PathBuf>,
-    type_aliases: &mut HashMap<String, TypeAliasDef>,
+    scopes_mut: &mut [Scope],
     _program: &mut Program,
 ) -> Result<(), Error> {
     let parsed =
@@ -89,8 +89,9 @@ pub fn compile_type_import(
                     )));
                 }
 
-                // Store all types as type aliases (with 0+ parameters)
-                type_aliases.insert(
+                // Store all types as type aliases in current scope
+                scopes::define_type_alias(
+                    scopes_mut,
                     name.to_string(),
                     (type_parameters.clone(), type_definition.clone()),
                 );
@@ -110,8 +111,9 @@ pub fn compile_type_import(
                     .iter()
                     .find(|alias| alias.0.as_str() == *requested_name)
                 {
-                    // Store all types as type aliases (with 0+ parameters)
-                    type_aliases.insert(
+                    // Store all types as type aliases in current scope
+                    scopes::define_type_alias(
+                        scopes_mut,
                         name.to_string(),
                         ((*type_parameters).clone(), (*type_definition).clone()),
                     );

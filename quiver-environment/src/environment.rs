@@ -881,8 +881,19 @@ impl Environment {
         type_aliases: &std::collections::HashMap<String, quiver_compiler::compiler::TypeAliasDef>,
         alias_name: &str,
     ) -> Result<Type, String> {
+        // Convert type_aliases HashMap to a single scope for resolution
+        let mut bindings = std::collections::HashMap::new();
+        for (name, type_alias) in type_aliases {
+            bindings.insert(
+                name.clone(),
+                quiver_compiler::compiler::Binding::TypeAlias(type_alias.clone()),
+            );
+        }
+        let scope = quiver_compiler::compiler::Scope::new(bindings, None);
+        let scopes = vec![scope];
+
         quiver_compiler::compiler::resolve_type_alias_for_display(
-            type_aliases,
+            &scopes,
             alias_name,
             &mut self.program,
         )

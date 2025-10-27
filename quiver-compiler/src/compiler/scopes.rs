@@ -2,23 +2,35 @@ use crate::ast;
 use quiver_core::types::Type;
 use std::collections::HashMap;
 
-use super::{Error, helpers};
+use super::{Error, helpers, typing::TypeAliasDef};
+
+/// A binding can be either a variable or a type alias
+#[derive(Debug, Clone)]
+pub enum Binding {
+    Variable { ty: Type, index: usize },
+    TypeAlias(TypeAliasDef),
+}
 
 /// Represents a scope in the compiler's variable environment
-/// Each scope tracks local variables and an optional function parameter
+/// Each scope tracks bindings (variables and type aliases) and an optional function parameter
 pub struct Scope {
-    pub variables: HashMap<String, (Type, usize)>,
+    pub bindings: HashMap<String, Binding>,
     pub parameter: Option<(Type, usize)>,
 }
 
 impl Scope {
-    pub fn new(
-        variables: HashMap<String, (Type, usize)>,
-        parameter: Option<(Type, usize)>,
-    ) -> Self {
+    pub fn new(bindings: HashMap<String, Binding>, parameter: Option<(Type, usize)>) -> Self {
         Self {
-            variables,
+            bindings,
             parameter,
+        }
+    }
+
+    /// Create a new empty scope
+    pub fn empty() -> Self {
+        Self {
+            bindings: HashMap::new(),
+            parameter: None,
         }
     }
 }
@@ -36,9 +48,22 @@ pub fn define_variable(
     let index = *local_count;
     *local_count += 1;
     if let Some(scope) = scopes.last_mut() {
-        scope.variables.insert(full_name, (var_type, index));
+        scope.bindings.insert(
+            full_name,
+            Binding::Variable {
+                ty: var_type,
+                index,
+            },
+        );
     }
     index
+}
+
+/// Define a new type alias in the current scope
+pub fn define_type_alias(scopes: &mut [Scope], name: String, type_alias: TypeAliasDef) {
+    if let Some(scope) = scopes.last_mut() {
+        scope.bindings.insert(name, Binding::TypeAlias(type_alias));
+    }
 }
 
 /// Look up a variable in the scope stack
@@ -50,8 +75,19 @@ pub fn lookup_variable(
 ) -> Option<(Type, usize)> {
     let full_name = helpers::make_capture_name(name, accessors);
     for scope in scopes.iter().rev() {
-        if let Some(&(ref variable_type, index)) = scope.variables.get(&full_name) {
-            return Some((variable_type.clone(), index));
+        if let Some(Binding::Variable { ty, index }) = scope.bindings.get(&full_name) {
+            return Some((ty.clone(), *index));
+        }
+    }
+    None
+}
+
+/// Look up a type alias in the scope stack
+/// Searches from innermost to outermost scope
+pub fn lookup_type_alias(scopes: &[Scope], name: &str) -> Option<TypeAliasDef> {
+    for scope in scopes.iter().rev() {
+        if let Some(Binding::TypeAlias(type_alias)) = scope.bindings.get(name) {
+            return Some(type_alias.clone());
         }
     }
     None

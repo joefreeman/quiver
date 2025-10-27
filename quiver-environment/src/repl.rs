@@ -1,6 +1,6 @@
 use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
-use quiver_compiler::compiler::ModuleCache;
+use quiver_compiler::compiler::{Binding, ModuleCache};
 use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
 use quiver_core::process::ProcessId;
@@ -30,10 +30,9 @@ impl std::fmt::Display for ReplError {
 pub struct Repl {
     repl_process_id: Option<ProcessId>,
     types: Vec<quiver_core::types::TupleTypeInfo>, // Accumulated types across evaluations
-    variable_map: HashMap<String, (Type, usize)>,  // variable name -> (type, local index)
-    type_aliases: HashMap<String, quiver_compiler::compiler::TypeAliasDef>, // type definitions persisted across sessions
-    module_cache: ModuleCache, // persistent module cache across evaluations
-    last_result_type: Type,    // Type of the last evaluated result, for continuations
+    bindings: HashMap<String, Binding>, // variables and type aliases persisted across sessions
+    module_cache: ModuleCache,          // persistent module cache across evaluations
+    last_result_type: Type,             // Type of the last evaluated result, for continuations
     module_loader: Box<dyn ModuleLoader>,
 }
 
@@ -44,8 +43,7 @@ impl Repl {
         Self {
             repl_process_id: None,
             types,
-            variable_map: HashMap::new(),
-            type_aliases: HashMap::new(),
+            bindings: HashMap::new(),
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
             module_loader,
@@ -63,35 +61,25 @@ impl Repl {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
-        // Compile with existing variables
-        let existing_vars = if self.variable_map.is_empty() {
-            None
-        } else {
-            Some(&self.variable_map)
-        };
-
         let result = Compiler::compile(
             parsed,
-            self.type_aliases.clone(),
+            &self.bindings,
             self.module_cache.clone(),
             self.module_loader.as_ref(),
             self.types.clone(),
-            None, // module_path
-            existing_vars,
+            None,                          // module_path
             self.last_result_type.clone(), // parameter_type - use previous result type for continuations
         )
         .map_err(ReplError::Compiler)?;
 
         let instructions = result.instructions;
         let result_type = result.result_type;
-        let variables = result.variables;
-        let type_aliases = result.type_aliases;
+        let bindings = result.bindings;
         let module_cache = result.module_cache;
         let mut program = result.program;
 
         // Update REPL state
-        self.variable_map = variables;
-        self.type_aliases = type_aliases;
+        self.bindings = bindings;
         self.module_cache = module_cache;
         self.last_result_type = result_type.clone();
 
@@ -159,24 +147,40 @@ impl Repl {
         env: &mut Environment,
         name: &str,
     ) -> Result<u64, EnvironmentError> {
-        let (_, local_index) = self
-            .variable_map
+        let binding = self
+            .bindings
             .get(name)
             .ok_or_else(|| EnvironmentError::VariableNotFound(name.to_string()))?;
+
+        let local_index = match binding {
+            Binding::Variable { index, .. } => *index,
+            Binding::TypeAlias(_) => {
+                return Err(EnvironmentError::VariableNotFound(format!(
+                    "'{}' is a type alias, not a variable",
+                    name
+                )));
+            }
+        };
 
         let repl_process_id = self
             .repl_process_id
             .ok_or(EnvironmentError::NoReplProcess)?;
 
-        env.request_locals(repl_process_id, vec![*local_index])
+        env.request_locals(repl_process_id, vec![local_index])
     }
 
     /// Get all variable names and their types, ordered by local index
     pub fn get_variables(&self) -> Vec<(String, Type)> {
         let mut vars: Vec<_> = self
-            .variable_map
+            .bindings
             .iter()
-            .map(|(name, (ty, idx))| (name.clone(), ty.clone(), *idx))
+            .filter_map(|(name, binding)| {
+                if let Binding::Variable { ty, index } = binding {
+                    Some((name.clone(), ty.clone(), *index))
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Sort by local index to maintain definition order
@@ -193,10 +197,19 @@ impl Repl {
             return;
         };
 
-        // Keep all variables currently in the variable map
+        // Keep all variables currently in the bindings map
         // Sort indices to ensure consistent ordering
-        let mut keep_indices: Vec<usize> =
-            self.variable_map.values().map(|(_, idx)| *idx).collect();
+        let mut keep_indices: Vec<usize> = self
+            .bindings
+            .values()
+            .filter_map(|binding| {
+                if let Binding::Variable { index, .. } = binding {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect();
         keep_indices.sort();
 
         // Build mapping from old index to new index
@@ -205,12 +218,14 @@ impl Repl {
             index_mapping.insert(old_idx, new_idx);
         }
 
-        // Update variable_map with new indices
-        for (_, idx) in self.variable_map.values_mut() {
-            *idx = index_mapping
-                .get(idx)
-                .copied()
-                .expect("Invalid variable index");
+        // Update bindings with new indices
+        for binding in self.bindings.values_mut() {
+            if let Binding::Variable { index, .. } = binding {
+                *index = index_mapping
+                    .get(index)
+                    .copied()
+                    .expect("Invalid variable index");
+            }
         }
 
         // Compact the locals on the worker (ignore errors - this is just an optimization)
@@ -225,6 +240,19 @@ impl Repl {
         env: &mut Environment,
         alias_name: &str,
     ) -> Result<Type, String> {
-        env.resolve_type_alias(&self.type_aliases, alias_name)
+        // Extract type aliases from bindings
+        let type_aliases: HashMap<String, quiver_compiler::compiler::TypeAliasDef> = self
+            .bindings
+            .iter()
+            .filter_map(|(name, binding)| {
+                if let Binding::TypeAlias(type_alias) = binding {
+                    Some((name.clone(), type_alias.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        env.resolve_type_alias(&type_aliases, alias_name)
     }
 }

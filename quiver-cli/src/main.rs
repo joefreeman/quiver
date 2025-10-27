@@ -94,12 +94,11 @@ fn compile_command(
     let ast = parse(&source).map_err(|e| format!("Parse error: {:?}", e))?;
     let result = Compiler::compile(
         ast,
-        HashMap::new(),
+        &HashMap::new(), // No existing bindings
         ModuleCache::new(),
         &module_loader,
         vec![],
         module_path,
-        None,
         Type::nil(),
     )
     .map_err(|e| format!("Compile error: {:?}", e))?;
@@ -183,12 +182,11 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
     let ast = parse(source).map_err(|e| format!("Parse error: {:?}", e))?;
     let compilation_result = Compiler::compile(
         ast,
-        HashMap::new(),
+        &HashMap::new(), // No existing bindings
         ModuleCache::new(),
         &module_loader,
         vec![],
         module_path,
-        None,
         Type::nil(),
     )
     .map_err(|e| format!("Compile error: {:?}", e))?;
