@@ -25,7 +25,7 @@ Quiver uses postfix notation where data flows left-to-right through transformati
 Pattern matching allows destructuring values and branching based on their structure. Matches can test literal values, extract components, and control program flow.
 
 ```
-response :: Success[bin] | Error[code: int];
+response : Success[bin] | Error[code: int];
 
 handle_response = #response {
   | ~> =Success[content] => content
@@ -68,9 +68,9 @@ Point()                  // Empty named partial - matches any tuple named 'Point
 ### Type aliases
 
 ```
-point :: Point[x: int, y: int];
-adder :: #int -> int;
-writer :: (write: (#bin -> Ok));
+point : Point[x: int, y: int];
+adder : #int -> int;
+writer : (write: (#bin -> Ok));
 ```
 
 ### Parameterised types
@@ -78,7 +78,7 @@ writer :: (write: (#bin -> Ok));
 Type aliases and functions can be parameterised with type parameters using angle brackets:
 
 ```
-pair<a, b> :: Pair[first: a, second: b];
+pair<a, b> : Pair[first: a, second: b];
 ```
 
 Functions can also declare type parameters:
@@ -93,8 +93,8 @@ Type parameters are inferred from usage. When a function with type parameters is
 ### Union types
 
 ```
-bool :: True | False;
-shape ::
+bool : True | False;
+shape :
   | Circle[radius: int]
   | Rectangle[width: int, height: int];
 ```
@@ -104,9 +104,9 @@ shape ::
 Use `&` to refer back to the root of the types, or `&1`/`&2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
 
 ```
-list<t> :: Nil | Cons[t, &];
-tree<t> :: Leaf[t] | Node[&, &];
-json ::
+list<t> : Nil | Cons[t, &];
+tree<t> : Leaf[t] | Node[&, &];
+json :
   | Null
   | bool
   | int
@@ -120,20 +120,20 @@ Type aliases can be extended using the spread operator `...` to compose new type
 
 ```
 // Compose types from reusable pieces
-entity :: [id: int, created_at: int];
-updateable :: (updated_at: int);
-post :: Post[...entity, title: Str[bin], ...updateable];  // Post[id: int, created_at: int, title: Str[bin], updated_at: int]
+entity : [id: int, created_at: int];
+updateable : (updated_at: int);
+post : Post[...entity, title: Str[bin], ...updateable];  // Post[id: int, created_at: int, title: Str[bin], updated_at: int]
 
 // Field override - later fields override earlier ones
-v1 :: User[id: int, name: Str[bin]];
-v2 :: v1[..., id: bin];  // User[id: bin, name: Str[bin]]
+v1 : User[id: int, name: Str[bin]];
+v2 : v1[..., id: bin];  // User[id: bin, name: Str[bin]]
 ```
 
 When spreading a union type, the spread is distributed across all variants:
 
 ```
-event :: Created[id: int] | Updated | Deleted;
-logged :: event[..., timestamp: int] // Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int];
+event : Created[id: int] | Updated | Deleted;
+logged : event[..., timestamp: int] // Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int];
 ```
 
 ### Strings
@@ -520,8 +520,8 @@ utils = %"./utils.qv"            // Import local file
 Import types from modules using patterns:
 
 ```
-(circle, rectangle) :: %"./shapes.qv";  // Import specific types
-* :: %"./geometry.qv";                  // Import all types
+(circle, rectangle) : %"./shapes.qv";  // Import specific types
+* : %"./geometry.qv";                  // Import all types
 ```
 
 ## Standard library
@@ -557,7 +557,7 @@ add[x, y] ~> mul[~, 2] ~> sub[~, 1]
 ### Working with tuples
 
 ```
-point :: Point[x: int, y: int];
+point : Point[x: int, y: int];
 
 math = %"math",
 
@@ -580,7 +580,7 @@ add_points[p1, p2]   // Point[x: 10, y: 7]
 ### Pattern matching
 
 ```
-list<t> :: Nil | Cons[t, &];
+list<t> : Nil | Cons[t, &];
 
 // Determine whether a list contains an item
 contains? = #<t>[list<t>, t] {
@@ -613,7 +613,7 @@ clamp = #int {
 
 ```
 // shapes.qv
-shape ::
+shape :
   | Circle[radius: int]
   | Rectangle[width: int, height: int];
 

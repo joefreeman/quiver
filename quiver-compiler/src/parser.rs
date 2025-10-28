@@ -1171,7 +1171,7 @@ fn type_alias(input: &str) -> IResult<&str, Statement> {
                 separated_list1(tuple((ws0, char(','), ws0)), identifier),
                 char('>'),
             )),
-            preceded(tuple((ws0, tag("::"), ws0)), type_definition),
+            preceded(tuple((ws0, tag(":"), ws0)), type_definition),
         )),
         |(name, type_parameters, type_definition)| Statement::TypeAlias {
             name,
@@ -1202,7 +1202,7 @@ fn type_import(input: &str) -> IResult<&str, Statement> {
     map(
         tuple((
             type_import_pattern,
-            preceded(tuple((ws0, tag("::"), ws0)), import),
+            preceded(tuple((ws0, tag(":"), ws0)), import),
         )),
         |(pattern, module_path)| Statement::TypeImport {
             pattern,

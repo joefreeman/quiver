@@ -1,5 +1,5 @@
 
-list<t> :: Nil | Cons[t, &];
+list<t> : Nil | Cons[t, &];
 
 math = %"math",
 

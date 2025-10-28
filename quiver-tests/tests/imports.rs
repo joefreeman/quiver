@@ -137,13 +137,13 @@ fn test_partial_type_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./types.qv".to_string(),
-        "ok :: Ok[int]; err :: Err[int]; []".to_string(),
+        "ok : Ok[int]; err : Err[int]; []".to_string(),
     );
     quiver()
         .with_modules(modules)
         .evaluate(
             r#"
-            (ok, err) :: %"./types.qv";
+            (ok, err) : %"./types.qv";
             double = #ok { ~> =Ok[x] => [x, 2] ~> __multiply__ },
             Ok[21] ~> double
             "#,
@@ -156,13 +156,13 @@ fn test_star_type_import() {
     let mut modules = HashMap::new();
     modules.insert(
         "./types.qv".to_string(),
-        "result :: Ok[int] | Err[int]; []".to_string(),
+        "result : Ok[int] | Err[int]; []".to_string(),
     );
     quiver()
         .with_modules(modules)
         .evaluate(
             r#"
-            * :: %"./types.qv";
+            * : %"./types.qv";
             unwrap = #result { ~> =Ok[x] => x | ~> =Err[x] => 0 },
             Ok[42] ~> unwrap
             "#,

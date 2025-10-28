@@ -10,7 +10,7 @@
 
 ```quiver
 // Define a recursive list type
-list<t> :: Nil | Cons[t, &];
+list<t> : Nil | Cons[t, &];
 
 // Import standard library
 math = %"math",
