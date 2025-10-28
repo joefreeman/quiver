@@ -2,12 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for matching against types with the pin operator (`... ~> ^int`, `... ~> ^(A[int] | B[bin])`).
+
 ### Changed
 
 - The value of a match expression (`... ~> =x` or `x = ...`) now returns the value itself if the match is successful (and nil otherwise), and a send expression (`... ~> p`) returns the process.
 - Added support for multiple REPL instances for an environment.
 - Various updates to the web API.
 - Made 'int' and 'bin' reserved names, and updated the compiler to store variables and type aliases in a single bindings map.
+
+### Fixed
+
+- Fixed pin matching with partial (`x = 1, A[x: 1] ~> ^A(x)`).
 
 ## [0.2.1] - 2025-10-25
 

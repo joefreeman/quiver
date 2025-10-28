@@ -245,16 +245,20 @@ role ~> ="admin"                 // String matching
 
 ### Pinning
 
-Use `^` to check against existing variables instead of binding:
+Use `^` to check against existing variables or types, instead of binding:
 
 ```
 y = 2
-2 ~> ^y                          // Ok (matches)
+2 ~> ^y                          // 2 (matches)
 3 ~> ^y                          // [] (doesn't match)
 
 Point[x, ^y] = Point[1, 2]       // Binds x, checks y is 2
 Point[1, 2] ~> ^Point[=x, y]     // x bound, y pinned
 A[x, ^B[y, =C[z]]]               // Mixed; x and z bound; y pinned
+
+42 ~> ^int                       // 42
+A[2] ~> ^A[y]                    // A[2]
+P[x: 1, y: 2] ~> ^P(x: int)      // P[x: 1, y: 2]
 ```
 
 Patterns default to bind mode. Use `^` to switch to pin mode, or `=` within `^` to switch back to bind mode.
