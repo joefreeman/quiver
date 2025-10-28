@@ -1,7 +1,7 @@
 use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
 use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
-use quiver_core::types::TupleTypeInfo;
+use quiver_core::types::{TupleTypeInfo, Type};
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,7 +13,8 @@ pub enum Command {
     UpdateProgram {
         constants: Vec<Constant>,
         functions: Vec<Function>,
-        types: Vec<TupleTypeInfo>,
+        tuple_types: Vec<TupleTypeInfo>,
+        check_types: Vec<Type>,
         builtins: Vec<BuiltinInfo>,
     },
 

@@ -38,7 +38,7 @@ pub struct Repl {
 
 impl Repl {
     pub fn new(program: Program, module_loader: Box<dyn ModuleLoader>) -> Self {
-        let types = program.get_types().to_vec();
+        let types = program.get_tuple_types().to_vec();
 
         Self {
             repl_process_id: None,
@@ -100,7 +100,7 @@ impl Repl {
         };
 
         // Store types for next iteration
-        self.types = program.get_types().to_vec();
+        self.types = program.get_tuple_types().to_vec();
 
         // If no function was created (type definitions only), we're done
         let Some(function_index) = function_index else {

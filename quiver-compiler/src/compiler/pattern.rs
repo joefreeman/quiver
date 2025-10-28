@@ -64,9 +64,7 @@ pub enum PatternMode {
 /// Represents a check that must be performed at runtime
 #[derive(Debug, Clone)]
 enum RuntimeCheck {
-    TupleType(TypeId),
-    Integer,
-    Binary,
+    Type(Type), // Type to check against - will be registered during code generation
     Literal(ast::Literal),
     Variable(String),
     Path(AccessPath),
@@ -108,7 +106,7 @@ pub struct BindingSet {
 
 /// Analyze pattern without generating code
 pub fn analyze_pattern(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     pattern: &ast::Match,
     value_type: &Type,
     mode: PatternMode,
@@ -117,7 +115,7 @@ pub fn analyze_pattern(
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
     let binding_sets = analyze_match_pattern(
-        type_lookup,
+        program,
         pattern,
         value_type,
         vec![],
@@ -194,17 +192,11 @@ pub fn generate_pattern_code(
                     }
                     codegen.add_instruction(Instruction::Equal(2));
                 }
-                RuntimeCheck::TupleType(type_id) => {
+                RuntimeCheck::Type(check_type) => {
                     generate_value_access(codegen, &requirement.path);
-                    codegen.add_instruction(Instruction::IsType(*type_id));
-                }
-                RuntimeCheck::Integer => {
-                    generate_value_access(codegen, &requirement.path);
-                    codegen.add_instruction(Instruction::IsInteger);
-                }
-                RuntimeCheck::Binary => {
-                    generate_value_access(codegen, &requirement.path);
-                    codegen.add_instruction(Instruction::IsBinary);
+                    // Register the type in the check_types registry and emit IsType instruction
+                    let type_id = program.register_check_type(check_type.clone());
+                    codegen.add_instruction(Instruction::IsType(type_id));
                 }
                 RuntimeCheck::Literal(literal) => {
                     generate_value_access(codegen, &requirement.path);
@@ -286,7 +278,7 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
 
 #[allow(clippy::too_many_arguments)]
 fn analyze_match_pattern(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     pattern: &ast::Match,
     value_type: &Type,
     path: AccessPath,
@@ -297,7 +289,7 @@ fn analyze_match_pattern(
 ) -> Result<Vec<BindingSet>, Error> {
     match pattern {
         ast::Match::Identifier(name) => analyze_identifier_pattern(
-            type_lookup,
+            program,
             name.clone(),
             value_type.clone(),
             path,
@@ -308,7 +300,7 @@ fn analyze_match_pattern(
         ),
         ast::Match::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
         ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
-            type_lookup,
+            program,
             tuple,
             value_type,
             path,
@@ -318,15 +310,15 @@ fn analyze_match_pattern(
             scopes,
         ),
         ast::Match::Partial(partial) => {
-            analyze_partial_pattern(type_lookup, partial, value_type, path, identifiers)
+            analyze_partial_pattern(program, partial, value_type, path, identifiers)
         }
-        ast::Match::Star => analyze_star_pattern(type_lookup, value_type, path, identifiers),
+        ast::Match::Star => analyze_star_pattern(program, value_type, path, identifiers),
         ast::Match::Placeholder => Ok(vec![BindingSet {
             requirements: vec![],
             bindings: vec![],
         }]),
         ast::Match::Pin(inner) => analyze_match_pattern(
-            type_lookup,
+            program,
             inner,
             value_type,
             path,
@@ -336,7 +328,7 @@ fn analyze_match_pattern(
             scopes,
         ),
         ast::Match::Bind(inner) => analyze_match_pattern(
-            type_lookup,
+            program,
             inner,
             value_type,
             path,
@@ -345,12 +337,34 @@ fn analyze_match_pattern(
             variables,
             scopes,
         ),
+        ast::Match::Type(ast_type) => {
+            // Type expressions should only appear in pin mode
+            // This can happen if someone writes =(type-expression)
+            if mode == PatternMode::Bind {
+                return Err(Error::FeatureUnsupported(
+                    "Type expressions can only be used in pin mode (^), not bind mode (=)"
+                        .to_string(),
+                ));
+            }
+
+            // Resolve the ast::Type to a Type
+            let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
+
+            // Create a runtime check for the type (same as type aliases)
+            Ok(vec![BindingSet {
+                requirements: vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Type(resolved_type),
+                }],
+                bindings: vec![],
+            }])
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn analyze_match_tuple_pattern(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     tuple: &ast::MatchTuple,
     value_type: &Type,
     path: AccessPath,
@@ -362,7 +376,7 @@ fn analyze_match_tuple_pattern(
     let mut binding_sets = vec![];
 
     // Find matching tuple types
-    let matching_types = find_matching_match_tuple_types(type_lookup, tuple, value_type)?;
+    let matching_types = find_matching_match_tuple_types(program, tuple, value_type)?;
 
     // For each matching type, create binding sets
     for (type_id, field_mappings) in &matching_types {
@@ -374,7 +388,7 @@ fn analyze_match_tuple_pattern(
 
         // Get tuple info and extract field types upfront to avoid borrow issues
         let tuple_fields: Vec<Type> = {
-            let tuple_info = type_lookup
+            let tuple_info = program
                 .lookup_type(type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
             tuple_info.fields.iter().map(|(_, t)| t.clone()).collect()
@@ -384,9 +398,10 @@ fn analyze_match_tuple_pattern(
         let mut base_requirements = vec![];
         // Add runtime check if needed
         if value_type.extract_tuple_types().len() > 1 {
+            // Need to check the type at runtime since value could be one of multiple tuple types
             base_requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::TupleType(*type_id),
+                check: RuntimeCheck::Type(Type::Tuple(*type_id)),
             });
         }
 
@@ -412,7 +427,7 @@ fn analyze_match_tuple_pattern(
 
             // Recursively analyze the field pattern
             let field_binding_sets = analyze_match_pattern(
-                type_lookup,
+                program,
                 &field.pattern,
                 &field_type,
                 field_path,
@@ -464,7 +479,7 @@ fn analyze_match_tuple_pattern(
 }
 
 fn find_matching_match_tuple_types(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     tuple: &ast::MatchTuple,
     value_type: &Type,
 ) -> Result<TupleMatchResult, Error> {
@@ -477,7 +492,7 @@ fn find_matching_match_tuple_types(
 
     for typ in types_to_check {
         if let Type::Tuple(type_id) = typ
-            && let Some(field_mappings) = check_match_tuple_match(type_lookup, tuple, *type_id)?
+            && let Some(field_mappings) = check_match_tuple_match(program, tuple, *type_id)?
         {
             matching_types.push((*type_id, field_mappings));
         }
@@ -487,11 +502,11 @@ fn find_matching_match_tuple_types(
 }
 
 fn check_match_tuple_match(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     tuple: &ast::MatchTuple,
     type_id: TypeId,
 ) -> Result<Option<Vec<(usize, usize)>>, Error> {
-    let tuple_info = type_lookup
+    let tuple_info = program
         .lookup_type(&type_id)
         .ok_or(Error::TypeNotInRegistry { type_id })?;
 
@@ -529,7 +544,7 @@ fn analyze_literal_pattern(
 
 #[allow(clippy::too_many_arguments)]
 fn analyze_identifier_pattern(
-    _type_lookup: &impl TypeLookup,
+    program: &mut Program,
     name: String,
     value_type: Type,
     path: AccessPath,
@@ -546,7 +561,7 @@ fn analyze_identifier_pattern(
             return Ok(vec![BindingSet {
                 requirements: vec![Requirement {
                     path,
-                    check: RuntimeCheck::Integer,
+                    check: RuntimeCheck::Type(Type::Integer),
                 }],
                 bindings: vec![],
             }]);
@@ -557,33 +572,32 @@ fn analyze_identifier_pattern(
             return Ok(vec![BindingSet {
                 requirements: vec![Requirement {
                     path,
-                    check: RuntimeCheck::Binary,
+                    check: RuntimeCheck::Type(Type::Binary),
                 }],
                 bindings: vec![],
             }]);
         }
 
-        // Check for type alias (monomorphic only for Phase 1)
-        if let Some((type_params, _ast_type)) = super::scopes::lookup_type_alias(scopes, &name) {
+        // Check for type alias
+        if let Some((type_params, ast_type)) = super::scopes::lookup_type_alias(scopes, &name) {
             if !type_params.is_empty() {
-                return Err(Error::InternalError {
-                    message: format!(
-                        "Cannot use parameterized type alias '{}' in pattern - parameterized types are not yet supported",
-                        name
-                    ),
-                });
+                return Err(Error::FeatureUnsupported(format!(
+                    "Parameterized type alias '{}' requires explicit type arguments. Use ^({}<...>) with type arguments specified",
+                    name, name
+                )));
             }
 
-            // Resolve the ast::Type to a Type - we need the program to do this
-            // but we don't have access to it here in the pattern module
-            // For now, we'll need to add a Program parameter or find another approach
-            // TODO: Implement type alias resolution for pattern matching
-            return Err(Error::InternalError {
-                message: format!(
-                    "Type alias matching not yet fully implemented for '{}'",
-                    name
-                ),
-            });
+            // Resolve the ast::Type to a Type
+            let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
+
+            // Type narrowing for type alias - don't record as identifier
+            return Ok(vec![BindingSet {
+                requirements: vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Type(resolved_type),
+                }],
+                bindings: vec![],
+            }]);
         }
     }
 
@@ -642,7 +656,7 @@ fn analyze_identifier_pattern(
 }
 
 fn analyze_partial_pattern(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     partial_pattern: &ast::PartialPattern,
     value_type: &Type,
     path: AccessPath,
@@ -652,7 +666,7 @@ fn analyze_partial_pattern(
 
     // Find types that have all required fields (and optionally matching tuple name)
     let matching_types = find_types_with_fields_and_name(
-        type_lookup,
+        program,
         &partial_pattern.fields,
         partial_pattern.name.as_ref(),
         value_type,
@@ -670,11 +684,11 @@ fn analyze_partial_pattern(
         if value_type.extract_tuple_types().len() > 1 {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::TupleType(*type_id),
+                check: RuntimeCheck::Type(Type::Tuple(*type_id)),
             });
         }
 
-        let tuple_info = type_lookup
+        let tuple_info = program
             .lookup_type(type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -721,7 +735,7 @@ fn analyze_partial_pattern(
 }
 
 fn analyze_star_pattern(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     value_type: &Type,
     path: AccessPath,
     identifiers: &mut HashMap<String, Identifier>,
@@ -737,7 +751,7 @@ fn analyze_star_pattern(
             IdentifierScope::new(identifiers, tuple_types.len() > 1);
         let variant_identifiers = variant_identifiers_scope.get_mut();
 
-        let tuple_info = type_lookup
+        let tuple_info = program
             .lookup_type(type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
@@ -746,7 +760,7 @@ fn analyze_star_pattern(
         if tuple_types.len() > 1 {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::TupleType(*type_id),
+                check: RuntimeCheck::Type(Type::Tuple(*type_id)),
             });
         }
 
@@ -793,7 +807,7 @@ fn analyze_star_pattern(
 }
 
 fn find_types_with_fields_and_name(
-    type_lookup: &impl TypeLookup,
+    program: &mut Program,
     field_names: &[String],
     tuple_name: Option<&String>,
     value_type: &Type,
@@ -807,7 +821,7 @@ fn find_types_with_fields_and_name(
 
     for typ in types_to_check {
         if let Type::Tuple(type_id) | Type::Partial(type_id) = typ {
-            let tuple_info = type_lookup
+            let tuple_info = program
                 .lookup_type(type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 

@@ -971,9 +971,35 @@ fn match_string(input: &str) -> IResult<&str, Match> {
     )(input)
 }
 
+// Parse an inline type expression: either (type-expr) or identifier<type-args>
+// This is used for pin patterns with explicit types
+fn inline_type_expression(input: &str) -> IResult<&str, Type> {
+    alt((
+        // Parenthesized type expression: (int | bin), (list<int>), etc.
+        delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+        // Type identifier with required type arguments: list<int>, tree<int, bin>
+        map(
+            pair(
+                identifier,
+                delimited(
+                    char('<'),
+                    separated_list1(tuple((ws0, char(','), ws0)), type_definition),
+                    char('>'),
+                ),
+            ),
+            |(name, arguments)| Type::Identifier { name, arguments },
+        ),
+    ))(input)
+}
+
 fn match_pattern(input: &str) -> IResult<&str, Match> {
     alt((
-        // Pin pattern (must come first to consume ^ prefix)
+        // Inline type with ^ prefix: ^(type-expression) or ^list<int>
+        // The ^ switches to pin mode, wrapping the type in Pin
+        map(preceded(char('^'), inline_type_expression), |type_def| {
+            Match::Pin(Box::new(Match::Type(type_def)))
+        }),
+        // Pin pattern (must come after inline type to allow recursive patterns)
         map(preceded(char('^'), match_pattern), |inner| {
             Match::Pin(Box::new(inner))
         }),
@@ -985,8 +1011,12 @@ fn match_pattern(input: &str) -> IResult<&str, Match> {
         match_string,
         // Try match tuple (handles both [..] and Name[..])
         map(match_tuple, Match::Tuple),
-        // Then try partial patterns (must come before identifier)
+        // Try partial patterns before inline types (partial patterns use parentheses too)
         map(partial_pattern_inner, Match::Partial),
+        // Inline type without ^ prefix: (type-expression) or list<int>
+        // For pin_match contexts where ^ is already consumed: 42 ~> ^(int | bin) or 42 ~> ^list<int>
+        // Must come after partial patterns to avoid ambiguity with (identifier)
+        map(inline_type_expression, Match::Type),
         // Then try literals
         map(literal, Match::Literal),
         // Star and placeholder

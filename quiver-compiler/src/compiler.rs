@@ -1024,7 +1024,7 @@ impl<'a> Compiler<'a> {
 
         // Analyze pattern to get bindings without generating code yet
         let (certainty, bindings, binding_sets) = pattern::analyze_pattern(
-            &self.program,
+            &mut self.program,
             &pattern,
             &value_type,
             mode,

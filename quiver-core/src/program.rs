@@ -15,12 +15,15 @@ pub struct Program {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<BuiltinInfo>,
-    types: Vec<TupleTypeInfo>,
+    /// Tuple type metadata - indexed by Type::Tuple(TypeId) and Type::Partial(TypeId)
+    tuple_types: Vec<TupleTypeInfo>,
+    /// Registered types for IsType checks - indexed by IsType(TypeId) instruction
+    types: Vec<Type>,
 }
 
 impl TypeLookup for Program {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.types.get(type_id.0)
+        self.tuple_types.get(type_id.0)
     }
 }
 
@@ -77,6 +80,7 @@ impl Program {
             constants: Vec::new(),
             functions: Vec::new(),
             builtins: Vec::new(),
+            tuple_types: Vec::new(),
             types: Vec::new(),
         };
 
@@ -92,32 +96,44 @@ impl Program {
 
     /// Create a new Program seeded with existing types
     /// If types is empty or doesn't include NIL/OK, they will be added automatically
-    pub fn with_types(types: Vec<TupleTypeInfo>) -> Self {
+    pub fn with_types(tuple_types: Vec<TupleTypeInfo>) -> Self {
         // Ensure NIL and OK are at indices 0 and 1
-        if types.is_empty() {
+        if tuple_types.is_empty() {
             // Start from scratch
             return Self::new();
         }
 
         // Validate that NIL and OK are at the expected indices if types are provided
         assert!(
-            types.len() >= 2,
+            tuple_types.len() >= 2,
             "Types must include NIL and OK at indices 0 and 1"
         );
-        assert_eq!(types[0].name, None, "Type at index 0 must be NIL (unnamed)");
-        assert_eq!(types[0].fields.len(), 0, "NIL type must have no fields");
         assert_eq!(
-            types[1].name,
+            tuple_types[0].name, None,
+            "Type at index 0 must be NIL (unnamed)"
+        );
+        assert_eq!(
+            tuple_types[0].fields.len(),
+            0,
+            "NIL type must have no fields"
+        );
+        assert_eq!(
+            tuple_types[1].name,
             Some("Ok".to_string()),
             "Type at index 1 must be OK"
         );
-        assert_eq!(types[1].fields.len(), 0, "OK type must have no fields");
+        assert_eq!(
+            tuple_types[1].fields.len(),
+            0,
+            "OK type must have no fields"
+        );
 
         Self {
             constants: Vec::new(),
             functions: Vec::new(),
             builtins: Vec::new(),
-            types,
+            tuple_types,
+            types: Vec::new(),
         }
     }
 
@@ -126,6 +142,7 @@ impl Program {
             constants: bytecode.constants,
             functions: bytecode.functions,
             builtins: bytecode.builtins,
+            tuple_types: bytecode.tuple_types,
             types: bytecode.types,
         }
     }
@@ -222,7 +239,7 @@ impl Program {
         is_partial: bool,
     ) -> TypeId {
         // Check if type already exists
-        for (index, existing_type) in self.types.iter().enumerate() {
+        for (index, existing_type) in self.tuple_types.iter().enumerate() {
             if existing_type.name == name
                 && existing_type.fields == fields
                 && existing_type.is_partial == is_partial
@@ -231,8 +248,8 @@ impl Program {
             }
         }
 
-        let type_id = TypeId(self.types.len());
-        self.types.push(TupleTypeInfo {
+        let type_id = TypeId(self.tuple_types.len());
+        self.tuple_types.push(TupleTypeInfo {
             name,
             fields,
             is_partial,
@@ -240,7 +257,29 @@ impl Program {
         type_id
     }
 
-    pub fn get_types(&self) -> &Vec<TupleTypeInfo> {
+    /// Register a type for use with IsType instruction
+    /// Returns the TypeId that can be used in IsType(TypeId)
+    pub fn register_check_type(&mut self, typ: Type) -> TypeId {
+        // Check if type already exists
+        if let Some(index) = self.types.iter().position(|t| t == &typ) {
+            return TypeId(index);
+        }
+
+        let type_id = TypeId(self.types.len());
+        self.types.push(typ);
+        type_id
+    }
+
+    /// Get a registered check type by TypeId (for IsType instruction)
+    pub fn get_check_type(&self, type_id: &TypeId) -> Option<&Type> {
+        self.types.get(type_id.0)
+    }
+
+    pub fn get_tuple_types(&self) -> &Vec<TupleTypeInfo> {
+        &self.tuple_types
+    }
+
+    pub fn get_check_types(&self) -> &Vec<Type> {
         &self.types
     }
 
@@ -254,6 +293,7 @@ impl Program {
                 functions: self.functions.clone(),
                 builtins: self.builtins.clone(),
                 entry: None,
+                tuple_types: self.tuple_types.clone(),
                 types: self.types.clone(),
             };
         };
@@ -261,6 +301,7 @@ impl Program {
         optimisation::tree_shake(
             &self.functions,
             &self.constants,
+            &self.tuple_types,
             &self.types,
             &self.builtins,
             entry_fn,

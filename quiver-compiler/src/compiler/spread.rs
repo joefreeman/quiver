@@ -475,9 +475,13 @@ fn emit_multi_variant_tuples(
                 // Pick the spread value and check its type
                 let depth = stack_size - 1 - spread_stack_idx;
                 compiler.codegen.add_instruction(Instruction::Pick(depth));
+                // Register the tuple type as a check type
+                let check_type_id = compiler
+                    .program
+                    .register_check_type(Type::Tuple(spread_type_id));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::IsType(spread_type_id));
+                    .add_instruction(Instruction::IsType(check_type_id));
                 compiler.codegen.add_instruction(Instruction::Not);
 
                 let fail_jump = compiler.codegen.emit_jump_if_placeholder();

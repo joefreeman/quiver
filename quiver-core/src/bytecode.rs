@@ -31,7 +31,10 @@ pub struct Bytecode {
     pub functions: Vec<Function>,
     pub builtins: Vec<BuiltinInfo>,
     pub entry: Option<usize>,
-    pub types: Vec<types::TupleTypeInfo>,
+    /// Tuple type metadata - indexed by Type::Tuple(TypeId) and Type::Partial(TypeId)
+    pub tuple_types: Vec<types::TupleTypeInfo>,
+    /// Registered types for IsType checks - indexed by IsType(TypeId) instruction
+    pub types: Vec<types::Type>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

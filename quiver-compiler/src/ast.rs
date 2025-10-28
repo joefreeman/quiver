@@ -166,6 +166,7 @@ pub enum Match {
     Placeholder,
     Pin(Box<Match>),
     Bind(Box<Match>),
+    Type(Type),
 }
 
 #[derive(Debug, Clone, PartialEq)]

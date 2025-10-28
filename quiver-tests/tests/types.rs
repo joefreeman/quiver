@@ -951,3 +951,229 @@ fn test_reserved_names_allowed_in_type_definitions() {
         .evaluate("data :: Data[int: int, bin: int]; Data[int: 42, bin: 99]")
         .expect("Data[int: 42, bin: 99]");
 }
+
+#[test]
+fn test_pin_with_type_alias_primitive() {
+    quiver()
+        .evaluate(
+            r#"
+            int_or_bin :: int | bin;
+            42 ~> ^int_or_bin
+            "#,
+        )
+        .expect("42");
+
+    quiver()
+        .evaluate(
+            r#"
+            int_or_bin :: int | bin;
+            '0a' ~> ^int_or_bin
+            "#,
+        )
+        .expect("'0a'");
+}
+
+#[test]
+fn test_pin_with_type_alias_union() {
+    quiver()
+        .evaluate(
+            r#"
+            list :: Nil | Cons[int, &];
+            Nil ~> ^list
+            "#,
+        )
+        .expect("Nil");
+
+    quiver()
+        .evaluate(
+            r#"
+            list :: Nil | Cons[int, &];
+            Cons[1, Cons[2, Nil]] ~> ^list
+            "#,
+        )
+        .expect("Cons[1, Cons[2, Nil]]");
+}
+
+#[test]
+fn test_pin_with_type_alias_mismatch() {
+    quiver()
+        .evaluate(
+            r#"
+            int_only :: int;
+            '0a' ~> ^int_only
+            "#,
+        )
+        .expect("[]");
+
+    quiver()
+        .evaluate(
+            r#"
+            point :: Point[x: int, y: int];
+            42 ~> ^point
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_pin_with_type_alias_in_pattern() {
+    quiver()
+        .evaluate(
+            r#"
+            shape :: Circle[r: int] | Square[s: int];
+            Circle[r: 5] ~> =^shape
+            "#,
+        )
+        .expect("Circle[r: 5]");
+}
+
+#[test]
+fn test_pin_with_type_alias_nested() {
+    quiver()
+        .evaluate(
+            r#"
+            inner :: int | bin;
+            Wrapper[value: 42] ~> =Wrapper[value: ^inner]
+            "#,
+        )
+        .expect("Wrapper[value: 42]");
+}
+
+#[test]
+fn test_pin_with_inline_type_primitive() {
+    quiver()
+        .evaluate(
+            r#"
+            42 ~> ^(int | bin)
+            "#,
+        )
+        .expect("42");
+
+    quiver()
+        .evaluate(
+            r#"
+            '0a' ~> ^(int | bin)
+            "#,
+        )
+        .expect("'0a'");
+}
+
+#[test]
+fn test_pin_with_inline_type_mismatch() {
+    quiver()
+        .evaluate(
+            r#"
+            A ~> ^(int | bin)
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_pin_with_inline_type_nested() {
+    quiver()
+        .evaluate(
+            r#"
+            A[value: 42] ~> =A[value: ^(int | bin)]
+            "#,
+        )
+        .expect("A[value: 42]");
+}
+
+#[test]
+fn test_pin_with_inline_type_complex() {
+    quiver()
+        .evaluate(
+            r#"
+            Rectangle[w: 5, h: 10] ~> ^(Rectangle[w: int, h: int] | Circle[r: int])
+            "#,
+        )
+        .expect("Rectangle[w: 5, h: 10]");
+}
+
+#[test]
+fn test_inline_type_in_bind_mode_error() {
+    quiver()
+        .evaluate(
+            r#"
+            42 ~> =(int | bin)
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::FeatureUnsupported(
+            "Type expressions can only be used in pin mode (^), not bind mode (=)".to_string(),
+        ));
+}
+
+#[test]
+fn test_generic_type_explicit_instantiation() {
+    quiver()
+        .evaluate(
+            r#"
+            list<t> :: Nil | Cons[t, &];
+            Cons[42, Nil] ~> ^(list<int>)
+            "#,
+        )
+        .expect("Cons[42, Nil]");
+}
+
+#[test]
+fn test_generic_type_explicit_instantiation_mismatch() {
+    quiver()
+        .evaluate(
+            r#"
+            list<t> :: Nil | Cons[t, &];
+            Cons['aa', Nil] ~> ^(list<int>)
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_generic_type_explicit_instantiation_in_pattern() {
+    quiver()
+        .evaluate(
+            r#"
+            list<t> :: Nil | Cons[t, &];
+            Cons[42, Cons[99, Nil]] ~> =Cons[x, ^(list<int>)]
+            "#,
+        )
+        .expect("Cons[42, Cons[99, Nil]]");
+}
+
+#[test]
+fn test_generic_type_without_instantiation_error() {
+    quiver()
+        .evaluate(
+            r#"
+            list<t> :: Nil | Cons[t, &];
+            Cons[42, Nil] ~> ^list
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::FeatureUnsupported(
+            "Parameterized type alias 'list' requires explicit type arguments. Use ^(list<...>) with type arguments specified".to_string(),
+        ));
+}
+
+#[test]
+fn test_generic_type_short_syntax() {
+    quiver()
+        .evaluate(
+            r#"
+            list<t> :: Nil | Cons[t, &];
+            Cons[42, Nil] ~> ^list<int>
+            "#,
+        )
+        .expect("Cons[42, Nil]");
+}
+
+#[test]
+fn test_generic_type_short_syntax_mismatch() {
+    quiver()
+        .evaluate(
+            r#"
+            list<t> :: Nil | Cons[t, &];
+            Cons['aa', Nil] ~> ^list<int>
+            "#,
+        )
+        .expect("[]");
+}

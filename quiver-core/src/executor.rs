@@ -25,14 +25,17 @@ pub struct Executor {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<BuiltinInfo>,
-    types: Vec<TupleTypeInfo>,
+    /// Tuple type metadata - indexed by Type::Tuple(TypeId) and Type::Partial(TypeId)
+    tuple_types: Vec<TupleTypeInfo>,
+    /// Registered types for IsType checks - indexed by IsType(TypeId) instruction
+    check_types: Vec<Type>,
     // Heap for runtime-allocated binaries
     heap: Vec<Vec<u8>>,
 }
 
 impl TypeLookup for Executor {
     fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.types.get(type_id.0)
+        self.tuple_types.get(type_id.0)
     }
 }
 
@@ -115,7 +118,8 @@ impl Executor {
             constants: vec![],
             functions: vec![],
             builtins: vec![],
-            types: vec![nil_type, ok_type],
+            tuple_types: vec![nil_type, ok_type],
+            check_types: vec![],
             heap: vec![],
         }
     }
@@ -268,12 +272,14 @@ impl Executor {
         &mut self,
         mut constants: Vec<Constant>,
         mut functions: Vec<Function>,
-        mut types: Vec<TupleTypeInfo>,
+        mut tuple_types: Vec<TupleTypeInfo>,
+        mut check_types: Vec<Type>,
         mut builtins: Vec<BuiltinInfo>,
     ) {
         self.constants.append(&mut constants);
         self.functions.append(&mut functions);
-        self.types.append(&mut types);
+        self.tuple_types.append(&mut tuple_types);
+        self.check_types.append(&mut check_types);
         self.builtins.append(&mut builtins);
     }
 
@@ -598,7 +604,7 @@ impl Executor {
 
     fn handle_tuple(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
         let type_info = self
-            .types
+            .tuple_types
             .get(type_id.0)
             .ok_or_else(|| Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
@@ -700,27 +706,22 @@ impl Executor {
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        let is_match = if let Value::Tuple(actual_type_id, _) = &value {
-            if actual_type_id == &type_id {
-                // Fast path: exact match
-                true
-            } else {
-                // Use Type::is_compatible for structural checking
-                let actual_type = Type::Tuple(*actual_type_id);
-                // Check if type_id refers to a partial type
-                let expected_type = if self
-                    .lookup_type(&type_id)
-                    .is_some_and(|info| info.is_partial)
-                {
-                    Type::Partial(type_id)
-                } else {
-                    Type::Tuple(type_id)
-                };
-                actual_type.is_compatible(&expected_type, self)
-            }
-        } else {
-            false
-        };
+        // Look up the expected type from check_types registry
+        let expected_type = self
+            .check_types
+            .get(type_id.0)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "Type ID {} not found in check_types registry",
+                    type_id.0
+                ))
+            })?
+            .clone();
+
+        // Convert value to its Type representation
+        let actual_type = self.value_to_type(&value);
+
+        let is_match = actual_type.is_compatible(&expected_type, self);
 
         let process = self
             .get_process_mut(pid)

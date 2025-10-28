@@ -146,6 +146,9 @@ impl<'a> FreeVariableCollector<'a> {
                 // Bind patterns define variables (explicitly switch back to bind mode)
                 self.visit_match_pattern(inner);
             }
+            ast::Match::Type(_) => {
+                // Type expressions don't reference variables
+            }
         }
     }
 
@@ -174,6 +177,9 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Match::Bind(inner) => {
                 // Explicit bind in pin context - switch back to bind mode
                 self.visit_match_pattern(inner);
+            }
+            ast::Match::Type(_) => {
+                // Type expressions don't reference variables
             }
         }
     }

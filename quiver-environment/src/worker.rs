@@ -4,7 +4,7 @@ use crate::transport::{CommandReceiver, EventSender};
 use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, Frame, ProcessId, ProcessStatus};
-use quiver_core::types::TupleTypeInfo;
+use quiver_core::types::{TupleTypeInfo, Type};
 use quiver_core::value::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -59,10 +59,11 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             Command::UpdateProgram {
                 constants,
                 functions,
-                types,
+                tuple_types,
+                check_types,
                 builtins,
             } => {
-                self.update_program(constants, functions, types, builtins)?;
+                self.update_program(constants, functions, tuple_types, check_types, builtins)?;
             }
             Command::StartProcess { id, function_index } => {
                 self.start_process(id, function_index)?;
@@ -185,11 +186,12 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         &mut self,
         constants: Vec<Constant>,
         functions: Vec<Function>,
-        types: Vec<TupleTypeInfo>,
+        tuple_types: Vec<TupleTypeInfo>,
+        check_types: Vec<Type>,
         builtins: Vec<BuiltinInfo>,
     ) -> Result<(), EnvironmentError> {
         self.executor
-            .update_program(constants, functions, types, builtins);
+            .update_program(constants, functions, tuple_types, check_types, builtins);
 
         Ok(())
     }
