@@ -255,4 +255,9 @@ impl Repl {
 
         env.resolve_type_alias(&type_aliases, alias_name)
     }
+
+    /// Get the type of the last evaluated result
+    pub fn get_last_result_type(&self) -> &Type {
+        &self.last_result_type
+    }
 }

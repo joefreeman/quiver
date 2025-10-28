@@ -113,12 +113,15 @@ impl TestBuilder {
             Err(e) => Err(e),
         };
 
+        let last_result_type = repl.get_last_result_type().clone();
+
         TestResult {
             result,
             source: source.to_string(),
             environment,
             repl,
             virtual_time_ms: virtual_time_ms.load(Ordering::Relaxed),
+            last_result_type,
         }
     }
 }
@@ -130,6 +133,7 @@ pub struct TestResult {
     environment: Environment,
     repl: Repl,
     virtual_time_ms: u64,
+    last_result_type: quiver_core::types::Type,
 }
 
 #[allow(dead_code)]
@@ -282,6 +286,44 @@ impl TestResult {
                 panic!(
                     "Failed to resolve type alias '{}': {} for source: {}",
                     alias_name, e, self.source
+                );
+            }
+        }
+        self
+    }
+
+    pub fn expect_type(self, expected: &str) -> Self {
+        match self.result {
+            Ok(Some(_)) => {
+                if expected.is_empty() {
+                    panic!(
+                        "Expected no executable code (type definitions only), but got a result for source: {}",
+                        self.source
+                    );
+                } else {
+                    // Check the inferred type
+                    let actual = self.environment.format_type(&self.last_result_type);
+                    assert_eq!(
+                        actual, expected,
+                        "Expected result type '{}', got '{}' for source: {}",
+                        expected, actual, self.source
+                    );
+                }
+            }
+            Ok(None) => {
+                if expected.is_empty() {
+                    // Success - no executable code as expected
+                } else {
+                    panic!(
+                        "Expected result type '{}', but got no result (type definitions only) for source: {}",
+                        expected, self.source
+                    );
+                }
+            }
+            Err(e) => {
+                panic!(
+                    "Expected result type '{}', got error: {:?} for source: {}",
+                    expected, e, self.source
                 );
             }
         }

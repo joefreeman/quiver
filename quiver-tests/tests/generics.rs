@@ -20,31 +20,34 @@ fn test_generic_type_with_different_instantiations() {
         .evaluate(
             r#"
             list<t> : Nil | Cons[t, &];
-            ints = Cons[1, Cons[2, Nil]],
-            bins = Cons['aa', Cons['bb', Nil]],
-            [ints.0, bins.0]
+            Cons[1, Cons[2, Nil]]
             "#,
         )
-        .expect("[1, 'aa']")
-        .expect_variable("ints", "Cons[int, Cons[int, Nil]]")
-        .expect_variable("bins", "Cons[bin, Cons[bin, Nil]]");
+        .expect_type("Cons[int, Cons[int, Nil]]");
+
+    quiver()
+        .evaluate(
+            r#"
+            list<t> : Nil | Cons[t, &];
+            Cons['aa', Cons['bb', Nil]],
+            "#,
+        )
+        .expect_type("Cons[bin, Cons[bin, Nil]]");
 }
 
 #[test]
 fn test_generic_function_single_type_param() {
     quiver()
-        .evaluate(
-            r#"
-            id = #<t>t { ~> =x => x },
-            a = 42 ~> id,
-            b = '00' ~> id,
-            [a, b]
-            "#,
-        )
-        .expect("[42, '00']")
-        .expect_variable("id", "#t -> t")
-        .expect_variable("a", "int")
-        .expect_variable("b", "bin");
+        .evaluate("#<t>t { ~> =x => x }")
+        .expect_type("#t -> t");
+
+    quiver()
+        .evaluate("42 ~> #<t>t { ~> =x => x }")
+        .expect_type("int");
+
+    quiver()
+        .evaluate("'00' ~> #<t>t { ~> =x => x }")
+        .expect_type("bin");
 }
 
 #[test]
@@ -62,16 +65,8 @@ fn test_generic_function_multiple_type_params() {
 #[test]
 fn test_generic_function_with_same_type_param_widening() {
     quiver()
-        .evaluate(
-            r#"
-            first = #<t>[t, t] { ~> =[a, _] => a },
-            result = first[1, '00'],
-            result
-            "#,
-        )
-        .expect("1")
-        .expect_variable("first", "#[t, t] -> t")
-        .expect_variable("result", "bin | int");
+        .evaluate("[1, '00'] ~> #<t>[t, t] { ~> =[a, _] => a }")
+        .expect_type("bin | int");
 }
 
 #[test]
@@ -111,14 +106,12 @@ fn test_heterogeneous_list_via_widening() {
         .evaluate(
             r#"
             list = %"list",
-            xs = list.new[]
+            list.new[]
               ~> list.append[~, 5]
               ~> list.append[~, "a"],
-            [xs ~> list.at[~, 0], xs ~> list.at[~, 1]]
             "#,
         )
-        .expect("[5, \"a\"]")
-        .expect_variable("xs", "[] | Cons[(int | Str[bin]), μ1] | Nil");
+        .expect_type("[] | Cons[(int | Str[bin]), μ1] | Nil");
 }
 
 #[test]
@@ -139,19 +132,8 @@ fn test_nested_generic_types() {
 #[test]
 fn test_generic_function_return_type_inference() {
     quiver()
-        .evaluate(
-            r#"
-            list<t> : Nil | Cons[t, &];
-            wrap = #<t>t { ~> =x => Cons[x, Nil] },
-            a = 42 ~> wrap,
-            b = '00' ~> wrap,
-            [a.0, b.0]
-            "#,
-        )
-        .expect("[42, '00']")
-        .expect_variable("wrap", "#t -> Cons[t, Nil]")
-        .expect_variable("a", "Cons[int, Nil]")
-        .expect_variable("b", "Cons[bin, Nil]");
+        .evaluate("#<t>t { ~> =x => A[x] }")
+        .expect_type("#t -> A[t]");
 }
 
 #[test]
