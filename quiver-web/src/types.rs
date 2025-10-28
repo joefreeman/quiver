@@ -45,7 +45,7 @@ impl From<quiver_core::value::Value> for Value {
                 quiver_core::value::Binary::Heap(index) => Value::BinaryHeap { index },
             },
             quiver_core::value::Value::Tuple(type_id, values) => Value::Tuple {
-                type_id: type_id.0,
+                type_id,
                 values: values.into_iter().map(Into::into).collect(),
             },
             quiver_core::value::Value::Function(index, captures) => Value::Function {
@@ -72,7 +72,7 @@ impl From<Value> for quiver_core::value::Value {
                 quiver_core::value::Value::Binary(quiver_core::value::Binary::Heap(index))
             }
             Value::Tuple { type_id, values } => quiver_core::value::Value::Tuple(
-                quiver_core::bytecode::TypeId(type_id),
+                type_id,
                 values.into_iter().map(Into::into).collect(),
             ),
             Value::Function { index, captures } => quiver_core::value::Value::Function(

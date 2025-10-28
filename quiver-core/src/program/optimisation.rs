@@ -1,16 +1,15 @@
-use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction, TypeId};
-use crate::types::{TupleTypeInfo, Type};
+use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction};
+use crate::types::{NIL, OK, TupleTypeInfo, Type};
 use std::collections::HashMap;
 
-/// Recursively mark all tuple TypeIds referenced within a Type structure
 fn mark_tuple_type_references(
     typ: &Type,
     used_tuple_types: &mut [bool],
-    tuple_type_queue: &mut Vec<TypeId>,
+    tuple_type_queue: &mut Vec<usize>,
 ) {
     match typ {
         Type::Tuple(type_id) | Type::Partial(type_id) => {
-            if type_id.0 < used_tuple_types.len() && !used_tuple_types[type_id.0] {
+            if *type_id < used_tuple_types.len() && !used_tuple_types[*type_id] {
                 tuple_type_queue.push(*type_id);
             }
         }
@@ -38,8 +37,7 @@ fn mark_tuple_type_references(
     }
 }
 
-/// Remap all tuple TypeIds within a Type structure according to the provided remap table
-fn remap_tuple_type_ids(typ: Type, tuple_type_remap: &HashMap<TypeId, TypeId>) -> Type {
+fn remap_tuple_type_ids(typ: Type, tuple_type_remap: &HashMap<usize, usize>) -> Type {
     match typ {
         Type::Tuple(old_id) => Type::Tuple(
             *tuple_type_remap
@@ -97,11 +95,11 @@ pub fn tree_shake(
     let mut check_type_queue = Vec::new();
 
     // Always mark NIL and OK as used (they're built-in control flow types)
-    if TypeId::NIL.0 < used_tuple_types.len() {
-        tuple_type_queue.push(TypeId::NIL);
+    if NIL < used_tuple_types.len() {
+        tuple_type_queue.push(NIL);
     }
-    if TypeId::OK.0 < used_tuple_types.len() {
-        tuple_type_queue.push(TypeId::OK);
+    if OK < used_tuple_types.len() {
+        tuple_type_queue.push(OK);
     }
 
     // Process all queues until all are empty
@@ -133,13 +131,13 @@ pub fn tree_shake(
                     }
                     Instruction::Tuple(type_id) => {
                         // Tuple instruction references tuple_types
-                        if type_id.0 < used_tuple_types.len() && !used_tuple_types[type_id.0] {
+                        if *type_id < used_tuple_types.len() && !used_tuple_types[*type_id] {
                             tuple_type_queue.push(*type_id);
                         }
                     }
                     Instruction::IsType(type_id) => {
                         // IsType instruction references check_types
-                        if type_id.0 < used_check_types.len() && !used_check_types[type_id.0] {
+                        if *type_id < used_check_types.len() && !used_check_types[*type_id] {
                             check_type_queue.push(*type_id);
                         }
                     }
@@ -156,13 +154,13 @@ pub fn tree_shake(
         // Process tuple types
         while let Some(type_id) = tuple_type_queue.pop() {
             // Skip if already processed
-            if type_id.0 >= used_tuple_types.len() || used_tuple_types[type_id.0] {
+            if type_id >= used_tuple_types.len() || used_tuple_types[type_id] {
                 continue;
             }
-            used_tuple_types[type_id.0] = true;
+            used_tuple_types[type_id] = true;
 
             // Get the tuple type info (if it exists)
-            let Some(type_info) = tuple_types.get(type_id.0) else {
+            let Some(type_info) = tuple_types.get(type_id) else {
                 continue;
             };
 
@@ -179,13 +177,13 @@ pub fn tree_shake(
         // Process check types
         while let Some(type_id) = check_type_queue.pop() {
             // Skip if already processed
-            if type_id.0 >= used_check_types.len() || used_check_types[type_id.0] {
+            if type_id >= used_check_types.len() || used_check_types[type_id] {
                 continue;
             }
-            used_check_types[type_id.0] = true;
+            used_check_types[type_id] = true;
 
             // Get the check type (if it exists)
-            let Some(check_type) = check_types.get(type_id.0) else {
+            let Some(check_type) = check_types.get(type_id) else {
                 continue;
             };
 
@@ -242,12 +240,11 @@ pub fn tree_shake(
 
     for (old_id, type_info) in tuple_types.iter().enumerate() {
         if used_tuple_types[old_id] {
-            tuple_type_remap.insert(TypeId(old_id), TypeId(new_tuple_types.len()));
+            tuple_type_remap.insert(old_id, new_tuple_types.len());
             new_tuple_types.push(type_info.clone());
         }
     }
 
-    // Remap TypeIds within the tuple type structures themselves
     let remapped_tuple_types = new_tuple_types
         .into_iter()
         .map(|mut type_info| {
@@ -265,12 +262,11 @@ pub fn tree_shake(
 
     for (old_id, check_type) in check_types.iter().enumerate() {
         if used_check_types[old_id] {
-            check_type_remap.insert(TypeId(old_id), TypeId(new_check_types.len()));
+            check_type_remap.insert(old_id, new_check_types.len());
             new_check_types.push(check_type.clone());
         }
     }
 
-    // Remap TypeIds within the check types themselves
     let remapped_check_types = new_check_types
         .into_iter()
         .map(|typ| remap_tuple_type_ids(typ, &tuple_type_remap))

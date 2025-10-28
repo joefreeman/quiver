@@ -342,7 +342,7 @@ fn extract_tuple_types_from_type_with_names(
     match typ {
         Type::Tuple(type_id) | Type::Partial(type_id) => {
             let tuple_info = program
-                .lookup_type(type_id)
+                .lookup_type(*type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
             Ok(vec![(tuple_info.name.clone(), tuple_info.fields.clone())])
         }
@@ -637,7 +637,7 @@ pub fn contains_variables(typ: &Type, type_lookup: &impl TypeLookup) -> bool {
         }
         Type::Tuple(type_id) | Type::Partial(type_id) => {
             // Check if any field contains variables
-            if let Some(type_info) = type_lookup.lookup_type(type_id) {
+            if let Some(type_info) = type_lookup.lookup_type(*type_id) {
                 type_info
                     .fields
                     .iter()
@@ -665,7 +665,7 @@ pub fn substitute(typ: &Type, bindings: &HashMap<String, Type>, program: &mut Pr
             let is_partial = matches!(typ, Type::Partial(_));
 
             // Look up the tuple's fields and clone to avoid borrow issues
-            if let Some(type_info) = program.lookup_type(type_id).cloned() {
+            if let Some(type_info) = program.lookup_type(*type_id).cloned() {
                 // Substitute within each field type
                 let mut any_changed = false;
                 let new_fields: Vec<_> = type_info
@@ -786,10 +786,10 @@ pub fn unify(
             }
 
             let info1 = type_lookup
-                .lookup_type(id1)
+                .lookup_type(*id1)
                 .ok_or(Error::TypeNotInRegistry { type_id: *id1 })?;
             let info2 = type_lookup
-                .lookup_type(id2)
+                .lookup_type(*id2)
                 .ok_or(Error::TypeNotInRegistry { type_id: *id2 })?;
 
             // Names must match
@@ -831,13 +831,13 @@ pub fn unify(
         | (Type::Partial(pattern_id), Type::Partial(concrete_id)) => {
             let pattern_info =
                 type_lookup
-                    .lookup_type(pattern_id)
+                    .lookup_type(*pattern_id)
                     .ok_or(Error::TypeNotInRegistry {
                         type_id: *pattern_id,
                     })?;
             let concrete_info =
                 type_lookup
-                    .lookup_type(concrete_id)
+                    .lookup_type(*concrete_id)
                     .ok_or(Error::TypeNotInRegistry {
                         type_id: *concrete_id,
                     })?;

@@ -1,4 +1,4 @@
-use quiver_core::bytecode::{Instruction, TypeId};
+use quiver_core::bytecode::Instruction;
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {
@@ -84,7 +84,7 @@ impl InstructionBuilder {
     /// Emits type check and branch pattern: Pick -> IsType -> Not -> JumpIf
     /// Returns the jump address for patching later
     /// Used when branching based on type matching
-    pub fn emit_type_check_branch(&mut self, depth: usize, type_id: TypeId) -> usize {
+    pub fn emit_type_check_branch(&mut self, depth: usize, type_id: usize) -> usize {
         self.add_instruction(Instruction::Pick(depth));
         self.add_instruction(Instruction::IsType(type_id));
         self.add_instruction(Instruction::Not);

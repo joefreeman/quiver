@@ -1,7 +1,7 @@
-use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction, TypeId};
+use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction};
 use crate::error::Error;
 use crate::executor::Executor;
-use crate::types::{TupleTypeInfo, Type, TypeLookup};
+use crate::types::{NIL, OK, TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use serde::{Deserialize, Serialize};
 
@@ -15,15 +15,13 @@ pub struct Program {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<BuiltinInfo>,
-    /// Tuple type metadata - indexed by Type::Tuple(TypeId) and Type::Partial(TypeId)
     tuple_types: Vec<TupleTypeInfo>,
-    /// Registered types for IsType checks - indexed by IsType(TypeId) instruction
     types: Vec<Type>,
 }
 
 impl TypeLookup for Program {
-    fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.tuple_types.get(type_id.0)
+    fn lookup_type(&self, type_id: usize) -> Option<&TupleTypeInfo> {
+        self.tuple_types.get(type_id)
     }
 }
 
@@ -86,10 +84,10 @@ impl Program {
 
         // Register built-in types
         let nil_type_id = program.register_type(None, vec![]);
-        assert_eq!(nil_type_id, TypeId::NIL);
+        assert_eq!(nil_type_id, NIL);
 
         let ok_type_id = program.register_type(Some("Ok".to_string()), vec![]);
-        assert_eq!(ok_type_id, TypeId::OK);
+        assert_eq!(ok_type_id, OK);
 
         program
     }
@@ -227,7 +225,7 @@ impl Program {
         &mut self,
         name: Option<String>,
         fields: Vec<(Option<String>, Type)>,
-    ) -> TypeId {
+    ) -> usize {
         // For backwards compatibility, always create concrete types (is_partial = false)
         self.register_type_with_partial(name, fields, false)
     }
@@ -237,18 +235,18 @@ impl Program {
         name: Option<String>,
         fields: Vec<(Option<String>, Type)>,
         is_partial: bool,
-    ) -> TypeId {
+    ) -> usize {
         // Check if type already exists
         for (index, existing_type) in self.tuple_types.iter().enumerate() {
             if existing_type.name == name
                 && existing_type.fields == fields
                 && existing_type.is_partial == is_partial
             {
-                return TypeId(index);
+                return index;
             }
         }
 
-        let type_id = TypeId(self.tuple_types.len());
+        let type_id = self.tuple_types.len();
         self.tuple_types.push(TupleTypeInfo {
             name,
             fields,
@@ -258,21 +256,19 @@ impl Program {
     }
 
     /// Register a type for use with IsType instruction
-    /// Returns the TypeId that can be used in IsType(TypeId)
-    pub fn register_check_type(&mut self, typ: Type) -> TypeId {
+    pub fn register_check_type(&mut self, typ: Type) -> usize {
         // Check if type already exists
         if let Some(index) = self.types.iter().position(|t| t == &typ) {
-            return TypeId(index);
+            return index;
         }
 
-        let type_id = TypeId(self.types.len());
+        let type_id = self.types.len();
         self.types.push(typ);
         type_id
     }
 
-    /// Get a registered check type by TypeId (for IsType instruction)
-    pub fn get_check_type(&self, type_id: &TypeId) -> Option<&Type> {
-        self.types.get(type_id.0)
+    pub fn get_check_type(&self, type_id: usize) -> Option<&Type> {
+        self.types.get(type_id)
     }
 
     pub fn get_tuple_types(&self) -> &Vec<TupleTypeInfo> {

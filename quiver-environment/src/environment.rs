@@ -1,7 +1,7 @@
 use crate::WorkerId;
 use crate::messages::{Command, Event};
 use crate::transport::WorkerHandle;
-use quiver_core::bytecode::{Bytecode, Function, Instruction, TypeId};
+use quiver_core::bytecode::{Bytecode, Function, Instruction};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
 use quiver_core::types::{CallableType, ProcessType, Type};
@@ -9,8 +9,7 @@ use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// Remap a Type's TypeIds according to the remap table
-fn remap_type(ty: Type, type_remap: &HashMap<TypeId, TypeId>) -> Type {
+fn remap_type(ty: Type, type_remap: &HashMap<usize, usize>) -> Type {
     match ty {
         Type::Tuple(old_id) => Type::Tuple(*type_remap.get(&old_id).unwrap_or(&old_id)),
         Type::Partial(old_id) => Type::Partial(*type_remap.get(&old_id).unwrap_or(&old_id)),
@@ -42,8 +41,8 @@ fn remap_function(
     function: Function,
     constant_remap: &HashMap<usize, usize>,
     function_remap: &HashMap<usize, usize>,
-    tuple_type_remap: &HashMap<TypeId, TypeId>,
-    check_type_remap: &HashMap<TypeId, TypeId>,
+    tuple_type_remap: &HashMap<usize, usize>,
+    check_type_remap: &HashMap<usize, usize>,
     builtin_remap: &HashMap<usize, usize>,
 ) -> Function {
     let remapped_instructions: Vec<Instruction> = function
@@ -439,8 +438,8 @@ impl Environment {
         // Build remapping tables
         let mut constant_remap: HashMap<usize, usize> = HashMap::new();
         let mut function_remap: HashMap<usize, usize> = HashMap::new();
-        let mut tuple_type_remap: HashMap<TypeId, TypeId> = HashMap::new();
-        let mut check_type_remap: HashMap<TypeId, TypeId> = HashMap::new();
+        let mut tuple_type_remap: HashMap<usize, usize> = HashMap::new();
+        let mut check_type_remap: HashMap<usize, usize> = HashMap::new();
         let mut builtin_remap: HashMap<usize, usize> = HashMap::new();
 
         // Merge constants (register_constant handles deduplication)
@@ -449,11 +448,9 @@ impl Environment {
             constant_remap.insert(old_idx, new_idx);
         }
 
-        // Merge tuple types (register_type handles deduplication after we remap TypeIds in fields)
         for (old_idx, type_info) in bytecode.tuple_types.iter().enumerate() {
-            let old_type_id = TypeId(old_idx);
+            let old_type_id = old_idx;
 
-            // Remap TypeIds in the type's fields before registering
             let remapped_fields: Vec<_> = type_info
                 .fields
                 .iter()
@@ -471,7 +468,7 @@ impl Environment {
 
         // Merge check types (register_check_type handles deduplication)
         for (old_idx, check_type) in bytecode.types.iter().enumerate() {
-            let old_type_id = TypeId(old_idx);
+            let old_type_id = old_idx;
             // Remap tuple type references within the check type
             let remapped_check_type = remap_type(check_type.clone(), &tuple_type_remap);
             let new_type_id = self.program.register_check_type(remapped_check_type);

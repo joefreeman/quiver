@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{Compiler, FileSystemModuleLoader, parse};
-use quiver_core::bytecode::{self, TypeId};
+use quiver_core::bytecode;
 use quiver_core::format;
 use quiver_core::program::Program;
-use quiver_core::types::Type;
+use quiver_core::types::{NIL, Type};
 use quiver_core::value::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -232,7 +232,7 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
     if let Some(entry_idx) = entry {
         // Build instructions to call the entry function with NIL
         let instructions = vec![
-            bytecode::Instruction::Tuple(TypeId::NIL),
+            bytecode::Instruction::Tuple(NIL),
             bytecode::Instruction::Function(entry_idx),
             bytecode::Instruction::Call,
         ];
@@ -293,7 +293,7 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
             println!(
                 "  {}: {}",
                 index,
-                format::format_type(&program, &Type::Tuple(TypeId(index)))
+                format::format_type(&program, &Type::Tuple(index))
             );
         }
     }

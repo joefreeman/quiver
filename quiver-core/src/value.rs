@@ -1,5 +1,5 @@
-use crate::bytecode::TypeId;
 use crate::process::ProcessId;
+use crate::types::{NIL, OK};
 use serde::{Deserialize, Serialize};
 
 /// Maximum binary size in bytes (16MB)
@@ -17,7 +17,7 @@ pub enum Binary {
 pub enum Value {
     Integer(i64),
     Binary(Binary),
-    Tuple(TypeId, Vec<Value>),
+    Tuple(usize, Vec<Value>),
     Function(usize, Vec<Value>),
     Builtin(String),
     Process(ProcessId, usize),
@@ -26,22 +26,22 @@ pub enum Value {
 impl Value {
     /// Create a NIL tuple value
     pub fn nil() -> Self {
-        Value::Tuple(TypeId::NIL, vec![])
+        Value::Tuple(NIL, vec![])
     }
 
     /// Create an OK tuple value
     pub fn ok() -> Self {
-        Value::Tuple(TypeId::OK, vec![])
+        Value::Tuple(OK, vec![])
     }
 
     /// Check if this value is NIL
     pub fn is_nil(&self) -> bool {
-        matches!(self, Value::Tuple(TypeId::NIL, fields) if fields.is_empty())
+        matches!(self, Value::Tuple(id, fields) if *id == NIL && fields.is_empty())
     }
 
     /// Check if this value is OK
     pub fn is_ok(&self) -> bool {
-        matches!(self, Value::Tuple(TypeId::OK, fields) if fields.is_empty())
+        matches!(self, Value::Tuple(id, fields) if *id == OK && fields.is_empty())
     }
 
     pub fn type_name(&self) -> &'static str {

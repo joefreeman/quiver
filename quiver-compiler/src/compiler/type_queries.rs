@@ -1,6 +1,5 @@
 use crate::ast;
 use quiver_core::{
-    bytecode::TypeId,
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -11,14 +10,14 @@ use super::Error;
 /// Returns error if any tuple doesn't have the field or if tuples have different structures
 pub fn get_field_types_at_position(
     program: &Program,
-    tuple_types: &[TypeId],
+    tuple_types: &[usize],
     position: usize,
 ) -> Result<Vec<Type>, Error> {
     let mut field_types = Vec::new();
 
     for type_id in tuple_types {
         let type_info = program
-            .lookup_type(type_id)
+            .lookup_type(*type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
         let fields = &type_info.fields;
 
@@ -37,7 +36,7 @@ pub fn get_field_types_at_position(
 /// Also ensures all tuples have the field at the same position
 pub fn get_field_types_by_name(
     program: &Program,
-    tuple_types: &[TypeId],
+    tuple_types: &[usize],
     field_name: &str,
 ) -> Result<Vec<(usize, Type)>, Error> {
     let mut results = Vec::new();
@@ -46,7 +45,7 @@ pub fn get_field_types_by_name(
     for type_id in tuple_types {
         // Look up the field in this tuple type
         let tuple_type = program
-            .lookup_type(type_id)
+            .lookup_type(*type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
         let (index, (_, field_type)) = tuple_type
             .fields

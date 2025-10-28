@@ -1,6 +1,6 @@
 use crate::ast;
 use quiver_core::{
-    bytecode::{Instruction, TypeId},
+    bytecode::Instruction,
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -33,7 +33,7 @@ impl CompiledValue {
 #[derive(Debug, Clone)]
 struct VariantInfo {
     fields: Vec<(Option<String>, Type)>,
-    spread_type_ids: Vec<TypeId>,
+    spread_type_ids: Vec<usize>,
 }
 
 /// Tracks where a final field value comes from
@@ -191,7 +191,7 @@ fn build_field_variants(
 
                     for existing_variant in &variants {
                         for &spread_type_id in &spread_type_ids {
-                            let spread_info = program.lookup_type(&spread_type_id).ok_or(
+                            let spread_info = program.lookup_type(spread_type_id).ok_or(
                                 Error::TypeNotInRegistry {
                                     type_id: spread_type_id,
                                 },
@@ -256,7 +256,7 @@ fn build_field_sources_for_variant(
             }
             CompiledValue::Spread { .. } => {
                 let spread_type_id = variant.spread_type_ids[spread_variant_idx];
-                let spread_info = program.lookup_type(&spread_type_id).unwrap();
+                let spread_info = program.lookup_type(spread_type_id).unwrap();
 
                 for (field_idx, (spread_field_name, _)) in spread_info.fields.iter().enumerate() {
                     if spread_field_name.is_none() {
@@ -290,7 +290,7 @@ fn build_field_sources_for_variant(
                     }
                     CompiledValue::Spread { .. } => {
                         let spread_type_id = variant.spread_type_ids[local_spread_idx];
-                        let spread_info = program.lookup_type(&spread_type_id).unwrap();
+                        let spread_info = program.lookup_type(spread_type_id).unwrap();
 
                         for (field_idx, (spread_field_name, _)) in
                             spread_info.fields.iter().enumerate()

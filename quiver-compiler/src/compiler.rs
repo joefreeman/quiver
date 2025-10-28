@@ -26,10 +26,10 @@ use crate::{
 
 use quiver_core::{
     builtins::BUILTIN_REGISTRY,
-    bytecode::{Constant, Function, Instruction, TypeId},
+    bytecode::{Constant, Function, Instruction},
     executor::Executor,
     program::Program,
-    types::{CallableType, ProcessType, Type, TypeLookup},
+    types::{CallableType, NIL, ProcessType, Type, TypeLookup},
     value::Value,
 };
 
@@ -48,7 +48,7 @@ pub enum Error {
         found: String,
     },
     TypeNotInRegistry {
-        type_id: TypeId,
+        type_id: usize,
     },
 
     // Structure errors
@@ -439,7 +439,7 @@ impl<'a> Compiler<'a> {
                         let ripple_type = &ctx.value_type;
                         if let Type::Tuple(type_id) = ripple_type {
                             self.program
-                                .lookup_type(type_id)
+                                .lookup_type(*type_id)
                                 .and_then(|type_info| type_info.name.clone())
                         } else {
                             None
@@ -452,7 +452,7 @@ impl<'a> Compiler<'a> {
                     scopes::lookup_variable(&self.scopes, &id, &[]).and_then(|(var_type, _)| {
                         if let Type::Tuple(type_id) = var_type {
                             self.program
-                                .lookup_type(&type_id)
+                                .lookup_type(type_id)
                                 .and_then(|type_info| type_info.name.clone())
                         } else {
                             None
@@ -1035,8 +1035,7 @@ impl<'a> Compiler<'a> {
         match certainty {
             MatchCertainty::WontMatch => {
                 self.codegen.add_instruction(Instruction::Pop);
-                self.codegen
-                    .add_instruction(Instruction::Tuple(TypeId::NIL));
+                self.codegen.add_instruction(Instruction::Tuple(NIL));
                 Ok(Type::nil())
             }
             MatchCertainty::WillMatch | MatchCertainty::MightMatch => {
@@ -1107,8 +1106,7 @@ impl<'a> Compiler<'a> {
                 }
                 // Failure path: pop the value and push nil
                 self.codegen.add_instruction(Instruction::Pop);
-                self.codegen
-                    .add_instruction(Instruction::Tuple(TypeId::NIL));
+                self.codegen.add_instruction(Instruction::Tuple(NIL));
 
                 self.codegen.patch_jump_to_here(success_jump_addr);
 
@@ -1707,7 +1705,7 @@ impl<'a> Compiler<'a> {
                 }
                 Type::Integer => {
                     // Timeout source
-                    result_types.push(Type::Tuple(TypeId::NIL))
+                    result_types.push(Type::Tuple(NIL))
                 }
                 _ => {
                     return Err(Error::TypeMismatch {
@@ -1777,8 +1775,7 @@ impl<'a> Compiler<'a> {
                 let block_parameter = value_type.clone().unwrap_or_else(Type::nil);
                 if value_type.is_none() {
                     // Blocks without a value need NIL on stack
-                    self.codegen
-                        .add_instruction(Instruction::Tuple(TypeId::NIL));
+                    self.codegen.add_instruction(Instruction::Tuple(NIL));
                 }
                 self.compile_block(block, block_parameter, None)
             }
@@ -2376,7 +2373,7 @@ impl<'a> Compiler<'a> {
         for type_id in &tuple_types {
             let type_info = self
                 .program
-                .lookup_type(type_id)
+                .lookup_type(*type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
             let fields = &type_info.fields;
 

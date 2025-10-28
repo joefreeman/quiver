@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use quiver_core::{
-    bytecode::{Constant, Instruction, TypeId},
+    bytecode::{Constant, Instruction},
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -11,7 +11,7 @@ use super::{Error, codegen::InstructionBuilder};
 
 // Type aliases for complex pattern matching types
 type PatternAnalysisResult = (MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>);
-type TupleMatchResult = Vec<(TypeId, Vec<(usize, usize)>)>;
+type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
 
 /// Helper for managing identifiers across variants
 /// Clones identifiers when processing multiple variants to avoid cross-contamination
@@ -389,7 +389,7 @@ fn analyze_match_tuple_pattern(
         // Get tuple info and extract field types upfront to avoid borrow issues
         let tuple_fields: Vec<Type> = {
             let tuple_info = program
-                .lookup_type(type_id)
+                .lookup_type(*type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
             tuple_info.fields.iter().map(|(_, t)| t.clone()).collect()
         };
@@ -504,10 +504,10 @@ fn find_matching_match_tuple_types(
 fn check_match_tuple_match(
     program: &mut Program,
     tuple: &ast::MatchTuple,
-    type_id: TypeId,
+    type_id: usize,
 ) -> Result<Option<Vec<(usize, usize)>>, Error> {
     let tuple_info = program
-        .lookup_type(&type_id)
+        .lookup_type(type_id)
         .ok_or(Error::TypeNotInRegistry { type_id })?;
 
     if tuple.name.as_ref() != tuple_info.name.as_ref()
@@ -689,7 +689,7 @@ fn analyze_partial_pattern(
         }
 
         let tuple_info = program
-            .lookup_type(type_id)
+            .lookup_type(*type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
         let mut bindings = Vec::new();
@@ -752,7 +752,7 @@ fn analyze_star_pattern(
         let variant_identifiers = variant_identifiers_scope.get_mut();
 
         let tuple_info = program
-            .lookup_type(type_id)
+            .lookup_type(*type_id)
             .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
         // Add type check if there are multiple tuple types
@@ -811,7 +811,7 @@ fn find_types_with_fields_and_name(
     field_names: &[String],
     tuple_name: Option<&String>,
     value_type: &Type,
-) -> Result<Vec<(TypeId, Vec<usize>)>, Error> {
+) -> Result<Vec<(usize, Vec<usize>)>, Error> {
     let mut matching_types = Vec::new();
 
     let types_to_check = match value_type {
@@ -822,7 +822,7 @@ fn find_types_with_fields_and_name(
     for typ in types_to_check {
         if let Type::Tuple(type_id) | Type::Partial(type_id) = typ {
             let tuple_info = program
-                .lookup_type(type_id)
+                .lookup_type(*type_id)
                 .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
 
             // Check if tuple name matches (if specified)

@@ -31,18 +31,8 @@ pub struct Bytecode {
     pub functions: Vec<Function>,
     pub builtins: Vec<BuiltinInfo>,
     pub entry: Option<usize>,
-    /// Tuple type metadata - indexed by Type::Tuple(TypeId) and Type::Partial(TypeId)
     pub tuple_types: Vec<types::TupleTypeInfo>,
-    /// Registered types for IsType checks - indexed by IsType(TypeId) instruction
     pub types: Vec<types::Type>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TypeId(pub usize);
-
-impl TypeId {
-    pub const NIL: TypeId = TypeId(0);
-    pub const OK: TypeId = TypeId(1);
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,11 +46,11 @@ pub enum Instruction {
     Clear(usize),
     Load(usize),
     Store(usize),
-    Tuple(TypeId),
+    Tuple(usize),
     Get(usize),
     IsInteger,
     IsBinary,
-    IsType(TypeId),
+    IsType(usize),
     Jump(isize),
     JumpIf(isize),
     Call,

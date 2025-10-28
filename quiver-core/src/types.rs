@@ -1,13 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::bytecode::TypeId;
+/// Index of the NIL tuple type (always at index 0)
+pub const NIL: usize = 0;
+
+/// Index of the OK tuple type (always at index 1)
+pub const OK: usize = 1;
 
 /// Trait for looking up type information.
 /// This trait exists in types.rs to break circular dependencies - it allows
 /// Type methods to look up type info without depending on Program.
 pub trait TypeLookup {
-    fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo>;
+    fn lookup_type(&self, type_id: usize) -> Option<&TupleTypeInfo>;
 }
 
 /// Type alias for tuple field information: (optional name, field type)
@@ -41,9 +45,9 @@ pub enum Type {
     #[serde(rename = "bin")]
     Binary,
     #[serde(rename = "tuple")]
-    Tuple(TypeId),
+    Tuple(usize),
     #[serde(rename = "partial")]
-    Partial(TypeId),
+    Partial(usize),
     #[serde(rename = "fn")]
     Callable(Box<CallableType>),
     #[serde(rename = "cycle")]
@@ -59,12 +63,12 @@ pub enum Type {
 impl Type {
     /// Create a NIL tuple type
     pub fn nil() -> Self {
-        Type::Tuple(TypeId::NIL)
+        Type::Tuple(NIL)
     }
 
     /// Create an OK tuple type
     pub fn ok() -> Self {
-        Type::Tuple(TypeId::OK)
+        Type::Tuple(OK)
     }
 
     /// Create a never type (empty union - bottom type)
@@ -74,12 +78,12 @@ impl Type {
 
     /// Check if this type is NIL
     pub fn is_nil(&self) -> bool {
-        matches!(self, Type::Tuple(TypeId::NIL))
+        matches!(self, Type::Tuple(id) if *id == NIL)
     }
 
     /// Check if this type is OK
     pub fn is_ok(&self) -> bool {
-        matches!(self, Type::Tuple(TypeId::OK))
+        matches!(self, Type::Tuple(id) if *id == OK)
     }
 
     /// Create a Type from a vector of types
@@ -96,8 +100,7 @@ impl Type {
         }
     }
 
-    /// Extract all tuple TypeIds from this Type, filtering out non-tuple types
-    pub fn extract_tuple_types(&self) -> Vec<TypeId> {
+    pub fn extract_tuple_types(&self) -> Vec<usize> {
         match self {
             Type::Union(types) => types
                 .iter()
@@ -173,10 +176,10 @@ impl Type {
                 }
 
                 // Look up both tuple types
-                let Some(info1) = type_lookup.lookup_type(id1) else {
+                let Some(info1) = type_lookup.lookup_type(*id1) else {
                     return false;
                 };
-                let Some(info2) = type_lookup.lookup_type(id2) else {
+                let Some(info2) = type_lookup.lookup_type(*id2) else {
                     return false;
                 };
 
@@ -299,10 +302,10 @@ impl Type {
 
             // Concrete tuple vs partial type: check if concrete satisfies partial constraint
             (Type::Tuple(concrete_id), Type::Partial(partial_id)) => {
-                let Some(concrete_info) = type_lookup.lookup_type(concrete_id) else {
+                let Some(concrete_info) = type_lookup.lookup_type(*concrete_id) else {
                     return false;
                 };
-                let Some(partial_info) = type_lookup.lookup_type(partial_id) else {
+                let Some(partial_info) = type_lookup.lookup_type(*partial_id) else {
                     return false;
                 };
 

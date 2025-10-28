@@ -1,5 +1,5 @@
 use crate::builtins::BUILTIN_REGISTRY;
-use crate::bytecode::{BuiltinInfo, Constant, Function, Instruction, TypeId};
+use crate::bytecode::{BuiltinInfo, Constant, Function, Instruction};
 use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
 use crate::types::{CallableType, ProcessType, TupleTypeInfo, Type, TypeLookup};
@@ -25,17 +25,15 @@ pub struct Executor {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<BuiltinInfo>,
-    /// Tuple type metadata - indexed by Type::Tuple(TypeId) and Type::Partial(TypeId)
     tuple_types: Vec<TupleTypeInfo>,
-    /// Registered types for IsType checks - indexed by IsType(TypeId) instruction
     check_types: Vec<Type>,
     // Heap for runtime-allocated binaries
     heap: Vec<Vec<u8>>,
 }
 
 impl TypeLookup for Executor {
-    fn lookup_type(&self, type_id: &TypeId) -> Option<&TupleTypeInfo> {
-        self.tuple_types.get(type_id.0)
+    fn lookup_type(&self, type_id: usize) -> Option<&TupleTypeInfo> {
+        self.tuple_types.get(type_id)
     }
 }
 
@@ -602,13 +600,13 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_tuple(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
+    fn handle_tuple(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action>, Error> {
         let type_info = self
             .tuple_types
-            .get(type_id.0)
+            .get(type_id)
             .ok_or_else(|| Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
-                found: format!("unknown TypeId({:?})", type_id),
+                found: format!("unknown type ({:?})", type_id),
             })?;
         let size = type_info.fields.len();
 
@@ -699,7 +697,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_is_type(&mut self, pid: ProcessId, type_id: TypeId) -> Result<Option<Action>, Error> {
+    fn handle_is_type(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -709,11 +707,11 @@ impl Executor {
         // Look up the expected type from check_types registry
         let expected_type = self
             .check_types
-            .get(type_id.0)
+            .get(type_id)
             .ok_or_else(|| {
                 Error::InvalidArgument(format!(
                     "Type ID {} not found in check_types registry",
-                    type_id.0
+                    type_id
                 ))
             })?
             .clone();
@@ -1645,7 +1643,7 @@ impl Executor {
             Value::Tuple(type_id, _) => {
                 // Check if this is a partial type
                 if self
-                    .lookup_type(type_id)
+                    .lookup_type(*type_id)
                     .is_some_and(|info| info.is_partial)
                 {
                     Type::Partial(*type_id)
