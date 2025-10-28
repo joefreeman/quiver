@@ -236,7 +236,7 @@ impl TestResult {
         }
     }
 
-    pub fn expect_type(self, variable_name: &str, expected: &str) -> Self {
+    pub fn expect_variable(self, variable_name: &str, expected: &str) -> Self {
         // Get variable type from the repl
         let variables = self.repl.get_variables();
         let variable_type = variables

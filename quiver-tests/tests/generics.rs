@@ -26,8 +26,8 @@ fn test_generic_type_with_different_instantiations() {
             "#,
         )
         .expect("[1, 'aa']")
-        .expect_type("ints", "Cons[int, Cons[int, Nil]]")
-        .expect_type("bins", "Cons[bin, Cons[bin, Nil]]");
+        .expect_variable("ints", "Cons[int, Cons[int, Nil]]")
+        .expect_variable("bins", "Cons[bin, Cons[bin, Nil]]");
 }
 
 #[test]
@@ -42,9 +42,9 @@ fn test_generic_function_single_type_param() {
             "#,
         )
         .expect("[42, '00']")
-        .expect_type("id", "#t -> t")
-        .expect_type("a", "int")
-        .expect_type("b", "bin");
+        .expect_variable("id", "#t -> t")
+        .expect_variable("a", "int")
+        .expect_variable("b", "bin");
 }
 
 #[test]
@@ -70,8 +70,8 @@ fn test_generic_function_with_same_type_param_widening() {
             "#,
         )
         .expect("1")
-        .expect_type("first", "#[t, t] -> t")
-        .expect_type("result", "bin | int");
+        .expect_variable("first", "#[t, t] -> t")
+        .expect_variable("result", "bin | int");
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn test_heterogeneous_list_via_widening() {
             "#,
         )
         .expect("[5, \"a\"]")
-        .expect_type("xs", "[] | Cons[(int | Str[bin]), μ1] | Nil");
+        .expect_variable("xs", "[] | Cons[(int | Str[bin]), μ1] | Nil");
 }
 
 #[test]
@@ -149,9 +149,9 @@ fn test_generic_function_return_type_inference() {
             "#,
         )
         .expect("[42, '00']")
-        .expect_type("wrap", "#t -> Cons[t, Nil]")
-        .expect_type("a", "Cons[int, Nil]")
-        .expect_type("b", "Cons[bin, Nil]");
+        .expect_variable("wrap", "#t -> Cons[t, Nil]")
+        .expect_variable("a", "Cons[int, Nil]")
+        .expect_variable("b", "Cons[bin, Nil]");
 }
 
 #[test]

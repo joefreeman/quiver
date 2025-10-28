@@ -41,7 +41,7 @@ fn test_function_with_type_pattern() {
             "#,
         )
         .expect("37")
-        .expect_type(
+        .expect_variable(
             "area",
             "#(Circle[r: int] | Rectangle[w: int, h: int]) -> (int | [])",
         );
@@ -58,7 +58,7 @@ fn test_recursive_list_type() {
             "#,
         )
         .expect("5")
-        .expect_type("xs", "Cons[int, Cons[int, Cons[int, Nil]]]");
+        .expect_variable("xs", "Cons[int, Cons[int, Cons[int, Nil]]]");
 }
 
 #[test]
@@ -75,7 +75,7 @@ fn test_cycle_ref_with_pattern_matching() {
             "#,
         )
         .expect("1")
-        .expect_type("get_head", "#(Nil | Cons[int, μ1]) -> (int | [])");
+        .expect_variable("get_head", "#(Nil | Cons[int, μ1]) -> (int | [])");
 }
 
 #[test]
@@ -417,7 +417,7 @@ fn test_unnamed_partial_type() {
             "#,
         )
         .expect("[[1, 2], [3, 4], [6, 7], [8, 9]]")
-        .expect_type("f", "#(x: int, y: int) -> [int, int]");
+        .expect_variable("f", "#(x: int, y: int) -> [int, int]");
 
     quiver()
         .evaluate(
@@ -437,7 +437,7 @@ fn test_named_partial_type() {
     quiver()
         .evaluate("f = #Point(x: int) { ~> .x }, Point[x: 1] ~> f")
         .expect("1")
-        .expect_type("f", "#Point(x: int) -> int");
+        .expect_variable("f", "#Point(x: int) -> int");
 
     quiver()
         .evaluate("f = #Point(x: int) { ~> .x }, [x: 1] ~> f")
@@ -468,7 +468,7 @@ fn test_empty_partial_type() {
             "#,
         )
         .expect("[[1, 2, 3], [x: 4, y: 5], Point[x: 6, y: 7], Point]")
-        .expect_type("f", "#() -> ()");
+        .expect_variable("f", "#() -> ()");
 }
 
 #[test]
