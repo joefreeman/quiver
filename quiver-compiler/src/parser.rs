@@ -989,6 +989,8 @@ fn inline_type_expression(input: &str) -> IResult<&str, Type> {
             ),
             |(name, arguments)| Type::Identifier { name, arguments },
         ),
+        // Partial types: A(x: int), (x: int), ()
+        partial_type,
     ))(input)
 }
 

@@ -1177,3 +1177,42 @@ fn test_generic_type_short_syntax_mismatch() {
         )
         .expect("[]");
 }
+
+#[test]
+fn test_named_partial_type_without_parens() {
+    // Named partial type without extra parentheses: ^A(x: int)
+    quiver()
+        .evaluate("A[x: 1, y: 2] ~> ^A(x: int)")
+        .expect("A[x: 1, y: 2]");
+
+    // Type mismatch should fail
+    quiver()
+        .evaluate("A[x: 'ff', y: 2] ~> ^A(x: int)")
+        .expect("[]");
+
+    // Missing field should fail
+    quiver()
+        .evaluate("A[y: 2, z: 3] ~> ^A(x: int)")
+        .expect("[]");
+}
+
+#[test]
+fn test_unnamed_partial_type_without_parens() {
+    // Unnamed partial type without extra parentheses: ^(x: int)
+    quiver().evaluate("A[x: 1] ~> ^(x: int)").expect("A[x: 1]");
+
+    quiver()
+        .evaluate("[x: 1, y: 2] ~> ^(x: int)")
+        .expect("[x: 1, y: 2]");
+
+    // Type mismatch should fail
+    quiver().evaluate("A[x: 'ff'] ~> ^(x: int)").expect("[]");
+}
+
+#[test]
+fn test_empty_partial_type_without_parens() {
+    // Empty partial type matches any tuple: ^()
+    quiver().evaluate("A[1] ~> ^()").expect("A[1]");
+    quiver().evaluate("[1, 2, 3] ~> ^()").expect("[1, 2, 3]");
+    quiver().evaluate("42 ~> ^()").expect("[]");
+}
