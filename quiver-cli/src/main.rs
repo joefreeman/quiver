@@ -286,7 +286,7 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
     // Create program from bytecode
     let program = Program::from_bytecode(bytecode_data);
 
-    let types_vec = program.get_tuple_types();
+    let types_vec = program.get_tuples();
     if !types_vec.is_empty() {
         println!("\nTypes:");
         for (index, _type_info) in types_vec.iter().enumerate() {

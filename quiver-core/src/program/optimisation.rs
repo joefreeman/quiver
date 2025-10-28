@@ -2,33 +2,29 @@ use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction};
 use crate::types::{NIL, OK, TupleTypeInfo, Type};
 use std::collections::HashMap;
 
-fn mark_tuple_type_references(
-    typ: &Type,
-    used_tuple_types: &mut [bool],
-    tuple_type_queue: &mut Vec<usize>,
-) {
+fn mark_tuple_references(typ: &Type, used_tuples: &mut [bool], tuple_queue: &mut Vec<usize>) {
     match typ {
         Type::Tuple(type_id) | Type::Partial(type_id) => {
-            if *type_id < used_tuple_types.len() && !used_tuple_types[*type_id] {
-                tuple_type_queue.push(*type_id);
+            if *type_id < used_tuples.len() && !used_tuples[*type_id] {
+                tuple_queue.push(*type_id);
             }
         }
         Type::Union(types_vec) => {
             for t in types_vec {
-                mark_tuple_type_references(t, used_tuple_types, tuple_type_queue);
+                mark_tuple_references(t, used_tuples, tuple_queue);
             }
         }
         Type::Callable(callable) => {
-            mark_tuple_type_references(&callable.parameter, used_tuple_types, tuple_type_queue);
-            mark_tuple_type_references(&callable.result, used_tuple_types, tuple_type_queue);
-            mark_tuple_type_references(&callable.receive, used_tuple_types, tuple_type_queue);
+            mark_tuple_references(&callable.parameter, used_tuples, tuple_queue);
+            mark_tuple_references(&callable.result, used_tuples, tuple_queue);
+            mark_tuple_references(&callable.receive, used_tuples, tuple_queue);
         }
         Type::Process(process) => {
             if let Some(receive) = &process.receive {
-                mark_tuple_type_references(receive, used_tuple_types, tuple_type_queue);
+                mark_tuple_references(receive, used_tuples, tuple_queue);
             }
             if let Some(returns) = &process.returns {
-                mark_tuple_type_references(returns, used_tuple_types, tuple_type_queue);
+                mark_tuple_references(returns, used_tuples, tuple_queue);
             }
         }
         Type::Integer | Type::Binary | Type::Cycle(_) | Type::Variable(_) => {
@@ -37,36 +33,36 @@ fn mark_tuple_type_references(
     }
 }
 
-fn remap_tuple_type_ids(typ: Type, tuple_type_remap: &HashMap<usize, usize>) -> Type {
+fn remap_tuple_ids(typ: Type, tuple_remap: &HashMap<usize, usize>) -> Type {
     match typ {
         Type::Tuple(old_id) => Type::Tuple(
-            *tuple_type_remap
+            *tuple_remap
                 .get(&old_id)
                 .expect("Tuple type ID should be in remap table after tree shaking"),
         ),
         Type::Partial(old_id) => Type::Partial(
-            *tuple_type_remap
+            *tuple_remap
                 .get(&old_id)
                 .expect("Partial type ID should be in remap table after tree shaking"),
         ),
         Type::Union(types_vec) => Type::Union(
             types_vec
                 .into_iter()
-                .map(|t| remap_tuple_type_ids(t, tuple_type_remap))
+                .map(|t| remap_tuple_ids(t, tuple_remap))
                 .collect(),
         ),
         Type::Callable(callable) => Type::Callable(Box::new(crate::types::CallableType {
-            parameter: remap_tuple_type_ids(callable.parameter, tuple_type_remap),
-            result: remap_tuple_type_ids(callable.result, tuple_type_remap),
-            receive: remap_tuple_type_ids(callable.receive, tuple_type_remap),
+            parameter: remap_tuple_ids(callable.parameter, tuple_remap),
+            result: remap_tuple_ids(callable.result, tuple_remap),
+            receive: remap_tuple_ids(callable.receive, tuple_remap),
         })),
         Type::Process(process) => Type::Process(Box::new(crate::types::ProcessType {
             receive: process
                 .receive
-                .map(|t| Box::new(remap_tuple_type_ids(*t, tuple_type_remap))),
+                .map(|t| Box::new(remap_tuple_ids(*t, tuple_remap))),
             returns: process
                 .returns
-                .map(|t| Box::new(remap_tuple_type_ids(*t, tuple_type_remap))),
+                .map(|t| Box::new(remap_tuple_ids(*t, tuple_remap))),
         })),
         Type::Integer | Type::Binary | Type::Cycle(_) | Type::Variable(_) => typ,
     }
@@ -77,34 +73,33 @@ fn remap_tuple_type_ids(typ: Type, tuple_type_remap: &HashMap<usize, usize>) -> 
 pub fn tree_shake(
     functions: &[Function],
     constants: &[Constant],
-    tuple_types: &[TupleTypeInfo],
-    check_types: &[Type],
+    tuples: &[TupleTypeInfo],
+    types: &[Type],
     builtins: &[BuiltinInfo],
     entry_fn: usize,
 ) -> Bytecode {
     // Mark phase: find all reachable functions, constants, types, and builtins
     let mut used_functions = vec![false; functions.len()];
     let mut used_constants = vec![false; constants.len()];
-    let mut used_tuple_types = vec![false; tuple_types.len()];
-    let mut used_check_types = vec![false; check_types.len()];
+    let mut used_tuples = vec![false; tuples.len()];
+    let mut used_types = vec![false; types.len()];
     let mut used_builtins = vec![false; builtins.len()];
 
     // Separate queues for functions, tuple types, and check types
     let mut function_queue = vec![entry_fn];
-    let mut tuple_type_queue = Vec::new();
-    let mut check_type_queue = Vec::new();
+    let mut tuple_queue = Vec::new();
+    let mut type_queue = Vec::new();
 
     // Always mark NIL and OK as used (they're built-in control flow types)
-    if NIL < used_tuple_types.len() {
-        tuple_type_queue.push(NIL);
+    if NIL < used_tuples.len() {
+        tuple_queue.push(NIL);
     }
-    if OK < used_tuple_types.len() {
-        tuple_type_queue.push(OK);
+    if OK < used_tuples.len() {
+        tuple_queue.push(OK);
     }
 
     // Process all queues until all are empty
-    while !function_queue.is_empty() || !tuple_type_queue.is_empty() || !check_type_queue.is_empty()
-    {
+    while !function_queue.is_empty() || !tuple_queue.is_empty() || !type_queue.is_empty() {
         // Process functions
         while let Some(fn_id) = function_queue.pop() {
             // Skip if already processed
@@ -130,15 +125,15 @@ pub fn tree_shake(
                         }
                     }
                     Instruction::Tuple(type_id) => {
-                        // Tuple instruction references tuple_types
-                        if *type_id < used_tuple_types.len() && !used_tuple_types[*type_id] {
-                            tuple_type_queue.push(*type_id);
+                        // Tuple instruction references tuples
+                        if *type_id < used_tuples.len() && !used_tuples[*type_id] {
+                            tuple_queue.push(*type_id);
                         }
                     }
                     Instruction::IsType(type_id) => {
-                        // IsType instruction references check_types
-                        if *type_id < used_check_types.len() && !used_check_types[*type_id] {
-                            check_type_queue.push(*type_id);
+                        // IsType instruction references types
+                        if *type_id < used_types.len() && !used_types[*type_id] {
+                            type_queue.push(*type_id);
                         }
                     }
                     Instruction::Builtin(id) => {
@@ -152,43 +147,39 @@ pub fn tree_shake(
         }
 
         // Process tuple types
-        while let Some(type_id) = tuple_type_queue.pop() {
+        while let Some(type_id) = tuple_queue.pop() {
             // Skip if already processed
-            if type_id >= used_tuple_types.len() || used_tuple_types[type_id] {
+            if type_id >= used_tuples.len() || used_tuples[type_id] {
                 continue;
             }
-            used_tuple_types[type_id] = true;
+            used_tuples[type_id] = true;
 
             // Get the tuple type info (if it exists)
-            let Some(type_info) = tuple_types.get(type_id) else {
+            let Some(type_info) = tuples.get(type_id) else {
                 continue;
             };
 
             // Recursively mark all tuple types referenced in this type's fields
             for (_, field_type) in &type_info.fields {
-                mark_tuple_type_references(
-                    field_type,
-                    &mut used_tuple_types,
-                    &mut tuple_type_queue,
-                );
+                mark_tuple_references(field_type, &mut used_tuples, &mut tuple_queue);
             }
         }
 
         // Process check types
-        while let Some(type_id) = check_type_queue.pop() {
+        while let Some(type_id) = type_queue.pop() {
             // Skip if already processed
-            if type_id >= used_check_types.len() || used_check_types[type_id] {
+            if type_id >= used_types.len() || used_types[type_id] {
                 continue;
             }
-            used_check_types[type_id] = true;
+            used_types[type_id] = true;
 
             // Get the check type (if it exists)
-            let Some(check_type) = check_types.get(type_id) else {
+            let Some(check_type) = types.get(type_id) else {
                 continue;
             };
 
             // Recursively mark all tuple types referenced in this check type
-            mark_tuple_type_references(check_type, &mut used_tuple_types, &mut tuple_type_queue);
+            mark_tuple_references(check_type, &mut used_tuples, &mut tuple_queue);
         }
     }
 
@@ -199,8 +190,8 @@ pub fn tree_shake(
             functions: functions.to_vec(),
             builtins: builtins.to_vec(),
             entry: Some(entry_fn),
-            tuple_types: tuple_types.to_vec(),
-            types: check_types.to_vec(),
+            tuples: tuples.to_vec(),
+            types: types.to_vec(),
         };
     }
 
@@ -235,41 +226,41 @@ pub fn tree_shake(
         }
     }
 
-    let mut tuple_type_remap = HashMap::new();
-    let mut new_tuple_types = Vec::new();
+    let mut tuple_remap = HashMap::new();
+    let mut new_tuples = Vec::new();
 
-    for (old_id, type_info) in tuple_types.iter().enumerate() {
-        if used_tuple_types[old_id] {
-            tuple_type_remap.insert(old_id, new_tuple_types.len());
-            new_tuple_types.push(type_info.clone());
+    for (old_id, type_info) in tuples.iter().enumerate() {
+        if used_tuples[old_id] {
+            tuple_remap.insert(old_id, new_tuples.len());
+            new_tuples.push(type_info.clone());
         }
     }
 
-    let remapped_tuple_types = new_tuple_types
+    let remapped_tuples = new_tuples
         .into_iter()
         .map(|mut type_info| {
             type_info.fields = type_info
                 .fields
                 .into_iter()
-                .map(|(name, typ)| (name, remap_tuple_type_ids(typ, &tuple_type_remap)))
+                .map(|(name, typ)| (name, remap_tuple_ids(typ, &tuple_remap)))
                 .collect();
             type_info
         })
         .collect();
 
-    let mut check_type_remap = HashMap::new();
-    let mut new_check_types = Vec::new();
+    let mut type_remap = HashMap::new();
+    let mut new_types = Vec::new();
 
-    for (old_id, check_type) in check_types.iter().enumerate() {
-        if used_check_types[old_id] {
-            check_type_remap.insert(old_id, new_check_types.len());
-            new_check_types.push(check_type.clone());
+    for (old_id, check_type) in types.iter().enumerate() {
+        if used_types[old_id] {
+            type_remap.insert(old_id, new_types.len());
+            new_types.push(check_type.clone());
         }
     }
 
-    let remapped_check_types = new_check_types
+    let remapped_types = new_types
         .into_iter()
-        .map(|typ| remap_tuple_type_ids(typ, &tuple_type_remap))
+        .map(|typ| remap_tuple_ids(typ, &tuple_remap))
         .collect();
 
     // Remap phase: update function, constant, builtin, and type indices
@@ -296,12 +287,12 @@ pub fn tree_shake(
                             .expect("Builtin ID should be in remap table after tree shaking"),
                     ),
                     Instruction::Tuple(old_type_id) => Instruction::Tuple(
-                        *tuple_type_remap
+                        *tuple_remap
                             .get(&old_type_id)
                             .expect("Tuple type ID should be in remap table after tree shaking"),
                     ),
                     Instruction::IsType(old_type_id) => Instruction::IsType(
-                        *check_type_remap
+                        *type_remap
                             .get(&old_type_id)
                             .expect("IsType type ID should be in remap table after tree shaking"),
                     ),
@@ -320,7 +311,7 @@ pub fn tree_shake(
         functions: remapped_functions,
         builtins: new_builtins,
         entry: new_entry,
-        tuple_types: remapped_tuple_types,
-        types: remapped_check_types,
+        tuples: remapped_tuples,
+        types: remapped_types,
     }
 }

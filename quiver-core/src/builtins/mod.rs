@@ -31,8 +31,8 @@ impl TypeSpec {
                         (field_name.map(|s| s.to_string()), spec.resolve(program))
                     })
                     .collect();
-                let type_id = program.register_type(name.map(|s| s.to_string()), fields);
-                Type::Tuple(type_id)
+                let tuple_id = program.register_tuple(name.map(|s| s.to_string()), fields, false);
+                Type::Tuple(tuple_id)
             }
             TypeSpec::Union(specs) => {
                 let types: Vec<Type> = specs.iter().map(|spec| spec.resolve(program)).collect();

@@ -1,7 +1,7 @@
 use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction};
 use crate::error::Error;
 use crate::executor::Executor;
-use crate::types::{NIL, OK, TupleTypeInfo, Type, TypeLookup};
+use crate::types::{NIL, OK, TupleLookup, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use serde::{Deserialize, Serialize};
 
@@ -15,13 +15,13 @@ pub struct Program {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<BuiltinInfo>,
-    tuple_types: Vec<TupleTypeInfo>,
+    tuples: Vec<TupleTypeInfo>,
     types: Vec<Type>,
 }
 
-impl TypeLookup for Program {
-    fn lookup_type(&self, type_id: usize) -> Option<&TupleTypeInfo> {
-        self.tuple_types.get(type_id)
+impl TupleLookup for Program {
+    fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {
+        self.tuples.get(tuple_id)
     }
 }
 
@@ -78,59 +78,51 @@ impl Program {
             constants: Vec::new(),
             functions: Vec::new(),
             builtins: Vec::new(),
-            tuple_types: Vec::new(),
+            tuples: Vec::new(),
             types: Vec::new(),
         };
 
         // Register built-in types
-        let nil_type_id = program.register_type(None, vec![]);
-        assert_eq!(nil_type_id, NIL);
+        let nil_tuple_id = program.register_tuple(None, vec![], false);
+        assert_eq!(nil_tuple_id, NIL);
 
-        let ok_type_id = program.register_type(Some("Ok".to_string()), vec![]);
-        assert_eq!(ok_type_id, OK);
+        let ok_tuple_id = program.register_tuple(Some("Ok".to_string()), vec![], false);
+        assert_eq!(ok_tuple_id, OK);
 
         program
     }
 
     /// Create a new Program seeded with existing types
     /// If types is empty or doesn't include NIL/OK, they will be added automatically
-    pub fn with_types(tuple_types: Vec<TupleTypeInfo>) -> Self {
+    pub fn with_types(tuples: Vec<TupleTypeInfo>) -> Self {
         // Ensure NIL and OK are at indices 0 and 1
-        if tuple_types.is_empty() {
+        if tuples.is_empty() {
             // Start from scratch
             return Self::new();
         }
 
         // Validate that NIL and OK are at the expected indices if types are provided
         assert!(
-            tuple_types.len() >= 2,
+            tuples.len() >= 2,
             "Types must include NIL and OK at indices 0 and 1"
         );
         assert_eq!(
-            tuple_types[0].name, None,
+            tuples[0].name, None,
             "Type at index 0 must be NIL (unnamed)"
         );
+        assert_eq!(tuples[0].fields.len(), 0, "NIL type must have no fields");
         assert_eq!(
-            tuple_types[0].fields.len(),
-            0,
-            "NIL type must have no fields"
-        );
-        assert_eq!(
-            tuple_types[1].name,
+            tuples[1].name,
             Some("Ok".to_string()),
             "Type at index 1 must be OK"
         );
-        assert_eq!(
-            tuple_types[1].fields.len(),
-            0,
-            "OK type must have no fields"
-        );
+        assert_eq!(tuples[1].fields.len(), 0, "OK type must have no fields");
 
         Self {
             constants: Vec::new(),
             functions: Vec::new(),
             builtins: Vec::new(),
-            tuple_types,
+            tuples,
             types: Vec::new(),
         }
     }
@@ -140,7 +132,7 @@ impl Program {
             constants: bytecode.constants,
             functions: bytecode.functions,
             builtins: bytecode.builtins,
-            tuple_types: bytecode.tuple_types,
+            tuples: bytecode.tuples,
             types: bytecode.types,
         }
     }
@@ -217,27 +209,14 @@ impl Program {
         &self.builtins
     }
 
-    pub fn get_builtin(&self, index: usize) -> Option<&BuiltinInfo> {
-        self.builtins.get(index)
-    }
-
-    pub fn register_type(
-        &mut self,
-        name: Option<String>,
-        fields: Vec<(Option<String>, Type)>,
-    ) -> usize {
-        // For backwards compatibility, always create concrete types (is_partial = false)
-        self.register_type_with_partial(name, fields, false)
-    }
-
-    pub fn register_type_with_partial(
+    pub fn register_tuple(
         &mut self,
         name: Option<String>,
         fields: Vec<(Option<String>, Type)>,
         is_partial: bool,
     ) -> usize {
         // Check if type already exists
-        for (index, existing_type) in self.tuple_types.iter().enumerate() {
+        for (index, existing_type) in self.tuples.iter().enumerate() {
             if existing_type.name == name
                 && existing_type.fields == fields
                 && existing_type.is_partial == is_partial
@@ -246,17 +225,17 @@ impl Program {
             }
         }
 
-        let type_id = self.tuple_types.len();
-        self.tuple_types.push(TupleTypeInfo {
+        let tuple_id = self.tuples.len();
+        self.tuples.push(TupleTypeInfo {
             name,
             fields,
             is_partial,
         });
-        type_id
+        tuple_id
     }
 
     /// Register a type for use with IsType instruction
-    pub fn register_check_type(&mut self, typ: Type) -> usize {
+    pub fn register_type(&mut self, typ: Type) -> usize {
         // Check if type already exists
         if let Some(index) = self.types.iter().position(|t| t == &typ) {
             return index;
@@ -267,15 +246,11 @@ impl Program {
         type_id
     }
 
-    pub fn get_check_type(&self, type_id: usize) -> Option<&Type> {
-        self.types.get(type_id)
+    pub fn get_tuples(&self) -> &Vec<TupleTypeInfo> {
+        &self.tuples
     }
 
-    pub fn get_tuple_types(&self) -> &Vec<TupleTypeInfo> {
-        &self.tuple_types
-    }
-
-    pub fn get_check_types(&self) -> &Vec<Type> {
+    pub fn get_types(&self) -> &Vec<Type> {
         &self.types
     }
 
@@ -289,7 +264,7 @@ impl Program {
                 functions: self.functions.clone(),
                 builtins: self.builtins.clone(),
                 entry: None,
-                tuple_types: self.tuple_types.clone(),
+                tuples: self.tuples.clone(),
                 types: self.types.clone(),
             };
         };
@@ -297,7 +272,7 @@ impl Program {
         optimisation::tree_shake(
             &self.functions,
             &self.constants,
-            &self.tuple_types,
+            &self.tuples,
             &self.types,
             &self.builtins,
             entry_fn,
@@ -350,12 +325,12 @@ impl Program {
                 let const_idx = self.register_constant(Constant::Binary(bytes));
                 vec![Instruction::Constant(const_idx)]
             }
-            Value::Tuple(type_id, elements) => {
+            Value::Tuple(tuple_id, elements) => {
                 let mut instrs = Vec::new();
                 for elem in elements {
                     instrs.extend(self.value_to_instructions(elem, executor));
                 }
-                instrs.push(Instruction::Tuple(*type_id));
+                instrs.push(Instruction::Tuple(*tuple_id));
                 instrs
             }
             Value::Function(function, captures) => {

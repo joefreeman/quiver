@@ -13,8 +13,8 @@ pub enum Command {
     UpdateProgram {
         constants: Vec<Constant>,
         functions: Vec<Function>,
-        tuple_types: Vec<TupleTypeInfo>,
-        check_types: Vec<Type>,
+        tuples: Vec<TupleTypeInfo>,
+        types: Vec<Type>,
         builtins: Vec<BuiltinInfo>,
     },
 

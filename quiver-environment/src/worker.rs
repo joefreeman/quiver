@@ -59,11 +59,11 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             Command::UpdateProgram {
                 constants,
                 functions,
-                tuple_types,
-                check_types,
+                tuples,
+                types,
                 builtins,
             } => {
-                self.update_program(constants, functions, tuple_types, check_types, builtins)?;
+                self.update_program(constants, functions, tuples, types, builtins)?;
             }
             Command::StartProcess { id, function_index } => {
                 self.start_process(id, function_index)?;
@@ -186,12 +186,12 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         &mut self,
         constants: Vec<Constant>,
         functions: Vec<Function>,
-        tuple_types: Vec<TupleTypeInfo>,
-        check_types: Vec<Type>,
+        tuples: Vec<TupleTypeInfo>,
+        types: Vec<Type>,
         builtins: Vec<BuiltinInfo>,
     ) -> Result<(), EnvironmentError> {
         self.executor
-            .update_program(constants, functions, tuple_types, check_types, builtins);
+            .update_program(constants, functions, tuples, types, builtins);
 
         Ok(())
     }

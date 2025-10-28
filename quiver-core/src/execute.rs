@@ -33,9 +33,9 @@ pub fn execute_instructions_sync(
     });
 
     // Skip the built-in types (NIL and OK at indices 0 and 1) since Executor::new() already has them
-    let tuple_types = program.get_tuple_types();
-    let tuple_types_to_send = if tuple_types.len() > 2 {
-        tuple_types[2..].to_vec()
+    let tuples = program.get_tuples();
+    let tuples_to_send = if tuples.len() > 2 {
+        tuples[2..].to_vec()
     } else {
         vec![]
     };
@@ -43,8 +43,8 @@ pub fn execute_instructions_sync(
     executor.update_program(
         program.get_constants().clone(),
         functions,
-        tuple_types_to_send,
-        program.get_check_types().clone(),
+        tuples_to_send,
+        program.get_types().clone(),
         program.get_builtins().clone(),
     );
 

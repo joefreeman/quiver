@@ -41,8 +41,8 @@ fn remap_function(
     function: Function,
     constant_remap: &HashMap<usize, usize>,
     function_remap: &HashMap<usize, usize>,
-    tuple_type_remap: &HashMap<usize, usize>,
-    check_type_remap: &HashMap<usize, usize>,
+    tuple_remap: &HashMap<usize, usize>,
+    type_remap: &HashMap<usize, usize>,
     builtin_remap: &HashMap<usize, usize>,
 ) -> Function {
     let remapped_instructions: Vec<Instruction> = function
@@ -59,10 +59,10 @@ fn remap_function(
                 Instruction::Builtin(*builtin_remap.get(&idx).unwrap_or(&idx))
             }
             Instruction::Tuple(type_id) => {
-                Instruction::Tuple(*tuple_type_remap.get(&type_id).unwrap_or(&type_id))
+                Instruction::Tuple(*tuple_remap.get(&type_id).unwrap_or(&type_id))
             }
             Instruction::IsType(type_id) => {
-                Instruction::IsType(*check_type_remap.get(&type_id).unwrap_or(&type_id))
+                Instruction::IsType(*type_remap.get(&type_id).unwrap_or(&type_id))
             }
             other => other,
         })
@@ -71,9 +71,9 @@ fn remap_function(
     Function {
         instructions: remapped_instructions,
         function_type: CallableType {
-            parameter: remap_type(function.function_type.parameter, tuple_type_remap),
-            result: remap_type(function.function_type.result, tuple_type_remap),
-            receive: remap_type(function.function_type.receive, tuple_type_remap),
+            parameter: remap_type(function.function_type.parameter, tuple_remap),
+            result: remap_type(function.function_type.result, tuple_remap),
+            receive: remap_type(function.function_type.receive, tuple_remap),
         },
         captures: function.captures,
     }
@@ -431,15 +431,15 @@ impl Environment {
         // Track old program sizes
         let old_constants_len = self.program.get_constants().len();
         let old_functions_len = self.program.get_functions().len();
-        let old_tuple_types_len = self.program.get_tuple_types().len();
-        let old_check_types_len = self.program.get_check_types().len();
+        let old_tuples_len = self.program.get_tuples().len();
+        let old_types_len = self.program.get_types().len();
         let old_builtins_len = self.program.get_builtins().len();
 
         // Build remapping tables
         let mut constant_remap: HashMap<usize, usize> = HashMap::new();
         let mut function_remap: HashMap<usize, usize> = HashMap::new();
-        let mut tuple_type_remap: HashMap<usize, usize> = HashMap::new();
-        let mut check_type_remap: HashMap<usize, usize> = HashMap::new();
+        let mut tuple_remap: HashMap<usize, usize> = HashMap::new();
+        let mut type_remap: HashMap<usize, usize> = HashMap::new();
         let mut builtin_remap: HashMap<usize, usize> = HashMap::new();
 
         // Merge constants (register_constant handles deduplication)
@@ -448,31 +448,31 @@ impl Environment {
             constant_remap.insert(old_idx, new_idx);
         }
 
-        for (old_idx, type_info) in bytecode.tuple_types.iter().enumerate() {
+        for (old_idx, type_info) in bytecode.tuples.iter().enumerate() {
             let old_type_id = old_idx;
 
             let remapped_fields: Vec<_> = type_info
                 .fields
                 .iter()
-                .map(|(name, ty)| (name.clone(), remap_type(ty.clone(), &tuple_type_remap)))
+                .map(|(name, ty)| (name.clone(), remap_type(ty.clone(), &tuple_remap)))
                 .collect();
 
-            // register_type_with_partial will deduplicate based on name, fields, and is_partial
-            let new_type_id = self.program.register_type_with_partial(
+            // register_tuple will deduplicate based on name, fields, and is_partial
+            let new_type_id = self.program.register_tuple(
                 type_info.name.clone(),
                 remapped_fields,
                 type_info.is_partial,
             );
-            tuple_type_remap.insert(old_type_id, new_type_id);
+            tuple_remap.insert(old_type_id, new_type_id);
         }
 
-        // Merge check types (register_check_type handles deduplication)
+        // Merge check types (register_tuple handles deduplication)
         for (old_idx, check_type) in bytecode.types.iter().enumerate() {
             let old_type_id = old_idx;
             // Remap tuple type references within the check type
-            let remapped_check_type = remap_type(check_type.clone(), &tuple_type_remap);
-            let new_type_id = self.program.register_check_type(remapped_check_type);
-            check_type_remap.insert(old_type_id, new_type_id);
+            let remapped_type = remap_type(check_type.clone(), &tuple_remap);
+            let new_type_id = self.program.register_type(remapped_type);
+            type_remap.insert(old_type_id, new_type_id);
         }
 
         // Merge builtins (register_builtin handles deduplication by name)
@@ -488,8 +488,8 @@ impl Environment {
                 function.clone(),
                 &constant_remap,
                 &function_remap,
-                &tuple_type_remap,
-                &check_type_remap,
+                &tuple_remap,
+                &type_remap,
                 &builtin_remap,
             );
 
@@ -501,24 +501,22 @@ impl Environment {
         // Get new program data to send to workers
         let new_constants: Vec<_> = self.program.get_constants()[old_constants_len..].to_vec();
         let new_functions: Vec<_> = self.program.get_functions()[old_functions_len..].to_vec();
-        let new_tuple_types: Vec<_> =
-            self.program.get_tuple_types()[old_tuple_types_len..].to_vec();
-        let new_check_types: Vec<_> =
-            self.program.get_check_types()[old_check_types_len..].to_vec();
+        let new_tuples: Vec<_> = self.program.get_tuples()[old_tuples_len..].to_vec();
+        let new_types: Vec<_> = self.program.get_types()[old_types_len..].to_vec();
         let new_builtins: Vec<_> = self.program.get_builtins()[old_builtins_len..].to_vec();
 
         // Send updates to workers
         if !new_constants.is_empty()
             || !new_functions.is_empty()
-            || !new_tuple_types.is_empty()
-            || !new_check_types.is_empty()
+            || !new_tuples.is_empty()
+            || !new_types.is_empty()
             || !new_builtins.is_empty()
         {
             let update_cmd = Command::UpdateProgram {
                 constants: new_constants,
                 functions: new_functions,
-                tuple_types: new_tuple_types,
-                check_types: new_check_types,
+                tuples: new_tuples,
+                types: new_types,
                 builtins: new_builtins,
             };
 

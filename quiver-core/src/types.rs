@@ -7,11 +7,11 @@ pub const NIL: usize = 0;
 /// Index of the OK tuple type (always at index 1)
 pub const OK: usize = 1;
 
-/// Trait for looking up type information.
+/// Trait for looking up tuple information.
 /// This trait exists in types.rs to break circular dependencies - it allows
 /// Type methods to look up type info without depending on Program.
-pub trait TypeLookup {
-    fn lookup_type(&self, type_id: usize) -> Option<&TupleTypeInfo>;
+pub trait TupleLookup {
+    fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo>;
 }
 
 /// Type alias for tuple field information: (optional name, field type)
@@ -100,7 +100,7 @@ impl Type {
         }
     }
 
-    pub fn extract_tuple_types(&self) -> Vec<usize> {
+    pub fn extract_tuples(&self) -> Vec<usize> {
         match self {
             Type::Union(types) => types
                 .iter()
@@ -115,18 +115,18 @@ impl Type {
     }
 
     /// Simple compatibility check using a type lookup provider
-    pub fn is_compatible<T: TypeLookup>(&self, pattern: &Type, type_lookup: &T) -> bool {
+    pub fn is_compatible<T: TupleLookup>(&self, pattern: &Type, tuple_lookup: &T) -> bool {
         let mut assumptions = HashSet::new();
         let mut type_stack = Vec::new();
-        self.is_compatible_with_impl(pattern, type_lookup, &mut assumptions, &mut type_stack)
+        self.is_compatible_with_impl(pattern, tuple_lookup, &mut assumptions, &mut type_stack)
     }
 
     /// Internal implementation of type compatibility checking.
     /// This uses coinductive reasoning to handle recursive types.
-    fn is_compatible_with_impl<T: TypeLookup>(
+    fn is_compatible_with_impl<T: TupleLookup>(
         &self,
         pattern: &Type,
-        type_lookup: &T,
+        tuple_lookup: &T,
         assumptions: &mut HashSet<(Type, Type)>,
         type_stack: &mut Vec<Type>,
     ) -> bool {
@@ -152,7 +152,7 @@ impl Type {
                 // Check receive type compatibility
                 let receive_compatible = match (&proc1.receive, &proc2.receive) {
                     (Some(r1), Some(r2)) => {
-                        r1.is_compatible_with_impl(r2, type_lookup, assumptions, type_stack)
+                        r1.is_compatible_with_impl(r2, tuple_lookup, assumptions, type_stack)
                     }
                     (None, _) | (_, None) => true, // Compatible if either has no receive type
                 };
@@ -160,7 +160,7 @@ impl Type {
                 // Check return type compatibility
                 let return_compatible = match (&proc1.returns, &proc2.returns) {
                     (Some(ret1), Some(ret2)) => {
-                        ret1.is_compatible_with_impl(ret2, type_lookup, assumptions, type_stack)
+                        ret1.is_compatible_with_impl(ret2, tuple_lookup, assumptions, type_stack)
                     }
                     (None, _) | (_, None) => true, // Compatible if either has no return type
                 };
@@ -176,10 +176,10 @@ impl Type {
                 }
 
                 // Look up both tuple types
-                let Some(info1) = type_lookup.lookup_type(*id1) else {
+                let Some(info1) = tuple_lookup.lookup_tuple(*id1) else {
                     return false;
                 };
-                let Some(info2) = type_lookup.lookup_type(*id2) else {
+                let Some(info2) = tuple_lookup.lookup_tuple(*id2) else {
                     return false;
                 };
 
@@ -191,7 +191,7 @@ impl Type {
                             fname1 == fname2
                                 && ftype1.is_compatible_with_impl(
                                     ftype2,
-                                    type_lookup,
+                                    tuple_lookup,
                                     assumptions,
                                     type_stack,
                                 )
@@ -216,7 +216,7 @@ impl Type {
                     variants.iter().any(|variant| {
                         variant.is_compatible_with_impl(
                             pattern,
-                            type_lookup,
+                            tuple_lookup,
                             assumptions,
                             type_stack,
                         )
@@ -247,7 +247,7 @@ impl Type {
                     // onto the stack again (it's already there!)
                     let variants = variants.clone();
                     variants.iter().any(|variant| {
-                        self.is_compatible_with_impl(variant, type_lookup, assumptions, type_stack)
+                        self.is_compatible_with_impl(variant, tuple_lookup, assumptions, type_stack)
                     })
                 } else {
                     // This shouldn't happen - cycles should only refer to unions
@@ -263,17 +263,17 @@ impl Type {
                 // - Receive types are contravariant (pattern's receive must be compatible with self's receive)
                 f2.parameter.is_compatible_with_impl(
                     &f1.parameter,
-                    type_lookup,
+                    tuple_lookup,
                     assumptions,
                     type_stack,
                 ) && f1.result.is_compatible_with_impl(
                     &f2.result,
-                    type_lookup,
+                    tuple_lookup,
                     assumptions,
                     type_stack,
                 ) && f2.receive.is_compatible_with_impl(
                     &f1.receive,
-                    type_lookup,
+                    tuple_lookup,
                     assumptions,
                     type_stack,
                 )
@@ -286,7 +286,7 @@ impl Type {
                 let result = variants.iter().any(|variant| {
                     concrete_type.is_compatible_with_impl(
                         variant,
-                        type_lookup,
+                        tuple_lookup,
                         assumptions,
                         type_stack,
                     )
@@ -297,15 +297,15 @@ impl Type {
 
             // When self is a union and pattern is concrete, check if any variant matches pattern
             (Type::Union(variants), pattern_type) => variants.iter().any(|variant| {
-                variant.is_compatible_with_impl(pattern_type, type_lookup, assumptions, type_stack)
+                variant.is_compatible_with_impl(pattern_type, tuple_lookup, assumptions, type_stack)
             }),
 
             // Concrete tuple vs partial type: check if concrete satisfies partial constraint
             (Type::Tuple(concrete_id), Type::Partial(partial_id)) => {
-                let Some(concrete_info) = type_lookup.lookup_type(*concrete_id) else {
+                let Some(concrete_info) = tuple_lookup.lookup_tuple(*concrete_id) else {
                     return false;
                 };
-                let Some(partial_info) = type_lookup.lookup_type(*partial_id) else {
+                let Some(partial_info) = tuple_lookup.lookup_tuple(*partial_id) else {
                     return false;
                 };
 
@@ -334,7 +334,7 @@ impl Type {
                                 concrete_fname.as_ref() == Some(partial_fname)
                                     && concrete_ftype.is_compatible_with_impl(
                                         partial_ftype,
-                                        type_lookup,
+                                        tuple_lookup,
                                         assumptions,
                                         type_stack,
                                     )

@@ -2,7 +2,7 @@ use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{BuiltinInfo, Constant, Function, Instruction};
 use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
-use crate::types::{CallableType, ProcessType, TupleTypeInfo, Type, TypeLookup};
+use crate::types::{CallableType, ProcessType, TupleLookup, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -25,15 +25,15 @@ pub struct Executor {
     constants: Vec<Constant>,
     functions: Vec<Function>,
     builtins: Vec<BuiltinInfo>,
-    tuple_types: Vec<TupleTypeInfo>,
-    check_types: Vec<Type>,
+    tuples: Vec<TupleTypeInfo>,
+    types: Vec<Type>,
     // Heap for runtime-allocated binaries
     heap: Vec<Vec<u8>>,
 }
 
-impl TypeLookup for Executor {
-    fn lookup_type(&self, type_id: usize) -> Option<&TupleTypeInfo> {
-        self.tuple_types.get(type_id)
+impl TupleLookup for Executor {
+    fn lookup_tuple(&self, type_id: usize) -> Option<&TupleTypeInfo> {
+        self.tuples.get(type_id)
     }
 }
 
@@ -116,8 +116,8 @@ impl Executor {
             constants: vec![],
             functions: vec![],
             builtins: vec![],
-            tuple_types: vec![nil_type, ok_type],
-            check_types: vec![],
+            tuples: vec![nil_type, ok_type],
+            types: vec![],
             heap: vec![],
         }
     }
@@ -270,14 +270,14 @@ impl Executor {
         &mut self,
         mut constants: Vec<Constant>,
         mut functions: Vec<Function>,
-        mut tuple_types: Vec<TupleTypeInfo>,
-        mut check_types: Vec<Type>,
+        mut tuples: Vec<TupleTypeInfo>,
+        mut types: Vec<Type>,
         mut builtins: Vec<BuiltinInfo>,
     ) {
         self.constants.append(&mut constants);
         self.functions.append(&mut functions);
-        self.tuple_types.append(&mut tuple_types);
-        self.check_types.append(&mut check_types);
+        self.tuples.append(&mut tuples);
+        self.types.append(&mut types);
         self.builtins.append(&mut builtins);
     }
 
@@ -453,8 +453,6 @@ impl Executor {
             Instruction::Store(index) => self.handle_store(pid, index),
             Instruction::Tuple(type_id) => self.handle_tuple(pid, type_id),
             Instruction::Get(index) => self.handle_get(pid, index),
-            Instruction::IsInteger => self.handle_is_integer(pid),
-            Instruction::IsBinary => self.handle_is_binary(pid),
             Instruction::IsType(type_id) => self.handle_is_type(pid, type_id),
             Instruction::Jump(offset) => self.handle_jump(pid, offset),
             Instruction::JumpIf(offset) => self.handle_jump_if(pid, offset),
@@ -602,7 +600,7 @@ impl Executor {
 
     fn handle_tuple(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action>, Error> {
         let type_info = self
-            .tuple_types
+            .tuples
             .get(type_id)
             .ok_or_else(|| Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
@@ -655,48 +653,6 @@ impl Executor {
         }
     }
 
-    fn handle_is_integer(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-        let result = if matches!(value, Value::Integer(_)) {
-            Value::ok()
-        } else {
-            Value::nil()
-        };
-
-        process.stack.push(result);
-
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
-        Ok(None)
-    }
-
-    fn handle_is_binary(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-        let result = if matches!(value, Value::Binary(_)) {
-            Value::ok()
-        } else {
-            Value::nil()
-        };
-
-        process.stack.push(result);
-
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
-        Ok(None)
-    }
-
     fn handle_is_type(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action>, Error> {
         let process = self
             .get_process_mut(pid)
@@ -704,15 +660,12 @@ impl Executor {
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        // Look up the expected type from check_types registry
+        // Look up the expected type from types registry
         let expected_type = self
-            .check_types
+            .types
             .get(type_id)
             .ok_or_else(|| {
-                Error::InvalidArgument(format!(
-                    "Type ID {} not found in check_types registry",
-                    type_id
-                ))
+                Error::InvalidArgument(format!("Type ID {} not found in types registry", type_id))
             })?
             .clone();
 
@@ -1643,7 +1596,7 @@ impl Executor {
             Value::Tuple(type_id, _) => {
                 // Check if this is a partial type
                 if self
-                    .lookup_type(*type_id)
+                    .lookup_tuple(*type_id)
                     .is_some_and(|info| info.is_partial)
                 {
                     Type::Partial(*type_id)

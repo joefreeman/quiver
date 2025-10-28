@@ -4,7 +4,7 @@ use crate::ast;
 use quiver_core::{
     bytecode::{Constant, Instruction},
     program::Program,
-    types::{Type, TypeLookup},
+    types::{TupleLookup, Type},
 };
 
 use super::{Error, codegen::InstructionBuilder};
@@ -195,7 +195,7 @@ pub fn generate_pattern_code(
                 RuntimeCheck::Type(check_type) => {
                     generate_value_access(codegen, &requirement.path);
                     // Register the type in the check_types registry and emit IsType instruction
-                    let type_id = program.register_check_type(check_type.clone());
+                    let type_id = program.register_type(check_type.clone());
                     codegen.add_instruction(Instruction::IsType(type_id));
                 }
                 RuntimeCheck::Literal(literal) => {
@@ -376,10 +376,10 @@ fn analyze_match_tuple_pattern(
     let mut binding_sets = vec![];
 
     // Find matching tuple types
-    let matching_types = find_matching_match_tuple_types(program, tuple, value_type)?;
+    let matching_types = find_matching_match_tuples(program, tuple, value_type)?;
 
     // For each matching type, create binding sets
-    for (type_id, field_mappings) in &matching_types {
+    for (tuple_id, field_mappings) in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         // For a single variant, use the parent's identifiers directly
         let mut variant_identifiers_scope =
@@ -389,19 +389,21 @@ fn analyze_match_tuple_pattern(
         // Get tuple info and extract field types upfront to avoid borrow issues
         let tuple_fields: Vec<Type> = {
             let tuple_info = program
-                .lookup_type(*type_id)
-                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+                .lookup_tuple(*tuple_id)
+                .ok_or(Error::TupleNotInRegistry {
+                    tuple_id: *tuple_id,
+                })?;
             tuple_info.fields.iter().map(|(_, t)| t.clone()).collect()
         };
 
         // Start with a binding set for this type
         let mut base_requirements = vec![];
         // Add runtime check if needed
-        if value_type.extract_tuple_types().len() > 1 {
+        if value_type.extract_tuples().len() > 1 {
             // Need to check the type at runtime since value could be one of multiple tuple types
             base_requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::Type(Type::Tuple(*type_id)),
+                check: RuntimeCheck::Type(Type::Tuple(*tuple_id)),
             });
         }
 
@@ -478,7 +480,7 @@ fn analyze_match_tuple_pattern(
     Ok(binding_sets)
 }
 
-fn find_matching_match_tuple_types(
+fn find_matching_match_tuples(
     program: &mut Program,
     tuple: &ast::MatchTuple,
     value_type: &Type,
@@ -491,10 +493,10 @@ fn find_matching_match_tuple_types(
     };
 
     for typ in types_to_check {
-        if let Type::Tuple(type_id) = typ
-            && let Some(field_mappings) = check_match_tuple_match(program, tuple, *type_id)?
+        if let Type::Tuple(tuple_id) = typ
+            && let Some(field_mappings) = check_match_tuple_match(program, tuple, *tuple_id)?
         {
-            matching_types.push((*type_id, field_mappings));
+            matching_types.push((*tuple_id, field_mappings));
         }
     }
 
@@ -504,11 +506,11 @@ fn find_matching_match_tuple_types(
 fn check_match_tuple_match(
     program: &mut Program,
     tuple: &ast::MatchTuple,
-    type_id: usize,
+    tuple_id: usize,
 ) -> Result<Option<Vec<(usize, usize)>>, Error> {
     let tuple_info = program
-        .lookup_type(type_id)
-        .ok_or(Error::TypeNotInRegistry { type_id })?;
+        .lookup_tuple(tuple_id)
+        .ok_or(Error::TupleNotInRegistry { tuple_id })?;
 
     if tuple.name.as_ref() != tuple_info.name.as_ref()
         || tuple.fields.len() != tuple_info.fields.len()
@@ -665,7 +667,7 @@ fn analyze_partial_pattern(
     let mut binding_sets = vec![];
 
     // Find types that have all required fields (and optionally matching tuple name)
-    let matching_types = find_types_with_fields_and_name(
+    let matching_types = find_tuples_with_fields_and_name(
         program,
         &partial_pattern.fields,
         partial_pattern.name.as_ref(),
@@ -673,7 +675,7 @@ fn analyze_partial_pattern(
     )?;
 
     // Create a binding set for each matching type
-    for (type_id, field_indices) in &matching_types {
+    for (tuple_id, field_indices) in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         let mut variant_identifiers_scope =
             IdentifierScope::new(identifiers, matching_types.len() > 1);
@@ -681,16 +683,18 @@ fn analyze_partial_pattern(
 
         let mut requirements = vec![];
 
-        if value_type.extract_tuple_types().len() > 1 {
+        if value_type.extract_tuples().len() > 1 {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::Type(Type::Tuple(*type_id)),
+                check: RuntimeCheck::Type(Type::Tuple(*tuple_id)),
             });
         }
 
         let tuple_info = program
-            .lookup_type(*type_id)
-            .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+            .lookup_tuple(*tuple_id)
+            .ok_or(Error::TupleNotInRegistry {
+                tuple_id: *tuple_id,
+            })?;
 
         let mut bindings = Vec::new();
         for (i, field_name) in partial_pattern.fields.iter().enumerate() {
@@ -741,26 +745,27 @@ fn analyze_star_pattern(
     identifiers: &mut HashMap<String, Identifier>,
 ) -> Result<Vec<BindingSet>, Error> {
     // Collect all tuple types
-    let tuple_types = value_type.extract_tuple_types();
+    let tuples = value_type.extract_tuples();
 
     // Create a binding set for each tuple type
     let mut binding_sets = vec![];
-    for type_id in &tuple_types {
+    for tuple_id in &tuples {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
-        let mut variant_identifiers_scope =
-            IdentifierScope::new(identifiers, tuple_types.len() > 1);
+        let mut variant_identifiers_scope = IdentifierScope::new(identifiers, tuples.len() > 1);
         let variant_identifiers = variant_identifiers_scope.get_mut();
 
         let tuple_info = program
-            .lookup_type(*type_id)
-            .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+            .lookup_tuple(*tuple_id)
+            .ok_or(Error::TupleNotInRegistry {
+                tuple_id: *tuple_id,
+            })?;
 
         // Add type check if there are multiple tuple types
         let mut requirements = vec![];
-        if tuple_types.len() > 1 {
+        if tuples.len() > 1 {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::Type(Type::Tuple(*type_id)),
+                check: RuntimeCheck::Type(Type::Tuple(*tuple_id)),
             });
         }
 
@@ -806,13 +811,13 @@ fn analyze_star_pattern(
     Ok(binding_sets)
 }
 
-fn find_types_with_fields_and_name(
+fn find_tuples_with_fields_and_name(
     program: &mut Program,
     field_names: &[String],
     tuple_name: Option<&String>,
     value_type: &Type,
 ) -> Result<Vec<(usize, Vec<usize>)>, Error> {
-    let mut matching_types = Vec::new();
+    let mut match_tuples = Vec::new();
 
     let types_to_check = match value_type {
         Type::Union(types) => types.as_slice(),
@@ -820,10 +825,12 @@ fn find_types_with_fields_and_name(
     };
 
     for typ in types_to_check {
-        if let Type::Tuple(type_id) | Type::Partial(type_id) = typ {
+        if let Type::Tuple(tuple_id) | Type::Partial(tuple_id) = typ {
             let tuple_info = program
-                .lookup_type(*type_id)
-                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+                .lookup_tuple(*tuple_id)
+                .ok_or(Error::TupleNotInRegistry {
+                    tuple_id: *tuple_id,
+                })?;
 
             // Check if tuple name matches (if specified)
             if let Some(expected_name) = tuple_name
@@ -833,12 +840,12 @@ fn find_types_with_fields_and_name(
             }
 
             if let Some(indices) = find_field_indices(field_names, &tuple_info.fields) {
-                matching_types.push((*type_id, indices));
+                match_tuples.push((*tuple_id, indices));
             }
         }
     }
 
-    Ok(matching_types)
+    Ok(match_tuples)
 }
 
 /// Find indices of specified fields in a tuple type

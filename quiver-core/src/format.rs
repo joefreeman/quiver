@@ -1,6 +1,6 @@
 use crate::bytecode::Constant;
 use crate::error::Error;
-use crate::types::{Type, TypeLookup};
+use crate::types::{TupleLookup, Type};
 use crate::value::{Binary, Value};
 
 /// Helper function to format bytes as a string if they represent valid UTF-8 text
@@ -65,7 +65,7 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
         }
         Type::Tuple(type_id) | Type::Partial(type_id) => {
             let is_partial = matches!(type_def, Type::Partial(_));
-            if let Some(type_info) = program.lookup_type(*type_id) {
+            if let Some(type_info) = program.lookup_tuple(*type_id) {
                 let field_strs: Vec<String> = type_info
                     .fields
                     .iter()
@@ -186,7 +186,7 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
         Value::Binary(binary) => format_binary(binary, heap, constants),
         Value::Process(process_id, _) => format!("@{}", process_id),
         Value::Tuple(type_id, elements) => {
-            if let Some(type_info) = program.lookup_type(*type_id) {
+            if let Some(type_info) = program.lookup_tuple(*type_id) {
                 if type_info.name.as_deref() == Some("Str")
                     && let [Value::Binary(binary)] = elements.as_slice()
                     && let Ok(bytes) = get_binary_bytes(binary, heap, constants)

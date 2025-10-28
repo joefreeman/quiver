@@ -29,7 +29,7 @@ use quiver_core::{
     bytecode::{Constant, Function, Instruction},
     executor::Executor,
     program::Program,
-    types::{CallableType, NIL, ProcessType, Type, TypeLookup},
+    types::{CallableType, NIL, ProcessType, TupleLookup, Type},
     value::Value,
 };
 
@@ -47,8 +47,8 @@ pub enum Error {
         expected: String,
         found: String,
     },
-    TypeNotInRegistry {
-        type_id: usize,
+    TupleNotInRegistry {
+        tuple_id: usize,
     },
 
     // Structure errors
@@ -60,7 +60,7 @@ pub enum Error {
     // Access errors
     FieldNotFound {
         field_name: String,
-        type_name: String,
+        tuple_id: usize,
     },
     FieldAccessOnNonTuple {
         field_name: String,
@@ -85,7 +85,7 @@ pub enum Error {
 
     // Operator errors
     OperatorTypeNotInRegistry {
-        type_id: String,
+        tuple_id: String,
     },
     OperatorOnNonTuple {
         operator: String,
@@ -437,9 +437,9 @@ impl<'a> Compiler<'a> {
                     // Get the ripple type from ripple_context
                     ripple_context.and_then(|ctx| {
                         let ripple_type = &ctx.value_type;
-                        if let Type::Tuple(type_id) = ripple_type {
+                        if let Type::Tuple(tuple_id) = ripple_type {
                             self.program
-                                .lookup_type(*type_id)
+                                .lookup_tuple(*tuple_id)
                                 .and_then(|type_info| type_info.name.clone())
                         } else {
                             None
@@ -450,9 +450,9 @@ impl<'a> Compiler<'a> {
                     // Identifier spread: identifier[..., fields]
                     // Look up the variable's type
                     scopes::lookup_variable(&self.scopes, &id, &[]).and_then(|(var_type, _)| {
-                        if let Type::Tuple(type_id) = var_type {
+                        if let Type::Tuple(tuple_id) = var_type {
                             self.program
-                                .lookup_type(type_id)
+                                .lookup_tuple(tuple_id)
                                 .and_then(|type_info| type_info.name.clone())
                         } else {
                             None
@@ -509,8 +509,10 @@ impl<'a> Compiler<'a> {
                 )
             }
         };
-        let type_id = self.program.register_type(resolved_name, field_types);
-        self.codegen.add_instruction(Instruction::Tuple(type_id));
+        let tuple_id = self
+            .program
+            .register_tuple(resolved_name, field_types, false);
+        self.codegen.add_instruction(Instruction::Tuple(tuple_id));
 
         // Clean up ripple value if we own it
         if let Some(ctx) = ripple_context
@@ -520,7 +522,7 @@ impl<'a> Compiler<'a> {
             self.codegen.add_instruction(Instruction::Pop);
         }
 
-        Ok(Type::Tuple(type_id))
+        Ok(Type::Tuple(tuple_id))
     }
 
     fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<Type, Error> {
@@ -898,12 +900,12 @@ impl<'a> Compiler<'a> {
                     let mut last_type = var_type;
 
                     for accessor in &capture.accessors {
-                        let tuple_types = last_type.extract_tuple_types();
+                        let tuples = last_type.extract_tuples();
                         let field_types = match accessor {
                             ast::AccessPath::Field(field_name) => {
                                 match type_queries::get_field_types_by_name(
                                     &self.program,
-                                    &tuple_types,
+                                    &tuples,
                                     field_name,
                                 ) {
                                     Ok(results) if !results.is_empty() => {
@@ -915,7 +917,7 @@ impl<'a> Compiler<'a> {
                             ast::AccessPath::Index(index) => {
                                 match type_queries::get_field_types_at_position(
                                     &self.program,
-                                    &tuple_types,
+                                    &tuples,
                                     *index,
                                 ) {
                                     Ok(types) => types,
@@ -1465,14 +1467,14 @@ impl<'a> Compiler<'a> {
                 let index = self.program.register_constant(constant);
                 Ok((vec![Instruction::Constant(index)], Type::Binary))
             }
-            Value::Tuple(type_id, fields) => {
+            Value::Tuple(tuple_id, fields) => {
                 let mut instructions = Vec::new();
                 for field in fields {
                     let (field_instructions, _) = self.value_to_instructions(field, executor)?;
                     instructions.extend(field_instructions);
                 }
-                instructions.push(Instruction::Tuple(*type_id));
-                Ok((instructions, Type::Tuple(*type_id)))
+                instructions.push(Instruction::Tuple(*tuple_id));
+                Ok((instructions, Type::Tuple(*tuple_id)))
             }
             Value::Function(function, captures) => {
                 // Get the function definition
@@ -2357,9 +2359,9 @@ impl<'a> Compiler<'a> {
         // We need to extract the tuple elements and call Equal(count)
 
         // Extract tuple type IDs from the value type
-        let tuple_types = value_type.extract_tuple_types();
+        let tuples = value_type.extract_tuples();
 
-        if tuple_types.is_empty() {
+        if tuples.is_empty() {
             return Err(Error::TypeMismatch {
                 expected: "tuple".to_string(),
                 found: "unknown".to_string(),
@@ -2370,11 +2372,13 @@ impl<'a> Compiler<'a> {
         let mut common_field_count = None;
         let mut first_field_types = Vec::new();
 
-        for type_id in &tuple_types {
-            let type_info = self
-                .program
-                .lookup_type(*type_id)
-                .ok_or(Error::TypeNotInRegistry { type_id: *type_id })?;
+        for tuple_id in &tuples {
+            let type_info =
+                self.program
+                    .lookup_tuple(*tuple_id)
+                    .ok_or(Error::TupleNotInRegistry {
+                        tuple_id: *tuple_id,
+                    })?;
             let fields = &type_info.fields;
 
             let field_count = fields.len();
@@ -2449,9 +2453,9 @@ impl<'a> Compiler<'a> {
         target_name: &str,
     ) -> Result<Type, Error> {
         for accessor in accessors {
-            let tuple_types = last_type.extract_tuple_types();
+            let tuples = last_type.extract_tuples();
 
-            if tuple_types.is_empty() {
+            if tuples.is_empty() {
                 return Err(Error::MemberAccessOnNonTuple {
                     target: target_name.to_string(),
                 });
@@ -2459,15 +2463,12 @@ impl<'a> Compiler<'a> {
 
             let (index, field_types) = match accessor {
                 ast::AccessPath::Field(field_name) => {
-                    let results = type_queries::get_field_types_by_name(
-                        &self.program,
-                        &tuple_types,
-                        &field_name,
-                    )
-                    .map_err(|_| Error::MemberFieldNotFound {
-                        field_name: field_name.clone(),
-                        target: target_name.to_string(),
-                    })?;
+                    let results =
+                        type_queries::get_field_types_by_name(&self.program, &tuples, &field_name)
+                            .map_err(|_| Error::MemberFieldNotFound {
+                                field_name: field_name.clone(),
+                                target: target_name.to_string(),
+                            })?;
                     if results.is_empty() {
                         return Err(Error::MemberFieldNotFound {
                             field_name,
@@ -2479,14 +2480,11 @@ impl<'a> Compiler<'a> {
                     (index, field_types)
                 }
                 ast::AccessPath::Index(index) => {
-                    let field_types = type_queries::get_field_types_at_position(
-                        &self.program,
-                        &tuple_types,
-                        index,
-                    )
-                    .map_err(|_| Error::MemberAccessOnNonTuple {
-                        target: target_name.to_string(),
-                    })?;
+                    let field_types =
+                        type_queries::get_field_types_at_position(&self.program, &tuples, index)
+                            .map_err(|_| Error::MemberAccessOnNonTuple {
+                                target: target_name.to_string(),
+                            })?;
                     (index, field_types)
                 }
             };

@@ -2,7 +2,7 @@ use crate::ast;
 use quiver_core::{
     bytecode::Instruction,
     program::Program,
-    types::{Type, TypeLookup},
+    types::{TupleLookup, Type},
 };
 
 use super::{Compiler, Error, RippleContext};
@@ -177,7 +177,7 @@ fn build_field_variants(
                 spread_count += 1;
 
                 if let CompiledValue::Spread { ty, .. } = &compiled_values[compiled_idx] {
-                    let spread_type_ids = ty.extract_tuple_types();
+                    let spread_type_ids = ty.extract_tuples();
 
                     if spread_type_ids.is_empty() {
                         return Err(Error::TypeMismatch {
@@ -190,15 +190,15 @@ fn build_field_variants(
                     let mut new_variants = Vec::new();
 
                     for existing_variant in &variants {
-                        for &spread_type_id in &spread_type_ids {
-                            let spread_info = program.lookup_type(spread_type_id).ok_or(
-                                Error::TypeNotInRegistry {
-                                    type_id: spread_type_id,
+                        for &spread_tuple_id in &spread_type_ids {
+                            let spread_info = program.lookup_tuple(spread_tuple_id).ok_or(
+                                Error::TupleNotInRegistry {
+                                    tuple_id: spread_tuple_id,
                                 },
                             )?;
 
                             let mut new_variant = existing_variant.clone();
-                            new_variant.spread_type_ids.push(spread_type_id);
+                            new_variant.spread_type_ids.push(spread_tuple_id);
 
                             // Track where to insert new fields (at current position)
                             let insertion_point = new_variant.fields.len();
@@ -255,8 +255,8 @@ fn build_field_sources_for_variant(
                 unnamed_sources.push(FieldSource::CompiledField(compiled_idx));
             }
             CompiledValue::Spread { .. } => {
-                let spread_type_id = variant.spread_type_ids[spread_variant_idx];
-                let spread_info = program.lookup_type(spread_type_id).unwrap();
+                let spread_tuple_id = variant.spread_type_ids[spread_variant_idx];
+                let spread_info = program.lookup_tuple(spread_tuple_id).unwrap();
 
                 for (field_idx, (spread_field_name, _)) in spread_info.fields.iter().enumerate() {
                     if spread_field_name.is_none() {
@@ -289,8 +289,8 @@ fn build_field_sources_for_variant(
                         }
                     }
                     CompiledValue::Spread { .. } => {
-                        let spread_type_id = variant.spread_type_ids[local_spread_idx];
-                        let spread_info = program.lookup_type(spread_type_id).unwrap();
+                        let spread_tuple_id = variant.spread_type_ids[local_spread_idx];
+                        let spread_info = program.lookup_tuple(spread_tuple_id).unwrap();
 
                         for (field_idx, (spread_field_name, _)) in
                             spread_info.fields.iter().enumerate()
@@ -432,16 +432,16 @@ fn emit_single_variant_tuple(
         build_field_sources_for_variant(variant, compiled_values, &compiler.program);
     emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
-    let type_id = compiler
+    let tuple_id = compiler
         .program
-        .register_type(tuple_name, variant.fields.clone());
+        .register_tuple(tuple_name, variant.fields.clone(), false);
     compiler
         .codegen
-        .add_instruction(Instruction::Tuple(type_id));
+        .add_instruction(Instruction::Tuple(tuple_id));
 
     emit_stack_cleanup_code(compiler, stack_size);
 
-    Ok(Type::Tuple(type_id))
+    Ok(Type::Tuple(tuple_id))
 }
 
 /// Emit bytecode for multiple variant tuples (with type checking and branching)
@@ -469,19 +469,17 @@ fn emit_multi_variant_tuples(
                 .filter(|(_, cv)| matches!(cv, CompiledValue::Spread { .. }))
                 .enumerate()
             {
-                let spread_type_id = variant.spread_type_ids[spread_field_idx];
+                let spread_tuple_id = variant.spread_type_ids[spread_field_idx];
                 let spread_stack_idx = compiled_values[spread_compiled_idx.0].stack_offset();
 
                 // Pick the spread value and check its type
                 let depth = stack_size - 1 - spread_stack_idx;
                 compiler.codegen.add_instruction(Instruction::Pick(depth));
                 // Register the tuple type as a check type
-                let check_type_id = compiler
-                    .program
-                    .register_check_type(Type::Tuple(spread_type_id));
+                let tuple_id = compiler.program.register_type(Type::Tuple(spread_tuple_id));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::IsType(check_type_id));
+                    .add_instruction(Instruction::IsType(tuple_id));
                 compiler.codegen.add_instruction(Instruction::Not);
 
                 let fail_jump = compiler.codegen.emit_jump_if_placeholder();
@@ -491,12 +489,13 @@ fn emit_multi_variant_tuples(
             // All checks passed - construct this variant
             emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
-            let type_id = compiler
-                .program
-                .register_type(tuple_name.clone(), variant.fields.clone());
+            let tuple_id =
+                compiler
+                    .program
+                    .register_tuple(tuple_name.clone(), variant.fields.clone(), false);
             compiler
                 .codegen
-                .add_instruction(Instruction::Tuple(type_id));
+                .add_instruction(Instruction::Tuple(tuple_id));
 
             end_jumps.push(compiler.codegen.emit_jump_placeholder());
 
@@ -508,12 +507,13 @@ fn emit_multi_variant_tuples(
             // Last variant - no need to check, just construct it
             emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
-            let type_id = compiler
-                .program
-                .register_type(tuple_name.clone(), variant.fields.clone());
+            let tuple_id =
+                compiler
+                    .program
+                    .register_tuple(tuple_name.clone(), variant.fields.clone(), false);
             compiler
                 .codegen
-                .add_instruction(Instruction::Tuple(type_id));
+                .add_instruction(Instruction::Tuple(tuple_id));
         }
     }
 
@@ -528,10 +528,11 @@ fn emit_multi_variant_tuples(
     let union_types: Vec<Type> = variants
         .iter()
         .map(|variant| {
-            let type_id = compiler
-                .program
-                .register_type(tuple_name.clone(), variant.fields.clone());
-            Type::Tuple(type_id)
+            let tuple_id =
+                compiler
+                    .program
+                    .register_tuple(tuple_name.clone(), variant.fields.clone(), false);
+            Type::Tuple(tuple_id)
         })
         .collect();
 

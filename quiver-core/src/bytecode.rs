@@ -31,7 +31,7 @@ pub struct Bytecode {
     pub functions: Vec<Function>,
     pub builtins: Vec<BuiltinInfo>,
     pub entry: Option<usize>,
-    pub tuple_types: Vec<types::TupleTypeInfo>,
+    pub tuples: Vec<types::TupleTypeInfo>,
     pub types: Vec<types::Type>,
 }
 
@@ -48,8 +48,6 @@ pub enum Instruction {
     Store(usize),
     Tuple(usize),
     Get(usize),
-    IsInteger,
-    IsBinary,
     IsType(usize),
     Jump(isize),
     JumpIf(isize),
