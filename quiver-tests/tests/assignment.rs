@@ -394,6 +394,19 @@ fn test_repeated_identifier_pin() {
 }
 
 #[test]
+fn test_pin_against_partial() {
+    quiver()
+        .evaluate("x = 1, A[x: 1] ~> ^(x)")
+        .expect("A[x: 1]");
+    quiver().evaluate("x = 2, A[x: 1] ~> ^(x)").expect("[]");
+    quiver().evaluate("A[x: 1] ~> ^(x)").expect_compile_error(
+        quiver_compiler::compiler::Error::InternalError {
+            message: "Pin variable 'x' not found in scope".to_string(),
+        },
+    );
+}
+
+#[test]
 fn test_repeated_identifier_nested() {
     quiver()
         .evaluate("[Point[1, 2], 1] ~> =[Point[x, _], x], x")

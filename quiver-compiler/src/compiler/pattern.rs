@@ -309,10 +309,18 @@ fn analyze_match_pattern(
             variables,
             scopes,
         ),
-        ast::Match::Partial(partial) => {
-            analyze_partial_pattern(program, partial, value_type, path, identifiers)
+        ast::Match::Partial(partial) => analyze_partial_pattern(
+            program,
+            partial,
+            value_type,
+            path,
+            mode,
+            identifiers,
+            variables,
+        ),
+        ast::Match::Star => {
+            analyze_star_pattern(program, value_type, path, mode, identifiers, variables)
         }
-        ast::Match::Star => analyze_star_pattern(program, value_type, path, identifiers),
         ast::Match::Placeholder => Ok(vec![BindingSet {
             requirements: vec![],
             bindings: vec![],
@@ -662,7 +670,9 @@ fn analyze_partial_pattern(
     partial_pattern: &ast::PartialPattern,
     value_type: &Type,
     path: AccessPath,
+    mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
+    variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
 
@@ -712,20 +722,37 @@ fn analyze_partial_pattern(
                     check: RuntimeCheck::Path(field_path),
                 });
             } else {
-                // First occurrence - record it and create binding
+                // First occurrence - record it
                 variant_identifiers.insert(
                     field_name.clone(),
                     Identifier {
                         first_path: field_path.clone(),
-                        is_pin_mode: false,
+                        is_pin_mode: mode == PatternMode::Pin,
                         is_repeated: false,
                     },
                 );
-                bindings.push(Binding {
-                    name: field_name.clone(),
-                    path: field_path,
-                    var_type: field_type.clone(),
-                });
+
+                match mode {
+                    PatternMode::Bind => {
+                        // Create a binding for this identifier
+                        bindings.push(Binding {
+                            name: field_name.clone(),
+                            path: field_path,
+                            var_type: field_type.clone(),
+                        });
+                    }
+                    PatternMode::Pin => {
+                        // In pin mode, check against existing variable if it exists
+                        if variables.contains(field_name) {
+                            requirements.push(Requirement {
+                                path: field_path,
+                                check: RuntimeCheck::Variable(field_name.clone()),
+                            });
+                        }
+                        // If variable doesn't exist and this is the only occurrence,
+                        // validation will error later in analyze_pattern
+                    }
+                }
             }
         }
 
@@ -742,7 +769,9 @@ fn analyze_star_pattern(
     program: &mut Program,
     value_type: &Type,
     path: AccessPath,
+    mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
+    variables: &HashSet<String>,
 ) -> Result<Vec<BindingSet>, Error> {
     // Collect all tuple types
     let tuples = value_type.extract_tuples();
@@ -784,20 +813,37 @@ fn analyze_star_pattern(
                         check: RuntimeCheck::Path(field_path),
                     });
                 } else {
-                    // First occurrence - record it and create binding
+                    // First occurrence - record it
                     variant_identifiers.insert(
                         field_name.clone(),
                         Identifier {
                             first_path: field_path.clone(),
-                            is_pin_mode: false,
+                            is_pin_mode: mode == PatternMode::Pin,
                             is_repeated: false,
                         },
                     );
-                    bindings.push(Binding {
-                        name: field_name.clone(),
-                        path: field_path,
-                        var_type: field_type.clone(),
-                    });
+
+                    match mode {
+                        PatternMode::Bind => {
+                            // Create a binding for this identifier
+                            bindings.push(Binding {
+                                name: field_name.clone(),
+                                path: field_path,
+                                var_type: field_type.clone(),
+                            });
+                        }
+                        PatternMode::Pin => {
+                            // In pin mode, check against existing variable if it exists
+                            if variables.contains(field_name) {
+                                requirements.push(Requirement {
+                                    path: field_path,
+                                    check: RuntimeCheck::Variable(field_name.clone()),
+                                });
+                            }
+                            // If variable doesn't exist and this is the only occurrence,
+                            // validation will error later in analyze_pattern
+                        }
+                    }
                 }
             }
         }
