@@ -10,8 +10,28 @@ use quiver_core::{
 use super::{Error, codegen::InstructionBuilder};
 
 // Type aliases for complex pattern matching types
-type PatternAnalysisResult = (MatchCertainty, Vec<(String, Type)>, Vec<BindingSet>);
+type PatternAnalysisResult = (Vec<(String, Type)>, Vec<BindingSet>, Type);
 type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
+
+/// Narrow a type by filtering to variants compatible with a type check
+fn narrow_type_by_type_check(value_type: &Type, check_type: &Type, program: &Program) -> Type {
+    let variants = match value_type {
+        Type::Union(types) => types.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+
+    let matching_variants: Vec<Type> = variants
+        .iter()
+        .filter(|variant| variant.is_compatible(check_type, program))
+        .cloned()
+        .collect();
+
+    if matching_variants.is_empty() {
+        Type::never()
+    } else {
+        Type::from_types(matching_variants)
+    }
+}
 
 /// Helper for managing identifiers across variants
 /// Clones identifiers when processing multiple variants to avoid cross-contamination
@@ -39,17 +59,6 @@ impl<'a> IdentifierScope<'a> {
             Self::Owned(map) => map,
         }
     }
-}
-
-/// Represents the certainty of a pattern match
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchCertainty {
-    /// Pattern cannot possibly match the value type
-    WontMatch,
-    /// Pattern might match, requires runtime checks
-    MightMatch,
-    /// Pattern will definitely match, no runtime checks needed
-    WillMatch,
 }
 
 /// Represents the mode of pattern matching
@@ -113,7 +122,7 @@ pub fn analyze_pattern(
     scopes: &[super::scopes::Scope],
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
-    let binding_sets = analyze_match_pattern(
+    let (binding_sets, narrowed_type) = analyze_match_pattern(
         program,
         pattern,
         value_type,
@@ -124,37 +133,49 @@ pub fn analyze_pattern(
     )?;
 
     if binding_sets.is_empty() {
-        return Ok((MatchCertainty::WontMatch, Vec::new(), Vec::new()));
+        // Won't match - return never type (empty union)
+        return Ok((Vec::new(), Vec::new(), Type::never()));
     }
 
     // Validate: check for single-occurrence pins with no variable in scope
     for (name, info) in &identifiers {
-        if info.is_pin_mode && !info.is_repeated {
-            if super::scopes::lookup_variable(scopes, name, &[]).is_none() {
-                return Err(Error::InternalError {
-                    message: format!("Pin variable '{}' not found in scope", name),
-                });
-            }
+        if info.is_pin_mode
+            && !info.is_repeated
+            && super::scopes::lookup_variable(scopes, name, &[]).is_none()
+        {
+            return Err(Error::InternalError {
+                message: format!("Pin variable '{}' not found in scope", name),
+            });
         }
     }
 
-    let certainty = if binding_sets.iter().any(|bs| bs.requirements.is_empty()) {
-        MatchCertainty::WillMatch
+    // Check if all binding sets have requirements (might match) or some have none (will match)
+    let will_match = binding_sets.iter().any(|bs| bs.requirements.is_empty());
+
+    // Collect all bindings and union their types across all binding sets
+    let mut bindings_map: HashMap<String, Vec<Type>> = HashMap::new();
+    for binding_set in &binding_sets {
+        for binding in &binding_set.bindings {
+            bindings_map
+                .entry(binding.name.clone())
+                .or_default()
+                .push(binding.var_type.clone());
+        }
+    }
+
+    let all_bindings: Vec<(String, Type)> = bindings_map
+        .into_iter()
+        .map(|(name, types)| (name, Type::from_types(types)))
+        .collect();
+
+    // Include [] in the result type if there are runtime requirements (might match)
+    let result_type = if will_match {
+        narrowed_type
     } else {
-        MatchCertainty::MightMatch
+        Type::from_types(vec![Type::nil(), narrowed_type])
     };
 
-    let all_bindings = if let Some(first_set) = binding_sets.first() {
-        first_set
-            .bindings
-            .iter()
-            .map(|b| (b.name.clone(), b.var_type.clone()))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    Ok((certainty, all_bindings, binding_sets))
+    Ok((all_bindings, binding_sets, result_type))
 }
 
 /// Generate bytecode for pattern matching
@@ -286,7 +307,7 @@ fn analyze_match_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<Vec<BindingSet>, Error> {
+) -> Result<(Vec<BindingSet>, Type), Error> {
     match pattern {
         ast::Match::Identifier(name) => analyze_identifier_pattern(
             program,
@@ -297,16 +318,12 @@ fn analyze_match_pattern(
             identifiers,
             scopes,
         ),
-        ast::Match::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
-        ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
-            program,
-            tuple,
-            value_type,
-            path,
-            mode,
-            identifiers,
-            scopes,
-        ),
+        ast::Match::Literal(literal) => {
+            analyze_literal_pattern(literal.clone(), path, value_type, program)
+        }
+        ast::Match::Tuple(tuple) => {
+            analyze_match_tuple_pattern(program, tuple, value_type, path, mode, identifiers, scopes)
+        }
         ast::Match::Partial(partial) => analyze_partial_pattern(
             program,
             partial,
@@ -319,10 +336,13 @@ fn analyze_match_pattern(
         ast::Match::Star => {
             analyze_star_pattern(program, value_type, path, mode, identifiers, scopes)
         }
-        ast::Match::Placeholder => Ok(vec![BindingSet {
-            requirements: vec![],
-            bindings: vec![],
-        }]),
+        ast::Match::Placeholder => Ok((
+            vec![BindingSet {
+                requirements: vec![],
+                bindings: vec![],
+            }],
+            value_type.clone(),
+        )),
         ast::Match::Pin(inner) => analyze_match_pattern(
             program,
             inner,
@@ -354,14 +374,20 @@ fn analyze_match_pattern(
             // Resolve the ast::Type to a Type
             let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
 
+            // Narrow the type by filtering compatible variants
+            let narrowed_type = narrow_type_by_type_check(value_type, &resolved_type, program);
+
             // Create a runtime check for the type (same as type aliases)
-            Ok(vec![BindingSet {
-                requirements: vec![Requirement {
-                    path,
-                    check: RuntimeCheck::Type(resolved_type),
+            Ok((
+                vec![BindingSet {
+                    requirements: vec![Requirement {
+                        path,
+                        check: RuntimeCheck::Type(resolved_type),
+                    }],
+                    bindings: vec![],
                 }],
-                bindings: vec![],
-            }])
+                narrowed_type,
+            ))
         }
     }
 }
@@ -375,8 +401,9 @@ fn analyze_match_tuple_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<Vec<BindingSet>, Error> {
+) -> Result<(Vec<BindingSet>, Type), Error> {
     let mut binding_sets = vec![];
+    let mut successful_tuple_ids = vec![];
 
     // Find matching tuple types
     let matching_types = find_matching_match_tuples(program, tuple, value_type)?;
@@ -431,7 +458,7 @@ fn analyze_match_tuple_pattern(
             field_path.push(*actual_idx);
 
             // Recursively analyze the field pattern
-            let field_binding_sets = analyze_match_pattern(
+            let (field_binding_sets, _field_narrowed_type) = analyze_match_pattern(
                 program,
                 &field.pattern,
                 &field_type,
@@ -467,7 +494,11 @@ fn analyze_match_tuple_pattern(
         }
 
         // Add all binding sets from this type to the result
-        binding_sets.extend(current_binding_sets);
+        // Only track this tuple as successful if it produced binding sets
+        if !current_binding_sets.is_empty() {
+            successful_tuple_ids.push(*tuple_id);
+            binding_sets.extend(current_binding_sets);
+        }
     }
 
     if matches!(&value_type, Type::Union(types) if types.is_empty()) {
@@ -479,7 +510,19 @@ fn analyze_match_tuple_pattern(
         });
     }
 
-    Ok(binding_sets)
+    // Construct narrowed type only from tuples that successfully produced binding sets
+    let narrowed_variants: Vec<Type> = successful_tuple_ids
+        .iter()
+        .map(|tuple_id| Type::Tuple(*tuple_id))
+        .collect();
+
+    let narrowed_type = if narrowed_variants.is_empty() {
+        Type::never()
+    } else {
+        Type::from_types(narrowed_variants)
+    };
+
+    Ok((binding_sets, narrowed_type))
 }
 
 fn find_matching_match_tuples(
@@ -536,14 +579,28 @@ fn check_match_tuple_match(
 fn analyze_literal_pattern(
     literal: ast::Literal,
     path: AccessPath,
-) -> Result<Vec<BindingSet>, Error> {
-    Ok(vec![BindingSet {
-        requirements: vec![Requirement {
-            path,
-            check: RuntimeCheck::Literal(literal),
+    value_type: &Type,
+    program: &Program,
+) -> Result<(Vec<BindingSet>, Type), Error> {
+    // Determine the type of the literal
+    let literal_type = match &literal {
+        ast::Literal::Integer(_) => Type::Integer,
+        ast::Literal::Binary(_) => Type::Binary,
+    };
+
+    // Narrow the type by filtering compatible variants
+    let narrowed_type = narrow_type_by_type_check(value_type, &literal_type, program);
+
+    Ok((
+        vec![BindingSet {
+            requirements: vec![Requirement {
+                path,
+                check: RuntimeCheck::Literal(literal),
+            }],
+            bindings: vec![],
         }],
-        bindings: vec![],
-    }])
+        narrowed_type,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -555,30 +612,38 @@ fn analyze_identifier_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<Vec<BindingSet>, Error> {
+) -> Result<(Vec<BindingSet>, Type), Error> {
     // In pin mode, check for type names FIRST (before recording as identifier)
     if mode == PatternMode::Pin {
         // Check if this is a primitive type name
         if name == "int" {
             // Type narrowing for integer type - don't record as identifier
-            return Ok(vec![BindingSet {
-                requirements: vec![Requirement {
-                    path,
-                    check: RuntimeCheck::Type(Type::Integer),
+            let narrowed_type = narrow_type_by_type_check(&value_type, &Type::Integer, program);
+            return Ok((
+                vec![BindingSet {
+                    requirements: vec![Requirement {
+                        path,
+                        check: RuntimeCheck::Type(Type::Integer),
+                    }],
+                    bindings: vec![],
                 }],
-                bindings: vec![],
-            }]);
+                narrowed_type,
+            ));
         }
 
         if name == "bin" {
             // Type narrowing for binary type - don't record as identifier
-            return Ok(vec![BindingSet {
-                requirements: vec![Requirement {
-                    path,
-                    check: RuntimeCheck::Type(Type::Binary),
+            let narrowed_type = narrow_type_by_type_check(&value_type, &Type::Binary, program);
+            return Ok((
+                vec![BindingSet {
+                    requirements: vec![Requirement {
+                        path,
+                        check: RuntimeCheck::Type(Type::Binary),
+                    }],
+                    bindings: vec![],
                 }],
-                bindings: vec![],
-            }]);
+                narrowed_type,
+            ));
         }
 
         // Check for type alias
@@ -594,27 +659,35 @@ fn analyze_identifier_pattern(
             let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
 
             // Type narrowing for type alias - don't record as identifier
-            return Ok(vec![BindingSet {
-                requirements: vec![Requirement {
-                    path,
-                    check: RuntimeCheck::Type(resolved_type),
+            let narrowed_type = narrow_type_by_type_check(&value_type, &resolved_type, program);
+            return Ok((
+                vec![BindingSet {
+                    requirements: vec![Requirement {
+                        path,
+                        check: RuntimeCheck::Type(resolved_type),
+                    }],
+                    bindings: vec![],
                 }],
-                bindings: vec![],
-            }]);
+                narrowed_type,
+            ));
         }
     }
 
     // Check if we've seen this identifier before
     if let Some(info) = identifiers.get_mut(&name) {
         // Second or later occurrence - mark as repeated and create Path requirement
+        // No type narrowing for repeated identifiers (equality check)
         info.is_repeated = true;
-        Ok(vec![BindingSet {
-            requirements: vec![Requirement {
-                path: info.first_path.clone(),
-                check: RuntimeCheck::Path(path),
+        Ok((
+            vec![BindingSet {
+                requirements: vec![Requirement {
+                    path: info.first_path.clone(),
+                    check: RuntimeCheck::Path(path),
+                }],
+                bindings: vec![],
             }],
-            bindings: vec![],
-        }])
+            value_type,
+        ))
     } else {
         // First occurrence - record it
         identifiers.insert(
@@ -629,19 +702,24 @@ fn analyze_identifier_pattern(
         match mode {
             PatternMode::Bind => {
                 // Create a binding for this identifier
-                Ok(vec![BindingSet {
-                    requirements: vec![],
-                    bindings: vec![Binding {
-                        name,
-                        path,
-                        var_type: value_type,
+                // No type narrowing in bind mode (binds any type)
+                Ok((
+                    vec![BindingSet {
+                        requirements: vec![],
+                        bindings: vec![Binding {
+                            name,
+                            path,
+                            var_type: value_type.clone(),
+                        }],
                     }],
-                }])
+                    value_type,
+                ))
             }
             PatternMode::Pin => {
                 // Not a type - treat as variable pin
                 // In pin mode, only create Variable requirement if variable exists in scope
                 // If it doesn't exist and this is the only occurrence, we'll error later
+                // No type narrowing for variable pins (runtime value check)
                 let mut requirements = vec![];
                 if super::scopes::lookup_variable(scopes, &name, &[]).is_some() {
                     requirements.push(Requirement {
@@ -649,10 +727,13 @@ fn analyze_identifier_pattern(
                         check: RuntimeCheck::Variable(name),
                     });
                 }
-                Ok(vec![BindingSet {
-                    requirements,
-                    bindings: vec![],
-                }])
+                Ok((
+                    vec![BindingSet {
+                        requirements,
+                        bindings: vec![],
+                    }],
+                    value_type,
+                ))
             }
         }
     }
@@ -666,7 +747,7 @@ fn analyze_partial_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<Vec<BindingSet>, Error> {
+) -> Result<(Vec<BindingSet>, Type), Error> {
     let mut binding_sets = vec![];
 
     // Find types that have all required fields (and optionally matching tuple name)
@@ -755,7 +836,19 @@ fn analyze_partial_pattern(
         });
     }
 
-    Ok(binding_sets)
+    // Construct narrowed type from matching tuple types
+    let narrowed_variants: Vec<Type> = matching_types
+        .iter()
+        .map(|(tuple_id, _)| Type::Partial(*tuple_id))
+        .collect();
+
+    let narrowed_type = if narrowed_variants.is_empty() {
+        Type::never()
+    } else {
+        Type::from_types(narrowed_variants)
+    };
+
+    Ok((binding_sets, narrowed_type))
 }
 
 fn analyze_star_pattern(
@@ -765,7 +858,7 @@ fn analyze_star_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<Vec<BindingSet>, Error> {
+) -> Result<(Vec<BindingSet>, Type), Error> {
     // Collect all tuple types
     let tuples = value_type.extract_tuples();
 
@@ -847,7 +940,8 @@ fn analyze_star_pattern(
         });
     }
 
-    Ok(binding_sets)
+    // Star pattern matches all variants, so narrowed type is the full input type
+    Ok((binding_sets, value_type.clone()))
 }
 
 fn find_tuples_with_fields_and_name(

@@ -34,6 +34,13 @@ fn test_branch_pattern_matching() {
 }
 
 #[test]
+fn test_use_continuation_in_consequence() {
+    quiver()
+        .evaluate("42 ~> { ~> =10 => 100 | ~> =42 => ~> [~, ~] }")
+        .expect("[42, 42]");
+}
+
+#[test]
 fn test_string_match() {
     quiver()
         .evaluate("\"bar\" ~> { ~> =\"foo\" => 1 | ~> =\"bar\" => 2 }")

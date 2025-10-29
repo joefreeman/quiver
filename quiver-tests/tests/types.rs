@@ -43,7 +43,7 @@ fn test_function_with_type_pattern() {
         .expect("37")
         .expect_variable(
             "area",
-            "#(Circle[r: int] | Rectangle[w: int, h: int]) -> (int | [])",
+            "#(Circle[r: int] | Rectangle[w: int, h: int]) -> ([] | int)",
         );
 }
 
@@ -75,7 +75,7 @@ fn test_cycle_ref_with_pattern_matching() {
             "#,
         )
         .expect("1")
-        .expect_variable("get_head", "#(Nil | Cons[int, μ1]) -> (int | [])");
+        .expect_variable("get_head", "#(Nil | Cons[int, μ1]) -> ([] | int)");
 }
 
 #[test]

@@ -15,7 +15,6 @@ mod variables;
 
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
-pub use pattern::MatchCertainty;
 pub use scopes::{Binding, Scope};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_types};
 
@@ -1015,89 +1014,86 @@ impl<'a> Compiler<'a> {
         self.codegen.patch_jump_to_here(start_jump_addr);
 
         // Analyze pattern to get bindings without generating code yet
-        let (certainty, bindings, binding_sets) = pattern::analyze_pattern(
-            &mut self.program,
-            &pattern,
-            &value_type,
-            mode,
-            &self.scopes,
-        )?;
+        let (bindings, binding_sets, result_type) =
+            pattern::analyze_pattern(&mut self.program, &pattern, &value_type, mode, &self.scopes)?;
 
-        match certainty {
-            MatchCertainty::WontMatch => {
-                self.codegen.add_instruction(Instruction::Pop);
-                self.codegen.add_instruction(Instruction::Tuple(NIL));
-                Ok(Type::nil())
+        // If result type is never (empty union), pattern won't match - skip pattern matching code
+        if result_type.is_never() {
+            self.codegen.add_instruction(Instruction::Pop);
+            self.codegen.add_instruction(Instruction::Tuple(NIL));
+            return Ok(Type::nil());
+        }
+
+        // Pre-allocate locals for all bindings
+        let mut bindings_map = HashMap::new();
+
+        for (variable_name, variable_type) in &bindings {
+            // Check for reserved primitive type names
+            if helpers::is_reserved_name(variable_name) {
+                return Err(Error::TypeUnresolved(format!(
+                    "Cannot use reserved primitive type '{}' as a variable name",
+                    variable_name
+                )));
             }
-            MatchCertainty::WillMatch | MatchCertainty::MightMatch => {
-                // Pre-allocate locals for all bindings
-                let mut bindings_map = HashMap::new();
 
-                for (variable_name, variable_type) in &bindings {
-                    // Check for reserved primitive type names
-                    if helpers::is_reserved_name(variable_name) {
-                        return Err(Error::TypeUnresolved(format!(
-                            "Cannot use reserved primitive type '{}' as a variable name",
-                            variable_name
-                        )));
-                    }
+            let local_index = self.local_count;
+            self.local_count += 1;
+            bindings_map.insert(variable_name.clone(), local_index);
 
-                    let local_index = self.local_count;
-                    self.local_count += 1;
-                    bindings_map.insert(variable_name.clone(), local_index);
-
-                    // Register in scope
-                    if let Some(scope) = self.scopes.last_mut() {
-                        scope.bindings.insert(
-                            variable_name.clone(),
-                            Binding::Variable {
-                                ty: variable_type.clone(),
-                                index: local_index,
-                            },
-                        );
-                    }
-                }
-
-                // Allocate locals in VM
-                let num_bindings = bindings.len();
-                if num_bindings > 0 {
-                    self.codegen
-                        .add_instruction(Instruction::Allocate(num_bindings));
-                }
-
-                // Now generate pattern matching code with pre-allocated locals
-                // Use on_no_match if provided (for receive blocks), otherwise use fail_jump_addr
-                let fail_target = on_no_match.unwrap_or(fail_jump_addr);
-                pattern::generate_pattern_code(
-                    &mut self.codegen,
-                    &mut self.program,
-                    &mut self.local_count,
-                    Some(&bindings_map),
-                    &self.scopes,
-                    &binding_sets,
-                    fail_target,
-                )?;
-
-                // Success path: leave the value on the stack
-                let success_jump_addr = self.codegen.emit_jump_placeholder();
-
-                // Only patch fail_jump_addr if we didn't use on_no_match
-                if on_no_match.is_none() {
-                    self.codegen.patch_jump_to_here(fail_jump_addr);
-                }
-                // Failure path: pop the value and push nil
-                self.codegen.add_instruction(Instruction::Pop);
-                self.codegen.add_instruction(Instruction::Tuple(NIL));
-
-                self.codegen.patch_jump_to_here(success_jump_addr);
-
-                if certainty == MatchCertainty::WillMatch {
-                    Ok(value_type)
-                } else {
-                    Ok(union_types(vec![value_type, Type::nil()]))
-                }
+            // Register in scope
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.bindings.insert(
+                    variable_name.clone(),
+                    Binding::Variable {
+                        ty: variable_type.clone(),
+                        index: local_index,
+                    },
+                );
             }
         }
+
+        // Allocate locals in VM
+        let num_bindings = bindings.len();
+        if num_bindings > 0 {
+            self.codegen
+                .add_instruction(Instruction::Allocate(num_bindings));
+        }
+
+        // Now generate pattern matching code with pre-allocated locals
+        // Use on_no_match if provided (for receive blocks), otherwise use fail_jump_addr
+        let fail_target = on_no_match.unwrap_or(fail_jump_addr);
+        pattern::generate_pattern_code(
+            &mut self.codegen,
+            &mut self.program,
+            &mut self.local_count,
+            Some(&bindings_map),
+            &self.scopes,
+            &binding_sets,
+            fail_target,
+        )?;
+
+        // Success path: leave the value on the stack
+        let success_jump_addr = self.codegen.emit_jump_placeholder();
+
+        // Only patch fail_jump_addr if we didn't use on_no_match
+        if on_no_match.is_none() {
+            self.codegen.patch_jump_to_here(fail_jump_addr);
+        }
+        // Failure path: pop the value and push nil
+        self.codegen.add_instruction(Instruction::Pop);
+        self.codegen.add_instruction(Instruction::Tuple(NIL));
+
+        self.codegen.patch_jump_to_here(success_jump_addr);
+
+        Ok(result_type)
+    }
+
+    /// Helper to check if an expression starts with a continuation (~>)
+    fn expression_starts_with_continuation(expression: &ast::Expression) -> bool {
+        expression
+            .chains
+            .first()
+            .is_some_and(|chain| chain.continuation)
     }
 
     fn compile_block(
@@ -1160,14 +1156,32 @@ impl<'a> Compiler<'a> {
                 continue;
             }
 
+            // Check if the consequence starts with a continuation (~>)
+            let starts_with_continuation = branch
+                .consequence
+                .as_ref()
+                .is_some_and(Self::expression_starts_with_continuation);
+
             if let Some(ref consequence) = branch.consequence {
                 // Branch has a consequence - compile it
-                let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
+                // Use emit_duplicate_jump_if_nil (without pop) to keep the value on stack for consequence
+                let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil();
                 next_branch_jumps.push((next_branch_jump, i + 1));
 
-                // Compile the consequence - parameter not available (nil type)
-                let consequence_type = self.compile_expression(consequence.clone(), None)?;
-                branch_types.push(consequence_type);
+                // Only pass input_type if the consequence starts with a continuation (~>)
+                let consequence_type = if starts_with_continuation {
+                    // Continuation receives the value on the stack
+                    self.compile_expression_with_input(
+                        consequence.clone(),
+                        None,
+                        Some(condition_type.clone()),
+                    )?
+                } else {
+                    // Other terms don't use the value, so pop it first
+                    self.codegen.add_instruction(Instruction::Pop);
+                    self.compile_expression(consequence.clone(), None)?
+                };
+                branch_types.push(consequence_type.clone());
 
                 // Clear branch-specific locals, but keep the parameter
                 let branch_specific_locals = self.local_count - (param_local + 1);
@@ -1176,17 +1190,12 @@ impl<'a> Compiler<'a> {
                         .add_instruction(Instruction::Clear(branch_specific_locals));
                 }
 
-                // If this is the last branch and the condition can be nil,
-                // the block can also return nil (when condition fails)
-                if is_last_branch {
-                    let condition_can_be_nil = match &condition_type {
-                        Type::Union(types) => types.iter().any(Type::is_nil),
-                        t => t.is_nil(),
-                    };
-
-                    if condition_can_be_nil {
-                        branch_types.push(Type::nil());
-                    }
+                // If this is the last branch and the condition can be nil, include nil in the result
+                // BUT: only if the consequence doesn't start with a continuation, because continuations
+                // perform their own narrowing and their result type already accounts for
+                // all possibilities (including the condition's nil being handled by next-branch jump)
+                if is_last_branch && !starts_with_continuation && condition_type.contains_nil() {
+                    branch_types.push(Type::nil());
                 }
             } else {
                 // No consequence - use condition type
@@ -1245,32 +1254,58 @@ impl<'a> Compiler<'a> {
         expression: ast::Expression,
         on_no_match: Option<usize>,
     ) -> Result<Type, Error> {
-        let mut last_type = None;
+        self.compile_expression_with_input(expression, on_no_match, None)
+    }
+
+    fn compile_expression_with_input(
+        &mut self,
+        expression: ast::Expression,
+        on_no_match: Option<usize>,
+        input_type: Option<Type>,
+    ) -> Result<Type, Error> {
+        let has_input = input_type.is_some();
+        let mut last_type = input_type;
         let mut end_jumps = Vec::new();
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            let chain_type = self.compile_chain(chain.clone(), on_no_match, None)?;
+            let chain_type = self.compile_chain_with_input(
+                chain.clone(),
+                on_no_match,
+                None,
+                if i == 0 { last_type.clone() } else { None },
+            )?;
 
             // Check if the previous type contained nil and we're not on the first chain
-            let should_propagate_nil = if i > 0 {
-                if let Some(ref prev_type) = last_type {
-                    match prev_type {
-                        Type::Union(types) => types.iter().any(Type::is_nil),
-                        t => t.is_nil(),
+            let should_propagate_nil =
+                i > 0 && last_type.as_ref().is_some_and(|t| t.contains_nil());
+
+            // Special handling when input_type was provided (consequence with multiple chains)
+            // In this case, chains are alternatives and we should combine their success types
+            if has_input && i > 0 {
+                // Strip nil from previous chains since it causes jump to next chain
+                let prev_success_types: Vec<Type> = if let Some(ref prev) = last_type {
+                    match prev {
+                        Type::Union(types) => {
+                            types.iter().filter(|t| !t.is_nil()).cloned().collect()
+                        }
+                        t if !t.is_nil() => vec![t.clone()],
+                        _ => vec![],
                     }
                 } else {
-                    false
-                }
-            } else {
-                false
-            };
+                    vec![]
+                };
 
-            // If previous type could be nil and we're past the first chain, propagate nil possibility
-            last_type = Some(if should_propagate_nil {
-                union_types(vec![chain_type, Type::nil()])
+                let mut combined = prev_success_types;
+                combined.push(chain_type);
+                last_type = Some(union_types(combined));
             } else {
-                chain_type
-            });
+                // Normal case: propagate nil if previous chain could be nil
+                last_type = Some(if should_propagate_nil {
+                    union_types(vec![chain_type, Type::nil()])
+                } else {
+                    chain_type
+                });
+            }
 
             // If last_type is NIL, subsequent chains are unreachable - break early
             if let Some(ref last_type) = last_type
@@ -1301,6 +1336,16 @@ impl<'a> Compiler<'a> {
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
     ) -> Result<Type, Error> {
+        self.compile_chain_with_input(chain, on_no_match, ripple_context, None)
+    }
+
+    fn compile_chain_with_input(
+        &mut self,
+        chain: ast::Chain,
+        on_no_match: Option<usize>,
+        ripple_context: Option<&RippleContext>,
+        input_type: Option<Type>,
+    ) -> Result<Type, Error> {
         // If this is a continuation chain (starts with ~>), load the parameter
         let mut current_type = if chain.continuation {
             // Continuation chains explicitly use the parameter from scope
@@ -1308,7 +1353,8 @@ impl<'a> Compiler<'a> {
             self.codegen.add_instruction(Instruction::Load(param_local));
             Some(parameter_type)
         } else {
-            None
+            // Use input_type if provided (e.g., from a consequence receiving narrowed type)
+            input_type
         };
 
         for term in chain.terms {

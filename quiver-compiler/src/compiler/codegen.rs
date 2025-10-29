@@ -69,6 +69,14 @@ impl InstructionBuilder {
         jump_addr
     }
 
+    /// Like emit_duplicate_jump_if_nil_pop, but keeps the value on the stack
+    /// for use by a consequence expression. Jumps if nil, otherwise leaves value on stack.
+    pub fn emit_duplicate_jump_if_nil(&mut self) -> usize {
+        self.add_instruction(Instruction::Duplicate);
+        self.add_instruction(Instruction::Not);
+        self.emit_jump_if_placeholder()
+    }
+
     /// Emits Pick followed by Get - common pattern for accessing nested fields
     pub fn emit_pick_and_get(&mut self, depth: usize, index: usize) {
         self.add_instruction(Instruction::Pick(depth));

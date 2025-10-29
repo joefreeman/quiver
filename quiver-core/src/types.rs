@@ -76,9 +76,22 @@ impl Type {
         Type::Union(vec![])
     }
 
+    /// Check if this is the never type (empty union)
+    pub fn is_never(&self) -> bool {
+        matches!(self, Type::Union(types) if types.is_empty())
+    }
+
     /// Check if this type is NIL
     pub fn is_nil(&self) -> bool {
         matches!(self, Type::Tuple(id) if *id == NIL)
+    }
+
+    /// Check if this type contains NIL (either is NIL or is a union containing NIL)
+    pub fn contains_nil(&self) -> bool {
+        match self {
+            Type::Union(types) => types.iter().any(Type::is_nil),
+            t => t.is_nil(),
+        }
     }
 
     /// Check if this type is OK
@@ -90,7 +103,16 @@ impl Type {
     /// Returns a single type if the vector has one element, otherwise a Union
     pub fn from_types(mut types: Vec<Type>) -> Type {
         // Remove duplicates
-        types.sort_by_key(|t| format!("{:?}", t));
+        // Sort with nil (Tuple(0)) first, then alphabetically
+        types.sort_by_key(|t| {
+            let debug_str = format!("{:?}", t);
+            if matches!(t, Type::Tuple(0)) {
+                // Nil should come first - use a string that sorts before everything
+                format!(" {}", debug_str)
+            } else {
+                debug_str
+            }
+        });
         types.dedup();
 
         if types.len() == 1 {

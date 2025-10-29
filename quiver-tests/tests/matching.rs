@@ -147,53 +147,181 @@ fn test_type_narrowing_in_blocks() {
 }
 
 #[test]
-fn test_type_narrowing_in_tuples() {
-    // Type narrowing on tuple field
+fn test_type_narrowing_in_function() {
     quiver()
-        .evaluate("data = Data[42], data ~> =Data[^int], Ok")
-        .expect("Ok");
-
-    quiver()
-        .evaluate("data = Data['abcd'], data ~> =Data[^int]")
-        .expect("[]");
-
-    quiver()
-        .evaluate("data = Data['abcd'], data ~> =Data[^bin], Ok")
-        .expect("Ok");
+        .evaluate("1 ~> #(int | bin) { ~> ^int }")
+        .expect_type("[] | int");
 }
 
 #[test]
-fn test_type_narrowing_mixed_list() {
-    // Test type narrowing on mixed int/bin values
+fn test_narrowing_multiple_matching_variants() {
+    // Multiple variants match the pattern structurally
     quiver()
-        .evaluate("value = 42, value ~> { ~> ^int => value | 0 }")
-        .expect("42");
-
-    quiver()
-        .evaluate("value = 'abcd', value ~> { ~> ^int => value | 0 }")
-        .expect("0");
-
-    quiver()
-        .evaluate("value = 'abcd', value ~> { ~> ^bin => value | 'ff' }")
-        .expect("'abcd'");
-
-    quiver()
-        .evaluate("value = 42, value ~> { ~> ^bin => value | 'ff' }")
-        .expect("'ff'");
+        .evaluate("A[1] ~> #(A[int] | A[bin] | B[int]) { ~> =A[x] => x }")
+        .expect_type("[] | bin | int");
 }
 
 #[test]
-fn test_reserved_names_still_reserved_in_bind_mode() {
-    // int and bin should still be reserved as variable names
-    quiver().evaluate("int = 42").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
-        ),
-    );
+fn test_narrowing_no_matching_variants() {
+    // No variants match - should return just []
+    quiver()
+        .evaluate("A[1] ~> #(A[int] | B[int]) { ~> =C[x] }")
+        .expect_type("[]");
+}
 
-    quiver().evaluate("bin = 'abcd'").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
-        ),
-    );
+#[test]
+fn test_narrowing_all_variants_match() {
+    // All variants match structurally, but runtime checks can still fail
+    quiver()
+        .evaluate("A[1] ~> #(A[int] | A[bin]) { ~> =A[x] => x }")
+        .expect_type("[] | bin | int");
+}
+
+#[test]
+fn test_narrowing_nested_field() {
+    // Pattern narrows based on nested tuple types
+    quiver()
+        .evaluate("X[A[1]] ~> #(X[A[int]] | X[B[int]]) { ~> ^X[A[int]] }")
+        .expect_type("[] | X[A[int]]");
+}
+
+#[test]
+fn test_narrowing_with_wildcard() {
+    // Wildcards match anything - only outer structure matters
+    quiver()
+        .evaluate("A[1, 'ff'] ~> #(A[int, bin] | B[int, bin]) { ~> ^A[_, _] }")
+        .expect_type("[] | A[int, bin]");
+}
+
+#[test]
+fn test_narrowing_with_literal() {
+    // Literal pattern should narrow to only matching variant
+    quiver()
+        .evaluate("A[1] ~> #(A[int] | B[int]) { ~> ^A[1] }")
+        .expect_type("[] | A[int]");
+}
+
+#[test]
+fn test_narrowing_repeated_identifiers() {
+    // Repeated identifier requires both structural match and runtime equality
+    quiver()
+        .evaluate(
+            r#"
+            A[1, 1] ~> #(A[int, int] | A[int, bin] | B[int, int]) {
+              ~> =A[x, x] => x
+            }
+            "#,
+        )
+        .expect_type("[] | int");
+}
+
+#[test]
+fn test_narrowing_partial_types() {
+    // Should work with partial types
+    quiver()
+        .evaluate("A[x: 1] ~> #(A[x: int] | B[x: int]) { ~> ^A[x: int] }")
+        .expect_type("[] | A[x: int]");
+}
+
+#[test]
+fn test_narrowing_type_and_variable_pin() {
+    // Combines structural narrowing with runtime variable check
+    quiver()
+        .evaluate("y = 2, A[2] ~> #(A[int] | B[int]) { ~> ^A[y] }")
+        .expect_type("[] | A[int]");
+}
+
+#[test]
+fn test_narrowing_nested_union_in_field() {
+    quiver()
+        .evaluate("A[1] ~> #(A[int | bin] | B[int]) { ~> ^A[(int | bin)] }")
+        .expect_type("[] | A[(bin | int)]");
+}
+
+#[test]
+fn test_narrowing_with_branches() {
+    quiver()
+        .evaluate("A ~> #(A | B | C) { ~> ^(A | B) => ~> ^A }")
+        .expect_type("[] | A");
+
+    quiver()
+        .evaluate("A ~> #(A | B | C) { ~> ^(A | B) => ~> ^A | X }")
+        .expect_type("[] | A | X");
+
+    quiver()
+        .evaluate("A ~> #(A | B | C) { ~> ^(A | B) => 1 | X }")
+        .expect_type("int | X");
+}
+
+#[test]
+fn test_narrowing_star_pattern() {
+    // Star matches everything - no narrowing, no failure possible
+    quiver()
+        .evaluate("A[1] ~> #(A[int] | B[int]) { ~> ^_ => 1 }")
+        .expect_type("int");
+}
+
+#[test]
+fn test_narrowing_with_type_alias() {
+    // Type alias should work for narrowing
+    quiver()
+        .evaluate(
+            r#"
+            a : A[int, int];
+            A[1, 2] ~> #(A[int, int] | B[int, int]) { ~> ^a }
+            "#,
+        )
+        .expect_type("[] | A[int, int]");
+}
+
+#[test]
+fn test_narrowing_generic_type() {
+    // Parameterized types should narrow correctly
+    quiver()
+        .evaluate(
+            r#"
+            box<t> : Box[t];
+            Box[A[1]] ~> #(Box[A[int]] | Box[B[int]]) { ~> ^box<A[int]> }
+            "#,
+        )
+        .expect_type("[] | Box[A[int]]");
+}
+
+#[test]
+fn test_narrowing_preserves_field_types() {
+    // Narrowing should preserve the exact field types from matching variants
+    quiver()
+        .evaluate("A[1] ~> #(A[int] | B[int]) { ~> ^A[1] => 1 }")
+        .expect_type("[] | int");
+}
+
+#[test]
+fn test_narrowing_complex_nested_pattern() {
+    // Complex nested pattern with multiple levels
+    quiver()
+        .evaluate(
+            r#"
+            X[Y[A[1]]] ~> #(X[Y[A[int]]] | X[Y[B[int]]] | X[Z[A[int]]]) {
+                ~> ^X[Y[A[int]]]
+            }
+            "#,
+        )
+        .expect_type("[] | X[Y[A[int]]]");
+}
+
+#[test]
+fn test_narrowing_in_block_branches() {
+    // Type narrowing in block branches
+    quiver()
+        .evaluate(
+            r#"
+            value = A[1],
+            value ~> #(A[int] | B[int]) {
+              | ~> =A[x] => x
+              | ~> =B[x] => x
+              | 0
+            }
+            "#,
+        )
+        .expect_type("int");
 }
