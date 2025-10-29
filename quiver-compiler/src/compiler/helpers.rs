@@ -12,53 +12,52 @@ pub fn is_reserved_name(name: &str) -> bool {
 }
 
 /// Check if a tuple contains ripple operations (~) in any of its field values
+/// Only checks if fields would consume an outer piped value, not ripples in nested chains
 pub fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
     fields.iter().any(|f| match &f.value {
-        ast::FieldValue::Chain(chain) => chain_contains_ripple(chain),
+        ast::FieldValue::Chain(chain) => chain_starts_with_ripple(chain),
         ast::FieldValue::Spread(_) => false,
     })
 }
 
-/// Check if any source in a select operation contains ripple
-pub fn select_contains_ripple(sources: &[ast::Chain]) -> bool {
-    sources.iter().any(chain_contains_ripple)
-}
+/// Check if a chain starts with (or immediately contains) a ripple operation
+/// This determines if the chain would consume an outer piped value.
+/// Returns false if the chain starts with a self-contained expression (literal, identifier, etc.)
+/// as any ripples in that case would consume the expression's value, not the outer piped value.
+fn chain_starts_with_ripple(chain: &ast::Chain) -> bool {
+    // Only check the first term - if it starts with a value-producing expression,
+    // any later ripples are part of a nested chain
+    if let Some(first_term) = chain.terms.first() {
+        match first_term {
+            // Direct ripple - consumes outer piped value
+            ast::Term::Ripple => true,
 
-/// Check if a chain contains ripple operations
-pub fn chain_contains_ripple(chain: &ast::Chain) -> bool {
-    for term in &chain.terms {
-        match term {
-            ast::Term::Ripple => return true,
-            ast::Term::BindMatch(_) | ast::Term::PinMatch(_) => continue,
-            ast::Term::Tuple(tuple) => return tuple_contains_ripple(&tuple.fields),
-            ast::Term::Block(block) => return block_contains_ripple(block),
-            ast::Term::Function(func) => {
-                return func.body.as_ref().is_some_and(block_contains_ripple);
-            }
-            ast::Term::Select(select) => match select {
-                ast::Select::Identifier(_) => return false,
-                ast::Select::Type(_) => return false,
-                ast::Select::Function(func) => {
-                    return func.body.as_ref().is_some_and(block_contains_ripple);
-                }
-                ast::Select::Sources(sources) => {
-                    return select_contains_ripple(sources);
-                }
-            },
-            _ => return false,
+            // Tuples/blocks might contain ripple that consumes outer value
+            ast::Term::Tuple(tuple) => tuple_contains_ripple(&tuple.fields),
+            ast::Term::Block(block) => block_contains_ripple(block),
+
+            // Anything else (literal, identifier, function, etc.) is self-contained
+            // Any ripples after this consume THIS value, not the outer piped value
+            _ => false,
         }
+    } else {
+        false
     }
-    false
 }
 
-/// Check if a block contains ripple operations
+/// Check if any source in a select operation uses the outer piped value via ripple
+pub fn select_contains_ripple(sources: &[ast::Chain]) -> bool {
+    sources.iter().any(chain_starts_with_ripple)
+}
+
+/// Check if a block contains ripple operations that would consume an outer piped value
 pub fn block_contains_ripple(block: &ast::Block) -> bool {
     block.branches.iter().any(|branch| {
-        branch.condition.chains.iter().any(chain_contains_ripple)
+        branch.condition.chains.iter().any(chain_starts_with_ripple)
             || branch
                 .consequence
                 .as_ref()
-                .is_some_and(|expr| expr.chains.iter().any(chain_contains_ripple))
+                .is_some_and(|expr| expr.chains.iter().any(chain_starts_with_ripple))
     })
 }
 
