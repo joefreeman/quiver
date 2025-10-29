@@ -1,6 +1,3 @@
-// Math standard library
-// Provides user-friendly function names for arithmetic operations
-
 [
   add: __add__,
   sub: __subtract__,
@@ -16,10 +13,27 @@
     | ~> __modulo__
   },
 
-  lt: #[int, int] { ~> __compare__ ~> =-1 },
-  le: #[int, int] { ~> __compare__ ~> { ~> =-1 | ~> =0 } },
-  gt: #[int, int] { ~> __compare__ ~> { ~> =1 } },
-  ge: #[int, int] { ~> __compare__ ~> { ~> =0 | ~> =1 } },
+  lt: #[int, int] {
+    ~> __compare__ ~> =-1
+  },
+
+  le: #[int, int] {
+    ~> __compare__ ~> {
+      | ~> =-1
+      | ~> =0
+    }
+  },
+
+  gt: #[int, int] {
+    ~> __compare__ ~> { ~> =1 }
+  },
+
+  ge: #[int, int] {
+    ~> __compare__ ~> {
+      | ~> =0
+      | ~> =1
+    }
+  },
 
   abs: __abs__,
 
