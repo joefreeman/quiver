@@ -22,8 +22,37 @@ fn test_division() {
 }
 
 #[test]
+fn test_division_by_zero() {
+    quiver()
+        .evaluate("[10, 0] ~> __divide__")
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "Division by zero".to_string(),
+        ));
+}
+
+#[test]
 fn test_modulo() {
     quiver().evaluate("[9, 5] ~> __modulo__").expect("4");
 }
 
-// TODO: test divide by zero
+#[test]
+fn test_modulo_by_zero() {
+    quiver()
+        .evaluate("[10, 0] ~> __modulo__")
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "Modulo by zero".to_string(),
+        ));
+}
+
+#[test]
+fn test_builtin_sqrt_negative_errors() {
+    quiver()
+        .evaluate(
+            r#"
+            -4 ~> __sqrt__
+            "#,
+        )
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "Cannot take square root of negative number".to_string(),
+        ));
+}

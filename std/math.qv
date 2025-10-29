@@ -2,20 +2,29 @@
 // Provides user-friendly function names for arithmetic operations
 
 [
-  // Basic arithmetic operations on [int, int] tuples
   add: __add__,
   sub: __subtract__,
   mul: __multiply__,
-  div: __divide__,
-  mod: __modulo__,
 
-  // Comparison operations on [int, int] tuples
+  div: #[int, int] {
+    | ~> =[a, 0] => []
+    | ~> __divide__
+  },
+
+  mod: #[int, int] {
+    | ~> =[a, 0] => []
+    | ~> __modulo__
+  },
+
   lt: #[int, int] { ~> __compare__ ~> =-1 },
   le: #[int, int] { ~> __compare__ ~> { ~> =-1 | ~> =0 } },
   gt: #[int, int] { ~> __compare__ ~> { ~> =1 } },
   ge: #[int, int] { ~> __compare__ ~> { ~> =0 | ~> =1 } },
 
-  // Single-argument math functions
   abs: __abs__,
-  sqrt: __sqrt__
+
+  sqrt: #int {
+    | ~> [~, 0] ~> __compare__ ~> =-1 => []
+    | ~> __sqrt__
+  }
 ]

@@ -13,6 +13,7 @@
 - Various updates to the web API.
 - Made 'int' and 'bin' reserved names, and updated the compiler to store variables and type aliases in a single bindings map.
 - Update syntax for defining types to use single colon (e.g., `t : int | bin`).
+- Some 'math' standard library functions now return nil (`[]`) instead of causing runtime errors - e.g., for division by zero.
 
 ### Fixed
 
