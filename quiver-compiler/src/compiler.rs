@@ -1014,23 +1014,12 @@ impl<'a> Compiler<'a> {
 
         self.codegen.patch_jump_to_here(start_jump_addr);
 
-        // Build available variables set from current scope for pin patterns
-        let mut available_variables = HashSet::new();
-        if let Some(scope) = self.scopes.last() {
-            for (name, binding) in &scope.bindings {
-                if let Binding::Variable { .. } = binding {
-                    available_variables.insert(name.clone());
-                }
-            }
-        }
-
         // Analyze pattern to get bindings without generating code yet
         let (certainty, bindings, binding_sets) = pattern::analyze_pattern(
             &mut self.program,
             &pattern,
             &value_type,
             mode,
-            &available_variables,
             &self.scopes,
         )?;
 
@@ -1076,16 +1065,6 @@ impl<'a> Compiler<'a> {
                         .add_instruction(Instruction::Allocate(num_bindings));
                 }
 
-                // Build variables map from current scope for pin patterns
-                let mut variables = HashMap::new();
-                if let Some(scope) = self.scopes.last() {
-                    for (name, binding) in &scope.bindings {
-                        if let Binding::Variable { ty: _, index } = binding {
-                            variables.insert(name.clone(), *index);
-                        }
-                    }
-                }
-
                 // Now generate pattern matching code with pre-allocated locals
                 // Use on_no_match if provided (for receive blocks), otherwise use fail_jump_addr
                 let fail_target = on_no_match.unwrap_or(fail_jump_addr);
@@ -1094,7 +1073,7 @@ impl<'a> Compiler<'a> {
                     &mut self.program,
                     &mut self.local_count,
                     Some(&bindings_map),
-                    &variables,
+                    &self.scopes,
                     &binding_sets,
                     fail_target,
                 )?;

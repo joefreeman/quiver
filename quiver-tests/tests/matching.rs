@@ -95,6 +95,17 @@ fn test_pin_without_variable_single_occurrence() {
 }
 
 #[test]
+fn test_pin_from_outer_scope() {
+    // Pin pattern should be able to reference variables from outer scopes
+    quiver()
+        .evaluate("x = 5, [] ~> #{ A[5] ~> ^A[x] }")
+        .expect("A[5]");
+    quiver()
+        .evaluate("x = 5, [] ~> #{ A[6] ~> ^A[x] }")
+        .expect("[]");
+}
+
+#[test]
 fn test_pin_mixed_repeated_and_single() {
     quiver()
         .evaluate("[1, 1, 2] ~> ^[x, x, y]")

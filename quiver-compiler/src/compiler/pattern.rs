@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::ast;
 use quiver_core::{
@@ -110,7 +110,6 @@ pub fn analyze_pattern(
     pattern: &ast::Match,
     value_type: &Type,
     mode: PatternMode,
-    variables: &HashSet<String>,
     scopes: &[super::scopes::Scope],
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
@@ -121,7 +120,6 @@ pub fn analyze_pattern(
         vec![],
         mode,
         &mut identifiers,
-        variables,
         scopes,
     )?;
 
@@ -131,10 +129,12 @@ pub fn analyze_pattern(
 
     // Validate: check for single-occurrence pins with no variable in scope
     for (name, info) in &identifiers {
-        if info.is_pin_mode && !info.is_repeated && !variables.contains(name) {
-            return Err(Error::InternalError {
-                message: format!("Pin variable '{}' not found in scope", name),
-            });
+        if info.is_pin_mode && !info.is_repeated {
+            if super::scopes::lookup_variable(scopes, name, &[]).is_none() {
+                return Err(Error::InternalError {
+                    message: format!("Pin variable '{}' not found in scope", name),
+                });
+            }
         }
     }
 
@@ -163,7 +163,7 @@ pub fn generate_pattern_code(
     program: &mut Program,
     local_count: &mut usize,
     bindings_map: Option<&HashMap<String, usize>>,
-    variables: &HashMap<String, usize>,
+    scopes: &[super::scopes::Scope],
     binding_sets: &[BindingSet],
     fail_addr: usize,
 ) -> Result<(), Error> {
@@ -214,10 +214,11 @@ pub fn generate_pattern_code(
                 }
                 RuntimeCheck::Variable(name) => {
                     generate_value_access(codegen, &requirement.path);
-                    let var_index = variables.get(name).ok_or_else(|| Error::InternalError {
-                        message: format!("Pin variable '{}' not found in scope", name),
-                    })?;
-                    codegen.add_instruction(Instruction::Load(*var_index));
+                    let (_var_type, var_index) = super::scopes::lookup_variable(scopes, name, &[])
+                        .ok_or_else(|| Error::InternalError {
+                            message: format!("Pin variable '{}' not found in scope", name),
+                        })?;
+                    codegen.add_instruction(Instruction::Load(var_index));
                     codegen.add_instruction(Instruction::Equal(2));
                 }
             }
@@ -284,7 +285,6 @@ fn analyze_match_pattern(
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
-    variables: &HashSet<String>,
     scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
     match pattern {
@@ -295,7 +295,6 @@ fn analyze_match_pattern(
             path,
             mode,
             identifiers,
-            variables,
             scopes,
         ),
         ast::Match::Literal(literal) => analyze_literal_pattern(literal.clone(), path),
@@ -306,7 +305,6 @@ fn analyze_match_pattern(
             path,
             mode,
             identifiers,
-            variables,
             scopes,
         ),
         ast::Match::Partial(partial) => analyze_partial_pattern(
@@ -316,10 +314,10 @@ fn analyze_match_pattern(
             path,
             mode,
             identifiers,
-            variables,
+            scopes,
         ),
         ast::Match::Star => {
-            analyze_star_pattern(program, value_type, path, mode, identifiers, variables)
+            analyze_star_pattern(program, value_type, path, mode, identifiers, scopes)
         }
         ast::Match::Placeholder => Ok(vec![BindingSet {
             requirements: vec![],
@@ -332,7 +330,6 @@ fn analyze_match_pattern(
             path,
             PatternMode::Pin,
             identifiers,
-            variables,
             scopes,
         ),
         ast::Match::Bind(inner) => analyze_match_pattern(
@@ -342,7 +339,6 @@ fn analyze_match_pattern(
             path,
             PatternMode::Bind,
             identifiers,
-            variables,
             scopes,
         ),
         ast::Match::Type(ast_type) => {
@@ -378,7 +374,6 @@ fn analyze_match_tuple_pattern(
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
-    variables: &HashSet<String>,
     scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
@@ -443,7 +438,6 @@ fn analyze_match_tuple_pattern(
                 field_path,
                 mode,
                 variant_identifiers,
-                variables,
                 scopes,
             )?;
 
@@ -560,7 +554,6 @@ fn analyze_identifier_pattern(
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
-    variables: &HashSet<String>,
     scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
     // In pin mode, check for type names FIRST (before recording as identifier)
@@ -650,7 +643,7 @@ fn analyze_identifier_pattern(
                 // In pin mode, only create Variable requirement if variable exists in scope
                 // If it doesn't exist and this is the only occurrence, we'll error later
                 let mut requirements = vec![];
-                if variables.contains(&name) {
+                if super::scopes::lookup_variable(scopes, &name, &[]).is_some() {
                     requirements.push(Requirement {
                         path,
                         check: RuntimeCheck::Variable(name),
@@ -672,7 +665,7 @@ fn analyze_partial_pattern(
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
-    variables: &HashSet<String>,
+    scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
     let mut binding_sets = vec![];
 
@@ -743,7 +736,7 @@ fn analyze_partial_pattern(
                     }
                     PatternMode::Pin => {
                         // In pin mode, check against existing variable if it exists
-                        if variables.contains(field_name) {
+                        if super::scopes::lookup_variable(scopes, field_name, &[]).is_some() {
                             requirements.push(Requirement {
                                 path: field_path,
                                 check: RuntimeCheck::Variable(field_name.clone()),
@@ -771,7 +764,7 @@ fn analyze_star_pattern(
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
-    variables: &HashSet<String>,
+    scopes: &[super::scopes::Scope],
 ) -> Result<Vec<BindingSet>, Error> {
     // Collect all tuple types
     let tuples = value_type.extract_tuples();
@@ -834,7 +827,7 @@ fn analyze_star_pattern(
                         }
                         PatternMode::Pin => {
                             // In pin mode, check against existing variable if it exists
-                            if variables.contains(field_name) {
+                            if super::scopes::lookup_variable(scopes, field_name, &[]).is_some() {
                                 requirements.push(Requirement {
                                     path: field_path,
                                     check: RuntimeCheck::Variable(field_name.clone()),

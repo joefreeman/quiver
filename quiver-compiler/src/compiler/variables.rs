@@ -69,9 +69,9 @@ impl<'a> FreeVariableCollector<'a> {
                 // Bind matches don't reference variables, they define them
             }
             ast::Term::PinMatch(pattern) => {
-                // Pin matches may reference variables (for pins) and define variables (for binds)
-                // Visit the pattern to find any pinned variable references
-                self.visit_match_pattern(pattern);
+                // Pin matches reference existing variables
+                // The ^x syntax means we're already in pin mode
+                self.visit_pin_pattern(pattern);
             }
             ast::Term::Block(block) => {
                 self.visit_block(block);
