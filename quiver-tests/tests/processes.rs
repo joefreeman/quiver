@@ -74,6 +74,43 @@ fn test_spawn_postfix_syntax() {
 }
 
 #[test]
+fn test_spawn_sugar_parameterless() {
+    quiver().evaluate("p = @{ 42 }, p ~> !").expect("42");
+}
+
+#[test]
+fn test_spawn_sugar_primitive_type() {
+    quiver()
+        .evaluate("p = 42 ~> @int { ~> }, p ~> !")
+        .expect("42");
+}
+
+#[test]
+fn test_spawn_sugar_type_alias() {
+    quiver()
+        .evaluate(
+            r#"
+            my_type : int | bin;
+            p = 42 ~> @my_type { ~> },
+            p ~> !
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_spawn_sugar_tuple_type() {
+    quiver()
+        .evaluate(
+            r#"
+            p = [42, 100] ~> @[int, int] { ~> },
+            p ~> !
+            "#,
+        )
+        .expect("[42, 100]");
+}
+
+#[test]
 fn test_receive_simple() {
     quiver()
         .evaluate("p = @#{ !#int }, 42 ~> p ~> !")

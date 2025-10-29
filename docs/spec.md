@@ -429,11 +429,10 @@ process = #{ ... },
 processor = @process
 ```
 
-Processes can be initialised with an argument:
+Processes can be initialised with an argument, and a shorthand can be used to define the function:
 
 ```
-count = #int { ... }
-counter = @count
+counter = @int { ... }
 ```
 
 ### Receiving messages
@@ -444,7 +443,7 @@ The function's parameter type defines the message type to be received. And this 
 
 ```
 // Spawn a process with an int receive type
-p1 = @#{
+p1 = @{
   !int ~> {
     | ~> =0 => "done"
     | &[]
@@ -670,8 +669,8 @@ next_year = person.age ~> math.add[~, 1],
 ### Concurrent processes
 
 ```
-// Echo process that receives and prints messages
-echo = #[] {
+// Spawn process that receives strings
+pid = @{
   !Str[bin] ~> {
     | ~> ="" => []           // Stop on empty string
     | ~> =s => {
@@ -680,9 +679,6 @@ echo = #[] {
     }
   }
 },
-
-// Spawn the process
-pid = @echo,
 
 // Send messages
 "hello" ~> pid,

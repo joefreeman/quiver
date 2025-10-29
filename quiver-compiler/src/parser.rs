@@ -993,10 +993,51 @@ fn not_term(input: &str) -> IResult<&str, Term> {
 }
 
 fn spawn_term(input: &str) -> IResult<&str, Term> {
-    // Match @ followed by optional term (bare @ becomes @~)
-    map(preceded(char('@'), opt(term)), |opt_t| {
-        Term::Spawn(Box::new(opt_t.unwrap_or(Term::Ripple)))
-    })(input)
+    alt((
+        // @{ ... } - Spawn parameterless function (sugar for @#{ ... })
+        map(preceded(pair(char('@'), opt(ws1)), block), |body| {
+            Term::Spawn(Box::new(Term::Function(Function {
+                type_parameters: vec![],
+                parameter_type: None,
+                body: Some(body),
+            })))
+        }),
+        // @identifier { ... } - Spawn with identifier type (sugar for @#identifier { ... })
+        map(
+            tuple((preceded(char('@'), identifier), preceded(opt(ws1), block))),
+            |(ident, body)| {
+                // Check if identifier is a primitive type
+                let param_type = match ident.as_str() {
+                    "int" => Type::Primitive(PrimitiveType::Int),
+                    "bin" => Type::Primitive(PrimitiveType::Bin),
+                    _ => Type::Identifier {
+                        name: ident,
+                        arguments: vec![],
+                    },
+                };
+                Term::Spawn(Box::new(Term::Function(Function {
+                    type_parameters: vec![],
+                    parameter_type: Some(param_type),
+                    body: Some(body),
+                })))
+            },
+        ),
+        // @[...] - Spawn with tuple type (sugar for @#[...] { ... })
+        map(
+            tuple((preceded(char('@'), tuple_type), preceded(opt(ws1), block))),
+            |(tuple_ty, body)| {
+                Term::Spawn(Box::new(Term::Function(Function {
+                    type_parameters: vec![],
+                    parameter_type: Some(tuple_ty),
+                    body: Some(body),
+                })))
+            },
+        ),
+        // @<term> - Match @ followed by optional term (bare @ becomes @~)
+        map(preceded(char('@'), opt(term)), |opt_t| {
+            Term::Spawn(Box::new(opt_t.unwrap_or(Term::Ripple)))
+        }),
+    ))(input)
 }
 
 fn self_term(input: &str) -> IResult<&str, Term> {
