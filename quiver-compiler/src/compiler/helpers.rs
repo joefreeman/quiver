@@ -35,9 +35,16 @@ pub fn chain_contains_ripple(chain: &ast::Chain) -> bool {
             ast::Term::Function(func) => {
                 return func.body.as_ref().is_some_and(block_contains_ripple);
             }
-            ast::Term::Select(select) => {
-                return select_contains_ripple(&select.sources);
-            }
+            ast::Term::Select(select) => match select {
+                ast::Select::Identifier(_) => return false,
+                ast::Select::Type(_) => return false,
+                ast::Select::Function(func) => {
+                    return func.body.as_ref().is_some_and(block_contains_ripple);
+                }
+                ast::Select::Sources(sources) => {
+                    return select_contains_ripple(sources);
+                }
+            },
             _ => return false,
         }
     }

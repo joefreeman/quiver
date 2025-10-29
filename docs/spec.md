@@ -438,14 +438,14 @@ counter = @count
 
 ### Receiving messages
 
-The select operator, `!`, can be used to receive messages by applying it to a function - for example, applying it to an identity function: `!#int`.
+The select operator, `!`, can be used to receive messages by applying it to a function - for example, applying it to an identity function: `!#int`, which can be shortened to `!int`.
 
 The function's parameter type defines the message type to be received. And this in turn will define the receive type of the process spawned with the surrounding function:
 
 ```
 // Spawn a process with an int receive type
 p1 = @#{
-  !#int ~> {
+  !int ~> {
     | ~> =0 => "done"
     | &[]
   }
@@ -672,7 +672,7 @@ next_year = person.age ~> math.add[~, 1],
 ```
 // Echo process that receives and prints messages
 echo = #[] {
-  !#Str[bin] ~> {
+  !Str[bin] ~> {
     | ~> ="" => []           // Stop on empty string
     | ~> =s => {
       s ~> __println__,      // (not implemented!)

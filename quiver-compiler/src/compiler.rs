@@ -596,24 +596,82 @@ impl<'a> Compiler<'a> {
     ) -> Result<Option<Type>, Error> {
         match term {
             ast::Term::Select(select) => {
-                // For a single select with multiple sources, collect all types
-                // and create a union if they differ
-                let mut select_sources = Vec::new();
-                for source in &select.sources {
-                    self.extract_receive_type_from_source(
-                        source,
-                        chained_type.as_ref(),
-                        &mut select_sources,
-                    )?;
-                }
+                // Extract receive types based on select variant
+                match select {
+                    ast::Select::Identifier(ident) => {
+                        // Implement semantic resolution to get the receive type from the identifier
+                        // Check if it's a primitive type, type alias, or variable
+                        if ident == "int" {
+                            receive_types.push(Type::Integer);
+                        } else if ident == "bin" {
+                            receive_types.push(Type::Binary);
+                        } else if let Some((_, ast_type)) =
+                            scopes::lookup_type_alias(&self.scopes, ident)
+                        {
+                            // It's a type alias - resolve its definition
+                            let resolved = typing::resolve_ast_type(
+                                &self.scopes,
+                                ast_type,
+                                &mut self.program,
+                            )?;
+                            receive_types.push(resolved);
+                        } else {
+                            // It's a variable - treat as a source and extract receive type from it
+                            let source_chain = ast::Chain {
+                                match_pattern: None,
+                                terms: vec![ast::Term::Access(ast::Access {
+                                    identifier: Some(ident.clone()),
+                                    accessors: vec![],
+                                    argument: None,
+                                })],
+                                continuation: false,
+                            };
+                            let mut source_types = Vec::new();
+                            self.extract_receive_type_from_source(
+                                &source_chain,
+                                chained_type.as_ref(),
+                                &mut source_types,
+                            )?;
+                            receive_types.extend(source_types);
+                        }
+                    }
+                    ast::Select::Type(ty) => {
+                        // Identity receive function with explicit type
+                        let resolved_type =
+                            typing::resolve_ast_type(&self.scopes, ty.clone(), &mut self.program)?;
+                        receive_types.push(resolved_type);
+                    }
+                    ast::Select::Function(func) => {
+                        // Receive function with body
+                        if let Some(param_type) = &func.parameter_type {
+                            let resolved_type = typing::resolve_ast_type(
+                                &self.scopes,
+                                param_type.clone(),
+                                &mut self.program,
+                            )?;
+                            receive_types.push(resolved_type);
+                        }
+                    }
+                    ast::Select::Sources(sources) => {
+                        // Multiple sources - collect all receive types
+                        let mut select_sources = Vec::new();
+                        for source in sources {
+                            self.extract_receive_type_from_source(
+                                source,
+                                chained_type.as_ref(),
+                                &mut select_sources,
+                            )?;
+                        }
 
-                // If this select has receive sources, add the unified type
-                if !select_sources.is_empty() {
-                    if select_sources.len() == 1 {
-                        receive_types.push(select_sources[0].clone());
-                    } else {
-                        // Multiple sources in same select - create union
-                        receive_types.push(Type::Union(select_sources));
+                        // If this select has receive sources, add the unified type
+                        if !select_sources.is_empty() {
+                            if select_sources.len() == 1 {
+                                receive_types.push(select_sources[0].clone());
+                            } else {
+                                // Multiple sources in same select - create union
+                                receive_types.push(Type::Union(select_sources));
+                            }
+                        }
                     }
                 }
                 // Select doesn't produce a chainable type for receive extraction
@@ -2093,11 +2151,94 @@ impl<'a> Compiler<'a> {
                 }
             }
             ast::Term::Select(select) => {
-                // Select operation: !(p1 | p2 | ...) or p ~> !(~) or p ~> !(sources)
-                // When chained (p ~> !...), sources can reference the chained value via ripple (~)
-                // Note: The parser transforms bare `!` into `!(~)` automatically
+                // Select operation with four forms:
+                // 1. !identifier - needs semantic resolution
+                // 2. !(type) - identity receive function
+                // 3. !identifier { ... } or !(type) { ... } - receive function with body
+                // 4. !(source1, source2, ...) - multiple sources racing
 
-                let sources = select.sources.clone();
+                // Check if we need to validate ripple usage (only for Sources variant)
+                let is_sources_variant = matches!(select, ast::Select::Sources(_));
+
+                let sources = match select {
+                    ast::Select::Identifier(ident) => {
+                        // Perform semantic resolution to determine if it's a type or variable
+                        if ident == "int" {
+                            // It's the int primitive type - convert to identity function
+                            vec![ast::Chain {
+                                match_pattern: None,
+                                terms: vec![ast::Term::Function(ast::Function {
+                                    type_parameters: vec![],
+                                    parameter_type: Some(ast::Type::Primitive(
+                                        ast::PrimitiveType::Int,
+                                    )),
+                                    body: None,
+                                })],
+                                continuation: false,
+                            }]
+                        } else if ident == "bin" {
+                            // It's the bin primitive type - convert to identity function
+                            vec![ast::Chain {
+                                match_pattern: None,
+                                terms: vec![ast::Term::Function(ast::Function {
+                                    type_parameters: vec![],
+                                    parameter_type: Some(ast::Type::Primitive(
+                                        ast::PrimitiveType::Bin,
+                                    )),
+                                    body: None,
+                                })],
+                                continuation: false,
+                            }]
+                        } else if scopes::lookup_type_alias(&self.scopes, ident.as_str()).is_some()
+                        {
+                            // It's a type alias - convert to identity function with identifier type
+                            vec![ast::Chain {
+                                match_pattern: None,
+                                terms: vec![ast::Term::Function(ast::Function {
+                                    type_parameters: vec![],
+                                    parameter_type: Some(ast::Type::Identifier {
+                                        name: ident.clone(),
+                                        arguments: vec![],
+                                    }),
+                                    body: None,
+                                })],
+                                continuation: false,
+                            }]
+                        } else {
+                            // It's a variable - treat as variable access
+                            vec![ast::Chain {
+                                match_pattern: None,
+                                terms: vec![ast::Term::Access(ast::Access {
+                                    identifier: Some(ident.clone()),
+                                    accessors: vec![],
+                                    argument: None,
+                                })],
+                                continuation: false,
+                            }]
+                        }
+                    }
+                    ast::Select::Type(ty) => {
+                        // Identity receive function: convert to #type
+                        vec![ast::Chain {
+                            match_pattern: None,
+                            terms: vec![ast::Term::Function(ast::Function {
+                                type_parameters: vec![],
+                                parameter_type: Some(ty.clone()),
+                                body: None,
+                            })],
+                            continuation: false,
+                        }]
+                    }
+                    ast::Select::Function(func) => {
+                        // Receive function with body
+                        vec![ast::Chain {
+                            match_pattern: None,
+                            terms: vec![ast::Term::Function(func.clone())],
+                            continuation: false,
+                        }]
+                    }
+                    ast::Select::Sources(sources) => sources.clone(),
+                };
 
                 if sources.is_empty() {
                     return Err(Error::FeatureUnsupported(
@@ -2106,7 +2247,11 @@ impl<'a> Compiler<'a> {
                 }
 
                 // If there's a chained value, check that it's used (via ripple) in at least one source
-                if value_type.is_some() && !helpers::select_contains_ripple(&sources) {
+                // Skip this check for Type and Function variants (they don't use ripple)
+                if value_type.is_some()
+                    && is_sources_variant
+                    && !helpers::select_contains_ripple(&sources)
+                {
                     return Err(Error::FeatureUnsupported(
                         "Chained value must be used in select sources (use ripple operator ~)"
                             .to_string(),

@@ -599,43 +599,132 @@ fn access(input: &str) -> IResult<&str, Access> {
     )(input)
 }
 
-// Parse select operator - can be prefix !(p1 | p2) or postfix p ~> ! or p ~> !timeout
+// Parse select operator with four forms:
+// 1. !identifier - Identifier (needs semantic resolution)
+// 2. !identifier { ... } - Function (with identifier type)
+// 3. !(type) or !(type) { ... } - Type or Function (with explicit type)
+// 4. !(source1, source2, ...) - Sources (comma-separated)
+// 5. !<term> - Sources with single term (e.g., !#int, !@process)
 fn select_term(input: &str) -> IResult<&str, Term> {
     alt((
-        // Prefix form: !(alt1 | alt2 | ...)
+        // !identifier { ... } - Function with identifier type
+        map(
+            tuple((preceded(char('!'), identifier), preceded(opt(ws1), block))),
+            |(ident, body)| {
+                // Check if identifier is a primitive type
+                let param_type = match ident.as_str() {
+                    "int" => Type::Primitive(PrimitiveType::Int),
+                    "bin" => Type::Primitive(PrimitiveType::Bin),
+                    _ => Type::Identifier {
+                        name: ident,
+                        arguments: vec![],
+                    },
+                };
+                Term::Select(Select::Function(Function {
+                    type_parameters: vec![],
+                    parameter_type: Some(param_type),
+                    body: Some(body),
+                }))
+            },
+        ),
+        // !(type) { ... } - Function with explicit type
+        // Note: If type is just an identifier, still treat as Function (not Identifier with block)
+        // because the block indicates it's definitely a receive function
+        map(
+            tuple((
+                delimited(
+                    pair(char('!'), pair(char('('), wsc)),
+                    type_definition,
+                    pair(wsc, char(')')),
+                ),
+                preceded(opt(ws1), block),
+            )),
+            |(param_type, body)| {
+                Term::Select(Select::Function(Function {
+                    type_parameters: vec![],
+                    parameter_type: Some(param_type),
+                    body: Some(body),
+                }))
+            },
+        ),
+        // ![...] or ![..., optional] - Tuple type without body
+        map(preceded(char('!'), tuple_type), |tuple_ty| {
+            Term::Select(Select::Type(tuple_ty))
+        }),
+        // !(type) - Type without body
+        // Note: !(identifier) is treated as Identifier, not Type, to allow semantic resolution
         map(
             delimited(
                 pair(char('!'), pair(char('('), wsc)),
-                separated_list1(tuple((wsc, char('|'), wsc)), chain),
+                type_definition,
                 pair(wsc, char(')')),
             ),
-            |sources| Term::Select(Select { sources }),
+            |param_type| {
+                // If the type is just a bare identifier, treat it as Identifier for semantic resolution
+                if let Type::Identifier {
+                    ref name,
+                    ref arguments,
+                } = param_type
+                    && arguments.is_empty()
+                {
+                    return Term::Select(Select::Identifier(name.clone()));
+                }
+                Term::Select(Select::Type(param_type))
+            },
         ),
-        // Postfix form: ! or !term
-        // Transform bare ! into !(~) - a select with a single ripple source
+        // !(source1, source2, ...) - Sources (comma-separated chains)
         map(
-            pair(
+            delimited(
+                pair(char('!'), pair(char('('), wsc)),
+                separated_list1(tuple((wsc, char(','), wsc)), chain),
+                pair(wsc, char(')')),
+            ),
+            |sources| Term::Select(Select::Sources(sources)),
+        ),
+        // !<access> - Sources with accessor OR identifier (e.g., !math.add, !p1, !receiver_func)
+        // access parser matches both bare identifiers and identifiers with accessors
+        map(preceded(char('!'), access), |acc| {
+            // Check if it's a bare identifier without accessors - use Identifier variant
+            if acc.accessors.is_empty()
+                && acc.argument.is_none()
+                && let Some(ref id) = acc.identifier
+            {
+                return Term::Select(Select::Identifier(id.clone()));
+            }
+            // Otherwise, it's a Sources with the access term
+            Term::Select(Select::Sources(vec![Chain {
+                match_pattern: None,
+                terms: vec![Term::Access(acc)],
+                continuation: false,
+            }]))
+        }),
+        // !<non-select-term> - Sources with single term (e.g., !#int, !@process)
+        map(
+            preceded(
                 char('!'),
-                opt(map(term, |t| Chain {
+                alt((
+                    // Parse non-select terms to avoid infinite recursion
+                    map(function, Term::Function),
+                    map(spawn_term, |t| t), // spawn_term returns Term directly
+                    map(literal, Term::Literal),
+                )),
+            ),
+            |t| {
+                Term::Select(Select::Sources(vec![Chain {
                     match_pattern: None,
                     terms: vec![t],
                     continuation: false,
-                })),
-            ),
-            |(_, opt_chain)| {
-                let sources = if let Some(c) = opt_chain {
-                    vec![c]
-                } else {
-                    // Bare ! becomes !(~) - implicit ripple source
-                    vec![Chain {
-                        match_pattern: None,
-                        terms: vec![Term::Ripple],
-                        continuation: false,
-                    }]
-                };
-                Term::Select(Select { sources })
+                }]))
             },
         ),
+        // Bare ! - becomes Sources with implicit ripple
+        map(char('!'), |_| {
+            Term::Select(Select::Sources(vec![Chain {
+                match_pattern: None,
+                terms: vec![Term::Ripple],
+                continuation: false,
+            }]))
+        }),
     ))(input)
 }
 

@@ -152,8 +152,22 @@ pub struct TailCall {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Select {
-    pub sources: Vec<Chain>,
+pub enum Select {
+    /// Bare identifier needing semantic resolution
+    /// Example: !int, !timeout
+    Identifier(String),
+
+    /// Explicit type (identity receive function)
+    /// Example: !(int | bin), ![int, int]
+    Type(Type),
+
+    /// Receive function (type + body)
+    /// Example: !int { ... }, !(int | bin) { ... }
+    Function(Function),
+
+    /// Multiple comma-separated sources
+    /// Example: !(#int, #bin, 1000)
+    Sources(Vec<Chain>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
