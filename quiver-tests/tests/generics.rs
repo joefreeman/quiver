@@ -111,7 +111,7 @@ fn test_heterogeneous_list_via_widening() {
               ~> list.append[~, "a"],
             "#,
         )
-        .expect_type("[] | Cons[(int | Str[bin]), μ1] | Nil");
+        .expect_type("Cons[(Str[bin] | int), μ1] | Nil | []");
 }
 
 #[test]

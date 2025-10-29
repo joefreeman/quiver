@@ -101,19 +101,13 @@ impl Type {
 
     /// Create a Type from a vector of types
     /// Returns a single type if the vector has one element, otherwise a Union
-    pub fn from_types(mut types: Vec<Type>) -> Type {
-        // Remove duplicates
-        // Sort with nil (Tuple(0)) first, then alphabetically
-        types.sort_by_key(|t| {
-            let debug_str = format!("{:?}", t);
-            if matches!(t, Type::Tuple(0)) {
-                // Nil should come first - use a string that sorts before everything
-                format!(" {}", debug_str)
-            } else {
-                debug_str
-            }
-        });
-        types.dedup();
+    pub fn from_types(types: Vec<Type>) -> Type {
+        // Remove duplicates using HashSet (efficient for small unions)
+        let unique: HashSet<Type> = types.into_iter().collect();
+        let mut types: Vec<Type> = unique.into_iter().collect();
+
+        // Sort for deterministic internal representation (needed for structural equality)
+        types.sort_by_key(|t| format!("{:?}", t));
 
         if types.len() == 1 {
             types.into_iter().next().unwrap()

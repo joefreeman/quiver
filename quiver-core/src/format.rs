@@ -119,10 +119,13 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
             if types_list.is_empty() {
                 "never".to_string()
             } else {
-                let type_strs: Vec<String> = types_list
+                let mut type_strs: Vec<String> = types_list
                     .iter()
                     .map(|t| format_type_impl(program, t, true))
                     .collect();
+
+                // Sort for consistent output
+                type_strs.sort();
 
                 if nested {
                     format!("({})", type_strs.join(" | "))

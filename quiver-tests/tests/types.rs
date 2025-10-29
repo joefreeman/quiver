@@ -75,7 +75,7 @@ fn test_cycle_ref_with_pattern_matching() {
             "#,
         )
         .expect("1")
-        .expect_variable("get_head", "#(Nil | Cons[int, μ1]) -> ([] | int)");
+        .expect_variable("get_head", "#(Cons[int, μ1] | Nil) -> ([] | int)");
 }
 
 #[test]
@@ -722,7 +722,7 @@ fn test_type_spread_parameterized_union() {
         )
         .expect_alias(
             "tagged",
-            "Tagged[value: t, tag: bin] | Tagged[error: e, tag: bin]",
+            "Tagged[error: e, tag: bin] | Tagged[value: t, tag: bin]",
         );
 }
 
@@ -859,7 +859,7 @@ fn test_identifier_spread_syntax_union() {
         )
         .expect_alias(
             "logged",
-            "Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int]",
+            "Created[id: int, timestamp: int] | Deleted[timestamp: int] | Updated[timestamp: int]",
         );
 }
 
