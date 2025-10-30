@@ -1202,6 +1202,19 @@ fn match_tuple(input: &str) -> IResult<&str, MatchTuple> {
     ))(input)
 }
 
+fn process_ref_term(input: &str) -> IResult<&str, Term> {
+    map(
+        preceded(
+            char('@'),
+            map_res(digit1, |s: &str| {
+                s.parse::<usize>()
+                    .map_err(|_| Error::IntegerMalformed(format!("@{}", s)))
+            }),
+        ),
+        Term::Process,
+    )(input)
+}
+
 fn term(input: &str) -> IResult<&str, Term> {
     alt((
         // String terms (before literals to handle quotes)
@@ -1210,7 +1223,8 @@ fn term(input: &str) -> IResult<&str, Term> {
         map(terminated(char('~'), peek(not(char('[')))), |_| {
             Term::Ripple
         }),
-        // Process operations
+        // Process operations (process_ref_term must come before spawn_term to match @N first)
+        process_ref_term,
         spawn_term,
         self_term,
         // Pin match and bind match (must be before literals and identifiers)

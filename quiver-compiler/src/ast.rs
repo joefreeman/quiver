@@ -64,6 +64,7 @@ pub enum Term {
     Self_,
     Select(Select),
     Ripple,
+    Process(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]

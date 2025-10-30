@@ -76,6 +76,9 @@ pub enum Command {
     /// Request all process statuses
     GetStatuses { request_id: u64 },
 
+    /// Request all process types (for REPL process references)
+    GetProcessTypes { request_id: u64 },
+
     /// Request process info
     GetProcessInfo {
         request_id: u64,
@@ -137,6 +140,12 @@ pub enum Event {
     StatusesResponse {
         request_id: u64,
         result: Result<HashMap<ProcessId, ProcessStatus>, crate::environment::EnvironmentError>,
+    },
+
+    /// Response to GetProcessTypes
+    ProcessTypesResponse {
+        request_id: u64,
+        result: Result<HashMap<ProcessId, (Type, usize)>, crate::environment::EnvironmentError>,
     },
 
     /// Response to GetProcessInfo

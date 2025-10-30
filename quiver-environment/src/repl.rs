@@ -53,10 +53,15 @@ impl Repl {
     /// Compile and evaluate an expression
     /// Returns a request ID that can be polled for the result
     /// Returns None if the source only contains type definitions (no executable code)
+    ///
+    /// Process types must be fetched before calling this method:
+    /// - Native: request_process_types() + step()/poll_request() loop
+    /// - Web: async request via wasm bindings
     pub fn evaluate(
         &mut self,
         env: &mut Environment,
         source: &str,
+        process_types: HashMap<usize, (Type, usize)>,
     ) -> Result<Option<u64>, ReplError> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
@@ -69,6 +74,7 @@ impl Repl {
             self.types.clone(),
             None,                          // module_path
             self.last_result_type.clone(), // parameter_type - use previous result type for continuations
+            &process_types,
         )
         .map_err(ReplError::Compiler)?;
 

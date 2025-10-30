@@ -243,6 +243,20 @@ impl Executor {
             .collect()
     }
 
+    pub fn get_process_types(&self) -> HashMap<ProcessId, (Type, usize)> {
+        self.processes
+            .iter()
+            .filter_map(|(id, process)| {
+                let function = self.get_function(process.function_index)?;
+                let process_type = Type::Process(Box::new(ProcessType {
+                    receive: Some(Box::new(function.function_type.receive.clone())),
+                    returns: Some(Box::new(function.function_type.result.clone())),
+                }));
+                Some((*id, (process_type, process.function_index)))
+            })
+            .collect()
+    }
+
     pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
         self.processes.get(&id).map(|process| ProcessInfo {
             id,
@@ -468,6 +482,9 @@ impl Executor {
             Instruction::Send => self.handle_send(pid),
             Instruction::Self_ => self.handle_self(pid),
             Instruction::Select(n) => self.handle_select(pid, n, current_time_ms),
+            Instruction::Process(process_id, function_index) => {
+                self.handle_process_ref(pid, process_id, function_index)
+            }
         }
     }
 
@@ -1103,6 +1120,26 @@ impl Executor {
 
         let function_index = process.function_index;
         process.stack.push(Value::Process(pid, function_index));
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
+        Ok(None)
+    }
+
+    fn handle_process_ref(
+        &mut self,
+        pid: ProcessId,
+        process_id: usize,
+        function_index: usize,
+    ) -> Result<Option<Action>, Error> {
+        let process = self
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        process
+            .stack
+            .push(Value::Process(process_id, function_index));
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;

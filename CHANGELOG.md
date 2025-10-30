@@ -5,6 +5,7 @@
 ### Added
 
 - Added support for matching against types with the pin operator (`... ~> ^int`, `... ~> ^(A[int] | B[bin])`).
+- Added support for referencing processes by ID in the REPL with `@123`.
 
 ### Changed
 

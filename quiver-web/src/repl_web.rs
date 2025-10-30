@@ -80,7 +80,15 @@ export class Repl {
   constructor(environment: Environment);
 
   /**
+   * Refresh the cache of process types for process references (@N)
+   * Call this before evaluate() to ensure process references work correctly
+   * @param callback - Callback invoked when types are cached (or on error)
+   */
+  refreshProcessTypes(callback: (result: Result<void>) => void): void;
+
+  /**
    * Evaluate source code and invoke callback when result is ready
+   * Note: Call refreshProcessTypes() first if you need process references (@N) to work
    * @param source - Quiver source code to evaluate
    * @param callback - Callback invoked with the evaluation result
    */
@@ -130,6 +138,16 @@ impl CallbackHandle {
 type EventLoopClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 type SharedEnvironment = Rc<RefCell<quiver_environment::Environment>>;
 type SharedCallbacks = Rc<RefCell<HashMap<u64, CallbackHandle>>>;
+type SharedProcessTypes = Rc<RefCell<HashMap<usize, (quiver_core::types::Type, usize)>>>;
+type SharedPendingEvaluations = Rc<
+    RefCell<
+        Vec<(
+            String,
+            CallbackHandle,
+            Rc<RefCell<quiver_environment::Repl>>,
+        )>,
+    >,
+>;
 
 #[wasm_bindgen(skip_typescript)]
 pub struct Environment {
@@ -137,6 +155,8 @@ pub struct Environment {
     running: Rc<RefCell<bool>>,
     event_loop_closure: EventLoopClosure,
     pending_callbacks: SharedCallbacks,
+    cached_process_types: SharedProcessTypes,
+    pending_evaluations: SharedPendingEvaluations,
 }
 
 #[wasm_bindgen]
@@ -214,18 +234,34 @@ impl Environment {
         let environment = quiver_environment::Environment::new(workers);
         let environment_rc = Rc::new(RefCell::new(environment));
         let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let cached_process_types = Rc::new(RefCell::new(HashMap::new()));
+        let pending_evaluations = Rc::new(RefCell::new(Vec::new()));
 
         Ok(Self {
             environment: environment_rc,
             running: Rc::new(RefCell::new(false)),
             event_loop_closure: Rc::new(RefCell::new(None)),
             pending_callbacks,
+            cached_process_types,
+            pending_evaluations,
         })
     }
 
     /// Get shared state for Repl instances (internal use)
-    fn get_shared_state(&self) -> (SharedEnvironment, SharedCallbacks) {
-        (self.environment.clone(), self.pending_callbacks.clone())
+    fn get_shared_state(
+        &self,
+    ) -> (
+        SharedEnvironment,
+        SharedCallbacks,
+        SharedProcessTypes,
+        SharedPendingEvaluations,
+    ) {
+        (
+            self.environment.clone(),
+            self.pending_callbacks.clone(),
+            self.cached_process_types.clone(),
+            self.pending_evaluations.clone(),
+        )
     }
 
     /// Start the event loop
@@ -239,6 +275,8 @@ impl Environment {
         let environment = self.environment.clone();
         let running = self.running.clone();
         let pending_callbacks = self.pending_callbacks.clone();
+        let cached_process_types = self.cached_process_types.clone();
+        let pending_evaluations = self.pending_evaluations.clone();
 
         // Use self.event_loop_closure as the holder directly
         let closure_holder = self.event_loop_closure.clone();
@@ -261,6 +299,11 @@ impl Environment {
                 for request_id in request_ids {
                     match environment.borrow_mut().poll_request(request_id) {
                         Ok(Some(result)) => {
+                            // Cache process types if this is a ProcessTypes result
+                            if let RequestResult::ProcessTypes(ref types) = result {
+                                *cached_process_types.borrow_mut() = types.clone();
+                            }
+
                             if let Some(callback) = callbacks.remove(&request_id) {
                                 callbacks_to_invoke.push((callback, result));
                             }
@@ -281,6 +324,35 @@ impl Environment {
             // Invoke callbacks outside of the borrow
             for (callback, result) in callbacks_to_invoke {
                 Self::handle_result(&environment.borrow(), callback, result);
+            }
+
+            // Process pending evaluations
+            let evaluations_to_process = {
+                let mut evals = pending_evaluations.borrow_mut();
+                std::mem::take(&mut *evals)
+            };
+
+            for (source, callback, repl) in evaluations_to_process {
+                let process_types = cached_process_types.borrow().clone();
+
+                match repl.borrow_mut().evaluate(
+                    &mut environment.borrow_mut(),
+                    &source,
+                    process_types,
+                ) {
+                    Ok(Some(request_id)) => {
+                        pending_callbacks.borrow_mut().insert(request_id, callback);
+                    }
+                    Ok(None) => {
+                        callback.invoke(crate::types::Result::ok(None::<EvaluationResult>));
+                    }
+                    Err(e) => {
+                        callback.invoke::<EvaluationResult>(crate::types::Result::err(format!(
+                            "{}",
+                            e
+                        )));
+                    }
+                }
             }
 
             // Schedule next tick if still running
@@ -452,6 +524,11 @@ impl Environment {
                 // Not used in the web API
                 callback.invoke::<()>(crate::types::Result::err("Unexpected result type: Locals"));
             }
+            RequestResult::ProcessTypes(_) => {
+                // Process types are cached automatically by the polling loop
+                // Just return success to the callback
+                callback.invoke::<()>(crate::types::Result::ok(()));
+            }
         }
     }
 }
@@ -460,6 +537,7 @@ impl Environment {
 pub struct Repl {
     environment: SharedEnvironment,
     pending_callbacks: SharedCallbacks,
+    pending_evaluations: SharedPendingEvaluations,
     repl: Rc<RefCell<quiver_environment::Repl>>,
 }
 
@@ -472,7 +550,8 @@ impl Repl {
         console_error_panic_hook::set_once();
 
         // Get shared state from environment
-        let (env_rc, callbacks_rc) = environment.get_shared_state();
+        let (env_rc, callbacks_rc, _process_types_rc, evaluations_rc) =
+            environment.get_shared_state();
 
         // Create REPL
         let program = Program::new();
@@ -482,35 +561,46 @@ impl Repl {
         Ok(Self {
             environment: env_rc,
             pending_callbacks: callbacks_rc,
+            pending_evaluations: evaluations_rc,
             repl: Rc::new(RefCell::new(repl)),
         })
     }
 
-    /// Evaluate source code and invoke callback when result is ready
-    pub fn evaluate(&mut self, source: String, callback: JsValue) {
+    /// Refresh the cache of process types
+    ///
+    /// Call this before evaluate() to ensure process references (@N) work correctly.
+    /// The callback will be invoked when types are ready (or on error).
+    #[wasm_bindgen(js_name = "refreshProcessTypes")]
+    pub fn refresh_process_types(&mut self, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
-        let result = self
-            .repl
-            .borrow_mut()
-            .evaluate(&mut self.environment.borrow_mut(), &source);
 
-        match result {
-            Ok(Some(request_id)) => {
-                // Store callback for later
+        match self.environment.borrow_mut().request_process_types() {
+            Ok(request_id) => {
+                // The polling loop will automatically cache the types and invoke the callback
                 self.pending_callbacks
                     .borrow_mut()
                     .insert(request_id, CallbackHandle::new(callback));
             }
-            Ok(None) => {
-                // No executable code (e.g., only type definitions)
-                let cb = CallbackHandle::new(callback);
-                cb.invoke(crate::types::Result::ok(None::<EvaluationResult>));
-            }
             Err(e) => {
                 let cb = CallbackHandle::new(callback);
-                cb.invoke::<EvaluationResult>(crate::types::Result::err(format!("{}", e)));
+                cb.invoke::<()>(crate::types::Result::err(e.to_string()));
             }
         }
+    }
+
+    /// Evaluate source code and invoke callback when result is ready
+    ///
+    /// Note: Call refreshProcessTypes() first if you need process references (@N) to work.
+    pub fn evaluate(&mut self, source: String, callback: JsValue) {
+        let callback: js_sys::Function = callback.into();
+
+        // Queue the evaluation to be processed by the polling loop
+        // This avoids RefCell borrow conflicts
+        self.pending_evaluations.borrow_mut().push((
+            source,
+            CallbackHandle::new(callback),
+            self.repl.clone(),
+        ));
     }
 
     /// Compact locals to remove unused variables (optimization, safe to skip)

@@ -113,6 +113,7 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_term(term);
             }
             ast::Term::Self_ => {}
+            ast::Term::Process(_) => {}
             ast::Term::Select(select) => match select {
                 ast::Select::Identifier(ident) => {
                     // Record the identifier as a variable reference

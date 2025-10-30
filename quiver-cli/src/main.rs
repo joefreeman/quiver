@@ -100,6 +100,7 @@ fn compile_command(
         vec![],
         module_path,
         Type::nil(),
+        &HashMap::new(), // No process types (not a REPL)
     )
     .map_err(|e| format!("Compile error: {:?}", e))?;
 
@@ -188,6 +189,7 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
         vec![],
         module_path,
         Type::nil(),
+        &HashMap::new(), // No process types (not a REPL)
     )
     .map_err(|e| format!("Compile error: {:?}", e))?;
 

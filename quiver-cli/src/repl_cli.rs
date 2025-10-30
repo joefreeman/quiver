@@ -10,6 +10,11 @@ use std::io::IsTerminal;
 
 const HISTORY_FILE: &str = ".quiv_history";
 
+struct EvaluationResult {
+    value: Value,
+    heap: Vec<Vec<u8>>,
+}
+
 pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
     environment: Environment,
@@ -71,7 +76,13 @@ impl ReplCli {
                             break;
                         }
                     } else {
-                        self.evaluate(line);
+                        match self.evaluate(line) {
+                            Ok(result) => self.print(result),
+                            Err(e) => {
+                                self.last_was_nil = false;
+                                eprintln!("{}", self.format_error(e).red());
+                            }
+                        }
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
@@ -287,26 +298,65 @@ impl ReplCli {
         }
     }
 
-    fn evaluate(&mut self, line: &str) {
-        let request_id = match self.repl.evaluate(&mut self.environment, line) {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                // No executable code (e.g., only type definitions)
-                self.last_was_nil = false;
-                return;
-            }
-            Err(e) => {
-                self.last_was_nil = false;
-                eprintln!("{}", self.format_error(e).red());
-                return;
+    fn evaluate(&mut self, line: &str) -> Result<Option<EvaluationResult>, ReplError> {
+        // First, fetch all process types
+        let types_request_id = self
+            .environment
+            .request_process_types()
+            .map_err(ReplError::Environment)?;
+
+        // Wait for process types
+        let process_types = match self
+            .wait_for_result(types_request_id)
+            .map_err(ReplError::Environment)?
+        {
+            RequestResult::ProcessTypes(types) => types,
+            _ => {
+                return Err(ReplError::Environment(
+                    quiver_environment::EnvironmentError::UnexpectedResultType,
+                ));
             }
         };
 
-        match self.wait_for_result(request_id) {
-            Ok(RequestResult::Result(Ok((value, heap)))) => {
+        // Now evaluate with the process types
+        let request_id = match self
+            .repl
+            .evaluate(&mut self.environment, line, process_types)?
+        {
+            Some(id) => id,
+            None => {
+                // No executable code (e.g., only type definitions)
+                return Ok(None);
+            }
+        };
+
+        // Wait for the evaluation result
+        match self
+            .wait_for_result(request_id)
+            .map_err(ReplError::Environment)?
+        {
+            RequestResult::Result(Ok((value, heap))) => {
                 // Compact locals after successful evaluation (optimization)
                 self.repl.compact(&mut self.environment);
 
+                Ok(Some(EvaluationResult { value, heap }))
+            }
+            RequestResult::Result(Err(e)) => {
+                // Create a new REPL after runtime error
+                let program = Program::new();
+                let module_loader = Box::new(FileSystemModuleLoader::new());
+                self.repl = Repl::new(program, module_loader);
+                Err(ReplError::Runtime(e))
+            }
+            _ => Err(ReplError::Environment(
+                quiver_environment::EnvironmentError::UnexpectedResultType,
+            )),
+        }
+    }
+
+    fn print(&mut self, result: Option<EvaluationResult>) {
+        match result {
+            Some(EvaluationResult { value, heap }) => {
                 // Track if result was nil for colored prompt
                 self.last_was_nil = value.is_nil();
 
@@ -328,21 +378,9 @@ impl ReplCli {
 
                 println!("{}", output);
             }
-            Ok(RequestResult::Result(Err(e))) => {
-                // Create a new REPL after runtime error
-                let program = Program::new();
-                let module_loader = Box::new(FileSystemModuleLoader::new());
-                self.repl = Repl::new(program, module_loader);
+            None => {
+                // No executable code (e.g., only type definitions)
                 self.last_was_nil = false;
-                eprintln!("{}", self.format_error(ReplError::Runtime(e)).red());
-            }
-            Ok(_) => {
-                self.last_was_nil = false;
-                eprintln!("{}", "Unexpected result type".red());
-            }
-            Err(e) => {
-                self.last_was_nil = false;
-                eprintln!("{}", self.format_error(ReplError::Environment(e)).red());
             }
         }
     }

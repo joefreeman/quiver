@@ -109,6 +109,9 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
             Command::GetStatuses { request_id } => {
                 self.get_statuses(request_id)?;
             }
+            Command::GetProcessTypes { request_id } => {
+                self.get_process_types(request_id)?;
+            }
             Command::GetProcessInfo {
                 request_id,
                 process_id,
@@ -492,6 +495,15 @@ impl<R: CommandReceiver, S: EventSender> Worker<R, S> {
         self.sender.send(Event::StatusesResponse {
             request_id,
             result: Ok(statuses),
+        })?;
+        Ok(())
+    }
+
+    fn get_process_types(&mut self, request_id: u64) -> Result<(), EnvironmentError> {
+        let process_types = self.executor.get_process_types();
+        self.sender.send(Event::ProcessTypesResponse {
+            request_id,
+            result: Ok(process_types),
         })?;
         Ok(())
     }

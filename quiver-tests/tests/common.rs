@@ -70,7 +70,8 @@ impl TestBuilder {
         let mut repl = Repl::new(program, module_loader);
 
         // Evaluate source
-        let result = match repl.evaluate(&mut environment, source) {
+        let result = match repl.evaluate(&mut environment, source, std::collections::HashMap::new())
+        {
             Ok(Some(request_id)) => {
                 // Poll for result with timeout
                 let start = std::time::Instant::now();

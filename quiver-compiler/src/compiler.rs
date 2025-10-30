@@ -168,11 +168,14 @@ pub struct Compiler<'a> {
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
 
+    process_types: &'a HashMap<usize, (Type, usize)>,
+
     // Track the receive type of the function currently being compiled
     current_receive_type: Type,
 }
 
 impl<'a> Compiler<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn compile(
         ast_program: ast::Program,
         existing_bindings: &HashMap<String, Binding>,
@@ -181,6 +184,7 @@ impl<'a> Compiler<'a> {
         base_types: Vec<quiver_core::types::TupleTypeInfo>,
         module_path: Option<PathBuf>,
         parameter_type: Type,
+        process_types: &'a HashMap<usize, (Type, usize)>,
     ) -> Result<CompilationResult, Error> {
         let program = Program::with_types(base_types);
 
@@ -192,6 +196,7 @@ impl<'a> Compiler<'a> {
             program,
             module_loader,
             module_path,
+            process_types,
             current_receive_type: Type::never(),
         };
 
@@ -2294,6 +2299,27 @@ impl<'a> Compiler<'a> {
                     self.apply_value_to_type(self_type, val_type)
                 } else {
                     Ok(self_type)
+                }
+            }
+            ast::Term::Process(process_id) => {
+                // Look up process info from the map (REPL-only feature)
+                let (process_type, function_index) = self
+                    .process_types
+                    .get(&process_id)
+                    .cloned()
+                    .ok_or_else(|| Error::InternalError {
+                    message: format!("Process {} not found", process_id),
+                })?;
+
+                // Generate Process instruction
+                self.codegen
+                    .add_instruction(Instruction::Process(process_id, function_index));
+
+                // Apply value if present (for message sends like `10 ~> @1`)
+                if let Some(val_type) = value_type {
+                    self.apply_value_to_type(process_type, val_type)
+                } else {
+                    Ok(process_type)
                 }
             }
             ast::Term::Ripple => {

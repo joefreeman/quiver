@@ -9,6 +9,13 @@ use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+type WorkerRequestMap<T> = HashMap<u64, Option<HashMap<ProcessId, T>>>;
+
+enum Aggregation {
+    Statuses(WorkerRequestMap<ProcessStatus>),
+    ProcessTypes(WorkerRequestMap<(Type, usize)>),
+}
+
 fn remap_type(ty: Type, type_remap: &HashMap<usize, usize>) -> Type {
     match ty {
         Type::Tuple(old_id) => Type::Tuple(*type_remap.get(&old_id).unwrap_or(&old_id)),
@@ -164,6 +171,7 @@ pub enum RequestResult {
     Result(Result<ValueWithHeap, quiver_core::error::Error>),
     // RuntimeError(quiver_core::error::Error),
     Statuses(HashMap<ProcessId, ProcessStatus>),
+    ProcessTypes(HashMap<ProcessId, (Type, usize)>),
     ProcessInfo(Option<ProcessInfo>),
     Locals(Vec<ValueWithHeap>),
 }
@@ -179,8 +187,8 @@ pub struct Environment {
     process_router: HashMap<ProcessId, WorkerId>,
     pending_awaits: HashMap<ProcessId, PendingAwait>, // awaiter -> pending await state
     pending_requests: HashMap<u64, Option<RequestResult>>,
-    // Maps aggregation_id -> worker_request_id -> Option<statuses>
-    status_aggregations: HashMap<u64, HashMap<u64, Option<HashMap<ProcessId, ProcessStatus>>>>,
+    // Maps aggregation_id -> Aggregation (either Statuses or ProcessTypes)
+    aggregations: HashMap<u64, Aggregation>,
     next_request_id: u64,
     next_process_id: ProcessId,
 }
@@ -195,7 +203,7 @@ impl Environment {
             process_router: HashMap::new(),
             pending_awaits: HashMap::new(),
             pending_requests: HashMap::new(),
-            status_aggregations: HashMap::new(),
+            aggregations: HashMap::new(),
             next_request_id: 0,
             next_process_id: 0,
         }
@@ -310,8 +318,8 @@ impl Environment {
         }
 
         // Store aggregation state
-        self.status_aggregations
-            .insert(aggregation_id, worker_requests);
+        self.aggregations
+            .insert(aggregation_id, Aggregation::Statuses(worker_requests));
 
         // Mark aggregation as pending
         self.pending_requests.insert(aggregation_id, None);
@@ -321,6 +329,45 @@ impl Environment {
             let request_id = request_ids[i];
             worker
                 .send(Command::GetStatuses { request_id })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+
+        Ok(aggregation_id)
+    }
+
+    /// Request all process types (for REPL process references)
+    /// Returns a single aggregation ID that will collect results from all workers
+    pub fn request_process_types(&mut self) -> Result<u64, EnvironmentError> {
+        let num_workers = self.workers.len();
+
+        // Create aggregation ID
+        let aggregation_id = self.allocate_request_id();
+
+        // Allocate all request IDs into a Vec (to preserve ordering)
+        let mut request_ids = Vec::new();
+        for _ in 0..num_workers {
+            request_ids.push(self.allocate_request_id());
+        }
+
+        // Create aggregation map with all worker requests marked as pending (None)
+        let mut worker_requests = HashMap::new();
+        for &request_id in &request_ids {
+            worker_requests.insert(request_id, None);
+            self.pending_requests.insert(request_id, None);
+        }
+
+        // Store aggregation state
+        self.aggregations
+            .insert(aggregation_id, Aggregation::ProcessTypes(worker_requests));
+
+        // Mark aggregation as pending
+        self.pending_requests.insert(aggregation_id, None);
+
+        // Send requests to workers (using ordered Vec)
+        for (i, worker) in self.workers.iter_mut().enumerate() {
+            let request_id = request_ids[i];
+            worker
+                .send(Command::GetProcessTypes { request_id })
                 .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
 
@@ -561,6 +608,9 @@ impl Environment {
             Event::StatusesResponse { request_id, result } => {
                 self.handle_statuses_response(request_id, result)
             }
+            Event::ProcessTypesResponse { request_id, result } => {
+                self.handle_process_types_response(request_id, result)
+            }
             Event::InfoResponse { request_id, result } => {
                 self.handle_info_response(request_id, result)
             }
@@ -755,8 +805,10 @@ impl Environment {
 
         // Check if this request is part of an aggregation
         let mut aggregation_id = None;
-        for (agg_id, worker_requests) in &self.status_aggregations {
-            if worker_requests.contains_key(&request_id) {
+        for (agg_id, aggregation) in &self.aggregations {
+            if let Aggregation::Statuses(worker_requests) = aggregation
+                && worker_requests.contains_key(&request_id)
+            {
                 aggregation_id = Some(*agg_id);
                 break;
             }
@@ -764,7 +816,8 @@ impl Environment {
 
         if let Some(agg_id) = aggregation_id {
             // This is part of an aggregation - store the result
-            if let Some(worker_requests) = self.status_aggregations.get_mut(&agg_id) {
+            if let Some(Aggregation::Statuses(worker_requests)) = self.aggregations.get_mut(&agg_id)
+            {
                 worker_requests.insert(request_id, Some(statuses));
 
                 // Check if all results are collected
@@ -781,7 +834,7 @@ impl Environment {
 
                     // Clean up aggregation and individual worker requests
                     let worker_req_ids: Vec<u64> = worker_requests.keys().copied().collect();
-                    self.status_aggregations.remove(&agg_id);
+                    self.aggregations.remove(&agg_id);
                     for worker_req_id in worker_req_ids {
                         self.pending_requests.remove(&worker_req_id);
                     }
@@ -794,6 +847,63 @@ impl Environment {
             // Not part of an aggregation - store directly
             self.pending_requests
                 .insert(request_id, Some(RequestResult::Statuses(statuses)));
+        }
+
+        Ok(())
+    }
+
+    fn handle_process_types_response(
+        &mut self,
+        request_id: u64,
+        result: Result<HashMap<ProcessId, (Type, usize)>, EnvironmentError>,
+    ) -> Result<(), EnvironmentError> {
+        let process_types = result?;
+
+        // Check if this request is part of an aggregation
+        let mut aggregation_id = None;
+        for (agg_id, aggregation) in &self.aggregations {
+            if let Aggregation::ProcessTypes(worker_requests) = aggregation
+                && worker_requests.contains_key(&request_id)
+            {
+                aggregation_id = Some(*agg_id);
+                break;
+            }
+        }
+
+        if let Some(agg_id) = aggregation_id {
+            // This is part of an aggregation - store the result
+            if let Some(Aggregation::ProcessTypes(worker_requests)) =
+                self.aggregations.get_mut(&agg_id)
+            {
+                worker_requests.insert(request_id, Some(process_types));
+
+                // Check if all results are collected
+                if worker_requests.values().all(|v| v.is_some()) {
+                    // Merge all results into a single HashMap
+                    let mut merged = HashMap::new();
+                    for types in worker_requests.values().flatten() {
+                        merged.extend(types.clone());
+                    }
+
+                    // Store the aggregated result
+                    self.pending_requests
+                        .insert(agg_id, Some(RequestResult::ProcessTypes(merged)));
+
+                    // Clean up aggregation and individual worker requests
+                    let worker_req_ids: Vec<u64> = worker_requests.keys().copied().collect();
+                    self.aggregations.remove(&agg_id);
+                    for worker_req_id in worker_req_ids {
+                        self.pending_requests.remove(&worker_req_id);
+                    }
+                } else {
+                    // Still waiting for more results - mark this individual request as complete
+                    self.pending_requests.insert(request_id, None);
+                }
+            }
+        } else {
+            // Single (non-aggregated) request
+            self.pending_requests
+                .insert(request_id, Some(RequestResult::ProcessTypes(process_types)));
         }
 
         Ok(())
@@ -846,6 +956,16 @@ impl Environment {
             returns: Some(Box::new(function.function_type.result.clone())),
         }));
         Some(self.format_type(&process_type))
+    }
+
+    /// Get the type for a process given its function index
+    pub fn get_process_type(&self, function_index: usize) -> Option<Type> {
+        let function = self.program.get_function(function_index)?;
+        let process_type = Type::Process(Box::new(ProcessType {
+            receive: Some(Box::new(function.function_type.receive.clone())),
+            returns: Some(Box::new(function.function_type.result.clone())),
+        }));
+        Some(process_type)
     }
 
     /// Convert a runtime Value to its Type representation
