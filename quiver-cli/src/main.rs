@@ -8,8 +8,9 @@ use quiver_core::types::{NIL, Type};
 use quiver_core::value::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 
+mod diagnostics;
 mod repl_cli;
 use repl_cli::ReplCli;
 
@@ -72,26 +73,44 @@ fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Handle parse error with visual formatting if in a TTY, otherwise plain text
+fn handle_parse_error(err: quiver_compiler::parser::Error, source: &str, source_id: &str) -> ! {
+    // Check if stderr is a terminal and NO_COLOR is not set
+    let use_color = std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err();
+
+    if use_color {
+        // Use ariadne for visual error display
+        diagnostics::eprint(&err, source_id, source);
+    } else {
+        // Plain text fallback
+        eprintln!("Error: {}", err);
+    }
+    std::process::exit(1);
+}
+
 fn compile_command(
     input: Option<String>,
     output: Option<String>,
     eval: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let source = if let Some(code) = eval {
-        code
-    } else if let Some(path) = input {
-        fs::read_to_string(&path)?
+    let (source, source_id) = if let Some(code) = eval {
+        (code, "eval".to_string())
+    } else if let Some(path) = input.clone() {
+        (fs::read_to_string(&path)?, path)
     } else {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
-        buffer
+        (buffer, "stdin".to_string())
     };
 
     // Compile source to bytecode
     let module_loader = FileSystemModuleLoader::new();
     let module_path = std::env::current_dir().ok();
 
-    let ast = parse(&source).map_err(|e| format!("Parse error: {:?}", e))?;
+    let ast = match parse(&source) {
+        Ok(ast) => ast,
+        Err(e) => handle_parse_error(e, &source, &source_id),
+    };
     let result = Compiler::compile(
         ast,
         &HashMap::new(), // No existing bindings
@@ -180,7 +199,10 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
     let module_loader = FileSystemModuleLoader::new();
     let module_path = std::env::current_dir().ok();
 
-    let ast = parse(source).map_err(|e| format!("Parse error: {:?}", e))?;
+    let ast = match parse(source) {
+        Ok(ast) => ast,
+        Err(e) => handle_parse_error(e, source, "input"),
+    };
     let compilation_result = Compiler::compile(
         ast,
         &HashMap::new(), // No existing bindings

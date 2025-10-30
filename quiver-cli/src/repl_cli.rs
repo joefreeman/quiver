@@ -80,7 +80,7 @@ impl ReplCli {
                             Ok(result) => self.print(result),
                             Err(e) => {
                                 self.last_was_nil = false;
-                                eprintln!("{}", self.format_error(e).red());
+                                self.print_error(e, line);
                             }
                         }
                     }
@@ -385,12 +385,30 @@ impl ReplCli {
         }
     }
 
-    fn format_error(&self, error: ReplError) -> String {
+    fn print_error(&self, error: ReplError, source: &str) {
         match error {
-            ReplError::Parser(e) => format!("Parser error: {:?}", e),
-            ReplError::Compiler(e) => format!("Compiler error: {:?}", e),
-            ReplError::Runtime(e) => format!("Runtime error: {:?}", e),
-            ReplError::Environment(e) => format!("Environment error: {}", e),
+            ReplError::Parser(e) => {
+                // Check if stderr is a terminal and NO_COLOR is not set
+                let use_color =
+                    std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err();
+
+                if use_color {
+                    // Use ariadne for visual error display
+                    crate::diagnostics::eprint(&e, "repl", source);
+                } else {
+                    // Plain text fallback
+                    eprintln!("{}", format!("Parse error: {}", e).red());
+                }
+            }
+            ReplError::Compiler(e) => {
+                eprintln!("{}", format!("Compile error: {:?}", e).red());
+            }
+            ReplError::Runtime(e) => {
+                eprintln!("{}", format!("Runtime error: {:?}", e).red());
+            }
+            ReplError::Environment(e) => {
+                eprintln!("{}", format!("Environment error: {}", e).red());
+            }
         }
     }
 }
