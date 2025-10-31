@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::web_transport::WebWorkerHandle;
+use include_dir::{Dir, include_dir};
 use quiver_compiler::modules::InMemoryModuleLoader;
 use quiver_core::program::Program;
 use quiver_environment::{RequestResult, WorkerHandle};
@@ -107,15 +108,32 @@ export class Repl {
 }
 "#;
 
-// Embed standard library files at compile time
-const STD_MATH: &str = include_str!("../../std/math.qv");
-const STD_LIST: &str = include_str!("../../std/list.qv");
+// Embed standard library directory at compile time
+static STD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../std");
 
 /// Create a module loader with the standard library pre-loaded
 fn create_std_module_loader() -> Box<InMemoryModuleLoader> {
     let mut modules = HashMap::new();
-    modules.insert("math".to_string(), STD_MATH.to_string());
-    modules.insert("list".to_string(), STD_LIST.to_string());
+
+    // Automatically load all .qv files from the std directory
+    for file in STD_DIR.files() {
+        if let Some(path) = file.path().to_str()
+            && path.ends_with(".qv")
+        {
+            // Extract module name (filename without .qv extension)
+            let module_name = path
+                .trim_end_matches(".qv")
+                .split('/')
+                .next_back()
+                .unwrap_or(path);
+
+            // Read file contents as UTF-8 string
+            if let Some(contents) = file.contents_utf8() {
+                modules.insert(module_name.to_string(), contents.to_string());
+            }
+        }
+    }
+
     Box::new(InMemoryModuleLoader::new(modules))
 }
 
