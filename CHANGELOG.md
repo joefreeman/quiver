@@ -9,14 +9,16 @@
 
 ### Changed
 
-- The value of a match expression (`... ~> =x` or `x = ...`) now returns the value itself if the match is successful (and nil otherwise), and a send expression (`... ~> p`) returns the process.
-- Added support for multiple REPL instances for an environment.
+- The value of a match expression (`... ~> =x` or `x = ...`) now returns the value itself if the match is successful (and nil otherwise).
+- A send expression (`... ~> p`) now returns the process.
+- Added support for multiple REPL instances in an environment.
 - Various updates to the web API.
 - Made 'int' and 'bin' reserved names, and updated the compiler to store variables and type aliases in a single bindings map.
-- Update syntax for defining types to use single colon (e.g., `t : int | bin`).
-- Some 'math' standard library functions now return nil (`[]`) instead of causing runtime errors - e.g., for division by zero.
-- Updated the select operator to have sources separated by commas.
+- Updated syntax for defining types to use single colon (e.g., `t : int | bin`).
+- Some 'math' standard library functions (e.g., division) now return nil (`[]`) instead of causing runtime errors.
+- Updated the select operator to separate sources by commas (e.g., `!(p1, f, 1000)`).
 - Added support for shorthand for spawning processes (`@int { ... }`) and defining receive functions (`!int`).
+- Improved detail and formatting of parser errors.
 
 ### Fixed
 
