@@ -1,0 +1,36 @@
+[
+  new: __binary_new__,
+  length: __binary_length__,
+  concat: __binary_concat__,
+  and: __binary_and__,
+  or: __binary_or__,
+  xor: __binary_xor__,
+  not: __binary_not__,
+  shift: __binary_shift__,
+
+  get_byte: #[bin, int] {
+    ~> [..., 0, 8] ~> __binary_get__
+  },
+
+  get_bit: #[bin, int] {
+    ~> =[b, bit_index] => {
+      byte_offset = [bit_index, 8] ~> __divide__,
+      bit_offset = [bit_index, 8] ~> __modulo__,
+      [b, byte_offset, bit_offset, 1] ~> __binary_get__
+    }
+  },
+
+  set_byte: #[bin, int, int] {
+    ~> =[b, offset, value] => [b, offset, 0, value, 8] ~> __binary_set__
+  },
+
+  set_bit: #[bin, int, int] {
+    ~> =[b, bit_index, value] => {
+      byte_offset = [bit_index, 8] ~> __divide__,
+      bit_offset = [bit_index, 8] ~> __modulo__,
+      [b, byte_offset, bit_offset, value, 1] ~> __binary_set__
+    }
+  },
+
+  slice: __binary_slice__
+]
