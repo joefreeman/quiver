@@ -51,42 +51,6 @@ pub fn builtin_binary_length(arg: &Value, executor: &mut Executor) -> Result<Val
     }
 }
 
-/// Get a byte at a specific index (returns 0-255)
-/// binary_get_byte(bin, index: int) -> int
-pub fn builtin_binary_get_byte(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary), Value::Integer(index)) => {
-                if *index < 0 {
-                    return Err(Error::InvalidArgument(
-                        "Index cannot be negative".to_string(),
-                    ));
-                }
-                let index = *index as usize;
-                let binary_data = executor.get_binary_data(binary)?;
-                binary_data
-                    .byte_at(index)
-                    .map(|b| Value::Integer(b as i64))
-                    .ok_or_else(|| {
-                        Error::InvalidArgument(format!(
-                            "Index {} out of bounds for binary of length {}",
-                            index,
-                            binary_data.len()
-                        ))
-                    })
-            }
-            _ => Err(Error::TypeMismatch {
-                expected: "[binary, integer]".to_string(),
-                found: "invalid tuple contents".to_string(),
-            }),
-        },
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
-        }),
-    }
-}
-
 /// Concatenate two binaries
 /// binary_concat([bin, bin]) -> bin
 pub fn builtin_binary_concat(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
@@ -139,16 +103,14 @@ pub fn builtin_binary_and(arg: &Value, executor: &mut Executor) -> Result<Value,
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
                     let binary_data_a = executor.get_binary_data(binary_a)?;
                     let binary_data_b = executor.get_binary_data(binary_b)?;
-                    let bytes_a = binary_data_a.to_vec();
-                    let bytes_b = binary_data_b.to_vec();
 
                     // For bitwise operations, take the shorter length
-                    let result_len = bytes_a.len().min(bytes_b.len());
-                    let mut result = Vec::with_capacity(result_len);
-
-                    for i in 0..result_len {
-                        result.push(bytes_a[i] & bytes_b[i]);
-                    }
+                    // Use iterators to avoid materializing both binaries
+                    let result: Vec<u8> = binary_data_a
+                        .iter()
+                        .zip(binary_data_b.iter())
+                        .map(|(a, b)| a & b)
+                        .collect();
 
                     let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
@@ -175,16 +137,24 @@ pub fn builtin_binary_or(arg: &Value, executor: &mut Executor) -> Result<Value, 
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
                     let binary_data_a = executor.get_binary_data(binary_a)?;
                     let binary_data_b = executor.get_binary_data(binary_b)?;
-                    let bytes_a = binary_data_a.to_vec();
-                    let bytes_b = binary_data_b.to_vec();
 
                     // For bitwise operations, take the longer length, padding with zeros
-                    let result_len = bytes_a.len().max(bytes_b.len());
-                    let mut result = Vec::with_capacity(result_len);
+                    let len_a = binary_data_a.len();
+                    let len_b = binary_data_b.len();
+                    let result_len = len_a.max(len_b);
 
+                    let mut result = Vec::with_capacity(result_len);
                     for i in 0..result_len {
-                        let a = bytes_a.get(i).copied().unwrap_or(0);
-                        let b = bytes_b.get(i).copied().unwrap_or(0);
+                        let a = if i < len_a {
+                            binary_data_a.byte_at(i).unwrap()
+                        } else {
+                            0
+                        };
+                        let b = if i < len_b {
+                            binary_data_b.byte_at(i).unwrap()
+                        } else {
+                            0
+                        };
                         result.push(a | b);
                     }
 
@@ -213,16 +183,24 @@ pub fn builtin_binary_xor(arg: &Value, executor: &mut Executor) -> Result<Value,
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
                     let binary_data_a = executor.get_binary_data(binary_a)?;
                     let binary_data_b = executor.get_binary_data(binary_b)?;
-                    let bytes_a = binary_data_a.to_vec();
-                    let bytes_b = binary_data_b.to_vec();
 
                     // For XOR, take the longer length, padding with zeros
-                    let result_len = bytes_a.len().max(bytes_b.len());
-                    let mut result = Vec::with_capacity(result_len);
+                    let len_a = binary_data_a.len();
+                    let len_b = binary_data_b.len();
+                    let result_len = len_a.max(len_b);
 
+                    let mut result = Vec::with_capacity(result_len);
                     for i in 0..result_len {
-                        let a = bytes_a.get(i).copied().unwrap_or(0);
-                        let b = bytes_b.get(i).copied().unwrap_or(0);
+                        let a = if i < len_a {
+                            binary_data_a.byte_at(i).unwrap()
+                        } else {
+                            0
+                        };
+                        let b = if i < len_b {
+                            binary_data_b.byte_at(i).unwrap()
+                        } else {
+                            0
+                        };
                         result.push(a ^ b);
                     }
 
@@ -248,8 +226,8 @@ pub fn builtin_binary_not(arg: &Value, executor: &mut Executor) -> Result<Value,
     match arg {
         Value::Binary(binary) => {
             let binary_data = executor.get_binary_data(binary)?;
-            let bytes = binary_data.to_vec();
-            let result: Vec<u8> = bytes.iter().map(|&byte| !byte).collect();
+            // Use iterator to avoid double materialization
+            let result: Vec<u8> = binary_data.iter().map(|byte| !byte).collect();
 
             let binary = executor.allocate_binary(result)?;
             Ok(Value::Binary(binary))
@@ -265,23 +243,24 @@ pub fn builtin_binary_not(arg: &Value, executor: &mut Executor) -> Result<Value,
 // SHIFT OPERATIONS
 // =============================================================================
 
-/// Left shift binary by n bits
-/// binary_shift_left([bin, int]) -> bin
-pub fn builtin_binary_shift_left(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
+/// Shift binary by n bits (positive = left, negative = right, logical shift)
+/// binary_shift([bin, int]) -> bin
+pub fn builtin_binary_shift(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
-                (Value::Binary(binary), Value::Integer(shift_bits)) => {
+                (Value::Binary(binary), Value::Integer(shift_amount)) => {
+                    if *shift_amount == 0 {
+                        // No shift needed
+                        return Ok(Value::Binary(*binary));
+                    }
+
                     let binary_data = executor.get_binary_data(binary)?;
                     let bytes = binary_data.to_vec();
 
-                    if *shift_bits < 0 {
-                        return Err(Error::InvalidArgument(
-                            "Shift amount cannot be negative".to_string(),
-                        ));
-                    }
+                    let shift_left = *shift_amount > 0;
+                    let shift_bits = shift_amount.unsigned_abs() as u32;
 
-                    let shift_bits = *shift_bits as u32;
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
@@ -293,81 +272,41 @@ pub fn builtin_binary_shift_left(arg: &Value, executor: &mut Executor) -> Result
                     let byte_shift = (shift_bits / 8) as usize;
                     let bit_shift = shift_bits % 8;
 
-                    if bit_shift == 0 {
-                        // Simple byte-aligned shift
-                        for i in 0..bytes.len() {
-                            if i + byte_shift < bytes.len() {
-                                result[i] = bytes[i + byte_shift];
+                    if shift_left {
+                        // Left shift
+                        if bit_shift == 0 {
+                            // Simple byte-aligned shift
+                            for i in 0..bytes.len() {
+                                if i + byte_shift < bytes.len() {
+                                    result[i] = bytes[i + byte_shift];
+                                }
+                            }
+                        } else {
+                            // Bit-level shift
+                            let mut carry = 0u8;
+                            for i in (0..bytes.len()).rev() {
+                                if i + byte_shift < bytes.len() {
+                                    let src_byte = bytes[i + byte_shift];
+                                    result[i] = (src_byte << bit_shift) | carry;
+                                    carry = src_byte >> (8 - bit_shift);
+                                }
                             }
                         }
                     } else {
-                        // Bit-level shift
-                        let mut carry = 0u8;
-                        for i in (0..bytes.len()).rev() {
-                            if i + byte_shift < bytes.len() {
-                                let src_byte = bytes[i + byte_shift];
-                                result[i] = (src_byte << bit_shift) | carry;
-                                carry = src_byte >> (8 - bit_shift);
-                            }
-                        }
-                    }
-
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(Value::Binary(binary))
-                }
-                _ => Err(Error::TypeMismatch {
-                    expected: "[binary, integer]".to_string(),
-                    found: "invalid tuple contents".to_string(),
-                }),
-            }
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
-        }),
-    }
-}
-
-/// Right shift binary by n bits (logical shift)
-/// binary_shift_right([bin, int]) -> bin
-pub fn builtin_binary_shift_right(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => {
-            match (&elements[0], &elements[1]) {
-                (Value::Binary(binary), Value::Integer(shift_bits)) => {
-                    let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
-
-                    if *shift_bits < 0 {
-                        return Err(Error::InvalidArgument(
-                            "Shift amount cannot be negative".to_string(),
-                        ));
-                    }
-
-                    let shift_bits = *shift_bits as u32;
-                    if shift_bits >= (bytes.len() as u32 * 8) {
-                        // Shift larger than total bits results in zeros
-                        let result = vec![0u8; bytes.len()];
-                        let binary = executor.allocate_binary(result)?;
-                        return Ok(Value::Binary(binary));
-                    }
-
-                    let mut result = vec![0u8; bytes.len()];
-                    let byte_shift = (shift_bits / 8) as usize;
-                    let bit_shift = shift_bits % 8;
-
-                    if bit_shift == 0 {
-                        // Simple byte-aligned shift
-                        result[byte_shift..bytes.len()]
-                            .copy_from_slice(&bytes[..(bytes.len() - byte_shift)]);
-                    } else {
-                        // Bit-level shift
-                        let mut carry = 0u8;
-                        for i in 0..bytes.len() {
-                            if i >= byte_shift {
-                                let src_byte = bytes[i - byte_shift];
-                                result[i] = (src_byte >> bit_shift) | carry;
-                                carry = src_byte << (8 - bit_shift);
+                        // Right shift
+                        if bit_shift == 0 {
+                            // Simple byte-aligned shift
+                            result[byte_shift..bytes.len()]
+                                .copy_from_slice(&bytes[..(bytes.len() - byte_shift)]);
+                        } else {
+                            // Bit-level shift
+                            let mut carry = 0u8;
+                            for i in 0..bytes.len() {
+                                if i >= byte_shift {
+                                    let src_byte = bytes[i - byte_shift];
+                                    result[i] = (src_byte >> bit_shift) | carry;
+                                    carry = src_byte << (8 - bit_shift);
+                                }
                             }
                         }
                     }
@@ -388,55 +327,8 @@ pub fn builtin_binary_shift_right(arg: &Value, executor: &mut Executor) -> Resul
     }
 }
 // =============================================================================
-// BIT-LEVEL ACCESS OPERATIONS
+// BIT/BYTE-LEVEL ACCESS OPERATIONS
 // =============================================================================
-
-/// Get bit at specific position (0 = rightmost bit)
-/// binary_get_bit_pos([bin, int]) -> int
-pub fn builtin_binary_get_bit_pos(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => {
-            match (&elements[0], &elements[1]) {
-                (Value::Binary(binary), Value::Integer(bit_index)) => {
-                    let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
-
-                    if *bit_index < 0 {
-                        return Err(Error::InvalidArgument(
-                            "Bit index cannot be negative".to_string(),
-                        ));
-                    }
-
-                    let bit_index = *bit_index as usize;
-                    let total_bits = bytes.len() * 8;
-
-                    if bit_index >= total_bits {
-                        return Err(Error::InvalidArgument(format!(
-                            "Bit index {} out of bounds for binary with {} bits",
-                            bit_index, total_bits
-                        )));
-                    }
-
-                    // Calculate byte and bit position (big-endian bit numbering)
-                    let byte_index = bit_index / 8;
-                    let bit_position = bit_index % 8;
-                    let byte_value = bytes[byte_index];
-                    let bit_value = (byte_value >> (7 - bit_position)) & 1;
-
-                    Ok(Value::Integer(bit_value as i64))
-                }
-                _ => Err(Error::TypeMismatch {
-                    expected: "[binary, integer]".to_string(),
-                    found: "invalid tuple contents".to_string(),
-                }),
-            }
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
-        }),
-    }
-}
 
 /// Count number of set bits (popcount) - CRITICAL for HAMT
 /// binary_popcount(bin) -> int
@@ -444,13 +336,12 @@ pub fn builtin_binary_popcount(arg: &Value, executor: &mut Executor) -> Result<V
     match arg {
         Value::Binary(binary) => {
             let binary_data = executor.get_binary_data(binary)?;
-            let bytes = binary_data.to_vec();
 
-            // Use efficient bit counting algorithm
-            let mut count = 0u64;
-            for &byte in &bytes {
-                count += byte.count_ones() as u64;
-            }
+            // Use iterator to avoid materializing the entire binary
+            let count: u64 = binary_data
+                .iter()
+                .map(|byte| byte.count_ones() as u64)
+                .sum();
 
             Ok(Value::Integer(count as i64))
         }
@@ -461,254 +352,248 @@ pub fn builtin_binary_popcount(arg: &Value, executor: &mut Executor) -> Result<V
     }
 }
 
-/// Set bit at specific position to value (0 or 1)
-/// binary_set_bit([bin, int, int]) -> bin
-pub fn builtin_binary_set_bit(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
+/// Get an integer from binary at specific position (big-endian)
+/// binary_get([bin, byte_offset, bit_offset, num_bits]) -> int
+/// byte_offset: which byte to start at (0-indexed)
+/// bit_offset: which bit within that byte (0-7, 0 is MSB)
+/// num_bits: how many bits to read (1-64)
+pub fn builtin_binary_get(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
-        Value::Tuple(_, elements) if elements.len() == 3 => {
-            match (&elements[0], &elements[1], &elements[2]) {
-                (Value::Binary(binary), Value::Integer(bit_index), Value::Integer(bit_value)) => {
+        Value::Tuple(_, elements) if elements.len() == 4 => {
+            match (&elements[0], &elements[1], &elements[2], &elements[3]) {
+                (
+                    Value::Binary(binary),
+                    Value::Integer(byte_offset),
+                    Value::Integer(bit_offset),
+                    Value::Integer(num_bits),
+                ) => {
                     let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
 
-                    if *bit_index < 0 {
+                    if *byte_offset < 0 {
                         return Err(Error::InvalidArgument(
-                            "Bit index cannot be negative".to_string(),
+                            "Byte offset cannot be negative".to_string(),
                         ));
                     }
 
-                    if *bit_value != 0 && *bit_value != 1 {
+                    if *bit_offset < 0 || *bit_offset > 7 {
+                        return Err(Error::InvalidArgument("Bit offset must be 0-7".to_string()));
+                    }
+
+                    if *num_bits < 1 || *num_bits > 64 {
                         return Err(Error::InvalidArgument(
-                            "Bit value must be 0 or 1".to_string(),
+                            "Number of bits must be between 1 and 64".to_string(),
                         ));
                     }
 
-                    let bit_index = *bit_index as usize;
-                    let total_bits = bytes.len() * 8;
+                    let byte_offset = *byte_offset as usize;
+                    let bit_offset = *bit_offset as usize;
+                    let num_bits = *num_bits as usize;
 
-                    if bit_index >= total_bits {
+                    // Calculate which bytes we need to read
+                    let total_bit_start = byte_offset * 8 + bit_offset;
+                    let total_bit_end = total_bit_start + num_bits;
+                    let last_byte_needed = total_bit_end.div_ceil(8);
+
+                    if last_byte_needed > binary_data.len() {
                         return Err(Error::InvalidArgument(format!(
-                            "Bit index {} out of bounds for binary with {} bits",
-                            bit_index, total_bits
+                            "Not enough bits: need {} bits starting at byte {} bit {}",
+                            num_bits, byte_offset, bit_offset
                         )));
                     }
 
-                    let mut result = bytes.to_vec();
-                    let byte_index = bit_index / 8;
-                    let bit_position = bit_index % 8;
+                    // Read all bytes we need
+                    let mut value = 0u64;
+                    let bytes_to_read = last_byte_needed - byte_offset;
 
-                    if *bit_value == 1 {
-                        result[byte_index] |= 1 << (7 - bit_position);
+                    for i in 0..bytes_to_read {
+                        value =
+                            (value << 8) | (binary_data.byte_at(byte_offset + i).unwrap() as u64);
+                    }
+
+                    // Shift to align our bits to the right
+                    let bits_read = bytes_to_read * 8;
+                    let bits_after = bits_read - bit_offset - num_bits;
+
+                    value >>= bits_after;
+
+                    // Mask to keep only the bits we want
+                    let mask = if num_bits == 64 {
+                        u64::MAX
                     } else {
-                        result[byte_index] &= !(1 << (7 - bit_position));
-                    }
+                        (1u64 << num_bits) - 1
+                    };
+                    value &= mask;
 
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(Value::Binary(binary))
-                }
-                _ => Err(Error::TypeMismatch {
-                    expected: "[binary, integer, integer]".to_string(),
-                    found: "invalid tuple contents".to_string(),
-                }),
-            }
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer, integer]".to_string(),
-            found: "not a 3-element tuple".to_string(),
-        }),
-    }
-}
-
-// =============================================================================
-// MULTI-BYTE ACCESS OPERATIONS
-// =============================================================================
-
-/// Get a 32-bit unsigned integer from binary at specific byte offset (big-endian)
-/// binary_get_u32([bin, int]) -> int
-pub fn builtin_binary_get_u32(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary), Value::Integer(offset)) => {
-                let binary_data = executor.get_binary_data(binary)?;
-                let bytes = binary_data.to_vec();
-
-                if *offset < 0 {
-                    return Err(Error::InvalidArgument(
-                        "Offset cannot be negative".to_string(),
-                    ));
-                }
-
-                let offset = *offset as usize;
-                if offset + 4 > bytes.len() {
-                    return Err(Error::InvalidArgument(
-                        "Not enough bytes for u32".to_string(),
-                    ));
-                }
-
-                let value = u32::from_be_bytes([
-                    bytes[offset],
-                    bytes[offset + 1],
-                    bytes[offset + 2],
-                    bytes[offset + 3],
-                ]);
-
-                Ok(Value::Integer(value as i64))
-            }
-            _ => Err(Error::TypeMismatch {
-                expected: "[binary, integer]".to_string(),
-                found: "invalid tuple contents".to_string(),
-            }),
-        },
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
-        }),
-    }
-}
-
-/// Set a 32-bit unsigned integer in binary at specific byte offset (big-endian)
-/// binary_set_u32([bin, int, int]) -> bin
-pub fn builtin_binary_set_u32(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 3 => {
-            match (&elements[0], &elements[1], &elements[2]) {
-                (Value::Binary(binary), Value::Integer(offset), Value::Integer(value)) => {
-                    let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
-
-                    if *offset < 0 {
-                        return Err(Error::InvalidArgument(
-                            "Offset cannot be negative".to_string(),
-                        ));
-                    }
-
-                    if *value < 0 || *value > u32::MAX as i64 {
-                        return Err(Error::InvalidArgument(
-                            "Value must be a valid u32".to_string(),
-                        ));
-                    }
-
-                    let offset = *offset as usize;
-                    if offset + 4 > bytes.len() {
-                        return Err(Error::InvalidArgument(
-                            "Not enough bytes for u32".to_string(),
-                        ));
-                    }
-
-                    let mut result = bytes.to_vec();
-                    let value_bytes = (*value as u32).to_be_bytes();
-
-                    result[offset] = value_bytes[0];
-                    result[offset + 1] = value_bytes[1];
-                    result[offset + 2] = value_bytes[2];
-                    result[offset + 3] = value_bytes[3];
-
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(Value::Binary(binary))
-                }
-                _ => Err(Error::TypeMismatch {
-                    expected: "[binary, integer, integer]".to_string(),
-                    found: "invalid tuple contents".to_string(),
-                }),
-            }
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer, integer]".to_string(),
-            found: "not a 3-element tuple".to_string(),
-        }),
-    }
-}
-
-/// Get a 64-bit unsigned integer from binary at specific byte offset (big-endian)
-/// binary_get_u64([bin, int]) -> int
-pub fn builtin_binary_get_u64(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => {
-            match (&elements[0], &elements[1]) {
-                (Value::Binary(binary), Value::Integer(offset)) => {
-                    let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
-
-                    if *offset < 0 {
-                        return Err(Error::InvalidArgument(
-                            "Offset cannot be negative".to_string(),
-                        ));
-                    }
-
-                    let offset = *offset as usize;
-                    if offset + 8 > bytes.len() {
-                        return Err(Error::InvalidArgument(
-                            "Not enough bytes for u64".to_string(),
-                        ));
-                    }
-
-                    let value = u64::from_be_bytes([
-                        bytes[offset],
-                        bytes[offset + 1],
-                        bytes[offset + 2],
-                        bytes[offset + 3],
-                        bytes[offset + 4],
-                        bytes[offset + 5],
-                        bytes[offset + 6],
-                        bytes[offset + 7],
-                    ]);
-
-                    // Note: This may overflow i64 but Quiver only has i64 integers
                     Ok(Value::Integer(value as i64))
                 }
                 _ => Err(Error::TypeMismatch {
-                    expected: "[binary, integer]".to_string(),
+                    expected: "[binary, integer, integer, integer]".to_string(),
                     found: "invalid tuple contents".to_string(),
                 }),
             }
         }
         _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
+            expected: "[binary, integer, integer, integer]".to_string(),
+            found: "not a 4-element tuple".to_string(),
         }),
     }
 }
 
-/// Set a 64-bit unsigned integer in binary at specific byte offset (big-endian)
-/// binary_set_u64([bin, int, int]) -> bin
-pub fn builtin_binary_set_u64(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
+/// Set an integer in binary at specific position (big-endian)
+/// binary_set([bin, byte_offset, bit_offset, value, num_bits]) -> bin
+/// byte_offset: which byte to start at (0-indexed)
+/// bit_offset: which bit within that byte (0-7, 0 is MSB)
+/// num_bits: how many bits to write (1-64)
+pub fn builtin_binary_set(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
-        Value::Tuple(_, elements) if elements.len() == 3 => {
-            match (&elements[0], &elements[1], &elements[2]) {
-                (Value::Binary(binary), Value::Integer(offset), Value::Integer(value)) => {
+        Value::Tuple(_, elements) if elements.len() == 5 => {
+            match (
+                &elements[0],
+                &elements[1],
+                &elements[2],
+                &elements[3],
+                &elements[4],
+            ) {
+                (
+                    Value::Binary(binary),
+                    Value::Integer(byte_offset),
+                    Value::Integer(bit_offset),
+                    Value::Integer(value),
+                    Value::Integer(num_bits),
+                ) => {
                     let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
 
-                    if *offset < 0 {
+                    if *byte_offset < 0 {
                         return Err(Error::InvalidArgument(
-                            "Offset cannot be negative".to_string(),
+                            "Byte offset cannot be negative".to_string(),
                         ));
                     }
 
-                    let offset = *offset as usize;
-                    if offset + 8 > bytes.len() {
+                    if *bit_offset < 0 || *bit_offset > 7 {
+                        return Err(Error::InvalidArgument("Bit offset must be 0-7".to_string()));
+                    }
+
+                    if *num_bits < 1 || *num_bits > 64 {
                         return Err(Error::InvalidArgument(
-                            "Not enough bytes for u64".to_string(),
+                            "Number of bits must be between 1 and 64".to_string(),
                         ));
                     }
 
-                    let mut result = bytes.to_vec();
-                    let value_bytes = (*value as u64).to_be_bytes();
+                    let byte_offset = *byte_offset as usize;
+                    let bit_offset = *bit_offset as usize;
+                    let num_bits = *num_bits as usize;
+                    let len = binary_data.len();
 
-                    result[offset..(8 + offset)].copy_from_slice(&value_bytes);
+                    // Calculate which bytes we need to modify
+                    let total_bit_start = byte_offset * 8 + bit_offset;
+                    let total_bit_end = total_bit_start + num_bits;
+                    let last_byte_needed = total_bit_end.div_ceil(8);
 
-                    let binary = executor.allocate_binary(result)?;
+                    if last_byte_needed > len {
+                        return Err(Error::InvalidArgument(format!(
+                            "Not enough bits: need {} bits starting at byte {} bit {}",
+                            num_bits, byte_offset, bit_offset
+                        )));
+                    }
+
+                    // Validate value fits in num_bits
+                    let max_value = if num_bits == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << num_bits) - 1
+                    };
+
+                    if *value < 0 || (*value as u64) > max_value {
+                        return Err(Error::InvalidArgument(format!(
+                            "Value {} does not fit in {} bits",
+                            value, num_bits
+                        )));
+                    }
+
+                    let value_u64 = *value as u64;
+
+                    // Read the bytes we need to modify
+                    let bytes_to_modify = last_byte_needed - byte_offset;
+                    let mut modified_bytes = Vec::with_capacity(bytes_to_modify);
+
+                    for i in 0..bytes_to_modify {
+                        modified_bytes.push(binary_data.byte_at(byte_offset + i).unwrap());
+                    }
+
+                    // Create a mask for the bits we want to modify
+                    let bits_in_modified = bytes_to_modify * 8;
+                    let bits_after = bits_in_modified - bit_offset - num_bits;
+
+                    // Shift value to correct position
+                    let shifted_value = value_u64 << bits_after;
+
+                    // Create mask: all 1s except in our target bits
+                    let mask = if num_bits == 64 {
+                        0
+                    } else {
+                        let target_mask = ((1u64 << num_bits) - 1) << bits_after;
+                        !target_mask
+                    };
+
+                    // Reconstruct the bytes
+                    let mut current_bytes = 0u64;
+                    for &byte in &modified_bytes {
+                        current_bytes = (current_bytes << 8) | (byte as u64);
+                    }
+
+                    let new_bytes_value = (current_bytes & mask) | shifted_value;
+
+                    // Convert back to bytes
+                    let mut new_bytes = Vec::with_capacity(bytes_to_modify);
+                    for i in (0..bytes_to_modify).rev() {
+                        new_bytes.push(((new_bytes_value >> (i * 8)) & 0xFF) as u8);
+                    }
+
+                    // Use O(log n) slicing to construct result
+                    let result = if byte_offset == 0 && last_byte_needed == len {
+                        // Replacing entire binary
+                        BinaryData::new(new_bytes)
+                    } else if byte_offset == 0 {
+                        // Modified bytes at start
+                        let right = BinaryData::slice(
+                            Rc::new(binary_data.clone()),
+                            last_byte_needed,
+                            len - last_byte_needed,
+                        )
+                        .unwrap();
+                        BinaryData::concat(Rc::new(BinaryData::new(new_bytes)), Rc::new(right))
+                    } else if last_byte_needed == len {
+                        // Modified bytes at end
+                        let left = BinaryData::slice(Rc::new(binary_data.clone()), 0, byte_offset)
+                            .unwrap();
+                        BinaryData::concat(Rc::new(left), Rc::new(BinaryData::new(new_bytes)))
+                    } else {
+                        // Modified bytes in middle
+                        let left = BinaryData::slice(Rc::new(binary_data.clone()), 0, byte_offset)
+                            .unwrap();
+                        let right = BinaryData::slice(
+                            Rc::new(binary_data.clone()),
+                            last_byte_needed,
+                            len - last_byte_needed,
+                        )
+                        .unwrap();
+                        let with_middle =
+                            BinaryData::concat(Rc::new(left), Rc::new(BinaryData::new(new_bytes)));
+                        BinaryData::concat(Rc::new(with_middle), Rc::new(right))
+                    };
+
+                    let binary = executor.allocate_binary_data(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
-                    expected: "[binary, integer, integer]".to_string(),
+                    expected: "[binary, integer, integer, integer, integer]".to_string(),
                     found: "invalid tuple contents".to_string(),
                 }),
             }
         }
         _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer, integer]".to_string(),
-            found: "not a 3-element tuple".to_string(),
+            expected: "[binary, integer, integer, integer, integer]".to_string(),
+            found: "not a 5-element tuple".to_string(),
         }),
     }
 }
@@ -725,7 +610,6 @@ pub fn builtin_binary_slice(arg: &Value, executor: &mut Executor) -> Result<Valu
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), Value::Integer(start), Value::Integer(end)) => {
                     let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
 
                     if *start < 0 || *end < 0 {
                         return Err(Error::InvalidArgument(
@@ -735,8 +619,9 @@ pub fn builtin_binary_slice(arg: &Value, executor: &mut Executor) -> Result<Valu
 
                     let start = *start as usize;
                     let end = *end as usize;
+                    let len = binary_data.len();
 
-                    if start > bytes.len() || end > bytes.len() {
+                    if start > len || end > len {
                         return Err(Error::InvalidArgument("Index out of bounds".to_string()));
                     }
 
@@ -746,8 +631,13 @@ pub fn builtin_binary_slice(arg: &Value, executor: &mut Executor) -> Result<Valu
                         ));
                     }
 
-                    let slice = bytes[start..end].to_vec();
-                    let binary = executor.allocate_binary(slice)?;
+                    // Use O(1) structural slicing instead of materializing
+                    let sliced =
+                        BinaryData::slice(Rc::new(binary_data.clone()), start, end - start)
+                            .ok_or_else(|| {
+                                Error::InvalidArgument("Failed to create slice".to_string())
+                            })?;
+                    let binary = executor.allocate_binary_data(sliced)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -763,115 +653,6 @@ pub fn builtin_binary_slice(arg: &Value, executor: &mut Executor) -> Result<Valu
     }
 }
 
-/// Take first N bytes from binary
-/// binary_take([bin, int]) -> bin
-pub fn builtin_binary_take(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary), Value::Integer(count)) => {
-                let binary_data = executor.get_binary_data(binary)?;
-                let bytes = binary_data.to_vec();
-
-                if *count < 0 {
-                    return Err(Error::InvalidArgument(
-                        "Count cannot be negative".to_string(),
-                    ));
-                }
-
-                let count = (*count as usize).min(bytes.len());
-                let slice = bytes[..count].to_vec();
-
-                let binary = executor.allocate_binary(slice)?;
-                Ok(Value::Binary(binary))
-            }
-            _ => Err(Error::TypeMismatch {
-                expected: "[binary, integer]".to_string(),
-                found: "invalid tuple contents".to_string(),
-            }),
-        },
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
-        }),
-    }
-}
-
-/// Drop first N bytes from binary
-/// binary_drop([bin, int]) -> bin
-pub fn builtin_binary_drop(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
-            (Value::Binary(binary), Value::Integer(count)) => {
-                let binary_data = executor.get_binary_data(binary)?;
-                let bytes = binary_data.to_vec();
-
-                if *count < 0 {
-                    return Err(Error::InvalidArgument(
-                        "Count cannot be negative".to_string(),
-                    ));
-                }
-
-                let count = (*count as usize).min(bytes.len());
-                let slice = bytes[count..].to_vec();
-
-                let binary = executor.allocate_binary(slice)?;
-                Ok(Value::Binary(binary))
-            }
-            _ => Err(Error::TypeMismatch {
-                expected: "[binary, integer]".to_string(),
-                found: "invalid tuple contents".to_string(),
-            }),
-        },
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
-        }),
-    }
-}
-
-/// Pad binary to specified length with zeros at the end
-/// binary_pad([bin, int]) -> bin
-pub fn builtin_binary_pad(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 2 => {
-            match (&elements[0], &elements[1]) {
-                (Value::Binary(binary), Value::Integer(target_length)) => {
-                    let binary_data = executor.get_binary_data(binary)?;
-                    let bytes = binary_data.to_vec();
-
-                    if *target_length < 0 {
-                        return Err(Error::InvalidArgument(
-                            "Target length cannot be negative".to_string(),
-                        ));
-                    }
-
-                    let target_length = *target_length as usize;
-
-                    if target_length <= bytes.len() {
-                        // No padding needed, return copy of original
-                        let binary = executor.allocate_binary(bytes.to_vec())?;
-                        return Ok(Value::Binary(binary));
-                    }
-
-                    let mut result = bytes.to_vec();
-                    result.resize(target_length, 0);
-
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(Value::Binary(binary))
-                }
-                _ => Err(Error::TypeMismatch {
-                    expected: "[binary, integer]".to_string(),
-                    found: "invalid tuple contents".to_string(),
-                }),
-            }
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "[binary, integer]".to_string(),
-            found: "not a 2-element tuple".to_string(),
-        }),
-    }
-}
-
 // =============================================================================
 // HASHING OPERATIONS
 // =============================================================================
@@ -882,14 +663,11 @@ pub fn builtin_binary_hash32(arg: &Value, executor: &mut Executor) -> Result<Val
     match arg {
         Value::Binary(binary) => {
             let binary_data = executor.get_binary_data(binary)?;
-            let bytes = binary_data.to_vec();
 
-            // FNV-1a 32-bit hash
-            let mut hash: u32 = 2166136261; // FNV offset basis
-            for &byte in &bytes {
-                hash ^= byte as u32;
-                hash = hash.wrapping_mul(16777619); // FNV prime
-            }
+            // FNV-1a 32-bit hash using iterator to avoid materializing
+            let hash = binary_data.iter().fold(2166136261u32, |hash, byte| {
+                (hash ^ (byte as u32)).wrapping_mul(16777619)
+            });
 
             Ok(Value::Integer(hash as i64))
         }
@@ -906,14 +684,13 @@ pub fn builtin_binary_hash64(arg: &Value, executor: &mut Executor) -> Result<Val
     match arg {
         Value::Binary(binary) => {
             let binary_data = executor.get_binary_data(binary)?;
-            let bytes = binary_data.to_vec();
 
-            // FNV-1a 64-bit hash
-            let mut hash: u64 = 14695981039346656037; // FNV offset basis
-            for &byte in &bytes {
-                hash ^= byte as u64;
-                hash = hash.wrapping_mul(1099511628211); // FNV prime
-            }
+            // FNV-1a 64-bit hash using iterator to avoid materializing
+            let hash = binary_data
+                .iter()
+                .fold(14695981039346656037u64, |hash, byte| {
+                    (hash ^ (byte as u64)).wrapping_mul(1099511628211)
+                });
 
             // Note: This may not fit in i64 but we cast it anyway
             Ok(Value::Integer(hash as i64))
@@ -921,54 +698,6 @@ pub fn builtin_binary_hash64(arg: &Value, executor: &mut Executor) -> Result<Val
         _ => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
             found: "not binary".to_string(),
-        }),
-    }
-}
-
-/// Hash a string (converted to binary) for use in data structures
-/// string_hash(bin) -> int
-pub fn builtin_string_hash(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
-    // For strings, we use the same implementation as hash32 but with a different name
-    // This is common in many languages to have separate string vs binary hash functions
-    builtin_binary_hash32(arg, executor)
-}
-
-/// Extract N-bit chunks from hash for HAMT navigation
-/// hash_chunk([int, int, int]) -> int (hash, shift_bits, chunk_size_bits)
-pub fn builtin_hash_chunk(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
-    match arg {
-        Value::Tuple(_, elements) if elements.len() == 3 => {
-            match (&elements[0], &elements[1], &elements[2]) {
-                (Value::Integer(hash), Value::Integer(shift_bits), Value::Integer(chunk_bits)) => {
-                    if *shift_bits < 0 || *chunk_bits < 0 || *chunk_bits > 6 {
-                        return Err(Error::InvalidArgument("Invalid bit parameters".to_string()));
-                    }
-
-                    let hash = *hash as u64;
-                    let shift = *shift_bits as u32;
-                    let chunk_size = *chunk_bits as u32;
-
-                    if shift >= 64 {
-                        return Ok(Value::Integer(0));
-                    }
-
-                    // Create mask for the chunk size (e.g., 5 bits = 0x1F)
-                    let mask = (1u64 << chunk_size) - 1;
-
-                    // Extract the chunk
-                    let chunk = (hash >> shift) & mask;
-
-                    Ok(Value::Integer(chunk as i64))
-                }
-                _ => Err(Error::TypeMismatch {
-                    expected: "[integer, integer, integer]".to_string(),
-                    found: "invalid tuple contents".to_string(),
-                }),
-            }
-        }
-        _ => Err(Error::TypeMismatch {
-            expected: "[integer, integer, integer]".to_string(),
-            found: "not a 3-element tuple".to_string(),
         }),
     }
 }

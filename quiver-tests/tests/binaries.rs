@@ -61,18 +61,18 @@ fn test_binary_length_builtin() {
 
 #[test]
 fn test_binary_get_byte_builtin() {
-    // Test getting bytes from binaries
+    // Test getting bytes from binaries using binary_get with 1 byte (8 bits)
     quiver()
-        .evaluate("['68656c6c6f', 0] ~> __binary_get_byte__")
+        .evaluate("['68656c6c6f', 0, 0, 8] ~> __binary_get__")
         .expect("104"); // 0x68 = 104
     quiver()
-        .evaluate("['68656c6c6f', 1] ~> __binary_get_byte__")
+        .evaluate("['68656c6c6f', 1, 0, 8] ~> __binary_get__")
         .expect("101"); // 0x65 = 101
     quiver()
-        .evaluate("['4142', 0] ~> __binary_get_byte__")
+        .evaluate("['4142', 0, 0, 8] ~> __binary_get__")
         .expect("65"); // 0x41 = 65
     quiver()
-        .evaluate("['4142', 1] ~> __binary_get_byte__")
+        .evaluate("['4142', 1, 0, 8] ~> __binary_get__")
         .expect("66"); // 0x42 = 66
 }
 
@@ -80,14 +80,14 @@ fn test_binary_get_byte_builtin() {
 fn test_binary_get_byte_bounds() {
     // Test bounds checking
     quiver()
-        .evaluate("['68656c6c6f', 5] ~> __binary_get_byte__")
+        .evaluate("['68656c6c6f', 5, 0, 8] ~> __binary_get__")
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
-            "Index 5 out of bounds for binary of length 5".to_string(),
+            "Not enough bits: need 8 bits starting at byte 5 bit 0".to_string(),
         ));
     quiver()
-        .evaluate("['68656c6c6f', -1] ~> __binary_get_byte__")
+        .evaluate("['68656c6c6f', -1, 0, 8] ~> __binary_get__")
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
-            "Index cannot be negative".to_string(),
+            "Byte offset cannot be negative".to_string(),
         ));
 }
 

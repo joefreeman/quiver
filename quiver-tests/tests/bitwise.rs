@@ -71,37 +71,37 @@ fn test_binary_not() {
 
 #[test]
 fn test_binary_shift_left() {
-    // Test left shift by 1: 0x01 << 1 = 0x02
+    // Test left shift by 1: 0x01 << 1 = 0x02 (positive = left)
     quiver()
-        .evaluate("['01', 1] ~> __binary_shift_left__")
+        .evaluate("['01', 1] ~> __binary_shift__")
         .expect("'02'");
 
     // Test left shift by 4: 0x0F << 4 = 0xF0
     quiver()
-        .evaluate("['0f', 4] ~> __binary_shift_left__")
+        .evaluate("['0f', 4] ~> __binary_shift__")
         .expect("'f0'");
 
     // Test multi-byte shift: 0x0001 << 8 = 0x0100
     quiver()
-        .evaluate("['0001', 8] ~> __binary_shift_left__")
+        .evaluate("['0001', 8] ~> __binary_shift__")
         .expect("'0100'");
 }
 
 #[test]
 fn test_binary_shift_right() {
-    // Test right shift by 1: 0x02 >> 1 = 0x01
+    // Test right shift by 1: 0x02 >> 1 = 0x01 (negative = right)
     quiver()
-        .evaluate("['02', 1] ~> __binary_shift_right__")
+        .evaluate("['02', -1] ~> __binary_shift__")
         .expect("'01'");
 
     // Test right shift by 4: 0xF0 >> 4 = 0x0F
     quiver()
-        .evaluate("['f0', 4] ~> __binary_shift_right__")
+        .evaluate("['f0', -4] ~> __binary_shift__")
         .expect("'0f'");
 
     // Test multi-byte shift: 0x0100 >> 8 = 0x0001
     quiver()
-        .evaluate("['0100', 8] ~> __binary_shift_right__")
+        .evaluate("['0100', -8] ~> __binary_shift__")
         .expect("'0001'");
 }
 
@@ -130,15 +130,15 @@ fn test_binary_popcount_critical() {
 fn test_binary_get_bit_pos() {
     // Test getting specific bits from 0x80 = 10000000
     quiver()
-        .evaluate("['80', 0] ~> __binary_get_bit_pos__")
+        .evaluate("['80', 0, 0, 1] ~> __binary_get__")
         .expect("1"); // MSB is set
     quiver()
-        .evaluate("['80', 7] ~> __binary_get_bit_pos__")
+        .evaluate("['80', 0, 7, 1] ~> __binary_get__")
         .expect("0"); // LSB is not set
 
     // Test with 0xFF = 11111111 (all bits set)
     quiver()
-        .evaluate("['ff', 3] ~> __binary_get_bit_pos__")
+        .evaluate("['ff', 0, 3, 1] ~> __binary_get__")
         .expect("1"); // Bit 3 is set
 }
 
@@ -146,12 +146,12 @@ fn test_binary_get_bit_pos() {
 fn test_binary_set_bit() {
     // Test setting bit 0 in 0x00 to get 0x80
     quiver()
-        .evaluate("['00', 0, 1] ~> __binary_set_bit__")
+        .evaluate("['00', 0, 0, 1, 1] ~> __binary_set__")
         .expect("'80'");
 
     // Test clearing bit 0 in 0xFF to get 0x7F
     quiver()
-        .evaluate("['ff', 0, 0] ~> __binary_set_bit__")
+        .evaluate("['ff', 0, 0, 0, 1] ~> __binary_set__")
         .expect("'7f'");
 
     // Test setting multiple bits
@@ -159,8 +159,8 @@ fn test_binary_set_bit() {
         .evaluate(
             r#"
             start = '00'
-            bit0_set = [start, 0, 1] ~> __binary_set_bit__
-            [bit0_set, 7, 1] ~> __binary_set_bit__
+            bit0_set = [start, 0, 0, 1, 1] ~> __binary_set__
+            [bit0_set, 0, 7, 1, 1] ~> __binary_set__
             "#,
         )
         .expect("'81'"); // 10000001
@@ -176,9 +176,9 @@ fn test_binary_popcount_hamt_pattern() {
             r#"
             // Create binary: set some bits to simulate HAMT bitmap
             empty = 4 ~> __binary_new__
-            with_bit0 = [empty, 0, 1] ~> __binary_set_bit__
-            with_bit5 = [with_bit0, 5, 1] ~> __binary_set_bit__
-            with_bit10 = [with_bit5, 10, 1] ~> __binary_set_bit__
+            with_bit0 = [empty, 0, 0, 1, 1] ~> __binary_set__
+            with_bit5 = [with_bit0, 0, 5, 1, 1] ~> __binary_set__
+            with_bit10 = [with_bit5, 1, 2, 1, 1] ~> __binary_set__
             with_bit10 ~> __binary_popcount__
             "#,
         )
@@ -191,12 +191,12 @@ fn test_shift_operations_boundary() {
 
     // Shift by 0 should be identity
     quiver()
-        .evaluate("['ff', 0] ~> __binary_shift_left__")
+        .evaluate("['ff', 0] ~> __binary_shift__")
         .expect("'ff'");
 
     // Large shift should result in zeros
     quiver()
-        .evaluate("['ff', 100] ~> __binary_shift_left__")
+        .evaluate("['ff', 100] ~> __binary_shift__")
         .expect("'00'");
 }
 
@@ -218,26 +218,50 @@ fn test_bitwise_chaining() {
 
 #[test]
 fn test_error_conditions() {
-    // Test negative shift
-    quiver()
-        .evaluate("['ff', -1] ~> __binary_shift_left__")
-        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
-            "Shift amount cannot be negative".to_string(),
-        ));
-
     // Test bit index out of bounds
     quiver()
-        .evaluate("['ff', 100] ~> __binary_get_bit_pos__")
+        .evaluate("['ff', 12, 4, 1] ~> __binary_get__")
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
-            "Bit index 100 out of bounds for binary with 8 bits".to_string(),
+            "Not enough bits: need 1 bits starting at byte 12 bit 4".to_string(),
         ));
 
-    // Test invalid bit value for set_bit
+    // Test invalid bit offset
     quiver()
-        .evaluate("['ff', 0, 2] ~> __binary_set_bit__")
+        .evaluate("['ff', 0, 8, 1] ~> __binary_get__")
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
-            "Bit value must be 0 or 1".to_string(),
+            "Bit offset must be 0-7".to_string(),
         ));
+}
+
+#[test]
+fn test_bit_unaligned_access() {
+    // Test reading and writing bits that span byte boundaries
+
+    // Create binary: 0xAB = 10101011
+    // Read 4 bits starting at bit 2: should get bits 2-5 = 1010 = 10
+    quiver()
+        .evaluate("['ab', 0, 2, 4] ~> __binary_get__")
+        .expect("10"); // 1010 in binary = 10 in decimal
+
+    // Test writing across byte boundaries
+    // Start with 0x0000, write 12 bits starting at byte 0 bit 4
+    // Writing 0xABC (101010111100 in binary)
+    quiver()
+        .evaluate(
+            r#"
+            start = '0000'
+            result = [start, 0, 4, 2748, 12] ~> __binary_set__
+            result
+            "#,
+        )
+        .expect("'0abc'"); // Should be 0x0ABC when aligned to bit 4
+
+    // Test reading multi-byte values starting at odd bit positions
+    // 0xFFFF = 1111111111111111
+    // Read 8 bits starting at byte 0 bit 4: should get 11111111 = 255
+    quiver()
+        .evaluate("['ffff', 0, 4, 8] ~> __binary_get__")
+        .expect("255");
 }
 
 #[test]
@@ -250,17 +274,17 @@ fn test_hamt_simulation() {
             bitmap = 8 ~> __binary_new__,  // 8-byte bitmap
 
             // Set bits at positions that would represent hash collisions
-            step1 = [bitmap, 5, 1] ~> __binary_set_bit__,   // Set bit 5
-            step2 = [step1, 13, 1] ~> __binary_set_bit__,   // Set bit 13
-            step3 = [step2, 21, 1] ~> __binary_set_bit__,   // Set bit 21
+            step1 = [bitmap, 0, 5, 1, 1] ~> __binary_set__,   // Set bit 5
+            step2 = [step1, 1, 5, 1, 1] ~> __binary_set__,   // Set bit 13
+            step3 = [step2, 2, 5, 1, 1] ~> __binary_set__,   // Set bit 21
 
             // Count how many slots are occupied
             occupied_count = step3 ~> __binary_popcount__,
 
             // Extract a 5-bit chunk (like HAMT does for navigation)
-            shifted = [step3, 3] ~> __binary_shift_right__,  // Shift right by 3
+            shifted = [step3, -3] ~> __binary_shift__,  // Shift right by 3 (negative = right)
             mask = 4 ~> __binary_new__,  // Create mask binary
-            mask_with_bits = [mask, 0, 1] ~> __binary_set_bit__,  // Set LSB
+            mask_with_bits = [mask, 0, 0, 1, 1] ~> __binary_set__,  // Set LSB
             chunk = [shifted, mask_with_bits] ~> __binary_and__,
 
             occupied_count

@@ -119,6 +119,25 @@ fn create_builtin_registry() -> BuiltinRegistry {
             (None, TypeSpec::Integer),
         ],
     );
+    let bin_int_int_int = TypeSpec::Tuple(
+        None,
+        vec![
+            (None, TypeSpec::Binary),
+            (None, TypeSpec::Integer),
+            (None, TypeSpec::Integer),
+            (None, TypeSpec::Integer),
+        ],
+    );
+    let bin_int_int_int_int = TypeSpec::Tuple(
+        None,
+        vec![
+            (None, TypeSpec::Binary),
+            (None, TypeSpec::Integer),
+            (None, TypeSpec::Integer),
+            (None, TypeSpec::Integer),
+            (None, TypeSpec::Integer),
+        ],
+    );
 
     // Math functions
     register_builtin!(functions, "abs", math::builtin_math_abs, TypeSpec::Integer => TypeSpec::Integer);
@@ -139,7 +158,6 @@ fn create_builtin_registry() -> BuiltinRegistry {
     // Binary functions
     register_builtin!(functions, "binary_new", binary::builtin_binary_new, TypeSpec::Integer => TypeSpec::Binary);
     register_builtin!(functions, "binary_length", binary::builtin_binary_length, TypeSpec::Binary => TypeSpec::Integer);
-    register_builtin!(functions, "binary_get_byte", binary::builtin_binary_get_byte, bin_int.clone() => TypeSpec::Integer);
     register_builtin!(functions, "binary_concat", binary::builtin_binary_concat, bin_bin.clone() => TypeSpec::Binary);
 
     // Bitwise operations
@@ -149,31 +167,21 @@ fn create_builtin_registry() -> BuiltinRegistry {
     register_builtin!(functions, "binary_not", binary::builtin_binary_not, TypeSpec::Binary => TypeSpec::Binary);
 
     // Shift operations
-    register_builtin!(functions, "binary_shift_left", binary::builtin_binary_shift_left, bin_int.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_shift_right", binary::builtin_binary_shift_right, bin_int.clone() => TypeSpec::Binary);
+    register_builtin!(functions, "binary_shift", binary::builtin_binary_shift, bin_int.clone() => TypeSpec::Binary);
 
     // Bit-level operations
-    register_builtin!(functions, "binary_get_bit_pos", binary::builtin_binary_get_bit_pos, bin_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "binary_set_bit", binary::builtin_binary_set_bit, bin_int_int.clone() => TypeSpec::Binary);
     register_builtin!(functions, "binary_popcount", binary::builtin_binary_popcount, TypeSpec::Binary => TypeSpec::Integer);
 
-    // Multi-byte operations
-    register_builtin!(functions, "binary_get_u32", binary::builtin_binary_get_u32, bin_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "binary_set_u32", binary::builtin_binary_set_u32, bin_int_int.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_get_u64", binary::builtin_binary_get_u64, bin_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "binary_set_u64", binary::builtin_binary_set_u64, bin_int_int.clone() => TypeSpec::Binary);
+    // Multi-byte operations (unified bit/byte access)
+    register_builtin!(functions, "binary_get", binary::builtin_binary_get, bin_int_int_int.clone() => TypeSpec::Integer);
+    register_builtin!(functions, "binary_set", binary::builtin_binary_set, bin_int_int_int_int.clone() => TypeSpec::Binary);
 
     // Slicing operations
     register_builtin!(functions, "binary_slice", binary::builtin_binary_slice, bin_int_int.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_take", binary::builtin_binary_take, bin_int.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_drop", binary::builtin_binary_drop, bin_int.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_pad", binary::builtin_binary_pad, bin_int_int.clone() => TypeSpec::Binary);
 
     // Hashing operations
     register_builtin!(functions, "binary_hash32", binary::builtin_binary_hash32, TypeSpec::Binary => TypeSpec::Integer);
     register_builtin!(functions, "binary_hash64", binary::builtin_binary_hash64, TypeSpec::Binary => TypeSpec::Integer);
-    register_builtin!(functions, "string_hash", binary::builtin_string_hash, TypeSpec::Binary => TypeSpec::Integer);
-    register_builtin!(functions, "hash_chunk", binary::builtin_hash_chunk, bin_int.clone() => TypeSpec::Integer);
 
     BuiltinRegistry { functions }
 }
