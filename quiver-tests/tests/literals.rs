@@ -55,3 +55,10 @@ fn test_decimal_still_works() {
 fn test_negative_decimal_still_works() {
     quiver().evaluate("-42").expect("-42");
 }
+
+#[test]
+fn test_binary_literal_constant() {
+    // Test that binary literals create constant references
+    quiver().evaluate("'00ff'").expect("'00ff'");
+    quiver().evaluate("'abcd'").expect("'abcd'");
+}
