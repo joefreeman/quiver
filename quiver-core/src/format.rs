@@ -1,7 +1,13 @@
 use crate::bytecode::Constant;
-use crate::error::Error;
+use crate::program::Program;
 use crate::types::{TupleLookup, Type};
 use crate::value::{Binary, Value};
+
+/// Trait for looking up binary data from Binary references
+pub trait BinaryLookup {
+    /// Get the bytes for a binary reference, or None if not found
+    fn get_bytes(&self, binary: &Binary) -> Option<&[u8]>;
+}
 
 /// Helper function to format bytes as a string if they represent valid UTF-8 text
 fn try_format_as_string(bytes: &[u8]) -> Option<String> {
@@ -138,62 +144,57 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
     }
 }
 
-/// Get binary bytes from either a constant or heap
-fn get_binary_bytes(
-    binary: &Binary,
-    heap: &[Vec<u8>],
-    constants: &[Constant],
-) -> Result<Vec<u8>, Error> {
-    match binary {
-        Binary::Constant(index) => {
-            let constant = constants
-                .get(*index)
-                .ok_or(Error::ConstantUndefined(*index))?;
-            match constant {
-                Constant::Binary(bytes) => Ok(bytes.clone()),
-                _ => Err(Error::TypeMismatch {
-                    expected: "binary".to_string(),
-                    found: "integer".to_string(),
-                }),
-            }
-        }
-        Binary::Heap(index) => heap.get(*index).cloned().ok_or_else(|| {
-            Error::InvalidArgument(format!("Heap binary index {} not found", index))
-        }),
-    }
-}
-
 /// Format a binary value showing its actual content
-pub fn format_binary(binary: &Binary, heap: &[Vec<u8>], constants: &[Constant]) -> String {
-    match get_binary_bytes(binary, heap, constants) {
-        Ok(bytes) => {
-            if bytes.len() <= 8 {
-                // Show short binaries in full
-                format!("'{}'", hex::encode(bytes))
-            } else {
-                // Show truncated for long binaries
-                format!("'{}…'", hex::encode(&bytes[..8]))
-            }
-        }
-        Err(_) => "<invalid binary>".to_string(),
+fn format_binary(bytes: &[u8]) -> String {
+    if bytes.len() <= 8 {
+        // Show short binaries in full
+        format!("'{}'", hex::encode(bytes))
+    } else {
+        // Show truncated for long binaries
+        format!("'{}…'", hex::encode(&bytes[..8]))
     }
 }
 
-pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::Program) -> String {
-    let constants = program.get_constants();
+/// Standard implementation of BinaryLookup using heap and program
+pub struct HeapAndProgramLookup<'a> {
+    pub heap: &'a [Vec<u8>],
+    pub program: &'a Program,
+}
 
+impl<'a> BinaryLookup for HeapAndProgramLookup<'a> {
+    fn get_bytes(&self, binary: &Binary) -> Option<&[u8]> {
+        match binary {
+            Binary::Constant(idx) => {
+                if let Some(Constant::Binary(bytes)) = self.program.get_constant(*idx) {
+                    Some(bytes.as_slice())
+                } else {
+                    None
+                }
+            }
+            Binary::Heap(idx) => self.heap.get(*idx).map(|v| v.as_slice()),
+        }
+    }
+}
+
+pub fn format_value<L: BinaryLookup>(value: &Value, lookup: &L, program: &Program) -> String {
     match value {
         Value::Function(function, _) => format!("#{}", function),
         Value::Builtin(name) => format!("__{}__", name),
         Value::Integer(i) => i.to_string(),
-        Value::Binary(binary) => format_binary(binary, heap, constants),
+        Value::Binary(binary) => {
+            if let Some(bytes) = lookup.get_bytes(binary) {
+                format_binary(bytes)
+            } else {
+                "<invalid binary>".to_string()
+            }
+        }
         Value::Process(process_id, _) => format!("@{}", process_id),
         Value::Tuple(type_id, elements) => {
             if let Some(type_info) = program.lookup_tuple(*type_id) {
                 if type_info.name.as_deref() == Some("Str")
                     && let [Value::Binary(binary)] = elements.as_slice()
-                    && let Ok(bytes) = get_binary_bytes(binary, heap, constants)
-                    && let Some(formatted) = try_format_as_string(&bytes)
+                    && let Some(bytes) = lookup.get_bytes(binary)
+                    && let Some(formatted) = try_format_as_string(bytes)
                 {
                     return formatted;
                 }
@@ -205,7 +206,7 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
                         .iter()
                         .enumerate()
                         .map(|(i, elem)| {
-                            let formatted = format_value(elem, heap, program);
+                            let formatted = format_value(elem, lookup, program);
                             match type_info.fields.get(i).and_then(|(name, _)| name.as_ref()) {
                                 Some(name) => format!("{}: {}", name, formatted),
                                 None => formatted,
@@ -230,7 +231,7 @@ pub fn format_value(value: &Value, heap: &[Vec<u8>], program: &crate::program::P
                     if i > 0 {
                         result.push_str(", ");
                     }
-                    result.push_str(&format_value(element, heap, program));
+                    result.push_str(&format_value(element, lookup, program));
                 }
                 result.push(']');
                 result

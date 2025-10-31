@@ -420,6 +420,7 @@ name = "quiver-web"
 version = "0.3.0"
 dependencies = [
  "console_error_panic_hook",
+ "hex",
  "js-sys",
  "quiver-compiler",
  "quiver-core",

@@ -1,3 +1,7 @@
+use quiver_core::bytecode::Constant;
+use quiver_core::executor::Executor;
+use quiver_core::program::Program;
+use quiver_core::value::Binary;
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
@@ -11,11 +15,9 @@ pub enum Value {
     Integer {
         value: i64,
     },
-    BinaryConstant {
-        index: usize,
-    },
-    BinaryHeap {
-        index: usize,
+    Binary {
+        // Hex-encoded binary data for JSON serialization
+        hex: String,
     },
     Tuple {
         #[serde(rename = "typeId")]
@@ -36,54 +38,131 @@ pub enum Value {
     },
 }
 
-impl From<quiver_core::value::Value> for Value {
-    fn from(value: quiver_core::value::Value) -> Self {
-        match value {
-            quiver_core::value::Value::Integer(i) => Value::Integer { value: i },
-            quiver_core::value::Value::Binary(b) => match b {
-                quiver_core::value::Binary::Constant(index) => Value::BinaryConstant { index },
-                quiver_core::value::Binary::Heap(index) => Value::BinaryHeap { index },
-            },
-            quiver_core::value::Value::Tuple(type_id, values) => Value::Tuple {
-                type_id,
-                values: values.into_iter().map(Into::into).collect(),
-            },
-            quiver_core::value::Value::Function(index, captures) => Value::Function {
-                index,
-                captures: captures.into_iter().map(Into::into).collect(),
-            },
-            quiver_core::value::Value::Builtin(name) => Value::Builtin { name },
-            quiver_core::value::Value::Process(pid, function_index) => Value::Process {
-                pid,
-                function_index,
-            },
-        }
+impl Value {
+    /// Convert web value to core value for formatting purposes
+    /// Extracts hex-encoded binaries and adds them to the heap
+    /// Returns (core_value, extended_heap)
+    pub fn to_core_for_formatting(
+        &self,
+        heap: &[Vec<u8>],
+    ) -> (quiver_core::value::Value, Vec<Vec<u8>>) {
+        let mut extended_heap = heap.to_vec();
+        let core_value = self.to_core_recursive(&mut extended_heap);
+        (core_value, extended_heap)
     }
-}
 
-impl From<Value> for quiver_core::value::Value {
-    fn from(value: Value) -> Self {
-        match value {
-            Value::Integer { value } => quiver_core::value::Value::Integer(value),
-            Value::BinaryConstant { index } => {
-                quiver_core::value::Value::Binary(quiver_core::value::Binary::Constant(index))
-            }
-            Value::BinaryHeap { index } => {
-                quiver_core::value::Value::Binary(quiver_core::value::Binary::Heap(index))
+    fn to_core_recursive(&self, heap: &mut Vec<Vec<u8>>) -> quiver_core::value::Value {
+        match self {
+            Value::Integer { value } => quiver_core::value::Value::Integer(*value),
+            Value::Binary { hex } => {
+                // Decode hex and add to heap
+                let bytes = hex::decode(hex).unwrap_or_default();
+                let heap_idx = heap.len();
+                heap.push(bytes);
+                quiver_core::value::Value::Binary(Binary::Heap(heap_idx))
             }
             Value::Tuple { type_id, values } => quiver_core::value::Value::Tuple(
-                type_id,
-                values.into_iter().map(Into::into).collect(),
+                *type_id,
+                values.iter().map(|v| v.to_core_recursive(heap)).collect(),
             ),
             Value::Function { index, captures } => quiver_core::value::Value::Function(
-                index,
-                captures.into_iter().map(Into::into).collect(),
+                *index,
+                captures.iter().map(|v| v.to_core_recursive(heap)).collect(),
             ),
-            Value::Builtin { name } => quiver_core::value::Value::Builtin(name),
+            Value::Builtin { name } => quiver_core::value::Value::Builtin(name.clone()),
             Value::Process {
                 pid,
                 function_index,
-            } => quiver_core::value::Value::Process(pid, function_index),
+            } => quiver_core::value::Value::Process(*pid, *function_index),
+        }
+    }
+
+    /// Convert from core value to web value
+    /// Requires heap data and program to resolve binary references
+    pub fn from_core_value(
+        value: &quiver_core::value::Value,
+        heap_data: &[Vec<u8>],
+        program: &Program,
+    ) -> Self {
+        match value {
+            quiver_core::value::Value::Integer(i) => Value::Integer { value: *i },
+            quiver_core::value::Value::Binary(binary) => {
+                // Resolve binary reference to actual bytes
+                let bytes = match binary {
+                    Binary::Constant(idx) => program
+                        .get_constant(*idx)
+                        .and_then(|c| {
+                            if let Constant::Binary(b) = c {
+                                Some(b.as_slice())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(&[]),
+                    Binary::Heap(idx) => heap_data.get(*idx).map(|v| v.as_slice()).unwrap_or(&[]),
+                };
+
+                Value::Binary {
+                    hex: hex::encode(bytes),
+                }
+            }
+            quiver_core::value::Value::Tuple(type_id, values) => Value::Tuple {
+                type_id: *type_id,
+                values: values
+                    .iter()
+                    .map(|v| Value::from_core_value(v, heap_data, program))
+                    .collect(),
+            },
+            quiver_core::value::Value::Function(index, captures) => Value::Function {
+                index: *index,
+                captures: captures
+                    .iter()
+                    .map(|v| Value::from_core_value(v, heap_data, program))
+                    .collect(),
+            },
+            quiver_core::value::Value::Builtin(name) => Value::Builtin { name: name.clone() },
+            quiver_core::value::Value::Process(pid, function_index) => Value::Process {
+                pid: *pid,
+                function_index: *function_index,
+            },
+        }
+    }
+
+    /// Convert from web value to core value
+    /// Requires mutable executor to allocate binaries to heap
+    pub fn to_core_value(
+        self,
+        executor: &mut Executor,
+    ) -> std::result::Result<quiver_core::value::Value, String> {
+        match self {
+            Value::Integer { value } => Ok(quiver_core::value::Value::Integer(value)),
+            Value::Binary { hex } => {
+                // Decode hex string and allocate to executor heap
+                let bytes = hex::decode(&hex).map_err(|e| format!("Invalid hex: {}", e))?;
+                let binary = executor
+                    .allocate_binary(bytes)
+                    .map_err(|e| format!("Failed to allocate binary: {:?}", e))?;
+                Ok(quiver_core::value::Value::Binary(binary))
+            }
+            Value::Tuple { type_id, values } => {
+                let core_values: std::result::Result<Vec<_>, _> = values
+                    .into_iter()
+                    .map(|v| v.to_core_value(executor))
+                    .collect();
+                Ok(quiver_core::value::Value::Tuple(type_id, core_values?))
+            }
+            Value::Function { index, captures } => {
+                let core_captures: std::result::Result<Vec<_>, _> = captures
+                    .into_iter()
+                    .map(|v| v.to_core_value(executor))
+                    .collect();
+                Ok(quiver_core::value::Value::Function(index, core_captures?))
+            }
+            Value::Builtin { name } => Ok(quiver_core::value::Value::Builtin(name)),
+            Value::Process {
+                pid,
+                function_index,
+            } => Ok(quiver_core::value::Value::Process(pid, function_index)),
         }
     }
 }

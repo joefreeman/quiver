@@ -278,7 +278,11 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
 
         // Print result unless quiet or OK/NIL
         if !quiet && !value.is_ok() && !value.is_nil() {
-            println!("{}", format::format_value(&value, &[], &program));
+            let lookup = format::HeapAndProgramLookup {
+                heap: &[],
+                program: &program,
+            };
+            println!("{}", format::format_value(&value, &lookup, &program));
         }
     }
 

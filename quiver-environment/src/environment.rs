@@ -940,12 +940,21 @@ impl Environment {
 
     /// Format a value for display
     pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
-        quiver_core::format::format_value(value, heap, &self.program)
+        let lookup = quiver_core::format::HeapAndProgramLookup {
+            heap,
+            program: &self.program,
+        };
+        quiver_core::format::format_value(value, &lookup, &self.program)
     }
 
     /// Format a type for display
     pub fn format_type(&self, ty: &Type) -> String {
         quiver_core::format::format_type(&self.program, ty)
+    }
+
+    /// Get a reference to the program
+    pub fn get_program(&self) -> &Program {
+        &self.program
     }
 
     /// Get the formatted type for a process given its function index

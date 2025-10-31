@@ -1,7 +1,7 @@
 use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction};
 use crate::executor::Executor;
 use crate::types::{NIL, OK, TupleLookup, TupleTypeInfo, Type};
-use crate::value::Value;
+use crate::value::{Binary, Value};
 use serde::{Deserialize, Serialize};
 
 mod optimisation;
@@ -271,12 +271,20 @@ impl Program {
                 let const_idx = self.register_constant(Constant::Integer(*n));
                 vec![Instruction::Constant(const_idx)]
             }
-            Value::Binary(bin_ref) => {
-                let bytes = executor
-                    .get_binary_bytes(bin_ref)
-                    .expect("Binary should be valid during value serialization");
-                let const_idx = self.register_constant(Constant::Binary(bytes));
-                vec![Instruction::Constant(const_idx)]
+            Value::Binary(binary) => {
+                match binary {
+                    Binary::Constant(const_idx) => {
+                        // Already a constant, just reference it
+                        vec![Instruction::Constant(*const_idx)]
+                    }
+                    Binary::Heap(heap_idx) => {
+                        // Get bytes from heap and create a new constant
+                        let binary_data = &executor.heap[*heap_idx];
+                        let bytes = binary_data.to_vec();
+                        let const_idx = self.register_constant(Constant::Binary(bytes));
+                        vec![Instruction::Constant(const_idx)]
+                    }
+                }
             }
             Value::Tuple(tuple_id, elements) => {
                 let mut instrs = Vec::new();

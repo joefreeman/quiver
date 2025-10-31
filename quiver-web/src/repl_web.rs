@@ -439,10 +439,14 @@ impl Environment {
         value: wasm_bindgen::JsValue,
         heap: wasm_bindgen::JsValue,
     ) -> std::result::Result<String, wasm_bindgen::JsValue> {
-        let value: crate::types::Value = serde_wasm_bindgen::from_value(value)?;
+        let web_value: crate::types::Value = serde_wasm_bindgen::from_value(value)?;
         let heap: Vec<Vec<u8>> = serde_wasm_bindgen::from_value(heap)?;
-        let value: quiver_core::value::Value = value.into();
-        Ok(self.environment.borrow().format_value(&value, &heap))
+        // Convert web value to core value, extending heap with any hex-encoded binaries
+        let (core_value, extended_heap) = web_value.to_core_for_formatting(&heap);
+        Ok(self
+            .environment
+            .borrow()
+            .format_value(&core_value, &extended_heap))
     }
 
     /// Format a type for display (derives type from value)
@@ -451,9 +455,10 @@ impl Environment {
         &self,
         value: wasm_bindgen::JsValue,
     ) -> std::result::Result<String, wasm_bindgen::JsValue> {
-        let value: crate::types::Value = serde_wasm_bindgen::from_value(value)?;
-        let value: quiver_core::value::Value = value.into();
-        let ty = self.environment.borrow().value_to_type(&value);
+        let web_value: crate::types::Value = serde_wasm_bindgen::from_value(value)?;
+        // Convert to core value with empty heap (formatting doesn't need actual binary data)
+        let (core_value, _heap) = web_value.to_core_for_formatting(&[]);
+        let ty = self.environment.borrow().value_to_type(&core_value);
         Ok(self.environment.borrow().format_type(&ty))
     }
 
@@ -466,7 +471,7 @@ impl Environment {
         match result {
             RequestResult::Result(Ok((value, heap))) => {
                 callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
-                    value: value.into(),
+                    value: crate::types::Value::from_core_value(&value, &heap, env.get_program()),
                     heap,
                 })));
             }
@@ -496,7 +501,12 @@ impl Environment {
                     let result = info.result.map(|r| match r {
                         Ok(value) => crate::types::Result::Ok {
                             value: EvaluationResult {
-                                value: value.into(),
+                                // Note: Process info doesn't preserve heap data, so binaries will be empty
+                                value: crate::types::Value::from_core_value(
+                                    &value,
+                                    &[],
+                                    env.get_program(),
+                                ),
                                 heap: vec![],
                             },
                         },

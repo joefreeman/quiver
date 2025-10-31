@@ -1,3 +1,4 @@
+use crate::binary::BinaryData;
 use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{BuiltinInfo, Constant, Function, Instruction};
 use crate::error::Error;
@@ -27,8 +28,8 @@ pub struct Executor {
     builtins: Vec<BuiltinInfo>,
     tuples: Vec<TupleTypeInfo>,
     types: Vec<Type>,
-    // Heap for runtime-allocated binaries
-    heap: Vec<Vec<u8>>,
+    // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
+    pub heap: Vec<BinaryData>,
 }
 
 impl TupleLookup for Executor {
@@ -48,49 +49,51 @@ impl Executor {
         self.constants.get(index)
     }
 
-    pub fn with_binary_bytes<F, R>(&self, binary: &Binary, f: F) -> Result<R, Error>
-    where
-        F: FnOnce(&[u8]) -> Result<R, Error>,
-    {
+    /// Get BinaryData from either constants or heap
+    pub fn get_binary_data(&self, binary: &Binary) -> Result<&BinaryData, Error> {
         match binary {
             Binary::Constant(index) => {
                 let constant = self
                     .get_constant(*index)
                     .ok_or(Error::ConstantUndefined(*index))?;
                 match constant {
-                    Constant::Binary(bytes) => f(bytes),
+                    Constant::Binary(_bytes) => {
+                        // For constants, we need to return a reference, but we only have Vec<u8>
+                        // This is a limitation - we'll need to handle this differently
+                        // For now, return an error - we'll fix this properly
+                        Err(Error::InvalidArgument(
+                            "Getting BinaryData from constant not yet implemented".to_string(),
+                        ))
+                    }
                     _ => Err(Error::TypeMismatch {
                         expected: "binary".to_string(),
                         found: "integer".to_string(),
                     }),
                 }
             }
-            Binary::Heap(index) => {
-                let bytes = self.heap.get(*index).ok_or_else(|| {
-                    Error::InvalidArgument(format!("Heap binary index {} not found", index))
-                })?;
-                f(bytes)
-            }
+            Binary::Heap(index) => self.heap.get(*index).ok_or_else(|| {
+                Error::InvalidArgument(format!("Heap binary index {} not found", index))
+            }),
         }
     }
 
-    /// Convenience method that clones the binary data
-    /// For cases where the closure API would be cumbersome (e.g., multiple binary accesses)
-    pub fn get_binary_bytes(&self, binary: &Binary) -> Result<Vec<u8>, Error> {
-        self.with_binary_bytes(binary, |bytes| Ok(bytes.to_vec()))
-    }
-
-    pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
-        if bytes.len() > MAX_BINARY_SIZE {
+    /// Allocate BinaryData on the heap and return a Binary reference
+    pub fn allocate_binary_data(&mut self, data: BinaryData) -> Result<Binary, Error> {
+        if data.len() > MAX_BINARY_SIZE {
             return Err(Error::InvalidArgument(format!(
                 "Binary size {} exceeds maximum {}",
-                bytes.len(),
+                data.len(),
                 MAX_BINARY_SIZE
             )));
         }
         let index = self.heap.len();
-        self.heap.push(bytes);
+        self.heap.push(data);
         Ok(Binary::Heap(index))
+    }
+
+    /// Create a binary from Vec<u8>
+    pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
+        self.allocate_binary_data(BinaryData::new(bytes))
     }
 
     pub fn new() -> Self {
@@ -494,7 +497,12 @@ impl Executor {
             .ok_or(Error::ConstantUndefined(index))?;
         let value = match constant {
             Constant::Integer(integer) => Value::Integer(*integer),
-            Constant::Binary(_) => Value::Binary(Binary::Constant(index)),
+            Constant::Binary(bytes) => {
+                // Allocate constant binary to heap and get reference
+                // TODO: Cache this so we don't re-allocate the same constant multiple times
+                let binary_ref = self.allocate_binary(bytes.clone())?;
+                Value::Binary(binary_ref)
+            }
         };
 
         let process = self
@@ -1714,9 +1722,44 @@ impl Executor {
         match (a, b) {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Binary(a), Value::Binary(b)) => {
-                match (self.get_binary_bytes(a), self.get_binary_bytes(b)) {
-                    (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
-                    _ => false,
+                // Compare binary data content
+                match (a, b) {
+                    (Binary::Constant(idx_a), Binary::Constant(idx_b)) => {
+                        // Both are constants - compare the constant data
+                        if let (Some(Constant::Binary(bytes_a)), Some(Constant::Binary(bytes_b))) =
+                            (self.get_constant(*idx_a), self.get_constant(*idx_b))
+                        {
+                            bytes_a == bytes_b
+                        } else {
+                            false
+                        }
+                    }
+                    (Binary::Heap(idx_a), Binary::Heap(idx_b)) => {
+                        // Both are heap - compare the heap data
+                        if let (Some(data_a), Some(data_b)) =
+                            (self.heap.get(*idx_a), self.heap.get(*idx_b))
+                        {
+                            // Compare lengths first (fast path)
+                            if data_a.len() != data_b.len() {
+                                return false;
+                            }
+                            // Compare bytes
+                            data_a.to_vec() == data_b.to_vec()
+                        } else {
+                            false
+                        }
+                    }
+                    (Binary::Constant(idx_c), Binary::Heap(idx_h))
+                    | (Binary::Heap(idx_h), Binary::Constant(idx_c)) => {
+                        // One is constant, one is heap - compare bytes
+                        if let (Some(Constant::Binary(bytes_c)), Some(data_h)) =
+                            (self.get_constant(*idx_c), self.heap.get(*idx_h))
+                        {
+                            bytes_c.as_slice() == data_h.to_vec().as_slice()
+                        } else {
+                            false
+                        }
+                    }
                 }
             }
             (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
@@ -1741,112 +1784,114 @@ impl Executor {
         }
     }
 
-    /// Extract heap data from a value for cross-executor transfer.
-    /// Returns the value with heap indices remapped to 0..n and the extracted heap data.
+    /// Extract heap data from a value for serialization across thread boundaries
+    /// Returns (value, heap_data) where heap_data is a Vec of flattened binary data
     pub fn extract_heap_data(&self, value: &Value) -> Result<(Value, Vec<Vec<u8>>), Error> {
-        let mut heap_data = Vec::new();
-        let mut heap_map = HashMap::new();
-        let converted = self.extract_value_recursive(value, &mut heap_data, &mut heap_map)?;
-        Ok((converted, heap_data))
-    }
+        // Collect all unique heap indices referenced by this value
+        let mut heap_indices = HashSet::new();
+        collect_heap_indices(value, &mut heap_indices);
 
-    fn extract_value_recursive(
-        &self,
-        value: &Value,
-        heap_data: &mut Vec<Vec<u8>>,
-        heap_map: &mut HashMap<usize, usize>,
-    ) -> Result<Value, Error> {
-        match value {
-            Value::Binary(Binary::Heap(heap_index)) => {
-                // Check if we've already extracted this heap entry
-                if let Some(&new_index) = heap_map.get(heap_index) {
-                    return Ok(Value::Binary(Binary::Heap(new_index)));
-                }
+        // Sort indices for deterministic ordering
+        let mut indices_vec: Vec<usize> = heap_indices.into_iter().collect();
+        indices_vec.sort_unstable();
 
-                // Read the binary data from heap
-                let bytes = self.get_binary_bytes(&Binary::Heap(*heap_index))?;
-
-                // Add to extracted heap data with new index
-                let new_index = heap_data.len();
-                heap_data.push(bytes);
-                heap_map.insert(*heap_index, new_index);
-
-                Ok(Value::Binary(Binary::Heap(new_index)))
-            }
-            Value::Binary(Binary::Constant(_)) => {
-                // Constants don't need extraction
-                Ok(value.clone())
-            }
-            Value::Tuple(type_id, elements) => {
-                // Recursively extract from all tuple elements
-                let converted_elements = elements
-                    .iter()
-                    .map(|elem| self.extract_value_recursive(elem, heap_data, heap_map))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Tuple(*type_id, converted_elements))
-            }
-            Value::Function(func_index, captures) => {
-                // Recursively extract from all captures
-                let converted_captures = captures
-                    .iter()
-                    .map(|cap| self.extract_value_recursive(cap, heap_data, heap_map))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Function(*func_index, converted_captures))
-            }
-            // Other value types don't contain heap references
-            Value::Integer(_) | Value::Builtin(_) | Value::Process(_, _) => Ok(value.clone()),
+        // Create index mapping from old heap index to new compact index
+        let mut index_map = HashMap::new();
+        for (new_idx, &old_idx) in indices_vec.iter().enumerate() {
+            index_map.insert(old_idx, new_idx);
         }
-    }
 
+        // Extract and flatten binary data
+        let mut heap_data = Vec::new();
+        for &old_idx in &indices_vec {
+            if let Some(binary_data) = self.heap.get(old_idx) {
+                heap_data.push(binary_data.to_vec());
+            } else {
+                return Err(Error::InvalidArgument(format!(
+                    "Heap index {} not found",
+                    old_idx
+                )));
+            }
+        }
+
+        // Remap value indices
+        let remapped_value = remap_heap_indices(value, &index_map)?;
+
+        Ok((remapped_value, heap_data))
+    }
+}
+
+/// Recursively collect all heap indices referenced by a value
+fn collect_heap_indices(value: &Value, indices: &mut HashSet<usize>) {
+    match value {
+        Value::Binary(Binary::Heap(idx)) => {
+            indices.insert(*idx);
+        }
+        Value::Tuple(_, elements) => {
+            for elem in elements {
+                collect_heap_indices(elem, indices);
+            }
+        }
+        Value::Function(_, captures) => {
+            for capture in captures {
+                collect_heap_indices(capture, indices);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Remap heap indices in a value according to the provided mapping
+fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Result<Value, Error> {
+    match value {
+        Value::Binary(Binary::Heap(old_idx)) => {
+            if let Some(&new_idx) = index_map.get(old_idx) {
+                Ok(Value::Binary(Binary::Heap(new_idx)))
+            } else {
+                Err(Error::InvalidArgument(format!(
+                    "Heap index {} not in mapping",
+                    old_idx
+                )))
+            }
+        }
+        Value::Binary(binary @ Binary::Constant(_)) => Ok(Value::Binary(*binary)),
+        Value::Tuple(type_id, elements) => {
+            let remapped_elements: Result<Vec<_>, _> = elements
+                .iter()
+                .map(|elem| remap_heap_indices(elem, index_map))
+                .collect();
+            Ok(Value::Tuple(*type_id, remapped_elements?))
+        }
+        Value::Function(func_idx, captures) => {
+            let remapped_captures: Result<Vec<_>, _> = captures
+                .iter()
+                .map(|capture| remap_heap_indices(capture, index_map))
+                .collect();
+            Ok(Value::Function(*func_idx, remapped_captures?))
+        }
+        Value::Integer(i) => Ok(Value::Integer(*i)),
+        Value::Builtin(name) => Ok(Value::Builtin(name.clone())),
+        Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
+    }
+}
+
+impl Executor {
     /// Inject heap data into this executor and remap heap indices in the value.
+    /// Binary heap data is allocated to the executor's heap and indices are remapped.
     pub fn inject_heap_data(
         &mut self,
         value: Value,
         heap_data: &[Vec<u8>],
     ) -> Result<Value, Error> {
-        // Allocate all heap entries and build remap table
-        let mut remap = HashMap::new();
-        for (old_index, bytes) in heap_data.iter().enumerate() {
-            let new_index = self.heap.len();
-            self.heap.push(bytes.clone());
-            remap.insert(old_index, new_index);
+        // Allocate all heap data to executor and build index mapping
+        let mut index_map = HashMap::new();
+        for (new_idx, bytes) in heap_data.iter().enumerate() {
+            let heap_idx = self.heap.len();
+            self.heap.push(BinaryData::new(bytes.clone()));
+            index_map.insert(new_idx, heap_idx);
         }
 
-        // Remap heap indices in the value
-        Self::inject_value_recursive(value, &remap)
-    }
-
-    fn inject_value_recursive(value: Value, remap: &HashMap<usize, usize>) -> Result<Value, Error> {
-        match value {
-            Value::Binary(Binary::Heap(old_index)) => {
-                // Remap to new heap index
-                let new_index = remap.get(&old_index).copied().ok_or_else(|| {
-                    Error::InvalidArgument(format!("Heap index {} not in remap table", old_index))
-                })?;
-                Ok(Value::Binary(Binary::Heap(new_index)))
-            }
-            Value::Binary(Binary::Constant(_)) => {
-                // Constants don't need remapping
-                Ok(value)
-            }
-            Value::Tuple(type_id, elements) => {
-                // Recursively remap all tuple elements
-                let remapped_elements = elements
-                    .into_iter()
-                    .map(|elem| Self::inject_value_recursive(elem, remap))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Tuple(type_id, remapped_elements))
-            }
-            Value::Function(func_index, captures) => {
-                // Recursively remap all captures
-                let remapped_captures = captures
-                    .into_iter()
-                    .map(|cap| Self::inject_value_recursive(cap, remap))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Function(func_index, remapped_captures))
-            }
-            // Other value types don't contain heap references
-            Value::Integer(_) | Value::Builtin(_) | Value::Process(_, _) => Ok(value),
-        }
+        // Remap value indices
+        remap_heap_indices(&value, &index_map)
     }
 }

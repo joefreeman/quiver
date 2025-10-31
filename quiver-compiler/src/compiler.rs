@@ -410,7 +410,6 @@ impl<'a> Compiler<'a> {
                 Ok(Type::Integer)
             }
             ast::Literal::Binary(bytes) => {
-                // TODO: is clone bad?
                 let index = self
                     .program
                     .register_constant(Constant::Binary(bytes.clone()));
@@ -1544,16 +1543,23 @@ impl<'a> Compiler<'a> {
                     .register_constant(Constant::Integer(*int_value));
                 Ok((vec![Instruction::Constant(index)], Type::Integer))
             }
-            Value::Binary(binary_ref) => {
-                // Get the binary bytes (handles both Constant and Heap cases)
-                let binary_data = executor.get_binary_bytes(binary_ref).map_err(|e| {
-                    Error::FeatureUnsupported(format!("Failed to get binary bytes: {:?}", e))
-                })?;
-
-                // Create a constant from the binary data
-                let constant = Constant::Binary(binary_data);
-                let index = self.program.register_constant(constant);
-                Ok((vec![Instruction::Constant(index)], Type::Binary))
+            Value::Binary(binary) => {
+                // Binary is already an index reference (Constant or Heap)
+                // For heap binaries, we need to extract bytes from executor
+                match binary {
+                    quiver_core::value::Binary::Constant(const_idx) => {
+                        // Just use the existing constant
+                        Ok((vec![Instruction::Constant(*const_idx)], Type::Binary))
+                    }
+                    quiver_core::value::Binary::Heap(heap_idx) => {
+                        // Extract from executor heap and create a new constant
+                        let binary_data = &executor.heap[*heap_idx];
+                        let bytes = binary_data.to_vec();
+                        let constant = Constant::Binary(bytes);
+                        let index = self.program.register_constant(constant);
+                        Ok((vec![Instruction::Constant(index)], Type::Binary))
+                    }
+                }
             }
             Value::Tuple(tuple_id, fields) => {
                 let mut instructions = Vec::new();
