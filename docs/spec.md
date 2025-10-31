@@ -341,7 +341,7 @@ x = coords ~> .0         // Positional access in pipeline
 
 Functions always have a single parameter and a result. The parameter is explicitly typed, and the result type is inferred.
 
-Functions are defined with `#... { ... }` syntax, where the first `...` is the type definition of the parameter, and the second `...` is the function body (a 'block'; see below).
+Functions are defined with `#... { ... }` syntax, where the first `...` is the type definition of the parameter, and the second `...` is the function body (a 'block'; see above).
 
 Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
@@ -486,13 +486,13 @@ For example, given two processes, `p1` and `p2`, the following select will wait 
 
 ```
 // Wait for
-!(p1 | p2 | 5000)
+!(p1, p2, 5000)
 ```
 
 A select operator can be used in a chain by including the ripple operator (`~`) to refer to the chained value. For example, to wait for a process, but timeout after one second:
 
 ```
-p1 ~> !(~ | 1000)
+p1 ~> !(~, 1000)
 ```
 
 ### Referring to processes
