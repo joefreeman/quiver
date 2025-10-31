@@ -1,0 +1,7 @@
+[
+  and: __integer_and__,
+  or: __integer_or__,
+  xor: __integer_xor__,
+  not: __integer_not__,
+  shift: __integer_shift__
+]

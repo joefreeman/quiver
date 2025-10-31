@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub mod binary;
+pub mod integer;
 pub mod math;
 
 /// Type specification for lazy type resolution
@@ -182,6 +183,14 @@ fn create_builtin_registry() -> BuiltinRegistry {
     // Hashing operations
     register_builtin!(functions, "binary_hash32", binary::builtin_binary_hash32, TypeSpec::Binary => TypeSpec::Integer);
     register_builtin!(functions, "binary_hash64", binary::builtin_binary_hash64, TypeSpec::Binary => TypeSpec::Integer);
+
+    // Integer bitwise operations
+    register_builtin!(functions, "integer_and", integer::builtin_integer_and, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(functions, "integer_or", integer::builtin_integer_or, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(functions, "integer_xor", integer::builtin_integer_xor, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(functions, "integer_not", integer::builtin_integer_not, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(functions, "integer_shift", integer::builtin_integer_shift, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(functions, "integer_popcount", integer::builtin_integer_popcount, TypeSpec::Integer => TypeSpec::Integer);
 
     BuiltinRegistry { functions }
 }
