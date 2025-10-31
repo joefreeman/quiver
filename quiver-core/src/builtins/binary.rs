@@ -6,7 +6,7 @@ use crate::value::Value;
 
 /// Create a new zero-filled binary of the specified size
 /// binary_new(size: int) -> bin
-pub fn builtin_binary_new(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_new(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Integer(size) => {
             if *size < 0 {
@@ -24,7 +24,7 @@ pub fn builtin_binary_new(arg: &Value, program: &mut Executor) -> Result<Value, 
             }
 
             let bytes = vec![0u8; size];
-            let binary = program.allocate_binary(bytes)?;
+            let binary = executor.allocate_binary(bytes)?;
             Ok(Value::Binary(binary))
         }
         other => Err(Error::TypeMismatch {
@@ -36,10 +36,10 @@ pub fn builtin_binary_new(arg: &Value, program: &mut Executor) -> Result<Value, 
 
 /// Get the length of a binary
 /// binary_length(bin) -> int
-pub fn builtin_binary_length(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_length(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
-            program.with_binary_bytes(binary, |bytes| Ok(Value::Integer(bytes.len() as i64)))
+            executor.with_binary_bytes(binary, |bytes| Ok(Value::Integer(bytes.len() as i64)))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -50,11 +50,11 @@ pub fn builtin_binary_length(arg: &Value, program: &mut Executor) -> Result<Valu
 
 /// Get a byte at a specific index (returns 0-255)
 /// binary_get_byte(bin, index: int) -> int
-pub fn builtin_binary_get_byte(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_get_byte(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(index)) => {
-                program.with_binary_bytes(binary, |bytes| {
+                executor.with_binary_bytes(binary, |bytes| {
                     if *index < 0 {
                         return Err(Error::InvalidArgument(
                             "Index cannot be negative".to_string(),
@@ -85,12 +85,12 @@ pub fn builtin_binary_get_byte(arg: &Value, program: &mut Executor) -> Result<Va
 
 /// Concatenate two binaries
 /// binary_concat([bin, bin]) -> bin
-pub fn builtin_binary_concat(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_concat(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                let bytes_a = program.get_binary_bytes(binary_a)?;
-                let bytes_b = program.get_binary_bytes(binary_b)?;
+                let bytes_a = executor.get_binary_bytes(binary_a)?;
+                let bytes_b = executor.get_binary_bytes(binary_b)?;
 
                 let total_len = bytes_a.len() + bytes_b.len();
                 if total_len > crate::value::MAX_BINARY_SIZE {
@@ -105,7 +105,7 @@ pub fn builtin_binary_concat(arg: &Value, program: &mut Executor) -> Result<Valu
                 result.extend_from_slice(&bytes_a);
                 result.extend_from_slice(&bytes_b);
 
-                let binary = program.allocate_binary(result)?;
+                let binary = executor.allocate_binary(result)?;
                 Ok(Value::Binary(binary))
             }
             _ => Err(Error::TypeMismatch {
@@ -126,13 +126,13 @@ pub fn builtin_binary_concat(arg: &Value, program: &mut Executor) -> Result<Valu
 
 /// Bitwise AND of two binaries
 /// binary_and([bin, bin]) -> bin
-pub fn builtin_binary_and(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_and(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                    let bytes_a = program.get_binary_bytes(binary_a)?;
-                    let bytes_b = program.get_binary_bytes(binary_b)?;
+                    let bytes_a = executor.get_binary_bytes(binary_a)?;
+                    let bytes_b = executor.get_binary_bytes(binary_b)?;
 
                     // For bitwise operations, take the shorter length
                     let result_len = bytes_a.len().min(bytes_b.len());
@@ -142,7 +142,7 @@ pub fn builtin_binary_and(arg: &Value, program: &mut Executor) -> Result<Value, 
                         result.push(bytes_a[i] & bytes_b[i]);
                     }
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -160,13 +160,13 @@ pub fn builtin_binary_and(arg: &Value, program: &mut Executor) -> Result<Value, 
 
 /// Bitwise OR of two binaries
 /// binary_or([bin, bin]) -> bin
-pub fn builtin_binary_or(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_or(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                    let bytes_a = program.get_binary_bytes(binary_a)?;
-                    let bytes_b = program.get_binary_bytes(binary_b)?;
+                    let bytes_a = executor.get_binary_bytes(binary_a)?;
+                    let bytes_b = executor.get_binary_bytes(binary_b)?;
 
                     // For bitwise operations, take the longer length, padding with zeros
                     let result_len = bytes_a.len().max(bytes_b.len());
@@ -178,7 +178,7 @@ pub fn builtin_binary_or(arg: &Value, program: &mut Executor) -> Result<Value, E
                         result.push(a | b);
                     }
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -196,13 +196,13 @@ pub fn builtin_binary_or(arg: &Value, program: &mut Executor) -> Result<Value, E
 
 /// Bitwise XOR of two binaries
 /// binary_xor([bin, bin]) -> bin
-pub fn builtin_binary_xor(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_xor(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                    let bytes_a = program.get_binary_bytes(binary_a)?;
-                    let bytes_b = program.get_binary_bytes(binary_b)?;
+                    let bytes_a = executor.get_binary_bytes(binary_a)?;
+                    let bytes_b = executor.get_binary_bytes(binary_b)?;
 
                     // For XOR, take the longer length, padding with zeros
                     let result_len = bytes_a.len().max(bytes_b.len());
@@ -214,7 +214,7 @@ pub fn builtin_binary_xor(arg: &Value, program: &mut Executor) -> Result<Value, 
                         result.push(a ^ b);
                     }
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -232,13 +232,13 @@ pub fn builtin_binary_xor(arg: &Value, program: &mut Executor) -> Result<Value, 
 
 /// Bitwise NOT of a binary
 /// binary_not(bin) -> bin
-pub fn builtin_binary_not(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_not(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
-            let bytes = program.get_binary_bytes(binary)?;
+            let bytes = executor.get_binary_bytes(binary)?;
             let result: Vec<u8> = bytes.iter().map(|&byte| !byte).collect();
 
-            let binary = program.allocate_binary(result)?;
+            let binary = executor.allocate_binary(result)?;
             Ok(Value::Binary(binary))
         }
         other => Err(Error::TypeMismatch {
@@ -254,12 +254,12 @@ pub fn builtin_binary_not(arg: &Value, program: &mut Executor) -> Result<Value, 
 
 /// Left shift binary by n bits
 /// binary_shift_left([bin, int]) -> bin
-pub fn builtin_binary_shift_left(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_shift_left(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary), Value::Integer(shift_bits)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *shift_bits < 0 {
                         return Err(Error::InvalidArgument(
@@ -271,7 +271,7 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &mut Executor) -> Result<
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
-                        let binary = program.allocate_binary(result)?;
+                        let binary = executor.allocate_binary(result)?;
                         return Ok(Value::Binary(binary));
                     }
 
@@ -298,7 +298,7 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &mut Executor) -> Result<
                         }
                     }
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -316,12 +316,12 @@ pub fn builtin_binary_shift_left(arg: &Value, program: &mut Executor) -> Result<
 
 /// Right shift binary by n bits (logical shift)
 /// binary_shift_right([bin, int]) -> bin
-pub fn builtin_binary_shift_right(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_shift_right(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary), Value::Integer(shift_bits)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *shift_bits < 0 {
                         return Err(Error::InvalidArgument(
@@ -333,7 +333,7 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &mut Executor) -> Result
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
-                        let binary = program.allocate_binary(result)?;
+                        let binary = executor.allocate_binary(result)?;
                         return Ok(Value::Binary(binary));
                     }
 
@@ -357,7 +357,7 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &mut Executor) -> Result
                         }
                     }
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -378,12 +378,12 @@ pub fn builtin_binary_shift_right(arg: &Value, program: &mut Executor) -> Result
 
 /// Get bit at specific position (0 = rightmost bit)
 /// binary_get_bit_pos([bin, int]) -> int
-pub fn builtin_binary_get_bit_pos(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_get_bit_pos(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary), Value::Integer(bit_index)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *bit_index < 0 {
                         return Err(Error::InvalidArgument(
@@ -424,10 +424,10 @@ pub fn builtin_binary_get_bit_pos(arg: &Value, program: &mut Executor) -> Result
 
 /// Count number of set bits (popcount) - CRITICAL for HAMT
 /// binary_popcount(bin) -> int
-pub fn builtin_binary_popcount(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_popcount(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
-            let bytes = program.get_binary_bytes(binary)?;
+            let bytes = executor.get_binary_bytes(binary)?;
 
             // Use efficient bit counting algorithm
             let mut count = 0u64;
@@ -446,12 +446,12 @@ pub fn builtin_binary_popcount(arg: &Value, program: &mut Executor) -> Result<Va
 
 /// Set bit at specific position to value (0 or 1)
 /// binary_set_bit([bin, int, int]) -> bin
-pub fn builtin_binary_set_bit(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_set_bit(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), Value::Integer(bit_index), Value::Integer(bit_value)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *bit_index < 0 {
                         return Err(Error::InvalidArgument(
@@ -485,7 +485,7 @@ pub fn builtin_binary_set_bit(arg: &Value, program: &mut Executor) -> Result<Val
                         result[byte_index] &= !(1 << (7 - bit_position));
                     }
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -507,11 +507,11 @@ pub fn builtin_binary_set_bit(arg: &Value, program: &mut Executor) -> Result<Val
 
 /// Get a 32-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u32([bin, int]) -> int
-pub fn builtin_binary_get_u32(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_get_u32(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(offset)) => {
-                let bytes = program.get_binary_bytes(binary)?;
+                let bytes = executor.get_binary_bytes(binary)?;
 
                 if *offset < 0 {
                     return Err(Error::InvalidArgument(
@@ -549,12 +549,12 @@ pub fn builtin_binary_get_u32(arg: &Value, program: &mut Executor) -> Result<Val
 
 /// Set a 32-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u32([bin, int, int]) -> bin
-pub fn builtin_binary_set_u32(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_set_u32(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), Value::Integer(offset), Value::Integer(value)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -583,7 +583,7 @@ pub fn builtin_binary_set_u32(arg: &Value, program: &mut Executor) -> Result<Val
                     result[offset + 2] = value_bytes[2];
                     result[offset + 3] = value_bytes[3];
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -601,12 +601,12 @@ pub fn builtin_binary_set_u32(arg: &Value, program: &mut Executor) -> Result<Val
 
 /// Get a 64-bit unsigned integer from binary at specific byte offset (big-endian)
 /// binary_get_u64([bin, int]) -> int
-pub fn builtin_binary_get_u64(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_get_u64(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary), Value::Integer(offset)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -650,12 +650,12 @@ pub fn builtin_binary_get_u64(arg: &Value, program: &mut Executor) -> Result<Val
 
 /// Set a 64-bit unsigned integer in binary at specific byte offset (big-endian)
 /// binary_set_u64([bin, int, int]) -> bin
-pub fn builtin_binary_set_u64(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_set_u64(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), Value::Integer(offset), Value::Integer(value)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *offset < 0 {
                         return Err(Error::InvalidArgument(
@@ -675,7 +675,7 @@ pub fn builtin_binary_set_u64(arg: &Value, program: &mut Executor) -> Result<Val
 
                     result[offset..(8 + offset)].copy_from_slice(&value_bytes);
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -697,12 +697,12 @@ pub fn builtin_binary_set_u64(arg: &Value, program: &mut Executor) -> Result<Val
 
 /// Extract a slice from binary [start, end) (end is exclusive)
 /// binary_slice([bin, int, int]) -> bin
-pub fn builtin_binary_slice(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_slice(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), Value::Integer(start), Value::Integer(end)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *start < 0 || *end < 0 {
                         return Err(Error::InvalidArgument(
@@ -724,7 +724,7 @@ pub fn builtin_binary_slice(arg: &Value, program: &mut Executor) -> Result<Value
                     }
 
                     let slice = bytes[start..end].to_vec();
-                    let binary = program.allocate_binary(slice)?;
+                    let binary = executor.allocate_binary(slice)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -742,11 +742,11 @@ pub fn builtin_binary_slice(arg: &Value, program: &mut Executor) -> Result<Value
 
 /// Take first N bytes from binary
 /// binary_take([bin, int]) -> bin
-pub fn builtin_binary_take(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_take(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(count)) => {
-                let bytes = program.get_binary_bytes(binary)?;
+                let bytes = executor.get_binary_bytes(binary)?;
 
                 if *count < 0 {
                     return Err(Error::InvalidArgument(
@@ -757,7 +757,7 @@ pub fn builtin_binary_take(arg: &Value, program: &mut Executor) -> Result<Value,
                 let count = (*count as usize).min(bytes.len());
                 let slice = bytes[..count].to_vec();
 
-                let binary = program.allocate_binary(slice)?;
+                let binary = executor.allocate_binary(slice)?;
                 Ok(Value::Binary(binary))
             }
             _ => Err(Error::TypeMismatch {
@@ -774,11 +774,11 @@ pub fn builtin_binary_take(arg: &Value, program: &mut Executor) -> Result<Value,
 
 /// Drop first N bytes from binary
 /// binary_drop([bin, int]) -> bin
-pub fn builtin_binary_drop(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_drop(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), Value::Integer(count)) => {
-                let bytes = program.get_binary_bytes(binary)?;
+                let bytes = executor.get_binary_bytes(binary)?;
 
                 if *count < 0 {
                     return Err(Error::InvalidArgument(
@@ -789,7 +789,7 @@ pub fn builtin_binary_drop(arg: &Value, program: &mut Executor) -> Result<Value,
                 let count = (*count as usize).min(bytes.len());
                 let slice = bytes[count..].to_vec();
 
-                let binary = program.allocate_binary(slice)?;
+                let binary = executor.allocate_binary(slice)?;
                 Ok(Value::Binary(binary))
             }
             _ => Err(Error::TypeMismatch {
@@ -806,12 +806,12 @@ pub fn builtin_binary_drop(arg: &Value, program: &mut Executor) -> Result<Value,
 
 /// Pad binary to specified length with zeros at the end
 /// binary_pad([bin, int]) -> bin
-pub fn builtin_binary_pad(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_pad(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary), Value::Integer(target_length)) => {
-                    let bytes = program.get_binary_bytes(binary)?;
+                    let bytes = executor.get_binary_bytes(binary)?;
 
                     if *target_length < 0 {
                         return Err(Error::InvalidArgument(
@@ -823,14 +823,14 @@ pub fn builtin_binary_pad(arg: &Value, program: &mut Executor) -> Result<Value, 
 
                     if target_length <= bytes.len() {
                         // No padding needed, return copy of original
-                        let binary = program.allocate_binary(bytes.to_vec())?;
+                        let binary = executor.allocate_binary(bytes.to_vec())?;
                         return Ok(Value::Binary(binary));
                     }
 
                     let mut result = bytes.to_vec();
                     result.resize(target_length, 0);
 
-                    let binary = program.allocate_binary(result)?;
+                    let binary = executor.allocate_binary(result)?;
                     Ok(Value::Binary(binary))
                 }
                 _ => Err(Error::TypeMismatch {
@@ -852,10 +852,10 @@ pub fn builtin_binary_pad(arg: &Value, program: &mut Executor) -> Result<Value, 
 
 /// Simple FNV-1a hash implementation for 32-bit hashes
 /// binary_hash32(bin) -> int
-pub fn builtin_binary_hash32(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_hash32(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
-            let bytes = program.get_binary_bytes(binary)?;
+            let bytes = executor.get_binary_bytes(binary)?;
 
             // FNV-1a 32-bit hash
             let mut hash: u32 = 2166136261; // FNV offset basis
@@ -875,10 +875,10 @@ pub fn builtin_binary_hash32(arg: &Value, program: &mut Executor) -> Result<Valu
 
 /// Simple FNV-1a hash implementation for 64-bit hashes
 /// binary_hash64(bin) -> int
-pub fn builtin_binary_hash64(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_binary_hash64(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     match arg {
         Value::Binary(binary) => {
-            let bytes = program.get_binary_bytes(binary)?;
+            let bytes = executor.get_binary_bytes(binary)?;
 
             // FNV-1a 64-bit hash
             let mut hash: u64 = 14695981039346656037; // FNV offset basis
@@ -899,10 +899,10 @@ pub fn builtin_binary_hash64(arg: &Value, program: &mut Executor) -> Result<Valu
 
 /// Hash a string (converted to binary) for use in data structures
 /// string_hash(bin) -> int
-pub fn builtin_string_hash(arg: &Value, program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_string_hash(arg: &Value, executor: &mut Executor) -> Result<Value, Error> {
     // For strings, we use the same implementation as hash32 but with a different name
     // This is common in many languages to have separate string vs binary hash functions
-    builtin_binary_hash32(arg, program)
+    builtin_binary_hash32(arg, executor)
 }
 
 /// Extract N-bit chunks from hash for HAMT navigation

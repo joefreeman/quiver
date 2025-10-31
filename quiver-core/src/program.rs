@@ -1,8 +1,7 @@
 use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction};
-use crate::error::Error;
 use crate::executor::Executor;
 use crate::types::{NIL, OK, TupleLookup, TupleTypeInfo, Type};
-use crate::value::{Binary, MAX_BINARY_SIZE, Value};
+use crate::value::Value;
 use serde::{Deserialize, Serialize};
 
 mod optimisation;
@@ -34,43 +33,6 @@ impl Default for Program {
 impl Program {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
-    }
-
-    pub fn with_binary_bytes<F, R>(&self, binary: &Binary, f: F) -> Result<R, Error>
-    where
-        F: FnOnce(&[u8]) -> Result<R, Error>,
-    {
-        match binary {
-            Binary::Constant(index) => match self.constants.get(*index) {
-                Some(Constant::Binary(bytes)) => f(bytes),
-                Some(_) => Err(Error::TypeMismatch {
-                    expected: "binary constant".to_string(),
-                    found: "non-binary constant".to_string(),
-                }),
-                None => Err(Error::ConstantUndefined(*index)),
-            },
-            Binary::Heap(_) => Err(Error::InvalidArgument(
-                "Heap binaries cannot be accessed from Program (no scheduler context)".to_string(),
-            )),
-        }
-    }
-
-    /// Convenience method that clones the binary data
-    /// For cases where the closure API would be cumbersome (e.g., multiple binary accesses)
-    pub fn get_binary_bytes(&self, binary: &Binary) -> Result<Vec<u8>, Error> {
-        self.with_binary_bytes(binary, |bytes| Ok(bytes.to_vec()))
-    }
-
-    pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
-        if bytes.len() > MAX_BINARY_SIZE {
-            return Err(Error::InvalidArgument(format!(
-                "Binary size {} exceeds maximum {}",
-                bytes.len(),
-                MAX_BINARY_SIZE
-            )));
-        }
-        let index = self.register_constant(Constant::Binary(bytes));
-        Ok(Binary::Constant(index))
     }
 
     pub fn new() -> Self {
@@ -144,15 +106,6 @@ impl Program {
             self.constants.push(constant);
             self.constants.len() - 1
         }
-    }
-
-    /// Register a constant at a specific index, expanding the vector if necessary.
-    /// Used for syncing constants from executor threads back to the main program.
-    pub fn register_constant_at(&mut self, index: usize, constant: Constant) {
-        if index >= self.constants.len() {
-            self.constants.resize(index + 1, Constant::Integer(0));
-        }
-        self.constants[index] = constant;
     }
 
     pub fn get_constants(&self) -> &Vec<Constant> {
