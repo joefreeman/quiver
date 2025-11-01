@@ -1210,13 +1210,18 @@ impl<'a> Compiler<'a> {
             // Match might fail - check if it's a pure type guard
             if pattern::is_pure_type_guard(&binding_sets) {
                 // Extract narrowed type (remove nil from union)
-                let narrowed = match &result_type {
-                    Type::Union(types) => {
-                        let non_nil: Vec<Type> =
-                            types.iter().filter(|t| !t.is_nil()).cloned().collect();
-                        Type::from_types(non_nil)
+                // Special case: if result type is exactly nil, the guard is for nil itself
+                let narrowed = if result_type.is_nil() {
+                    result_type.clone()
+                } else {
+                    match &result_type {
+                        Type::Union(types) => {
+                            let non_nil: Vec<Type> =
+                                types.iter().filter(|t| !t.is_nil()).cloned().collect();
+                            Type::from_types(non_nil)
+                        }
+                        _ => result_type.clone(),
                     }
-                    _ => result_type.clone(),
                 };
                 Guard::Type(narrowed)
             } else {
@@ -1299,6 +1304,15 @@ impl<'a> Compiler<'a> {
             if let Guard::Type(guarded_type) = condition_guard {
                 // Subtract the guarded type from remaining type
                 remaining_type = subtract_type(&remaining_type, &guarded_type);
+            }
+
+            // Check if this is a fallback branch (doesn't examine the input)
+            let condition_uses_input = Self::expression_starts_with_continuation(&branch.condition);
+
+            // If this is the last branch and it's a fallback (doesn't check input),
+            // it handles all remaining cases - mark as exhaustive
+            if is_last_branch && !condition_uses_input {
+                remaining_type = Type::never();
             }
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
