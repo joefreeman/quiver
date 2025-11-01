@@ -130,6 +130,10 @@ impl ReplCli {
                 println!("{}", "  \\v - List variables".bright_black());
                 println!("{}", "  \\p - List processes".bright_black());
                 println!("{}", "  \\p X - Inspect process with ID X".bright_black());
+                println!(
+                    "{}",
+                    "  \\x - Show (compile-time) type of last expression".bright_black()
+                );
             }
 
             ["q"] => {
@@ -158,6 +162,12 @@ impl ReplCli {
 
             ["v"] => {
                 self.list_variables();
+            }
+
+            ["x"] => {
+                let result_type = self.repl.get_last_result_type();
+                let formatted_type = self.environment.format_type(result_type);
+                println!("{}", formatted_type.bright_black());
             }
 
             ["p"] => {
