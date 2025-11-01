@@ -113,6 +113,15 @@ pub struct BindingSet {
     bindings: Vec<Binding>,         // Variable bindings to create if requirements are met
 }
 
+/// Check if binding sets represent a pure type guard (only type checks, no value checks)
+pub fn is_pure_type_guard(binding_sets: &[BindingSet]) -> bool {
+    binding_sets.iter().all(|bs| {
+        bs.requirements
+            .iter()
+            .all(|req| matches!(req.check, RuntimeCheck::Type(_)))
+    })
+}
+
 /// Analyze pattern without generating code
 pub fn analyze_pattern(
     program: &mut Program,

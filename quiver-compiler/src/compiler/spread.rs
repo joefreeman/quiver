@@ -67,7 +67,7 @@ fn compile_field_values(
                 } else {
                     None
                 };
-                let ty = compiler.compile_chain(chain.clone(), None, ripple_context_param)?;
+                let (ty, _) = compiler.compile_chain(chain.clone(), None, ripple_context_param)?;
                 compiled_values.push(CompiledValue::Field {
                     name: field.name.clone(),
                     ty,

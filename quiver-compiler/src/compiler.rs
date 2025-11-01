@@ -32,6 +32,59 @@ use quiver_core::{
     value::Value,
 };
 
+/// Represents a guard that an expression performs on its input value.
+/// Used for exhaustiveness checking in pattern matching.
+#[derive(Debug, Clone, PartialEq)]
+enum Guard {
+    /// No guard - expression doesn't check the input
+    None,
+    /// Pure type guard - expression eliminates this type from the input
+    Type(Type),
+    /// Complex guard - has checks but can't be used for exhaustiveness
+    Complex,
+}
+
+/// Subtract a type from another type (for exhaustiveness checking).
+/// Returns the remaining variants after removing the subtracted type.
+fn subtract_type(from: &Type, subtract: &Type) -> Type {
+    match from {
+        Type::Union(types) => {
+            // For unions, filter out any variants that match the subtracted type
+            let remaining: Vec<Type> = types
+                .iter()
+                .filter(|t| !types_equal(t, subtract))
+                .cloned()
+                .collect();
+            Type::from_types(remaining)
+        }
+        single if types_equal(single, subtract) => {
+            // Single type matches - return never (empty union)
+            Type::never()
+        }
+        single => {
+            // Single type doesn't match - return it unchanged
+            single.clone()
+        }
+    }
+}
+
+/// Check if two types are equal (helper for subtract_type)
+fn types_equal(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Tuple(id_a), Type::Tuple(id_b)) => id_a == id_b,
+        (Type::Partial(id_a), Type::Partial(id_b)) => id_a == id_b,
+        (Type::Integer, Type::Integer) => true,
+        (Type::Binary, Type::Binary) => true,
+        (Type::Union(types_a), Type::Union(types_b)) => {
+            types_a.len() == types_b.len()
+                && types_a
+                    .iter()
+                    .all(|t| types_b.iter().any(|u| types_equal(t, u)))
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Error {
     // Undefined errors
@@ -299,7 +352,10 @@ impl<'a> Compiler<'a> {
                 self.compile_type_import(pattern, &module_path)?;
                 Ok(Type::nil())
             }
-            ast::Statement::Expression(expression) => self.compile_expression(expression, None),
+            ast::Statement::Expression(expression) => {
+                let (result_type, _) = self.compile_expression(expression, None)?;
+                Ok(result_type)
+            }
         }
     }
 
@@ -491,7 +547,9 @@ impl<'a> Compiler<'a> {
                     } else {
                         None
                     };
-                    self.compile_chain(chain.clone(), None, ripple_context_param)?
+                    let (field_type, _) =
+                        self.compile_chain(chain.clone(), None, ripple_context_param)?;
+                    field_type
                 }
                 ast::FieldValue::Spread(_) => {
                     unreachable!("Spread should be handled by compile_tuple_with_spread")
@@ -1020,13 +1078,13 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        let body_type = match function.body {
+        let (body_type, _) = match function.body {
             Some(body) => self.compile_block(body, parameter_type.clone(), None)?,
             None => {
                 // Identity function: just return the parameter
                 // The calling convention puts the parameter on the stack,
                 // so we don't need any instructions - just leave it there
-                parameter_type.clone()
+                (parameter_type.clone(), Guard::None)
             }
         };
 
@@ -1069,7 +1127,7 @@ impl<'a> Compiler<'a> {
         value_type: Type,
         on_no_match: Option<usize>,
         mode: pattern::PatternMode,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Guard), Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
 
@@ -1083,7 +1141,7 @@ impl<'a> Compiler<'a> {
         if result_type.is_never() {
             self.codegen.add_instruction(Instruction::Pop);
             self.codegen.add_instruction(Instruction::Tuple(NIL));
-            return Ok(Type::nil());
+            return Ok((Type::nil(), Guard::Complex));
         }
 
         // Pre-allocate locals for all bindings
@@ -1147,7 +1205,29 @@ impl<'a> Compiler<'a> {
 
         self.codegen.patch_jump_to_here(success_jump_addr);
 
-        Ok(result_type)
+        // Determine the guard for this match
+        let guard = if result_type.contains_nil() {
+            // Match might fail - check if it's a pure type guard
+            if pattern::is_pure_type_guard(&binding_sets) {
+                // Extract narrowed type (remove nil from union)
+                let narrowed = match &result_type {
+                    Type::Union(types) => {
+                        let non_nil: Vec<Type> =
+                            types.iter().filter(|t| !t.is_nil()).cloned().collect();
+                        Type::from_types(non_nil)
+                    }
+                    _ => result_type.clone(),
+                };
+                Guard::Type(narrowed)
+            } else {
+                Guard::Complex
+            }
+        } else {
+            // Match always succeeds - no guard
+            Guard::None
+        };
+
+        Ok((result_type, guard))
     }
 
     /// Helper to check if an expression starts with a continuation (~>)
@@ -1163,7 +1243,7 @@ impl<'a> Compiler<'a> {
         block: ast::Block,
         parameter_type: Type,
         on_no_match: Option<usize>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Guard), Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -1187,6 +1267,9 @@ impl<'a> Compiler<'a> {
             Some((parameter_type.clone(), param_local)),
         ));
 
+        // Track remaining type for exhaustiveness checking
+        let mut remaining_type = parameter_type.clone();
+
         for (i, branch) in block.branches.iter().enumerate() {
             let is_last_branch = i == block.branches.len() - 1;
 
@@ -1209,7 +1292,14 @@ impl<'a> Compiler<'a> {
             }
 
             // Compile the condition expression - it can use ~> to access the parameter
-            let condition_type = self.compile_expression(branch.condition.clone(), on_no_match)?;
+            let (condition_type, condition_guard) =
+                self.compile_expression(branch.condition.clone(), on_no_match)?;
+
+            // Update remaining type based on guard
+            if let Guard::Type(guarded_type) = condition_guard {
+                // Subtract the guarded type from remaining type
+                remaining_type = subtract_type(&remaining_type, &guarded_type);
+            }
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
             if condition_type.is_nil() {
@@ -1234,7 +1324,7 @@ impl<'a> Compiler<'a> {
                 next_branch_jumps.push((next_branch_jump, i + 1));
 
                 // Only pass input_type if the consequence starts with a continuation (~>)
-                let consequence_type = if starts_with_continuation {
+                let (consequence_type, _) = if starts_with_continuation {
                     // Continuation receives the value on the stack
                     self.compile_expression_with_input(
                         consequence.clone(),
@@ -1255,11 +1345,19 @@ impl<'a> Compiler<'a> {
                         .add_instruction(Instruction::Clear(branch_specific_locals));
                 }
 
-                // If this is the last branch and the condition can be nil, include nil in the result
+                // If this is the last branch, check if we need to add nil
+                // Add nil if:
+                // 1. There are remaining unchecked types (remaining_type is not never), AND
+                // 2. The condition can fail (condition_type contains nil)
+                // If the condition always succeeds, it's exhaustive even if it didn't narrow the type
                 // BUT: only if the consequence doesn't start with a continuation, because continuations
                 // perform their own narrowing and their result type already accounts for
                 // all possibilities (including the condition's nil being handled by next-branch jump)
-                if is_last_branch && !starts_with_continuation && condition_type.contains_nil() {
+                if is_last_branch
+                    && !starts_with_continuation
+                    && !remaining_type.is_never()
+                    && condition_type.contains_nil()
+                {
                     branch_types.push(Type::nil());
                 }
             } else {
@@ -1331,14 +1429,15 @@ impl<'a> Compiler<'a> {
             self.codegen.patch_jump_to_addr(jump_addr, end_addr);
         }
 
-        Ok(union_types(branch_types))
+        // Blocks don't perform guards on their input (the parameter is stored, not checked)
+        Ok((union_types(branch_types), Guard::None))
     }
 
     fn compile_expression(
         &mut self,
         expression: ast::Expression,
         on_no_match: Option<usize>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Guard), Error> {
         self.compile_expression_with_input(expression, on_no_match, None)
     }
 
@@ -1347,18 +1446,26 @@ impl<'a> Compiler<'a> {
         expression: ast::Expression,
         on_no_match: Option<usize>,
         input_type: Option<Type>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Guard), Error> {
         let has_input = input_type.is_some();
         let mut last_type = input_type;
         let mut end_jumps = Vec::new();
+        let mut guard = Guard::None;
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            let chain_type = self.compile_chain_with_input(
+            let (chain_type, chain_guard) = self.compile_chain_with_input(
                 chain.clone(),
                 on_no_match,
                 None,
                 if i == 0 { last_type.clone() } else { None },
             )?;
+
+            // Track guard from first chain only (multiple chains make it complex)
+            if i == 0 {
+                guard = chain_guard;
+            } else if !matches!(chain_guard, Guard::None) {
+                guard = Guard::Complex;
+            }
 
             // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil =
@@ -1410,9 +1517,10 @@ impl<'a> Compiler<'a> {
             self.codegen.patch_jump_to_addr(jump_addr, end_addr);
         }
 
-        last_type.ok_or_else(|| Error::InternalError {
+        let result_type = last_type.ok_or_else(|| Error::InternalError {
             message: "Expression compiled with no chains".to_string(),
-        })
+        })?;
+        Ok((result_type, guard))
     }
 
     fn compile_chain(
@@ -1420,7 +1528,7 @@ impl<'a> Compiler<'a> {
         chain: ast::Chain,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Guard), Error> {
         self.compile_chain_with_input(chain, on_no_match, ripple_context, None)
     }
 
@@ -1430,7 +1538,7 @@ impl<'a> Compiler<'a> {
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
         input_type: Option<Type>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Guard), Error> {
         // If this is a continuation chain (starts with ~>), load the parameter
         let mut current_type = if chain.continuation {
             // Continuation chains explicitly use the parameter from scope
@@ -1442,16 +1550,27 @@ impl<'a> Compiler<'a> {
             input_type
         };
 
+        // Track guards from terms - for now, combine conservatively
+        let mut guard = Guard::None;
         for term in chain.terms {
-            current_type =
-                Some(self.compile_term(term, current_type, on_no_match, ripple_context)?);
+            let (term_type, term_guard) =
+                self.compile_term(term, current_type, on_no_match, ripple_context)?;
+            current_type = Some(term_type);
+
+            // Combine guards: if we have multiple guards, it's complex
+            guard = match (guard, term_guard) {
+                (Guard::None, g) => g,
+                (g, Guard::None) => g,
+                (Guard::Type(_), Guard::Type(_)) => Guard::Complex, // Multiple type guards - too complex for now
+                _ => Guard::Complex,
+            };
         }
 
         let result_type = current_type.ok_or_else(|| Error::InternalError {
             message: "Chain compiled with no terms and no continuation".to_string(),
         })?;
 
-        // If there's a match pattern, apply it
+        // If there's a match pattern, apply it and use its guard
         if let Some(pattern) = chain.match_pattern {
             self.compile_match(
                 pattern,
@@ -1460,7 +1579,7 @@ impl<'a> Compiler<'a> {
                 pattern::PatternMode::Bind,
             )
         } else {
-            Ok(result_type)
+            Ok((result_type, guard))
         }
     }
 
@@ -1719,7 +1838,7 @@ impl<'a> Compiler<'a> {
                 None
             };
 
-            let source_type = self.compile_chain(source.clone(), None, ripple_param)?;
+            let (source_type, _) = self.compile_chain(source.clone(), None, ripple_param)?;
 
             // Validate receive functions
             self.validate_receive_function(source, &source_type)?;
@@ -1734,7 +1853,7 @@ impl<'a> Compiler<'a> {
     /// Creates a wrapper function that captures the argument and target, then spawns it
     fn compile_chained_spawn(&mut self, term: ast::Term, arg_type: Type) -> Result<Type, Error> {
         // Compile the target function
-        let target_type = self.compile_term(term, None, None, None)?;
+        let (target_type, _) = self.compile_term(term, None, None, None)?;
 
         let (target_param, target_receive, target_result) =
             if let Type::Callable(callable) = &target_type {
@@ -1850,7 +1969,7 @@ impl<'a> Compiler<'a> {
         value_type: Option<Type>,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Guard), Error> {
         match term {
             ast::Term::Literal(literal) => {
                 if value_type.is_some() {
@@ -1859,7 +1978,7 @@ impl<'a> Compiler<'a> {
                             .to_string(),
                     ));
                 }
-                self.compile_literal(literal)
+                Ok((self.compile_literal(literal)?, Guard::None))
             }
             ast::Term::Tuple(tuple) => {
                 // Tuples without ripples or spreads when a value is present should use assignment patterns
@@ -1887,7 +2006,10 @@ impl<'a> Compiler<'a> {
                     ripple_context
                 };
 
-                self.compile_tuple(tuple.name, tuple.fields, ripple_context_param)
+                Ok((
+                    self.compile_tuple(tuple.name, tuple.fields, ripple_context_param)?,
+                    Guard::None,
+                ))
             }
             ast::Term::Block(block) => {
                 // Blocks take their input as a parameter
@@ -1903,11 +2025,12 @@ impl<'a> Compiler<'a> {
                 let function_type = self.compile_function(func)?;
 
                 // If a value is being piped to it, apply the value
-                if let Some(val_type) = value_type {
-                    self.apply_value_to_type(function_type, val_type)
+                let result_type = if let Some(val_type) = value_type {
+                    self.apply_value_to_type(function_type, val_type)?
                 } else {
-                    Ok(function_type)
-                }
+                    function_type
+                };
+                Ok((result_type, Guard::None))
             }
             ast::Term::Access(access) => {
                 match &access.identifier {
@@ -1930,9 +2053,12 @@ impl<'a> Compiler<'a> {
                                 self.codegen.add_instruction(Instruction::Rotate(2));
 
                                 // Apply argument to the accessed function
-                                self.apply_value_to_type(accessed_type, arg_type)
+                                Ok((
+                                    self.apply_value_to_type(accessed_type, arg_type)?,
+                                    Guard::None,
+                                ))
                             } else {
-                                Ok(accessed_type)
+                                Ok((accessed_type, Guard::None))
                             }
                         } else {
                             Err(Error::FeatureUnsupported(
@@ -1982,13 +2108,14 @@ impl<'a> Compiler<'a> {
                         let accessed_type = self.compile_member_access(name, access.accessors)?;
 
                         // Apply argument if present, otherwise apply piped value if present
-                        if let Some(arg_type) = arg_type {
-                            self.apply_value_to_type(accessed_type, arg_type)
+                        let result_type = if let Some(arg_type) = arg_type {
+                            self.apply_value_to_type(accessed_type, arg_type)?
                         } else if let Some(val_type) = value_type {
-                            self.apply_value_to_type(accessed_type, val_type)
+                            self.apply_value_to_type(accessed_type, val_type)?
                         } else {
-                            Ok(accessed_type)
-                        }
+                            accessed_type
+                        };
+                        Ok((result_type, Guard::None))
                     }
                 }
             }
@@ -1998,7 +2125,7 @@ impl<'a> Compiler<'a> {
                         "Import cannot be applied to value".to_string(),
                     ));
                 }
-                self.compile_import(&path)
+                Ok((self.compile_import(&path)?, Guard::None))
             }
             ast::Term::Builtin(builtin) => {
                 // If there's an argument, compile it first (before loading the builtin)
@@ -2042,13 +2169,14 @@ impl<'a> Compiler<'a> {
                 let builtin_type = self.compile_builtin(&builtin.name)?;
 
                 // Apply argument if present, otherwise apply piped value if present
-                if let Some(arg_type) = arg_type {
-                    self.apply_value_to_type(builtin_type, arg_type)
+                let result_type = if let Some(arg_type) = arg_type {
+                    self.apply_value_to_type(builtin_type, arg_type)?
                 } else if let Some(val_type) = value_type {
-                    self.apply_value_to_type(builtin_type, val_type)
+                    self.apply_value_to_type(builtin_type, val_type)?
                 } else {
-                    Ok(builtin_type)
-                }
+                    builtin_type
+                };
+                Ok((result_type, Guard::None))
             }
             ast::Term::TailCall(tail_call) => {
                 // If there's an argument, compile it first (may contain ripples using value_type)
@@ -2076,23 +2204,26 @@ impl<'a> Compiler<'a> {
                     value_type
                 };
 
-                self.compile_tail_call(
-                    tail_call.identifier.as_deref(),
-                    &tail_call.accessors,
-                    arg_type,
-                )
+                Ok((
+                    self.compile_tail_call(
+                        tail_call.identifier.as_deref(),
+                        &tail_call.accessors,
+                        arg_type,
+                    )?,
+                    Guard::None,
+                ))
             }
             ast::Term::Equality => {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Equality operator requires a value".to_string())
                 })?;
-                self.compile_equality(val_type)
+                Ok((self.compile_equality(val_type)?, Guard::None))
             }
             ast::Term::Not => {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Not operator requires a value".to_string())
                 })?;
-                self.compile_not(val_type)
+                Ok((self.compile_not(val_type)?, Guard::None))
             }
             ast::Term::BindMatch(pattern) => {
                 // Bind matches create new bindings
@@ -2137,18 +2268,21 @@ impl<'a> Compiler<'a> {
 
                         self.codegen.add_instruction(Instruction::Spawn);
 
-                        Ok(Type::Process(Box::new(ProcessType {
-                            receive: Some(Box::new(callable.receive.clone())),
-                            returns: Some(Box::new(callable.result.clone())),
-                        })))
+                        Ok((
+                            Type::Process(Box::new(ProcessType {
+                                receive: Some(Box::new(callable.receive.clone())),
+                                returns: Some(Box::new(callable.result.clone())),
+                            })),
+                            Guard::None,
+                        ))
                     } else {
                         // Chained spawn with explicit function: arg ~> @f
-                        self.compile_chained_spawn(*term, arg_type)
+                        Ok((self.compile_chained_spawn(*term, arg_type)?, Guard::None))
                     }
                 } else {
                     // Direct spawn: @function (no argument)
                     // Compile the term to get the function value
-                    let term_type = self.compile_term(*term, None, None, None)?;
+                    let (term_type, _) = self.compile_term(*term, None, None, None)?;
 
                     // Extract the parameter, receive and return types from the function
                     let (param_type, receive_type, return_type) =
@@ -2178,10 +2312,13 @@ impl<'a> Compiler<'a> {
                     // Emit spawn instruction (pops function, pushes Process)
                     self.codegen.add_instruction(Instruction::Spawn);
 
-                    Ok(Type::Process(Box::new(ProcessType {
-                        receive: Some(Box::new(receive_type)),
-                        returns: Some(Box::new(return_type)),
-                    })))
+                    Ok((
+                        Type::Process(Box::new(ProcessType {
+                            receive: Some(Box::new(receive_type)),
+                            returns: Some(Box::new(return_type)),
+                        })),
+                        Guard::None,
+                    ))
                 }
             }
             ast::Term::Select(select) => {
@@ -2311,7 +2448,7 @@ impl<'a> Compiler<'a> {
                     .add_instruction(Instruction::Select(sources.len()));
 
                 // Compute and return the select return type
-                self.compute_select_return_type(&source_types)
+                Ok((self.compute_select_return_type(&source_types)?, Guard::None))
             }
             ast::Term::Self_ => {
                 self.codegen.add_instruction(Instruction::Self_);
@@ -2324,11 +2461,12 @@ impl<'a> Compiler<'a> {
                 let self_type = Type::Process(Box::new(process_type));
 
                 // Apply value if present (for message sends like `10 ~> .`)
-                if let Some(val_type) = value_type {
-                    self.apply_value_to_type(self_type, val_type)
+                let result_type = if let Some(val_type) = value_type {
+                    self.apply_value_to_type(self_type, val_type)?
                 } else {
-                    Ok(self_type)
-                }
+                    self_type
+                };
+                Ok((result_type, Guard::None))
             }
             ast::Term::Process(process_id) => {
                 // Look up process info from the map (REPL-only feature)
@@ -2345,11 +2483,12 @@ impl<'a> Compiler<'a> {
                     .add_instruction(Instruction::Process(process_id, function_index));
 
                 // Apply value if present (for message sends like `10 ~> @1`)
-                if let Some(val_type) = value_type {
-                    self.apply_value_to_type(process_type, val_type)
+                let result_type = if let Some(val_type) = value_type {
+                    self.apply_value_to_type(process_type, val_type)?
                 } else {
-                    Ok(process_type)
-                }
+                    process_type
+                };
+                Ok((result_type, Guard::None))
             }
             ast::Term::Ripple => {
                 // Ripple evaluates to the chained value
@@ -2357,12 +2496,12 @@ impl<'a> Compiler<'a> {
                 if let Some(val_type) = value_type {
                     // Value was directly chained to this ripple - use it
                     // The value is already on the stack, no need to Pick
-                    Ok(val_type)
+                    Ok((val_type, Guard::None))
                 } else if let Some(ctx) = ripple_context {
                     // Inherit ripple context from parent tuple
                     self.codegen
                         .add_instruction(Instruction::Pick(ctx.stack_offset));
-                    Ok(ctx.value_type.clone())
+                    Ok((ctx.value_type.clone(), Guard::None))
                 } else {
                     // Neither value_type nor ripple_context available
                     Err(Error::FeatureUnsupported(

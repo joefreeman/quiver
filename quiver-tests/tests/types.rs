@@ -43,8 +43,59 @@ fn test_function_with_type_pattern() {
         .expect("37")
         .expect_variable(
             "area",
-            "#(Circle[r: int] | Rectangle[w: int, h: int]) -> ([] | int)",
+            "#(Circle[r: int] | Rectangle[w: int, h: int]) -> int",
         );
+}
+
+#[test]
+fn test_exhaustive_union_matching() {
+    // Exhaustive matching should not include [] in return type
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A[int] | B[int]) {
+              | ~> ^A[int] => 10
+              | ~> ^B[int] => 20
+            },
+            A[5] ~> f
+            "#,
+        )
+        .expect("10")
+        .expect_variable("f", "#(A[int] | B[int]) -> int");
+}
+
+#[test]
+fn test_non_exhaustive_union_matching() {
+    // Non-exhaustive matching should include [] in return type
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A[int] | B[int] | C[int]) {
+              | ~> ^A[int] => 10
+              | ~> ^B[int] => 20
+            },
+            C[99] ~> f
+            "#,
+        )
+        .expect("[]")
+        .expect_variable("f", "#(A[int] | B[int] | C[int]) -> ([] | int)");
+}
+
+#[test]
+fn test_value_guard_with_full_coverage() {
+    // Even with value guards, full coverage means exhaustive
+    quiver()
+        .evaluate(
+            r#"
+            f = #A[int] {
+              | ~> ^A[10] => 100
+              | ~> ^A[int] => 999
+            },
+            A[10] ~> f
+            "#,
+        )
+        .expect("100")
+        .expect_variable("f", "#A[int] -> int");
 }
 
 #[test]
@@ -75,7 +126,7 @@ fn test_cycle_ref_with_pattern_matching() {
             "#,
         )
         .expect("1")
-        .expect_variable("get_head", "#(Cons[int, μ1] | Nil) -> ([] | int)");
+        .expect_variable("get_head", "#(Cons[int, μ1] | Nil) -> int");
 }
 
 #[test]
