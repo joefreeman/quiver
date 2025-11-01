@@ -325,3 +325,27 @@ fn test_narrowing_in_block_branches() {
         )
         .expect_type("int");
 }
+
+#[test]
+fn test_narrowing_with_fallback_branch() {
+    quiver()
+        .evaluate("f = #(int | bin) { ~> ^bin | 'ff' }, f")
+        .expect_type("#(bin | int) -> bin");
+
+    quiver()
+        .evaluate("'0a' ~> #(int | bin) { ~> ^bin | 'ff' }")
+        .expect("'0a'");
+    quiver()
+        .evaluate("42 ~> #(int | bin) { ~> ^bin | 'ff' }")
+        .expect("'ff'");
+}
+
+#[test]
+fn test_nil_condition_with_fallback() {
+    quiver()
+        .evaluate("#(A[int] | B[int]) { ~> ^C[int] }")
+        .expect_type("#(A[int] | B[int]) -> []");
+    quiver()
+        .evaluate("#(A[int] | B[int]) { ~> ^C[int] | 42 }")
+        .expect_type("#(A[int] | B[int]) -> int");
+}

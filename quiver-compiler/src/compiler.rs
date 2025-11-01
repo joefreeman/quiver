@@ -1213,8 +1213,11 @@ impl<'a> Compiler<'a> {
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
             if condition_type.is_nil() {
-                // Continue to next branch
-                branch_types.push(condition_type);
+                // Only include nil in result type if this is the last branch
+                // Otherwise, nil causes fallthrough to the next branch
+                if is_last_branch {
+                    branch_types.push(condition_type);
+                }
                 continue;
             }
 
@@ -1261,7 +1264,27 @@ impl<'a> Compiler<'a> {
                 }
             } else {
                 // No consequence - use condition type
-                branch_types.push(condition_type);
+                // For non-last branches, filter out nil since it causes fallthrough to next branch
+                if is_last_branch {
+                    branch_types.push(condition_type);
+                } else {
+                    // Only include non-nil types - nil will be handled by subsequent branches
+                    match condition_type {
+                        Type::Union(types) => {
+                            let non_nil_types: Vec<Type> =
+                                types.into_iter().filter(|t| !t.is_nil()).collect();
+                            if !non_nil_types.is_empty() {
+                                branch_types.push(union_types(non_nil_types));
+                            }
+                        }
+                        t if !t.is_nil() => {
+                            branch_types.push(t);
+                        }
+                        _ => {
+                            // Condition is purely nil - will always fall through
+                        }
+                    }
+                }
 
                 // Clear branch-specific locals, but keep the parameter
                 let branch_specific_locals = self.local_count - (param_local + 1);
