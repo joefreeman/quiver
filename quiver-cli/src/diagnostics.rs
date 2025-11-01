@@ -87,6 +87,10 @@ fn help_text(kind: &ErrorKind) -> Option<String> {
             Some("Function body should be a valid expression".to_string())
         }
 
+        ErrorKind::HexMalformed(_) => {
+            Some("Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F".to_string())
+        }
+
         ErrorKind::StringEscapeInvalid(esc) => {
             if esc.starts_with('\\') && esc.len() == 2 {
                 Some("Valid escape sequences are: \\n \\r \\t \\\\ \\\"".to_string())

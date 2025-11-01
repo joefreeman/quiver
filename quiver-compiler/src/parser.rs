@@ -218,6 +218,9 @@ pub fn parse(source: &str) -> Result<Program, Error> {
                                 found,
                             }
                         }
+                        nom::error::ErrorKind::HexDigit => {
+                            ErrorKind::HexMalformed(fragment.to_string())
+                        }
                         _ => {
                             let found = fragment.chars().take(20).collect::<String>();
                             ErrorKind::ParseError(format!("unexpected input: {}", found))
@@ -339,21 +342,18 @@ fn integer_literal(input: Span) -> IResult<Span, Literal> {
 }
 
 fn binary_literal(input: Span) -> IResult<Span, Literal> {
-    map_res(
-        delimited(
-            char('\''),
-            take_while(|c: char| c.is_ascii_hexdigit()),
-            char('\''),
-        ),
-        |s: Span| {
-            hex::decode(s.fragment()).map(Literal::Binary).map_err(|_| {
-                Error::new(
-                    ErrorKind::HexMalformed(s.fragment().to_string()),
-                    Some(SourceSpan::from_span(s)),
-                )
-            })
-        },
-    )(input)
+    // Match opening quote, content (any chars except quote), and closing quote
+    let (remaining, (_, content, _)) =
+        tuple((char('\''), take_while(|c: char| c != '\''), char('\'')))(input)?;
+
+    // Decode the hex string - this will fail if there are invalid hex digits
+    match hex::decode(content.fragment()) {
+        Ok(bytes) => Ok((remaining, Literal::Binary(bytes))),
+        Err(_) => Err(nom::Err::Failure(nom::error::Error::new(
+            content,
+            nom::error::ErrorKind::HexDigit,
+        ))),
+    }
 }
 
 fn string_term(input: Span) -> IResult<Span, Term> {
