@@ -82,9 +82,10 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Term::Access(access) => {
-                if let Some(name) = &access.identifier {
+                if let Some(ast::AccessSource::Identifier(name)) = &access.source {
                     self.visit_identifier(name, access.accessors.clone());
                 }
+                // $ doesn't capture variables, so skip AccessSource::Parameter
                 if let Some(argument) = &access.argument {
                     for field in &argument.fields {
                         if let ast::FieldValue::Chain(chain) = &field.value {

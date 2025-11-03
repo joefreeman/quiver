@@ -208,3 +208,34 @@ fn test_identity_function_with_type_parameter() {
         )
         .expect("42");
 }
+
+#[test]
+fn test_dollar_parameter_reference() {
+    quiver().evaluate("f = #int { $ }, 5 ~> f").expect("5");
+}
+
+#[test]
+fn test_dollar_with_tuple_field_access() {
+    quiver()
+        .evaluate("f = #[int, int] { [$.0, $.1] ~> __add__ }, [10, 20] ~> f")
+        .expect("30");
+}
+
+#[test]
+fn test_dollar_in_nested_block() {
+    quiver()
+        .evaluate("f = #int { 100 ~> { ~> __add__[~, $] } }, 7 ~> f")
+        .expect("107");
+}
+
+#[test]
+fn test_dollar_with_named_tuple_field() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #Point[x: int, y: int] { [$.x, $.y] ~> __add__ },
+            Point[x: 10, y: 20] ~> f
+            "#,
+        )
+        .expect("30");
+}

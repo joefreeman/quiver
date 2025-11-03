@@ -15,7 +15,7 @@ mod variables;
 
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
-pub use scopes::{Binding, Scope};
+pub use scopes::{Binding, Scope, ScopeKind};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_types};
 
 use crate::{
@@ -301,7 +301,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Initialize scope with bindings and optional parameter
-        compiler.scopes = vec![Scope::new(scope_bindings, scope_parameter)];
+        compiler.scopes = vec![Scope::new(scope_bindings, scope_parameter, ScopeKind::Root)];
 
         let num_statements = ast_program.statements.len();
         let mut result_type = Type::nil();
@@ -686,7 +686,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             let source_chain = ast::Chain {
                                 match_pattern: None,
                                 terms: vec![ast::Term::Access(ast::Access {
-                                    identifier: Some(ident.clone()),
+                                    source: Some(ast::AccessSource::Identifier(ident.clone())),
                                     accessors: vec![],
                                     argument: None,
                                 })],
@@ -754,7 +754,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
 
                 // Try to resolve the access to get its type
-                if let Some(identifier) = &access.identifier {
+                if let Some(ast::AccessSource::Identifier(identifier)) = &access.source {
                     let var_type =
                         scopes::lookup_variable(&self.scopes, identifier, &access.accessors)
                             .map(|(t, _)| t)
@@ -855,7 +855,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         continue;
                     }
 
-                    let Some(identifier) = &access.identifier else {
+                    let Some(ast::AccessSource::Identifier(identifier)) = &access.source else {
                         continue;
                     };
 
@@ -990,7 +990,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        self.scopes = vec![Scope::new(function_scope_bindings, None)];
+        self.scopes = vec![Scope::new(function_scope_bindings, None, ScopeKind::Root)];
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
         self.current_receive_type = receive_type.clone();
@@ -1083,7 +1083,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
         let (body_type, _) = match function.body {
-            Some(body) => self.compile_block(body, parameter_type.clone(), None)?,
+            Some(body) => {
+                self.compile_block(body, parameter_type.clone(), None, ScopeKind::Function)?
+            }
             None => {
                 // Identity function: just return the parameter
                 // The calling convention puts the parameter on the stack,
@@ -1252,6 +1254,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         block: ast::Block,
         parameter_type: Type,
         on_no_match: Option<usize>,
+        scope_kind: ScopeKind,
     ) -> Result<(Type, Guard), Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
@@ -1274,6 +1277,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes.push(Scope::new(
             HashMap::new(),
             Some((parameter_type.clone(), param_local)),
+            scope_kind,
         ));
 
         // Track remaining type for exhaustiveness checking
@@ -2045,7 +2049,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Blocks without a value need NIL on stack
                     self.codegen.add_instruction(Instruction::Tuple(NIL));
                 }
-                self.compile_block(block, block_parameter, None)
+                self.compile_block(block, block_parameter, None, ScopeKind::Block)
             }
             ast::Term::Function(func) => {
                 // Compile the function itself
@@ -2060,7 +2064,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((result_type, Guard::None))
             }
             ast::Term::Access(access) => {
-                match &access.identifier {
+                match &access.source {
                     None => {
                         // Field/positional access (.x, .0) requires a value
                         if let Some(val_type) = value_type {
@@ -2093,7 +2097,64 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             ))
                         }
                     }
-                    Some(name) => {
+                    Some(ast::AccessSource::Parameter) => {
+                        // $ accesses the function parameter
+                        let (param_type, param_local) =
+                            scopes::get_function_parameter(&self.scopes)?;
+                        self.codegen.add_instruction(Instruction::Load(param_local));
+
+                        // Apply accessors to the parameter (e.g., $.x, $.0)
+                        let accessed_type =
+                            self.compile_accessor(param_type, access.accessors, "$")?;
+
+                        // Handle argument if present (e.g., $[...])
+                        if let Some(args) = &access.argument {
+                            // Check if argument would silently drop piped value
+                            if value_type.is_some()
+                                && !helpers::tuple_contains_ripple(&args.fields)
+                                && !helpers::tuple_contains_spread(&args.fields)
+                            {
+                                return Err(Error::ValueIgnored(
+                                    "Function argument ignores piped value; use ripple (e.g., $[~, 2])"
+                                        .to_string(),
+                                ));
+                            }
+
+                            // Convert value_type to ripple_context if present
+                            let ripple_context_value;
+                            let ripple_context_param = if let Some(vt) = value_type.as_ref() {
+                                ripple_context_value = RippleContext {
+                                    value_type: vt.clone(),
+                                    stack_offset: 0,
+                                    owns_value: true,
+                                };
+                                Some(&ripple_context_value)
+                            } else {
+                                ripple_context
+                            };
+
+                            let arg_type = self.compile_tuple(
+                                args.name.clone(),
+                                args.fields.clone(),
+                                ripple_context_param,
+                            )?;
+
+                            // Apply argument to the accessed function
+                            Ok((
+                                self.apply_value_to_type(accessed_type, arg_type)?,
+                                Guard::None,
+                            ))
+                        } else if let Some(val_type) = value_type {
+                            // Apply piped value to the accessed function
+                            Ok((
+                                self.apply_value_to_type(accessed_type, val_type)?,
+                                Guard::None,
+                            ))
+                        } else {
+                            Ok((accessed_type, Guard::None))
+                        }
+                    }
+                    Some(ast::AccessSource::Identifier(name)) => {
                         // If there's an argument, compile it first (before loading the function)
                         // so that ripples in the argument can access the piped value on the stack
                         let arg_type = if let Some(args) = &access.argument {
@@ -2407,7 +2468,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             vec![ast::Chain {
                                 match_pattern: None,
                                 terms: vec![ast::Term::Access(ast::Access {
-                                    identifier: Some(ident.clone()),
+                                    source: Some(ast::AccessSource::Identifier(ident.clone())),
                                     accessors: vec![],
                                     argument: None,
                                 })],

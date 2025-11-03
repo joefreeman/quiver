@@ -1,6 +1,9 @@
 use crate::WorkerId;
 use crate::messages::{Command, Event};
 use crate::transport::WorkerHandle;
+use quiver_compiler::compiler::{
+    Binding, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
+};
 use quiver_core::bytecode::{Bytecode, Function, Instruction};
 use quiver_core::effects::{Effect, EffectBackend};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
@@ -1108,26 +1111,19 @@ impl<E: Effect> Environment<E> {
     /// This is useful for testing and displaying type aliases.
     pub fn resolve_type_alias(
         &mut self,
-        type_aliases: &std::collections::HashMap<String, quiver_compiler::compiler::TypeAliasDef>,
+        type_aliases: &std::collections::HashMap<String, TypeAliasDef>,
         alias_name: &str,
     ) -> Result<Type, String> {
         // Convert type_aliases HashMap to a single scope for resolution
         let mut bindings = std::collections::HashMap::new();
         for (name, type_alias) in type_aliases {
-            bindings.insert(
-                name.clone(),
-                quiver_compiler::compiler::Binding::TypeAlias(type_alias.clone()),
-            );
+            bindings.insert(name.clone(), Binding::TypeAlias(type_alias.clone()));
         }
-        let scope = quiver_compiler::compiler::Scope::new(bindings, None);
+        let scope = Scope::new(bindings, None, ScopeKind::Root);
         let scopes = vec![scope];
 
-        quiver_compiler::compiler::resolve_type_alias_for_display(
-            &scopes,
-            alias_name,
-            &mut self.program,
-        )
-        .map_err(|e| format!("{:?}", e))
+        resolve_type_alias_for_display(&scopes, alias_name, &mut self.program)
+            .map_err(|e| format!("{:?}", e))
     }
 
     /// Handle effect request from a worker

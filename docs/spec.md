@@ -345,7 +345,9 @@ Functions are defined with `#... { ... }` syntax, where the first `...` is the t
 
 Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
-Identity functions (that simply return their input unchanged) can be defined without a body: `#int` is equivalent to `#int { ~> }`.
+The function parameter can be accessed using `$` (e.g., `$.x`, `$.0`). Unlike `~>`, which refers to a block's parameter, `$` always refers to the enclosing function's parameter.
+
+Identity functions (that simply return their input unchanged) can be defined without a body: `#int` is equivalent to `#int { $ }`.
 
 ```
 // Single parameter function
@@ -365,6 +367,9 @@ area = #shape {
 
 // Identity function
 f = #int
+
+// Parameter reference with $
+sum = #[int, int] { [$.0, $.1] ~> math.add }
 ```
 
 ### Function application
@@ -567,9 +572,9 @@ p2 = Point[...p1, y: 4],
 
 // Function to add points
 add_points = #[point, point] {
-  ~> =[a, b] => Point[
-    x: math.add[a.x, b.x],
-    y: math.add[a.y, b.y],
+  Point[
+    x: math.add[$.0.x, $.1.x],
+    y: math.add[$.0.y, $.1.y],
   ]
 },
 

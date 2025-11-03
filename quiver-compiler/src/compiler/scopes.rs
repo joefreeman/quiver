@@ -11,18 +11,35 @@ pub enum Binding {
     TypeAlias(TypeAliasDef),
 }
 
+/// The kind of scope, used to distinguish function scopes from block scopes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    /// Root scope (top-level program)
+    Root,
+    /// Function scope - its parameter IS the function parameter (accessible via $)
+    Function,
+    /// Block scope - its parameter is local to the block (accessible via ~>)
+    Block,
+}
+
 /// Represents a scope in the compiler's variable environment
 /// Each scope tracks bindings (variables and type aliases) and an optional function parameter
 pub struct Scope {
     pub bindings: HashMap<String, Binding>,
     pub parameter: Option<(Type, usize)>,
+    pub kind: ScopeKind,
 }
 
 impl Scope {
-    pub fn new(bindings: HashMap<String, Binding>, parameter: Option<(Type, usize)>) -> Self {
+    pub fn new(
+        bindings: HashMap<String, Binding>,
+        parameter: Option<(Type, usize)>,
+        kind: ScopeKind,
+    ) -> Self {
         Self {
             bindings,
             parameter,
+            kind,
         }
     }
 
@@ -31,6 +48,7 @@ impl Scope {
         Self {
             bindings: HashMap::new(),
             parameter: None,
+            kind: ScopeKind::Root,
         }
     }
 }
@@ -109,4 +127,19 @@ pub fn get_parameter(scopes: &[Scope]) -> Result<(Type, usize), Error> {
         .ok_or_else(|| Error::InternalError {
             message: "No parameter in current scope".to_string(),
         })
+}
+
+/// Get the function parameter (for $ operator)
+/// Walks up scopes to find the nearest Function scope's parameter
+pub fn get_function_parameter(scopes: &[Scope]) -> Result<(Type, usize), Error> {
+    for scope in scopes.iter().rev() {
+        if scope.kind == ScopeKind::Function
+            && let Some(param) = &scope.parameter
+        {
+            return Ok(param.clone());
+        }
+    }
+    Err(Error::InternalError {
+        message: "No function parameter available ($ used outside function)".to_string(),
+    })
 }

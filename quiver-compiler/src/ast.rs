@@ -121,8 +121,16 @@ pub struct Function {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum AccessSource {
+    /// Identifier like `foo`
+    Identifier(String),
+    /// Function parameter `$`
+    Parameter,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Access {
-    pub identifier: Option<String>,
+    pub source: Option<AccessSource>,
     pub accessors: Vec<AccessPath>,
     pub argument: Option<Tuple>,
 }

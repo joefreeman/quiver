@@ -838,7 +838,10 @@ fn access(input: Span) -> IResult<Span, Access> {
     verify(
         map(
             tuple((
-                opt(identifier),
+                opt(alt((
+                    map(char('$'), |_| AccessSource::Parameter),
+                    map(identifier, AccessSource::Identifier),
+                ))),
                 many0(preceded(
                     char('.'),
                     alt((
@@ -851,8 +854,8 @@ fn access(input: Span) -> IResult<Span, Access> {
                     delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
                 )),
             )),
-            |(identifier, accessors, argument)| Access {
-                identifier,
+            |(source, accessors, argument)| Access {
+                source,
                 accessors,
                 argument: argument.map(|fields| Tuple {
                     name: TupleName::None,
@@ -860,7 +863,7 @@ fn access(input: Span) -> IResult<Span, Access> {
                 }),
             },
         ),
-        |ma| ma.identifier.is_some() || !ma.accessors.is_empty(),
+        |ma| ma.source.is_some() || !ma.accessors.is_empty(),
     )(input)
 }
 
@@ -952,9 +955,9 @@ fn select_term(input: Span) -> IResult<Span, Term> {
             // Check if it's a bare identifier without accessors - use Identifier variant
             if acc.accessors.is_empty()
                 && acc.argument.is_none()
-                && let Some(ref id) = acc.identifier
+                && let Some(AccessSource::Identifier(id)) = acc.source
             {
-                return Term::Select(Select::Identifier(id.clone()));
+                return Term::Select(Select::Identifier(id));
             }
             // Otherwise, it's a Sources with the access term
             Term::Select(Select::Sources(vec![Chain {
