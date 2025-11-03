@@ -1,7 +1,7 @@
 use crate::bytecode::Instruction;
+use crate::effects::Effect;
 use crate::error::Error;
 use crate::executor::Executor;
-use crate::process::Frame;
 use crate::program::Program;
 use crate::value::Value;
 
@@ -12,12 +12,13 @@ use crate::value::Value;
 /// Creates a temporary executor, spawns a single process, executes the instructions,
 /// and returns both the result value and the executor (which may contain
 /// heap-allocated data that the value references).
-pub fn execute_instructions_sync(
+pub fn execute_instructions_sync<E: Effect>(
     program: &Program,
     instructions: Vec<Instruction>,
     result_type: crate::types::Type,
-) -> Result<(Value, Executor), Error> {
-    let mut executor = Executor::new();
+    builtins: &crate::builtins::BuiltinRegistry<E>,
+) -> Result<(Value, Executor<E>), Error> {
+    let mut executor = Executor::new(builtins.clone());
 
     // Register the instructions as a temporary function to get a function_index
     let mut functions = program.get_functions().clone();
@@ -50,22 +51,8 @@ pub fn execute_instructions_sync(
 
     let process_id = 0;
 
-    // Spawn a process with the temporary function
-    executor.spawn_process(process_id, function_index, false);
-
-    // Set up the process with the instructions
-    {
-        let process = executor
-            .get_process_mut(process_id)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        // Push NIL as the initial parameter
-        process.stack.push(Value::nil());
-
-        // Create a frame with the function index
-        let frame = Frame::new(function_index, 0, 0);
-        process.frames.push(frame);
-    }
+    // Spawn a process with the temporary function (no captures)
+    executor.spawn_process(process_id, function_index, vec![], vec![], false)?;
 
     // Execute until completion
     loop {

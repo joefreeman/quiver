@@ -46,19 +46,19 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
         Type::Process(process_type) => {
-            let formatted = match (&process_type.receive, &process_type.returns) {
-                (Some(receive), Some(returns)) => {
+            let formatted = match (&process_type.send, &process_type.receive) {
+                (Some(send), Some(receive)) => {
                     format!(
                         "@{} -> {}",
-                        format_type_impl(program, receive, true),
-                        format_type_impl(program, returns, true)
+                        format_type_impl(program, send, true),
+                        format_type_impl(program, receive, true)
                     )
                 }
-                (Some(receive), None) => {
-                    format!("@{}", format_type_impl(program, receive, true))
+                (Some(send), None) => {
+                    format!("@{} -> ?", format_type_impl(program, send, true))
                 }
-                (None, Some(returns)) => {
-                    format!("@-> {}", format_type_impl(program, returns, true))
+                (None, Some(receive)) => {
+                    format!("@-> {}", format_type_impl(program, receive, true))
                 }
                 (None, None) => "@".to_string(),
             };
@@ -140,18 +140,19 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
                 }
             }
         }
+        Type::Resource(name) => format!("\\{}", name),
         Type::Variable(name) => name.to_string(),
     }
 }
 
 /// Format a binary value showing its actual content
 fn format_binary(bytes: &[u8]) -> String {
-    if bytes.len() <= 8 {
-        // Show short binaries in full
+    if bytes.len() <= 64 {
+        // Show binaries up to 64 bytes in full
         format!("'{}'", hex::encode(bytes))
     } else {
         // Show truncated for long binaries
-        format!("'{}…'", hex::encode(&bytes[..8]))
+        format!("'{}…'", hex::encode(&bytes[..64]))
     }
 }
 
@@ -189,6 +190,7 @@ pub fn format_value<L: BinaryLookup>(value: &Value, lookup: &L, program: &Progra
             }
         }
         Value::Process(process_id, _) => format!("@{}", process_id),
+        Value::Resource(resource_id, _) => format!("\\#{}", resource_id),
         Value::Tuple(type_id, elements) => {
             if let Some(type_info) = program.lookup_tuple(*type_id) {
                 if type_info.name.as_deref() == Some("Str")

@@ -21,8 +21,8 @@ fn test_process_without_receive_rejects_send() {
     quiver()
         .evaluate("p = @#{ [] }, 42 ~> p")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "process with receive type".to_string(),
-            found: "process without receive type (cannot send messages)".to_string(),
+            expected: "process with send type".to_string(),
+            found: "process without send type (cannot send to it)".to_string(),
         });
 }
 
@@ -244,8 +244,8 @@ fn test_self_reference_cannot_be_awaited() {
     quiver()
         .evaluate("42 ~> @#{ !(#int) ~> =x => . ~> =self_pid, self_pid ~> ! }")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "process with return type (awaitable)".to_string(),
-            found: "process without return type (cannot await)".to_string(),
+            expected: "process with receive type (awaitable/readable)".to_string(),
+            found: "process without receive type (cannot select)".to_string(),
         });
 }
 

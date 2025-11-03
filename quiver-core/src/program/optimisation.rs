@@ -20,14 +20,14 @@ fn mark_tuple_references(typ: &Type, used_tuples: &mut [bool], tuple_queue: &mut
             mark_tuple_references(&callable.receive, used_tuples, tuple_queue);
         }
         Type::Process(process) => {
+            if let Some(send) = &process.send {
+                mark_tuple_references(send, used_tuples, tuple_queue);
+            }
             if let Some(receive) = &process.receive {
                 mark_tuple_references(receive, used_tuples, tuple_queue);
             }
-            if let Some(returns) = &process.returns {
-                mark_tuple_references(returns, used_tuples, tuple_queue);
-            }
         }
-        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Variable(_) => {
+        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Variable(_) | Type::Resource(_) => {
             // These don't reference other types
         }
     }
@@ -57,14 +57,16 @@ fn remap_tuple_ids(typ: Type, tuple_remap: &HashMap<usize, usize>) -> Type {
             receive: remap_tuple_ids(callable.receive, tuple_remap),
         })),
         Type::Process(process) => Type::Process(Box::new(crate::types::ProcessType {
+            send: process
+                .send
+                .map(|t| Box::new(remap_tuple_ids(*t, tuple_remap))),
             receive: process
                 .receive
                 .map(|t| Box::new(remap_tuple_ids(*t, tuple_remap))),
-            returns: process
-                .returns
-                .map(|t| Box::new(remap_tuple_ids(*t, tuple_remap))),
         })),
-        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Variable(_) => typ,
+        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Variable(_) | Type::Resource(_) => {
+            typ
+        }
     }
 }
 

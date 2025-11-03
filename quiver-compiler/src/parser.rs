@@ -498,6 +498,20 @@ fn primitive_type(input: Span) -> IResult<Span, Type> {
     ))(input)
 }
 
+fn resource_type_name(input: Span) -> IResult<Span, String> {
+    map(
+        recognize(pair(
+            satisfy(|c: char| c.is_ascii_uppercase()),
+            take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
+        )),
+        |s: Span| s.fragment().to_string(),
+    )(input)
+}
+
+fn resource_type(input: Span) -> IResult<Span, Type> {
+    map(preceded(char('\\'), resource_type_name), Type::Resource)(input)
+}
+
 fn field_type(input: Span) -> IResult<Span, FieldType> {
     alt((
         // Spread with optional identifier and optional type arguments: ... or ...identifier or ...identifier<type, type>
@@ -760,6 +774,7 @@ fn function_input_type(input: Span) -> IResult<Span, Type> {
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
+        resource_type,
         process_type,
         type_identifier,
     ))(input)
@@ -771,6 +786,7 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         primitive_type,
+        resource_type,
         process_type,
         type_identifier,
     ))(input)
@@ -781,6 +797,7 @@ fn base_type(input: Span) -> IResult<Span, Type> {
         tuple_type,
         partial_type, // Must come before grouping parentheses to have priority
         primitive_type,
+        resource_type, // Must come before type_identifier to match \Resource
         type_cycle,
         process_type,
         type_parameter, // Must come before type_identifier to match <t> before trying identifier

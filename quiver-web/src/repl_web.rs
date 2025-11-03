@@ -153,8 +153,10 @@ impl CallbackHandle {
     }
 }
 
+use crate::effects::WebEffect;
+
 type EventLoopClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
-type SharedEnvironment = Rc<RefCell<quiver_environment::Environment>>;
+type SharedEnvironment = Rc<RefCell<quiver_environment::Environment<WebEffect>>>;
 type SharedCallbacks = Rc<RefCell<HashMap<u64, CallbackHandle>>>;
 type SharedProcessTypes = Rc<RefCell<HashMap<usize, (quiver_core::types::Type, usize)>>>;
 type SharedPendingEvaluations = Rc<
@@ -162,7 +164,7 @@ type SharedPendingEvaluations = Rc<
         Vec<(
             String,
             CallbackHandle,
-            Rc<RefCell<quiver_environment::Repl>>,
+            Rc<RefCell<quiver_environment::Repl<WebEffect>>>,
         )>,
     >,
 >;
@@ -191,7 +193,7 @@ impl Environment {
         console_error_panic_hook::set_once();
 
         // Create workers by calling the factory function
-        let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
+        let mut workers: Vec<Box<dyn WorkerHandle<WebEffect>>> = Vec::new();
         for _ in 0..num_workers {
             let worker = worker_factory
                 .call0(&JsValue::NULL)
@@ -228,7 +230,7 @@ impl Environment {
                         }
                     } else {
                         // Parse as Event
-                        match serde_json::from_str::<quiver_environment::Event>(&text) {
+                        match serde_json::from_str::<quiver_environment::Event<WebEffect>>(&text) {
                             Ok(event) => {
                                 event_queue_for_closure.borrow_mut().push_back(event);
                             }
@@ -249,7 +251,12 @@ impl Environment {
         }
 
         // Create environment
-        let environment = quiver_environment::Environment::new(workers);
+        // For WASM, use core modules only (no network builtins)
+        let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
+            &quiver_core::builtins::core_modules(),
+        );
+        // WASM doesn't use old io_backend (no io_uring available)
+        let environment = quiver_environment::Environment::new(workers, builtins);
         let environment_rc = Rc::new(RefCell::new(environment));
         let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let cached_process_types = Rc::new(RefCell::new(HashMap::new()));
@@ -482,7 +489,7 @@ impl Environment {
 
     // Helper to convert RequestResult to appropriate callback invocation
     fn handle_result(
-        env: &quiver_environment::Environment,
+        env: &quiver_environment::Environment<WebEffect>,
         callback: CallbackHandle,
         result: RequestResult,
     ) {
@@ -566,7 +573,7 @@ pub struct Repl {
     environment: SharedEnvironment,
     pending_callbacks: SharedCallbacks,
     pending_evaluations: SharedPendingEvaluations,
-    repl: Rc<RefCell<quiver_environment::Repl>>,
+    repl: Rc<RefCell<quiver_environment::Repl<WebEffect>>>,
 }
 
 #[wasm_bindgen]
@@ -584,7 +591,11 @@ impl Repl {
         // Create REPL
         let program = Program::new();
         let module_loader = create_std_module_loader();
-        let repl = quiver_environment::Repl::new(program, module_loader);
+        // For WASM, use core modules only (no network builtins)
+        let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
+            &quiver_core::builtins::core_modules(),
+        );
+        let repl = quiver_environment::Repl::new(program, module_loader, builtins);
 
         Ok(Self {
             environment: env_rc,

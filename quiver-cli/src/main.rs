@@ -6,13 +6,41 @@ use quiver_core::format;
 use quiver_core::program::Program;
 use quiver_core::types::{NIL, Type};
 use quiver_core::value::Value;
+use quiver_environment::{Environment, WorkerHandle};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
 mod diagnostics;
+mod native_transport;
 mod repl_cli;
+use native_transport::spawn_worker;
 use repl_cli::ReplCli;
+
+/// Execution result type: (Value, Vec of binary outputs)
+type ExecutionResult = Result<(Value, Vec<Vec<u8>>), Box<dyn std::error::Error>>;
+
+/// Build complete builtin registry including core builtins and network builtins
+pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect> {
+    let mut registry = quiver_core::builtins::BuiltinRegistry::with_modules(
+        &quiver_core::builtins::core_modules(),
+    );
+    // Add I/O builtins from quiver-io
+    quiver_io::register_network_builtins(&mut registry);
+    quiver_io::register_file_builtins(&mut registry);
+    registry
+}
+
+/// Create an effect backend for the new effects system
+pub fn create_effect_backend()
+-> Option<Box<dyn quiver_core::effects::EffectBackend<E = quiver_io::NativeEffect>>> {
+    quiver_io::NativeEffectBackend::new(256)
+        .ok()
+        .map(|backend| {
+            Box::new(backend)
+                as Box<dyn quiver_core::effects::EffectBackend<E = quiver_io::NativeEffect>>
+        })
+}
 
 #[derive(Parser)]
 #[command(name = "quiv", version, about = "Quiver CLI")]
@@ -111,6 +139,8 @@ fn compile_command(
         Ok(ast) => ast,
         Err(e) => handle_parse_error(e, &source, &source_id),
     };
+    // Build registry from core modules and network builtins
+    let builtins = build_builtin_registry();
     let result = Compiler::compile(
         ast,
         &HashMap::new(), // No existing bindings
@@ -120,6 +150,7 @@ fn compile_command(
         module_path,
         Type::nil(),
         &HashMap::new(), // No process types (not a REPL)
+        &builtins,
     )
     .map_err(|e| format!("Compile error: {:?}", e))?;
 
@@ -129,7 +160,7 @@ fn compile_command(
 
     // Execute the instructions synchronously to get the function value
     let (result, executor) =
-        quiver_core::execute_instructions_sync(&program, instructions, result_type)
+        quiver_core::execute_instructions_sync(&program, instructions, result_type, &builtins)
             .map_err(|e| format!("Execution error: {:?}", e))?;
 
     // Extract the entry function from the result
@@ -203,6 +234,8 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
         Ok(ast) => ast,
         Err(e) => handle_parse_error(e, source, "input"),
     };
+    // Build registry from core modules and network builtins
+    let builtins = build_builtin_registry();
     let compilation_result = Compiler::compile(
         ast,
         &HashMap::new(), // No existing bindings
@@ -212,6 +245,7 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
         module_path,
         Type::nil(),
         &HashMap::new(), // No process types (not a REPL)
+        &builtins,
     )
     .map_err(|e| format!("Compile error: {:?}", e))?;
 
@@ -221,7 +255,7 @@ fn compile_execute(source: &str, quiet: bool) -> Result<(), Box<dyn std::error::
 
     // Execute the instructions synchronously to get the function value
     let (result, executor) =
-        quiver_core::execute_instructions_sync(&program, instructions, result_type)
+        quiver_core::execute_instructions_sync(&program, instructions, result_type, &builtins)
             .map_err(|e| format!("Execution error: {:?}", e))?;
 
     // Extract the entry function from the result
@@ -267,9 +301,8 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
             .map(|f| f.function_type.result.clone())
             .unwrap_or_else(|| Type::Union(vec![])); // Top type as fallback
 
-        let (value, _executor) =
-            quiver_core::execute_instructions_sync(&program, instructions, result_type)
-                .map_err(|e| format!("Execution error: {:?}", e))?;
+        let (value, heap) = execute_with_environment(&program, instructions, result_type)
+            .map_err(|e| format!("Execution error: {:?}", e))?;
 
         // Check if result is NIL tuple (exit with error)
         if value.is_nil() {
@@ -279,7 +312,7 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
         // Print result unless quiet or OK/NIL
         if !quiet && !value.is_ok() && !value.is_nil() {
             let lookup = format::HeapAndProgramLookup {
-                heap: &[],
+                heap: &heap,
                 program: &program,
             };
             println!("{}", format::format_value(&value, &lookup, &program));
@@ -287,6 +320,94 @@ fn execute_bytecode(bytecode_json: &str, quiet: bool) -> Result<(), Box<dyn std:
     }
 
     Ok(())
+}
+
+/// Execute instructions using the Environment architecture with multi-worker support.
+/// This is similar to execute_instructions_sync but uses the Environment/worker infrastructure
+/// needed for process spawning and other concurrent operations.
+fn execute_with_environment(
+    program: &Program,
+    instructions: Vec<bytecode::Instruction>,
+    result_type: Type,
+) -> ExecutionResult {
+    // Create workers
+    let num_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+
+    // Build registry from core modules and network builtins
+    let builtins = build_builtin_registry();
+
+    let mut workers: Vec<Box<dyn WorkerHandle<quiver_io::NativeEffect>>> = Vec::new();
+    for _ in 0..num_workers {
+        workers.push(Box::new(spawn_worker(
+            || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+            },
+            builtins.clone(),
+        )));
+    }
+
+    // Create environment with effect backend (new system)
+    let effect_backend = create_effect_backend();
+    let mut environment = Environment::<quiver_io::NativeEffect>::new(workers, builtins);
+
+    // Set the effect backend
+    if let Some(backend) = effect_backend {
+        environment.set_effect_backend(backend);
+    }
+
+    // Create a wrapper function with our instructions
+    let mut prog = program.clone();
+    let function = bytecode::Function {
+        instructions,
+        function_type: quiver_core::types::CallableType {
+            parameter: Type::nil(),
+            result: result_type,
+            receive: Type::Union(vec![]), // Bottom type (never)
+        },
+        captures: vec![],
+    };
+    let function_index = prog.register_function(function);
+
+    // Create bytecode with this function as the entry point
+    let mut bytecode_data = prog.to_bytecode(Some(function_index));
+    bytecode_data.entry = Some(function_index);
+
+    // Start the process in the environment
+    let process_id = environment
+        .start_process(bytecode_data)
+        .map_err(|e| format!("Failed to start process: {:?}", e))?;
+
+    // Request the result
+    let request_id = environment
+        .request_result(process_id)
+        .map_err(|e| format!("Failed to request result: {:?}", e))?;
+
+    loop {
+        let did_work = environment.step().unwrap_or(false);
+
+        match environment.poll_request(request_id) {
+            Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap))))) => {
+                return Ok((value, heap));
+            }
+            Ok(Some(quiver_environment::RequestResult::Result(Err(e)))) => {
+                return Err(format!("Runtime error: {:?}", e).into());
+            }
+            Ok(Some(_)) => {
+                return Err("Unexpected result type".into());
+            }
+            Ok(None) => {
+                if !did_work {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+            Err(e) => return Err(format!("Environment error: {:?}", e).into()),
+        }
+    }
 }
 
 fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {

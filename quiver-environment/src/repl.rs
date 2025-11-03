@@ -3,6 +3,7 @@ use quiver_compiler::Compiler;
 use quiver_compiler::compiler::{Binding, ModuleCache};
 use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
+use quiver_core::effects::Effect;
 use quiver_core::process::ProcessId;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
@@ -27,17 +28,22 @@ impl std::fmt::Display for ReplError {
     }
 }
 
-pub struct Repl {
+pub struct Repl<E: Effect> {
     repl_process_id: Option<ProcessId>,
     types: Vec<quiver_core::types::TupleTypeInfo>, // Accumulated types across evaluations
     bindings: HashMap<String, Binding>, // variables and type aliases persisted across sessions
     module_cache: ModuleCache,          // persistent module cache across evaluations
     last_result_type: Type,             // Type of the last evaluated result, for continuations
     module_loader: Box<dyn ModuleLoader>,
+    builtins: quiver_core::builtins::BuiltinRegistry<E>,
 }
 
-impl Repl {
-    pub fn new(program: Program, module_loader: Box<dyn ModuleLoader>) -> Self {
+impl<E: Effect> Repl<E> {
+    pub fn new(
+        program: Program,
+        module_loader: Box<dyn ModuleLoader>,
+        builtins: quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Self {
         let types = program.get_tuples().to_vec();
 
         Self {
@@ -47,6 +53,7 @@ impl Repl {
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
             module_loader,
+            builtins,
         }
     }
 
@@ -59,7 +66,7 @@ impl Repl {
     /// - Web: async request via wasm bindings
     pub fn evaluate(
         &mut self,
-        env: &mut Environment,
+        env: &mut Environment<E>,
         source: &str,
         process_types: HashMap<usize, (Type, usize)>,
     ) -> Result<Option<u64>, ReplError> {
@@ -75,6 +82,7 @@ impl Repl {
             None,                          // module_path
             self.last_result_type.clone(), // parameter_type - use previous result type for continuations
             &process_types,
+            &self.builtins,
         )
         .map_err(ReplError::Compiler)?;
 
@@ -150,7 +158,7 @@ impl Repl {
     /// The result will be RequestResult::Locals containing the variable value
     pub fn request_variable(
         &mut self,
-        env: &mut Environment,
+        env: &mut Environment<E>,
         name: &str,
     ) -> Result<u64, EnvironmentError> {
         let binding = self
@@ -197,7 +205,7 @@ impl Repl {
     }
 
     /// Compact locals to remove unused variables (optimization, safe to skip)
-    pub fn compact(&mut self, env: &mut Environment) {
+    pub fn compact(&mut self, env: &mut Environment<E>) {
         // Silently ignore if no REPL process exists yet
         let Some(repl_process_id) = self.repl_process_id else {
             return;
@@ -243,7 +251,7 @@ impl Repl {
     /// This is useful for testing and displaying type aliases.
     pub fn resolve_type_alias(
         &mut self,
-        env: &mut Environment,
+        env: &mut Environment<E>,
         alias_name: &str,
     ) -> Result<Type, String> {
         // Extract type aliases from bindings

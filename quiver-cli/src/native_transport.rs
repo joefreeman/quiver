@@ -1,16 +1,17 @@
 use quiver_environment::{
     Command, CommandReceiver, EnvironmentError, Event, EventSender, Worker, WorkerHandle,
 };
+use quiver_io::NativeEffect;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 /// Command receiver using mpsc::Receiver
 pub struct NativeCommandReceiver {
-    receiver: Receiver<Command>,
+    receiver: Receiver<Command<NativeEffect>>,
 }
 
-impl CommandReceiver for NativeCommandReceiver {
-    fn try_recv(&mut self) -> Result<Option<Command>, EnvironmentError> {
+impl CommandReceiver<NativeEffect> for NativeCommandReceiver {
+    fn try_recv(&mut self) -> Result<Option<Command<NativeEffect>>, EnvironmentError> {
         match self.receiver.try_recv() {
             Ok(cmd) => Ok(Some(cmd)),
             Err(TryRecvError::Empty) => Ok(None),
@@ -21,11 +22,11 @@ impl CommandReceiver for NativeCommandReceiver {
 
 /// Event sender using mpsc::Sender
 pub struct NativeEventSender {
-    sender: Sender<Event>,
+    sender: Sender<Event<NativeEffect>>,
 }
 
-impl EventSender for NativeEventSender {
-    fn send(&mut self, event: Event) -> Result<(), EnvironmentError> {
+impl EventSender<NativeEffect> for NativeEventSender {
+    fn send(&mut self, event: Event<NativeEffect>) -> Result<(), EnvironmentError> {
         self.sender.send(event).map_err(|e| {
             EnvironmentError::WorkerCommunication(format!("Failed to send event: {}", e))
         })
@@ -34,19 +35,19 @@ impl EventSender for NativeEventSender {
 
 /// Worker handle for native implementation
 pub struct NativeWorkerHandle {
-    cmd_sender: Sender<Command>,
-    evt_receiver: Receiver<Event>,
+    cmd_sender: Sender<Command<NativeEffect>>,
+    evt_receiver: Receiver<Event<NativeEffect>>,
     _thread_handle: JoinHandle<()>,
 }
 
-impl WorkerHandle for NativeWorkerHandle {
-    fn send(&mut self, command: Command) -> Result<(), EnvironmentError> {
+impl WorkerHandle<NativeEffect> for NativeWorkerHandle {
+    fn send(&mut self, command: Command<NativeEffect>) -> Result<(), EnvironmentError> {
         self.cmd_sender.send(command).map_err(|e| {
             EnvironmentError::WorkerCommunication(format!("Failed to send command: {}", e))
         })
     }
 
-    fn try_recv(&mut self) -> Result<Option<Event>, EnvironmentError> {
+    fn try_recv(&mut self) -> Result<Option<Event<NativeEffect>>, EnvironmentError> {
         match self.evt_receiver.try_recv() {
             Ok(event) => Ok(Some(event)),
             Err(TryRecvError::Empty) => Ok(None),
@@ -56,7 +57,10 @@ impl WorkerHandle for NativeWorkerHandle {
 }
 
 /// Spawn a native worker thread with a custom time function
-pub fn spawn_worker<F>(time_fn: F) -> NativeWorkerHandle
+pub fn spawn_worker<F>(
+    time_fn: F,
+    builtins: quiver_core::builtins::BuiltinRegistry<NativeEffect>,
+) -> NativeWorkerHandle
 where
     F: Fn() -> u64 + Send + 'static,
 {
@@ -70,7 +74,7 @@ where
         let error_sender = evt_tx.clone();
         let evt_sender = NativeEventSender { sender: evt_tx };
 
-        let mut worker = Worker::new(cmd_receiver, evt_sender);
+        let mut worker = Worker::<NativeEffect, _, _>::new(cmd_receiver, evt_sender, builtins);
 
         // Run the worker loop
         loop {

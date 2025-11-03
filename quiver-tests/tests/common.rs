@@ -3,6 +3,7 @@ use quiver_compiler::modules::InMemoryModuleLoader;
 use quiver_core::program::Program;
 use quiver_core::value::Value;
 use quiver_environment::{Environment, Repl, ReplError, WorkerHandle};
+use quiver_io::NativeEffect;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +26,7 @@ macro_rules! load_stdlib_modules {
 #[allow(dead_code)]
 pub struct TestBuilder {
     modules: HashMap<String, String>,
+    with_io: bool,
 }
 
 #[allow(dead_code)]
@@ -32,6 +34,7 @@ impl Default for TestBuilder {
     fn default() -> Self {
         Self {
             modules: load_stdlib_modules!("math", "list", "binary", "integer"),
+            with_io: false,
         }
     }
 }
@@ -51,23 +54,61 @@ impl TestBuilder {
         self
     }
 
+    pub fn with_io(mut self) -> Self {
+        self.with_io = true;
+        self
+    }
+
     pub fn evaluate(self, source: &str) -> TestResult {
         // Initialize virtual time for testing
         let virtual_time_ms = Arc::new(AtomicU64::new(0));
 
-        // Create workers with virtual time function
-        let num_workers = 2;
-        let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
-        for _ in 0..num_workers {
-            let time = virtual_time_ms.clone();
-            workers.push(Box::new(spawn_worker(move || time.load(Ordering::Relaxed))));
+        // Build builtin registry from core modules
+        let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
+            &quiver_core::builtins::core_modules(),
+        );
+
+        // Add I/O builtins if I/O is enabled
+        if self.with_io {
+            quiver_io::register_network_builtins(&mut builtins);
+            quiver_io::register_file_builtins(&mut builtins);
         }
 
+        // Create workers with virtual time function
+        let num_workers = 2;
+        let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
+        for _ in 0..num_workers {
+            let time = virtual_time_ms.clone();
+            let builtins_clone = builtins.clone();
+
+            workers.push(Box::new(spawn_worker(
+                move || time.load(Ordering::Relaxed),
+                builtins_clone,
+            )));
+        }
+
+        // Create shared effect backend if enabled
+        let effect_backend = if self.with_io {
+            quiver_io::NativeEffectBackend::new(256)
+                .ok()
+                .map(|backend| {
+                    Box::new(backend)
+                        as Box<dyn quiver_core::effects::EffectBackend<E = NativeEffect>>
+                })
+        } else {
+            None
+        };
+
         // Create environment and REPL
-        let mut environment = Environment::new(workers);
+        let mut environment = Environment::<NativeEffect>::new(workers, builtins.clone());
+
+        // Set the effect backend
+        if let Some(backend) = effect_backend {
+            environment.set_effect_backend(backend);
+        }
         let program = Program::new();
         let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
-        let mut repl = Repl::new(program, module_loader);
+        let mut repl = Repl::new(program, module_loader, builtins);
 
         // Evaluate source
         let result = match repl.evaluate(&mut environment, source, std::collections::HashMap::new())
@@ -131,8 +172,8 @@ impl TestBuilder {
 pub struct TestResult {
     result: ReplResult,
     source: String,
-    environment: Environment,
-    repl: Repl,
+    environment: Environment<NativeEffect>,
+    repl: Repl<NativeEffect>,
     virtual_time_ms: u64,
     last_result_type: quiver_core::types::Type,
 }

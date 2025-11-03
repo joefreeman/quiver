@@ -84,7 +84,7 @@ fn ast_contains_cycle(typ: &ast::Type) -> bool {
         // Function and process types are boundaries - cycles inside them don't count
         // as structural recursion
         ast::Type::Function(_) | ast::Type::Process(_) => false,
-        ast::Type::Primitive(_) => false,
+        ast::Type::Primitive(_) | ast::Type::Resource(_) => false,
     }
 }
 
@@ -373,6 +373,7 @@ fn resolve_ast_type_impl(
     match ast_type {
         ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(Type::Integer),
         ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(Type::Binary),
+        ast::Type::Resource(name) => Ok(Type::Resource(name)),
         ast::Type::Tuple(tuple) => {
             // Resolve field types without distributing unions
             // Check if there are any spreads
@@ -591,7 +592,10 @@ fn resolve_ast_type_impl(
                 })
                 .transpose()?
                 .map(Box::new);
-            Ok(Type::Process(Box::new(ProcessType { receive, returns })))
+            Ok(Type::Process(Box::new(ProcessType {
+                send: receive,
+                receive: returns,
+            })))
         }
         ast::Type::Identifier { name, arguments } => {
             // For bare identifiers (no arguments), check type parameter bindings first
@@ -625,13 +629,13 @@ pub fn contains_variables(typ: &Type, tuple_lookup: &impl TupleLookup) -> bool {
                 || contains_variables(&func_type.result, tuple_lookup)
                 || contains_variables(&func_type.receive, tuple_lookup)
         }
-        Type::Process(proc_type) => {
-            proc_type
-                .receive
+        Type::Process(process_type) => {
+            process_type
+                .send
                 .as_ref()
-                .is_some_and(|r| contains_variables(r, tuple_lookup))
-                || proc_type
-                    .returns
+                .is_some_and(|s| contains_variables(s, tuple_lookup))
+                || process_type
+                    .receive
                     .as_ref()
                     .is_some_and(|r| contains_variables(r, tuple_lookup))
         }
@@ -647,7 +651,7 @@ pub fn contains_variables(typ: &Type, tuple_lookup: &impl TupleLookup) -> bool {
                 false
             }
         }
-        Type::Integer | Type::Binary | Type::Cycle(_) => false,
+        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Resource(_) => false,
     }
 }
 
@@ -697,19 +701,19 @@ pub fn substitute(typ: &Type, bindings: &HashMap<String, Type>, program: &mut Pr
                 typ.clone()
             }
         }
-        Type::Integer | Type::Binary | Type::Cycle(_) => typ.clone(),
+        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Resource(_) => typ.clone(),
         Type::Callable(func_type) => Type::Callable(Box::new(CallableType {
             parameter: substitute(&func_type.parameter, bindings, program),
             result: substitute(&func_type.result, bindings, program),
             receive: substitute(&func_type.receive, bindings, program),
         })),
-        Type::Process(proc_type) => Type::Process(Box::new(ProcessType {
-            receive: proc_type
-                .receive
+        Type::Process(process_type) => Type::Process(Box::new(ProcessType {
+            send: process_type
+                .send
                 .as_ref()
-                .map(|r| Box::new(substitute(r, bindings, program))),
-            returns: proc_type
-                .returns
+                .map(|s| Box::new(substitute(s, bindings, program))),
+            receive: process_type
+                .receive
                 .as_ref()
                 .map(|r| Box::new(substitute(r, bindings, program))),
         })),
@@ -753,23 +757,23 @@ pub fn unify(
 
         // Process types must match in structure
         (Type::Process(p1), Type::Process(p2)) => {
-            // Unify receive types
-            match (&p1.receive, &p2.receive) {
-                (Some(r1), Some(r2)) => unify(bindings, r1, r2, tuple_lookup)?,
+            // Unify send types (what can be sent TO the process)
+            match (&p1.send, &p2.send) {
+                (Some(s1), Some(s2)) => unify(bindings, s1, s2, tuple_lookup)?,
                 (None, None) => {}
                 _ => {
                     return Err(Error::TypeUnresolved(
-                        "Process types have incompatible receive types".to_string(),
+                        "Process types have incompatible send types".to_string(),
                     ));
                 }
             }
-            // Unify return types
-            match (&p1.returns, &p2.returns) {
+            // Unify receive types (what you GET from the process)
+            match (&p1.receive, &p2.receive) {
                 (Some(ret1), Some(ret2)) => unify(bindings, ret1, ret2, tuple_lookup)?,
                 (None, None) => {}
                 _ => {
                     return Err(Error::TypeUnresolved(
-                        "Process types have incompatible return types".to_string(),
+                        "Process types have incompatible receive types".to_string(),
                     ));
                 }
             }

@@ -1,14 +1,24 @@
+use crate::effects::Effect;
 use crate::error::Error;
 use crate::executor::Executor;
+use crate::process::{Action, ProcessId};
 use crate::program::Program;
 use crate::types::Type;
 use crate::value::Value;
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 pub mod binary;
 pub mod integer;
 pub mod math;
+
+/// Result of a builtin function execution
+#[derive(Debug)]
+pub enum BuiltinResult<E: Effect> {
+    /// Immediate value result
+    Value(Value),
+    /// Action that requires Environment coordination
+    Action(Action<E>),
+}
 
 /// Type specification for lazy type resolution
 #[derive(Clone, Debug)]
@@ -17,6 +27,8 @@ pub enum TypeSpec {
     Binary,
     Tuple(Option<&'static str>, Vec<(Option<&'static str>, TypeSpec)>),
     Union(Vec<TypeSpec>),
+    Process(Option<Box<TypeSpec>>, Option<Box<TypeSpec>>), // Process type: (send, receive)
+    Resource(String), // Opaque resource type identifier (e.g., "File", "TcpSocket")
 }
 
 impl TypeSpec {
@@ -39,34 +51,83 @@ impl TypeSpec {
                 let types: Vec<Type> = specs.iter().map(|spec| spec.resolve(program)).collect();
                 Type::Union(types)
             }
+            TypeSpec::Process(send, receive) => {
+                Type::Process(Box::new(crate::types::ProcessType {
+                    send: send.as_ref().map(|s| Box::new(s.resolve(program))),
+                    receive: receive.as_ref().map(|r| Box::new(r.resolve(program))),
+                }))
+            }
+            TypeSpec::Resource(name) => Type::Resource(name.clone()),
         }
     }
 }
 
 /// Function signature for builtin implementations
-pub type BuiltinFn = fn(&Value, &mut Executor) -> Result<Value, Error>;
+pub type BuiltinFn<E> = fn(ProcessId, &Value, &mut Executor<E>) -> Result<BuiltinResult<E>, Error>;
+
+/// Function signature for builtin module registration
+pub type BuiltinModule<E> = fn(&mut BuiltinRegistry<E>);
 
 /// Helper to coerce function item to function pointer (avoids rust-analyzer warnings)
-const fn coerce_builtin(f: BuiltinFn) -> BuiltinFn {
+const fn coerce_builtin<E: Effect>(f: BuiltinFn<E>) -> BuiltinFn<E> {
     f
 }
 
 /// Macro for registering a single builtin function
 macro_rules! register_builtin {
-    ($functions:expr, $fn_name:literal, $impl:path, $param:expr => $result:expr) => {
-        $functions.insert($fn_name, (coerce_builtin($impl), $param, $result));
+    ($registry:expr, $fn_name:literal, $impl:path, $param:expr => $result:expr) => {
+        $registry.register($fn_name.to_string(), coerce_builtin($impl), $param, $result);
     };
 }
 
 /// Registry of all available builtin functions
-pub struct BuiltinRegistry {
+#[derive(Clone)]
+pub struct BuiltinRegistry<E: Effect> {
     /// Function name -> (implementation, param_spec, result_spec)
-    functions: HashMap<&'static str, (BuiltinFn, TypeSpec, TypeSpec)>,
+    functions: HashMap<String, (BuiltinFn<E>, TypeSpec, TypeSpec)>,
 }
 
-impl BuiltinRegistry {
+impl<E: Effect> Default for BuiltinRegistry<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E: Effect> BuiltinRegistry<E> {
+    /// Create a new empty builtin registry
+    pub fn new() -> Self {
+        Self {
+            functions: HashMap::new(),
+        }
+    }
+
+    /// Register a single builtin function
+    pub fn register(
+        &mut self,
+        name: String,
+        impl_fn: BuiltinFn<E>,
+        param: TypeSpec,
+        result: TypeSpec,
+    ) {
+        self.functions.insert(name, (impl_fn, param, result));
+    }
+
+    /// Merge another registry into this one
+    pub fn merge(&mut self, other: Self) {
+        self.functions.extend(other.functions);
+    }
+
+    /// Create a registry from a list of builtin module functions
+    pub fn with_modules(modules: &[BuiltinModule<E>]) -> Self {
+        let mut registry = Self::new();
+        for module in modules {
+            module(&mut registry);
+        }
+        registry
+    }
+
     /// Get the implementation function for a builtin by function name
-    pub fn get_implementation(&self, function: &str) -> Option<BuiltinFn> {
+    pub fn get_implementation(&self, function: &str) -> Option<BuiltinFn<E>> {
         self.functions.get(function).map(|(impl_fn, _, _)| *impl_fn)
     }
 
@@ -89,21 +150,41 @@ impl BuiltinRegistry {
     }
 
     /// Get all available function names
-    pub fn get_function_names(&self) -> Vec<&'static str> {
-        let mut functions: Vec<&'static str> = self.functions.keys().copied().collect();
+    pub fn get_function_names(&self) -> Vec<String> {
+        let mut functions: Vec<String> = self.functions.keys().cloned().collect();
         functions.sort_unstable();
         functions
     }
 }
 
-fn create_builtin_registry() -> BuiltinRegistry {
-    let mut functions = HashMap::new();
-
-    // Common type specifications
+/// Register all math builtins (arithmetic and mathematical functions)
+pub fn register_math_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    // Common type specification for binary integer operations
     let int_int = TypeSpec::Tuple(
         None,
         vec![(None, TypeSpec::Integer), (None, TypeSpec::Integer)],
     );
+
+    // Math functions
+    register_builtin!(registry, "abs", math::builtin_math_abs, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "sqrt", math::builtin_math_sqrt, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "sin", math::builtin_math_sin, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "cos", math::builtin_math_cos, TypeSpec::Integer => TypeSpec::Integer);
+
+    // Arithmetic operations - operate on [int, int] tuples
+    register_builtin!(registry, "add", math::builtin_add, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "subtract", math::builtin_subtract, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "multiply", math::builtin_multiply, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "divide", math::builtin_divide, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "modulo", math::builtin_modulo, int_int.clone() => TypeSpec::Integer);
+
+    // Comparison operations - operate on [int, int] tuples
+    register_builtin!(registry, "compare", math::builtin_compare, int_int => TypeSpec::Integer);
+}
+
+/// Register all binary builtins (binary data manipulation)
+pub fn register_binary_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    // Common type specifications
     let bin_int = TypeSpec::Tuple(
         None,
         vec![(None, TypeSpec::Binary), (None, TypeSpec::Integer)],
@@ -140,60 +221,57 @@ fn create_builtin_registry() -> BuiltinRegistry {
         ],
     );
 
-    // Math functions
-    register_builtin!(functions, "abs", math::builtin_math_abs, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(functions, "sqrt", math::builtin_math_sqrt, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(functions, "sin", math::builtin_math_sin, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(functions, "cos", math::builtin_math_cos, TypeSpec::Integer => TypeSpec::Integer);
-
-    // Arithmetic operations - operate on [int, int] tuples
-    register_builtin!(functions, "add", math::builtin_add, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "subtract", math::builtin_subtract, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "multiply", math::builtin_multiply, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "divide", math::builtin_divide, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "modulo", math::builtin_modulo, int_int.clone() => TypeSpec::Integer);
-
-    // Comparison operations - operate on [int, int] tuples
-    register_builtin!(functions, "compare", math::builtin_compare, int_int.clone() => TypeSpec::Integer);
-
     // Binary functions
-    register_builtin!(functions, "binary_new", binary::builtin_binary_new, TypeSpec::Integer => TypeSpec::Binary);
-    register_builtin!(functions, "binary_length", binary::builtin_binary_length, TypeSpec::Binary => TypeSpec::Integer);
-    register_builtin!(functions, "binary_concat", binary::builtin_binary_concat, bin_bin.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_new", binary::builtin_binary_new, TypeSpec::Integer => TypeSpec::Binary);
+    register_builtin!(registry, "binary_length", binary::builtin_binary_length, TypeSpec::Binary => TypeSpec::Integer);
+    register_builtin!(registry, "binary_concat", binary::builtin_binary_concat, bin_bin.clone() => TypeSpec::Binary);
 
     // Bitwise operations
-    register_builtin!(functions, "binary_and", binary::builtin_binary_and, bin_bin.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_or", binary::builtin_binary_or, bin_bin.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_xor", binary::builtin_binary_xor, bin_bin.clone() => TypeSpec::Binary);
-    register_builtin!(functions, "binary_not", binary::builtin_binary_not, TypeSpec::Binary => TypeSpec::Binary);
+    register_builtin!(registry, "binary_and", binary::builtin_binary_and, bin_bin.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_or", binary::builtin_binary_or, bin_bin.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_xor", binary::builtin_binary_xor, bin_bin.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_not", binary::builtin_binary_not, TypeSpec::Binary => TypeSpec::Binary);
 
     // Shift operations
-    register_builtin!(functions, "binary_shift", binary::builtin_binary_shift, bin_int.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_shift", binary::builtin_binary_shift, bin_int => TypeSpec::Binary);
 
     // Bit-level operations
-    register_builtin!(functions, "binary_popcount", binary::builtin_binary_popcount, TypeSpec::Binary => TypeSpec::Integer);
+    register_builtin!(registry, "binary_popcount", binary::builtin_binary_popcount, TypeSpec::Binary => TypeSpec::Integer);
 
     // Multi-byte operations (unified bit/byte access)
-    register_builtin!(functions, "binary_get", binary::builtin_binary_get, bin_int_int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "binary_set", binary::builtin_binary_set, bin_int_int_int_int.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_get", binary::builtin_binary_get, bin_int_int_int => TypeSpec::Integer);
+    register_builtin!(registry, "binary_set", binary::builtin_binary_set, bin_int_int_int_int => TypeSpec::Binary);
 
     // Slicing operations
-    register_builtin!(functions, "binary_slice", binary::builtin_binary_slice, bin_int_int.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_slice", binary::builtin_binary_slice, bin_int_int => TypeSpec::Binary);
 
     // Hashing operations
-    register_builtin!(functions, "binary_hash32", binary::builtin_binary_hash32, TypeSpec::Binary => TypeSpec::Integer);
-    register_builtin!(functions, "binary_hash64", binary::builtin_binary_hash64, TypeSpec::Binary => TypeSpec::Integer);
-
-    // Integer bitwise operations
-    register_builtin!(functions, "integer_and", integer::builtin_integer_and, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "integer_or", integer::builtin_integer_or, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "integer_xor", integer::builtin_integer_xor, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "integer_not", integer::builtin_integer_not, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(functions, "integer_shift", integer::builtin_integer_shift, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(functions, "integer_popcount", integer::builtin_integer_popcount, TypeSpec::Integer => TypeSpec::Integer);
-
-    BuiltinRegistry { functions }
+    register_builtin!(registry, "binary_hash32", binary::builtin_binary_hash32, TypeSpec::Binary => TypeSpec::Integer);
+    register_builtin!(registry, "binary_hash64", binary::builtin_binary_hash64, TypeSpec::Binary => TypeSpec::Integer);
 }
 
-/// Global builtin registry instance
-pub static BUILTIN_REGISTRY: LazyLock<BuiltinRegistry> = LazyLock::new(create_builtin_registry);
+/// Register all integer bitwise builtins
+pub fn register_integer_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    // Common type specification
+    let int_int = TypeSpec::Tuple(
+        None,
+        vec![(None, TypeSpec::Integer), (None, TypeSpec::Integer)],
+    );
+
+    // Integer bitwise operations
+    register_builtin!(registry, "integer_and", integer::builtin_integer_and, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_or", integer::builtin_integer_or, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_xor", integer::builtin_integer_xor, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_not", integer::builtin_integer_not, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "integer_shift", integer::builtin_integer_shift, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_popcount", integer::builtin_integer_popcount, TypeSpec::Integer => TypeSpec::Integer);
+}
+
+/// Get all core builtin modules
+pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
+    vec![
+        register_math_builtins,
+        register_binary_builtins,
+        register_integer_builtins,
+    ]
+}

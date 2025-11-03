@@ -8,6 +8,7 @@ quiver-core = { path = "../quiver-core" }
 quiver-compiler = { path = "../quiver-compiler" }
 quiver-environment = { path = "../quiver-environment" }
 quiver = { path = "../quiver-cli", package = "quiver-cli" }
+quiver-io = { path = "../quiver-io" }
 
 [dev-dependencies]
 # Test dependencies if needed

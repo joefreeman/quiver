@@ -4,6 +4,7 @@ use quiver_compiler::FileSystemModuleLoader;
 use quiver_core::program::Program;
 use quiver_core::value::Value;
 use quiver_environment::{Environment, Repl, ReplError, RequestResult, WorkerHandle};
+use quiver_io::NativeEffect;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::io::IsTerminal;
@@ -17,8 +18,8 @@ struct EvaluationResult {
 
 pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
-    environment: Environment,
-    repl: Repl,
+    environment: Environment<NativeEffect>,
+    repl: Repl<NativeEffect>,
     last_was_nil: bool,
 }
 
@@ -29,21 +30,32 @@ impl ReplCli {
 
         // Create workers with system time
         let num_workers = 4;
-        let mut workers: Vec<Box<dyn WorkerHandle>> = Vec::new();
-        for _ in 0..num_workers {
-            workers.push(Box::new(spawn_worker(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("System time before Unix epoch")
-                    .as_millis() as u64
-            })));
-        }
 
-        // Create environment and REPL
-        let environment = Environment::new(workers);
+        // Build registry from core modules and network builtins
+        let builtins = crate::build_builtin_registry();
+
+        let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
+        for _ in 0..num_workers {
+            workers.push(Box::new(spawn_worker(
+                || {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("System time before Unix epoch")
+                        .as_millis() as u64
+                },
+                builtins.clone(),
+            )));
+        }
+        let effect_backend = crate::create_effect_backend();
+        let mut environment = Environment::<NativeEffect>::new(workers, builtins.clone());
+
+        // Set the effect backend
+        if let Some(backend) = effect_backend {
+            environment.set_effect_backend(backend);
+        }
         let program = Program::new();
         let module_loader = Box::new(FileSystemModuleLoader::new());
-        let repl = Repl::new(program, module_loader);
+        let repl = Repl::new(program, module_loader, builtins);
 
         Ok(Self {
             editor,
@@ -355,7 +367,8 @@ impl ReplCli {
                 // Create a new REPL after runtime error
                 let program = Program::new();
                 let module_loader = Box::new(FileSystemModuleLoader::new());
-                self.repl = Repl::new(program, module_loader);
+                let builtins = crate::build_builtin_registry();
+                self.repl = Repl::new(program, module_loader, builtins);
                 Err(ReplError::Runtime(e))
             }
             _ => Err(ReplError::Environment(

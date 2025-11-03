@@ -205,6 +205,7 @@ pub enum Type {
     Identifier { name: String, arguments: Vec<Type> },
     Cycle(Option<usize>),
     Process(ProcessType),
+    Resource(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

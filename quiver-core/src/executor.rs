@@ -1,6 +1,6 @@
 use crate::binary::BinaryData;
-use crate::builtins::BUILTIN_REGISTRY;
 use crate::bytecode::{BuiltinInfo, Constant, Function, Instruction};
+use crate::effects::Effect;
 use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
 use crate::types::{CallableType, ProcessType, TupleLookup, TupleTypeInfo, Type};
@@ -17,11 +17,12 @@ enum SelectResult {
     Continue,
 }
 
-pub struct Executor {
+pub struct Executor<E: Effect> {
     processes: HashMap<ProcessId, Process>,
     queue: VecDeque<ProcessId>,
     spawning: HashSet<ProcessId>,
     selecting: HashSet<ProcessId>,
+    effecting: HashSet<ProcessId>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
@@ -30,21 +31,16 @@ pub struct Executor {
     types: Vec<Type>,
     // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
     pub heap: Vec<BinaryData>,
+    // Builtin registry for executing builtin functions
+    builtins_registry: crate::builtins::BuiltinRegistry<E>,
 }
 
-impl TupleLookup for Executor {
+impl<E: Effect> TupleLookup for Executor<E> {
     fn lookup_tuple(&self, type_id: usize) -> Option<&TupleTypeInfo> {
         self.tuples.get(type_id)
     }
 }
-
-impl Default for Executor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Executor {
+impl<E: Effect> Executor<E> {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
     }
@@ -96,7 +92,7 @@ impl Executor {
         self.allocate_binary_data(BinaryData::new(bytes))
     }
 
-    pub fn new() -> Self {
+    pub fn new(builtins_registry: crate::builtins::BuiltinRegistry<E>) -> Self {
         // Create NIL type (index 0)
         let nil_type = TupleTypeInfo {
             name: None,
@@ -116,19 +112,60 @@ impl Executor {
             queue: VecDeque::new(),
             spawning: HashSet::new(),
             selecting: HashSet::new(),
+            effecting: HashSet::new(),
             constants: vec![],
             functions: vec![],
             builtins: vec![],
             tuples: vec![nil_type, ok_type],
             types: vec![],
             heap: vec![],
+            builtins_registry,
         }
     }
 
-    pub fn spawn_process(&mut self, id: ProcessId, function_index: usize, persistent: bool) {
+    pub fn spawn_process(
+        &mut self,
+        id: ProcessId,
+        function_index: usize,
+        captures: Vec<Value>,
+        heap_data: Vec<Vec<u8>>,
+        persistent: bool,
+    ) -> Result<(), Error> {
+        // Create the process
         let process = Process::new(function_index, persistent);
         self.processes.insert(id, process);
+
+        // Inject heap data and populate locals with captures
+        let captures_count = captures.len();
+        for value in captures {
+            let injected = self.inject_heap_data(value, &heap_data)?;
+
+            let process = self
+                .get_process_mut(id)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            process.locals.push(injected);
+        }
+
+        // Push nil parameter onto stack
+        let process = self
+            .get_process_mut(id)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        process.stack.push(Value::nil());
+
+        // Push initial frame with function index
+        let process = self
+            .get_process_mut(id)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        process.frames.push(crate::process::Frame::new(
+            function_index,
+            0,
+            captures_count,
+        ));
+
+        // Add to queue
         self.queue.push_back(id);
+
+        Ok(())
     }
 
     fn get_current_instruction(&self, process_id: ProcessId) -> Option<Instruction> {
@@ -148,6 +185,10 @@ impl Executor {
 
     pub fn get_process_mut(&mut self, id: ProcessId) -> Option<&mut Process> {
         self.processes.get_mut(&id)
+    }
+
+    pub fn get_builtins_registry(&self) -> &crate::builtins::BuiltinRegistry<E> {
+        &self.builtins_registry
     }
 
     pub fn suspend_process(&mut self, id: ProcessId) {
@@ -174,27 +215,94 @@ impl Executor {
     }
 
     /// Notify a process that was waiting for a result with the result value
-    pub fn notify_result(&mut self, awaiter: ProcessId, awaited: ProcessId, result: Value) {
+    pub fn notify_result(
+        &mut self,
+        awaiter: ProcessId,
+        awaited: ProcessId,
+        result: Value,
+        heap: Vec<Vec<u8>>,
+    ) -> Result<(), Error> {
+        // Inject heap data into the result value
+        let injected_result = self.inject_heap_data(result, &heap)?;
+
         // Store the result in the process's awaiting map
         if let Some(process) = self.get_process_mut(awaiter) {
-            process.awaiting.insert(awaited, Some(result));
+            process.awaiting.insert(awaited, Some(injected_result));
         }
 
         // Re-queue awaiter to retry its Select instruction
         if self.selecting.remove(&awaiter) {
             self.queue.push_back(awaiter);
         }
+
+        Ok(())
     }
 
-    pub fn notify_message(&mut self, id: ProcessId, message: Value) {
+    /// Notify a process that an effect operation completed
+    pub fn notify_effect_completion(
+        &mut self,
+        process_id: ProcessId,
+        result: Result<Value, String>,
+        heap: Vec<Vec<u8>>,
+    ) -> Result<(), Error> {
+        let was_effecting = self.effecting.remove(&process_id);
+
+        // Convert result to either Ok(Value) or Err(Error)
+        let value_result = match result {
+            Ok(v) => Ok(self.inject_heap_data(v, &heap)?),
+            Err(err_msg) => Err(Error::InvalidArgument(format!(
+                "Effect operation failed: {}",
+                err_msg
+            ))),
+        };
+
+        // Get process and update based on result
+        let process = self
+            .get_process_mut(process_id)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        match value_result {
+            Ok(value) => {
+                // Success: push value and increment counter
+                process.stack.push(value);
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
+            }
+            Err(error) => {
+                // Error: set error and terminate the process
+                process.result = Some(Err(error));
+                process.frames.clear();
+            }
+        }
+
+        // Re-queue if it was effecting
+        if was_effecting {
+            self.queue.push_back(process_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn notify_message(
+        &mut self,
+        id: ProcessId,
+        message: Value,
+        heap: Vec<Vec<u8>>,
+    ) -> Result<(), Error> {
+        // Inject heap data into the message value
+        let injected_message = self.inject_heap_data(message, &heap)?;
+
         if let Some(process) = self.processes.get_mut(&id) {
-            process.mailbox.push_back(message);
+            process.mailbox.push_back(injected_message);
         }
 
         // Re-queue if the process is selecting (waiting for messages)
         if self.selecting.remove(&id) {
             self.queue.push_back(id);
         }
+
+        Ok(())
     }
 
     pub fn mark_spawning(&mut self, id: ProcessId) {
@@ -204,6 +312,11 @@ impl Executor {
 
     pub fn mark_selecting(&mut self, id: ProcessId) {
         self.selecting.insert(id);
+        self.queue.retain(|&pid| pid != id);
+    }
+
+    pub fn mark_effecting(&mut self, id: ProcessId) {
+        self.effecting.insert(id);
         self.queue.retain(|&pid| pid != id);
     }
 
@@ -222,7 +335,10 @@ impl Executor {
     fn get_status(&self, id: ProcessId, process: &Process) -> ProcessStatus {
         if self.queue.contains(&id) {
             ProcessStatus::Active
-        } else if self.spawning.contains(&id) || self.selecting.contains(&id) {
+        } else if self.spawning.contains(&id)
+            || self.selecting.contains(&id)
+            || self.effecting.contains(&id)
+        {
             ProcessStatus::Waiting
         } else if matches!(&process.result, Some(Err(_))) {
             ProcessStatus::Failed
@@ -252,8 +368,8 @@ impl Executor {
             .filter_map(|(id, process)| {
                 let function = self.get_function(process.function_index)?;
                 let process_type = Type::Process(Box::new(ProcessType {
-                    receive: Some(Box::new(function.function_type.receive.clone())),
-                    returns: Some(Box::new(function.function_type.result.clone())),
+                    send: Some(Box::new(function.function_type.receive.clone())),
+                    receive: Some(Box::new(function.function_type.result.clone())),
                 }));
                 Some((*id, (process_type, process.function_index)))
             })
@@ -283,6 +399,16 @@ impl Executor {
         self.builtins.get(index)
     }
 
+    /// Re-queue a process for execution (e.g., after I/O completion)
+    pub fn requeue_process(&mut self, process_id: ProcessId) {
+        self.queue.push_back(process_id);
+    }
+
+    /// Remove a process from the execution queue
+    pub fn remove_from_queue(&mut self, process_id: ProcessId) {
+        self.queue.retain(|&p| p != process_id);
+    }
+
     pub fn update_program(
         &mut self,
         mut constants: Vec<Constant>,
@@ -300,7 +426,7 @@ impl Executor {
 
     /// Execute up to max_units instruction units for a single process.
     /// Returns None to continue, or Some(request) for a routing request that needs to be handled by the scheduler.
-    pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> Option<Action> {
+    pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> Option<Action<E>> {
         // Check for expired timeouts before processing
         self.check_expired_timeouts(current_time_ms);
         // Pop process from queue
@@ -327,15 +453,16 @@ impl Executor {
                 Err(error) => {
                     if let Some(process) = self.get_process_mut(current_pid) {
                         process.result = Some(Err(error.clone()));
+                        process.frames.clear();
                     }
-                    return None;
                 }
             }
 
-            // Check if process should yield (moved to spawning/selecting, or has pending request)
+            // Check if process should yield (moved to spawning/selecting/effecting, or has pending request)
             // Pending request check ensures only ONE routing request per step
             if self.spawning.contains(&current_pid)
                 || self.selecting.contains(&current_pid)
+                || self.effecting.contains(&current_pid)
                 || pending_request.is_some()
             {
                 break;
@@ -436,8 +563,29 @@ impl Executor {
                 })
                 .collect();
 
+            // Get the process result to check if it's an error
+            let process_result = self.get_process(current_pid).and_then(|p| p.result.clone());
+
             for awaiter in awaiters {
-                self.notify_result(awaiter, current_pid, result_value.clone());
+                match &process_result {
+                    Some(Ok(_)) => {
+                        // Success - notify with the result value
+                        self.notify_result(awaiter, current_pid, result_value.clone(), vec![])
+                            .ok(); // Ignore errors since this is internal notification
+                    }
+                    Some(Err(error)) => {
+                        // Error - propagate to awaiter by setting their result
+                        if let Some(awaiter_process) = self.get_process_mut(awaiter) {
+                            awaiter_process.result = Some(Err(error.clone()));
+                            awaiter_process.frames.clear();
+                        }
+                    }
+                    None => {
+                        // No result yet (shouldn't happen at this point)
+                        self.notify_result(awaiter, current_pid, result_value.clone(), vec![])
+                            .ok();
+                    }
+                }
             }
         } else {
             let should_requeue =
@@ -459,7 +607,7 @@ impl Executor {
         pid: ProcessId,
         instruction: Instruction,
         current_time_ms: u64,
-    ) -> Result<Option<Action>, Error> {
+    ) -> Result<Option<Action<E>>, Error> {
         match instruction {
             Instruction::Constant(index) => self.handle_constant(pid, index),
             Instruction::Pop => self.handle_pop(pid),
@@ -491,7 +639,11 @@ impl Executor {
         }
     }
 
-    fn handle_constant(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
+    fn handle_constant(
+        &mut self,
+        pid: ProcessId,
+        index: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         let constant = self
             .get_constant(index)
             .ok_or(Error::ConstantUndefined(index))?;
@@ -516,7 +668,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_pop(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_pop(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -528,7 +680,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_duplicate(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_duplicate(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -541,7 +693,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_pick(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action>, Error> {
+    fn handle_pick(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -559,7 +711,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_rotate(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action>, Error> {
+    fn handle_rotate(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -579,7 +731,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_load(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
+    fn handle_load(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -601,7 +753,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_store(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
+    fn handle_store(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -623,7 +775,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_tuple(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action>, Error> {
+    fn handle_tuple(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action<E>>, Error> {
         let type_info = self
             .tuples
             .get(type_id)
@@ -651,7 +803,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_get(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
+    fn handle_get(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -678,7 +830,11 @@ impl Executor {
         }
     }
 
-    fn handle_is_type(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action>, Error> {
+    fn handle_is_type(
+        &mut self,
+        pid: ProcessId,
+        type_id: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -713,7 +869,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_jump(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action>, Error> {
+    fn handle_jump(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action<E>>, Error> {
         if let Some(process) = self.get_process_mut(pid)
             && let Some(frame) = process.frames.last_mut()
         {
@@ -724,7 +880,11 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_jump_if(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action>, Error> {
+    fn handle_jump_if(
+        &mut self,
+        pid: ProcessId,
+        offset: isize,
+    ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -747,7 +907,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_call(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_call(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         let function_value = {
             let process = self
                 .get_process_mut(pid)
@@ -793,25 +953,43 @@ impl Executor {
                     process.stack.pop().ok_or(Error::StackUnderflow)?
                 };
 
-                let builtin = BUILTIN_REGISTRY.get_implementation(&name).ok_or_else(|| {
-                    Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
-                })?;
+                let builtin = self
+                    .builtins_registry
+                    .get_implementation(&name)
+                    .ok_or_else(|| {
+                        Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
+                    })?;
 
-                let result = builtin(&parameter, self)?;
+                let result = builtin(pid, &parameter, self)?;
 
-                let process = self
-                    .get_process_mut(pid)
-                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                // Handle both immediate and action results
+                match result {
+                    crate::builtins::BuiltinResult::Value(value) => {
+                        // Immediate result: push value and increment counter
+                        let process = self
+                            .get_process_mut(pid)
+                            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-                process.stack.push(result);
+                        process.stack.push(value);
 
-                // Unlike regular calls, builtins don't create a new frame
-                // So we need to manually increment the counter
-                if let Some(frame) = process.frames.last_mut() {
-                    frame.counter += 1;
+                        // Unlike regular calls, builtins don't create a new frame
+                        // So we need to manually increment the counter
+                        if let Some(frame) = process.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+                        Ok(None)
+                    }
+                    crate::builtins::BuiltinResult::Action(action) => {
+                        // Check if this is an effect request and mark process as effecting
+                        if let Action::RequestEffect { process_id, .. } = &action {
+                            self.mark_effecting(*process_id);
+                        }
+
+                        // Action result: return the action for Environment to handle
+                        // Don't increment counter - will be incremented in notify_* method
+                        Ok(Some(action))
+                    }
                 }
-
-                Ok(None)
             }
             _ => Err(Error::TypeMismatch {
                 expected: "function".to_string(),
@@ -820,7 +998,11 @@ impl Executor {
         }
     }
 
-    fn handle_tail_call(&mut self, pid: ProcessId, recurse: bool) -> Result<Option<Action>, Error> {
+    fn handle_tail_call(
+        &mut self,
+        pid: ProcessId,
+        recurse: bool,
+    ) -> Result<Option<Action<E>>, Error> {
         if recurse {
             let process = self
                 .get_process_mut(pid)
@@ -887,7 +1069,7 @@ impl Executor {
         &mut self,
         pid: ProcessId,
         function_index: usize,
-    ) -> Result<Option<Action>, Error> {
+    ) -> Result<Option<Action<E>>, Error> {
         let func = self
             .get_function(function_index)
             .ok_or(Error::FunctionUndefined(function_index))?;
@@ -920,7 +1102,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_clear(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action>, Error> {
+    fn handle_clear(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -936,7 +1118,11 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_allocate(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action>, Error> {
+    fn handle_allocate(
+        &mut self,
+        pid: ProcessId,
+        count: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -951,7 +1137,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_builtin(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action>, Error> {
+    fn handle_builtin(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
         let builtin_name = self
             .get_builtin(index)
             .ok_or(Error::BuiltinUndefined(index))?
@@ -969,7 +1155,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_equal(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action>, Error> {
+    fn handle_equal(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1008,7 +1194,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_not(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_not(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1029,7 +1215,7 @@ impl Executor {
         Ok(None)
     }
 
-    fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         // Check if we're inside a receive function
         let is_receiving = self
             .get_process(pid)
@@ -1072,7 +1258,7 @@ impl Executor {
         }))
     }
 
-    fn handle_send(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_send(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         // Check if we're inside a receive function
         let is_receiving = self
             .get_process(pid)
@@ -1091,37 +1277,43 @@ impl Executor {
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        let pid_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let target_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
         let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        let target_pid = match pid_value {
-            Value::Process(target, _) => target,
-            _ => {
-                return Err(Error::TypeMismatch {
-                    expected: "pid".to_string(),
-                    found: pid_value.type_name().to_string(),
-                });
+        match target_value {
+            Value::Process(target_pid, _) => {
+                // Push process back onto stack
+                let process = self
+                    .get_process_mut(pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                process.stack.push(target_value);
+
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
+
+                // Return routing request for scheduler to handle
+                Ok(Some(Action::Deliver {
+                    target: target_pid,
+                    value: message,
+                }))
             }
-        };
-
-        // Push ok onto stack before returning routing request
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-        process.stack.push(pid_value);
-
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
+            Value::Resource(_resource_id, _) => {
+                // Resources are opaque handles - cannot send to them directly
+                // Use built-in functions like __file_write__ or __tcp_socket_write__ instead
+                Err(Error::TypeMismatch {
+                    expected: "process".to_string(),
+                    found: "resource".to_string(),
+                })
+            }
+            _ => Err(Error::TypeMismatch {
+                expected: "process".to_string(),
+                found: target_value.type_name().to_string(),
+            }),
         }
-
-        // Return routing request for scheduler to handle
-        Ok(Some(Action::Deliver {
-            target: target_pid,
-            value: message,
-        }))
     }
 
-    fn handle_self(&mut self, pid: ProcessId) -> Result<Option<Action>, Error> {
+    fn handle_self(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1140,7 +1332,7 @@ impl Executor {
         pid: ProcessId,
         process_id: usize,
         function_index: usize,
-    ) -> Result<Option<Action>, Error> {
+    ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1192,7 +1384,7 @@ impl Executor {
         pid: ProcessId,
         n: usize,
         current_time_ms: u64,
-    ) -> Result<Option<Action>, Error> {
+    ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1299,7 +1491,7 @@ impl Executor {
         receive_result: Option<Value>,
         start_time: u64,
         current_time_ms: u64,
-    ) -> Result<Option<Action>, Error> {
+    ) -> Result<Option<Action<E>>, Error> {
         let select_state = self
             .get_process(pid)
             .and_then(|p| p.select_state.clone())
@@ -1339,6 +1531,14 @@ impl Executor {
                             // No match, continue to next source
                         }
                     }
+                }
+                Value::Resource(_resource_id, _) => {
+                    // Resources are opaque handles - cannot select on them directly
+                    // Use built-in functions like __file_read__, __tcp_socket_read__, or __tcp_listener_accept__ instead
+                    return Err(Error::TypeMismatch {
+                        expected: "process, timeout, or receive function".to_string(),
+                        found: "resource".to_string(),
+                    });
                 }
                 _ => {
                     return Err(Error::InvalidArgument(format!(
@@ -1589,7 +1789,7 @@ impl Executor {
         pid: ProcessId,
         n: usize,
         current_time_ms: u64,
-    ) -> Result<Option<Action>, Error> {
+    ) -> Result<Option<Action<E>>, Error> {
         // Phase 1: Check if we're continuing from a receive function call
         let receive_result = self.handle_select_continuation(pid)?;
 
@@ -1614,7 +1814,11 @@ impl Executor {
     }
 
     /// Complete a select by cleaning up state and pushing result
-    fn complete_select(&mut self, pid: ProcessId, result: Value) -> Result<Option<Action>, Error> {
+    fn complete_select(
+        &mut self,
+        pid: ProcessId,
+        result: Value,
+    ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1679,10 +1883,11 @@ impl Executor {
                     .expect("Function should exist")
                     .function_type;
                 Type::Process(Box::new(ProcessType {
-                    receive: Some(Box::new(func_type.receive.clone())),
-                    returns: Some(Box::new(func_type.result.clone())),
+                    send: Some(Box::new(func_type.receive.clone())),
+                    receive: Some(Box::new(func_type.result.clone())),
                 }))
             }
+            Value::Resource(_, type_name) => Type::Resource(type_name.clone()),
         }
     }
 
@@ -1872,10 +2077,11 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
         Value::Integer(i) => Ok(Value::Integer(*i)),
         Value::Builtin(name) => Ok(Value::Builtin(name.clone())),
         Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
+        Value::Resource(id, type_name) => Ok(Value::Resource(*id, type_name.clone())),
     }
 }
 
-impl Executor {
+impl<E: Effect> Executor<E> {
     /// Inject heap data into this executor and remap heap indices in the value.
     /// Binary heap data is allocated to the executor's heap and indices are remapped.
     pub fn inject_heap_data(

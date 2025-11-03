@@ -1,3 +1,4 @@
+use crate::effects::WebEffect;
 use quiver_environment::{
     Command, CommandReceiver, EnvironmentError, Event, EventSender, WorkerHandle,
 };
@@ -9,34 +10,34 @@ use web_sys::Worker;
 
 /// Command receiver for Web Worker (worker side)
 pub struct WebCommandReceiver {
-    queue: Rc<RefCell<VecDeque<Command>>>,
+    queue: Rc<RefCell<VecDeque<Command<WebEffect>>>>,
 }
 
 impl WebCommandReceiver {
-    pub fn new(queue: Rc<RefCell<VecDeque<Command>>>) -> Self {
+    pub fn new(queue: Rc<RefCell<VecDeque<Command<WebEffect>>>>) -> Self {
         Self { queue }
     }
 }
 
-impl CommandReceiver for WebCommandReceiver {
-    fn try_recv(&mut self) -> Result<Option<Command>, EnvironmentError> {
+impl CommandReceiver<WebEffect> for WebCommandReceiver {
+    fn try_recv(&mut self) -> Result<Option<Command<WebEffect>>, EnvironmentError> {
         Ok(self.queue.borrow_mut().pop_front())
     }
 }
 
 /// Event sender for Web Worker (worker side)
 pub struct WebEventSender {
-    post_message: Rc<dyn Fn(Event) -> Result<(), EnvironmentError>>,
+    post_message: Rc<dyn Fn(Event<WebEffect>) -> Result<(), EnvironmentError>>,
 }
 
 impl WebEventSender {
-    pub fn new(post_message: Rc<dyn Fn(Event) -> Result<(), EnvironmentError>>) -> Self {
+    pub fn new(post_message: Rc<dyn Fn(Event<WebEffect>) -> Result<(), EnvironmentError>>) -> Self {
         Self { post_message }
     }
 }
 
-impl EventSender for WebEventSender {
-    fn send(&mut self, event: Event) -> Result<(), EnvironmentError> {
+impl EventSender<WebEffect> for WebEventSender {
+    fn send(&mut self, event: Event<WebEffect>) -> Result<(), EnvironmentError> {
         (self.post_message)(event)
     }
 }
@@ -44,13 +45,13 @@ impl EventSender for WebEventSender {
 /// Worker handle for web (main thread side)
 pub struct WebWorkerHandle {
     worker: Worker,
-    event_queue: Rc<RefCell<VecDeque<Event>>>,
+    event_queue: Rc<RefCell<VecDeque<Event<WebEffect>>>>,
     ready: Rc<RefCell<bool>>,
-    pending_commands: Rc<RefCell<VecDeque<Command>>>,
+    pending_commands: Rc<RefCell<VecDeque<Command<WebEffect>>>>,
 }
 
 impl WebWorkerHandle {
-    pub fn new(worker: Worker, event_queue: Rc<RefCell<VecDeque<Event>>>) -> Self {
+    pub fn new(worker: Worker, event_queue: Rc<RefCell<VecDeque<Event<WebEffect>>>>) -> Self {
         Self {
             worker,
             event_queue,
@@ -65,13 +66,13 @@ impl WebWorkerHandle {
     }
 
     /// Get a handle to the pending commands queue
-    pub fn pending_commands(&self) -> Rc<RefCell<VecDeque<Command>>> {
+    pub fn pending_commands(&self) -> Rc<RefCell<VecDeque<Command<WebEffect>>>> {
         self.pending_commands.clone()
     }
 }
 
-impl WorkerHandle for WebWorkerHandle {
-    fn send(&mut self, command: Command) -> Result<(), EnvironmentError> {
+impl WorkerHandle<WebEffect> for WebWorkerHandle {
+    fn send(&mut self, command: Command<WebEffect>) -> Result<(), EnvironmentError> {
         if *self.ready.borrow() {
             // Worker is ready - send immediately
             let json = serde_json::to_string(&command).map_err(|e| {
@@ -94,7 +95,7 @@ impl WorkerHandle for WebWorkerHandle {
         Ok(())
     }
 
-    fn try_recv(&mut self) -> Result<Option<Event>, EnvironmentError> {
+    fn try_recv(&mut self) -> Result<Option<Event<WebEffect>>, EnvironmentError> {
         Ok(self.event_queue.borrow_mut().pop_front())
     }
 }

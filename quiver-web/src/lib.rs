@@ -1,7 +1,11 @@
+mod effects;
 mod repl_web;
 mod types;
 mod web_transport;
 mod worker_entry;
+
+// Re-export effects
+pub use effects::WebEffect;
 
 // Re-export types for use in TypeScript
 pub use types::*;

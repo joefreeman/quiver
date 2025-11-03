@@ -11,3 +11,6 @@ pub use transport::{CommandReceiver, EventSender, WorkerHandle};
 pub use worker::Worker;
 
 pub type WorkerId = usize;
+
+// Re-export Effect trait for convenience
+pub use quiver_core::effects::Effect;

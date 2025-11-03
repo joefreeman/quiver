@@ -44,8 +44,8 @@ enum FieldSource {
 }
 
 /// Compile all field values and spread sources, returning compiled values and stack size
-fn compile_field_values(
-    compiler: &mut Compiler,
+fn compile_field_values<E: quiver_core::effects::Effect>(
+    compiler: &mut Compiler<'_, E>,
     fields: &[ast::TupleField],
     ripple_context: Option<&RippleContext>,
 ) -> Result<(Vec<CompiledValue>, usize), Error> {
@@ -320,8 +320,8 @@ fn build_field_sources_for_variant(
 }
 
 /// Emit instructions to extract field values from the stack
-fn emit_field_extraction_code(
-    compiler: &mut Compiler,
+fn emit_field_extraction_code<E: quiver_core::effects::Effect>(
+    compiler: &mut Compiler<'_, E>,
     field_sources: &[Option<FieldSource>],
     compiled_values: &[CompiledValue],
     stack_size: usize,
@@ -356,15 +356,18 @@ fn emit_field_extraction_code(
 }
 
 /// Emit instructions to clean up temporary values from the stack
-fn emit_stack_cleanup_code(compiler: &mut Compiler, count: usize) {
+fn emit_stack_cleanup_code<E: quiver_core::effects::Effect>(
+    compiler: &mut Compiler<'_, E>,
+    count: usize,
+) {
     for _ in 0..count {
         compiler.codegen.add_instruction(Instruction::Rotate(2));
         compiler.codegen.add_instruction(Instruction::Pop);
     }
 }
 
-pub fn compile_tuple_with_spread(
-    compiler: &mut Compiler,
+pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
+    compiler: &mut Compiler<'_, E>,
     tuple_name: Option<String>,
     fields: Vec<ast::TupleField>,
     ripple_context: Option<&RippleContext>,
@@ -421,8 +424,8 @@ pub fn compile_tuple_with_spread(
 }
 
 /// Emit bytecode for a single variant tuple (no branching needed)
-fn emit_single_variant_tuple(
-    compiler: &mut Compiler,
+fn emit_single_variant_tuple<E: quiver_core::effects::Effect>(
+    compiler: &mut Compiler<'_, E>,
     variant: &VariantInfo,
     compiled_values: &[CompiledValue],
     stack_size: usize,
@@ -445,8 +448,8 @@ fn emit_single_variant_tuple(
 }
 
 /// Emit bytecode for multiple variant tuples (with type checking and branching)
-fn emit_multi_variant_tuples(
-    compiler: &mut Compiler,
+fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
+    compiler: &mut Compiler<'_, E>,
     variants: &[VariantInfo],
     compiled_values: &[CompiledValue],
     stack_size: usize,

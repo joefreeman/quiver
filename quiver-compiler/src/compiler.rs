@@ -24,9 +24,7 @@ use crate::{
 };
 
 use quiver_core::{
-    builtins::BUILTIN_REGISTRY,
     bytecode::{Constant, Function, Instruction},
-    executor::Executor,
     program::Program,
     types::{CallableType, NIL, ProcessType, TupleLookup, Type},
     value::Value,
@@ -209,7 +207,7 @@ struct RippleContext {
     owns_value: bool,
 }
 
-pub struct Compiler<'a> {
+pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Core components
     codegen: InstructionBuilder,
     module_cache: ModuleCache,
@@ -220,14 +218,17 @@ pub struct Compiler<'a> {
     program: Program,
     module_loader: &'a dyn ModuleLoader,
     module_path: Option<PathBuf>,
+    builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
 
     process_types: &'a HashMap<usize, (Type, usize)>,
 
     // Track the receive type of the function currently being compiled
     current_receive_type: Type,
+
+    _phantom: std::marker::PhantomData<E>,
 }
 
-impl<'a> Compiler<'a> {
+impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     #[allow(clippy::too_many_arguments)]
     pub fn compile(
         ast_program: ast::Program,
@@ -238,6 +239,7 @@ impl<'a> Compiler<'a> {
         module_path: Option<PathBuf>,
         parameter_type: Type,
         process_types: &'a HashMap<usize, (Type, usize)>,
+        builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
     ) -> Result<CompilationResult, Error> {
         let program = Program::with_types(base_types);
 
@@ -249,8 +251,10 @@ impl<'a> Compiler<'a> {
             program,
             module_loader,
             module_path,
+            builtins,
             process_types,
             current_receive_type: Type::never(),
+            _phantom: std::marker::PhantomData,
         };
 
         // Prepare scope bindings from existing bindings
@@ -438,7 +442,7 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(())
             }
-            ast::Type::Primitive(_) | ast::Type::Cycle(_) => Ok(()),
+            ast::Type::Primitive(_) | ast::Type::Cycle(_) | ast::Type::Resource(_) => Ok(()),
         }
     }
 
@@ -1673,12 +1677,16 @@ impl<'a> Compiler<'a> {
         self.local_count = saved_local_count;
 
         // Execute the module instructions to get the result value
-        let (module_value, executor) =
-            quiver_core::execute_instructions_sync(&self.program, module_instructions, last_type)
-                .map_err(|e| Error::ModuleExecution {
-                module_path: module_path.to_string(),
-                error: e,
-            })?;
+        let (module_value, executor) = quiver_core::execute_instructions_sync(
+            &self.program,
+            module_instructions,
+            last_type,
+            self.builtins,
+        )
+        .map_err(|e| Error::ModuleExecution {
+            module_path: module_path.to_string(),
+            error: e,
+        })?;
 
         // Convert the runtime value back to instructions
         let (instructions, module_type) = self.value_to_instructions(&module_value, &executor)?;
@@ -1690,7 +1698,7 @@ impl<'a> Compiler<'a> {
     fn value_to_instructions(
         &mut self,
         value: &Value,
-        executor: &Executor,
+        executor: &quiver_core::executor::Executor<E>,
     ) -> Result<(Vec<Instruction>, Type), Error> {
         match value {
             Value::Integer(int_value) => {
@@ -1768,10 +1776,12 @@ impl<'a> Compiler<'a> {
                 Ok((instructions, Type::Callable(Box::new(function_type))))
             }
             Value::Builtin(name) => {
-                let builtin_index = self.program.register_builtin(name.to_string());
+                let builtin_index = self
+                    .program
+                    .register_builtin(name.to_string(), self.builtins);
 
                 if let Some((param_type, result_type)) =
-                    BUILTIN_REGISTRY.resolve_signature(name, &mut self.program)
+                    self.builtins.resolve_signature(name, &mut self.program)
                 {
                     Ok((
                         vec![Instruction::Builtin(builtin_index)],
@@ -1787,6 +1797,9 @@ impl<'a> Compiler<'a> {
             }
             Value::Process(_, _) => Err(Error::FeatureUnsupported(
                 "Cannot use process in constant context".to_string(),
+            )),
+            Value::Resource(..) => Err(Error::FeatureUnsupported(
+                "Cannot use resource in constant context".to_string(),
             )),
         }
     }
@@ -1929,8 +1942,8 @@ impl<'a> Compiler<'a> {
         self.codegen.add_instruction(Instruction::Spawn);
 
         Ok(Type::Process(Box::new(ProcessType {
-            receive: Some(Box::new(target_receive)),
-            returns: Some(Box::new(target_result)),
+            send: Some(Box::new(target_receive)),
+            receive: Some(Box::new(target_result)),
         })))
     }
 
@@ -1941,13 +1954,13 @@ impl<'a> Compiler<'a> {
         for source_type in source_types {
             match source_type {
                 Type::Process(process_type) => {
-                    // Awaiting process - get its return type
-                    if let Some(return_type) = &process_type.returns {
-                        result_types.push((**return_type).clone());
+                    // Process (process or resource) - get its receive type
+                    if let Some(receive_type) = &process_type.receive {
+                        result_types.push((**receive_type).clone());
                     } else {
                         return Err(Error::TypeMismatch {
-                            expected: "process with return type (awaitable)".to_string(),
-                            found: "process without return type (cannot await)".to_string(),
+                            expected: "process with receive type (awaitable/readable)".to_string(),
+                            found: "process without receive type (cannot select)".to_string(),
                         });
                     }
                 }
@@ -1961,7 +1974,7 @@ impl<'a> Compiler<'a> {
                 }
                 _ => {
                     return Err(Error::TypeMismatch {
-                        expected: "process, function, or integer (timeout)".to_string(),
+                        expected: "process, function, resource, or integer (timeout)".to_string(),
                         found: quiver_core::format::format_type(&self.program, source_type),
                     });
                 }
@@ -2284,8 +2297,8 @@ impl<'a> Compiler<'a> {
 
                         Ok((
                             Type::Process(Box::new(ProcessType {
-                                receive: Some(Box::new(callable.receive.clone())),
-                                returns: Some(Box::new(callable.result.clone())),
+                                send: Some(Box::new(callable.receive.clone())),
+                                receive: Some(Box::new(callable.result.clone())),
                             })),
                             Guard::None,
                         ))
@@ -2328,8 +2341,8 @@ impl<'a> Compiler<'a> {
 
                     Ok((
                         Type::Process(Box::new(ProcessType {
-                            receive: Some(Box::new(receive_type)),
-                            returns: Some(Box::new(return_type)),
+                            send: Some(Box::new(receive_type)),
+                            receive: Some(Box::new(return_type)),
                         })),
                         Guard::None,
                     ))
@@ -2469,8 +2482,8 @@ impl<'a> Compiler<'a> {
                 // Return a process type with the current function's receive type
                 // Return type is None since a process can't know its own return type
                 let process_type = ProcessType {
-                    receive: Some(Box::new(self.current_receive_type.clone())),
-                    returns: None,
+                    send: Some(Box::new(self.current_receive_type.clone())),
+                    receive: None,
                 };
                 let self_type = Type::Process(Box::new(process_type));
 
@@ -2617,41 +2630,40 @@ impl<'a> Compiler<'a> {
                 Ok(result_type)
             }
             Type::Process(ref process_type) => {
-                // Message send
-                // Type check: ensure the process has a receive type and message type matches
-                if let Some(expected_msg_type) = &process_type.receive {
-                    // Check if it's the empty union (never receives)
-                    if matches!(expected_msg_type.as_ref(), Type::Union(v) if v.is_empty()) {
+                // Send to process
+                // Type check: ensure it has a send type and value type matches
+                if let Some(expected_send_type) = &process_type.send {
+                    // Check if it's the empty union (never accepts sends)
+                    if matches!(expected_send_type.as_ref(), Type::Union(v) if v.is_empty()) {
                         return Err(Error::TypeMismatch {
-                            expected: "process with receive type".to_string(),
-                            found: "process without receive type (cannot send messages)"
-                                .to_string(),
+                            expected: "process with send type".to_string(),
+                            found: "process without send type (cannot send to it)".to_string(),
                         });
                     }
-                    if !value_type.is_compatible(expected_msg_type, &self.program) {
+                    if !value_type.is_compatible(expected_send_type, &self.program) {
                         return Err(Error::TypeMismatch {
                             expected: quiver_core::format::format_type(
                                 &self.program,
-                                expected_msg_type,
+                                expected_send_type,
                             ),
                             found: quiver_core::format::format_type(&self.program, &value_type),
                         });
                     }
                 } else {
-                    // None means unknown receive type
+                    // None means unknown send type
                     return Err(Error::TypeMismatch {
-                        expected: "process with known receive type".to_string(),
-                        found: "process with unknown receive type".to_string(),
+                        expected: "process with known send type".to_string(),
+                        found: "process with unknown send type".to_string(),
                     });
                 }
 
-                // Emit send instruction (expects [message, pid] on stack)
+                // Emit send instruction (expects [value, process] on stack)
                 self.codegen.add_instruction(Instruction::Send);
 
                 Ok(target_type)
             }
             _ => Err(Error::TypeMismatch {
-                expected: "function or process".to_string(),
+                expected: "function, process, or resource".to_string(),
                 found: quiver_core::format::format_type(&self.program, &target_type),
             }),
         }
@@ -2716,11 +2728,14 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_builtin(&mut self, name: &str) -> Result<Type, Error> {
-        let (param_type, result_type) = BUILTIN_REGISTRY
+        let (param_type, result_type) = self
+            .builtins
             .resolve_signature(name, &mut self.program)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
 
-        let builtin_index = self.program.register_builtin(name.to_string());
+        let builtin_index = self
+            .program
+            .register_builtin(name.to_string(), self.builtins);
 
         self.codegen
             .add_instruction(Instruction::Builtin(builtin_index));

@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Maximum binary size in bytes (16MB)
 pub const MAX_BINARY_SIZE: usize = 16 * 1024 * 1024;
 
+/// Resource identifier
+pub type ResourceId = usize;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Binary {
     /// Reference to a binary stored in the constants table
@@ -21,6 +24,7 @@ pub enum Value {
     Function(usize, Vec<Value>),
     Builtin(String),
     Process(ProcessId, usize),
+    Resource(ResourceId, String),
 }
 
 impl Value {
@@ -52,6 +56,7 @@ impl Value {
             Value::Function(_, _) => "function",
             Value::Builtin(_) => "builtin",
             Value::Process(_, _) => "process",
+            Value::Resource(_, _) => "resource",
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
 use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
+use quiver_core::effects::Effect;
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::types::{TupleTypeInfo, Type};
 use quiver_core::value::Value;
@@ -8,7 +9,8 @@ use std::collections::HashMap;
 
 /// Commands sent from Environment to Workers
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Command {
+#[serde(bound(serialize = "", deserialize = ""))]
+pub enum Command<E: Effect> {
     /// Update program data (additive only)
     UpdateProgram {
         constants: Vec<Constant>,
@@ -97,11 +99,23 @@ pub enum Command {
         process_id: ProcessId,
         keep_indices: Vec<usize>,
     },
+
+    /// Effect operation completed
+    EffectCompletion {
+        process_id: ProcessId,
+        result: Result<Value, String>,
+        heap: Vec<Vec<u8>>,
+    },
+
+    // Phantom data to maintain generic parameter
+    #[serde(skip)]
+    _Phantom(std::marker::PhantomData<E>),
 }
 
 /// Events sent from Workers to Environment
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {
+#[serde(bound(serialize = "", deserialize = ""))]
+pub enum Event<E: Effect> {
     /// Action: Spawn new process
     SpawnAction {
         caller: ProcessId,
@@ -164,4 +178,11 @@ pub enum Event {
     WorkerError {
         error: crate::environment::EnvironmentError,
     },
+
+    /// Request effect operation from Environment
+    EffectRequest { process_id: ProcessId, effect: E },
+
+    // Phantom data to maintain generic parameter
+    #[serde(skip)]
+    _Phantom(std::marker::PhantomData<E>),
 }

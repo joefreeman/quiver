@@ -1,14 +1,20 @@
 //! Math builtin function implementations
-
+use crate::builtins::BuiltinResult;
+use crate::effects::Effect;
 use crate::error::Error;
 use crate::executor::Executor;
+use crate::process::ProcessId;
 use crate::value::Value;
 
 /// Builtin function: math:abs
 /// Returns the absolute value of an integer
-pub fn builtin_math_abs(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_math_abs<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     match arg {
-        Value::Integer(n) => Ok(Value::Integer(n.abs())),
+        Value::Integer(n) => Ok(BuiltinResult::Value(Value::Integer(n.abs()))),
         _other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
             found: "non-integer".to_string(),
@@ -18,7 +24,11 @@ pub fn builtin_math_abs(arg: &Value, _program: &mut Executor) -> Result<Value, E
 
 /// Builtin function: math:sqrt
 /// Returns the square root of an integer (truncated to integer)
-pub fn builtin_math_sqrt(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_math_sqrt<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     match arg {
         Value::Integer(n) => {
             if *n < 0 {
@@ -27,7 +37,7 @@ pub fn builtin_math_sqrt(arg: &Value, _program: &mut Executor) -> Result<Value, 
                 ))
             } else {
                 let result = (*n as f64).sqrt() as i64;
-                Ok(Value::Integer(result))
+                Ok(BuiltinResult::Value(Value::Integer(result)))
             }
         }
         _other => Err(Error::TypeMismatch {
@@ -39,11 +49,15 @@ pub fn builtin_math_sqrt(arg: &Value, _program: &mut Executor) -> Result<Value, 
 
 /// Builtin function: math:sin
 /// Returns the sine of an integer (treating it as radians, truncated to integer)
-pub fn builtin_math_sin(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_math_sin<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     match arg {
         Value::Integer(n) => {
             let result = (*n as f64).sin() as i64;
-            Ok(Value::Integer(result))
+            Ok(BuiltinResult::Value(Value::Integer(result)))
         }
         _other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
@@ -54,11 +68,15 @@ pub fn builtin_math_sin(arg: &Value, _program: &mut Executor) -> Result<Value, E
 
 /// Builtin function: math:cos
 /// Returns the cosine of an integer (treating it as radians, truncated to integer)
-pub fn builtin_math_cos(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_math_cos<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     match arg {
         Value::Integer(n) => {
             let result = (*n as f64).cos() as i64;
-            Ok(Value::Integer(result))
+            Ok(BuiltinResult::Value(Value::Integer(result)))
         }
         _other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
@@ -109,48 +127,72 @@ fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
 
 /// Builtin function: __add__
 /// Adds two integers from a tuple
-pub fn builtin_add(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_add<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    Ok(Value::Integer(a + b))
+    Ok(BuiltinResult::Value(Value::Integer(a + b)))
 }
 
 /// Builtin function: __subtract__
 /// Subtracts two integers from a tuple
-pub fn builtin_subtract(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_subtract<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    Ok(Value::Integer(a - b))
+    Ok(BuiltinResult::Value(Value::Integer(a - b)))
 }
 
 /// Builtin function: __multiply__
 /// Multiplies two integers from a tuple
-pub fn builtin_multiply(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_multiply<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    Ok(Value::Integer(a * b))
+    Ok(BuiltinResult::Value(Value::Integer(a * b)))
 }
 
 /// Builtin function: __divide__
 /// Divides two integers from a tuple
-pub fn builtin_divide(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_divide<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
     if b == 0 {
         return Err(Error::InvalidArgument("Division by zero".to_string()));
     }
-    Ok(Value::Integer(a / b))
+    Ok(BuiltinResult::Value(Value::Integer(a / b)))
 }
 
 /// Builtin function: __modulo__
 /// Takes modulo of two integers from a tuple
-pub fn builtin_modulo(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_modulo<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
     if b == 0 {
         return Err(Error::InvalidArgument("Modulo by zero".to_string()));
     }
-    Ok(Value::Integer(a % b))
+    Ok(BuiltinResult::Value(Value::Integer(a % b)))
 }
 
 /// Builtin function: __compare__
 /// Compares two integers and returns -1, 0, or 1
-pub fn builtin_compare(arg: &Value, _program: &mut Executor) -> Result<Value, Error> {
+pub fn builtin_compare<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
 
     let result = if a < b {
@@ -161,5 +203,5 @@ pub fn builtin_compare(arg: &Value, _program: &mut Executor) -> Result<Value, Er
         0
     };
 
-    Ok(Value::Integer(result))
+    Ok(BuiltinResult::Value(Value::Integer(result)))
 }

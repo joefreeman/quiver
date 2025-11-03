@@ -34,8 +34,8 @@ pub struct CallableType {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct ProcessType {
+    pub send: Option<Box<Type>>,
     pub receive: Option<Box<Type>>,
-    pub returns: Option<Box<Type>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
@@ -56,6 +56,8 @@ pub enum Type {
     Union(Vec<Type>),
     #[serde(rename = "process")]
     Process(Box<ProcessType>),
+    #[serde(rename = "resource")]
+    Resource(String),
     #[serde(rename = "var")]
     Variable(String),
 }
@@ -163,26 +165,29 @@ impl Type {
             (Type::Integer, Type::Integer) => true,
             (Type::Binary, Type::Binary) => true,
 
-            // Process types are compatible if their receive and return types are compatible
-            (Type::Process(proc1), Type::Process(proc2)) => {
+            // Process types (processes) are compatible if their send and receive types are compatible
+            (Type::Process(sel1), Type::Process(sel2)) => {
+                // Check send type compatibility
+                let send_compatible = match (&sel1.send, &sel2.send) {
+                    (Some(s1), Some(s2)) => {
+                        s1.is_compatible_with_impl(s2, tuple_lookup, assumptions, type_stack)
+                    }
+                    (None, _) | (_, None) => true, // Compatible if either has unknown send type
+                };
+
                 // Check receive type compatibility
-                let receive_compatible = match (&proc1.receive, &proc2.receive) {
+                let receive_compatible = match (&sel1.receive, &sel2.receive) {
                     (Some(r1), Some(r2)) => {
                         r1.is_compatible_with_impl(r2, tuple_lookup, assumptions, type_stack)
                     }
-                    (None, _) | (_, None) => true, // Compatible if either has no receive type
+                    (None, _) | (_, None) => true, // Compatible if either has unknown receive type
                 };
 
-                // Check return type compatibility
-                let return_compatible = match (&proc1.returns, &proc2.returns) {
-                    (Some(ret1), Some(ret2)) => {
-                        ret1.is_compatible_with_impl(ret2, tuple_lookup, assumptions, type_stack)
-                    }
-                    (None, _) | (_, None) => true, // Compatible if either has no return type
-                };
-
-                receive_compatible && return_compatible
+                send_compatible && receive_compatible
             }
+
+            // Resource types must have matching resource type identifiers
+            (Type::Resource(r1), Type::Resource(r2)) => r1 == r2,
 
             // For tuples, check structural compatibility
             (Type::Tuple(id1), Type::Tuple(id2)) => {

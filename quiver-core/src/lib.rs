@@ -1,6 +1,7 @@
 pub mod binary;
 pub mod builtins;
 pub mod bytecode;
+pub mod effects;
 pub mod error;
 pub mod execute;
 pub mod executor;
@@ -11,8 +12,9 @@ pub mod types;
 pub mod value;
 
 pub use binary::{BinaryData, MAX_BINARY_SIZE};
+pub use builtins::BuiltinResult;
 pub use error::Error;
 pub use execute::execute_instructions_sync;
 pub use executor::Executor;
 pub use process::{Action, ProcessId, ProcessInfo, ProcessStatus};
-pub use value::{Binary, Value};
+pub use value::{Binary, ResourceId, Value};

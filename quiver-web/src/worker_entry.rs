@@ -1,3 +1,4 @@
+use crate::effects::WebEffect;
 use crate::web_transport::{WebCommandReceiver, WebEventSender};
 use quiver_environment::{Command, EnvironmentError, Event, Worker};
 use std::cell::RefCell;
@@ -16,24 +17,30 @@ pub fn worker_main() {
         .expect("Not in a worker context");
 
     // Create command queue
-    let command_queue: Rc<RefCell<VecDeque<Command>>> = Rc::new(RefCell::new(VecDeque::new()));
+    let command_queue: Rc<RefCell<VecDeque<Command<WebEffect>>>> =
+        Rc::new(RefCell::new(VecDeque::new()));
     let command_queue_clone = command_queue.clone();
 
     // Create event sender that uses postMessage
     let global_clone = global.clone();
-    let post_message_fn = Rc::new(move |event: Event| -> Result<(), EnvironmentError> {
-        let json = serde_json::to_string(&event).map_err(|e| {
-            EnvironmentError::WorkerCommunication(format!("Failed to serialize event: {}", e))
-        })?;
-
-        global_clone
-            .post_message(&JsValue::from_str(&json))
-            .map_err(|e| {
-                EnvironmentError::WorkerCommunication(format!("Failed to post message: {:?}", e))
+    let post_message_fn = Rc::new(
+        move |event: Event<WebEffect>| -> Result<(), EnvironmentError> {
+            let json = serde_json::to_string(&event).map_err(|e| {
+                EnvironmentError::WorkerCommunication(format!("Failed to serialize event: {}", e))
             })?;
 
-        Ok(())
-    });
+            global_clone
+                .post_message(&JsValue::from_str(&json))
+                .map_err(|e| {
+                    EnvironmentError::WorkerCommunication(format!(
+                        "Failed to post message: {:?}",
+                        e
+                    ))
+                })?;
+
+            Ok(())
+        },
+    );
 
     let evt_sender = WebEventSender::new(post_message_fn.clone());
 
@@ -46,7 +53,7 @@ pub fn worker_main() {
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
             // Parse as Command
-            match serde_json::from_str::<Command>(&text) {
+            match serde_json::from_str::<Command<WebEffect>>(&text) {
                 Ok(cmd) => {
                     command_queue_clone.borrow_mut().push_back(cmd);
                 }
@@ -62,13 +69,18 @@ pub fn worker_main() {
 
     // Create and initialize worker immediately
     let cmd_receiver = WebCommandReceiver::new(command_queue);
-    let worker = Worker::new(cmd_receiver, evt_sender);
+    // Use core-only modules for web REPL (no network builtins)
+    let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
+        &quiver_core::builtins::core_modules(),
+    );
+    // Workers no longer manage io_backend - it's owned by Environment
+    let worker = Worker::new(cmd_receiver, evt_sender, builtins);
 
     // Start the worker loop
     start_worker_loop(worker);
 }
 
-fn start_worker_loop(worker: Worker<WebCommandReceiver, WebEventSender>) {
+fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSender>) {
     let worker = Rc::new(RefCell::new(worker));
     let worker_clone = worker.clone();
 

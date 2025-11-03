@@ -1,3 +1,4 @@
+use crate::effects::WebEffect;
 use quiver_core::bytecode::Constant;
 use quiver_core::executor::Executor;
 use quiver_core::program::Program;
@@ -35,6 +36,11 @@ pub enum Value {
         pid: usize,
         #[serde(rename = "functionIndex")]
         function_index: usize,
+    },
+    Resource {
+        id: usize,
+        #[serde(rename = "processId")]
+        process_id: usize,
     },
 }
 
@@ -74,6 +80,9 @@ impl Value {
                 pid,
                 function_index,
             } => quiver_core::value::Value::Process(*pid, *function_index),
+            Value::Resource { id, process_id: _ } => {
+                quiver_core::value::Value::Resource(*id, "Resource".to_string())
+            }
         }
     }
 
@@ -125,6 +134,10 @@ impl Value {
                 pid: *pid,
                 function_index: *function_index,
             },
+            quiver_core::value::Value::Resource(id, _) => Value::Resource {
+                id: *id,
+                process_id: 0, // Resources are now tracked by Environment, not processes
+            },
         }
     }
 
@@ -132,7 +145,7 @@ impl Value {
     /// Requires mutable executor to allocate binaries to heap
     pub fn to_core_value(
         self,
-        executor: &mut Executor,
+        executor: &mut Executor<WebEffect>,
     ) -> std::result::Result<quiver_core::value::Value, String> {
         match self {
             Value::Integer { value } => Ok(quiver_core::value::Value::Integer(value)),
@@ -163,6 +176,10 @@ impl Value {
                 pid,
                 function_index,
             } => Ok(quiver_core::value::Value::Process(pid, function_index)),
+            Value::Resource { id, process_id: _ } => Ok(quiver_core::value::Value::Resource(
+                id,
+                "Resource".to_string(),
+            )),
         }
     }
 }

@@ -1,3 +1,4 @@
+use crate::effects::Effect;
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -27,7 +28,7 @@ pub struct ProcessInfo {
 }
 
 #[derive(Debug, Clone)]
-pub enum Action {
+pub enum Action<E: Effect> {
     /// Spawn a new process with the given function and captures
     Spawn {
         caller: ProcessId,
@@ -41,6 +42,8 @@ pub enum Action {
         targets: Vec<ProcessId>,
         caller: ProcessId,
     },
+    /// Request a platform-specific effect
+    RequestEffect { process_id: ProcessId, effect: E },
 }
 
 #[derive(Debug, Clone)]

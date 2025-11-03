@@ -129,16 +129,18 @@ impl Program {
         self.functions.get(index)
     }
 
-    pub fn register_builtin(&mut self, name: String) -> usize {
+    pub fn register_builtin<E: crate::effects::Effect>(
+        &mut self,
+        name: String,
+        registry: &crate::builtins::BuiltinRegistry<E>,
+    ) -> usize {
         // Check if builtin already exists
         if let Some(index) = self.builtins.iter().position(|b| b.name == name) {
             return index;
         }
 
         // Look up type specs from the builtin registry and resolve them
-        let builtin_info = if let Some((param_spec, result_spec)) =
-            crate::builtins::BUILTIN_REGISTRY.get_specs(&name)
-        {
+        let builtin_info = if let Some((param_spec, result_spec)) = registry.get_specs(&name) {
             BuiltinInfo {
                 name: name.clone(),
                 parameter_type: param_spec.resolve(self),
@@ -236,11 +238,11 @@ impl Program {
     /// Creates a new function that allocates locals for the captures, converts each
     /// capture value to instructions, stores them in locals, then executes the original
     /// function's instructions.
-    pub fn inject_function_captures(
+    pub fn inject_function_captures<E: crate::effects::Effect>(
         &mut self,
         function_index: usize,
         captures: Vec<Value>,
-        executor: &Executor,
+        executor: &Executor<E>,
     ) -> usize {
         let mut instructions = Vec::new();
         instructions.push(Instruction::Allocate(captures.len()));
@@ -265,7 +267,11 @@ impl Program {
 
     /// Convert a runtime value to instructions that reconstruct it.
     /// This is used for serializing values (like captures) back into bytecode.
-    fn value_to_instructions(&mut self, value: &Value, executor: &Executor) -> Vec<Instruction> {
+    fn value_to_instructions<E: crate::effects::Effect>(
+        &mut self,
+        value: &Value,
+        executor: &Executor<E>,
+    ) -> Vec<Instruction> {
         match value {
             Value::Integer(n) => {
                 let const_idx = self.register_constant(Constant::Integer(*n));
@@ -303,11 +309,15 @@ impl Program {
                 vec![Instruction::Function(func_index)]
             }
             Value::Builtin(name) => {
-                let builtin_idx = self.register_builtin(name.clone());
+                let builtin_idx =
+                    self.register_builtin(name.clone(), executor.get_builtins_registry());
                 vec![Instruction::Builtin(builtin_idx)]
             }
             Value::Process(_, _) => {
                 panic!("Cannot convert pid to instructions")
+            }
+            Value::Resource(..) => {
+                panic!("Cannot convert resource to instructions")
             }
         }
     }

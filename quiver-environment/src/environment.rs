@@ -2,10 +2,11 @@ use crate::WorkerId;
 use crate::messages::{Command, Event};
 use crate::transport::WorkerHandle;
 use quiver_core::bytecode::{Bytecode, Function, Instruction};
+use quiver_core::effects::{Effect, EffectBackend};
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
 use quiver_core::types::{CallableType, ProcessType, Type};
-use quiver_core::value::Value;
+use quiver_core::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -32,11 +33,9 @@ fn remap_type(ty: Type, type_remap: &HashMap<usize, usize>) -> Type {
             receive: remap_type(callable.receive, type_remap),
         })),
         Type::Process(process) => Type::Process(Box::new(ProcessType {
+            send: process.send.map(|t| Box::new(remap_type(*t, type_remap))),
             receive: process
                 .receive
-                .map(|t| Box::new(remap_type(*t, type_remap))),
-            returns: process
-                .returns
                 .map(|t| Box::new(remap_type(*t, type_remap))),
         })),
         other => other,
@@ -88,9 +87,8 @@ fn remap_function(
 
 // Type aliases for complex types
 pub type ValueWithHeap = (Value, Vec<Vec<u8>>);
-pub type RuntimeResult = Result<Value, quiver_core::error::Error>;
-pub type CompletedResult = (RuntimeResult, Vec<Vec<u8>>);
-pub type ProcessResultsMap = HashMap<ProcessId, Option<CompletedResult>>;
+pub type RuntimeResult = Result<ValueWithHeap, quiver_core::error::Error>;
+pub type ProcessResultsMap = HashMap<ProcessId, Option<RuntimeResult>>;
 pub type WorkerResponsesMap = HashMap<WorkerId, ProcessResultsMap>;
 pub type LocalsResult = Result<Vec<ValueWithHeap>, EnvironmentError>;
 
@@ -181,9 +179,10 @@ struct PendingAwait {
     responses: WorkerResponsesMap,
 }
 
-pub struct Environment {
-    workers: Vec<Box<dyn WorkerHandle>>,
+pub struct Environment<E: Effect> {
+    workers: Vec<Box<dyn WorkerHandle<E>>>,
     program: Program,
+    builtins: quiver_core::builtins::BuiltinRegistry<E>,
     process_router: HashMap<ProcessId, WorkerId>,
     pending_awaits: HashMap<ProcessId, PendingAwait>, // awaiter -> pending await state
     pending_requests: HashMap<u64, Option<RequestResult>>,
@@ -191,28 +190,54 @@ pub struct Environment {
     aggregations: HashMap<u64, Aggregation>,
     next_request_id: u64,
     next_process_id: ProcessId,
+
+    // Effect backend and resource management
+    effect_backend: Option<Box<dyn EffectBackend<E = E>>>,
+    resource_ownership: HashMap<ResourceId, ProcessId>,
 }
 
-impl Environment {
-    pub fn new(workers: Vec<Box<dyn WorkerHandle>>) -> Self {
+impl<E: Effect> Environment<E> {
+    pub fn new(
+        workers: Vec<Box<dyn WorkerHandle<E>>>,
+        builtins: quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Self {
         let program = Program::new();
 
         Self {
             workers,
             program: program.clone(),
+            builtins,
             process_router: HashMap::new(),
             pending_awaits: HashMap::new(),
             pending_requests: HashMap::new(),
             aggregations: HashMap::new(),
             next_request_id: 0,
             next_process_id: 0,
+            effect_backend: None, // Will be set when we move I/O to effects
+            resource_ownership: HashMap::new(),
         }
+    }
+
+    /// Set the effect backend for executing platform-specific effects
+    pub fn set_effect_backend(&mut self, backend: Box<dyn EffectBackend<E = E>>) {
+        self.effect_backend = Some(backend);
     }
 
     /// Process events from workers, route actions
     /// Returns true if work was done, false if idle
     pub fn step(&mut self) -> Result<bool, EnvironmentError> {
         let mut did_work = false;
+
+        // Process effect completions
+        if let Some(effect_backend) = self.effect_backend.as_mut() {
+            let completions = effect_backend.process_completions();
+            if !completions.is_empty() {
+                did_work = true;
+                for (process_id, completion) in completions {
+                    self.handle_effect_completion(process_id, completion)?;
+                }
+            }
+        }
 
         // Collect all events from all workers first
         let mut events = Vec::new();
@@ -524,7 +549,9 @@ impl Environment {
 
         // Merge builtins (register_builtin handles deduplication by name)
         for (old_idx, builtin_info) in bytecode.builtins.iter().enumerate() {
-            let new_idx = self.program.register_builtin(builtin_info.name.clone());
+            let new_idx = self
+                .program
+                .register_builtin(builtin_info.name.clone(), &self.builtins);
             builtin_remap.insert(old_idx, new_idx);
         }
 
@@ -583,7 +610,7 @@ impl Environment {
             .expect("Entry function should be in remap table"))
     }
 
-    fn handle_event(&mut self, event: Event) -> Result<(), EnvironmentError> {
+    fn handle_event(&mut self, event: Event<E>) -> Result<(), EnvironmentError> {
         match event {
             Event::SpawnAction {
                 caller,
@@ -618,6 +645,13 @@ impl Environment {
                 self.handle_locals_response(request_id, result)
             }
             Event::WorkerError { error } => self.handle_worker_error(error),
+            Event::EffectRequest { process_id, effect } => {
+                self.handle_effect_request(process_id, effect)
+            }
+            Event::_Phantom(_) => {
+                // This variant is never actually used, only for maintaining generics
+                unreachable!("_Phantom variant should never be constructed")
+            }
         }
     }
 
@@ -667,6 +701,13 @@ impl Environment {
         awaiter: ProcessId,
         results: ProcessResultsMap,
     ) -> Result<(), EnvironmentError> {
+        // Clean up resources for any completed processes
+        for (process_id, result) in &results {
+            if result.is_some() {
+                // Process has completed (success or failure) - clean up its resources
+                self.cleanup_process_resources(*process_id);
+            }
+        }
         // Get the worker ID that sent this response by looking up any process ID in results
         // (works even if all results are None, since we still have the process IDs)
         let sender_worker_id = results
@@ -733,9 +774,29 @@ impl Environment {
         // Allocate new ProcessId
         let new_pid = self.allocate_process_id();
 
-        // Choose worker (round-robin)
-        let worker_id = new_pid % self.workers.len();
+        // Choose worker: if any captures are resources, spawn on the same worker
+        // that owns the first resource (via the resource's owner process_id).
+        // Otherwise use round-robin.
+        let worker_id = captures
+            .iter()
+            .find_map(|capture| {
+                if let Value::Resource(resource_id, _) = capture {
+                    // Look up the owner of this resource and find their worker
+                    self.resource_ownership
+                        .get(resource_id)
+                        .and_then(|owner_pid| self.process_router.get(owner_pid).copied())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| new_pid % self.workers.len());
+
         self.process_router.insert(new_pid, worker_id);
+
+        // Transfer ownership of any resources in captures to the new process
+        for capture in &captures {
+            self.transfer_resource_ownership(capture, new_pid);
+        }
 
         // Spawn process on chosen worker with function and captures
         self.workers[worker_id]
@@ -764,12 +825,35 @@ impl Environment {
         Ok(())
     }
 
+    /// Recursively transfer ownership of all resources in a value to a target process
+    fn transfer_resource_ownership(&mut self, value: &Value, new_owner: ProcessId) {
+        match value {
+            Value::Resource(resource_id, _) => {
+                self.resource_ownership.insert(*resource_id, new_owner);
+            }
+            Value::Tuple(_, fields) => {
+                for field in fields {
+                    self.transfer_resource_ownership(field, new_owner);
+                }
+            }
+            Value::Function(_, captures) => {
+                for capture in captures {
+                    self.transfer_resource_ownership(capture, new_owner);
+                }
+            }
+            _ => {} // Other value types don't contain resources
+        }
+    }
+
     fn handle_deliver(
         &mut self,
         target: ProcessId,
         message: Value,
         heap: Vec<Vec<u8>>,
     ) -> Result<(), EnvironmentError> {
+        // Transfer ownership of any resources in the message to the target process
+        self.transfer_resource_ownership(&message, target);
+
         let worker_id = self
             .process_router
             .get(&target)
@@ -961,8 +1045,8 @@ impl Environment {
     pub fn format_process_type(&self, function_index: usize) -> Option<String> {
         let function = self.program.get_function(function_index)?;
         let process_type = Type::Process(Box::new(ProcessType {
-            receive: Some(Box::new(function.function_type.receive.clone())),
-            returns: Some(Box::new(function.function_type.result.clone())),
+            send: Some(Box::new(function.function_type.receive.clone())),
+            receive: Some(Box::new(function.function_type.result.clone())),
         }));
         Some(self.format_type(&process_type))
     }
@@ -971,8 +1055,8 @@ impl Environment {
     pub fn get_process_type(&self, function_index: usize) -> Option<Type> {
         let function = self.program.get_function(function_index)?;
         let process_type = Type::Process(Box::new(ProcessType {
-            receive: Some(Box::new(function.function_type.receive.clone())),
-            returns: Some(Box::new(function.function_type.result.clone())),
+            send: Some(Box::new(function.function_type.receive.clone())),
+            receive: Some(Box::new(function.function_type.result.clone())),
         }));
         Some(process_type)
     }
@@ -1011,10 +1095,11 @@ impl Environment {
                     .expect("Function should exist")
                     .function_type;
                 Type::Process(Box::new(ProcessType {
-                    receive: Some(Box::new(func_type.receive.clone())),
-                    returns: Some(Box::new(func_type.result.clone())),
+                    send: Some(Box::new(func_type.receive.clone())),
+                    receive: Some(Box::new(func_type.result.clone())),
                 }))
             }
+            Value::Resource(_, type_name) => Type::Resource(type_name.clone()),
         }
     }
 
@@ -1043,5 +1128,119 @@ impl Environment {
             &mut self.program,
         )
         .map_err(|e| format!("{:?}", e))
+    }
+
+    /// Handle effect request from a worker
+    fn handle_effect_request(
+        &mut self,
+        process_id: ProcessId,
+        effect: E,
+    ) -> Result<(), EnvironmentError> {
+        // Validate ownership for operations on existing resources
+        if let Some(resource_id) = effect.resource_id() {
+            // Check that the process owns this resource
+            if let Some(owner) = self.resource_ownership.get(&resource_id)
+                && *owner != process_id
+            {
+                return Err(EnvironmentError::Executor(
+                    quiver_core::error::Error::InvalidArgument(format!(
+                        "Process {} does not own resource {}",
+                        process_id, resource_id
+                    )),
+                ));
+            }
+        }
+        // Resource-creating operations (those that return None from resource_id()) don't need ownership checks
+
+        // Execute the effect via the effect backend
+        let effect_backend = self.effect_backend.as_mut().ok_or_else(|| {
+            EnvironmentError::Executor(quiver_core::error::Error::InvalidArgument(
+                "No effect backend available".to_string(),
+            ))
+        })?;
+
+        // Execute effect (may return immediate result or submit for async processing)
+        // The backend tracks pending operations by process_id
+        match effect_backend.execute(process_id, effect) {
+            Ok(Some(completion)) => {
+                // Immediate completion - handle it now
+                self.handle_effect_completion(process_id, completion)?;
+            }
+            Ok(None) => {
+                // Async operation submitted - backend will track it and return via process_completions()
+            }
+            Err(e) => {
+                // Operation failed - send error to worker
+                let worker_id = self
+                    .process_router
+                    .get(&process_id)
+                    .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
+                self.workers[*worker_id]
+                    .send(Command::EffectCompletion {
+                        process_id,
+                        result: Err(format!("{:?}", e)),
+                        heap: vec![],
+                    })
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle completed effect operation (generic version)
+    fn handle_effect_completion(
+        &mut self,
+        process_id: ProcessId,
+        result: Result<(Value, Vec<Vec<u8>>), quiver_core::effects::EffectError>,
+    ) -> Result<(), EnvironmentError> {
+        // If this was a resource-creating operation, register ownership
+        if result.is_ok()
+            && let Ok((Value::Resource(rid, _), _)) = &result
+        {
+            self.resource_ownership.insert(*rid, process_id);
+        }
+
+        // Unwrap the result and heap data
+        let (result, heap) = match result {
+            Ok((value, heap_data)) => (Ok(value), heap_data),
+            Err(err) => (Err(format!("{}", err)), vec![]),
+        };
+
+        // Send completion to the worker
+        let worker_id = self
+            .process_router
+            .get(&process_id)
+            .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
+
+        self.workers[*worker_id]
+            .send(Command::EffectCompletion {
+                process_id,
+                result,
+                heap,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Clean up all resources owned by a process
+    /// This is called when a process completes (either successfully or with an error)
+    fn cleanup_process_resources(&mut self, process_id: ProcessId) {
+        if let Some(backend) = &mut self.effect_backend {
+            // Find all resources owned by this process
+            let resources: Vec<_> = self
+                .resource_ownership
+                .iter()
+                .filter(|(_, owner)| **owner == process_id)
+                .map(|(rid, _)| *rid)
+                .collect();
+
+            // Close each resource via the backend
+            for resource_id in resources {
+                backend.close_resource(resource_id);
+                self.resource_ownership.remove(&resource_id);
+            }
+        }
     }
 }
