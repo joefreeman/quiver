@@ -891,6 +891,7 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 Term::Select(Select::Function(Function {
                     type_parameters: vec![],
                     parameter_type: Some(param_type),
+                    return_type: None,
                     body: Some(body),
                 }))
             },
@@ -911,6 +912,7 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 Term::Select(Select::Function(Function {
                     type_parameters: vec![],
                     parameter_type: Some(param_type),
+                    return_type: None,
                     body: Some(body),
                 }))
             },
@@ -1177,12 +1179,14 @@ fn function(input: Span) -> IResult<Span, Function> {
                     char('>'),
                 )),
                 opt(preceded(not(peek(char('{'))), function_input_type)),
+                opt(preceded(tuple((ws1, tag("->"), ws1)), function_output_type)),
                 opt(alt((preceded(ws1, block), block))),
             )),
         ),
-        |(type_parameters, parameter_type, body)| Function {
+        |(type_parameters, parameter_type, return_type, body)| Function {
             type_parameters: type_parameters.unwrap_or_default(),
             parameter_type,
+            return_type,
             body,
         },
     )(input)
@@ -1267,6 +1271,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
             Term::Spawn(Box::new(Term::Function(Function {
                 type_parameters: vec![],
                 parameter_type: None,
+                return_type: None,
                 body: Some(body),
             })))
         }),
@@ -1286,6 +1291,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 Term::Spawn(Box::new(Term::Function(Function {
                     type_parameters: vec![],
                     parameter_type: Some(param_type),
+                    return_type: None,
                     body: Some(body),
                 })))
             },
@@ -1297,6 +1303,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 Term::Spawn(Box::new(Term::Function(Function {
                     type_parameters: vec![],
                     parameter_type: Some(tuple_ty),
+                    return_type: None,
                     body: Some(body),
                 })))
             },

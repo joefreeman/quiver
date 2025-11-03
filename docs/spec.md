@@ -339,7 +339,7 @@ x = coords ~> .0         // Positional access in pipeline
 
 ## Functions
 
-Functions always have a single parameter and a result. The parameter is explicitly typed, and the result type is inferred.
+Functions always have a single parameter and a result. The parameter is explicitly typed, and the result type is inferred. Optionally, the return type can be specified (e.g., `#int -> bin { ... }`), and will be validated at compile time.
 
 Functions are defined with `#... { ... }` syntax, where the first `...` is the type definition of the parameter, and the second `...` is the function body (a 'block'; see above).
 

@@ -239,3 +239,140 @@ fn test_dollar_with_named_tuple_field() {
         )
         .expect("30");
 }
+
+#[test]
+fn test_function_with_return_type() {
+    quiver()
+        .evaluate("f = #int -> int { ~> __add__[~, 1] }, 5 ~> f")
+        .expect("6");
+}
+
+#[test]
+fn test_function_return_type_mismatch() {
+    quiver()
+        .evaluate("f = #int -> bin { ~> __add__[~, 1] }, 5 ~> f")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "bin".to_string(),
+            found: "int".to_string(),
+        });
+}
+
+#[test]
+fn test_function_with_tuple_return_type() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #[int, int] -> int { [$.0, $.1] ~> __add__ },
+            [3, 4] ~> f
+            "#,
+        )
+        .expect("7");
+}
+
+#[test]
+fn test_function_tuple_return_type_mismatch() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #[int, int] -> bin { [$.0, $.1] ~> __add__ },
+            [3, 4] ~> f
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "bin".to_string(),
+            found: "int".to_string(),
+        });
+}
+
+#[test]
+fn test_identity_function_with_return_type() {
+    quiver().evaluate("f = #int -> int, 42 ~> f").expect("42");
+}
+
+#[test]
+fn test_identity_function_return_type_mismatch() {
+    quiver()
+        .evaluate("f = #int -> bin, 42 ~> f")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "bin".to_string(),
+            found: "int".to_string(),
+        });
+}
+
+#[test]
+fn test_function_with_generic_return_type() {
+    quiver()
+        .evaluate(
+            r#"
+            id = #<t>t -> t { ~> },
+            42 ~> id
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_function_with_generic_return_type_string() {
+    quiver()
+        .evaluate(
+            r#"
+            id = #<t>t -> t { ~> },
+            "hello" ~> id
+            "#,
+        )
+        .expect("\"hello\"");
+}
+
+#[test]
+fn test_function_with_complex_return_type() {
+    quiver()
+        .evaluate(
+            r#"
+            double = #int -> int { ~> __multiply__[~, 2] },
+            square = #int -> int { ~> __multiply__[~, ~] },
+            5 ~> double ~> square
+            "#,
+        )
+        .expect("100");
+}
+
+#[test]
+fn test_function_with_named_tuple_return_type() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #int -> Point[x: int, y: int] {
+                ~> =n => Point[x: n, y: [n, n] ~> __multiply__]
+            },
+            3 ~> f
+            "#,
+        )
+        .expect("Point[x: 3, y: 9]");
+}
+
+#[test]
+fn test_function_named_tuple_return_type_mismatch() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #int -> Point[x: int, y: int] { ~> },
+            3 ~> f
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "Point[x: int, y: int]".to_string(),
+            found: "int".to_string(),
+        });
+}
+
+#[test]
+fn test_generic_function_return_type_mismatch() {
+    // Generic function with type parameter t but return type bin
+    // Body returns t, which doesn't match bin
+    quiver()
+        .evaluate("f = #<t>t -> bin { ~> }, 5 ~> f")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "bin".to_string(),
+            found: "t".to_string(),
+        });
+}

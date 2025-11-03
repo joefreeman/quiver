@@ -117,6 +117,7 @@ pub struct TupleField {
 pub struct Function {
     pub type_parameters: Vec<String>,
     pub parameter_type: Option<Type>,
+    pub return_type: Option<Type>,
     pub body: Option<Block>,
 }
 

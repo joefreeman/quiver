@@ -1094,6 +1094,36 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         };
 
+        // Validate return type if specified
+        if let Some(return_type_ast) = &function.return_type {
+            let expected_return_type = typing::resolve_function_parameter_type(
+                &self.scopes,
+                return_type_ast.clone(),
+                &function.type_parameters,
+                &mut self.program,
+            )?;
+
+            // For generic functions, we need strict type equality (not just compatibility)
+            // because type variables should match exactly, not be compatible with concrete types
+            let types_match = if !function.type_parameters.is_empty() {
+                // For generic functions: require exact type equality
+                body_type == expected_return_type
+            } else {
+                // For non-generic functions: use compatibility check
+                body_type.is_compatible(&expected_return_type, &self.program)
+            };
+
+            if !types_match {
+                return Err(Error::TypeMismatch {
+                    expected: quiver_core::format::format_type(
+                        &self.program,
+                        &expected_return_type,
+                    ),
+                    found: quiver_core::format::format_type(&self.program, &body_type),
+                });
+            }
+        }
+
         let func_type = CallableType {
             parameter: parameter_type,
             result: body_type,
@@ -2433,6 +2463,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                     parameter_type: Some(ast::Type::Primitive(
                                         ast::PrimitiveType::Int,
                                     )),
+                                    return_type: None,
                                     body: None,
                                 })],
                                 continuation: false,
@@ -2446,6 +2477,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                     parameter_type: Some(ast::Type::Primitive(
                                         ast::PrimitiveType::Bin,
                                     )),
+                                    return_type: None,
                                     body: None,
                                 })],
                                 continuation: false,
@@ -2461,6 +2493,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                         name: ident.clone(),
                                         arguments: vec![],
                                     }),
+                                    return_type: None,
                                     body: None,
                                 })],
                                 continuation: false,
@@ -2485,6 +2518,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             terms: vec![ast::Term::Function(ast::Function {
                                 type_parameters: vec![],
                                 parameter_type: Some(ty.clone()),
+                                return_type: None,
                                 body: None,
                             })],
                             continuation: false,

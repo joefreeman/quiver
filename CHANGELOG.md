@@ -6,6 +6,7 @@
 
 - Added initial support for I/O (sockets and files).
 - Re-added support for `$` to access the function parameter.
+- Added support for optionally specifying return type on functions (e.g., `#int -> bin { ... }`).
 
 ## [0.3.0] - 2025-10-31
 
