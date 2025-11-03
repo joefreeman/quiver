@@ -97,8 +97,7 @@ pub fn builtin_tcp_connect(
             }
         }
         Binary::Heap(idx) => executor
-            .heap
-            .get(*idx)
+            .get_heap_binary(*idx)
             .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
             .to_vec(),
     };
@@ -268,8 +267,7 @@ pub fn builtin_tcp_socket_write(
             }
         }
         Binary::Heap(idx) => executor
-            .heap
-            .get(*idx)
+            .get_heap_binary(*idx)
             .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
             .to_vec(),
     };

@@ -285,7 +285,9 @@ impl Program {
                     }
                     Binary::Heap(heap_idx) => {
                         // Get bytes from heap and create a new constant
-                        let binary_data = &executor.heap[*heap_idx];
+                        let binary_data = executor
+                            .get_heap_binary(*heap_idx)
+                            .expect("Heap binary index should be valid");
                         let bytes = binary_data.to_vec();
                         let const_idx = self.register_constant(Constant::Binary(bytes));
                         vec![Instruction::Constant(const_idx)]

@@ -30,7 +30,7 @@ pub struct Executor<E: Effect> {
     tuples: Vec<TupleTypeInfo>,
     types: Vec<Type>,
     // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
-    pub heap: Vec<BinaryData>,
+    heap: Vec<BinaryData>,
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
 }
@@ -43,6 +43,11 @@ impl<E: Effect> TupleLookup for Executor<E> {
 impl<E: Effect> Executor<E> {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
+    }
+
+    /// Get BinaryData from heap by index
+    pub fn get_heap_binary(&self, index: usize) -> Option<&BinaryData> {
+        self.heap.get(index)
     }
 
     /// Get BinaryData from either constants or heap

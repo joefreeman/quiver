@@ -86,8 +86,7 @@ pub fn builtin_file_open(
             }
         }
         Binary::Heap(idx) => executor
-            .heap
-            .get(*idx)
+            .get_heap_binary(*idx)
             .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
             .to_vec(),
     };
@@ -203,8 +202,7 @@ pub fn builtin_file_write(
             }
         }
         Binary::Heap(idx) => executor
-            .heap
-            .get(*idx)
+            .get_heap_binary(*idx)
             .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
             .to_vec(),
     };

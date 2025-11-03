@@ -1721,7 +1721,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     }
                     quiver_core::value::Binary::Heap(heap_idx) => {
                         // Extract from executor heap and create a new constant
-                        let binary_data = &executor.heap[*heap_idx];
+                        let binary_data = executor
+                            .get_heap_binary(*heap_idx)
+                            .expect("Heap binary index should be valid");
                         let bytes = binary_data.to_vec();
                         let constant = Constant::Binary(bytes);
                         let index = self.program.register_constant(constant);
