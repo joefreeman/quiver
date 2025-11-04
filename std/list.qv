@@ -61,29 +61,29 @@ take' = #<t>[list<t>, int, list<t>] {
     ~> =Cons[_, tail] => tail
   },
 
-  empty?: #<t>list<t> { ~> =Nil => Ok },
+  empty?: #<t>list<t> {
+    ~> =Nil => Ok
+  },
 
   prepend: #<t>[list<t>, t] {
-    ~> =[xs, x] => Cons[x, xs]
+    Cons[$.1, $.0]
   },
 
   append: #<t>[list<t>, t] {
-    ~> =[xs, x] => {
-      reversed = [xs, Nil] ~> reverse',
-      [Cons[x, reversed], Nil] ~> reverse'
-    }
+    reversed = [$.0, Nil] ~> reverse',
+    [Cons[$.1, reversed], Nil] ~> reverse'
   },
 
   concat: #<t>[list<t>, list<t>] {
-    ~> =[xs, ys] => concat'[xs, ys, Nil]
+    ~> [..., Nil] ~> concat'
   },
 
   length: #<t>list<t> {
-    ~> =xs => [xs, 0] ~> length'
+    ~> [~, 0] ~> length'
   },
 
   reverse: #<t>list<t> {
-    ~> =xs => [xs, Nil] ~> reverse'
+    ~> [~, Nil] ~> reverse'
   },
 
   at: #<t>[list<t>, int] {
@@ -95,11 +95,11 @@ take' = #<t>[list<t>, int, list<t>] {
   },
 
   map: #<t, u>[list<t>, #t -> u] {
-    ~> =[xs, f] => map'[xs, f, Nil]
+    ~> [..., Nil] ~> map'
   },
 
   filter: #<t>[list<t>, #t -> (t | [])] {
-    ~> =[xs, f] => filter'[xs, f, Nil]
+    ~> [..., Nil] ~> filter'
   },
 
   drop: #<t>[list<t>, int] {
@@ -110,7 +110,7 @@ take' = #<t>[list<t>, int, list<t>] {
   },
 
   take: #<t>[list<t>, int] {
-    ~> =[xs, x] => take'[xs, x, Nil]
+    ~> [..., Nil] ~> take'
   },
 
   contains?: #<t>[list<t>, t] {
