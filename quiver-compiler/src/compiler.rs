@@ -2772,14 +2772,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         accessors: &[ast::AccessPath],
         arg_type: Option<Type>,
     ) -> Result<Type, Error> {
-        if identifier.is_none() && accessors.is_empty() {
-            // Tail call to parameter
-            if arg_type.is_none() {
+        // Handle argument - if none provided, check if function parameter is nil and use that
+        let _arg_type = if let Some(arg_t) = arg_type {
+            arg_t
+        } else {
+            let (func_param_type, _) = scopes::get_function_parameter(&self.scopes)?;
+            if func_param_type == Type::nil() {
+                // Push nil onto stack for tail call
+                let nil_tuple_id = self.program.register_tuple(None, vec![], false);
+                self.codegen
+                    .add_instruction(Instruction::Tuple(nil_tuple_id));
+                Type::nil()
+            } else {
                 return Err(Error::FeatureUnsupported(
                     "Tail call requires a value".to_string(),
                 ));
             }
-            // Argument is already on stack, just emit tail call
+        };
+
+        if identifier.is_none() && accessors.is_empty() {
+            // Tail call to parameter - argument is already on stack, just emit tail call
             self.codegen.add_instruction(Instruction::TailCall(true));
             Ok(Type::never())
         } else {
@@ -2789,12 +2801,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     "Member access in tail call requires an identifier".to_string(),
                 )
             })?;
-
-            if arg_type.is_none() {
-                return Err(Error::FeatureUnsupported(
-                    "Tail call requires a value".to_string(),
-                ));
-            }
 
             let func_type = if accessors.is_empty() {
                 // Simple identifier lookup

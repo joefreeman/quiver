@@ -61,3 +61,9 @@ fn test_factorial() {
         )
         .expect("120");
 }
+
+#[test]
+fn test_tail_call_with_nil_argument() {
+    quiver().evaluate("f = #{ &[] }");
+    quiver().evaluate("f = #{ & }");
+}
