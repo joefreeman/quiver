@@ -14,9 +14,8 @@ fn try_format_as_string(bytes: &[u8]) -> Option<String> {
     let s = String::from_utf8(bytes.to_vec()).ok()?;
 
     if s.contains('\0')
-        || !s
-            .chars()
-            .any(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        || s.chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
     {
         return None;
     }

@@ -1145,7 +1145,7 @@ fn branch(input: Span) -> IResult<Span, Branch> {
     map(
         pair(
             expression,
-            opt(preceded(tuple((ws1, tag("=>"), ws1)), expression)),
+            opt(preceded(tuple((wsc, tag("=>"), wsc)), expression)),
         ),
         |(condition, consequence)| Branch {
             condition,
