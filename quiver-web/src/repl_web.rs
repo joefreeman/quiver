@@ -521,7 +521,9 @@ impl Environment {
             RequestResult::ProcessInfo(info_opt) => {
                 let js_info = info_opt.map(|info| {
                     // Get the formatted process type
-                    let process_type = env.format_process_type(info.function_index);
+                    let process_type = info
+                        .function_index
+                        .and_then(|idx| env.format_process_type(idx));
 
                     let result = info.result.map(|r| match r {
                         Ok(value) => crate::types::Result::Ok {

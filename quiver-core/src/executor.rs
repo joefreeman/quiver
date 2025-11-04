@@ -386,11 +386,7 @@ impl<E: Effect> Executor<E> {
         self.processes.get(&id).map(|process| ProcessInfo {
             id,
             status: self.get_status(id, process),
-            function_index: process
-                .frames
-                .first()
-                .map(|f| f.function_index)
-                .unwrap_or(0),
+            function_index: process.frames.first().map(|f| f.function_index),
             stack_size: process.stack.len(),
             locals_count: process.locals.len(),
             frames_count: process.frames.len(),

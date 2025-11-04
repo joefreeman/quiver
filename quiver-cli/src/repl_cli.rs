@@ -302,16 +302,6 @@ impl ReplCli {
             Ok(RequestResult::ProcessInfo(Some(info))) => {
                 println!("{}", format!("Process {}:", id).bright_black());
 
-                // Show type
-                if let Some(type_str) = self
-                    .environment
-                    .lock()
-                    .unwrap()
-                    .format_process_type(info.function_index)
-                {
-                    println!("{}", format!("  Type: {}", type_str).bright_black());
-                }
-
                 // Show status with persistent annotation
                 let status_line = if info.persistent {
                     format!("  Status: {:?} (persistent)", info.status)
@@ -332,6 +322,21 @@ impl ReplCli {
                     "{}",
                     format!("  Mailbox: {}", info.mailbox_size).bright_black()
                 );
+
+                // Show type
+                if let Some(function_index) = info.function_index {
+                    if let Some(type_str) = self
+                        .environment
+                        .lock()
+                        .unwrap()
+                        .format_process_type(function_index)
+                    {
+                        println!("{}", format!("  Type: {}", type_str).bright_black());
+                    }
+                } else {
+                    println!("{}", "  Type: ―".bright_black());
+                }
+
                 if let Some(Ok(ref result)) = info.result {
                     println!(
                         "{}",
