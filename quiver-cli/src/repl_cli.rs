@@ -73,10 +73,19 @@ impl ReplCli {
         let shutdown_clone = Arc::clone(&shutdown_signal);
         let stepping_thread = Some(thread::spawn(move || {
             while !shutdown_clone.load(Ordering::Relaxed) {
-                if let Ok(mut env) = env_clone.lock() {
-                    let _ = env.step();
-                }
-                thread::sleep(std::time::Duration::from_micros(100));
+                let did_work = if let Ok(mut env) = env_clone.lock() {
+                    env.step().unwrap_or(false)
+                } else {
+                    false
+                };
+
+                // Adaptive sleep: short when active, longer when idle
+                let sleep_duration = if did_work {
+                    std::time::Duration::from_micros(100) // 100μs when busy
+                } else {
+                    std::time::Duration::from_millis(10) // 10ms when idle
+                };
+                thread::sleep(sleep_duration);
             }
         }));
 

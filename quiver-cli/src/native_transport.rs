@@ -86,8 +86,8 @@ where
                     // Work was done, continue immediately
                 }
                 Ok(false) => {
-                    // No work, sleep briefly to avoid spinning
-                    std::thread::sleep(std::time::Duration::from_micros(100));
+                    // No work, sleep longer to reduce idle CPU usage
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(e) => {
                     // Send error event to environment
