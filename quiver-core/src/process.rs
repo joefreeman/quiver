@@ -5,6 +5,9 @@ use std::collections::{HashMap, VecDeque};
 
 pub type ProcessId = usize;
 
+/// Result type containing a value with its heap data
+pub type ProcessResult = Result<(Value, Vec<Vec<u8>>), crate::error::Error>;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProcessStatus {
     Active,
@@ -24,7 +27,7 @@ pub struct ProcessInfo {
     pub frames_count: usize,
     pub mailbox_size: usize,
     pub persistent: bool,
-    pub result: Option<Result<Value, crate::error::Error>>,
+    pub result: Option<ProcessResult>,
 }
 
 #[derive(Debug, Clone)]

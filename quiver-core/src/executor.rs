@@ -383,16 +383,28 @@ impl<E: Effect> Executor<E> {
     }
 
     pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
-        self.processes.get(&id).map(|process| ProcessInfo {
-            id,
-            status: self.get_status(id, process),
-            function_index: process.frames.first().map(|f| f.function_index),
-            stack_size: process.stack.len(),
-            locals_count: process.locals.len(),
-            frames_count: process.frames.len(),
-            mailbox_size: process.mailbox.len(),
-            persistent: process.persistent,
-            result: process.result.clone(),
+        self.processes.get(&id).map(|process| {
+            // Extract heap data from result if present
+            let result = match &process.result {
+                Some(Ok(value)) => match self.extract_heap_data(value) {
+                    Ok((extracted_value, heap)) => Some(Ok((extracted_value, heap))),
+                    Err(_) => process.result.clone().map(|r| r.map(|v| (v, vec![]))),
+                },
+                Some(Err(e)) => Some(Err(e.clone())),
+                None => None,
+            };
+
+            ProcessInfo {
+                id,
+                status: self.get_status(id, process),
+                function_index: process.frames.first().map(|f| f.function_index),
+                stack_size: process.stack.len(),
+                locals_count: process.locals.len(),
+                frames_count: process.frames.len(),
+                mailbox_size: process.mailbox.len(),
+                persistent: process.persistent,
+                result,
+            }
         })
     }
 

@@ -526,15 +526,14 @@ impl Environment {
                         .and_then(|idx| env.format_process_type(idx));
 
                     let result = info.result.map(|r| match r {
-                        Ok(value) => crate::types::Result::Ok {
+                        Ok((value, heap)) => crate::types::Result::Ok {
                             value: EvaluationResult {
-                                // Note: Process info doesn't preserve heap data, so binaries will be empty
                                 value: crate::types::Value::from_core_value(
                                     &value,
-                                    &[],
+                                    &heap,
                                     env.get_program(),
                                 ),
-                                heap: vec![],
+                                heap,
                             },
                         },
                         Err(e) => crate::types::Result::Err {

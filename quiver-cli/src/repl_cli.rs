@@ -337,12 +337,12 @@ impl ReplCli {
                     println!("{}", "  Type: ―".bright_black());
                 }
 
-                if let Some(Ok(ref result)) = info.result {
+                if let Some(Ok((ref value, ref heap))) = info.result {
                     println!(
                         "{}",
                         format!(
                             "  Result: {}",
-                            self.environment.lock().unwrap().format_value(result, &[])
+                            self.environment.lock().unwrap().format_value(value, heap)
                         )
                         .bright_black()
                     );
