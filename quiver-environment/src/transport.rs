@@ -13,7 +13,7 @@ pub trait EventSender<E: Effect> {
 }
 
 /// Handle for communicating with a worker (Environment side)
-pub trait WorkerHandle<E: Effect> {
+pub trait WorkerHandle<E: Effect>: Send {
     fn send(&mut self, command: Command<E>) -> Result<(), EnvironmentError>;
     fn try_recv(&mut self) -> Result<Option<Event<E>>, EnvironmentError>;
 }

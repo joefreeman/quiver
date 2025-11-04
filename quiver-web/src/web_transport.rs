@@ -99,3 +99,8 @@ impl WorkerHandle<WebEffect> for WebWorkerHandle {
         Ok(self.event_queue.borrow_mut().pop_front())
     }
 }
+
+// Safety: WebWorkerHandle is marked as Send to satisfy WorkerHandle trait bounds.
+// This is safe because WASM is single-threaded - there are no real threads in the browser
+// context where this code runs, so Send is effectively meaningless here.
+unsafe impl Send for WebWorkerHandle {}

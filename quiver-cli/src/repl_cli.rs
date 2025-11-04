@@ -8,6 +8,11 @@ use quiver_io::NativeEffect;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::io::IsTerminal;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::{self, JoinHandle};
 
 const HISTORY_FILE: &str = ".quiv_history";
 
@@ -18,9 +23,11 @@ struct EvaluationResult {
 
 pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
-    environment: Environment<NativeEffect>,
+    environment: Arc<Mutex<Environment<NativeEffect>>>,
     repl: Repl<NativeEffect>,
     last_was_nil: bool,
+    stepping_thread: Option<JoinHandle<()>>,
+    shutdown_signal: Arc<AtomicBool>,
 }
 
 impl ReplCli {
@@ -57,11 +64,29 @@ impl ReplCli {
         let module_loader = Box::new(FileSystemModuleLoader::new());
         let repl = Repl::new(program, module_loader, builtins);
 
+        // Wrap environment in Arc<Mutex> for shared access
+        let environment = Arc::new(Mutex::new(environment));
+        let shutdown_signal = Arc::new(AtomicBool::new(false));
+
+        // Spawn background thread to step the environment continuously
+        let env_clone = Arc::clone(&environment);
+        let shutdown_clone = Arc::clone(&shutdown_signal);
+        let stepping_thread = Some(thread::spawn(move || {
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                if let Ok(mut env) = env_clone.lock() {
+                    let _ = env.step();
+                }
+                thread::sleep(std::time::Duration::from_micros(100));
+            }
+        }));
+
         Ok(Self {
             editor,
             environment,
             repl,
             last_was_nil: false,
+            stepping_thread,
+            shutdown_signal,
         })
     }
 
@@ -178,7 +203,7 @@ impl ReplCli {
 
             ["x"] => {
                 let result_type = self.repl.get_last_result_type();
-                let formatted_type = self.environment.format_type(result_type);
+                let formatted_type = self.environment.lock().unwrap().format_type(result_type);
                 println!("{}", formatted_type.bright_black());
             }
 
@@ -207,9 +232,11 @@ impl ReplCli {
         request_id: u64,
     ) -> Result<RequestResult, quiver_environment::EnvironmentError> {
         loop {
-            self.environment.step()?;
+            // The background thread is now stepping, but we still want to
+            // step here to ensure progress on this request
+            self.environment.lock().unwrap().step()?;
 
-            match self.environment.poll_request(request_id)? {
+            match self.environment.lock().unwrap().poll_request(request_id)? {
                 Some(result) => return Ok(result),
                 None => std::thread::sleep(std::time::Duration::from_micros(10)),
             }
@@ -223,7 +250,7 @@ impl ReplCli {
         } else {
             println!("{}", "Variables:".bright_black());
             for (name, ty) in vars {
-                let formatted_type = self.environment.format_type(&ty);
+                let formatted_type = self.environment.lock().unwrap().format_type(&ty);
                 println!(
                     "{}",
                     format!("  {}: {}", name, formatted_type).bright_black()
@@ -233,7 +260,7 @@ impl ReplCli {
     }
 
     fn list_processes(&mut self) {
-        let request_id = match self.environment.request_statuses() {
+        let request_id = match self.environment.lock().unwrap().request_statuses() {
             Ok(id) => id,
             Err(e) => {
                 eprintln!(
@@ -263,7 +290,7 @@ impl ReplCli {
     }
 
     fn inspect_process(&mut self, id: usize) {
-        let request_id = match self.environment.request_process_info(id) {
+        let request_id = match self.environment.lock().unwrap().request_process_info(id) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("{}", format!("Error requesting process info: {}", e).red());
@@ -276,7 +303,12 @@ impl ReplCli {
                 println!("{}", format!("Process {}:", id).bright_black());
 
                 // Show type
-                if let Some(type_str) = self.environment.format_process_type(info.function_index) {
+                if let Some(type_str) = self
+                    .environment
+                    .lock()
+                    .unwrap()
+                    .format_process_type(info.function_index)
+                {
                     println!("{}", format!("  Type: {}", type_str).bright_black());
                 }
 
@@ -303,8 +335,11 @@ impl ReplCli {
                 if let Some(Ok(ref result)) = info.result {
                     println!(
                         "{}",
-                        format!("  Result: {}", self.environment.format_value(result, &[]))
-                            .bright_black()
+                        format!(
+                            "  Result: {}",
+                            self.environment.lock().unwrap().format_value(result, &[])
+                        )
+                        .bright_black()
                     );
                 } else if let Some(Err(ref err)) = info.result {
                     println!("{}", format!("  Result: Error({:?})", err).bright_black());
@@ -324,6 +359,8 @@ impl ReplCli {
         // First, fetch all process types
         let types_request_id = self
             .environment
+            .lock()
+            .unwrap()
             .request_process_types()
             .map_err(ReplError::Environment)?;
 
@@ -341,16 +378,17 @@ impl ReplCli {
         };
 
         // Now evaluate with the process types
-        let request_id = match self
-            .repl
-            .evaluate(&mut self.environment, line, process_types)?
-        {
-            Some(id) => id,
-            None => {
-                // No executable code (e.g., only type definitions)
-                return Ok(None);
-            }
-        };
+        let request_id =
+            match self
+                .repl
+                .evaluate(&mut *self.environment.lock().unwrap(), line, process_types)?
+            {
+                Some(id) => id,
+                None => {
+                    // No executable code (e.g., only type definitions)
+                    return Ok(None);
+                }
+            };
 
         // Wait for the evaluation result
         match self
@@ -359,7 +397,7 @@ impl ReplCli {
         {
             RequestResult::Result(Ok((value, heap))) => {
                 // Compact locals after successful evaluation (optimization)
-                self.repl.compact(&mut self.environment);
+                self.repl.compact(&mut *self.environment.lock().unwrap());
 
                 Ok(Some(EvaluationResult { value, heap }))
             }
@@ -383,13 +421,14 @@ impl ReplCli {
                 // Track if result was nil for colored prompt
                 self.last_was_nil = value.is_nil();
 
-                let formatted_value = self.environment.format_value(&value, &heap);
+                let formatted_value = self.environment.lock().unwrap().format_value(&value, &heap);
 
                 // Show type for functions, builtins, and processes
                 let output = match &value {
                     Value::Function(_, _) | Value::Builtin(_) | Value::Process(_, _) => {
-                        let value_type = self.environment.value_to_type(&value);
-                        let formatted_type = self.environment.format_type(&value_type);
+                        let env = self.environment.lock().unwrap();
+                        let value_type = env.value_to_type(&value);
+                        let formatted_type = env.format_type(&value_type);
                         format!(
                             "{} {}",
                             formatted_value,
@@ -432,6 +471,18 @@ impl ReplCli {
             ReplError::Environment(e) => {
                 eprintln!("{}", format!("Environment error: {}", e).red());
             }
+        }
+    }
+}
+
+impl Drop for ReplCli {
+    fn drop(&mut self) {
+        // Signal the background thread to stop
+        self.shutdown_signal.store(true, Ordering::Relaxed);
+
+        // Wait for the thread to finish
+        if let Some(handle) = self.stepping_thread.take() {
+            let _ = handle.join();
         }
     }
 }
