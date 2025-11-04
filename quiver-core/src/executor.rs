@@ -137,7 +137,7 @@ impl<E: Effect> Executor<E> {
         persistent: bool,
     ) -> Result<(), Error> {
         // Create the process
-        let process = Process::new(function_index, persistent);
+        let process = Process::new(persistent);
         self.processes.insert(id, process);
 
         // Inject heap data and populate locals with captures
@@ -371,12 +371,13 @@ impl<E: Effect> Executor<E> {
         self.processes
             .iter()
             .filter_map(|(id, process)| {
-                let function = self.get_function(process.function_index)?;
+                let function_index = process.frames.first()?.function_index;
+                let function = self.get_function(function_index)?;
                 let process_type = Type::Process(Box::new(ProcessType {
                     send: Some(Box::new(function.function_type.receive.clone())),
                     receive: Some(Box::new(function.function_type.result.clone())),
                 }));
-                Some((*id, (process_type, process.function_index)))
+                Some((*id, (process_type, function_index)))
             })
             .collect()
     }
@@ -385,7 +386,11 @@ impl<E: Effect> Executor<E> {
         self.processes.get(&id).map(|process| ProcessInfo {
             id,
             status: self.get_status(id, process),
-            function_index: process.function_index,
+            function_index: process
+                .frames
+                .first()
+                .map(|f| f.function_index)
+                .unwrap_or(0),
             stack_size: process.stack.len(),
             locals_count: process.locals.len(),
             frames_count: process.frames.len(),
@@ -1323,7 +1328,11 @@ impl<E: Effect> Executor<E> {
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        let function_index = process.function_index;
+        let function_index = process
+            .frames
+            .first()
+            .ok_or(Error::FrameUnderflow)?
+            .function_index;
         process.stack.push(Value::Process(pid, function_index));
 
         if let Some(frame) = process.frames.last_mut() {

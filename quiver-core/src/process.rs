@@ -83,7 +83,6 @@ pub struct SelectState {
 
 #[derive(Debug)]
 pub struct Process {
-    pub function_index: usize,
     pub stack: Vec<Value>,
     pub locals: Vec<Value>,
     pub frames: Vec<Frame>,
@@ -95,9 +94,8 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(function_index: usize, persistent: bool) -> Self {
+    pub fn new(persistent: bool) -> Self {
         Self {
-            function_index,
             stack: Vec::new(),
             locals: Vec::new(),
             frames: Vec::new(),
