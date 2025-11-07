@@ -231,58 +231,81 @@ impl Type {
                 }
 
                 let lookup_index = type_stack.len() - *depth;
-                if let Some(Type::Union(variants)) = type_stack.get(lookup_index) {
-                    // Resolve the cycle to the union and check compatibility
-                    let variants = variants.clone();
-                    variants.iter().any(|variant| {
-                        variant.is_compatible_with_impl(
+                match type_stack.get(lookup_index) {
+                    Some(Type::Union(variants)) => {
+                        // Resolve the cycle to the union and check compatibility
+                        let variants = variants.clone();
+                        variants.iter().any(|variant| {
+                            variant.is_compatible_with_impl(
+                                pattern,
+                                tuple_lookup,
+                                assumptions,
+                                type_stack,
+                            )
+                        })
+                    }
+                    Some(Type::Callable(_)) => {
+                        // For callable cycles, compare the resolved callable type
+                        let resolved = type_stack[lookup_index].clone();
+                        resolved.is_compatible_with_impl(
                             pattern,
                             tuple_lookup,
                             assumptions,
                             type_stack,
                         )
-                    })
-                } else {
-                    // Cycles should only refer to unions, but use coinductive reasoning as fallback
-                    true
+                    }
+                    _ => {
+                        // Use coinductive reasoning as fallback
+                        true
+                    }
                 }
             }
 
             // Handle cycles in pattern by looking up the type in the stack
             (_, Type::Cycle(depth)) => {
                 // Cycle(n) refers to the pattern type n positions from the end of the stack
-                // Cycles always refer to union types (enforced during type resolution)
+                // Cycles can refer to union or function types
 
                 // Check if stack has enough context
                 if type_stack.len() < *depth {
                     // Stack doesn't have enough context - this happens when comparing
                     // a concrete type against a variant containing a Cycle outside
-                    // the context of the enclosing Union. Use coinductive reasoning:
+                    // the context of the enclosing boundary. Use coinductive reasoning:
                     // assume compatibility and let the assumptions set prevent infinite loops.
                     return true;
                 }
 
                 let lookup_index = type_stack.len() - *depth;
-                if let Some(Type::Union(variants)) = type_stack.get(lookup_index) {
-                    // Check if self matches any variant WITHOUT pushing the union
-                    // onto the stack again (it's already there!)
-                    let variants = variants.clone();
-                    variants.iter().any(|variant| {
-                        self.is_compatible_with_impl(variant, tuple_lookup, assumptions, type_stack)
-                    })
-                } else {
-                    // This shouldn't happen - cycles should only refer to unions
-                    // But use coinductive reasoning as a fallback
-                    true
+                match type_stack.get(lookup_index) {
+                    Some(Type::Union(variants)) => {
+                        // Check if self matches any variant WITHOUT pushing the union
+                        // onto the stack again (it's already there!)
+                        let variants = variants.clone();
+                        variants.iter().any(|variant| {
+                            self.is_compatible_with_impl(variant, tuple_lookup, assumptions, type_stack)
+                        })
+                    }
+                    Some(Type::Callable(_)) => {
+                        // For callable cycles, compare against the resolved callable type
+                        let resolved = type_stack[lookup_index].clone();
+                        self.is_compatible_with_impl(&resolved, tuple_lookup, assumptions, type_stack)
+                    }
+                    _ => {
+                        // Use coinductive reasoning as a fallback
+                        true
+                    }
                 }
             }
 
             (Type::Callable(f1), Type::Callable(f2)) => {
+                // Push callable onto stack for cycle resolution
+                type_stack.push(self.clone());
+
                 // For functions:
                 // - Parameters are contravariant (pattern's param must be compatible with self's param)
                 // - Results are covariant (self's result must be compatible with pattern's result)
                 // - Receive types are contravariant (pattern's receive must be compatible with self's receive)
-                f2.parameter.is_compatible_with_impl(
+                let result = f2.parameter.is_compatible_with_impl(
                     &f1.parameter,
                     tuple_lookup,
                     assumptions,
@@ -297,7 +320,11 @@ impl Type {
                     tuple_lookup,
                     assumptions,
                     type_stack,
-                )
+                );
+
+                // Pop callable from stack
+                type_stack.pop();
+                result
             }
 
             // When self is concrete and pattern is a union, check if self matches any variant

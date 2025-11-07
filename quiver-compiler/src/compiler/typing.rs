@@ -34,7 +34,7 @@ pub fn union_types(types: Vec<Type>) -> Type {
 pub type TypeAliasDef = (Vec<String>, ast::Type);
 
 fn instantiate_generic_type(
-    union_depth: &mut usize,
+    recursion_depth: &mut usize,
     scopes_ref: &[Scope],
     name: &str,
     arguments: Vec<ast::Type>,
@@ -48,7 +48,7 @@ fn instantiate_generic_type(
     // Resolve all type arguments
     let resolved_args: Vec<Type> = arguments
         .into_iter()
-        .map(|arg| resolve_ast_type_impl(union_depth, scopes_ref, arg, program, type_bindings))
+        .map(|arg| resolve_ast_type_impl(recursion_depth, scopes_ref, arg, program, type_bindings))
         .collect::<Result<_, _>>()?;
 
     // Validate argument count
@@ -68,7 +68,9 @@ fn instantiate_generic_type(
     }
 
     // Resolve the body with parameter bindings
-    resolve_ast_type_impl(union_depth, scopes_ref, type_def.1, program, &new_bindings)
+    // Reset recursion depth to 0 so cycles in the type alias are relative to the alias definition
+    let mut alias_depth = 0;
+    resolve_ast_type_impl(&mut alias_depth, scopes_ref, type_def.1, program, &new_bindings)
 }
 
 /// Check if an AST type contains any cycle references
@@ -105,8 +107,8 @@ pub fn resolve_ast_type(
     program: &mut Program,
 ) -> Result<Type, Error> {
     let bindings = HashMap::new();
-    let mut union_depth = 0;
-    resolve_ast_type_impl(&mut union_depth, scopes_ref, ast_type, program, &bindings)
+    let mut recursion_depth = 0;
+    resolve_ast_type_impl(&mut recursion_depth, scopes_ref, ast_type, program, &bindings)
 }
 
 /// Resolve a function parameter type with explicitly declared type parameters.
@@ -123,8 +125,10 @@ pub fn resolve_function_parameter_type(
         bindings.insert(param.clone(), Type::Variable(param.clone()));
     }
 
-    let mut union_depth = 0;
-    resolve_ast_type_impl(&mut union_depth, scopes_ref, ast_type, program, &bindings)
+    // Start at depth 1 since this is a function parameter (the function creates a recursion boundary)
+    // This allows the parameter type to use & to refer to the enclosing function
+    let mut recursion_depth = 1;
+    resolve_ast_type_impl(&mut recursion_depth, scopes_ref, ast_type, program, &bindings)
 }
 
 /// Resolve a type alias for display purposes (e.g., in tests or REPL).
@@ -145,9 +149,9 @@ pub fn resolve_type_alias_for_display(
         bindings.insert(param.clone(), Type::Variable(param.clone()));
     }
 
-    let mut union_depth = 0;
+    let mut recursion_depth = 0;
     resolve_ast_type_impl(
-        &mut union_depth,
+        &mut recursion_depth,
         scopes_ref,
         ast_type.clone(),
         program,
@@ -210,7 +214,7 @@ type NamedFieldVariants = Vec<(Option<String>, FieldSet)>; // (tuple_name, field
 /// Resolve tuple fields that contain spreads
 /// Returns a vector of (name, field_set) pairs - multiple pairs if spreading creates union variants
 fn resolve_tuple_fields_with_spread(
-    union_depth: &mut usize,
+    recursion_depth: &mut usize,
     scopes_ref: &[Scope],
     fields: &[ast::FieldType],
     program: &mut Program,
@@ -226,7 +230,7 @@ fn resolve_tuple_fields_with_spread(
             ast::FieldType::Field { name, type_def } => {
                 // Resolve the field type
                 let field_type = resolve_ast_type_impl(
-                    union_depth,
+                    recursion_depth,
                     scopes_ref,
                     type_def.clone(),
                     program,
@@ -277,7 +281,7 @@ fn resolve_tuple_fields_with_spread(
                 let mut spread_bindings = type_bindings.clone();
                 for (param, arg) in type_params.iter().zip(type_arguments.iter()) {
                     let arg_type = resolve_ast_type_impl(
-                        union_depth,
+                        recursion_depth,
                         scopes_ref,
                         arg.clone(),
                         program,
@@ -288,7 +292,7 @@ fn resolve_tuple_fields_with_spread(
 
                 // Resolve the spread type with the bindings
                 let spread_type = resolve_ast_type_impl(
-                    union_depth,
+                    recursion_depth,
                     scopes_ref,
                     type_def.clone(),
                     program,
@@ -364,7 +368,7 @@ fn extract_tuples_from_type_with_names(
 }
 
 fn resolve_ast_type_impl(
-    union_depth: &mut usize,
+    recursion_depth: &mut usize,
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
@@ -385,7 +389,7 @@ fn resolve_ast_type_impl(
             if has_spread {
                 // Handle spreads - may create multiple variants
                 let field_variants = resolve_tuple_fields_with_spread(
-                    union_depth,
+                    recursion_depth,
                     scopes_ref,
                     &tuple.fields,
                     program,
@@ -448,7 +452,7 @@ fn resolve_ast_type_impl(
                 match field {
                     ast::FieldType::Field { name, type_def } => {
                         let field_type = resolve_ast_type_impl(
-                            union_depth,
+                            recursion_depth,
                             scopes_ref,
                             type_def,
                             program,
@@ -486,20 +490,26 @@ fn resolve_ast_type_impl(
             }
         }
         ast::Type::Function(function) => {
+            // Increment recursion depth for function boundary
+            *recursion_depth += 1;
+
             let input_type = resolve_ast_type_impl(
-                union_depth,
+                recursion_depth,
                 scopes_ref,
                 *function.input,
                 program,
                 type_bindings,
             )?;
             let output_type = resolve_ast_type_impl(
-                union_depth,
+                recursion_depth,
                 scopes_ref,
                 *function.output,
                 program,
                 type_bindings,
             )?;
+
+            // Decrement recursion depth
+            *recursion_depth -= 1;
 
             // Create function type without distributing unions
             Ok(Type::Callable(Box::new(CallableType {
@@ -515,14 +525,14 @@ fn resolve_ast_type_impl(
             }
             validate_union_has_base_case(&union.types)?;
 
-            // Increment union depth
-            *union_depth += 1;
+            // Increment recursion depth for union boundary
+            *recursion_depth += 1;
 
             // Resolve all union member types
             let mut resolved_types = Vec::new();
             for member_type in union.types {
                 let member_type = resolve_ast_type_impl(
-                    union_depth,
+                    recursion_depth,
                     scopes_ref,
                     member_type,
                     program,
@@ -534,8 +544,8 @@ fn resolve_ast_type_impl(
                 }
             }
 
-            // Decrement union depth
-            *union_depth -= 1;
+            // Decrement recursion depth
+            *recursion_depth -= 1;
 
             Ok(Type::from_types(resolved_types))
         }
@@ -543,25 +553,25 @@ fn resolve_ast_type_impl(
             // & or &N syntax for cycle references
             let target_depth = target_depth.unwrap_or(0);
 
-            // Validate: cycles require enclosing union
-            if *union_depth == 0 {
+            // Validate: cycles require enclosing union or function
+            if *recursion_depth == 0 {
                 return Err(Error::TypeUnresolved(
-                    "Cycle reference '&' requires enclosing union type".to_string(),
+                    "Cycle reference '&' requires enclosing union or function type".to_string(),
                 ));
             }
 
-            // Validate: target_depth must be <= union_depth
-            if target_depth >= *union_depth {
+            // Validate: target_depth must be < recursion_depth
+            if target_depth >= *recursion_depth {
                 return Err(Error::TypeUnresolved(format!(
-                    "Invalid cycle reference &{}: only {} union level(s) deep",
-                    target_depth, *union_depth
+                    "Invalid cycle reference &{}: only {} recursion level(s) deep",
+                    target_depth, *recursion_depth
                 )));
             }
 
             // Calculate actual depth for Cycle(depth)
-            // target_depth is downward from root (0 = root, 1 = first nested union)
+            // target_depth is downward from root (0 = root, 1 = first nested boundary)
             // Cycle(depth) is upward from current position
-            let cycle_depth = *union_depth - target_depth;
+            let cycle_depth = *recursion_depth - target_depth;
 
             Ok(Type::Cycle(cycle_depth))
         }
@@ -570,7 +580,7 @@ fn resolve_ast_type_impl(
                 .receive_type
                 .map(|receive_type| {
                     resolve_ast_type_impl(
-                        union_depth,
+                        recursion_depth,
                         scopes_ref,
                         *receive_type,
                         program,
@@ -583,7 +593,7 @@ fn resolve_ast_type_impl(
                 .return_type
                 .map(|return_type| {
                     resolve_ast_type_impl(
-                        union_depth,
+                        recursion_depth,
                         scopes_ref,
                         *return_type,
                         program,
@@ -608,7 +618,7 @@ fn resolve_ast_type_impl(
 
             // Instantiate the type (works for both bare identifiers and parameterized types)
             instantiate_generic_type(
-                union_depth,
+                recursion_depth,
                 scopes_ref,
                 &name,
                 arguments,
