@@ -70,7 +70,13 @@ fn instantiate_generic_type(
     // Resolve the body with parameter bindings
     // Reset recursion depth to 0 so cycles in the type alias are relative to the alias definition
     let mut alias_depth = 0;
-    resolve_ast_type_impl(&mut alias_depth, scopes_ref, type_def.1, program, &new_bindings)
+    resolve_ast_type_impl(
+        &mut alias_depth,
+        scopes_ref,
+        type_def.1,
+        program,
+        &new_bindings,
+    )
 }
 
 /// Check if an AST type contains any cycle references
@@ -108,7 +114,13 @@ pub fn resolve_ast_type(
 ) -> Result<Type, Error> {
     let bindings = HashMap::new();
     let mut recursion_depth = 0;
-    resolve_ast_type_impl(&mut recursion_depth, scopes_ref, ast_type, program, &bindings)
+    resolve_ast_type_impl(
+        &mut recursion_depth,
+        scopes_ref,
+        ast_type,
+        program,
+        &bindings,
+    )
 }
 
 /// Resolve a function parameter type with explicitly declared type parameters.
@@ -128,7 +140,13 @@ pub fn resolve_function_parameter_type(
     // Start at depth 1 since this is a function parameter (the function creates a recursion boundary)
     // This allows the parameter type to use & to refer to the enclosing function
     let mut recursion_depth = 1;
-    resolve_ast_type_impl(&mut recursion_depth, scopes_ref, ast_type, program, &bindings)
+    resolve_ast_type_impl(
+        &mut recursion_depth,
+        scopes_ref,
+        ast_type,
+        program,
+        &bindings,
+    )
 }
 
 /// Resolve a type alias for display purposes (e.g., in tests or REPL).
@@ -742,24 +760,48 @@ pub fn unify(
     match (pattern, concrete) {
         // When pattern is a variable, bind it or check consistency
         (Type::Variable(name), concrete) => {
-            if let Some(existing) = bindings.get(name) {
+            // First, resolve concrete if it's also a variable
+            let resolved_concrete = if let Type::Variable(concrete_name) = concrete {
+                bindings.get(concrete_name).unwrap_or(concrete)
+            } else {
+                concrete
+            };
+
+            if let Some(existing) = bindings.get(name).cloned() {
                 // Variable already bound - widen to union if different
-                if existing != concrete {
+                if &existing != resolved_concrete {
                     // Widen the type variable to a union
-                    let widened = Type::from_types(vec![existing.clone(), concrete.clone()]);
+                    // Important: Don't include the variable itself in the widened type
+                    // This would create a circular reference like `t: int | t`
+                    let widened = Type::from_types(vec![existing, resolved_concrete.clone()]);
                     bindings.insert(name.clone(), widened);
                 }
             } else {
-                // New binding
-                bindings.insert(name.clone(), concrete.clone());
+                // New binding - but make sure we're not binding a variable to itself
+                if let Type::Variable(resolved_name) = resolved_concrete {
+                    if resolved_name == name {
+                        // Don't bind a variable to itself
+                        return Ok(());
+                    }
+                }
+                bindings.insert(name.clone(), resolved_concrete.clone());
             }
             Ok(())
         }
 
-        // When concrete is a variable, we can't unify (shouldn't happen in practice)
-        (_, Type::Variable(_)) => Err(Error::TypeUnresolved(
-            "Cannot unify with unbound type variable".to_string(),
-        )),
+        // When concrete is a variable, resolve it and try unifying with the resolved type
+        (pattern, Type::Variable(name)) => {
+            if let Some(resolved) = bindings.get(name).cloned() {
+                // Concrete variable is bound - unify with its binding
+                unify(bindings, pattern, &resolved, tuple_lookup)
+            } else {
+                // Concrete variable is unbound - this shouldn't happen in normal unification
+                // but we can handle it by binding the variable to the pattern
+                Err(Error::TypeUnresolved(
+                    "Cannot unify with unbound type variable in concrete position".to_string(),
+                ))
+            }
+        }
 
         // Both are basic types - must match
         (Type::Integer, Type::Integer) => Ok(()),
