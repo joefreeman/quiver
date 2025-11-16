@@ -2637,6 +2637,119 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Resolve cycles in a function's result type after a call
+    ///
+    /// When a function is called, its result may contain Cycle(n) references.
+    /// A Cycle(n) means "go up n boundaries from here".
+    ///
+    /// This function traverses the result type, tracking depth (boundaries crossed).
+    /// When it encounters Cycle(n) at depth D from the function:
+    /// - To reach the function boundary from depth D requires going up (D+1) boundaries
+    /// - If n == D+1, the cycle points to the function itself → resolve it
+    /// - Otherwise, keep the cycle as-is
+    fn resolve_function_cycles(
+        &mut self,
+        typ: Type,
+        function_type: &Type,
+        depth_from_function: usize,
+    ) -> Type {
+        match typ {
+            Type::Cycle(n) => {
+                // Cycle(n) means "n boundaries upward from here"
+                // We're at depth_from_function boundaries inside the result
+                // To reach the function: need to go up (depth_from_function + 1) boundaries
+                //   - depth_from_function to exit the result's boundaries
+                //   - +1 to exit the function boundary itself
+                if n == depth_from_function + 1 {
+                    function_type.clone()
+                } else {
+                    // Cycle points elsewhere (could be to a boundary inside the result,
+                    // or to something even further out)
+                    Type::Cycle(n)
+                }
+            }
+            Type::Union(variants) => {
+                // Union is a boundary - increment depth
+                Type::from_types(
+                    variants
+                        .into_iter()
+                        .map(|v| {
+                            self.resolve_function_cycles(v, function_type, depth_from_function + 1)
+                        })
+                        .collect(),
+                )
+            }
+            Type::Callable(inner_func) => {
+                // Nested function is a boundary - increment depth
+                let resolved_param = self.resolve_function_cycles(
+                    inner_func.parameter,
+                    function_type,
+                    depth_from_function + 1,
+                );
+                let resolved_result = self.resolve_function_cycles(
+                    inner_func.result,
+                    function_type,
+                    depth_from_function + 1,
+                );
+                let resolved_receive = self.resolve_function_cycles(
+                    inner_func.receive,
+                    function_type,
+                    depth_from_function + 1,
+                );
+                Type::Callable(Box::new(CallableType {
+                    parameter: resolved_param,
+                    result: resolved_result,
+                    receive: resolved_receive,
+                }))
+            }
+            Type::Tuple(tuple_id) | Type::Partial(tuple_id) => {
+                // Tuples are not boundaries - maintain depth
+                if let Some(type_info) = self.program.lookup_tuple(tuple_id).cloned() {
+                    let new_fields: Vec<_> = type_info
+                        .fields
+                        .into_iter()
+                        .map(|(name, field_type)| {
+                            (
+                                name,
+                                self.resolve_function_cycles(
+                                    field_type,
+                                    function_type,
+                                    depth_from_function,
+                                ),
+                            )
+                        })
+                        .collect();
+                    let new_tuple_id = self.program.register_tuple(
+                        type_info.name,
+                        new_fields,
+                        type_info.is_partial,
+                    );
+                    if matches!(typ, Type::Partial(_)) {
+                        Type::Partial(new_tuple_id)
+                    } else {
+                        Type::Tuple(new_tuple_id)
+                    }
+                } else {
+                    typ
+                }
+            }
+            Type::Process(process_type) => {
+                // Process types don't create boundaries but may contain types with cycles
+                let resolved_send = process_type.send.map(|t| {
+                    Box::new(self.resolve_function_cycles(*t, function_type, depth_from_function))
+                });
+                let resolved_receive = process_type.receive.map(|t| {
+                    Box::new(self.resolve_function_cycles(*t, function_type, depth_from_function))
+                });
+                Type::Process(Box::new(ProcessType {
+                    send: resolved_send,
+                    receive: resolved_receive,
+                }))
+            }
+            _ => typ, // Integer, Binary, Variable, Resource don't contain nested types
+        }
+    }
+
     fn apply_value_to_type(&mut self, target_type: Type, value_type: Type) -> Result<Type, Error> {
         match target_type {
             Type::Callable(func_type) => {
@@ -2676,6 +2789,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     }
                     func_type.result.clone()
                 };
+
+                // Resolve cycles in result type that refer to the function itself
+                // Start at depth 0 since we haven't descended into any boundaries yet
+                let function_type = Type::Callable(func_type.clone());
+                let result_type = self.resolve_function_cycles(result_type, &function_type, 0);
 
                 // Check receive type compatibility
                 let called_receive_type = &func_type.receive;

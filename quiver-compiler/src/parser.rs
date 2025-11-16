@@ -775,6 +775,7 @@ fn function_input_type(input: Span) -> IResult<Span, Type> {
         tuple_type,
         primitive_type,
         resource_type,
+        type_cycle,
         process_type,
         type_identifier,
     ))(input)
@@ -787,6 +788,7 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
         tuple_type,
         primitive_type,
         resource_type,
+        type_cycle,
         process_type,
         type_identifier,
     ))(input)

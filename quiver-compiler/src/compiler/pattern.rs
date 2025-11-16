@@ -457,7 +457,10 @@ fn analyze_match_tuple_pattern(
             let raw_field_type = &tuple_fields[*actual_idx];
 
             // Resolve Type::Cycle references to the actual type
-            let field_type = if let Type::Cycle(_) = raw_field_type {
+            // Only Cycle(1) points to the immediate boundary (value_type)
+            // Higher depths point to outer boundaries (e.g., enclosing function types)
+            // and should be kept as-is since they refer to types outside this tuple
+            let field_type = if let Type::Cycle(1) = raw_field_type {
                 value_type.clone()
             } else {
                 raw_field_type.clone()
