@@ -169,3 +169,16 @@ fn test_star_type_import() {
         )
         .expect("42");
 }
+
+#[test]
+fn test_import_generic() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "./types.qv".to_string(),
+        "list<t> : Nil | Cons[t, &];".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate(r#"(list) : %"./types.qv""#)
+        .expect_alias("list", "Cons[t, μ1] | Nil");
+}

@@ -1,4 +1,5 @@
 list<t> : Nil | Cons[t, &];
+(iterator) : %"iter";
 
 math = %"math",
 
@@ -47,6 +48,24 @@ take' = #<t>[list<t>, int, list<t>] {
   | ~> =[_, 0, acc] => [acc, Nil] ~> reverse'
   | ~> =[Cons[head, tail], n, acc] => {
     math.sub[n, 1] ~> &[tail, ~, Cons[head, acc]]
+  }
+},
+
+iter' = #<t>[#& -> iterator<t>, list<t>] {
+  ~> =[self, xs],
+  #{
+    xs ~> {
+      | ~> =Nil => []
+      | ~> =Cons[head, tail] => self[self, tail] ~> [head, ~]
+    }
+  }
+},
+
+collect' = #<t>[iterator<t>, list<t>] {
+  ~> =[it, acc],
+  it[] ~> {
+    | ~> / ~> =Ok => acc
+    | ~> =[value, next] => value ~> Cons[~, acc] ~> &[next, ~]
   }
 },
 
@@ -129,5 +148,13 @@ take' = #<t>[list<t>, int, list<t>] {
     | ~> =[Nil, _] => []
     | ~> =[Cons[head, tail], pred], head ~> pred => Ok
     | ~> =[Cons[_, tail], pred] => &[tail, pred]
+  },
+
+  iter: #<t>list<t> {
+    ~> iter'[iter', ~]
+  },
+
+  collect: #<t>iterator<t> {
+    ~> collect'[~, Nil] ~> reverse'[~, Nil]
   }
 ]

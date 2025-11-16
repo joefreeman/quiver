@@ -33,7 +33,7 @@ pub struct TestBuilder {
 impl Default for TestBuilder {
     fn default() -> Self {
         Self {
-            modules: load_stdlib_modules!("math", "list", "binary", "integer", "string"),
+            modules: load_stdlib_modules!("math", "list", "binary", "integer", "string", "iter"),
             with_io: false,
         }
     }
