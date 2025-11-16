@@ -438,8 +438,10 @@ fn analyze_match_tuple_pattern(
         // Start with a binding set for this type
         let mut base_requirements = vec![];
         // Add runtime check if needed
-        if value_type.extract_tuples().len() > 1 {
-            // Need to check the type at runtime since value could be one of multiple tuple types
+        // We need a runtime check if value_type is a union (even if it contains only one tuple type)
+        // because the value could be a non-tuple type (like int or bin)
+        if matches!(value_type, Type::Union(_)) || matching_types.len() > 1 {
+            // Need to check the type at runtime since value could be one of multiple types
             base_requirements.push(Requirement {
                 path: path.clone(),
                 check: RuntimeCheck::Type(Type::Tuple(*tuple_id)),
