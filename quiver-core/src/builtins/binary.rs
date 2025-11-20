@@ -22,6 +22,7 @@ pub fn builtin_binary_new<E: Effect>(
                     "Size cannot be negative".to_string(),
                 ));
             }
+
             let size = *size as usize;
             if size > crate::value::MAX_BINARY_SIZE {
                 return Err(Error::InvalidArgument(format!(
@@ -758,6 +759,74 @@ pub fn builtin_binary_hash64<E: Effect>(
         _ => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
             found: "not binary".to_string(),
+        }),
+    }
+}
+
+/// Append an integer as bytes to a binary
+/// binary_append([bin, int, num_bytes]) -> bin
+pub fn builtin_binary_append<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    match arg {
+        Value::Tuple(_, elements) if elements.len() == 3 => {
+            match (&elements[0], &elements[1], &elements[2]) {
+                (Value::Binary(binary), Value::Integer(value), Value::Integer(num_bytes)) => {
+                    if *num_bytes < 1 || *num_bytes > 8 {
+                        return Err(Error::InvalidArgument(
+                            "Number of bytes must be between 1 and 8".to_string(),
+                        ));
+                    }
+
+                    if *value < 0 {
+                        return Err(Error::InvalidArgument(
+                            "Value cannot be negative".to_string(),
+                        ));
+                    }
+
+                    let num_bytes = *num_bytes as usize;
+                    let value = *value as u64;
+
+                    // Check if value fits in the specified number of bytes
+                    let max_value = if num_bytes == 8 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (num_bytes * 8)) - 1
+                    };
+
+                    if value > max_value {
+                        return Err(Error::InvalidArgument(format!(
+                            "Value {} does not fit in {} bytes",
+                            value, num_bytes
+                        )));
+                    }
+
+                    // Convert integer to bytes (big-endian)
+                    let mut new_bytes = Vec::with_capacity(num_bytes);
+                    for i in (0..num_bytes).rev() {
+                        new_bytes.push(((value >> (i * 8)) & 0xFF) as u8);
+                    }
+
+                    // Append using efficient concat
+                    let binary_data = executor.get_binary_data(binary)?;
+                    let new_data = BinaryData::new(new_bytes);
+                    let result =
+                        BinaryData::concat(Rc::new(binary_data.clone()), Rc::new(new_data));
+
+                    let binary = executor.allocate_binary_data(result)?;
+                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                }
+                _ => Err(Error::TypeMismatch {
+                    expected: "[binary, integer, integer]".to_string(),
+                    found: "invalid tuple contents".to_string(),
+                }),
+            }
+        }
+        _ => Err(Error::TypeMismatch {
+            expected: "[binary, integer, integer]".to_string(),
+            found: "not a 3-element tuple".to_string(),
         }),
     }
 }

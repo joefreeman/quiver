@@ -282,13 +282,23 @@ impl Type {
                         // onto the stack again (it's already there!)
                         let variants = variants.clone();
                         variants.iter().any(|variant| {
-                            self.is_compatible_with_impl(variant, tuple_lookup, assumptions, type_stack)
+                            self.is_compatible_with_impl(
+                                variant,
+                                tuple_lookup,
+                                assumptions,
+                                type_stack,
+                            )
                         })
                     }
                     Some(Type::Callable(_)) => {
                         // For callable cycles, compare against the resolved callable type
                         let resolved = type_stack[lookup_index].clone();
-                        self.is_compatible_with_impl(&resolved, tuple_lookup, assumptions, type_stack)
+                        self.is_compatible_with_impl(
+                            &resolved,
+                            tuple_lookup,
+                            assumptions,
+                            type_stack,
+                        )
                     }
                     _ => {
                         // Use coinductive reasoning as a fallback

@@ -463,3 +463,39 @@ fn test_bit_manipulation_pattern() {
         )
         .expect("'91'"); // 10010001 in binary
 }
+
+#[test]
+fn test_append() {
+    // Append single byte
+    quiver()
+        .evaluate(
+            r#"
+            binary = %"binary"
+            ['68656c', 0x6c, 1] ~> binary.append
+            "#,
+        )
+        .expect("'68656c6c'");
+
+    // Append multi-byte value
+    quiver()
+        .evaluate(
+            r#"
+            binary = %"binary"
+            ['', 0x68656c6c, 4] ~> binary.append
+            "#,
+        )
+        .expect("'68656c6c'");
+
+    // Build string by appending characters (UTF-8)
+    quiver()
+        .evaluate(
+            r#"
+            binary = %"binary"
+            step1 = ['', 0x41, 1] ~> binary.append,
+            step2 = [step1, 0xC3A9, 2] ~> binary.append,
+            step3 = [step2, 0xE282AC, 3] ~> binary.append,
+            step3
+            "#,
+        )
+        .expect("'41c3a9e282ac'"); // "Aé€"
+}

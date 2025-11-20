@@ -243,11 +243,14 @@ pub fn register_binary_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "binary_set", binary::builtin_binary_set, bin_int_int_int_int => TypeSpec::Binary);
 
     // Slicing operations
-    register_builtin!(registry, "binary_slice", binary::builtin_binary_slice, bin_int_int => TypeSpec::Binary);
+    register_builtin!(registry, "binary_slice", binary::builtin_binary_slice, bin_int_int.clone() => TypeSpec::Binary);
 
     // Hashing operations
     register_builtin!(registry, "binary_hash32", binary::builtin_binary_hash32, TypeSpec::Binary => TypeSpec::Integer);
     register_builtin!(registry, "binary_hash64", binary::builtin_binary_hash64, TypeSpec::Binary => TypeSpec::Integer);
+
+    // Append operation
+    register_builtin!(registry, "binary_append", binary::builtin_binary_append, bin_int_int => TypeSpec::Binary);
 }
 
 /// Register all integer bitwise builtins
