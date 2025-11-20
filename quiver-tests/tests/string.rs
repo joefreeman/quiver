@@ -605,64 +605,126 @@ fn test_index_of() {
 }
 
 #[test]
-fn test_chars() {
-    // Empty string
+fn test_iter() {
+    // Iterator now yields UTF-8 codepoints as integers
     quiver()
         .evaluate(
             r#"
-            string = %"string"
-            "" ~> string.chars
+            string = %"string",
+            list = %"list",
+            "hello" ~> string.iter ~> list.collect
+            "#,
+        )
+        .expect("Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]]");
+
+    quiver()
+        .evaluate(
+            r#"
+            string = %"string",
+            list = %"list",
+            "" ~> string.iter ~> list.collect
             "#,
         )
         .expect("Nil");
 
-    // Single character
     quiver()
         .evaluate(
             r#"
-            string = %"string"
-            "a" ~> string.chars
+            string = %"string",
+            list = %"list",
+            "🚀" ~> string.iter ~> list.collect
             "#,
         )
-        .expect("Cons[\"a\", Nil]");
+        .expect("Cons[4036991616, Nil]");
 
-    // ASCII string
     quiver()
         .evaluate(
             r#"
-            string = %"string"
-            "hello" ~> string.chars
+            string = %"string",
+            list = %"list",
+            "hi🚀" ~> string.iter ~> list.collect
             "#,
         )
-        .expect("Cons[\"h\", Cons[\"e\", Cons[\"l\", Cons[\"l\", Cons[\"o\", Nil]]]]]");
+        .expect("Cons[104, Cons[105, Cons[4036991616, Nil]]]");
+}
 
-    // Multi-byte UTF-8 characters
+#[test]
+fn test_collect() {
+    // Collect now expects integers (UTF-8 codepoints), not strings
     quiver()
         .evaluate(
             r#"
-            string = %"string"
-            "🚀🌙" ~> string.chars
+            string = %"string",
+            list = %"list",
+            Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]]
+            ~> list.iter
+            ~> string.collect
             "#,
         )
-        .expect("Cons[\"🚀\", Cons[\"🌙\", Nil]]");
+        .expect("\"hello\"");
 
-    // Mixed ASCII and UTF-8
     quiver()
         .evaluate(
             r#"
-            string = %"string"
-            "hi🚀" ~> string.chars
+            string = %"string",
+            list = %"list",
+            Nil
+            ~> list.iter
+            ~> string.collect
             "#,
         )
-        .expect("Cons[\"h\", Cons[\"i\", Cons[\"🚀\", Nil]]]");
+        .expect("\"\"");
 
-    // String with spaces
     quiver()
         .evaluate(
             r#"
-            string = %"string"
-            "a b" ~> string.chars
+            string = %"string",
+            list = %"list",
+            Cons[4036991616, Nil]
+            ~> list.iter
+            ~> string.collect
             "#,
         )
-        .expect("Cons[\"a\", Cons[\" \", Cons[\"b\", Nil]]]");
+        .expect("\"🚀\"");
+}
+
+#[test]
+fn test_iter_collect_roundtrip() {
+    quiver()
+        .evaluate(
+            r#"
+            string = %"string",
+            "hello world 🚀" ~> string.iter ~> string.collect
+            "#,
+        )
+        .expect("\"hello world 🚀\"");
+}
+
+#[test]
+fn test_iter_with_transformations() {
+    quiver()
+        .evaluate(
+            r#"
+            string = %"string",
+            iter = %"iter",
+            "hello"
+            ~> string.iter
+            ~> iter.take[~, 3]
+            ~> string.collect
+            "#,
+        )
+        .expect("\"hel\"");
+
+    quiver()
+        .evaluate(
+            r#"
+            string = %"string",
+            iter = %"iter",
+            "hello"
+            ~> string.iter
+            ~> iter.drop[~, 2]
+            ~> string.collect
+            "#,
+        )
+        .expect("\"llo\"");
 }

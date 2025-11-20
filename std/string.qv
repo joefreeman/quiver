@@ -1,99 +1,30 @@
 str : Str[bin];
 list<t> : Nil | Cons[t, &];
+iterator<t> : #[] -> ([t, &] | []);
 
 binary = %"binary",
 math = %"math",
 list_mod = %"list",
 integer = %"integer",
+iter_mod = %"iter",
 
-length' = #[bin, int, int] {
-  ~> =[data, pos, count],
-
-  {
-    | data
-      ~> binary.length
-      ~> math.gt[~, pos]
-      => {
-      | data
-        ~> binary.get_byte[~, pos]
-        ~> integer.and[~, 0xC0]
-        ~> =0x80
-        =>
-        // This IS a continuation byte, don't count it
-        pos
-        ~> math.add[~, 1]
-        ~> &[data, ~, count]
-
-      | new_count = math.add[count, 1],
-        math.add[pos, 1] ~> &[data, ~, new_count]
-      }
-    | count
-  }
+is_continuation_byte' = #[bin, int] {
+  ~> =[data, byte_pos],
+  data
+  ~> binary.get_byte[~, byte_pos]
+  ~> integer.and[~, 0xC0]
+  ~> =0x80
 },
 
 skip_continuation_bytes' = #[bin, int, int] {
   ~> =[data, byte_pos, data_len],
   {
-  | byte_pos
-    ~> math.ge[~, data_len]
-    => byte_pos
-  | data
-    ~> binary.get_byte[~, byte_pos]
-    ~> integer.and[~, 0xC0]
-    ~> =0x80
-    => byte_pos
+  | byte_pos ~> math.ge[~, data_len] => byte_pos
+  | [data, byte_pos] ~> is_continuation_byte' =>
+    byte_pos
     ~> math.add[~, 1]
     ~> &[data, ~, data_len]
   | byte_pos
-  }
-},
-
-// Find byte positions for character indices
-// Returns [start_byte, end_byte] for the character range [start_char, end_char)
-char_to_byte_pos' = #[bin, int, int, int, int, int] {
-  ~> =[data, byte_pos, char_idx, start_char, end_char, start_byte],
-
-  data_len = data ~> binary.length,
-
-  {
-  // Check termination conditions first (but only 2 checks instead of 6)
-  | math.ge[char_idx, end_char] =>
-    // Skip any remaining continuation bytes to get the true end position
-    actual_start_byte = {
-      | char_idx ~> ^start_char => byte_pos
-      | start_byte
-    },
-    end_byte_pos = [data, byte_pos, data_len] ~> skip_continuation_bytes',
-    [actual_start_byte, end_byte_pos]
-
-  | math.ge[byte_pos, data_len] =>
-    actual_start_byte = {
-      | char_idx ~> ^start_char => byte_pos
-      | start_byte
-    },
-    [actual_start_byte, byte_pos]
-
-  // Common case: check if continuation byte, then iterate
-  | data
-    ~> binary.get_byte[~, byte_pos]
-    ~> integer.and[~, 0xC0]
-    ~> =0x80
-    =>
-    // Continuation byte - skip without counting
-    byte_pos
-    ~> math.add[~, 1]
-    ~> &[data, ~, char_idx, start_char, end_char, start_byte]
-
-  // Normal character - count it and continue
-  | updated_start_byte = {
-      | char_idx ~> ^start_char => byte_pos
-      | start_byte
-    },
-
-    new_char_idx = math.add[char_idx, 1],
-    new_byte_pos = math.add[byte_pos, 1],
-
-    &[data, new_byte_pos, new_char_idx, start_char, end_char, updated_start_byte]
   }
 },
 
@@ -121,57 +52,17 @@ byte_pos_to_char_idx' = #[bin, int, int, int] {
 
   {
   | math.ge[current_pos, target_pos] => char_idx
+  | [data, current_pos] ~> is_continuation_byte' =>
+    current_pos
+    ~> math.add[~, 1]
+    ~> &[data, ~, target_pos, char_idx]
   | {
-      | data
-        ~> binary.get_byte[~, current_pos]
-        ~> integer.and[~, 0xC0]
-        ~> =0x80
-        =>
-        current_pos
-        ~> math.add[~, 1]
-        ~> &[data, ~, target_pos, char_idx]
-
-      | {
-        // Start of character - count it
-        new_char_idx = math.add[char_idx, 1],
-        current_pos
-        ~> math.add[~, 1]
-        ~> &[data, ~, target_pos, new_char_idx]
-      }
-    }
+    // Start of character - count it
+    new_char_idx = math.add[char_idx, 1],
+    current_pos
+    ~> math.add[~, 1]
+    ~> &[data, ~, target_pos, new_char_idx]
   }
-},
-
-chars' = #[bin, int, int, list<str>] {
-  ~> =[data, byte_pos, data_len, acc],
-
-  {
-  | math.ge[byte_pos, data_len] =>
-    acc ~> list_mod.reverse
-
-  | {
-    | data
-      ~> binary.get_byte[~, byte_pos]
-      ~> integer.and[~, 0xC0]
-      ~> =0x80
-      =>
-      byte_pos
-      ~> math.add[~, 1]
-      ~> &[data, ~, data_len, acc]
-
-    | {
-      char_end =
-        byte_pos
-        ~> math.add[~, 1]
-        ~> [data, ~, data_len]
-        ~> skip_continuation_bytes',
-
-      data
-      ~> binary.slice[~, byte_pos, char_end]
-      ~> list_mod.prepend[acc, Str[~]]
-      ~> &[data, char_end, data_len, ~]
-      }
-    }
   }
 },
 
@@ -196,6 +87,50 @@ split' = #[bin, bin, int, list<str>] {
       ~> [acc, Str[~]]
       ~> list_mod.prepend
       ~> list_mod.reverse
+  }
+},
+
+iter' = #[#& -> iterator<int>, bin, int, int] {
+  ~> =[self, data, byte_pos, data_len],
+
+  byte_pos = [data, byte_pos, data_len] ~> skip_continuation_bytes',
+
+  #{
+    | math.ge[byte_pos, data_len] => []
+    | {
+      char_end =
+        byte_pos
+        ~> math.add[~, 1]
+        ~> [data, ~, data_len]
+        ~> skip_continuation_bytes',
+
+      char =
+        char_end
+        ~> math.sub[~, byte_pos]
+        ~> math.mul[~, 8]
+        ~> [data, byte_pos, 0, ~]
+        ~> __binary_get__,
+
+      [char, self[self, data, char_end, data_len]]
+    }
+  }
+},
+
+collect' = #[iterator<int>, bin] {
+  ~> =[it, acc],
+  it[] ~> {
+    | ~> / ~> =Ok => Str[acc]
+    | ~> =[char_int, next] => {
+      byte_count = char_int ~> {
+        | ~> math.le[~, 0x7F] => 1
+        | ~> math.le[~, 0xDFBF] => 2
+        | ~> math.le[~, 0xEFBFBF] => 3
+        | 4
+      },
+      [acc, char_int, byte_count]
+      ~> binary.append
+      ~> &[next, ~]
+    }
   }
 },
 
@@ -268,17 +203,22 @@ split' = #[bin, bin, int, list<str>] {
   },
 
   length: #str {
-    ~> .0 ~> [~, 0, 0] ~> length'
+    ~> =Str[data],
+    data_len = data ~> binary.length,
+    [iter', data, 0, data_len]
+    ~> iter'
+    ~> iter_mod.count
   },
 
   slice: #[str, int, int] {
     ~> =[Str[data], start, end],
-
-    // Get byte positions for the character indices
-    [data, 0, 0, start, end, 0]
-    ~> char_to_byte_pos'
-    ~> [data, ...]
-    ~> binary.slice ~> Str[~]
+    data_len = data ~> binary.length,
+    [iter', data, 0, data_len]
+    ~> iter'
+    ~> iter_mod.drop[~, start]
+    ~> iter_mod.take[~, math.sub[end, start]]
+    ~> [~, '']
+    ~> collect'
   },
 
   index_of: #[str, str] {
@@ -297,10 +237,14 @@ split' = #[bin, bin, int, list<str>] {
     }
   },
 
-  chars: #str {
+  iter: #str {
     ~> =Str[data],
-
     data_len = data ~> binary.length,
-    list_mod.new[] ~> [data, 0, data_len, ~] ~> chars'
+    [iter', data, 0, data_len] ~> iter'
+  },
+
+  collect: #iterator<int> {
+    //empty_bin = binary.new[0],
+    ~> [~, ''] ~> collect'
   }
 ]
