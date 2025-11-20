@@ -565,6 +565,12 @@ impl Environment {
                 // Just return success to the callback
                 callback.invoke::<()>(crate::types::Result::ok(()));
             }
+            RequestResult::ExecutionStats(_) => {
+                // Not used in the web API
+                callback.invoke::<()>(crate::types::Result::err(
+                    "Unexpected result type: ExecutionStats",
+                ));
+            }
         }
     }
 }

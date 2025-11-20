@@ -778,11 +778,11 @@ pub fn unify(
                 }
             } else {
                 // New binding - but make sure we're not binding a variable to itself
-                if let Type::Variable(resolved_name) = resolved_concrete {
-                    if resolved_name == name {
-                        // Don't bind a variable to itself
-                        return Ok(());
-                    }
+                if let Type::Variable(resolved_name) = resolved_concrete
+                    && resolved_name == name
+                {
+                    // Don't bind a variable to itself
+                    return Ok(());
                 }
                 bindings.insert(name.clone(), resolved_concrete.clone());
             }

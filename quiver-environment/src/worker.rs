@@ -25,9 +25,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         receiver: R,
         sender: S,
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
+        profile: bool,
     ) -> Self {
         Self {
-            executor: Executor::new(builtins), // Environment handles I/O via effects now
+            executor: Executor::new(builtins, profile),
             awaited: HashSet::new(),
             awaiters_for_target: HashMap::new(),
             pending_result_requests: HashMap::new(),
@@ -135,6 +136,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 keep_indices,
             } => {
                 self.compact_locals(process_id, keep_indices)?;
+            }
+            Command::GetExecutionStats { request_id } => {
+                self.get_execution_stats(request_id)?;
             }
             Command::EffectCompletion {
                 process_id,
@@ -548,6 +552,15 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         }
 
         process.locals = new_locals;
+        Ok(())
+    }
+
+    fn get_execution_stats(&mut self, request_id: u64) -> Result<(), EnvironmentError> {
+        let stats = self.executor.stats.clone();
+        self.sender.send(Event::StatsResponse {
+            request_id,
+            result: Ok(stats),
+        })?;
         Ok(())
     }
 

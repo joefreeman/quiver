@@ -5,7 +5,112 @@ use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
 use crate::types::{CallableType, ProcessType, TupleLookup, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
+
+/// Instruction type for profiling statistics (groups parameterized instructions)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InstructionType {
+    Constant,
+    Pop,
+    Duplicate,
+    Pick,
+    Rotate,
+    Allocate,
+    Clear,
+    Load,
+    Store,
+    Tuple,
+    Get,
+    IsType,
+    Jump,
+    JumpIf,
+    Call,
+    TailCall,
+    Function,
+    Builtin,
+    Equal,
+    Not,
+    Spawn,
+    Send,
+    Self_,
+    Select,
+    Process,
+}
+
+impl InstructionType {
+    fn from_instruction(instr: &Instruction) -> Self {
+        match instr {
+            Instruction::Constant(_) => InstructionType::Constant,
+            Instruction::Pop => InstructionType::Pop,
+            Instruction::Duplicate => InstructionType::Duplicate,
+            Instruction::Pick(_) => InstructionType::Pick,
+            Instruction::Rotate(_) => InstructionType::Rotate,
+            Instruction::Allocate(_) => InstructionType::Allocate,
+            Instruction::Clear(_) => InstructionType::Clear,
+            Instruction::Load(_) => InstructionType::Load,
+            Instruction::Store(_) => InstructionType::Store,
+            Instruction::Tuple(_) => InstructionType::Tuple,
+            Instruction::Get(_) => InstructionType::Get,
+            Instruction::IsType(_) => InstructionType::IsType,
+            Instruction::Jump(_) => InstructionType::Jump,
+            Instruction::JumpIf(_) => InstructionType::JumpIf,
+            Instruction::Call => InstructionType::Call,
+            Instruction::TailCall(_) => InstructionType::TailCall,
+            Instruction::Function(_) => InstructionType::Function,
+            Instruction::Builtin(_) => InstructionType::Builtin,
+            Instruction::Equal(_) => InstructionType::Equal,
+            Instruction::Not => InstructionType::Not,
+            Instruction::Spawn => InstructionType::Spawn,
+            Instruction::Send => InstructionType::Send,
+            Instruction::Self_ => InstructionType::Self_,
+            Instruction::Select(_) => InstructionType::Select,
+            Instruction::Process(_, _) => InstructionType::Process,
+        }
+    }
+}
+
+/// Execution statistics for profiling
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutionStats {
+    /// Statistics by instruction type: (count, total_time_ns)
+    pub instruction_stats: HashMap<InstructionType, (u64, u64)>,
+
+    /// Per-builtin statistics by index: (count, total_time_ns)
+    pub builtin_stats: HashMap<usize, (u64, u64)>,
+}
+
+impl ExecutionStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Merge another ExecutionStats into this one (for aggregating from multiple executors)
+    pub fn merge(&mut self, other: &ExecutionStats) {
+        for (key, (count, time)) in &other.instruction_stats {
+            let entry = self.instruction_stats.entry(*key).or_insert((0, 0));
+            entry.0 += count;
+            entry.1 += time;
+        }
+        for (idx, (count, time)) in &other.builtin_stats {
+            let entry = self.builtin_stats.entry(*idx).or_insert((0, 0));
+            entry.0 += count;
+            entry.1 += time;
+        }
+    }
+
+    pub fn total_instructions(&self) -> u64 {
+        self.instruction_stats
+            .values()
+            .map(|(count, _)| count)
+            .sum()
+    }
+
+    pub fn total_time_ns(&self) -> u64 {
+        self.instruction_stats.values().map(|(_, time)| time).sum()
+    }
+}
 
 /// Result of processing a select source
 enum SelectResult {
@@ -33,6 +138,9 @@ pub struct Executor<E: Effect> {
     heap: Vec<BinaryData>,
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
+    // Profiling
+    pub stats: ExecutionStats,
+    profile: bool,
 }
 
 impl<E: Effect> TupleLookup for Executor<E> {
@@ -97,7 +205,7 @@ impl<E: Effect> Executor<E> {
         self.allocate_binary_data(BinaryData::new(bytes))
     }
 
-    pub fn new(builtins_registry: crate::builtins::BuiltinRegistry<E>) -> Self {
+    pub fn new(builtins_registry: crate::builtins::BuiltinRegistry<E>, profile: bool) -> Self {
         // Create NIL type (index 0)
         let nil_type = TupleTypeInfo {
             name: None,
@@ -125,6 +233,8 @@ impl<E: Effect> Executor<E> {
             types: vec![],
             heap: vec![],
             builtins_registry,
+            stats: ExecutionStats::new(),
+            profile,
         }
     }
 
@@ -626,7 +736,13 @@ impl<E: Effect> Executor<E> {
         instruction: Instruction,
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
-        match instruction {
+        let start = if self.profile {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        let result = match instruction {
             Instruction::Constant(index) => self.handle_constant(pid, index),
             Instruction::Pop => self.handle_pop(pid),
             Instruction::Duplicate => self.handle_duplicate(pid),
@@ -654,7 +770,21 @@ impl<E: Effect> Executor<E> {
             Instruction::Process(process_id, function_index) => {
                 self.handle_process_ref(pid, process_id, function_index)
             }
+        };
+
+        if let Some(start) = start {
+            let elapsed = start.elapsed().as_nanos() as u64;
+            let instr_type = InstructionType::from_instruction(&instruction);
+            let entry = self
+                .stats
+                .instruction_stats
+                .entry(instr_type)
+                .or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += elapsed;
         }
+
+        result
     }
 
     fn handle_constant(
@@ -971,6 +1101,9 @@ impl<E: Effect> Executor<E> {
                     process.stack.pop().ok_or(Error::StackUnderflow)?
                 };
 
+                // Find builtin index for profiling
+                let builtin_index = self.builtins.iter().position(|b| b.name == name);
+
                 let builtin = self
                     .builtins_registry
                     .get_implementation(&name)
@@ -978,7 +1111,22 @@ impl<E: Effect> Executor<E> {
                         Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
                     })?;
 
+                let start = if self.profile {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+
                 let result = builtin(pid, &parameter, self)?;
+
+                if let Some(start) = start {
+                    let elapsed = start.elapsed().as_nanos() as u64;
+                    if let Some(idx) = builtin_index {
+                        let entry = self.stats.builtin_stats.entry(idx).or_insert((0, 0));
+                        entry.0 += 1;
+                        entry.1 += elapsed;
+                    }
+                }
 
                 // Handle both immediate and action results
                 match result {

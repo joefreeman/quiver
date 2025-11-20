@@ -86,6 +86,7 @@ impl TestBuilder {
             workers.push(Box::new(spawn_worker(
                 move || time.load(Ordering::Relaxed),
                 builtins_clone,
+                false, // Don't enable profiling in tests
             )));
         }
 

@@ -74,7 +74,7 @@ pub fn worker_main() {
         &quiver_core::builtins::core_modules(),
     );
     // Workers no longer manage io_backend - it's owned by Environment
-    let worker = Worker::new(cmd_receiver, evt_sender, builtins);
+    let worker = Worker::new(cmd_receiver, evt_sender, builtins, false);
 
     // Start the worker loop
     start_worker_loop(worker);

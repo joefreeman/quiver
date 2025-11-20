@@ -100,6 +100,9 @@ pub enum Command<E: Effect> {
         keep_indices: Vec<usize>,
     },
 
+    /// Request execution statistics
+    GetExecutionStats { request_id: u64 },
+
     /// Effect operation completed
     EffectCompletion {
         process_id: ProcessId,
@@ -172,6 +175,12 @@ pub enum Event<E: Effect> {
     LocalsResponse {
         request_id: u64,
         result: LocalsResult,
+    },
+
+    /// Response to GetExecutionStats
+    StatsResponse {
+        request_id: u64,
+        result: Result<quiver_core::executor::ExecutionStats, crate::environment::EnvironmentError>,
     },
 
     /// Worker encountered an unrecoverable error

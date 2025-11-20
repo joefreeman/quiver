@@ -18,7 +18,7 @@ pub fn execute_instructions_sync<E: Effect>(
     result_type: crate::types::Type,
     builtins: &crate::builtins::BuiltinRegistry<E>,
 ) -> Result<(Value, Executor<E>), Error> {
-    let mut executor = Executor::new(builtins.clone());
+    let mut executor = Executor::new(builtins.clone(), false);
 
     // Register the instructions as a temporary function to get a function_index
     let mut functions = program.get_functions().clone();

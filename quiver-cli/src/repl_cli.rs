@@ -51,6 +51,7 @@ impl ReplCli {
                         .as_millis() as u64
                 },
                 builtins.clone(),
+                false, // Don't enable profiling in REPL
             )));
         }
         let effect_backend = crate::create_effect_backend();
