@@ -49,9 +49,12 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         }
 
         // Execute one step
-        if let Some(action) = self.executor.step(MAX_STEP_UNITS, current_time_ms) {
-            self.handle_action(action)?;
+        let (executed, action) = self.executor.step(MAX_STEP_UNITS, current_time_ms);
+        if executed {
             did_work = true;
+        }
+        if let Some(action) = action {
+            self.handle_action(action)?;
         }
 
         // Check for newly completed processes

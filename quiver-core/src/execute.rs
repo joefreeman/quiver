@@ -57,9 +57,8 @@ pub fn execute_instructions_sync<E: Effect>(
     // Execute until completion
     loop {
         // Step with a reasonable batch size
-        // TODO: check step result
         // Use time 0 since compile-time execution doesn't need real time tracking
-        let _step_result = executor.step(1000, 0);
+        let (_did_work, _action) = executor.step(1000, 0);
 
         // Check if the process has completed
         let process = executor

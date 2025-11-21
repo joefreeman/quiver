@@ -88,7 +88,7 @@ where
                     // Work was done, continue immediately
                 }
                 Ok(false) => {
-                    // No work, sleep longer to reduce idle CPU usage
+                    // No work - sleep to save CPU
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(e) => {

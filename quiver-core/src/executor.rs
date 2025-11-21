@@ -553,12 +553,14 @@ impl<E: Effect> Executor<E> {
     }
 
     /// Execute up to max_units instruction units for a single process.
-    /// Returns None to continue, or Some(request) for a routing request that needs to be handled by the scheduler.
-    pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> Option<Action<E>> {
+    /// Returns (did_work, optional_action) where did_work indicates if any instructions were executed.
+    pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> (bool, Option<Action<E>>) {
         // Check for expired timeouts before processing
         self.check_expired_timeouts(current_time_ms);
         // Pop process from queue
-        let current_pid = self.queue.pop_front()?;
+        let Some(current_pid) = self.queue.pop_front() else {
+            return (false, None); // No processes to run
+        };
 
         let mut units_executed = 0;
         let mut pending_request = None;
@@ -669,7 +671,7 @@ impl<E: Effect> Executor<E> {
                     let Some(result) = process.stack.pop() else {
                         // Stack underflow - process finished with no result on stack
                         process.result = Some(Err(Error::StackUnderflow));
-                        return None;
+                        return (true, None); // Did work but hit error
                     };
                     process.result = Some(Ok(result.clone()));
                     result
@@ -726,8 +728,8 @@ impl<E: Effect> Executor<E> {
             }
         }
 
-        // Return pending routing request if one was set, otherwise None
-        pending_request
+        // Return (did_work=true, pending_request) - we always do work if we got here
+        (true, pending_request)
     }
 
     fn execute_instruction(

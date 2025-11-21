@@ -325,13 +325,15 @@ fn execute_bytecode(
             .map(|f| f.function_type.result.clone())
             .unwrap_or_else(|| Type::Union(vec![])); // Top type as fallback
 
+        let start_time = std::time::Instant::now();
         let (value, heap, stats_opt) =
             execute_with_environment(&program, instructions, result_type, profile)
                 .map_err(|e| format!("Execution error: {:?}", e))?;
+        let wall_time = start_time.elapsed();
 
         // Print profiling report if enabled
         if let Some(stats) = stats_opt {
-            print_profile_report(&stats, &program);
+            print_profile_report(&stats, &program, wall_time);
         }
 
         // Check if result is NIL tuple (exit with error)
@@ -432,7 +434,7 @@ fn execute_with_environment(
 
                     // Poll for stats result
                     loop {
-                        environment.step().unwrap_or(false);
+                        let stats_did_work = environment.step().unwrap_or(false);
                         match environment.poll_request(stats_request_id) {
                             Ok(Some(quiver_environment::RequestResult::ExecutionStats(stats))) => {
                                 break Some(stats);
@@ -441,7 +443,9 @@ fn execute_with_environment(
                                 return Err("Unexpected result type for stats request".into());
                             }
                             Ok(None) => {
-                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                if !stats_did_work {
+                                    std::thread::sleep(std::time::Duration::from_millis(5));
+                                }
                             }
                             Err(e) => {
                                 return Err(format!("Stats collection error: {:?}", e).into());
@@ -462,7 +466,7 @@ fn execute_with_environment(
             }
             Ok(None) => {
                 if !did_work {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
             }
             Err(e) => return Err(format!("Environment error: {:?}", e).into()),
@@ -470,7 +474,11 @@ fn execute_with_environment(
     }
 }
 
-fn print_profile_report(stats: &quiver_core::executor::ExecutionStats, program: &Program) {
+fn print_profile_report(
+    stats: &quiver_core::executor::ExecutionStats,
+    program: &Program,
+    wall_time: std::time::Duration,
+) {
     eprintln!("\n=== Execution Profile ===\n");
 
     // Calculate totals
@@ -482,6 +490,27 @@ fn print_profile_report(stats: &quiver_core::executor::ExecutionStats, program: 
     let total_instruction_time: u64 = stats.instruction_stats.values().map(|(_, time)| time).sum();
     let total_builtin_count: u64 = stats.builtin_stats.values().map(|(count, _)| count).sum();
     let total_builtin_time: u64 = stats.builtin_stats.values().map(|(_, time)| time).sum();
+
+    // Wall-clock vs measured time comparison
+    let wall_time_ms = wall_time.as_secs_f64() * 1000.0;
+    let measured_time_ms = (total_instruction_time + total_builtin_time) as f64 / 1_000_000.0;
+    let overhead_ms = wall_time_ms - measured_time_ms;
+    let overhead_percent = if wall_time_ms > 0.0 {
+        (overhead_ms / wall_time_ms) * 100.0
+    } else {
+        0.0
+    };
+
+    eprintln!("Wall-clock time: {:.3}ms", wall_time_ms);
+    eprintln!(
+        "Measured execution time: {:.3}ms ({:.1}% of wall time)",
+        measured_time_ms,
+        100.0 - overhead_percent
+    );
+    eprintln!(
+        "Overhead (coordination, polling, etc.): {:.3}ms ({:.1}%)\n",
+        overhead_ms, overhead_percent
+    );
 
     eprintln!("Total instructions executed: {}", total_instruction_count);
     eprintln!(
