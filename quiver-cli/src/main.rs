@@ -449,122 +449,82 @@ fn print_profile_report(
     program: &Program,
     wall_time: std::time::Duration,
 ) {
-    eprintln!("\n=== Execution Profile ===\n");
-
     // Calculate totals
-    let total_instruction_count: u64 = stats
-        .instruction_stats
-        .values()
-        .map(|(count, _)| count)
-        .sum();
-    let total_instruction_time: u64 = stats.instruction_stats.values().map(|(_, time)| time).sum();
-    let total_builtin_count: u64 = stats.builtin_stats.values().map(|(count, _)| count).sum();
-    let total_builtin_time: u64 = stats.builtin_stats.values().map(|(_, time)| time).sum();
+    let total_instr_count: u64 = stats.instruction_stats.values().map(|(c, _)| c).sum();
+    let total_instr_time: u64 = stats.instruction_stats.values().map(|(_, t)| t).sum();
+    let total_builtin_count: u64 = stats.builtin_stats.values().map(|(c, _)| c).sum();
+    let total_builtin_time: u64 = stats.builtin_stats.values().map(|(_, t)| t).sum();
 
-    // Wall-clock vs measured time comparison
-    let wall_time_ms = wall_time.as_secs_f64() * 1000.0;
-    let measured_time_ms = (total_instruction_time + total_builtin_time) as f64 / 1_000_000.0;
-    let overhead_ms = wall_time_ms - measured_time_ms;
-    let overhead_percent = if wall_time_ms > 0.0 {
-        (overhead_ms / wall_time_ms) * 100.0
+    let wall_ms = wall_time.as_secs_f64() * 1000.0;
+    let exec_ms = (total_instr_time + total_builtin_time) as f64 / 1_000_000.0;
+    let exec_percent = if wall_ms > 0.0 {
+        (exec_ms / wall_ms) * 100.0
     } else {
         0.0
     };
 
-    eprintln!("Wall-clock time: {:.3}ms", wall_time_ms);
     eprintln!(
-        "Measured execution time: {:.3}ms ({:.1}% of wall time)",
-        measured_time_ms,
-        100.0 - overhead_percent
-    );
-    eprintln!(
-        "Overhead (coordination, polling, etc.): {:.3}ms ({:.1}%)\n",
-        overhead_ms, overhead_percent
+        "Total time: {:.2}ms (execution: {:.2}ms; {:.1}%)",
+        wall_ms, exec_ms, exec_percent
     );
 
-    eprintln!("Total instructions executed: {}", total_instruction_count);
-    eprintln!(
-        "Total instruction time: {:.3}ms",
-        total_instruction_time as f64 / 1_000_000.0
-    );
-    eprintln!("Total builtin calls: {}", total_builtin_count);
-    eprintln!(
-        "Total builtin time: {:.3}ms\n",
-        total_builtin_time as f64 / 1_000_000.0
-    );
+    // Instructions sorted by time
+    if !stats.instruction_stats.is_empty() {
+        let mut instrs: Vec<_> = stats.instruction_stats.iter().collect();
+        instrs.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
 
-    // Sort instructions by count
-    let mut instr_by_count: Vec<_> = stats.instruction_stats.iter().collect();
-    instr_by_count.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
-
-    eprintln!("Top instructions by count:");
-    for (instr_type, (count, time)) in instr_by_count.iter().take(10) {
-        let percent = (*count as f64 / total_instruction_count as f64) * 100.0;
-        let avg_ns = if *count > 0 { *time / *count } else { 0 };
         eprintln!(
-            "  {:?}: {} ({:.1}%) - avg {:.0}ns",
-            instr_type, count, percent, avg_ns
+            "\nInstructions ({}; {:.2}ms):",
+            total_instr_count,
+            total_instr_time as f64 / 1_000_000.0
         );
-    }
-
-    // Sort instructions by time
-    let mut instr_by_time: Vec<_> = stats.instruction_stats.iter().collect();
-    instr_by_time.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
-
-    eprintln!("\nTop instructions by total time:");
-    for (instr_type, (count, time)) in instr_by_time.iter().take(10) {
-        let percent = (*time as f64 / total_instruction_time as f64) * 100.0;
-        let avg_ns = if *count > 0 { *time / *count } else { 0 };
-        eprintln!(
-            "  {:?}: {:.3}ms ({:.1}%) - avg {:.0}ns from {} calls",
-            instr_type,
-            *time as f64 / 1_000_000.0,
-            percent,
-            avg_ns,
-            count
-        );
-    }
-
-    // Print builtin stats if any
-    if !stats.builtin_stats.is_empty() {
-        eprintln!("\nBuiltin statistics:");
-
-        // Sort builtins by count
-        let mut builtin_by_count: Vec<_> = stats.builtin_stats.iter().collect();
-        builtin_by_count.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
-
-        eprintln!("  Top builtins by count:");
-        for (builtin_idx, (count, time)) in builtin_by_count.iter().take(10) {
+        for (instr_type, (count, time)) in instrs.iter().take(10) {
+            let time_percent = if total_instr_time > 0 {
+                (*time as f64 / total_instr_time as f64) * 100.0
+            } else {
+                0.0
+            };
             let avg_ns = if *count > 0 { *time / *count } else { 0 };
-            let builtin_name = program
-                .get_builtins()
-                .get(**builtin_idx)
-                .map(|b| b.name.as_str())
-                .unwrap_or("<unknown>");
             eprintln!(
-                "    {}: {} calls - avg {:.0}ns",
-                builtin_name, count, avg_ns
+                "  {:?}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
+                instr_type,
+                count,
+                *time as f64 / 1_000_000.0,
+                time_percent,
+                avg_ns
             );
         }
+    }
 
-        // Sort builtins by time
-        let mut builtin_by_time: Vec<_> = stats.builtin_stats.iter().collect();
-        builtin_by_time.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
+    // Builtins sorted by time
+    if !stats.builtin_stats.is_empty() {
+        let mut builtins: Vec<_> = stats.builtin_stats.iter().collect();
+        builtins.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
 
-        eprintln!("\n  Top builtins by total time:");
-        for (builtin_idx, (count, time)) in builtin_by_time.iter().take(10) {
-            let avg_ns = if *count > 0 { *time / *count } else { 0 };
+        eprintln!(
+            "\nBuiltins ({}; {:.2}ms):",
+            total_builtin_count,
+            total_builtin_time as f64 / 1_000_000.0
+        );
+        for (builtin_idx, (count, time)) in builtins.iter().take(10) {
             let builtin_name = program
                 .get_builtins()
                 .get(**builtin_idx)
                 .map(|b| b.name.as_str())
                 .unwrap_or("<unknown>");
+            let time_percent = if total_builtin_time > 0 {
+                (*time as f64 / total_builtin_time as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_ns = if *count > 0 { *time / *count } else { 0 };
             eprintln!(
-                "    {}: {:.3}ms - avg {:.0}ns from {} calls",
+                "  {}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
                 builtin_name,
+                count,
                 *time as f64 / 1_000_000.0,
-                avg_ns,
-                count
+                time_percent,
+                avg_ns
             );
         }
     }
