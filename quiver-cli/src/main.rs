@@ -416,7 +416,7 @@ fn execute_with_environment(
         .start_process(bytecode_data)
         .map_err(|e| format!("Failed to start process: {:?}", e))?;
 
-    // Request the result
+    // Request the result (stats are automatically included if profiling is enabled)
     let request_id = environment
         .request_result(process_id)
         .map_err(|e| format!("Failed to request result: {:?}", e))?;
@@ -425,40 +425,10 @@ fn execute_with_environment(
         let did_work = environment.step().unwrap_or(false);
 
         match environment.poll_request(request_id) {
-            Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap))))) => {
-                // Collect execution stats if profiling is enabled
-                let stats_opt = if profile {
-                    let stats_request_id = environment
-                        .request_execution_stats()
-                        .map_err(|e| format!("Failed to request stats: {:?}", e))?;
-
-                    // Poll for stats result
-                    loop {
-                        let stats_did_work = environment.step().unwrap_or(false);
-                        match environment.poll_request(stats_request_id) {
-                            Ok(Some(quiver_environment::RequestResult::ExecutionStats(stats))) => {
-                                break Some(stats);
-                            }
-                            Ok(Some(_)) => {
-                                return Err("Unexpected result type for stats request".into());
-                            }
-                            Ok(None) => {
-                                if !stats_did_work {
-                                    std::thread::sleep(std::time::Duration::from_millis(5));
-                                }
-                            }
-                            Err(e) => {
-                                return Err(format!("Stats collection error: {:?}", e).into());
-                            }
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                return Ok((value, heap, stats_opt));
+            Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap)), stats))) => {
+                return Ok((value, heap, stats));
             }
-            Ok(Some(quiver_environment::RequestResult::Result(Err(e)))) => {
+            Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
                 return Err(format!("Runtime error: {:?}", e).into());
             }
             Ok(Some(_)) => {

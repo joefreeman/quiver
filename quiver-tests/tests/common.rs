@@ -130,10 +130,13 @@ impl TestBuilder {
                     }
 
                     match environment.poll_request(request_id) {
-                        Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap))))) => {
+                        Ok(Some(quiver_environment::RequestResult::Result(
+                            Ok((value, heap)),
+                            _,
+                        ))) => {
                             break Ok(Some((value, heap)));
                         }
-                        Ok(Some(quiver_environment::RequestResult::Result(Err(e)))) => {
+                        Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
                             break Err(ReplError::Runtime(e));
                         }
                         Ok(Some(_)) => {

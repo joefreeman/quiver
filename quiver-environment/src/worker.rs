@@ -442,16 +442,28 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .extract_heap_data(value)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
 
+                let stats = if self.executor.stats.total_instructions() > 0 {
+                    Some(self.executor.stats.clone())
+                } else {
+                    None
+                };
                 self.sender.send(Event::ResultResponse {
                     request_id,
                     result: Ok((extracted_value, heap)),
+                    stats,
                 })?;
             }
             Some(Err(error)) => {
                 // Process failed - send error response immediately
+                let stats = if self.executor.stats.total_instructions() > 0 {
+                    Some(self.executor.stats.clone())
+                } else {
+                    None
+                };
                 self.sender.send(Event::ResultResponse {
                     request_id,
                     result: Err(error.clone()),
+                    stats,
                 })?;
             }
             None => {
@@ -614,10 +626,16 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             if let Some(result) = self.extract_completed_result(process_id)?
                 && let Some(request_ids) = self.pending_result_requests.remove(&process_id)
             {
+                let stats = if self.executor.stats.total_instructions() > 0 {
+                    Some(self.executor.stats.clone())
+                } else {
+                    None
+                };
                 for request_id in request_ids {
                     self.sender.send(Event::ResultResponse {
                         request_id,
                         result: result.clone(),
+                        stats: stats.clone(),
                     })?;
                 }
             }

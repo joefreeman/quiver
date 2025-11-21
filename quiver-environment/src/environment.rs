@@ -18,7 +18,6 @@ type WorkerRequestMap<T> = HashMap<u64, Option<HashMap<ProcessId, T>>>;
 enum Aggregation {
     Statuses(WorkerRequestMap<ProcessStatus>),
     ProcessTypes(WorkerRequestMap<(Type, usize)>),
-    ExecutionStats(HashMap<u64, Option<quiver_core::executor::ExecutionStats>>),
 }
 
 fn remap_type(ty: Type, type_remap: &HashMap<usize, usize>) -> Type {
@@ -170,13 +169,14 @@ impl std::error::Error for EnvironmentError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestResult {
-    Result(Result<ValueWithHeap, quiver_core::error::Error>),
-    // RuntimeError(quiver_core::error::Error),
+    Result(
+        Result<ValueWithHeap, quiver_core::error::Error>,
+        Option<quiver_core::executor::ExecutionStats>,
+    ),
     Statuses(HashMap<ProcessId, ProcessStatus>),
     ProcessTypes(HashMap<ProcessId, (Type, usize)>),
     ProcessInfo(Option<ProcessInfo>),
     Locals(Vec<ValueWithHeap>),
-    ExecutionStats(quiver_core::executor::ExecutionStats),
 }
 
 struct PendingAwait {
@@ -308,14 +308,15 @@ impl<E: Effect> Environment<E> {
     }
 
     /// Request a process result (async operation)
+    /// Stats are included in the response if the executor has profiling enabled
     pub fn request_result(&mut self, pid: ProcessId) -> Result<u64, EnvironmentError> {
         let request_id = self.allocate_request_id();
-        let worker_id = self
+        let worker_id = *self
             .process_router
             .get(&pid)
             .ok_or(EnvironmentError::ProcessNotFound(pid))?;
 
-        self.workers[*worker_id]
+        self.workers[worker_id]
             .send(Command::GetResult {
                 request_id,
                 process_id: pid,
@@ -398,45 +399,6 @@ impl<E: Effect> Environment<E> {
             let request_id = request_ids[i];
             worker
                 .send(Command::GetProcessTypes { request_id })
-                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
-        }
-
-        Ok(aggregation_id)
-    }
-
-    /// Request execution statistics from all workers
-    /// Returns a single aggregation ID that will collect and merge stats from all workers
-    pub fn request_execution_stats(&mut self) -> Result<u64, EnvironmentError> {
-        let num_workers = self.workers.len();
-
-        // Create aggregation ID
-        let aggregation_id = self.allocate_request_id();
-
-        // Allocate all request IDs into a Vec (to preserve ordering)
-        let mut request_ids = Vec::new();
-        for _ in 0..num_workers {
-            request_ids.push(self.allocate_request_id());
-        }
-
-        // Create aggregation map with all worker requests marked as pending (None)
-        let mut worker_requests = HashMap::new();
-        for &request_id in &request_ids {
-            worker_requests.insert(request_id, None);
-            self.pending_requests.insert(request_id, None);
-        }
-
-        // Store aggregation state
-        self.aggregations
-            .insert(aggregation_id, Aggregation::ExecutionStats(worker_requests));
-
-        // Mark aggregation as pending
-        self.pending_requests.insert(aggregation_id, None);
-
-        // Send requests to workers (using ordered Vec)
-        for (i, worker) in self.workers.iter_mut().enumerate() {
-            let request_id = request_ids[i];
-            worker
-                .send(Command::GetExecutionStats { request_id })
                 .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
 
@@ -673,9 +635,11 @@ impl<E: Effect> Environment<E> {
             Event::ProcessResults { awaiter, results } => {
                 self.handle_process_results(awaiter, results)
             }
-            Event::ResultResponse { request_id, result } => {
-                self.handle_result_response(request_id, result)
-            }
+            Event::ResultResponse {
+                request_id,
+                result,
+                stats,
+            } => self.handle_result_response(request_id, result, stats),
             Event::StatusesResponse { request_id, result } => {
                 self.handle_statuses_response(request_id, result)
             }
@@ -921,9 +885,11 @@ impl<E: Effect> Environment<E> {
         &mut self,
         request_id: u64,
         result: Result<ValueWithHeap, quiver_core::error::Error>,
+        stats: Option<quiver_core::executor::ExecutionStats>,
     ) -> Result<(), EnvironmentError> {
+        // Stats come directly from the worker that executed the process
         self.pending_requests
-            .insert(request_id, Some(RequestResult::Result(result)));
+            .insert(request_id, Some(RequestResult::Result(result, stats)));
         Ok(())
     }
 
@@ -1042,58 +1008,11 @@ impl<E: Effect> Environment<E> {
 
     fn handle_stats_response(
         &mut self,
-        request_id: u64,
-        result: Result<quiver_core::executor::ExecutionStats, EnvironmentError>,
+        _request_id: u64,
+        _result: Result<quiver_core::executor::ExecutionStats, EnvironmentError>,
     ) -> Result<(), EnvironmentError> {
-        let stats = result?;
-
-        // Check if this request is part of an aggregation
-        let mut aggregation_id = None;
-        for (agg_id, aggregation) in &self.aggregations {
-            if let Aggregation::ExecutionStats(worker_requests) = aggregation
-                && worker_requests.contains_key(&request_id)
-            {
-                aggregation_id = Some(*agg_id);
-                break;
-            }
-        }
-
-        if let Some(agg_id) = aggregation_id {
-            // This is part of an aggregation - store the result
-            if let Some(Aggregation::ExecutionStats(worker_requests)) =
-                self.aggregations.get_mut(&agg_id)
-            {
-                worker_requests.insert(request_id, Some(stats));
-
-                // Check if all results are collected
-                if worker_requests.values().all(|v| v.is_some()) {
-                    // Merge all stats from all workers
-                    let mut merged = quiver_core::executor::ExecutionStats::new();
-                    for worker_stats in worker_requests.values().flatten() {
-                        merged.merge(worker_stats);
-                    }
-
-                    // Store the aggregated result
-                    self.pending_requests
-                        .insert(agg_id, Some(RequestResult::ExecutionStats(merged)));
-
-                    // Clean up aggregation and individual worker requests
-                    let worker_req_ids: Vec<u64> = worker_requests.keys().copied().collect();
-                    self.aggregations.remove(&agg_id);
-                    for worker_req_id in worker_req_ids {
-                        self.pending_requests.remove(&worker_req_id);
-                    }
-                } else {
-                    // Still waiting for more results - mark this individual request as complete
-                    self.pending_requests.insert(request_id, None);
-                }
-            }
-        } else {
-            // Single (non-aggregated) request
-            self.pending_requests
-                .insert(request_id, Some(RequestResult::ExecutionStats(stats)));
-        }
-
+        // Stats are now bundled with results from the worker directly
+        // This handler is kept for completeness but shouldn't be called
         Ok(())
     }
 

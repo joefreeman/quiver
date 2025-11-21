@@ -494,13 +494,13 @@ impl Environment {
         result: RequestResult,
     ) {
         match result {
-            RequestResult::Result(Ok((value, heap))) => {
+            RequestResult::Result(Ok((value, heap)), _) => {
                 callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
                     value: crate::types::Value::from_core_value(&value, &heap, env.get_program()),
                     heap,
                 })));
             }
-            RequestResult::Result(Err(e)) => {
+            RequestResult::Result(Err(e), _) => {
                 callback.invoke::<EvaluationResult>(crate::types::Result::err(format!(
                     "Runtime error: {:?}",
                     e
@@ -564,12 +564,6 @@ impl Environment {
                 // Process types are cached automatically by the polling loop
                 // Just return success to the callback
                 callback.invoke::<()>(crate::types::Result::ok(()));
-            }
-            RequestResult::ExecutionStats(_) => {
-                // Not used in the web API
-                callback.invoke::<()>(crate::types::Result::err(
-                    "Unexpected result type: ExecutionStats",
-                ));
             }
         }
     }

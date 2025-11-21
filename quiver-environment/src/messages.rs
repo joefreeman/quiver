@@ -151,6 +151,7 @@ pub enum Event<E: Effect> {
     ResultResponse {
         request_id: u64,
         result: Result<ValueWithHeap, quiver_core::error::Error>,
+        stats: Option<quiver_core::executor::ExecutionStats>,
     },
 
     /// Response to GetStatuses

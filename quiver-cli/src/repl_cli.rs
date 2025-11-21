@@ -410,13 +410,13 @@ impl ReplCli {
             .wait_for_result(request_id)
             .map_err(ReplError::Environment)?
         {
-            RequestResult::Result(Ok((value, heap))) => {
+            RequestResult::Result(Ok((value, heap)), _) => {
                 // Compact locals after successful evaluation (optimization)
                 self.repl.compact(&mut *self.environment.lock().unwrap());
 
                 Ok(Some(EvaluationResult { value, heap }))
             }
-            RequestResult::Result(Err(e)) => {
+            RequestResult::Result(Err(e), _) => {
                 // Create a new REPL after runtime error
                 let program = Program::new();
                 let module_loader = Box::new(FileSystemModuleLoader::new());
