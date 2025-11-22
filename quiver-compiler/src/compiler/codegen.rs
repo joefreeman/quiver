@@ -52,6 +52,13 @@ impl InstructionBuilder {
         };
     }
 
+    /// Emits an unconditional jump that immediately targets the given address
+    pub fn emit_jump_to_addr(&mut self, addr: usize) {
+        let current_addr = self.instructions.len();
+        let offset = (addr as isize) - (current_addr as isize) - 1;
+        self.add_instruction(Instruction::Jump(offset));
+    }
+
     /// Emits a conditional jump that immediately targets the given address
     pub fn emit_jump_if_to_addr(&mut self, addr: usize) {
         let current_addr = self.instructions.len();

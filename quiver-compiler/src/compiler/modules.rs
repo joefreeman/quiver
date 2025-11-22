@@ -1,14 +1,13 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::{ast, modules::ModuleLoader, parser};
-use quiver_core::{bytecode::Instruction, program::Program};
+use quiver_core::program::Program;
 
 use super::{Error, Scope, scopes};
 
 #[derive(Clone)]
 pub struct ModuleCache {
     pub ast_cache: HashMap<String, ast::Program>,
-    pub instruction_cache: HashMap<String, (Vec<Instruction>, quiver_core::types::Type)>,
     pub import_stack: Vec<String>,
 }
 
@@ -22,7 +21,6 @@ impl ModuleCache {
     pub fn new() -> Self {
         Self {
             ast_cache: HashMap::new(),
-            instruction_cache: HashMap::new(),
             import_stack: Vec::new(),
         }
     }

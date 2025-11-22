@@ -172,10 +172,12 @@ pub fn analyze_pattern(
         }
     }
 
-    let all_bindings: Vec<(String, Type)> = bindings_map
+    // Sort by name to ensure consistent ordering (must match generate_pattern_code)
+    let mut all_bindings: Vec<(String, Type)> = bindings_map
         .into_iter()
         .map(|(name, types)| (name, Type::from_types(types)))
         .collect();
+    all_bindings.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Include [] in the result type if there are runtime requirements (might match)
     let result_type = if will_match {
@@ -191,8 +193,6 @@ pub fn analyze_pattern(
 pub fn generate_pattern_code(
     codegen: &mut InstructionBuilder,
     program: &mut Program,
-    local_count: &mut usize,
-    bindings_map: Option<&HashMap<String, usize>>,
     scopes: &[super::scopes::Scope],
     binding_sets: &[BindingSet],
     fail_addr: usize,
@@ -263,21 +263,13 @@ pub fn generate_pattern_code(
         }
 
         // If we get here, all checks passed - extract bindings
-        for binding in binding_set.bindings.iter() {
+        // Sort by name to ensure consistent ordering across binding sets (important for unions
+        // where different variants may have bindings in different field orders)
+        let mut sorted_bindings: Vec<_> = binding_set.bindings.iter().collect();
+        sorted_bindings.sort_by(|a, b| a.name.cmp(&b.name));
+        for binding in sorted_bindings {
             generate_value_access(codegen, &binding.path);
-
-            // Get local index from bindings_map if provided, otherwise allocate new
-            let local_index = if let Some(map) = bindings_map {
-                *map.get(&binding.name).ok_or_else(|| Error::InternalError {
-                    message: format!("Binding '{}' not found in bindings_map", binding.name),
-                })?
-            } else {
-                let idx = *local_count;
-                *local_count += 1;
-                idx
-            };
-
-            codegen.add_instruction(Instruction::Store(local_index));
+            codegen.add_instruction(Instruction::Store);
         }
 
         // Jump to end (unless this is the last set)

@@ -290,10 +290,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let param_local = compiler.local_count;
             compiler.local_count += 1;
 
-            compiler.codegen.add_instruction(Instruction::Allocate(1));
-            compiler
-                .codegen
-                .add_instruction(Instruction::Store(param_local));
+            compiler.codegen.add_instruction(Instruction::Store);
 
             Some((parameter_type, param_local))
         } else {
@@ -952,8 +949,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Store in temporary local
                     let temp_local = self.local_count;
                     self.local_count += 1;
-                    self.codegen.add_instruction(Instruction::Allocate(1));
-                    self.codegen.add_instruction(Instruction::Store(temp_local));
+                    self.codegen.add_instruction(Instruction::Store);
 
                     capture_locals.push(temp_local);
                     capture_temps.push(temp_local);
@@ -1180,9 +1176,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return Ok((Type::nil(), Guard::Complex));
         }
 
-        // Pre-allocate locals for all bindings
-        let mut bindings_map = HashMap::new();
-
+        // Register locals for all bindings (indices needed for Load)
         for (variable_name, variable_type) in &bindings {
             // Check for reserved primitive type names
             if helpers::is_reserved_name(variable_name) {
@@ -1194,7 +1188,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             let local_index = self.local_count;
             self.local_count += 1;
-            bindings_map.insert(variable_name.clone(), local_index);
 
             // Register in scope
             if let Some(scope) = self.scopes.last_mut() {
@@ -1208,21 +1201,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        // Allocate locals in VM
-        let num_bindings = bindings.len();
-        if num_bindings > 0 {
-            self.codegen
-                .add_instruction(Instruction::Allocate(num_bindings));
-        }
-
-        // Now generate pattern matching code with pre-allocated locals
+        // Generate pattern matching code (Store instructions push locals)
         // Use on_no_match if provided (for receive blocks), otherwise use fail_jump_addr
         let fail_target = on_no_match.unwrap_or(fail_jump_addr);
         pattern::generate_pattern_code(
             &mut self.codegen,
             &mut self.program,
-            &mut self.local_count,
-            Some(&bindings_map),
             &self.scopes,
             &binding_sets,
             fail_target,
@@ -1298,10 +1282,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let param_local = self.local_count;
         self.local_count += 1;
 
-        // Allocate and store parameter from stack
-        self.codegen.add_instruction(Instruction::Allocate(1));
-        self.codegen
-            .add_instruction(Instruction::Store(param_local));
+        // Store parameter from stack
+        self.codegen.add_instruction(Instruction::Store);
 
         // Push new scope with parameter
         self.scopes.push(Scope::new(
@@ -1339,9 +1321,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.compile_expression(branch.condition.clone(), on_no_match)?;
 
             // Update remaining type based on guard
-            if let Guard::Type(guarded_type) = condition_guard {
+            if let Guard::Type(ref guarded_type) = condition_guard {
                 // Subtract the guarded type from remaining type
-                remaining_type = subtract_type(&remaining_type, &guarded_type);
+                remaining_type = subtract_type(&remaining_type, guarded_type);
             }
 
             // Check if this is a fallback branch (doesn't examine the input)
@@ -1369,11 +1351,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 .as_ref()
                 .is_some_and(Self::expression_starts_with_continuation);
 
+            // Check if the condition is a multi-chain expression (relevant for cleanup)
+            let is_multi_chain = branch.condition.chains.len() > 1;
+
             if let Some(ref consequence) = branch.consequence {
                 // Branch has a consequence - compile it
+                // Track how many branch-specific locals were pushed by pattern matching
+                // This is needed for cleanup when jumping to next branch
+                let branch_locals_count = self.local_count - (param_local + 1);
+
                 // Use emit_duplicate_jump_if_nil (without pop) to keep the value on stack for consequence
                 let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil();
-                next_branch_jumps.push((next_branch_jump, i + 1));
+
+                // Determine cleanup needs based on guard and expression structure:
+                // - Single-chain Guard::Type: pattern fails atomically, no cleanup (0)
+                // - Multi-chain Guard::Type: first chain stores bindings, need cleanup if later fails
+                // - Guard::Complex: later chain is pattern matching, fails atomically (0)
+                // - Guard::None: no pattern matching, always succeeds, cleanup all
+                let locals_to_clear = match condition_guard {
+                    Guard::Type(_) if !is_multi_chain => 0, // Single-chain pattern fails atomically
+                    Guard::Complex => 0, // Later chain's pattern fails atomically
+                    _ => branch_locals_count, // Multi-chain Type or None: clear all branch locals
+                };
+
+                // Track: jump address, target branch index, locals to clear
+                next_branch_jumps.push((next_branch_jump, i + 1, locals_to_clear));
 
                 // Only pass input_type if the consequence starts with a continuation (~>)
                 let (consequence_type, _) = if starts_with_continuation {
@@ -1391,6 +1393,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 branch_types.push(consequence_type.clone());
 
                 // Clear branch-specific locals, but keep the parameter
+                // This is on the success path (after emit_duplicate_jump_if_nil),
+                // so bindings have been stored and we should clear them
                 let branch_specific_locals = self.local_count - (param_local + 1);
                 if branch_specific_locals > 0 {
                     self.codegen
@@ -1437,8 +1441,25 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
 
                 // Clear branch-specific locals, but keep the parameter
+                // For Guard::Type: bindings only stored on success path, so check if result
+                // is nil before clearing. For Guard::Complex/None: always clear because
+                // earlier chains may have stored bindings or condition always succeeds.
                 let branch_specific_locals = self.local_count - (param_local + 1);
-                if branch_specific_locals > 0 {
+
+                if branch_specific_locals > 0 && matches!(condition_guard, Guard::Type(_)) {
+                    // Guard::Type: check if result is nil (failure) - skip clear if so
+                    self.codegen.add_instruction(Instruction::Duplicate);
+                    self.codegen.add_instruction(Instruction::Not);
+                    let skip_clear_jump = self.codegen.emit_jump_if_placeholder();
+
+                    // Success path: clear branch locals
+                    self.codegen
+                        .add_instruction(Instruction::Clear(branch_specific_locals));
+
+                    // Patch skip_clear_jump to here (failure path skips clear)
+                    self.codegen.patch_jump_to_here(skip_clear_jump);
+                } else if branch_specific_locals > 0 {
+                    // Guard::None or Guard::Complex: always clear
                     self.codegen
                         .add_instruction(Instruction::Clear(branch_specific_locals));
                 }
@@ -1456,30 +1477,80 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        let end_addr = self.codegen.instructions.len();
-
         // Clear the parameter (branches have already cleared their specific locals)
+        // Save address for end_jumps patching
+        let param_clear_addr = self.codegen.instructions.len();
         self.codegen.add_instruction(Instruction::Clear(1));
+
+        // Emit cleanup blocks for branches that need to clear locals before jumping
+        // Track jumps that need to be patched to the final end address
+        let mut final_end_jumps = Vec::new();
+
+        // Check if we need cleanup blocks (any branch has locals to clear)
+        let has_cleanup_blocks = next_branch_jumps
+            .iter()
+            .any(|(_, _, locals_to_clear)| *locals_to_clear > 0);
+
+        // If there are cleanup blocks, emit a jump to skip them on the success path
+        let skip_cleanup_jump = if has_cleanup_blocks {
+            Some(self.codegen.emit_jump_placeholder())
+        } else {
+            None
+        };
+
+        // Process each branch jump
+        for (jump_addr, next_branch_idx, locals_to_clear) in next_branch_jumps {
+            // Determine target: next branch start, on_no_match handler, or final end
+            let target_addr = if next_branch_idx < branch_starts.len() {
+                Some(branch_starts[next_branch_idx])
+            } else {
+                on_no_match
+            };
+
+            if locals_to_clear > 0 {
+                // Emit cleanup block: Clear locals, then jump to target
+                let cleanup_addr = self.codegen.instructions.len();
+                self.codegen
+                    .add_instruction(Instruction::Clear(locals_to_clear));
+
+                if let Some(addr) = target_addr {
+                    self.codegen.emit_jump_to_addr(addr);
+                } else {
+                    // Target is final end - will patch later
+                    final_end_jumps.push(self.codegen.emit_jump_placeholder());
+                }
+
+                // Patch original jump to point to cleanup block
+                self.codegen.patch_jump_to_addr(jump_addr, cleanup_addr);
+            } else {
+                // No cleanup needed - patch directly to target
+                if let Some(addr) = target_addr {
+                    self.codegen.patch_jump_to_addr(jump_addr, addr);
+                } else {
+                    // Target is final end - will patch later
+                    final_end_jumps.push(jump_addr);
+                }
+            }
+        }
+
+        // Patch the skip-cleanup jump and all final-end jumps to current position
+        if let Some(skip_jump) = skip_cleanup_jump {
+            self.codegen.patch_jump_to_here(skip_jump);
+        }
+        for jump_addr in final_end_jumps {
+            self.codegen.patch_jump_to_here(jump_addr);
+        }
+
+        // Patch end_jumps to go to param clear
+        for jump_addr in end_jumps {
+            self.codegen.patch_jump_to_addr(jump_addr, param_clear_addr);
+        }
 
         // Reset local count so future variables reuse these indexes
         self.local_count = locals_before;
 
         // Pop scope
         self.scopes.pop();
-
-        for (jump_addr, next_branch_idx) in next_branch_jumps {
-            let target_addr = if next_branch_idx >= branch_starts.len() {
-                // No more branches - jump to on_no_match if provided, otherwise end
-                on_no_match.unwrap_or(end_addr)
-            } else {
-                branch_starts[next_branch_idx]
-            };
-            self.codegen.patch_jump_to_addr(jump_addr, target_addr);
-        }
-
-        for jump_addr in end_jumps {
-            self.codegen.patch_jump_to_addr(jump_addr, end_addr);
-        }
 
         // Blocks don't perform guards on their input (the parameter is stored, not checked)
         Ok((union_types(branch_types), Guard::None))
@@ -1647,31 +1718,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ));
         }
 
-        // Check if we already have the compiled module instructions cached
-        let (instructions, result_type) = if let Some((cached_instructions, cached_type)) = self
-            .module_cache
-            .instruction_cache
-            .get(module_path)
-            .cloned()
-        {
-            // Return cached reconstruction instructions and type
-            (cached_instructions, cached_type)
-        } else {
-            // Add to import stack to track circular imports
-            self.module_cache.import_stack.push(module_path.to_string());
-            let (instructions, result_type) = self.import_module(module_path)?;
-            self.module_cache.import_stack.pop();
+        // Cannot cache instructions because Function instructions contain capture indices
+        // that are relative to local_count at the time of generation. Each import must
+        // regenerate instructions with correct local indices for the current context.
+        self.module_cache.import_stack.push(module_path.to_string());
+        let (instructions, result_type) = self.import_module(module_path)?;
+        self.module_cache.import_stack.pop();
 
-            // Cache the reconstruction instructions and type
-            self.module_cache.instruction_cache.insert(
-                module_path.to_string(),
-                (instructions.clone(), result_type.clone()),
-            );
-
-            (instructions, result_type)
-        };
-
-        // Emit the cached instructions
+        // Emit the module reconstruction instructions
         for instruction in instructions {
             self.codegen.add_instruction(instruction);
         }
@@ -1785,11 +1839,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let (capture_instructions, _) = self.value_to_instructions(value, executor)?;
                     instructions.extend(capture_instructions);
 
-                    // Allocate a local and store it
+                    // Store in local
                     let local_index = self.local_count;
                     self.local_count += 1;
-                    instructions.push(Instruction::Allocate(1));
-                    instructions.push(Instruction::Store(local_index));
+                    instructions.push(Instruction::Store);
                     capture_locals.push(local_index);
                 }
 
@@ -1942,18 +1995,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Stack is now: [argument, target_function]
         // We need to create a wrapper function that captures both and calls target with argument
 
-        // Save both to locals (allocate 2 slots, store target then argument)
+        // Save both to locals (Store pushes in stack order: target first, then argument)
         let wrapper_locals_base = self.local_count;
-        self.codegen.add_instruction(Instruction::Allocate(2));
-        self.codegen
-            .add_instruction(Instruction::Store(wrapper_locals_base + 1)); // target function
-        self.codegen
-            .add_instruction(Instruction::Store(wrapper_locals_base)); // argument
+        self.local_count += 2;
+        self.codegen.add_instruction(Instruction::Store); // target function -> index 0
+        self.codegen.add_instruction(Instruction::Store); // argument -> index 1
 
         // Create wrapper function that takes nil and calls target with captured argument
+        // captures[0] = target (at wrapper_locals_base), captures[1] = argument (at wrapper_locals_base + 1)
         let wrapper_instructions = vec![
-            Instruction::Load(0), // Load captured argument (from wrapper's captures[0])
-            Instruction::Load(1), // Load captured target function (from wrapper's captures[1])
+            Instruction::Load(1), // Load captured argument (from wrapper's captures[1])
+            Instruction::Load(0), // Load captured target function (from wrapper's captures[0])
             Instruction::Call,    // Call target with argument
         ];
 
@@ -1973,6 +2025,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Clean up locals (the function has captured them)
         self.codegen.add_instruction(Instruction::Clear(2));
+        self.local_count -= 2;
 
         // Spawn the wrapper
         self.codegen.add_instruction(Instruction::Spawn);

@@ -17,7 +17,6 @@ pub enum InstructionType {
     Duplicate,
     Pick,
     Rotate,
-    Allocate,
     Clear,
     Load,
     Store,
@@ -47,10 +46,9 @@ impl InstructionType {
             Instruction::Duplicate => InstructionType::Duplicate,
             Instruction::Pick(_) => InstructionType::Pick,
             Instruction::Rotate(_) => InstructionType::Rotate,
-            Instruction::Allocate(_) => InstructionType::Allocate,
             Instruction::Clear(_) => InstructionType::Clear,
             Instruction::Load(_) => InstructionType::Load,
-            Instruction::Store(_) => InstructionType::Store,
+            Instruction::Store => InstructionType::Store,
             Instruction::Tuple(_) => InstructionType::Tuple,
             Instruction::Get(_) => InstructionType::Get,
             Instruction::IsType(_) => InstructionType::IsType,
@@ -626,19 +624,11 @@ impl<E: Effect> Executor<E> {
             let frame = process.frames.pop().unwrap();
             let is_last_frame = process.frames.is_empty();
 
-            // Clear locals from the popped frame
+            // Clear locals from the popped frame (including captures)
             // For persistent processes, only keep locals if this was the last (top-level) frame
             let should_clear_locals = !process.persistent || !is_last_frame;
             if should_clear_locals {
-                let locals_to_clear = process
-                    .locals
-                    .len()
-                    .saturating_sub(frame.locals_base + frame.captures_count);
-                if locals_to_clear > 0 {
-                    process
-                        .locals
-                        .truncate(process.locals.len() - locals_to_clear);
-                }
+                process.locals.truncate(frame.locals_base);
             }
 
             // Check if we're in an active select and returning to the select instruction
@@ -751,7 +741,7 @@ impl<E: Effect> Executor<E> {
             Instruction::Pick(n) => self.handle_pick(pid, n),
             Instruction::Rotate(n) => self.handle_rotate(pid, n),
             Instruction::Load(index) => self.handle_load(pid, index),
-            Instruction::Store(index) => self.handle_store(pid, index),
+            Instruction::Store => self.handle_store(pid),
             Instruction::Tuple(type_id) => self.handle_tuple(pid, type_id),
             Instruction::Get(index) => self.handle_get(pid, index),
             Instruction::IsType(type_id) => self.handle_is_type(pid, type_id),
@@ -761,7 +751,6 @@ impl<E: Effect> Executor<E> {
             Instruction::TailCall(recurse) => self.handle_tail_call(pid, recurse),
             Instruction::Function(function_index) => self.handle_function(pid, function_index),
             Instruction::Clear(count) => self.handle_clear(pid, count),
-            Instruction::Allocate(count) => self.handle_allocate(pid, count),
             Instruction::Builtin(index) => self.handle_builtin(pid, index),
             Instruction::Equal(count) => self.handle_equal(pid, count),
             Instruction::Not => self.handle_not(pid),
@@ -892,8 +881,8 @@ impl<E: Effect> Executor<E> {
         let value = process
             .locals
             .get(actual_index)
-            .ok_or(Error::VariableUndefined(format!("local[{}]", index)))?
-            .clone();
+            .cloned()
+            .ok_or_else(|| Error::VariableUndefined(format!("local[{}]", index)))?;
 
         process.stack.push(value);
 
@@ -903,21 +892,13 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_store(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_store(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
-        let actual_index = frame.locals_base + index;
-
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-        if actual_index >= process.locals.len() {
-            return Err(Error::VariableUndefined(format!("local[{}]", index)));
-        }
-
-        process.locals[actual_index] = value;
+        process.locals.push(value);
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -1083,6 +1064,7 @@ impl<E: Effect> Executor<E> {
 
                 let locals_base = process.locals.len();
                 let captures_count = captures.len();
+
                 process.stack.push(parameter);
                 process.locals.extend(captures);
 
@@ -1279,25 +1261,6 @@ impl<E: Effect> Executor<E> {
             return Err(Error::StackUnderflow);
         }
         process.locals.truncate(process.locals.len() - count);
-
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
-        Ok(None)
-    }
-
-    fn handle_allocate(
-        &mut self,
-        pid: ProcessId,
-        count: usize,
-    ) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        process
-            .locals
-            .extend(std::iter::repeat_n(Value::nil(), count));
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;

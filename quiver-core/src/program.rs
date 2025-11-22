@@ -235,9 +235,8 @@ impl Program {
     }
 
     /// Inject function captures into a function, returning a new function index.
-    /// Creates a new function that allocates locals for the captures, converts each
-    /// capture value to instructions, stores them in locals, then executes the original
-    /// function's instructions.
+    /// Creates a new function that converts each capture value to instructions,
+    /// stores them in locals, then executes the original function's instructions.
     pub fn inject_function_captures<E: crate::effects::Effect>(
         &mut self,
         function_index: usize,
@@ -245,11 +244,10 @@ impl Program {
         executor: &Executor<E>,
     ) -> usize {
         let mut instructions = Vec::new();
-        instructions.push(Instruction::Allocate(captures.len()));
 
-        for (i, capture_value) in captures.iter().enumerate() {
+        for capture_value in captures.iter() {
             instructions.extend(self.value_to_instructions(capture_value, executor));
-            instructions.push(Instruction::Store(i));
+            instructions.push(Instruction::Store);
         }
 
         let func = self
