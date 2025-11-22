@@ -368,7 +368,7 @@ fn string_term(input: Span) -> IResult<Span, Term> {
             let bytes = s.into_bytes();
             // Create a Str tuple with the binary as its single field
             Term::Tuple(Tuple {
-                name: TupleName::Literal("Str".to_string()),
+                name: Some("Str".to_string()),
                 fields: vec![TupleField {
                     name: None,
                     value: FieldValue::Chain(Chain {
@@ -574,7 +574,7 @@ fn partial_type(input: Span) -> IResult<Span, Type> {
                     delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
                 )),
                 |(name, fields)| TupleType {
-                    name: TupleName::Literal(name),
+                    name: Some(name),
                     fields,
                     is_partial: true,
                 },
@@ -585,7 +585,7 @@ fn partial_type(input: Span) -> IResult<Span, Type> {
                 map(
                     delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
                     |fields| TupleType {
-                        name: TupleName::None,
+                        name: None,
                         fields,
                         is_partial: true,
                     },
@@ -613,7 +613,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                     delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
                 )),
                 |(name, fields)| TupleType {
-                    name: TupleName::Literal(name),
+                    name: Some(name),
                     fields,
                     is_partial: false,
                 },
@@ -639,7 +639,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                             }
                         }
                         TupleType {
-                            name: TupleName::Identifier(id),
+                            name: Some(id),
                             fields,
                             is_partial: false,
                         }
@@ -654,7 +654,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
             map(
                 delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
                 |fields| TupleType {
-                    name: TupleName::None,
+                    name: None,
                     fields,
                     is_partial: false,
                 },
@@ -666,7 +666,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                     peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
                 )),
                 |(name, _)| TupleType {
-                    name: TupleName::Literal(name),
+                    name: Some(name),
                     fields: vec![],
                     is_partial: false,
                 },
@@ -835,13 +835,18 @@ fn type_definition(input: Span) -> IResult<Span, Type> {
 
 // Term parsers
 
-// Parse access patterns
+// Parse access patterns: identifier, $, ~, with optional .field accessors and [args]
 fn access(input: Span) -> IResult<Span, Access> {
     verify(
         map(
             tuple((
                 opt(alt((
                     map(char('$'), |_| AccessSource::Parameter),
+                    // ~ followed by [ or . is an access, otherwise it's Term::Ripple
+                    map(
+                        terminated(char('~'), peek(alt((char('['), char('.'))))),
+                        |_| AccessSource::Ripple,
+                    ),
                     map(identifier, AccessSource::Identifier),
                 ))),
                 many0(preceded(
@@ -859,10 +864,7 @@ fn access(input: Span) -> IResult<Span, Access> {
             |(source, accessors, argument)| Access {
                 source,
                 accessors,
-                argument: argument.map(|fields| Tuple {
-                    name: TupleName::None,
-                    fields,
-                }),
+                argument,
             },
         ),
         |ma| ma.source.is_some() || !ma.accessors.is_empty(),
@@ -1024,12 +1026,12 @@ fn tuple_field(input: Span) -> IResult<Span, TupleField> {
         // Spread with identifier: ...identifier
         map(preceded(tag("..."), identifier), |id| TupleField {
             name: None,
-            value: FieldValue::Spread(SpreadSource::Identifier(id)),
+            value: FieldValue::Spread(Some(id)),
         }),
         // Spread chained value: ...
         map(tag("..."), |_| TupleField {
             name: None,
-            value: FieldValue::Spread(SpreadSource::Chained),
+            value: FieldValue::Spread(None),
         }),
         // Unnamed chain: chain
         map(chain, |chain_value| TupleField {
@@ -1055,78 +1057,14 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
                 delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
             )),
             |(name, fields)| Tuple {
-                name: TupleName::Literal(name),
-                fields,
-            },
-        ),
-        // identifier[...] with spread - lowercase identifier (preserves name)
-        // This must come before unnamed tuple to catch lowercase names with spreads
-        map(
-            verify(
-                map(
-                    tuple((
-                        identifier,
-                        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-                    )),
-                    |(name, mut fields)| {
-                        // Transform chained spread (...) into identifier spread (...identifier)
-                        // This allows a[..., y: 2] to mean "spread a and add y"
-                        for field in &mut fields {
-                            if matches!(field.value, FieldValue::Spread(SpreadSource::Chained)) {
-                                field.value =
-                                    FieldValue::Spread(SpreadSource::Identifier(name.clone()));
-                            }
-                        }
-                        (name, fields)
-                    },
-                ),
-                |(_, fields)| {
-                    fields
-                        .iter()
-                        .any(|f| matches!(f.value, FieldValue::Spread(_)))
-                },
-            ),
-            |(name, fields)| Tuple {
-                name: TupleName::Identifier(name),
-                fields,
-            },
-        ),
-        // ~[...] with spread - ripple with spread (preserves rippled name)
-        map(
-            verify(
-                map(
-                    preceded(
-                        char('~'),
-                        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-                    ),
-                    |mut fields| {
-                        // Transform chained spread (...) to reference the ripple
-                        for field in &mut fields {
-                            if matches!(field.value, FieldValue::Spread(SpreadSource::Chained)) {
-                                field.value = FieldValue::Spread(SpreadSource::Ripple);
-                            }
-                        }
-                        fields
-                    },
-                ),
-                |fields: &Vec<TupleField>| {
-                    fields
-                        .iter()
-                        .any(|f| matches!(f.value, FieldValue::Spread(_)))
-                },
-            ),
-            |fields| Tuple {
-                name: TupleName::Ripple,
+                name: Some(name),
                 fields,
             },
         ),
         // [...] - unnamed tuple with fields
         map(
             delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-            |fields| Tuple {
-                name: TupleName::None,
-                fields,
-            },
+            |fields| Tuple { name: None, fields },
         ),
         // TupleName - bare tuple name without fields
         // Only parse if not followed by '(' (which would indicate a partial pattern)
@@ -1136,7 +1074,7 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
                 peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
             )),
             |(name, _)| Tuple {
-                name: TupleName::Literal(name),
+                name: Some(name),
                 fields: vec![],
             },
         ),
@@ -1213,10 +1151,7 @@ fn tail_call(input: Span) -> IResult<Span, Term> {
         Term::TailCall(TailCall {
             identifier: ident,
             accessors,
-            argument: argument.map(|fields| Tuple {
-                name: TupleName::None,
-                fields,
-            }),
+            argument,
         }),
     ))
 }
@@ -1250,10 +1185,7 @@ fn builtin(input: Span) -> IResult<Span, Builtin> {
         input,
         Builtin {
             name: trimmed.to_string(),
-            argument: argument.map(|fields| Tuple {
-                name: TupleName::None,
-                fields,
-            }),
+            argument,
         },
     ))
 }
@@ -1500,10 +1432,11 @@ fn term(input: Span) -> IResult<Span, Term> {
     alt((
         // String terms (before literals to handle quotes)
         string_term,
-        // Ripple placeholder (but not ~[...] which is tuple with ripple spread)
-        map(terminated(char('~'), peek(not(char('[')))), |_| {
-            Term::Ripple
-        }),
+        // Ripple placeholder (but not ~[...] or ~.field which are Access with Ripple source)
+        map(
+            terminated(char('~'), peek(not(alt((char('['), char('.')))))),
+            |_| Term::Ripple,
+        ),
         // Process operations (process_ref_term must come before spawn_term to match @N first)
         process_ref_term,
         spawn_term,

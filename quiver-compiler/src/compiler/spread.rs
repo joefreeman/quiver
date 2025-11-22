@@ -77,18 +77,8 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
             }
             ast::FieldValue::Spread(spread_source) => {
                 let spread_type = match spread_source {
-                    ast::SpreadSource::Ripple => {
-                        let ctx = ripple_context.ok_or_else(|| {
-                            Error::FeatureUnsupported(
-                                "Ripple spread (~) requires a piped value".to_string(),
-                            )
-                        })?;
-                        compiler
-                            .codegen
-                            .add_instruction(Instruction::Pick(ctx.stack_offset + stack_size));
-                        ctx.value_type.clone()
-                    }
-                    ast::SpreadSource::Identifier(id) => {
+                    Some(id) => {
+                        // Named spread: ...identifier
                         let (var_type, var_index) =
                             super::scopes::lookup_variable(&compiler.scopes, id, &[])
                                 .ok_or_else(|| Error::VariableUndefined(id.clone()))?;
@@ -97,7 +87,8 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
                             .add_instruction(Instruction::Load(var_index));
                         var_type
                     }
-                    ast::SpreadSource::Chained => {
+                    None => {
+                        // Bare spread: ...
                         let ctx = ripple_context.ok_or_else(|| {
                             Error::FeatureUnsupported(
                                 "Chained spread (...) requires a piped value".to_string(),
@@ -372,13 +363,10 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     fields: Vec<ast::TupleField>,
     ripple_context: Option<&RippleContext>,
 ) -> Result<Type, Error> {
-    // Validate: chained spreads require ripple context
-    let has_chained_spread = fields.iter().any(|f| {
-        matches!(
-            &f.value,
-            ast::FieldValue::Spread(ast::SpreadSource::Chained | ast::SpreadSource::Ripple)
-        )
-    });
+    // Validate: bare spreads require ripple context
+    let has_chained_spread = fields
+        .iter()
+        .any(|f| matches!(&f.value, ast::FieldValue::Spread(None)));
 
     if has_chained_spread && ripple_context.is_none() {
         return Err(Error::FeatureUnsupported(

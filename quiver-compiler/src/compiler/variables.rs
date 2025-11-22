@@ -87,7 +87,7 @@ impl<'a> FreeVariableCollector<'a> {
                 }
                 // $ doesn't capture variables, so skip AccessSource::Parameter
                 if let Some(argument) = &access.argument {
-                    for field in &argument.fields {
+                    for field in argument {
                         if let ast::FieldValue::Chain(chain) = &field.value {
                             self.visit_chain(chain);
                         }
@@ -101,7 +101,7 @@ impl<'a> FreeVariableCollector<'a> {
                     self.visit_identifier(name, tail_call.accessors.clone());
                 }
                 if let Some(argument) = &tail_call.argument {
-                    for field in &argument.fields {
+                    for field in argument {
                         if let ast::FieldValue::Chain(chain) = &field.value {
                             self.visit_chain(chain);
                         }

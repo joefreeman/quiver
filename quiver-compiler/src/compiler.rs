@@ -478,7 +478,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     fn compile_tuple(
         &mut self,
-        tuple_name: ast::TupleName,
+        tuple_name: Option<String>,
         fields: Vec<ast::TupleField>,
         ripple_context: Option<&RippleContext>,
     ) -> Result<Type, Error> {
@@ -488,46 +488,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let contains_spread = helpers::tuple_contains_spread(&fields);
 
         if contains_spread {
-            // Resolve tuple name based on the TupleName variant
-            let resolved_tuple_name = match tuple_name {
-                ast::TupleName::Literal(name) => Some(name),
-                ast::TupleName::None => None,
-                ast::TupleName::Ripple => {
-                    // Ripple spread: ~[..., fields]
-                    // Get the ripple type from ripple_context
-                    ripple_context.and_then(|ctx| {
-                        let ripple_type = &ctx.value_type;
-                        if let Type::Tuple(tuple_id) = ripple_type {
-                            self.program
-                                .lookup_tuple(*tuple_id)
-                                .and_then(|type_info| type_info.name.clone())
-                        } else {
-                            None
-                        }
-                    })
-                }
-                ast::TupleName::Identifier(id) => {
-                    // Identifier spread: identifier[..., fields]
-                    // Look up the variable's type
-                    scopes::lookup_variable(&self.scopes, &id, &[]).and_then(|(var_type, _)| {
-                        if let Type::Tuple(tuple_id) = var_type {
-                            self.program
-                                .lookup_tuple(tuple_id)
-                                .and_then(|type_info| type_info.name.clone())
-                        } else {
-                            None
-                        }
-                    })
-                }
-            };
-
             // Use specialized compilation for tuples with spreads
-            return spread::compile_tuple_with_spread(
-                self,
-                resolved_tuple_name,
-                fields,
-                ripple_context,
-            );
+            return spread::compile_tuple_with_spread(self, tuple_name, fields, ripple_context);
         }
 
         // Compile field values and collect their types
@@ -560,20 +522,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         // Register the tuple type and emit instruction
-        let resolved_name = match tuple_name {
-            ast::TupleName::Literal(name) => Some(name),
-            ast::TupleName::None => None,
-            ast::TupleName::Identifier(_) | ast::TupleName::Ripple => {
-                // Parser enforces that identifier/ripple syntax requires spreads,
-                // so this path only executes when there are spreads (handled above)
-                unreachable!(
-                    "TupleName::Identifier/Ripple without spreads should be rejected by parser"
-                )
-            }
-        };
-        let tuple_id = self
-            .program
-            .register_tuple(resolved_name, field_types, false);
+        let tuple_id = self.program.register_tuple(tuple_name, field_types, false);
         self.codegen.add_instruction(Instruction::Tuple(tuple_id));
 
         // Clean up ripple value if we own it
@@ -741,9 +690,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok(None)
             }
             ast::Term::Access(access) => {
-                // Check argument tuple for receive types (e.g., math.div[~, !#int])
-                if let Some(arg_tuple) = &access.argument {
-                    for field in &arg_tuple.fields {
+                // Check argument for receive types (e.g., math.div[~, !#int])
+                if let Some(arg_fields) = &access.argument {
+                    for field in arg_fields {
                         if let ast::FieldValue::Chain(chain) = &field.value {
                             self.collect_receive_types_from_chain(chain, receive_types)?;
                         }
@@ -790,8 +739,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             ast::Term::Builtin(builtin) => {
                 // Check argument tuple for receive types (e.g., __add__[!#int, 5])
-                if let Some(arg_tuple) = &builtin.argument {
-                    for field in &arg_tuple.fields {
+                if let Some(arg_fields) = &builtin.argument {
+                    for field in arg_fields {
                         if let ast::FieldValue::Chain(chain) = &field.value {
                             self.collect_receive_types_from_chain(chain, receive_types)?;
                         }
@@ -801,8 +750,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             ast::Term::TailCall(tail_call) => {
                 // Check argument tuple for receive types (e.g., &f[!#int, 5])
-                if let Some(arg_tuple) = &tail_call.argument {
-                    for field in &arg_tuple.fields {
+                if let Some(arg_fields) = &tail_call.argument {
+                    for field in arg_fields {
                         if let ast::FieldValue::Chain(chain) = &field.value {
                             self.collect_receive_types_from_chain(chain, receive_types)?;
                         }
@@ -2062,19 +2011,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Returns None if no argument provided
     fn compile_argument(
         &mut self,
-        argument: Option<&ast::Tuple>,
+        argument: Option<&Vec<ast::TupleField>>,
         value_type: Option<&Type>,
         ripple_context: Option<&RippleContext>,
         context_name: &str,
     ) -> Result<Option<Type>, Error> {
-        let Some(args) = argument else {
+        let Some(fields) = argument else {
             return Ok(None);
         };
 
         // Check if argument would silently drop piped value
         if value_type.is_some()
-            && !helpers::tuple_contains_ripple(&args.fields)
-            && !helpers::tuple_contains_spread(&args.fields)
+            && !helpers::tuple_contains_ripple(fields)
+            && !helpers::tuple_contains_spread(fields)
         {
             return Err(Error::ValueIgnored(format!(
                 "{} argument ignores piped value; use ripple (e.g., {}[~, 2])",
@@ -2096,8 +2045,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         Ok(Some(self.compile_tuple(
-            args.name.clone(),
-            args.fields.clone(),
+            None,
+            fields.clone(),
             ripple_ctx,
         )?))
     }
@@ -2120,10 +2069,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 let accessed_type = self.compile_accessor(val_type, access.accessors, "value")?;
 
-                if let Some(args) = &access.argument {
+                if let Some(arg_fields) = &access.argument {
                     // Compile argument - no ripples allowed for bare accessor
-                    let arg_type =
-                        self.compile_tuple(args.name.clone(), args.fields.clone(), None)?;
+                    let arg_type = self.compile_tuple(None, arg_fields.clone(), None)?;
                     self.codegen.add_instruction(Instruction::Rotate(2));
                     self.apply_value_to_type(accessed_type, arg_type)
                 } else {
@@ -2152,6 +2100,44 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
             }
             Some(ast::AccessSource::Identifier(name)) => {
+                // Check if this is a tuple variable being spread (a[..., y] syntax)
+                let has_spread = access
+                    .argument
+                    .as_ref()
+                    .is_some_and(|args| helpers::tuple_contains_spread(args));
+
+                if has_spread
+                    && access.accessors.is_empty()
+                    && let Some((var_type, var_index)) =
+                        scopes::lookup_variable(&self.scopes, &name, &[])
+                    && let Type::Tuple(tuple_id) = var_type
+                {
+                    // This is tuple spread: a[..., y] where a is a tuple
+                    // Get the tuple name for inheritance
+                    let tuple_name = self
+                        .program
+                        .lookup_tuple(tuple_id)
+                        .and_then(|t| t.name.clone());
+
+                    // Load the tuple variable and create ripple context
+                    self.codegen.add_instruction(Instruction::Load(var_index));
+                    let ripple_ctx = RippleContext {
+                        value_type: var_type,
+                        stack_offset: 0,
+                        owns_value: true,
+                    };
+
+                    // Compile tuple with spread, using the variable as spread source
+                    let arg_fields = access.argument.unwrap();
+                    return spread::compile_tuple_with_spread(
+                        self,
+                        tuple_name,
+                        arg_fields,
+                        Some(&ripple_ctx),
+                    );
+                }
+
+                // Normal function call path
                 // Compile argument first so ripples can access the piped value
                 let arg_type = self.compile_argument(
                     access.argument.as_ref(),
@@ -2168,6 +2154,79 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.apply_value_to_type(accessed_type, val_type)
                 } else {
                     Ok(accessed_type)
+                }
+            }
+            Some(ast::AccessSource::Ripple) => {
+                // ~[args] or ~.field[args] - use piped value as source
+                let piped_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported(
+                        "Ripple access (~[...]) requires a piped value".to_string(),
+                    )
+                })?;
+
+                let has_spread = access
+                    .argument
+                    .as_ref()
+                    .is_some_and(|args| helpers::tuple_contains_spread(args));
+
+                if access.accessors.is_empty() && has_spread {
+                    // ~[..., y] - tuple spread from piped value (must be tuple)
+                    if let Type::Tuple(tuple_id) = &piped_type {
+                        // Get tuple name for inheritance
+                        let tuple_name = self
+                            .program
+                            .lookup_tuple(*tuple_id)
+                            .and_then(|t| t.name.clone());
+
+                        // Piped value is already on stack, create ripple context
+                        let ripple_ctx = RippleContext {
+                            value_type: piped_type,
+                            stack_offset: 0,
+                            owns_value: true,
+                        };
+
+                        let arg_fields = access.argument.unwrap();
+                        return spread::compile_tuple_with_spread(
+                            self,
+                            tuple_name,
+                            arg_fields,
+                            Some(&ripple_ctx),
+                        );
+                    } else {
+                        return Err(Error::TypeMismatch {
+                            expected: "tuple".to_string(),
+                            found: quiver_core::format::format_type(&self.program, &piped_type),
+                        });
+                    }
+                }
+
+                if access.accessors.is_empty() {
+                    // ~[args] without spread - call piped value (must be callable)
+                    let arg_fields = access.argument.ok_or_else(|| {
+                        Error::FeatureUnsupported(
+                            "Ripple access ~ requires arguments or field access".to_string(),
+                        )
+                    })?;
+
+                    // Compile argument tuple (no ripple context needed, piped value IS the function)
+                    let arg_type = self.compile_tuple(None, arg_fields, None)?;
+
+                    // Rotate so piped value (function) is on top
+                    self.codegen.add_instruction(Instruction::Rotate(2));
+
+                    self.apply_value_to_type(piped_type, arg_type)
+                } else {
+                    // ~.field or ~.field[args] - access field on piped value
+                    let accessed_type = self.compile_accessor(piped_type, access.accessors, "~")?;
+
+                    if let Some(arg_fields) = access.argument {
+                        // ~.field[args] - apply args to accessed value
+                        let arg_type = self.compile_tuple(None, arg_fields, None)?;
+                        self.codegen.add_instruction(Instruction::Rotate(2));
+                        self.apply_value_to_type(accessed_type, arg_type)
+                    } else {
+                        Ok(accessed_type)
+                    }
                 }
             }
         }
@@ -2429,7 +2488,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ast::Term::TailCall(tail_call) => {
                 // Compile argument if present (may contain ripples using value_type)
                 // TailCall doesn't check for ignored values - argument or piped value is used
-                let arg_type = if let Some(args) = &tail_call.argument {
+                let arg_type = if let Some(arg_fields) = &tail_call.argument {
                     let ripple_context_value;
                     let ripple_ctx = if let Some(vt) = value_type.as_ref() {
                         ripple_context_value = RippleContext {
@@ -2441,7 +2500,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     } else {
                         ripple_context
                     };
-                    Some(self.compile_tuple(args.name.clone(), args.fields.clone(), ripple_ctx)?)
+                    Some(self.compile_tuple(None, arg_fields.clone(), ripple_ctx)?)
                 } else {
                     value_type
                 };

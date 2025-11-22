@@ -177,23 +177,20 @@ pub fn resolve_type_alias_for_display(
     )
 }
 
-/// Resolve tuple name when using identifier spread syntax (e.g., t1[..., y: int])
+/// Resolve tuple name - distinguishes between literal names (capitalized) and type aliases (lowercase)
 fn resolve_tuple_name(
-    name: ast::TupleName,
+    name: Option<String>,
     scopes_ref: &[Scope],
     _program: &Program,
 ) -> Result<Option<String>, Error> {
     match name {
-        ast::TupleName::Literal(s) => Ok(Some(s)),
-        ast::TupleName::None => Ok(None),
-        ast::TupleName::Ripple => {
-            // Ripple is only valid in value context, not type context
-            Err(Error::FeatureUnsupported(
-                "Ripple (~) cannot be used in type definitions".to_string(),
-            ))
+        None => Ok(None),
+        Some(s) if s.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => {
+            // Capitalized: literal tuple name like "Point"
+            Ok(Some(s))
         }
-        ast::TupleName::Identifier(identifier) => {
-            // Look up the type alias to get its tuple name
+        Some(identifier) => {
+            // Lowercase: type alias reference like "event[..., x: int]"
             let (type_params, type_def) = scopes::lookup_type_alias(scopes_ref, &identifier)
                 .ok_or_else(|| Error::TypeAliasMissing(identifier.to_string()))?;
 
@@ -206,15 +203,12 @@ fn resolve_tuple_name(
             }
 
             // Resolve the type to get the actual tuple name
-            // We need to resolve it to extract the name, but we do a simpler check
-            // by looking at the AST directly
             match type_def {
                 ast::Type::Tuple(tuple_type) => {
                     resolve_tuple_name(tuple_type.name.clone(), scopes_ref, _program)
                 }
                 ast::Type::Union(_) => {
                     // For unions, don't try to extract a single name
-                    // The spread mechanism will handle each variant individually
                     Ok(None)
                 }
                 _ => Err(Error::TypeUnresolved(format!(
@@ -432,24 +426,18 @@ fn resolve_ast_type_impl(
                         }
                     }
 
-                    // Determine the final tuple name based on the name mode:
-                    // - TupleName::Literal -> use the literal name
-                    // - TupleName::Identifier -> use the variant name from spread
-                    // - TupleName::Ripple -> error (ripple only valid in value context)
-                    // - TupleName::None -> use None (unnamed)
-                    let final_name = match &tuple.name {
-                        ast::TupleName::Literal(_) | ast::TupleName::None => {
-                            resolve_tuple_name(tuple.name.clone(), scopes_ref, program)?
-                        }
-                        ast::TupleName::Identifier(_) => {
-                            // Use variant name from spread (inherits from source)
-                            variant_name
-                        }
-                        ast::TupleName::Ripple => {
-                            return Err(Error::FeatureUnsupported(
-                                "Ripple (~) cannot be used in type definitions".to_string(),
-                            ));
-                        }
+                    // Determine the final tuple name:
+                    // - None or capitalized name -> resolve directly
+                    // - Lowercase name (type alias) -> use variant name from spread
+                    let is_type_alias = tuple
+                        .name
+                        .as_ref()
+                        .is_some_and(|n| n.chars().next().is_some_and(|c| c.is_ascii_lowercase()));
+                    let final_name = if is_type_alias {
+                        // Use variant name from spread (inherits from source)
+                        variant_name
+                    } else {
+                        resolve_tuple_name(tuple.name.clone(), scopes_ref, program)?
                     };
 
                     let tuple_id = program.register_tuple(final_name, fields, false);

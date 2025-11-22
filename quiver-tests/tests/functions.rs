@@ -145,6 +145,35 @@ fn test_function_call_field_access() {
 }
 
 #[test]
+fn test_function_call_with_spread() {
+    quiver()
+        .evaluate(
+            r#"
+            math = %"math",
+            f = #[int, int, int] {
+              $.0
+              ~> math.add[~, $.1]
+              ~> math.add[~, $.2]
+            },
+            [1, 2] ~> f[..., 3]
+            "#,
+        )
+        .expect("6");
+}
+
+#[test]
+fn test_ripple_call_function() {
+    quiver()
+        .evaluate("math = %\"math\", math.add ~> ~[3, 4]")
+        .expect("7");
+}
+
+#[test]
+fn test_ripple_field_access() {
+    quiver().evaluate("[x: 5, y: 10] ~> ~.x").expect("5");
+}
+
+#[test]
 fn test_function_result_covariance() {
     quiver().evaluate(
         r#"

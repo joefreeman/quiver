@@ -74,37 +74,17 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TupleName {
-    /// Explicit tuple name like Point[x: 1]
-    Literal(String),
-    /// Inherit name from variable like a[..., y: 2]
-    Identifier(String),
-    /// Inherit name from ripple like ~[..., y: 2]
-    Ripple,
-    /// Unnamed tuple like [x: 1]
-    None,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct Tuple {
-    pub name: TupleName,
+    /// Tuple name: None for unnamed, Some for named (e.g., "Point")
+    pub name: Option<String>,
     pub fields: Vec<TupleField>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum SpreadSource {
-    /// Bare spread (...) - will be filled in based on context
-    Chained,
-    /// Identifier spread (...identifier)
-    Identifier(String),
-    /// Ripple spread - spreads the rippled value
-    Ripple,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
     Chain(Chain),
-    Spread(SpreadSource),
+    /// Spread: None for bare `...`, Some(name) for `...name`
+    Spread(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,13 +107,15 @@ pub enum AccessSource {
     Identifier(String),
     /// Function parameter `$`
     Parameter,
+    /// Ripple `~` - references the piped value
+    Ripple,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Access {
     pub source: Option<AccessSource>,
     pub accessors: Vec<AccessPath>,
-    pub argument: Option<Tuple>,
+    pub argument: Option<Vec<TupleField>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -145,7 +127,7 @@ pub enum AccessPath {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Builtin {
     pub name: String,
-    pub argument: Option<Tuple>,
+    pub argument: Option<Vec<TupleField>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,7 +140,7 @@ pub struct PartialPattern {
 pub struct TailCall {
     pub identifier: Option<String>,
     pub accessors: Vec<AccessPath>,
-    pub argument: Option<Tuple>,
+    pub argument: Option<Vec<TupleField>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,7 +213,8 @@ pub enum PrimitiveType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleType {
-    pub name: TupleName,
+    /// Tuple name: None for unnamed, Some for named or type alias reference
+    pub name: Option<String>,
     pub fields: Vec<FieldType>,
     pub is_partial: bool,
 }
