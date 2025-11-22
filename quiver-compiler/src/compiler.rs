@@ -1259,6 +1259,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Track remaining type for exhaustiveness checking
         let mut remaining_type = parameter_type.clone();
+        // Track if previous branch had a nil guard (for scope parameter narrowing)
+        let mut prev_had_nil_guard = false;
 
         for (i, branch) in block.branches.iter().enumerate() {
             let is_last_branch = i == block.branches.len() - 1;
@@ -1271,14 +1273,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // So if we jump to this branch, the previous branch's variables were never allocated
                 // Reset local count to after parameter (locals from previous branch are "forgotten")
                 self.local_count = param_local + 1;
-                // Clear scope so branch can reuse variable names
-                self.scopes
-                    .last_mut()
-                    .ok_or_else(|| Error::InternalError {
-                        message: "No scope available when compiling block branch".to_string(),
-                    })?
-                    .bindings
-                    .clear();
+                // Clear scope and update parameter type if previous branch had a nil guard
+                // (This enables type narrowing for the Not operator without affecting
+                // complex pattern matching which uses Type guards)
+                let scope = self.scopes.last_mut().ok_or_else(|| Error::InternalError {
+                    message: "No scope available when compiling block branch".to_string(),
+                })?;
+                scope.bindings.clear();
+                if prev_had_nil_guard
+                    && !remaining_type.is_never()
+                    && let Some((ref mut param_type, _)) = scope.parameter
+                {
+                    *param_type = remaining_type.clone();
+                }
             }
 
             // Compile the condition expression - it can use ~> to access the parameter
@@ -1440,6 +1447,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     end_jumps.push(success_jump);
                 }
             }
+
+            // Track if this branch had a nil guard for next iteration
+            prev_had_nil_guard = matches!(&condition_guard, Guard::Type(t) if t.is_nil());
         }
 
         // Clear the parameter (branches have already cleared their specific locals)
@@ -2524,7 +2534,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Not operator requires a value".to_string())
                 })?;
-                Ok((self.compile_not(val_type)?, Guard::None))
+                self.compile_not(val_type)
             }
             ast::Term::BindMatch(pattern) => {
                 // Bind matches create new bindings
@@ -3033,13 +3043,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    fn compile_not(&mut self, _value_type: Type) -> Result<Type, Error> {
+    fn compile_not(&mut self, _value_type: Type) -> Result<(Type, Guard), Error> {
         // The ! operator works with any value on the stack
         // It converts [] to Ok and everything else to []
         self.codegen.add_instruction(Instruction::Not);
 
         // The Not instruction returns either Ok or NIL
-        Ok(Type::from_types(vec![Type::ok(), Type::nil()]))
+        // When Not succeeds (returns Ok), it proves the input was nil
+        let result_type = Type::from_types(vec![Type::ok(), Type::nil()]);
+        Ok((result_type, Guard::Type(Type::nil())))
     }
 
     fn compile_accessor(
