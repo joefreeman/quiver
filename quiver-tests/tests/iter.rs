@@ -9,9 +9,8 @@ fn test_map() {
             list = %"list",
             iter = %"iter",
             math = %"math",
-            xs = Cons[1, Cons[2, Cons[3, Nil]]],
             inc = #int { ~> math.add[~, 1] },
-            xs
+            Cons[1, Cons[2, Cons[3, Nil]]]
             ~> list.iter
             ~> iter.map[~, inc]
             ~> list.collect
@@ -28,9 +27,8 @@ fn test_filter() {
             list = %"list",
             iter = %"iter",
             math = %"math",
-            xs = Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]],
             even? = #int { ~> math.mod[~, 2] ~> =0 },
-            xs
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> list.iter
             ~> iter.filter[~, even?]
             ~> list.collect
@@ -46,8 +44,7 @@ fn test_take() {
             r#"
             list = %"list",
             iter = %"iter",
-            xs = Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]],
-            xs
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> list.iter
             ~> iter.take[~, 3]
             ~> list.collect
@@ -63,8 +60,7 @@ fn test_drop() {
             r#"
             list = %"list",
             iter = %"iter",
-            xs = Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]],
-            xs
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> list.iter
             ~> iter.drop[~, 2]
             ~> list.collect
@@ -80,8 +76,7 @@ fn test_take_while() {
             r#"
             list = %"list",
             iter = %"iter",
-            xs = Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]],
-            xs
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> list.iter
             ~> iter.take_while[~, #int { ~> =3 ~> / }]
             ~> list.collect
@@ -97,8 +92,7 @@ fn test_drop_while() {
             r#"
             list = %"list",
             iter = %"iter",
-            xs = Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]],
-            xs
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> list.iter
             ~> iter.drop_while[~, #int { ~> =2 ~> / }]
             ~> list.collect
@@ -162,8 +156,10 @@ fn test_enumerate() {
             r#"
             list = %"list",
             iter = %"iter",
-            xs = Cons[2, Cons[3, Cons[4, Nil]]] ~> list.iter,
-            xs ~> iter.enumerate ~> list.collect
+            Cons[2, Cons[3, Cons[4, Nil]]]
+            ~> list.iter
+            ~> iter.enumerate
+            ~> list.collect
             "#,
         )
         .expect("Cons[[0, 2], Cons[[1, 3], Cons[[2, 4], Nil]]]");
