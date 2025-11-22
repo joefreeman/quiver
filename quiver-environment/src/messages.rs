@@ -31,6 +31,7 @@ pub enum Command<E: Effect> {
         id: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
+        argument: Value,
         heap_data: Vec<Vec<u8>>,
     },
 
@@ -124,6 +125,7 @@ pub enum Event<E: Effect> {
         caller: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
+        argument: Value,
         heap: Vec<Vec<u8>>,
     },
 

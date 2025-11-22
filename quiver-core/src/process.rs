@@ -32,11 +32,12 @@ pub struct ProcessInfo {
 
 #[derive(Debug, Clone)]
 pub enum Action<E: Effect> {
-    /// Spawn a new process with the given function and captures
+    /// Spawn a new process with the given function, captures, and argument
     Spawn {
         caller: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
+        argument: Value,
     },
     /// Deliver a message to a target process
     Deliver { target: ProcessId, value: Value },

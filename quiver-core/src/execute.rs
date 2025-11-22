@@ -51,8 +51,15 @@ pub fn execute_instructions_sync<E: Effect>(
 
     let process_id = 0;
 
-    // Spawn a process with the temporary function (no captures)
-    executor.spawn_process(process_id, function_index, vec![], vec![], false)?;
+    // Spawn a process with the temporary function (no captures, nil argument)
+    executor.spawn_process(
+        process_id,
+        function_index,
+        vec![],
+        Value::nil(),
+        vec![],
+        false,
+    )?;
 
     // Execute until completion
     loop {

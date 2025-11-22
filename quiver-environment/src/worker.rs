@@ -81,9 +81,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 id,
                 function_index,
                 captures,
+                argument,
                 heap_data,
             } => {
-                self.spawn_process(id, function_index, captures, heap_data)?;
+                self.spawn_process(id, function_index, captures, argument, heap_data)?;
             }
             Command::ResumeProcess { id, function_index } => {
                 self.resume_process(id, function_index)?;
@@ -166,8 +167,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 caller,
                 function_index,
                 captures,
+                argument,
             } => {
-                // Extract heap data from all captures
+                // Extract heap data from all captures and argument
                 let mut all_heap_data = Vec::new();
                 let mut extracted_captures = Vec::new();
 
@@ -180,10 +182,17 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     all_heap_data.append(&mut heap);
                 }
 
+                let (extracted_argument, mut arg_heap) = self
+                    .executor
+                    .extract_heap_data(&argument)
+                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
+                all_heap_data.append(&mut arg_heap);
+
                 self.sender.send(Event::SpawnAction {
                     caller,
                     function_index,
                     captures: extracted_captures,
+                    argument: extracted_argument,
                     heap: all_heap_data,
                 })?;
             }
@@ -244,7 +253,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
         // Spawn the persistent process with no captures
         self.executor
-            .spawn_process(id, function_index, vec![], vec![], true)
+            .spawn_process(id, function_index, vec![], Value::nil(), vec![], true)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 
@@ -253,6 +262,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         id: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
+        argument: Value,
         heap_data: Vec<Vec<u8>>,
     ) -> Result<(), EnvironmentError> {
         // Validate function exists
@@ -262,7 +272,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
         // Delegate to executor which handles heap injection and initialization
         self.executor
-            .spawn_process(id, function_index, captures, heap_data, false)
+            .spawn_process(id, function_index, captures, argument, heap_data, false)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 

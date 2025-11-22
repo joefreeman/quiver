@@ -241,6 +241,7 @@ impl<E: Effect> Executor<E> {
         id: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
+        argument: Value,
         heap_data: Vec<Vec<u8>>,
         persistent: bool,
     ) -> Result<(), Error> {
@@ -259,11 +260,12 @@ impl<E: Effect> Executor<E> {
             process.locals.push(injected);
         }
 
-        // Push nil parameter onto stack
+        // Push argument onto stack
+        let injected_arg = self.inject_heap_data(argument, &heap_data)?;
         let process = self
             .get_process_mut(id)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-        process.stack.push(Value::nil());
+        process.stack.push(injected_arg);
 
         // Push initial frame with function index
         let process = self
@@ -1366,6 +1368,7 @@ impl<E: Effect> Executor<E> {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
         let (function_index, captures) = match function_value {
             Value::Function(idx, caps) => (idx, caps),
@@ -1386,6 +1389,7 @@ impl<E: Effect> Executor<E> {
             caller: pid,
             function_index,
             captures,
+            argument,
         }))
     }
 

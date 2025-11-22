@@ -622,8 +622,9 @@ impl<E: Effect> Environment<E> {
                 caller,
                 function_index,
                 captures,
+                argument,
                 heap,
-            } => self.handle_spawn(caller, function_index, captures, heap),
+            } => self.handle_spawn(caller, function_index, captures, argument, heap),
             Event::DeliverAction {
                 target,
                 message,
@@ -780,18 +781,20 @@ impl<E: Effect> Environment<E> {
         caller: ProcessId,
         function_index: usize,
         captures: Vec<Value>,
+        argument: Value,
         heap: Vec<Vec<u8>>,
     ) -> Result<(), EnvironmentError> {
         // Allocate new ProcessId
         let new_pid = self.allocate_process_id();
 
-        // Choose worker: if any captures are resources, spawn on the same worker
+        // Choose worker: if any captures or argument are resources, spawn on the same worker
         // that owns the first resource (via the resource's owner process_id).
         // Otherwise use round-robin.
         let worker_id = captures
             .iter()
-            .find_map(|capture| {
-                if let Value::Resource(resource_id, _) = capture {
+            .chain(std::iter::once(&argument))
+            .find_map(|value| {
+                if let Value::Resource(resource_id, _) = value {
                     // Look up the owner of this resource and find their worker
                     self.resource_ownership
                         .get(resource_id)
@@ -804,17 +807,19 @@ impl<E: Effect> Environment<E> {
 
         self.process_router.insert(new_pid, worker_id);
 
-        // Transfer ownership of any resources in captures to the new process
+        // Transfer ownership of any resources in captures or argument to the new process
         for capture in &captures {
             self.transfer_resource_ownership(capture, new_pid);
         }
+        self.transfer_resource_ownership(&argument, new_pid);
 
-        // Spawn process on chosen worker with function and captures
+        // Spawn process on chosen worker with function, captures, and argument
         self.workers[worker_id]
             .send(Command::SpawnProcess {
                 id: new_pid,
                 function_index,
                 captures,
+                argument,
                 heap_data: heap.clone(),
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;

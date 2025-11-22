@@ -1966,9 +1966,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Compile chained spawn: `value ~> @function`
-    /// Creates a wrapper function that captures the argument and target, then spawns it
+    /// Stack has [argument], we compile the function and emit Spawn
     fn compile_chained_spawn(&mut self, term: ast::Term, arg_type: Type) -> Result<Type, Error> {
-        // Compile the target function
+        // Compile the target function (stack becomes [argument, function])
         let (target_type, _) = self.compile_term(term, None, None, None)?;
 
         let (target_param, target_receive, target_result) =
@@ -1992,42 +1992,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             });
         }
 
-        // Stack is now: [argument, target_function]
-        // We need to create a wrapper function that captures both and calls target with argument
-
-        // Save both to locals (Store pushes in stack order: target first, then argument)
-        let wrapper_locals_base = self.local_count;
-        self.local_count += 2;
-        self.codegen.add_instruction(Instruction::Store); // target function -> index 0
-        self.codegen.add_instruction(Instruction::Store); // argument -> index 1
-
-        // Create wrapper function that takes nil and calls target with captured argument
-        // captures[0] = target (at wrapper_locals_base), captures[1] = argument (at wrapper_locals_base + 1)
-        let wrapper_instructions = vec![
-            Instruction::Load(1), // Load captured argument (from wrapper's captures[1])
-            Instruction::Load(0), // Load captured target function (from wrapper's captures[0])
-            Instruction::Call,    // Call target with argument
-        ];
-
-        let wrapper_func_index = self.program.register_function(Function {
-            instructions: wrapper_instructions,
-            function_type: CallableType {
-                parameter: Type::nil(),
-                result: target_result.clone(),
-                receive: target_receive.clone(),
-            },
-            captures: vec![wrapper_locals_base, wrapper_locals_base + 1],
-        });
-
-        // Emit function reference with captures
-        self.codegen
-            .add_instruction(Instruction::Function(wrapper_func_index));
-
-        // Clean up locals (the function has captured them)
-        self.codegen.add_instruction(Instruction::Clear(2));
-        self.local_count -= 2;
-
-        // Spawn the wrapper
+        // Stack is [argument, function] - Spawn pops function, pops argument
         self.codegen.add_instruction(Instruction::Spawn);
 
         Ok(Type::Process(Box::new(ProcessType {
@@ -2439,6 +2404,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             });
                         }
 
+                        // Stack is [function], need [nil, function] for Spawn
+                        self.codegen.add_instruction(Instruction::Tuple(NIL));
+                        self.codegen.add_instruction(Instruction::Rotate(2));
                         self.codegen.add_instruction(Instruction::Spawn);
 
                         Ok((
@@ -2482,7 +2450,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         });
                     }
 
-                    // Emit spawn instruction (pops function, pushes Process)
+                    // Stack is [function], need [nil, function] for Spawn
+                    self.codegen.add_instruction(Instruction::Tuple(NIL));
+                    self.codegen.add_instruction(Instruction::Rotate(2));
                     self.codegen.add_instruction(Instruction::Spawn);
 
                     Ok((
