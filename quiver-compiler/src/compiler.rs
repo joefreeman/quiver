@@ -1965,40 +1965,304 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(source_types)
     }
 
-    /// Compile chained spawn: `value ~> @function`
-    /// Stack has [argument], we compile the function and emit Spawn
-    fn compile_chained_spawn(&mut self, term: ast::Term, arg_type: Type) -> Result<Type, Error> {
-        // Compile the target function (stack becomes [argument, function])
-        let (target_type, _) = self.compile_term(term, None, None, None)?;
+    /// Compile spawn operation: @f, f ~> @, or arg ~> @f
+    fn compile_spawn(&mut self, term: ast::Term, arg_type: Option<Type>) -> Result<Type, Error> {
+        // Case 1: f ~> @ (function is the piped value, spawn with nil)
+        if matches!(term, ast::Term::Ripple) {
+            let fn_type = arg_type.ok_or_else(|| {
+                Error::FeatureUnsupported("Ripple spawn requires piped value".to_string())
+            })?;
+            return self.emit_nil_param_spawn(fn_type);
+        }
 
-        let (target_param, target_receive, target_result) =
-            if let Type::Callable(callable) = &target_type {
-                (
-                    callable.parameter.clone(),
-                    callable.receive.clone(),
-                    callable.result.clone(),
-                )
-            } else {
-                return Err(Error::FeatureUnsupported(
-                    "Can only spawn functions".to_string(),
-                ));
-            };
+        // Compile the function term
+        let (fn_type, _) = self.compile_term(term, None, None, None)?;
 
-        // Type check: argument must be compatible with function parameter
-        if !arg_type.is_compatible(&target_param, &self.program) {
+        if let Some(arg_type) = arg_type {
+            // Case 2: arg ~> @f (spawn with argument)
+            self.emit_arg_spawn(fn_type, arg_type)
+        } else {
+            // Case 3: @f (spawn with nil)
+            self.emit_nil_param_spawn(fn_type)
+        }
+    }
+
+    /// Emit spawn for nil-parameter function (cases 1 and 3)
+    /// Stack before: [function]
+    fn emit_nil_param_spawn(&mut self, fn_type: Type) -> Result<Type, Error> {
+        let Type::Callable(callable) = &fn_type else {
+            return Err(Error::FeatureUnsupported(
+                "Can only spawn functions".to_string(),
+            ));
+        };
+
+        if callable.parameter != Type::nil() {
             return Err(Error::TypeMismatch {
-                expected: quiver_core::format::format_type(&self.program, &target_param),
+                expected: "function with nil parameter".to_string(),
+                found: format!(
+                    "function with parameter {}",
+                    quiver_core::format::format_type(&self.program, &callable.parameter)
+                ),
+            });
+        }
+
+        // Stack: [function] -> [nil, function] -> spawn
+        self.codegen.add_instruction(Instruction::Tuple(NIL));
+        self.codegen.add_instruction(Instruction::Rotate(2));
+        self.codegen.add_instruction(Instruction::Spawn);
+
+        Ok(Type::Process(Box::new(ProcessType {
+            send: Some(Box::new(callable.receive.clone())),
+            receive: Some(Box::new(callable.result.clone())),
+        })))
+    }
+
+    /// Emit spawn with argument (case 2)
+    /// Stack before: [argument, function]
+    fn emit_arg_spawn(&mut self, fn_type: Type, arg_type: Type) -> Result<Type, Error> {
+        let Type::Callable(callable) = &fn_type else {
+            return Err(Error::FeatureUnsupported(
+                "Can only spawn functions".to_string(),
+            ));
+        };
+
+        if !arg_type.is_compatible(&callable.parameter, &self.program) {
+            return Err(Error::TypeMismatch {
+                expected: quiver_core::format::format_type(&self.program, &callable.parameter),
                 found: quiver_core::format::format_type(&self.program, &arg_type),
             });
         }
 
-        // Stack is [argument, function] - Spawn pops function, pops argument
         self.codegen.add_instruction(Instruction::Spawn);
 
         Ok(Type::Process(Box::new(ProcessType {
-            send: Some(Box::new(target_receive)),
-            receive: Some(Box::new(target_result)),
+            send: Some(Box::new(callable.receive.clone())),
+            receive: Some(Box::new(callable.result.clone())),
         })))
+    }
+
+    /// Compile an argument tuple, handling ripple context conversion
+    /// Returns None if no argument provided
+    fn compile_argument(
+        &mut self,
+        argument: Option<&ast::Tuple>,
+        value_type: Option<&Type>,
+        ripple_context: Option<&RippleContext>,
+        context_name: &str,
+    ) -> Result<Option<Type>, Error> {
+        let Some(args) = argument else {
+            return Ok(None);
+        };
+
+        // Check if argument would silently drop piped value
+        if value_type.is_some()
+            && !helpers::tuple_contains_ripple(&args.fields)
+            && !helpers::tuple_contains_spread(&args.fields)
+        {
+            return Err(Error::ValueIgnored(format!(
+                "{} argument ignores piped value; use ripple (e.g., {}[~, 2])",
+                context_name, context_name
+            )));
+        }
+
+        // Convert value_type to ripple_context if present
+        let ripple_context_value;
+        let ripple_ctx = if let Some(vt) = value_type {
+            ripple_context_value = RippleContext {
+                value_type: vt.clone(),
+                stack_offset: 0,
+                owns_value: true,
+            };
+            Some(&ripple_context_value)
+        } else {
+            ripple_context
+        };
+
+        Ok(Some(self.compile_tuple(
+            args.name.clone(),
+            args.fields.clone(),
+            ripple_ctx,
+        )?))
+    }
+
+    /// Compile access expression: .x, $.x, foo.x, etc.
+    fn compile_access(
+        &mut self,
+        access: ast::Access,
+        value_type: Option<Type>,
+        ripple_context: Option<&RippleContext>,
+    ) -> Result<Type, Error> {
+        match access.source {
+            None => {
+                // Field/positional access (.x, .0) requires a value
+                let val_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported(
+                        "Field/positional access requires a value".to_string(),
+                    )
+                })?;
+
+                let accessed_type = self.compile_accessor(val_type, access.accessors, "value")?;
+
+                if let Some(args) = &access.argument {
+                    // Compile argument - no ripples allowed for bare accessor
+                    let arg_type =
+                        self.compile_tuple(args.name.clone(), args.fields.clone(), None)?;
+                    self.codegen.add_instruction(Instruction::Rotate(2));
+                    self.apply_value_to_type(accessed_type, arg_type)
+                } else {
+                    Ok(accessed_type)
+                }
+            }
+            Some(ast::AccessSource::Parameter) => {
+                // $ accesses the function parameter
+                let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
+                self.codegen.add_instruction(Instruction::Load(param_local));
+
+                let accessed_type = self.compile_accessor(param_type, access.accessors, "$")?;
+                let arg_type = self.compile_argument(
+                    access.argument.as_ref(),
+                    value_type.as_ref(),
+                    ripple_context,
+                    "$",
+                )?;
+
+                if let Some(arg_type) = arg_type {
+                    self.apply_value_to_type(accessed_type, arg_type)
+                } else if let Some(val_type) = value_type {
+                    self.apply_value_to_type(accessed_type, val_type)
+                } else {
+                    Ok(accessed_type)
+                }
+            }
+            Some(ast::AccessSource::Identifier(name)) => {
+                // Compile argument first so ripples can access the piped value
+                let arg_type = self.compile_argument(
+                    access.argument.as_ref(),
+                    value_type.as_ref(),
+                    ripple_context,
+                    &name,
+                )?;
+
+                let accessed_type = self.compile_member_access(&name, access.accessors)?;
+
+                if let Some(arg_type) = arg_type {
+                    self.apply_value_to_type(accessed_type, arg_type)
+                } else if let Some(val_type) = value_type {
+                    self.apply_value_to_type(accessed_type, val_type)
+                } else {
+                    Ok(accessed_type)
+                }
+            }
+        }
+    }
+
+    /// Compile select expression: !identifier, !(type), !{ body }, !(sources...)
+    fn compile_select(
+        &mut self,
+        select: ast::Select,
+        value_type: Option<Type>,
+    ) -> Result<Type, Error> {
+        // Check if we need to validate ripple usage (only for Sources variant)
+        let is_sources_variant = matches!(select, ast::Select::Sources(_));
+
+        // Normalize all select forms into sources: Vec<Chain>
+        let sources = self.normalize_select_sources(select)?;
+
+        if sources.is_empty() {
+            return Err(Error::FeatureUnsupported(
+                "Select requires at least one source".to_string(),
+            ));
+        }
+
+        // If there's a chained value, check that it's used (via ripple) in at least one source
+        if value_type.is_some() && is_sources_variant && !helpers::select_contains_ripple(&sources)
+        {
+            return Err(Error::FeatureUnsupported(
+                "Chained value must be used in select sources (use ripple operator ~)".to_string(),
+            ));
+        }
+
+        // Compile all sources
+        let source_types = self.compile_select_sources(&sources, value_type.as_ref())?;
+
+        // If there was a chained value, remove it from the bottom of the stack
+        if value_type.is_some() {
+            self.codegen.emit_rotate_pop(sources.len() + 1);
+        }
+
+        // Emit Select(n) instruction
+        self.codegen
+            .add_instruction(Instruction::Select(sources.len()));
+
+        self.compute_select_return_type(&source_types)
+    }
+
+    /// Normalize different select forms into a common Vec<Chain> representation
+    fn normalize_select_sources(&self, select: ast::Select) -> Result<Vec<ast::Chain>, Error> {
+        Ok(match select {
+            ast::Select::Identifier(ident) => {
+                // Semantic resolution: type or variable?
+                let param_type = if ident == "int" {
+                    Some(ast::Type::Primitive(ast::PrimitiveType::Int))
+                } else if ident == "bin" {
+                    Some(ast::Type::Primitive(ast::PrimitiveType::Bin))
+                } else if scopes::lookup_type_alias(&self.scopes, ident.as_str()).is_some() {
+                    Some(ast::Type::Identifier {
+                        name: ident.clone(),
+                        arguments: vec![],
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(param_type) = param_type {
+                    // It's a type - convert to identity function
+                    vec![ast::Chain {
+                        match_pattern: None,
+                        terms: vec![ast::Term::Function(ast::Function {
+                            type_parameters: vec![],
+                            parameter_type: Some(param_type),
+                            return_type: None,
+                            body: None,
+                        })],
+                        continuation: false,
+                    }]
+                } else {
+                    // It's a variable - treat as variable access
+                    vec![ast::Chain {
+                        match_pattern: None,
+                        terms: vec![ast::Term::Access(ast::Access {
+                            source: Some(ast::AccessSource::Identifier(ident)),
+                            accessors: vec![],
+                            argument: None,
+                        })],
+                        continuation: false,
+                    }]
+                }
+            }
+            ast::Select::Type(ty) => {
+                // Identity receive function
+                vec![ast::Chain {
+                    match_pattern: None,
+                    terms: vec![ast::Term::Function(ast::Function {
+                        type_parameters: vec![],
+                        parameter_type: Some(ty),
+                        return_type: None,
+                        body: None,
+                    })],
+                    continuation: false,
+                }]
+            }
+            ast::Select::Function(func) => {
+                // Receive function with body
+                vec![ast::Chain {
+                    match_pattern: None,
+                    terms: vec![ast::Term::Function(func)],
+                    continuation: false,
+                }]
+            }
+            ast::Select::Sources(sources) => sources,
+        })
     }
 
     /// Compute the return type of a select operation from source types
@@ -2113,150 +2377,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
                 Ok((result_type, Guard::None))
             }
-            ast::Term::Access(access) => {
-                match &access.source {
-                    None => {
-                        // Field/positional access (.x, .0) requires a value
-                        if let Some(val_type) = value_type {
-                            // Access on the piped value
-                            let accessed_type =
-                                self.compile_accessor(val_type, access.accessors, "value")?;
-
-                            if let Some(args) = &access.argument {
-                                // Compile argument - no ripples allowed (pass None as ripple_context)
-                                let arg_type = self.compile_tuple(
-                                    args.name.clone(),
-                                    args.fields.clone(),
-                                    None,
-                                )?;
-
-                                // Now we have: [function, tuple] on stack, but we need [tuple, function]
-                                self.codegen.add_instruction(Instruction::Rotate(2));
-
-                                // Apply argument to the accessed function
-                                Ok((
-                                    self.apply_value_to_type(accessed_type, arg_type)?,
-                                    Guard::None,
-                                ))
-                            } else {
-                                Ok((accessed_type, Guard::None))
-                            }
-                        } else {
-                            Err(Error::FeatureUnsupported(
-                                "Field/positional access requires a value".to_string(),
-                            ))
-                        }
-                    }
-                    Some(ast::AccessSource::Parameter) => {
-                        // $ accesses the function parameter
-                        let (param_type, param_local) =
-                            scopes::get_function_parameter(&self.scopes)?;
-                        self.codegen.add_instruction(Instruction::Load(param_local));
-
-                        // Apply accessors to the parameter (e.g., $.x, $.0)
-                        let accessed_type =
-                            self.compile_accessor(param_type, access.accessors, "$")?;
-
-                        // Handle argument if present (e.g., $[...])
-                        if let Some(args) = &access.argument {
-                            // Check if argument would silently drop piped value
-                            if value_type.is_some()
-                                && !helpers::tuple_contains_ripple(&args.fields)
-                                && !helpers::tuple_contains_spread(&args.fields)
-                            {
-                                return Err(Error::ValueIgnored(
-                                    "Function argument ignores piped value; use ripple (e.g., $[~, 2])"
-                                        .to_string(),
-                                ));
-                            }
-
-                            // Convert value_type to ripple_context if present
-                            let ripple_context_value;
-                            let ripple_context_param = if let Some(vt) = value_type.as_ref() {
-                                ripple_context_value = RippleContext {
-                                    value_type: vt.clone(),
-                                    stack_offset: 0,
-                                    owns_value: true,
-                                };
-                                Some(&ripple_context_value)
-                            } else {
-                                ripple_context
-                            };
-
-                            let arg_type = self.compile_tuple(
-                                args.name.clone(),
-                                args.fields.clone(),
-                                ripple_context_param,
-                            )?;
-
-                            // Apply argument to the accessed function
-                            Ok((
-                                self.apply_value_to_type(accessed_type, arg_type)?,
-                                Guard::None,
-                            ))
-                        } else if let Some(val_type) = value_type {
-                            // Apply piped value to the accessed function
-                            Ok((
-                                self.apply_value_to_type(accessed_type, val_type)?,
-                                Guard::None,
-                            ))
-                        } else {
-                            Ok((accessed_type, Guard::None))
-                        }
-                    }
-                    Some(ast::AccessSource::Identifier(name)) => {
-                        // If there's an argument, compile it first (before loading the function)
-                        // so that ripples in the argument can access the piped value on the stack
-                        let arg_type = if let Some(args) = &access.argument {
-                            // Check if argument would silently drop piped value
-                            if value_type.is_some()
-                                && !helpers::tuple_contains_ripple(&args.fields)
-                                && !helpers::tuple_contains_spread(&args.fields)
-                            {
-                                return Err(Error::ValueIgnored(
-                                    "Function argument ignores piped value; use ripple (e.g., f[~, 2])"
-                                        .to_string(),
-                                ));
-                            }
-
-                            // Convert value_type to ripple_context if present
-                            // Set owns_value=true when converting from value_type (we own it and must clean up)
-                            let ripple_context_value;
-                            let ripple_context_param = if let Some(vt) = value_type.as_ref() {
-                                ripple_context_value = RippleContext {
-                                    value_type: vt.clone(),
-                                    stack_offset: 0,
-                                    owns_value: true,
-                                };
-                                Some(&ripple_context_value)
-                            } else {
-                                ripple_context
-                            };
-
-                            Some(self.compile_tuple(
-                                args.name.clone(),
-                                args.fields.clone(),
-                                ripple_context_param,
-                            )?)
-                        } else {
-                            None
-                        };
-
-                        // Load the access
-                        let accessed_type = self.compile_member_access(name, access.accessors)?;
-
-                        // Apply argument if present, otherwise apply piped value if present
-                        let result_type = if let Some(arg_type) = arg_type {
-                            self.apply_value_to_type(accessed_type, arg_type)?
-                        } else if let Some(val_type) = value_type {
-                            self.apply_value_to_type(accessed_type, val_type)?
-                        } else {
-                            accessed_type
-                        };
-                        Ok((result_type, Guard::None))
-                    }
-                }
-            }
+            ast::Term::Access(access) => Ok((
+                self.compile_access(access, value_type, ripple_context)?,
+                Guard::None,
+            )),
             ast::Term::Import(path) => {
                 if value_type.is_some() {
                     return Err(Error::FeatureUnsupported(
@@ -2266,47 +2390,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((self.compile_import(&path)?, Guard::None))
             }
             ast::Term::Builtin(builtin) => {
-                // If there's an argument, compile it first (before loading the builtin)
-                // so that ripples in the argument can access the piped value on the stack
-                let arg_type = if let Some(args) = &builtin.argument {
-                    // Check if argument would silently drop piped value
-                    if value_type.is_some()
-                        && !helpers::tuple_contains_ripple(&args.fields)
-                        && !helpers::tuple_contains_spread(&args.fields)
-                    {
-                        return Err(Error::ValueIgnored(
-                            "Builtin argument ignores piped value; use ripple (e.g., __add__[~, 2])"
-                                .to_string(),
-                        ));
-                    }
+                // Compile argument first so ripples can access the piped value
+                let arg_type = self.compile_argument(
+                    builtin.argument.as_ref(),
+                    value_type.as_ref(),
+                    ripple_context,
+                    "__builtin__",
+                )?;
 
-                    // Convert value_type to ripple_context if present
-                    // Set owns_value=true when converting from value_type (we own it and must clean up)
-                    let ripple_context_value;
-                    let ripple_context_param = if let Some(vt) = value_type.as_ref() {
-                        ripple_context_value = RippleContext {
-                            value_type: vt.clone(),
-                            stack_offset: 0,
-                            owns_value: true,
-                        };
-                        Some(&ripple_context_value)
-                    } else {
-                        ripple_context
-                    };
-
-                    Some(self.compile_tuple(
-                        args.name.clone(),
-                        args.fields.clone(),
-                        ripple_context_param,
-                    )?)
-                } else {
-                    None
-                };
-
-                // Load the builtin
                 let builtin_type = self.compile_builtin(&builtin.name)?;
 
-                // Apply argument if present, otherwise apply piped value if present
                 let result_type = if let Some(arg_type) = arg_type {
                     self.apply_value_to_type(builtin_type, arg_type)?
                 } else if let Some(val_type) = value_type {
@@ -2317,12 +2410,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((result_type, Guard::None))
             }
             ast::Term::TailCall(tail_call) => {
-                // If there's an argument, compile it first (may contain ripples using value_type)
+                // Compile argument if present (may contain ripples using value_type)
+                // TailCall doesn't check for ignored values - argument or piped value is used
                 let arg_type = if let Some(args) = &tail_call.argument {
-                    // Convert value_type to ripple_context if present
-                    // Set owns_value=true when converting from value_type (we own it and must clean up)
                     let ripple_context_value;
-                    let ripple_context_param = if let Some(vt) = value_type.as_ref() {
+                    let ripple_ctx = if let Some(vt) = value_type.as_ref() {
                         ripple_context_value = RippleContext {
                             value_type: vt.clone(),
                             stack_offset: 0,
@@ -2332,12 +2424,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     } else {
                         ripple_context
                     };
-
-                    Some(self.compile_tuple(
-                        args.name.clone(),
-                        args.fields.clone(),
-                        ripple_context_param,
-                    )?)
+                    Some(self.compile_tuple(args.name.clone(), args.fields.clone(), ripple_ctx)?)
                 } else {
                     value_type
                 };
@@ -2377,225 +2464,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 })?;
                 self.compile_match(pattern, val_type, on_no_match, pattern::PatternMode::Pin)
             }
-            ast::Term::Spawn(term) => {
-                // Spawn a function, optionally with an argument: @f or 42 ~> @f
-
-                if let Some(arg_type) = value_type {
-                    // Check if this is the simple case: f ~> @ (spawn the piped function)
-                    if matches!(*term, ast::Term::Ripple) {
-                        // The function is already on the stack (from piping), just spawn it
-                        let Type::Callable(callable) = &arg_type else {
-                            return Err(Error::FeatureUnsupported(
-                                "Can only spawn functions".to_string(),
-                            ));
-                        };
-
-                        // Type check: function must take nil as parameter
-                        if callable.parameter != Type::nil() {
-                            return Err(Error::TypeMismatch {
-                                expected: "function with nil parameter".to_string(),
-                                found: format!(
-                                    "function with parameter {}",
-                                    quiver_core::format::format_type(
-                                        &self.program,
-                                        &callable.parameter
-                                    )
-                                ),
-                            });
-                        }
-
-                        // Stack is [function], need [nil, function] for Spawn
-                        self.codegen.add_instruction(Instruction::Tuple(NIL));
-                        self.codegen.add_instruction(Instruction::Rotate(2));
-                        self.codegen.add_instruction(Instruction::Spawn);
-
-                        Ok((
-                            Type::Process(Box::new(ProcessType {
-                                send: Some(Box::new(callable.receive.clone())),
-                                receive: Some(Box::new(callable.result.clone())),
-                            })),
-                            Guard::None,
-                        ))
-                    } else {
-                        // Chained spawn with explicit function: arg ~> @f
-                        Ok((self.compile_chained_spawn(*term, arg_type)?, Guard::None))
-                    }
-                } else {
-                    // Direct spawn: @function (no argument)
-                    // Compile the term to get the function value
-                    let (term_type, _) = self.compile_term(*term, None, None, None)?;
-
-                    // Extract the parameter, receive and return types from the function
-                    let (param_type, receive_type, return_type) =
-                        if let Type::Callable(callable) = &term_type {
-                            (
-                                callable.parameter.clone(),
-                                callable.receive.clone(),
-                                callable.result.clone(),
-                            )
-                        } else {
-                            return Err(Error::FeatureUnsupported(
-                                "Can only spawn functions".to_string(),
-                            ));
-                        };
-
-                    // Type check: function must take nil as parameter
-                    if param_type != Type::nil() {
-                        return Err(Error::TypeMismatch {
-                            expected: "function with nil parameter".to_string(),
-                            found: format!(
-                                "function with parameter {}",
-                                quiver_core::format::format_type(&self.program, &param_type)
-                            ),
-                        });
-                    }
-
-                    // Stack is [function], need [nil, function] for Spawn
-                    self.codegen.add_instruction(Instruction::Tuple(NIL));
-                    self.codegen.add_instruction(Instruction::Rotate(2));
-                    self.codegen.add_instruction(Instruction::Spawn);
-
-                    Ok((
-                        Type::Process(Box::new(ProcessType {
-                            send: Some(Box::new(receive_type)),
-                            receive: Some(Box::new(return_type)),
-                        })),
-                        Guard::None,
-                    ))
-                }
-            }
+            ast::Term::Spawn(term) => Ok((self.compile_spawn(*term, value_type)?, Guard::None)),
             ast::Term::Select(select) => {
-                // Select operation with four forms:
-                // 1. !identifier - needs semantic resolution
-                // 2. !(type) - identity receive function
-                // 3. !identifier { ... } or !(type) { ... } - receive function with body
-                // 4. !(source1, source2, ...) - multiple sources racing
-
-                // Check if we need to validate ripple usage (only for Sources variant)
-                let is_sources_variant = matches!(select, ast::Select::Sources(_));
-
-                let sources = match select {
-                    ast::Select::Identifier(ident) => {
-                        // Perform semantic resolution to determine if it's a type or variable
-                        if ident == "int" {
-                            // It's the int primitive type - convert to identity function
-                            vec![ast::Chain {
-                                match_pattern: None,
-                                terms: vec![ast::Term::Function(ast::Function {
-                                    type_parameters: vec![],
-                                    parameter_type: Some(ast::Type::Primitive(
-                                        ast::PrimitiveType::Int,
-                                    )),
-                                    return_type: None,
-                                    body: None,
-                                })],
-                                continuation: false,
-                            }]
-                        } else if ident == "bin" {
-                            // It's the bin primitive type - convert to identity function
-                            vec![ast::Chain {
-                                match_pattern: None,
-                                terms: vec![ast::Term::Function(ast::Function {
-                                    type_parameters: vec![],
-                                    parameter_type: Some(ast::Type::Primitive(
-                                        ast::PrimitiveType::Bin,
-                                    )),
-                                    return_type: None,
-                                    body: None,
-                                })],
-                                continuation: false,
-                            }]
-                        } else if scopes::lookup_type_alias(&self.scopes, ident.as_str()).is_some()
-                        {
-                            // It's a type alias - convert to identity function with identifier type
-                            vec![ast::Chain {
-                                match_pattern: None,
-                                terms: vec![ast::Term::Function(ast::Function {
-                                    type_parameters: vec![],
-                                    parameter_type: Some(ast::Type::Identifier {
-                                        name: ident.clone(),
-                                        arguments: vec![],
-                                    }),
-                                    return_type: None,
-                                    body: None,
-                                })],
-                                continuation: false,
-                            }]
-                        } else {
-                            // It's a variable - treat as variable access
-                            vec![ast::Chain {
-                                match_pattern: None,
-                                terms: vec![ast::Term::Access(ast::Access {
-                                    source: Some(ast::AccessSource::Identifier(ident.clone())),
-                                    accessors: vec![],
-                                    argument: None,
-                                })],
-                                continuation: false,
-                            }]
-                        }
-                    }
-                    ast::Select::Type(ty) => {
-                        // Identity receive function: convert to #type
-                        vec![ast::Chain {
-                            match_pattern: None,
-                            terms: vec![ast::Term::Function(ast::Function {
-                                type_parameters: vec![],
-                                parameter_type: Some(ty.clone()),
-                                return_type: None,
-                                body: None,
-                            })],
-                            continuation: false,
-                        }]
-                    }
-                    ast::Select::Function(func) => {
-                        // Receive function with body
-                        vec![ast::Chain {
-                            match_pattern: None,
-                            terms: vec![ast::Term::Function(func.clone())],
-                            continuation: false,
-                        }]
-                    }
-                    ast::Select::Sources(sources) => sources.clone(),
-                };
-
-                if sources.is_empty() {
-                    return Err(Error::FeatureUnsupported(
-                        "Select requires at least one source".to_string(),
-                    ));
-                }
-
-                // If there's a chained value, check that it's used (via ripple) in at least one source
-                // Skip this check for Type and Function variants (they don't use ripple)
-                if value_type.is_some()
-                    && is_sources_variant
-                    && !helpers::select_contains_ripple(&sources)
-                {
-                    return Err(Error::FeatureUnsupported(
-                        "Chained value must be used in select sources (use ripple operator ~)"
-                            .to_string(),
-                    ));
-                }
-
-                // Compile all sources
-                let source_types = self.compile_select_sources(&sources, value_type.as_ref())?;
-
-                // If there was a chained value, remove it from the bottom of the stack
-                // Stack is currently: [chained_value | src0 | src1 | ... | src(n-1)]
-                // We want: [src0 | src1 | ... | src(n-1)]
-                // Use Rotate to move chained_value to top, then Pop it
-                if value_type.is_some() {
-                    let n = sources.len();
-                    // Rotate(n+1) moves the item at depth n (the chained value) to the top
-                    self.codegen.add_instruction(Instruction::Rotate(n + 1));
-                    self.codegen.add_instruction(Instruction::Pop);
-                }
-
-                // Emit Select(n) instruction
-                self.codegen
-                    .add_instruction(Instruction::Select(sources.len()));
-
-                // Compute and return the select return type
-                Ok((self.compute_select_return_type(&source_types)?, Guard::None))
+                Ok((self.compile_select(select, value_type)?, Guard::None))
             }
             ast::Term::Self_ => {
                 self.codegen.add_instruction(Instruction::Self_);
