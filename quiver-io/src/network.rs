@@ -5,14 +5,14 @@ use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId};
 use quiver_core::value::{Binary, Value};
 
-/// tcp_connect([host: bin, port: int, buffer_size: int]) -> Resource<TcpSocket>
+/// tcp_connect([host: bin, port: int]) -> Resource<TcpSocket>
 /// Connect to a TCP server (async via io_uring)
 pub fn builtin_tcp_connect(
     process_id: ProcessId,
     value: &Value,
     executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract [host, port, buffer_size] tuple
+    // Extract [host, port] tuple
     let Value::Tuple(_, fields) = value else {
         return Err(Error::TypeMismatch {
             expected: "tuple".to_string(),
@@ -20,9 +20,9 @@ pub fn builtin_tcp_connect(
         });
     };
 
-    if fields.len() != 3 {
+    if fields.len() != 2 {
         return Err(Error::ArityMismatch {
-            expected: 3,
+            expected: 2,
             found: fields.len(),
         });
     }
@@ -58,25 +58,10 @@ pub fn builtin_tcp_connect(
         });
     };
 
-    // Get buffer size
-    let Value::Integer(buffer_size) = fields[2] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[2].type_name().to_string(),
-        });
-    };
-
     if !(0..=65535).contains(&port) {
         return Err(Error::InvalidArgument(format!(
             "Port must be between 0 and 65535, got {}",
             port
-        )));
-    }
-
-    if buffer_size <= 0 {
-        return Err(Error::InvalidArgument(format!(
-            "Buffer size must be positive, got {}",
-            buffer_size
         )));
     }
 
@@ -108,7 +93,6 @@ pub fn builtin_tcp_connect(
         effect: NativeEffect::TcpConnect {
             host: host_bytes,
             port: port as u16,
-            buffer_size: buffer_size as usize,
         },
     }))
 }
@@ -168,14 +152,14 @@ pub fn builtin_tcp_listen(
     }))
 }
 
-/// tcp_socket_read([socket]) -> bin
+/// tcp_socket_read([socket, length]) -> bin
 /// Read from a TCP socket (async)
 pub fn builtin_tcp_socket_read(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract socket resource from tuple
+    // Extract [socket, length] tuple
     let Value::Tuple(_, fields) = value else {
         return Err(Error::TypeMismatch {
             expected: "tuple".to_string(),
@@ -183,9 +167,9 @@ pub fn builtin_tcp_socket_read(
         });
     };
 
-    if fields.len() != 1 {
+    if fields.len() != 2 {
         return Err(Error::ArityMismatch {
-            expected: 1,
+            expected: 2,
             found: fields.len(),
         });
     }
@@ -200,10 +184,27 @@ pub fn builtin_tcp_socket_read(
         }
     };
 
+    let Value::Integer(length) = fields[1] else {
+        return Err(Error::TypeMismatch {
+            expected: "integer".to_string(),
+            found: fields[1].type_name().to_string(),
+        });
+    };
+
+    if length <= 0 {
+        return Err(Error::InvalidArgument(format!(
+            "Length must be positive, got {}",
+            length
+        )));
+    }
+
     // Return Action to request read operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Read { resource_id },
+        effect: NativeEffect::TcpSocketRead {
+            resource_id,
+            length: length as usize,
+        },
     }))
 }
 
@@ -275,7 +276,7 @@ pub fn builtin_tcp_socket_write(
     // Return Action to request write operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Write { resource_id, data },
+        effect: NativeEffect::TcpSocketWrite { resource_id, data },
     }))
 }
 
@@ -314,7 +315,7 @@ pub fn builtin_tcp_socket_close(
     // Return Action to request close operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Close { resource_id },
+        effect: NativeEffect::TcpSocketClose { resource_id },
     }))
 }
 
@@ -353,7 +354,7 @@ pub fn builtin_tcp_listener_accept(
     // Return Action to request accept operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Accept { resource_id },
+        effect: NativeEffect::TcpListenerAccept { resource_id },
     }))
 }
 
@@ -392,7 +393,7 @@ pub fn builtin_tcp_listener_close(
     // Return Action to request close operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Close { resource_id },
+        effect: NativeEffect::TcpListenerClose { resource_id },
     }))
 }
 
@@ -405,15 +406,8 @@ pub fn register_network_builtins(
         TypeSpec::Binary,
         TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]),
     ]);
-    let bin_int_int_network = TypeSpec::Tuple(
-        None,
-        vec![
-            (None, host_type),
-            (None, TypeSpec::Integer),
-            (None, TypeSpec::Integer),
-        ],
-    );
-    let int_int_network = TypeSpec::Tuple(
+    let host_port_tuple = TypeSpec::Tuple(None, vec![(None, host_type), (None, TypeSpec::Integer)]);
+    let int_int_tuple = TypeSpec::Tuple(
         None,
         vec![(None, TypeSpec::Integer), (None, TypeSpec::Integer)],
     );
@@ -429,21 +423,28 @@ pub fn register_network_builtins(
     registry.register(
         "tcp_connect".to_string(),
         builtin_tcp_connect,
-        bin_int_int_network,
+        host_port_tuple,
         tcp_socket_resource.clone(),
     );
     registry.register(
         "tcp_listen".to_string(),
         builtin_tcp_listen,
-        int_int_network,
+        int_int_tuple,
         tcp_listener_resource.clone(),
     );
 
     // Socket operations
+    // tcp_socket_read([socket, length]) -> bin
     registry.register(
         "tcp_socket_read".to_string(),
         builtin_tcp_socket_read,
-        TypeSpec::Tuple(None, vec![(None, tcp_socket_resource.clone())]),
+        TypeSpec::Tuple(
+            None,
+            vec![
+                (None, tcp_socket_resource.clone()),
+                (None, int_type.clone()),
+            ],
+        ),
         bin_type.clone(),
     );
     registry.register(

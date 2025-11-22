@@ -16,12 +16,12 @@ fn test_file_write_and_read() {
             // O_RDONLY = 0
             // Mode 0o644 = 420
 
-            write_file = __file_open__["{}" ~> .0, 577, 4096, 420],
-            __file_write__[write_file, "Hello, World!" ~> .0],
+            write_file = __file_open__["{}" ~> .0, 577, 420],
+            __file_write__[write_file, 0, "Hello, World!" ~> .0],
             __file_close__[write_file],
 
-            read_file = __file_open__["{}" ~> .0, 0, 4096, 0],
-            data = __file_read__[read_file],
+            read_file = __file_open__["{}" ~> .0, 0, 0],
+            data = __file_read__[read_file, 0, 4096],
             __file_close__[read_file],
 
             Str[data]
@@ -40,24 +40,24 @@ fn test_file_append() {
         std::env::temp_dir().join(format!("quiver_test_append_{}.txt", std::process::id()));
     let path_str = temp_path.to_str().unwrap();
 
-    // Write initial content, then append
+    // Write initial content, then append using explicit offset
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
             // O_WRONLY | O_CREAT | O_TRUNC = 577
-            write_file = __file_open__["{}" ~> .0, 577, 4096, 420],
-            __file_write__[write_file, "First line\n" ~> .0],
+            write_file = __file_open__["{}" ~> .0, 577, 420],
+            __file_write__[write_file, 0, "First line\n" ~> .0],
             __file_close__[write_file],
 
-            // O_WRONLY | O_APPEND = 1 | 1024 = 1025
-            append_file = __file_open__["{}" ~> .0, 1025, 4096, 420],
-            __file_write__[append_file, "Second line\n" ~> .0],
+            // Write at offset 11 (length of "First line\n")
+            append_file = __file_open__["{}" ~> .0, 1, 420],
+            __file_write__[append_file, 11, "Second line\n" ~> .0],
             __file_close__[append_file],
 
             // Read everything
-            read_file = __file_open__["{}" ~> .0, 0, 4096, 0],
-            data = __file_read__[read_file],
+            read_file = __file_open__["{}" ~> .0, 0, 0],
+            data = __file_read__[read_file, 0, 4096],
             __file_close__[read_file],
 
             Str[data]
@@ -80,7 +80,7 @@ fn test_file_type_checking() {
             // Function that takes a file and returns data
             read_from_file = #\File {
                 ~> =f,
-                data = __file_read__[f],
+                data = __file_read__[f, 0, 1024],
                 data
             },
 
@@ -95,7 +95,7 @@ fn test_file_type_checking() {
 fn test_file_resource_type() {
     quiver()
         .with_io()
-        .evaluate(r#"__file_open__["/tmp/foo" ~> .0, 577, 4096, 420]"#)
+        .evaluate(r#"__file_open__["/tmp/foo" ~> .0, 577, 420]"#)
         .expect_type("\\File");
 }
 
@@ -110,8 +110,8 @@ fn test_file_flush() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = __file_open__["{}" ~> .0, 577, 4096, 420],
-            __file_write__[file, "Flushed data" ~> .0],
+            file = __file_open__["{}" ~> .0, 577, 420],
+            __file_write__[file, 0, "Flushed data" ~> .0],
             __file_flush__[file],
             __file_close__[file],
             Ok
@@ -134,19 +134,19 @@ fn test_multiple_writes() {
         std::env::temp_dir().join(format!("quiver_test_multi_{}.txt", std::process::id()));
     let path_str = temp_path.to_str().unwrap();
 
-    // Multiple writes to same file
+    // Multiple writes to same file at different offsets
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
-            file = __file_open__["{}" ~> .0, 577, 4096, 420],
-            __file_write__[file, "Line 1\n" ~> .0],
-            __file_write__[file, "Line 2\n" ~> .0],
-            __file_write__[file, "Line 3\n" ~> .0],
+            file = __file_open__["{}" ~> .0, 577, 420],
+            __file_write__[file, 0, "Line 1\n" ~> .0],
+            __file_write__[file, 7, "Line 2\n" ~> .0],
+            __file_write__[file, 14, "Line 3\n" ~> .0],
             __file_close__[file],
 
-            read_file = __file_open__["{}" ~> .0, 0, 4096, 0],
-            data = __file_read__[read_file],
+            read_file = __file_open__["{}" ~> .0, 0, 0],
+            data = __file_read__[read_file, 0, 4096],
             __file_close__[read_file],
 
             Str[data]
@@ -173,9 +173,9 @@ fn test_read_from_closed_file() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = __file_open__["{}" ~> .0, 0, 4096, 0],
+            file = __file_open__["{}" ~> .0, 0, 0],
             __file_close__[file],
-            __file_read__[file]
+            __file_read__[file, 0, 1024]
         "#,
             path_str
         ))

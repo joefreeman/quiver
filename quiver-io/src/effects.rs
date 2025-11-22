@@ -6,39 +6,52 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NativeEffect {
     // File operations
-    OpenFile {
+    FileOpen {
         path: Vec<u8>,
         flags: i32,
         mode: u32,
-        buffer_size: usize,
+    },
+    FileRead {
+        resource_id: ResourceId,
+        offset: u64,
+        length: usize,
+    },
+    FileWrite {
+        resource_id: ResourceId,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    FileFlush {
+        resource_id: ResourceId,
+    },
+    FileClose {
+        resource_id: ResourceId,
     },
 
     // Network operations
     TcpConnect {
         host: Vec<u8>,
         port: u16,
-        buffer_size: usize,
     },
     TcpListen {
         port: u16,
         backlog: i32,
     },
-    Accept {
+    TcpListenerAccept {
         resource_id: ResourceId,
     },
-
-    // Resource operations
-    Read {
+    TcpListenerClose {
         resource_id: ResourceId,
     },
-    Write {
+    TcpSocketRead {
+        resource_id: ResourceId,
+        length: usize,
+    },
+    TcpSocketWrite {
         resource_id: ResourceId,
         data: Vec<u8>,
     },
-    Flush {
-        resource_id: ResourceId,
-    },
-    Close {
+    TcpSocketClose {
         resource_id: ResourceId,
     },
 }
@@ -47,16 +60,20 @@ impl Effect for NativeEffect {
     fn resource_id(&self) -> Option<ResourceId> {
         match self {
             // Resource-creating effects
-            NativeEffect::OpenFile { .. }
+            NativeEffect::FileOpen { .. }
             | NativeEffect::TcpConnect { .. }
             | NativeEffect::TcpListen { .. } => None,
 
             // Resource-using effects
-            NativeEffect::Accept { resource_id }
-            | NativeEffect::Read { resource_id }
-            | NativeEffect::Write { resource_id, .. }
-            | NativeEffect::Flush { resource_id }
-            | NativeEffect::Close { resource_id } => Some(*resource_id),
+            NativeEffect::FileRead { resource_id, .. }
+            | NativeEffect::FileWrite { resource_id, .. }
+            | NativeEffect::FileFlush { resource_id }
+            | NativeEffect::FileClose { resource_id }
+            | NativeEffect::TcpListenerAccept { resource_id }
+            | NativeEffect::TcpListenerClose { resource_id }
+            | NativeEffect::TcpSocketRead { resource_id, .. }
+            | NativeEffect::TcpSocketWrite { resource_id, .. }
+            | NativeEffect::TcpSocketClose { resource_id } => Some(*resource_id),
         }
     }
 }

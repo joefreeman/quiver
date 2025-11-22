@@ -17,7 +17,6 @@ pub enum Resource {
     TcpSocket {
         socket: Socket,
         peer_addr: SocketAddr,
-        buffer_size: usize,
     },
     TcpListener {
         socket: Socket,
@@ -26,8 +25,6 @@ pub enum Resource {
     File {
         file: File,
         path: String,
-        buffer_size: usize,
-        offset: u64, // File position (tracked for sequential writes)
     },
 }
 
@@ -37,14 +34,6 @@ impl Resource {
             Resource::TcpSocket { socket, .. } => socket.as_raw_fd(),
             Resource::TcpListener { socket, .. } => socket.as_raw_fd(),
             Resource::File { file, .. } => file.as_raw_fd(),
-        }
-    }
-
-    fn buffer_size(&self) -> usize {
-        match self {
-            Resource::TcpSocket { buffer_size, .. } => *buffer_size,
-            Resource::TcpListener { .. } => 0,
-            Resource::File { buffer_size, .. } => *buffer_size,
         }
     }
 }
@@ -59,13 +48,10 @@ pub enum IoOpType {
         buffer: Vec<u8>, // Keep buffer alive for the duration of the async operation
     },
     Flush,
-    Accept {
-        buffer_size: usize,
-    },
+    Accept,
     Connect {
         socket: Socket,
         peer_addr: SocketAddr,
-        buffer_size: usize,
     },
 }
 
@@ -106,32 +92,46 @@ impl EffectBackend for NativeEffectBackend {
         effect: NativeEffect,
     ) -> Result<Option<EffectResult>, Error> {
         match effect {
-            NativeEffect::OpenFile {
-                path,
-                flags,
-                mode,
-                buffer_size,
-            } => self.execute_open_file(path, flags, mode, buffer_size),
-
-            NativeEffect::TcpConnect {
-                host,
-                port,
-                buffer_size,
-            } => self.execute_tcp_connect(process_id, host, port, buffer_size),
-
-            NativeEffect::TcpListen { port, backlog } => self.execute_tcp_listen(port, backlog),
-
-            NativeEffect::Read { resource_id } => self.execute_read(process_id, resource_id),
-
-            NativeEffect::Write { resource_id, data } => {
-                self.execute_write(process_id, resource_id, data)
+            // File operations
+            NativeEffect::FileOpen { path, flags, mode } => {
+                self.execute_file_open(path, flags, mode)
             }
+            NativeEffect::FileRead {
+                resource_id,
+                offset,
+                length,
+            } => self.execute_file_read(process_id, resource_id, offset, length),
+            NativeEffect::FileWrite {
+                resource_id,
+                offset,
+                data,
+            } => self.execute_file_write(process_id, resource_id, offset, data),
+            NativeEffect::FileFlush { resource_id } => {
+                self.execute_file_flush(process_id, resource_id)
+            }
+            NativeEffect::FileClose { resource_id } => self.execute_file_close(resource_id),
 
-            NativeEffect::Flush { resource_id } => self.execute_flush(process_id, resource_id),
-
-            NativeEffect::Close { resource_id } => self.execute_close(resource_id),
-
-            NativeEffect::Accept { resource_id } => self.execute_accept(process_id, resource_id),
+            // TCP operations
+            NativeEffect::TcpConnect { host, port } => {
+                self.execute_tcp_connect(process_id, host, port)
+            }
+            NativeEffect::TcpListen { port, backlog } => self.execute_tcp_listen(port, backlog),
+            NativeEffect::TcpListenerAccept { resource_id } => {
+                self.execute_tcp_listener_accept(process_id, resource_id)
+            }
+            NativeEffect::TcpListenerClose { resource_id } => {
+                self.execute_tcp_listener_close(resource_id)
+            }
+            NativeEffect::TcpSocketRead {
+                resource_id,
+                length,
+            } => self.execute_tcp_socket_read(process_id, resource_id, length),
+            NativeEffect::TcpSocketWrite { resource_id, data } => {
+                self.execute_tcp_socket_write(process_id, resource_id, data)
+            }
+            NativeEffect::TcpSocketClose { resource_id } => {
+                self.execute_tcp_socket_close(resource_id)
+            }
         }
     }
 
@@ -164,26 +164,14 @@ impl EffectBackend for NativeEffectBackend {
                         completions.push((process_id, self.handle_flush_completion(result_code)));
                     }
 
-                    IoOpType::Accept { buffer_size } => {
-                        completions.push((
-                            process_id,
-                            self.handle_accept_completion(result_code, buffer_size),
-                        ));
+                    IoOpType::Accept => {
+                        completions.push((process_id, self.handle_accept_completion(result_code)));
                     }
 
-                    IoOpType::Connect {
-                        socket,
-                        peer_addr,
-                        buffer_size,
-                    } => {
+                    IoOpType::Connect { socket, peer_addr } => {
                         completions.push((
                             process_id,
-                            self.handle_connect_completion(
-                                result_code,
-                                socket,
-                                peer_addr,
-                                buffer_size,
-                            ),
+                            self.handle_connect_completion(result_code, socket, peer_addr),
                         ));
                     }
                 }
@@ -200,12 +188,11 @@ impl EffectBackend for NativeEffectBackend {
 }
 
 impl NativeEffectBackend {
-    fn execute_open_file(
+    fn execute_file_open(
         &mut self,
         path: Vec<u8>,
         flags: i32,
         mode: u32,
-        buffer_size: usize,
     ) -> Result<Option<EffectResult>, Error> {
         use std::os::unix::fs::OpenOptionsExt;
 
@@ -260,8 +247,6 @@ impl NativeEffectBackend {
         let metadata = Resource::File {
             file,
             path: path_str,
-            buffer_size,
-            offset: 0,
         };
         self.resources.insert(resource_id, metadata);
 
@@ -277,24 +262,18 @@ impl NativeEffectBackend {
         process_id: ProcessId,
         host: Vec<u8>,
         port: u16,
-        buffer_size: usize,
     ) -> Result<Option<EffectResult>, Error> {
         // Convert host bytes to string
         let host_str = String::from_utf8(host)
             .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in host".to_string()))?;
 
-        // Resolve address
+        // Resolve address (prefer IPv4)
         let addr_str = format!("{}:{}", host_str, port);
         let addr = addr_str
             .to_socket_addrs()
             .map_err(|e| Error::InvalidArgument(format!("Failed to resolve address: {}", e)))?
-            .next()
-            .ok_or_else(|| Error::InvalidArgument("No address resolved".to_string()))?;
-
-        // Ensure we have an IPv4 address
-        if !addr.is_ipv4() {
-            return Err(Error::InvalidArgument("Only IPv4 supported".to_string()));
-        }
+            .find(|addr| addr.is_ipv4())
+            .ok_or_else(|| Error::InvalidArgument("No IPv4 address resolved".to_string()))?;
 
         // Create socket using socket2
         let socket = Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
@@ -336,7 +315,6 @@ impl NativeEffectBackend {
                 IoOpType::Connect {
                     socket,
                     peer_addr: addr,
-                    buffer_size,
                 },
             ),
         );
@@ -387,25 +365,67 @@ impl NativeEffectBackend {
         ))))
     }
 
-    fn execute_read(
+    fn execute_file_read(
         &mut self,
         process_id: ProcessId,
         resource_id: ResourceId,
+        offset: u64,
+        length: usize,
     ) -> Result<Option<EffectResult>, Error> {
-        // For operations on existing resources, the resource_id parameter should match
-        // the one in the effect (they're the same)
         let resource = self
             .resources
             .get(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
-        let buffer_size = resource.buffer_size();
         let fd = resource.fd();
 
         // Allocate buffer for the read
-        let mut buffer = vec![0u8; buffer_size];
+        let mut buffer = vec![0u8; length];
 
-        // Submit async read operation
+        // Submit async read operation with explicit offset
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+
+        let read_op = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+            .offset(offset)
+            .build()
+            .user_data(completion_id);
+
+        unsafe {
+            self.ring
+                .submission()
+                .push(&read_op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit read: {}", e)))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
+
+        // Track the pending operation
+        self.pending
+            .insert(completion_id, (process_id, IoOpType::Read { buffer }));
+
+        // Async operation, no immediate completion
+        Ok(None)
+    }
+
+    fn execute_tcp_socket_read(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        length: usize,
+    ) -> Result<Option<EffectResult>, Error> {
+        let resource = self
+            .resources
+            .get(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        let fd = resource.fd();
+
+        // Allocate buffer for the read
+        let mut buffer = vec![0u8; length];
+
+        // Submit async read operation (no offset for sockets)
         let completion_id = self.next_completion_id;
         self.next_completion_id += 1;
 
@@ -431,45 +451,28 @@ impl NativeEffectBackend {
         Ok(None)
     }
 
-    fn execute_write(
+    fn execute_file_write(
         &mut self,
         process_id: ProcessId,
         resource_id: ResourceId,
+        offset: u64,
         data: Vec<u8>,
     ) -> Result<Option<EffectResult>, Error> {
         let resource = self
             .resources
-            .get_mut(&resource_id)
+            .get(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         let fd = resource.fd();
-        let buffer_len = data.len();
 
-        // For files, get and update offset. For sockets, no offset needed.
-        let file_offset = if let Resource::File { offset, .. } = resource {
-            let current_offset = *offset;
-            *offset += buffer_len as u64; // Pre-increment for next write
-            Some(current_offset)
-        } else {
-            None
-        };
-
-        // Submit async write operation
+        // Submit async write operation with explicit offset
         let completion_id = self.next_completion_id;
         self.next_completion_id += 1;
 
-        let write_op = if let Some(off) = file_offset {
-            // File write with explicit offset
-            opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
-                .offset(off)
-                .build()
-                .user_data(completion_id)
-        } else {
-            // Socket write (no offset)
-            opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
-                .build()
-                .user_data(completion_id)
-        };
+        let write_op = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
+            .offset(offset)
+            .build()
+            .user_data(completion_id);
 
         unsafe {
             self.ring
@@ -490,7 +493,47 @@ impl NativeEffectBackend {
         Ok(None)
     }
 
-    fn execute_flush(
+    fn execute_tcp_socket_write(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        data: Vec<u8>,
+    ) -> Result<Option<EffectResult>, Error> {
+        let resource = self
+            .resources
+            .get(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        let fd = resource.fd();
+
+        // Submit async write operation (no offset for sockets)
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+
+        let write_op = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
+            .build()
+            .user_data(completion_id);
+
+        unsafe {
+            self.ring
+                .submission()
+                .push(&write_op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit write: {}", e)))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
+
+        // Track the pending operation (keep buffer alive until completion)
+        self.pending.insert(
+            completion_id,
+            (process_id, IoOpType::Write { buffer: data }),
+        );
+
+        Ok(None)
+    }
+
+    fn execute_file_flush(
         &mut self,
         process_id: ProcessId,
         resource_id: ResourceId,
@@ -526,8 +569,11 @@ impl NativeEffectBackend {
         Ok(None)
     }
 
-    fn execute_close(&mut self, resource_id: ResourceId) -> Result<Option<EffectResult>, Error> {
-        // Remove the resource - File/Socket will be dropped and closed automatically
+    fn execute_file_close(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Result<Option<EffectResult>, Error> {
+        // Remove the resource - File will be dropped and closed automatically
         self.resources
             .remove(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
@@ -536,7 +582,7 @@ impl NativeEffectBackend {
         Ok(Some(Ok((Value::ok(), vec![]))))
     }
 
-    fn execute_accept(
+    fn execute_tcp_listener_accept(
         &mut self,
         process_id: ProcessId,
         resource_id: ResourceId,
@@ -567,17 +613,36 @@ impl NativeEffectBackend {
             .submit()
             .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
 
-        self.pending.insert(
-            completion_id,
-            (
-                process_id,
-                IoOpType::Accept {
-                    buffer_size: 8192, // Default buffer size for accepted connections
-                },
-            ),
-        );
+        self.pending
+            .insert(completion_id, (process_id, IoOpType::Accept));
 
         Ok(None)
+    }
+
+    fn execute_tcp_socket_close(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Result<Option<EffectResult>, Error> {
+        // Remove the resource - Socket will be dropped and closed automatically
+        self.resources
+            .remove(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        // Return immediate completion
+        Ok(Some(Ok((Value::ok(), vec![]))))
+    }
+
+    fn execute_tcp_listener_close(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Result<Option<EffectResult>, Error> {
+        // Remove the resource - Listener will be dropped and closed automatically
+        self.resources
+            .remove(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        // Return immediate completion
+        Ok(Some(Ok((Value::ok(), vec![]))))
     }
 
     fn handle_read_completion(&self, result_code: i32, mut buffer: Vec<u8>) -> EffectResult {
@@ -640,7 +705,7 @@ impl NativeEffectBackend {
         }
     }
 
-    fn handle_accept_completion(&mut self, result_code: i32, buffer_size: usize) -> EffectResult {
+    fn handle_accept_completion(&mut self, result_code: i32) -> EffectResult {
         use quiver_core::effects::EffectError;
 
         if result_code < 0 {
@@ -669,14 +734,8 @@ impl NativeEffectBackend {
         self.next_resource_id += 1;
 
         // Register the new socket
-        self.resources.insert(
-            new_resource_id,
-            Resource::TcpSocket {
-                socket,
-                peer_addr,
-                buffer_size,
-            },
-        );
+        self.resources
+            .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
 
         Ok((
             Value::Resource(new_resource_id, "TcpSocket".to_string()),
@@ -689,7 +748,6 @@ impl NativeEffectBackend {
         result_code: i32,
         socket: Socket,
         peer_addr: SocketAddr,
-        buffer_size: usize,
     ) -> EffectResult {
         use quiver_core::effects::EffectError;
 
@@ -709,14 +767,8 @@ impl NativeEffectBackend {
         let new_resource_id = self.next_resource_id;
         self.next_resource_id += 1;
 
-        self.resources.insert(
-            new_resource_id,
-            Resource::TcpSocket {
-                socket,
-                peer_addr,
-                buffer_size,
-            },
-        );
+        self.resources
+            .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
 
         Ok((
             Value::Resource(new_resource_id, "TcpSocket".to_string()),

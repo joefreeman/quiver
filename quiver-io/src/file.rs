@@ -5,14 +5,14 @@ use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId};
 use quiver_core::value::{Binary, Value};
 
-/// file_open([path: bin, flags: int, buffer_size: int, mode: int]) -> File
-/// Open a file with the specified flags, buffer size, and permissions
+/// file_open([path: bin, flags: int, mode: int]) -> File
+/// Open a file with the specified flags and permissions
 pub fn builtin_file_open(
     process_id: ProcessId,
     value: &Value,
     executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract [path, flags, buffer_size, mode] tuple
+    // Extract [path, flags, mode] tuple
     let Value::Tuple(_, fields) = value else {
         return Err(Error::TypeMismatch {
             expected: "tuple".to_string(),
@@ -20,9 +20,9 @@ pub fn builtin_file_open(
         });
     };
 
-    if fields.len() != 4 {
+    if fields.len() != 3 {
         return Err(Error::ArityMismatch {
-            expected: 4,
+            expected: 3,
             found: fields.len(),
         });
     }
@@ -46,28 +46,13 @@ pub fn builtin_file_open(
         });
     };
 
-    // Get buffer size
-    let Value::Integer(buffer_size) = fields[2] else {
+    // Get mode (permissions)
+    let Value::Integer(mode) = fields[2] else {
         return Err(Error::TypeMismatch {
             expected: "integer".to_string(),
             found: fields[2].type_name().to_string(),
         });
     };
-
-    // Get mode (permissions)
-    let Value::Integer(mode) = fields[3] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[3].type_name().to_string(),
-        });
-    };
-
-    if buffer_size <= 0 {
-        return Err(Error::InvalidArgument(format!(
-            "Buffer size must be positive, got {}",
-            buffer_size
-        )));
-    }
 
     // Get path bytes from binary
     let path_bytes = match &path_binary {
@@ -94,23 +79,22 @@ pub fn builtin_file_open(
     // Return Action to request file opening from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::OpenFile {
+        effect: NativeEffect::FileOpen {
             path: path_bytes,
             flags: flags as i32,
             mode: mode as u32,
-            buffer_size: buffer_size as usize,
         },
     }))
 }
 
-/// file_read([file]) -> bin
-/// Read from a file (async)
+/// file_read([file, offset, length]) -> bin
+/// Read from a file at the specified offset (async)
 pub fn builtin_file_read(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract file resource from tuple
+    // Extract [file, offset, length] tuple
     let Value::Tuple(_, fields) = value else {
         return Err(Error::TypeMismatch {
             expected: "tuple".to_string(),
@@ -118,9 +102,9 @@ pub fn builtin_file_read(
         });
     };
 
-    if fields.len() != 1 {
+    if fields.len() != 3 {
         return Err(Error::ArityMismatch {
-            expected: 1,
+            expected: 3,
             found: fields.len(),
         });
     }
@@ -135,21 +119,53 @@ pub fn builtin_file_read(
         }
     };
 
+    let Value::Integer(offset) = fields[1] else {
+        return Err(Error::TypeMismatch {
+            expected: "integer".to_string(),
+            found: fields[1].type_name().to_string(),
+        });
+    };
+
+    let Value::Integer(length) = fields[2] else {
+        return Err(Error::TypeMismatch {
+            expected: "integer".to_string(),
+            found: fields[2].type_name().to_string(),
+        });
+    };
+
+    if offset < 0 {
+        return Err(Error::InvalidArgument(format!(
+            "Offset must be non-negative, got {}",
+            offset
+        )));
+    }
+
+    if length <= 0 {
+        return Err(Error::InvalidArgument(format!(
+            "Length must be positive, got {}",
+            length
+        )));
+    }
+
     // Return Action to request read operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Read { resource_id },
+        effect: NativeEffect::FileRead {
+            resource_id,
+            offset: offset as u64,
+            length: length as usize,
+        },
     }))
 }
 
-/// file_write([file, data]) -> int
-/// Write to a file (async), returns bytes written
+/// file_write([file, offset, data]) -> int
+/// Write to a file at the specified offset (async), returns bytes written
 pub fn builtin_file_write(
     process_id: ProcessId,
     value: &Value,
     executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract [file, data] tuple
+    // Extract [file, offset, data] tuple
     let Value::Tuple(_, fields) = value else {
         return Err(Error::TypeMismatch {
             expected: "tuple".to_string(),
@@ -157,9 +173,9 @@ pub fn builtin_file_write(
         });
     };
 
-    if fields.len() != 2 {
+    if fields.len() != 3 {
         return Err(Error::ArityMismatch {
-            expected: 2,
+            expected: 3,
             found: fields.len(),
         });
     }
@@ -174,16 +190,30 @@ pub fn builtin_file_write(
         }
     };
 
+    let Value::Integer(offset) = fields[1] else {
+        return Err(Error::TypeMismatch {
+            expected: "integer".to_string(),
+            found: fields[1].type_name().to_string(),
+        });
+    };
+
     // Get data binary
-    let data_binary = match &fields[1] {
+    let data_binary = match &fields[2] {
         Value::Binary(binary) => *binary,
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
-                found: fields[1].type_name().to_string(),
+                found: fields[2].type_name().to_string(),
             });
         }
     };
+
+    if offset < 0 {
+        return Err(Error::InvalidArgument(format!(
+            "Offset must be non-negative, got {}",
+            offset
+        )));
+    }
 
     // Get data bytes
     let data = match &data_binary {
@@ -210,7 +240,11 @@ pub fn builtin_file_write(
     // Return Action to request write operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Write { resource_id, data },
+        effect: NativeEffect::FileWrite {
+            resource_id,
+            offset: offset as u64,
+            data,
+        },
     }))
 }
 
@@ -249,7 +283,7 @@ pub fn builtin_file_flush(
     // Return Action to request flush operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Flush { resource_id },
+        effect: NativeEffect::FileFlush { resource_id },
     }))
 }
 
@@ -288,7 +322,7 @@ pub fn builtin_file_close(
     // Return Action to request close operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
-        effect: NativeEffect::Close { resource_id },
+        effect: NativeEffect::FileClose { resource_id },
     }))
 }
 
@@ -299,7 +333,7 @@ pub fn register_file_builtins(registry: &mut quiver_core::builtins::BuiltinRegis
     let int_type = TypeSpec::Integer;
     let ok_type = TypeSpec::Tuple(Some("Ok"), vec![]);
 
-    // file_open([path, flags, buffer_size, mode]) -> File
+    // file_open([path, flags, mode]) -> File
     registry.register(
         "file_open".to_string(),
         builtin_file_open,
@@ -309,25 +343,38 @@ pub fn register_file_builtins(registry: &mut quiver_core::builtins::BuiltinRegis
                 (None, bin_type.clone()),
                 (None, int_type.clone()),
                 (None, int_type.clone()),
-                (None, int_type.clone()),
             ],
         ),
         file_resource.clone(),
     );
 
-    // file_read([File]) -> bin
+    // file_read([File, offset, length]) -> bin
     registry.register(
         "file_read".to_string(),
         builtin_file_read,
-        TypeSpec::Tuple(None, vec![(None, file_resource.clone())]),
+        TypeSpec::Tuple(
+            None,
+            vec![
+                (None, file_resource.clone()),
+                (None, int_type.clone()),
+                (None, int_type.clone()),
+            ],
+        ),
         bin_type.clone(),
     );
 
-    // file_write([File, bin]) -> int
+    // file_write([File, offset, bin]) -> int
     registry.register(
         "file_write".to_string(),
         builtin_file_write,
-        TypeSpec::Tuple(None, vec![(None, file_resource.clone()), (None, bin_type)]),
+        TypeSpec::Tuple(
+            None,
+            vec![
+                (None, file_resource.clone()),
+                (None, int_type.clone()),
+                (None, bin_type),
+            ],
+        ),
         int_type,
     );
 
