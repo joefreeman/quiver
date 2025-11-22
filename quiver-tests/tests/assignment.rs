@@ -97,7 +97,7 @@ fn test_star_assignment() {
 fn test_ignore_placeholder() {
     quiver().evaluate("[1, 2] ~> =[a, _], a").expect("1");
     quiver().evaluate("[1, 2] ~> =_").expect("[1, 2]");
-    quiver().evaluate("_ = [1, 2]").expect("[1, 2]");
+    quiver().evaluate("_ = [1, 2]").expect("Ok");
 }
 
 #[test]

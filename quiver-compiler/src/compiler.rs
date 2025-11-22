@@ -26,7 +26,7 @@ use crate::{
 use quiver_core::{
     bytecode::{Constant, Function, Instruction},
     program::Program,
-    types::{CallableType, NIL, ProcessType, TupleLookup, Type},
+    types::{CallableType, NIL, OK, ProcessType, TupleLookup, Type},
     value::Value,
 };
 
@@ -1159,6 +1159,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: Type,
         on_no_match: Option<usize>,
         mode: pattern::PatternMode,
+        return_ok: bool,
     ) -> Result<(Type, Guard), Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
@@ -1212,7 +1213,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             fail_target,
         )?;
 
-        // Success path: leave the value on the stack
+        // Success path: leave the value on the stack, or replace with Ok
+        if return_ok {
+            self.codegen.add_instruction(Instruction::Pop);
+            self.codegen.add_instruction(Instruction::Tuple(OK));
+        }
         let success_jump_addr = self.codegen.emit_jump_placeholder();
 
         // Only patch fail_jump_addr if we didn't use on_no_match
@@ -1252,7 +1257,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Guard::None
         };
 
-        Ok((result_type, guard))
+        // Compute final type - if return_ok, replace value type with Ok
+        let final_type = if return_ok {
+            if result_type.contains_nil() {
+                Type::from_types(vec![Type::ok(), Type::nil()])
+            } else {
+                Type::ok()
+            }
+        } else {
+            result_type
+        };
+
+        Ok((final_type, guard))
     }
 
     /// Helper to check if an expression starts with a continuation (~>)
@@ -1700,6 +1716,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 result_type,
                 on_no_match,
                 pattern::PatternMode::Bind,
+                true, // Direct assignment returns Ok
             )
         } else {
             Ok((result_type, guard))
@@ -2455,14 +2472,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Bind match requires a value".to_string())
                 })?;
-                self.compile_match(pattern, val_type, on_no_match, pattern::PatternMode::Bind)
+                self.compile_match(
+                    pattern,
+                    val_type,
+                    on_no_match,
+                    pattern::PatternMode::Bind,
+                    false,
+                )
             }
             ast::Term::PinMatch(pattern) => {
                 // Pin matches check against existing variables
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Pin match requires a value".to_string())
                 })?;
-                self.compile_match(pattern, val_type, on_no_match, pattern::PatternMode::Pin)
+                self.compile_match(
+                    pattern,
+                    val_type,
+                    on_no_match,
+                    pattern::PatternMode::Pin,
+                    false,
+                )
             }
             ast::Term::Spawn(term) => Ok((self.compile_spawn(*term, value_type)?, Guard::None)),
             ast::Term::Select(select) => {

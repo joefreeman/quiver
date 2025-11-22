@@ -39,9 +39,11 @@ find_index = #[bin, bin, int, int] {
       ~> math.add[offset, ~]
       ~> [haystack, offset, ~]
       ~> binary.slice
-      ~> =^needle => offset
+      ~> =^needle
+      => offset
 
-    | math.add[offset, 1]
+    | offset
+      ~> math.add[~, 1]
       ~> &[haystack, needle, ~, end]
   }
 },
@@ -230,10 +232,13 @@ collect' = #[iterator<int>, bin] {
     {
       | needle_len ~> =0 => 0  // Empty string is at index 0
       | math.gt[needle_len, haystack_len] => []  // Needle longer than haystack
-      | end = math.sub[haystack_len, needle_len],
-        byte_pos = find_index[haystack, needle, 0, end] =>
-        // Found - convert byte position to character index
+      | {
+        haystack_len
+        ~> math.sub[~, needle_len]
+        ~> find_index[haystack, needle, 0, ~]
+        ~> =byte_pos,
         [haystack, 0, byte_pos, 0] ~> byte_pos_to_char_idx'
+      }
     }
   },
 
