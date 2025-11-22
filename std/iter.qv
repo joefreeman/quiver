@@ -168,6 +168,14 @@ find_index' = #<t>[iterator<t>, #t -> (t | []), int] {
   }
 },
 
+intersperse' = #<t>[#& -> iterator<t>, iterator<t>, t] {
+  ~> =[self, it, sep],
+  #{
+    it[] ~> =[value, next],
+    [sep, #{ [value, self[self, next, sep]] }]
+  }
+},
+
 [
   map: #<t, u>[iterator<t>, #t -> u] {
     ~> [map', ...] ~> map'
@@ -264,6 +272,14 @@ find_index' = #<t>[iterator<t>, #t -> (t | []), int] {
     | ~> =[it, n] => {
       it[] ~> =[_, next],
       n ~> math.sub[~, 1] ~> &[next, ~]
+    }
+  },
+
+  intersperse: #<t>[iterator<t>, t] {
+    ~> =[it, sep],
+    #{
+      it[] ~> =[first, rest],
+      [first, intersperse'[intersperse', rest, sep]]
     }
   }
 ]

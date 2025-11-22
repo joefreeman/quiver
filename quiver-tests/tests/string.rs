@@ -728,3 +728,38 @@ fn test_iter_with_transformations() {
         )
         .expect("\"llo\"");
 }
+
+#[test]
+fn test_join() {
+    quiver()
+        .evaluate(
+            r#"
+            list = %"list",
+            string = %"string",
+            Cons["one", Cons["two", Cons["three", Nil]]]
+            ~> list.iter
+            ~> string.join[~, ", "]
+            "#,
+        )
+        .expect("\"one, two, three\"");
+
+    quiver()
+        .evaluate(
+            r#"
+            list = %"list",
+            string = %"string",
+            Cons["only", Nil] ~> list.iter ~> string.join[~, ", "]
+            "#,
+        )
+        .expect("\"only\"");
+
+    quiver()
+        .evaluate(
+            r#"
+            list = %"list",
+            string = %"string",
+            Nil ~> list.iter ~> string.join[~, ", "]
+            "#,
+        )
+        .expect("\"\"");
+}

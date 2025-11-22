@@ -244,7 +244,15 @@ collect' = #[iterator<int>, bin] {
   },
 
   collect: #iterator<int> {
-    //empty_bin = binary.new[0],
     ~> [~, ''] ~> collect'
+  },
+
+  join: #[iterator<str>, str] {
+    ~> =[it, Str[sep]],
+    it
+    ~> iter_mod.map[~, #str { ~> .0 }]
+    ~> iter_mod.intersperse[~, sep]
+    ~> iter_mod.fold[~, '', binary.concat]
+    ~> Str[~]
   }
 ]

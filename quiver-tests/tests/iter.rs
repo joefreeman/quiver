@@ -408,3 +408,45 @@ fn test_find_index() {
         )
         .expect("[]");
 }
+
+#[test]
+fn test_intersperse() {
+    quiver()
+        .evaluate(
+            r#"
+            list = %"list",
+            iter = %"iter",
+            Cons[1, Cons[2, Cons[3, Nil]]]
+            ~> list.iter
+            ~> iter.intersperse[~, 0]
+            ~> list.collect
+            "#,
+        )
+        .expect("Cons[1, Cons[0, Cons[2, Cons[0, Cons[3, Nil]]]]]");
+
+    quiver()
+        .evaluate(
+            r#"
+            list = %"list",
+            iter = %"iter",
+            Cons[42, Nil]
+            ~> list.iter
+            ~> iter.intersperse[~, 0]
+            ~> list.collect
+            "#,
+        )
+        .expect("Cons[42, Nil]");
+
+    quiver()
+        .evaluate(
+            r#"
+            list = %"list",
+            iter = %"iter",
+            Nil
+            ~> list.iter
+            ~> iter.intersperse[~, 0]
+            ~> list.collect
+            "#,
+        )
+        .expect("Nil");
+}

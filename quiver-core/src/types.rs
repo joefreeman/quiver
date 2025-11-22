@@ -308,8 +308,9 @@ impl Type {
             }
 
             (Type::Callable(f1), Type::Callable(f2)) => {
-                // Push callable onto stack for cycle resolution
-                type_stack.push(self.clone());
+                // Push pattern callable onto stack for cycle resolution
+                // Pattern cycles (like & in iterator<t>) need to resolve to pattern types
+                type_stack.push(pattern.clone());
 
                 // For functions:
                 // - Parameters are contravariant (pattern's param must be compatible with self's param)
