@@ -28,9 +28,20 @@ pub enum NativeEffect {
         resource_id: ResourceId,
     },
 
+    // DNS operations
+    DnsResolve {
+        hostname: Vec<u8>,
+    },
+    DnsNext {
+        resource_id: ResourceId,
+    },
+    DnsClose {
+        resource_id: ResourceId,
+    },
+
     // Network operations
     TcpConnect {
-        host: Vec<u8>,
+        ip: Vec<u8>,
         port: u16,
     },
     TcpListen {
@@ -61,6 +72,7 @@ impl Effect for NativeEffect {
         match self {
             // Resource-creating effects
             NativeEffect::FileOpen { .. }
+            | NativeEffect::DnsResolve { .. }
             | NativeEffect::TcpConnect { .. }
             | NativeEffect::TcpListen { .. } => None,
 
@@ -69,6 +81,8 @@ impl Effect for NativeEffect {
             | NativeEffect::FileWrite { resource_id, .. }
             | NativeEffect::FileFlush { resource_id }
             | NativeEffect::FileClose { resource_id }
+            | NativeEffect::DnsNext { resource_id }
+            | NativeEffect::DnsClose { resource_id }
             | NativeEffect::TcpListenerAccept { resource_id }
             | NativeEffect::TcpListenerClose { resource_id }
             | NativeEffect::TcpSocketRead { resource_id, .. }

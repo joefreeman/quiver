@@ -26,6 +26,12 @@ pub enum Resource {
         file: File,
         path: String,
     },
+    DnsResolver {
+        /// Resolved IP addresses (4 bytes for IPv4, 16 bytes for IPv6)
+        addresses: Vec<Vec<u8>>,
+        /// Current position in the iterator
+        position: usize,
+    },
 }
 
 impl Resource {
@@ -34,6 +40,9 @@ impl Resource {
             Resource::TcpSocket { socket, .. } => socket.as_raw_fd(),
             Resource::TcpListener { socket, .. } => socket.as_raw_fd(),
             Resource::File { file, .. } => file.as_raw_fd(),
+            Resource::DnsResolver { .. } => {
+                panic!("DnsResolver does not have a file descriptor")
+            }
         }
     }
 }
@@ -111,10 +120,13 @@ impl EffectBackend for NativeEffectBackend {
             }
             NativeEffect::FileClose { resource_id } => self.execute_file_close(resource_id),
 
+            // DNS operations
+            NativeEffect::DnsResolve { hostname } => self.execute_dns_resolve(hostname),
+            NativeEffect::DnsNext { resource_id } => self.execute_dns_next(resource_id),
+            NativeEffect::DnsClose { resource_id } => self.execute_dns_close(resource_id),
+
             // TCP operations
-            NativeEffect::TcpConnect { host, port } => {
-                self.execute_tcp_connect(process_id, host, port)
-            }
+            NativeEffect::TcpConnect { ip, port } => self.execute_tcp_connect(process_id, ip, port),
             NativeEffect::TcpListen { port, backlog } => self.execute_tcp_listen(port, backlog),
             NativeEffect::TcpListenerAccept { resource_id } => {
                 self.execute_tcp_listener_accept(process_id, resource_id)
@@ -257,26 +269,127 @@ impl NativeEffectBackend {
         ))))
     }
 
+    fn execute_dns_resolve(&mut self, hostname: Vec<u8>) -> Result<Option<EffectResult>, Error> {
+        // Convert hostname bytes to string
+        let hostname_str = String::from_utf8(hostname)
+            .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in hostname".to_string()))?;
+
+        // Resolve address using DNS (blocking)
+        let addr_str = format!("{}:0", hostname_str);
+        let addresses: Vec<Vec<u8>> = match addr_str.to_socket_addrs() {
+            Ok(addrs) => addrs
+                .map(|addr| match addr.ip() {
+                    std::net::IpAddr::V4(ipv4) => ipv4.octets().to_vec(),
+                    std::net::IpAddr::V6(ipv6) => ipv6.octets().to_vec(),
+                })
+                .collect(),
+            Err(e) => {
+                // Distinguish between "not found" and other errors
+                use std::io::ErrorKind;
+                match e.kind() {
+                    // Host not found - create empty resolver
+                    ErrorKind::NotFound | ErrorKind::InvalidInput => vec![],
+                    // Other errors - return error
+                    _ => {
+                        return Err(Error::InvalidArgument(format!(
+                            "DNS resolution failed: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+        };
+
+        // Allocate a new resource ID for this resolver
+        let resource_id = self.next_resource_id;
+        self.next_resource_id += 1;
+
+        // Register the DNS resolver resource
+        self.resources.insert(
+            resource_id,
+            Resource::DnsResolver {
+                addresses,
+                position: 0,
+            },
+        );
+
+        Ok(Some(Ok((
+            Value::Resource(resource_id, "DnsResolver".to_string()),
+            vec![],
+        ))))
+    }
+
+    fn execute_dns_next(&mut self, resource_id: ResourceId) -> Result<Option<EffectResult>, Error> {
+        let resource = self
+            .resources
+            .get_mut(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        let Resource::DnsResolver {
+            addresses,
+            position,
+        } = resource
+        else {
+            return Err(Error::InvalidArgument(
+                "Resource is not a DnsResolver".to_string(),
+            ));
+        };
+
+        if *position < addresses.len() {
+            let ip_bytes = addresses[*position].clone();
+            *position += 1;
+            Ok(Some(Ok((
+                Value::Binary(quiver_core::value::Binary::Heap(0)),
+                vec![ip_bytes],
+            ))))
+        } else {
+            // No more addresses - return Nil
+            Ok(Some(Ok((Value::nil(), vec![]))))
+        }
+    }
+
+    fn execute_dns_close(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Result<Option<EffectResult>, Error> {
+        self.resources
+            .remove(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        Ok(Some(Ok((Value::ok(), vec![]))))
+    }
+
     fn execute_tcp_connect(
         &mut self,
         process_id: ProcessId,
-        host: Vec<u8>,
+        ip: Vec<u8>,
         port: u16,
     ) -> Result<Option<EffectResult>, Error> {
-        // Convert host bytes to string
-        let host_str = String::from_utf8(host)
-            .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in host".to_string()))?;
+        // Parse raw IP bytes into SocketAddr
+        let addr = match ip.len() {
+            4 => {
+                let octets: [u8; 4] = ip.try_into().unwrap();
+                SocketAddr::from((octets, port))
+            }
+            16 => {
+                let octets: [u8; 16] = ip.try_into().unwrap();
+                SocketAddr::from((octets, port))
+            }
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "IP address must be 4 bytes (IPv4) or 16 bytes (IPv6), got {} bytes",
+                    ip.len()
+                )));
+            }
+        };
 
-        // Resolve address (prefer IPv4)
-        let addr_str = format!("{}:{}", host_str, port);
-        let addr = addr_str
-            .to_socket_addrs()
-            .map_err(|e| Error::InvalidArgument(format!("Failed to resolve address: {}", e)))?
-            .find(|addr| addr.is_ipv4())
-            .ok_or_else(|| Error::InvalidArgument("No IPv4 address resolved".to_string()))?;
-
-        // Create socket using socket2
-        let socket = Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+        // Create socket using socket2 (domain matches address type)
+        let domain = if addr.is_ipv4() {
+            socket2::Domain::IPV4
+        } else {
+            socket2::Domain::IPV6
+        };
+        let socket = Socket::new(domain, socket2::Type::STREAM, None)
             .map_err(|e| Error::InvalidArgument(format!("Failed to create socket: {}", e)))?;
 
         // Set socket to non-blocking mode for async connect

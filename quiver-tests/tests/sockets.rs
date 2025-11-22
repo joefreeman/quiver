@@ -34,11 +34,12 @@ fn test_tcp_client_connect_and_write() {
     thread::sleep(Duration::from_millis(50));
 
     // Connect from Quiver and send data
+    // '7f000001' is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
-            socket = __tcp_connect__["127.0.0.1" ~> .0, {}],
+            socket = __tcp_connect__['7f000001', {}],
             __tcp_socket_write__[socket, "Hello from Quiver!" ~> .0],
             response = __tcp_socket_read__[socket, 4096],
             __tcp_socket_close__[socket],
@@ -127,18 +128,19 @@ fn test_tcp_multiple_connections() {
     thread::sleep(Duration::from_millis(50));
 
     // Make multiple connections from Quiver
+    // '7f000001' is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
             // First connection
-            socket1 = __tcp_connect__["127.0.0.1" ~> .0, {}],
+            socket1 = __tcp_connect__['7f000001', {}],
             __tcp_socket_write__[socket1, "First" ~> .0],
             response1 = __tcp_socket_read__[socket1, 4096],
             __tcp_socket_close__[socket1],
 
             // Second connection
-            socket2 = __tcp_connect__["127.0.0.1" ~> .0, {}],
+            socket2 = __tcp_connect__['7f000001', {}],
             __tcp_socket_write__[socket2, "Second" ~> .0],
             response2 = __tcp_socket_read__[socket2, 4096],
             __tcp_socket_close__[socket2],
@@ -209,11 +211,12 @@ fn test_binary_data_over_socket() {
     thread::sleep(Duration::from_millis(50));
 
     // Send binary data
+    // '7f000001' is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
-            socket = __tcp_connect__["127.0.0.1", {}],
+            socket = __tcp_connect__['7f000001', {}],
             __tcp_socket_write__[socket, 'deadbeef'],
             response = __tcp_socket_read__[socket, 4096],
             __tcp_socket_close__[socket],
@@ -249,11 +252,12 @@ fn test_write_to_closed_socket() {
     thread::sleep(Duration::from_millis(50));
 
     // Connect, close, then try to write - should fail with runtime error
+    // '7f000001' is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
-        socket = __tcp_connect__["127.0.0.1", {}],
+        socket = __tcp_connect__['7f000001', {}],
         __tcp_socket_close__[socket],
         __tcp_socket_write__[socket, "test" ~> .0]
     "#,
