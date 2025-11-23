@@ -308,6 +308,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         process.stack.push(result_value);
         process.frames.push(Frame::new(function_index, 0, 0));
 
+        // Update the cached process type for REPL references
+        self.executor.update_process_type(id, function_index);
+
         // Add back to queue
         self.executor.add_to_queue(id);
 

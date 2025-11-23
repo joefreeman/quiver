@@ -122,6 +122,7 @@ enum SelectResult {
 
 pub struct Executor<E: Effect> {
     processes: HashMap<ProcessId, Process>,
+    process_types: HashMap<ProcessId, (Type, usize)>, // Cached types for REPL process references
     queue: VecDeque<ProcessId>,
     spawning: HashSet<ProcessId>,
     selecting: HashSet<ProcessId>,
@@ -220,6 +221,7 @@ impl<E: Effect> Executor<E> {
 
         Self {
             processes: HashMap::new(),
+            process_types: HashMap::new(),
             queue: VecDeque::new(),
             spawning: HashSet::new(),
             selecting: HashSet::new(),
@@ -287,6 +289,9 @@ impl<E: Effect> Executor<E> {
             0,
             captures_count,
         ));
+
+        // Cache the process type for REPL references
+        self.update_process_type(id, function_index);
 
         // Add to queue
         self.queue.push_back(id);
@@ -489,18 +494,18 @@ impl<E: Effect> Executor<E> {
     }
 
     pub fn get_process_types(&self) -> HashMap<ProcessId, (Type, usize)> {
-        self.processes
-            .iter()
-            .filter_map(|(id, process)| {
-                let function_index = process.frames.first()?.function_index;
-                let function = self.get_function(function_index)?;
-                let process_type = Type::Process(Box::new(ProcessType {
-                    send: Some(Box::new(function.function_type.receive.clone())),
-                    receive: Some(Box::new(function.function_type.result.clone())),
-                }));
-                Some((*id, (process_type, function_index)))
-            })
-            .collect()
+        self.process_types.clone()
+    }
+
+    /// Update the cached type for a process (called on spawn and resume)
+    pub fn update_process_type(&mut self, id: ProcessId, function_index: usize) {
+        if let Some(function) = self.get_function(function_index) {
+            let process_type = Type::Process(Box::new(ProcessType {
+                send: Some(Box::new(function.function_type.receive.clone())),
+                receive: Some(Box::new(function.function_type.result.clone())),
+            }));
+            self.process_types.insert(id, (process_type, function_index));
+        }
     }
 
     pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
