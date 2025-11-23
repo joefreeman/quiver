@@ -244,14 +244,16 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     fn start_process(
         &mut self,
         id: ProcessId,
-        function_index: usize,
+        function_index: Option<usize>,
     ) -> Result<(), EnvironmentError> {
-        // Validate function exists
-        if self.executor.get_function(function_index).is_none() {
-            return Err(EnvironmentError::FunctionNotFound(function_index));
+        // Validate function exists (if provided)
+        if let Some(idx) = function_index {
+            if self.executor.get_function(idx).is_none() {
+                return Err(EnvironmentError::FunctionNotFound(idx));
+            }
         }
 
-        // Spawn the persistent process with no captures
+        // Spawn the persistent process (sleeping if no function)
         self.executor
             .spawn_process(id, function_index, vec![], Value::nil(), vec![], true)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
@@ -272,7 +274,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
         // Delegate to executor which handles heap injection and initialization
         self.executor
-            .spawn_process(id, function_index, captures, argument, heap_data, false)
+            .spawn_process(id, Some(function_index), captures, argument, heap_data, false)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 

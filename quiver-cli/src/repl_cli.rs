@@ -1,7 +1,6 @@
 use colored::Colorize;
 use quiver_cli::spawn_worker;
 use quiver_compiler::FileSystemModuleLoader;
-use quiver_core::program::Program;
 use quiver_core::value::Value;
 use quiver_environment::{Environment, Repl, ReplError, RequestResult, WorkerHandle};
 use quiver_io::NativeEffect;
@@ -24,8 +23,7 @@ struct EvaluationResult {
 pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
     environment: Arc<Mutex<Environment<NativeEffect>>>,
-    repl: Repl<NativeEffect>,
-    last_was_nil: bool,
+    repl: Option<Repl<NativeEffect>>,
     stepping_thread: Option<JoinHandle<()>>,
     shutdown_signal: Arc<AtomicBool>,
 }
@@ -61,9 +59,6 @@ impl ReplCli {
         if let Some(backend) = effect_backend {
             environment.set_effect_backend(backend);
         }
-        let program = Program::new();
-        let module_loader = Box::new(FileSystemModuleLoader::new());
-        let repl = Repl::new(program, module_loader, builtins);
 
         // Wrap environment in Arc<Mutex> for shared access
         let environment = Arc::new(Mutex::new(environment));
@@ -93,18 +88,38 @@ impl ReplCli {
         Ok(Self {
             editor,
             environment,
-            repl,
-            last_was_nil: false,
+            repl: None,
             stepping_thread,
             shutdown_signal,
         })
     }
 
-    pub fn run(mut self) -> Result<(), ReadlineError> {
+    fn reset_repl(&mut self) -> Result<(), ReplError> {
+        let repl = {
+            let mut env = self.environment.lock().unwrap();
+            let module_loader = Box::new(FileSystemModuleLoader::new());
+            let builtins = crate::build_builtin_registry();
+            Repl::new(&mut env, module_loader, builtins)?
+        };
+
         if std::io::stdin().is_terminal() {
-            println!("Quiver v{}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "Quiver v{} - REPL @{}",
+                env!("CARGO_PKG_VERSION"),
+                repl.process_id()
+            );
             println!("Type \\? for help or \\q to exit");
             println!();
+        }
+
+        self.repl = Some(repl);
+        Ok(())
+    }
+
+    pub fn run(mut self) -> Result<(), ReadlineError> {
+        if let Err(e) = self.reset_repl() {
+            eprintln!("Fatal: Failed to start REPL: {}", e);
+            return Ok(());
         }
 
         loop {
@@ -126,8 +141,15 @@ impl ReplCli {
                         match self.evaluate(line) {
                             Ok(result) => self.print(result),
                             Err(e) => {
-                                self.last_was_nil = false;
+                                let is_runtime_error = matches!(e, ReplError::Runtime(_));
                                 self.print_error(e, line);
+                                if is_runtime_error {
+                                    println!();
+                                    if let Err(e) = self.reset_repl() {
+                                        eprintln!("Fatal: Failed to restart REPL: {}", e);
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -157,12 +179,7 @@ impl ReplCli {
     }
 
     fn get_prompt(&self) -> String {
-        let prompt = if self.last_was_nil {
-            ">>-".red()
-        } else {
-            ">>-".white()
-        };
-        format!("{} ", prompt.bold())
+        format!("{} ", ">>-".white().bold())
     }
 
     fn handle_command(&mut self, command: &str) -> bool {
@@ -173,7 +190,7 @@ impl ReplCli {
                 println!("{}", "Available commands:".bright_black());
                 println!("{}", "  \\? - Show this help message".bright_black());
                 println!("{}", "  \\q - Exit the REPL".bright_black());
-                println!("{}", "  \\! - Reset the environment".bright_black());
+                println!("{}", "  \\! - Reset the REPL".bright_black());
                 println!("{}", "  \\v - List variables".bright_black());
                 println!("{}", "  \\p - List processes".bright_black());
                 println!("{}", "  \\p X - Inspect process with ID X".bright_black());
@@ -188,22 +205,10 @@ impl ReplCli {
             }
 
             ["!"] => {
-                // Save history before resetting
-                if let Err(e) = self.editor.save_history(HISTORY_FILE) {
-                    eprintln!(
-                        "{}",
-                        format!("Warning: Failed to save history: {}", e).bright_black()
-                    );
-                }
-
-                match Self::new() {
-                    Ok(new_repl) => {
-                        *self = new_repl;
-                        println!("{}", "Environment reset".bright_black());
-                    }
-                    Err(e) => {
-                        eprintln!("{}", format!("Error resetting environment: {}", e).red());
-                    }
+                println!();
+                if let Err(e) = self.reset_repl() {
+                    eprintln!("Fatal: Failed to restart REPL: {}", e);
+                    return false;
                 }
             }
 
@@ -212,7 +217,7 @@ impl ReplCli {
             }
 
             ["x"] => {
-                let result_type = self.repl.get_last_result_type();
+                let result_type = self.repl.as_ref().unwrap().get_last_result_type();
                 let formatted_type = self.environment.lock().unwrap().format_type(result_type);
                 println!("{}", formatted_type.bright_black());
             }
@@ -254,7 +259,7 @@ impl ReplCli {
     }
 
     fn list_variables(&self) {
-        let vars = self.repl.get_variables();
+        let vars = self.repl.as_ref().unwrap().get_variables();
         if vars.is_empty() {
             println!("{}", "No variables defined".bright_black());
         } else {
@@ -393,17 +398,17 @@ impl ReplCli {
         };
 
         // Now evaluate with the process types
-        let request_id =
-            match self
-                .repl
-                .evaluate(&mut *self.environment.lock().unwrap(), line, process_types)?
-            {
-                Some(id) => id,
-                None => {
-                    // No executable code (e.g., only type definitions)
-                    return Ok(None);
-                }
-            };
+        let request_id = match self.repl.as_mut().unwrap().evaluate(
+            &mut *self.environment.lock().unwrap(),
+            line,
+            process_types,
+        )? {
+            Some(id) => id,
+            None => {
+                // No executable code (e.g., only type definitions)
+                return Ok(None);
+            }
+        };
 
         // Wait for the evaluation result
         match self
@@ -412,30 +417,23 @@ impl ReplCli {
         {
             RequestResult::Result(Ok((value, heap)), _) => {
                 // Compact locals after successful evaluation (optimization)
-                self.repl.compact(&mut *self.environment.lock().unwrap());
+                self.repl
+                    .as_mut()
+                    .unwrap()
+                    .compact(&mut *self.environment.lock().unwrap());
 
                 Ok(Some(EvaluationResult { value, heap }))
             }
-            RequestResult::Result(Err(e), _) => {
-                // Create a new REPL after runtime error
-                let program = Program::new();
-                let module_loader = Box::new(FileSystemModuleLoader::new());
-                let builtins = crate::build_builtin_registry();
-                self.repl = Repl::new(program, module_loader, builtins);
-                Err(ReplError::Runtime(e))
-            }
+            RequestResult::Result(Err(e), _) => Err(ReplError::Runtime(e)),
             _ => Err(ReplError::Environment(
                 quiver_environment::EnvironmentError::UnexpectedResultType,
             )),
         }
     }
 
-    fn print(&mut self, result: Option<EvaluationResult>) {
+    fn print(&self, result: Option<EvaluationResult>) {
         match result {
             Some(EvaluationResult { value, heap }) => {
-                // Track if result was nil for colored prompt
-                self.last_was_nil = value.is_nil();
-
                 let formatted_value = self.environment.lock().unwrap().format_value(&value, &heap);
 
                 // Show type for functions, builtins, and processes
@@ -457,7 +455,6 @@ impl ReplCli {
             }
             None => {
                 // No executable code (e.g., only type definitions)
-                self.last_was_nil = false;
             }
         }
     }

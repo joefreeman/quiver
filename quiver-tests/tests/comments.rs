@@ -14,7 +14,7 @@ fn test_comments() {
             }
             "#,
         )
-        .expect("#0");
+        .expect_type("#[] -> int");
     quiver()
         .evaluate(
             r#"
@@ -25,5 +25,5 @@ fn test_comments() {
             ] // end
             "#,
         )
-        .expect("Point[x: 10, y: 20]");
+        .expect_type("Point[x: int, y: int]");
 }

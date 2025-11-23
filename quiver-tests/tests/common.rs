@@ -1,6 +1,5 @@
 use quiver::spawn_worker;
 use quiver_compiler::modules::InMemoryModuleLoader;
-use quiver_core::program::Program;
 use quiver_core::value::Value;
 use quiver_environment::{Environment, Repl, ReplError, WorkerHandle};
 use quiver_io::NativeEffect;
@@ -109,9 +108,9 @@ impl TestBuilder {
         if let Some(backend) = effect_backend {
             environment.set_effect_backend(backend);
         }
-        let program = Program::new();
         let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
-        let mut repl = Repl::new(program, module_loader, builtins);
+        let mut repl = Repl::new(&mut environment, module_loader, builtins)
+            .expect("Failed to create REPL");
 
         // Evaluate source
         let result = match repl.evaluate(&mut environment, source, std::collections::HashMap::new())

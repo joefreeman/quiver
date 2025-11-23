@@ -265,9 +265,15 @@ impl<E: Effect> Environment<E> {
     }
 
     /// Start a new persistent process, returns assigned ProcessId
-    pub fn start_process(&mut self, bytecode: Bytecode) -> Result<ProcessId, EnvironmentError> {
-        // Merge bytecode into program and get remapped function index
-        let function_index = self.merge_bytecode(bytecode)?;
+    /// If bytecode is None, creates a sleeping process ready for resume (used by REPL)
+    pub fn start_process(
+        &mut self,
+        bytecode: Option<Bytecode>,
+    ) -> Result<ProcessId, EnvironmentError> {
+        let function_index = match bytecode {
+            Some(bc) => Some(self.merge_bytecode(bc)?),
+            None => None,
+        };
 
         let pid = self.allocate_process_id();
         let worker_id = pid % self.workers.len(); // Round-robin

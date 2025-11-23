@@ -54,7 +54,7 @@ pub fn execute_instructions_sync<E: Effect>(
     // Spawn a process with the temporary function (no captures, nil argument)
     executor.spawn_process(
         process_id,
-        function_index,
+        Some(function_index),
         vec![],
         Value::nil(),
         vec![],

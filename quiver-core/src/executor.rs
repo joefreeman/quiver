@@ -236,17 +236,28 @@ impl<E: Effect> Executor<E> {
         }
     }
 
+    /// Spawn a new process
+    /// If function_index is None, creates a sleeping process ready for resume (used by REPL)
     pub fn spawn_process(
         &mut self,
         id: ProcessId,
-        function_index: usize,
+        function_index: Option<usize>,
         captures: Vec<Value>,
         argument: Value,
         heap_data: Vec<Vec<u8>>,
         persistent: bool,
     ) -> Result<(), Error> {
         // Create the process
-        let process = Process::new(persistent);
+        let mut process = Process::new(persistent);
+
+        // If no function, create a sleeping process directly
+        let Some(function_index) = function_index else {
+            process.result = Some(Ok(Value::nil()));
+            self.processes.insert(id, process);
+            // Not added to queue - it's sleeping, waiting for resume
+            return Ok(());
+        };
+
         self.processes.insert(id, process);
 
         // Inject heap data and populate locals with captures

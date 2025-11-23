@@ -5,7 +5,6 @@ use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
 use quiver_core::effects::Effect;
 use quiver_core::process::ProcessId;
-use quiver_core::program::Program;
 use quiver_core::types::Type;
 use std::collections::HashMap;
 
@@ -40,21 +39,29 @@ pub struct Repl<E: Effect> {
 
 impl<E: Effect> Repl<E> {
     pub fn new(
-        program: Program,
+        env: &mut Environment<E>,
         module_loader: Box<dyn ModuleLoader>,
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
-    ) -> Self {
-        let types = program.get_tuples().to_vec();
+    ) -> Result<Self, ReplError> {
+        // Create a sleeping process ready for resume
+        let pid = env
+            .start_process(None)
+            .map_err(ReplError::Environment)?;
 
-        Self {
-            repl_process_id: None,
-            types,
+        Ok(Self {
+            repl_process_id: Some(pid),
+            types: vec![],
             bindings: HashMap::new(),
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
             module_loader,
             builtins,
-        }
+        })
+    }
+
+    /// Get the REPL process ID
+    pub fn process_id(&self) -> ProcessId {
+        self.repl_process_id.expect("REPL process not initialized")
     }
 
     /// Compile and evaluate an expression
@@ -138,7 +145,7 @@ impl<E: Effect> Repl<E> {
             None => {
                 // Create the persistent REPL process on first evaluation
                 let pid = env
-                    .start_process(bytecode)
+                    .start_process(Some(bytecode))
                     .map_err(ReplError::Environment)?;
                 self.repl_process_id = Some(pid);
                 pid

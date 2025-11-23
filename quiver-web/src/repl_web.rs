@@ -2,7 +2,6 @@ use crate::types::*;
 use crate::web_transport::WebWorkerHandle;
 use include_dir::{Dir, include_dir};
 use quiver_compiler::modules::InMemoryModuleLoader;
-use quiver_core::program::Program;
 use quiver_environment::{RequestResult, WorkerHandle};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -590,13 +589,17 @@ impl Repl {
             environment.get_shared_state();
 
         // Create REPL
-        let program = Program::new();
         let module_loader = create_std_module_loader();
         // For WASM, use core modules only (no network builtins)
         let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
             &quiver_core::builtins::core_modules(),
         );
-        let repl = quiver_environment::Repl::new(program, module_loader, builtins);
+        let repl = quiver_environment::Repl::new(
+            &mut *env_rc.borrow_mut(),
+            module_loader,
+            builtins,
+        )
+        .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
 
         Ok(Self {
             environment: env_rc,

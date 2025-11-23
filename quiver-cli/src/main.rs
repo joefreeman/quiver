@@ -413,7 +413,7 @@ fn execute_with_environment(
 
     // Start the process in the environment
     let process_id = environment
-        .start_process(bytecode_data)
+        .start_process(Some(bytecode_data))
         .map_err(|e| format!("Failed to start process: {:?}", e))?;
 
     // Request the result (stats are automatically included if profiling is enabled)

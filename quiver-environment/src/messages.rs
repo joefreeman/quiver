@@ -21,9 +21,10 @@ pub enum Command<E: Effect> {
     },
 
     /// Start a new persistent process (e.g., from REPL)
+    /// If function_index is None, the process starts in a sleeping state ready for resume
     StartProcess {
         id: ProcessId,
-        function_index: usize,
+        function_index: Option<usize>,
     },
 
     /// Spawn a new process (from another process)
