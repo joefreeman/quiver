@@ -792,3 +792,13 @@ fn test_sugar_tuple_type() {
         )
         .expect("[42, 100]");
 }
+
+#[test]
+fn test_process_reference_after_completion() {
+    // Test that @N syntax works even after the process has completed
+    quiver()
+        .evaluate("p = @{ 42 }")
+        .expect("Ok")
+        .then_evaluate("@1 ~> !")
+        .expect("42");
+}

@@ -9,6 +9,79 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 type ReplResult = Result<Option<(Value, Vec<Vec<u8>>)>, ReplError>;
 
+/// Evaluate source and return a TestResult
+fn evaluate(
+    mut environment: Environment<NativeEffect>,
+    mut repl: Repl<NativeEffect>,
+    virtual_time: Arc<AtomicU64>,
+    source: &str,
+) -> TestResult {
+    // Fetch process types
+    let types_request_id = environment
+        .request_process_types()
+        .expect("Failed to request process types");
+
+    let process_types = loop {
+        environment.step().ok();
+        match environment.poll_request(types_request_id) {
+            Ok(Some(quiver_environment::RequestResult::ProcessTypes(types))) => break types,
+            Ok(Some(_)) => panic!("Unexpected result type for process types request"),
+            Ok(None) => continue,
+            Err(e) => panic!("Failed to get process types: {:?}", e),
+        }
+    };
+
+    // Evaluate and poll for result
+    let result = match repl.evaluate(&mut environment, source, process_types) {
+        Ok(Some(request_id)) => {
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(5);
+
+            loop {
+                let did_work = environment.step().unwrap_or(false);
+
+                if !did_work {
+                    virtual_time.fetch_add(1, Ordering::Relaxed);
+                }
+
+                match environment.poll_request(request_id) {
+                    Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap)), _))) => {
+                        break Ok(Some((value, heap)));
+                    }
+                    Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
+                        break Err(ReplError::Runtime(e));
+                    }
+                    Ok(Some(_)) => {
+                        panic!("Unexpected result type for evaluation request");
+                    }
+                    Ok(None) => {
+                        if start.elapsed() > timeout {
+                            break Err(ReplError::Environment(
+                                quiver_environment::EnvironmentError::Timeout(timeout),
+                            ));
+                        }
+                        std::thread::sleep(std::time::Duration::from_micros(10));
+                    }
+                    Err(e) => break Err(ReplError::Environment(e)),
+                }
+            }
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(e),
+    };
+
+    let last_result_type = repl.get_last_result_type().clone();
+
+    TestResult {
+        result,
+        source: source.to_string(),
+        environment,
+        repl,
+        virtual_time,
+        last_result_type,
+    }
+}
+
 macro_rules! load_stdlib_modules {
     ($($name:literal),* $(,)?) => {{
         let mut modules = HashMap::new();
@@ -109,67 +182,10 @@ impl TestBuilder {
             environment.set_effect_backend(backend);
         }
         let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
-        let mut repl = Repl::new(&mut environment, module_loader, builtins)
+        let repl = Repl::new(&mut environment, module_loader, builtins)
             .expect("Failed to create REPL");
 
-        // Evaluate source
-        let result = match repl.evaluate(&mut environment, source, std::collections::HashMap::new())
-        {
-            Ok(Some(request_id)) => {
-                // Poll for result with timeout
-                let start = std::time::Instant::now();
-                let timeout = std::time::Duration::from_secs(5);
-
-                loop {
-                    let did_work = environment.step().unwrap_or(false);
-
-                    // If idle, advance virtual time
-                    if !did_work {
-                        virtual_time_ms.fetch_add(1, Ordering::Relaxed);
-                    }
-
-                    match environment.poll_request(request_id) {
-                        Ok(Some(quiver_environment::RequestResult::Result(
-                            Ok((value, heap)),
-                            _,
-                        ))) => {
-                            break Ok(Some((value, heap)));
-                        }
-                        Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
-                            break Err(ReplError::Runtime(e));
-                        }
-                        Ok(Some(_)) => {
-                            panic!("Unexpected result type for evaluation request");
-                        }
-                        Ok(None) => {
-                            if start.elapsed() > timeout {
-                                break Err(ReplError::Environment(
-                                    quiver_environment::EnvironmentError::Timeout(timeout),
-                                ));
-                            }
-                            std::thread::sleep(std::time::Duration::from_micros(10));
-                        }
-                        Err(e) => break Err(ReplError::Environment(e)),
-                    }
-                }
-            }
-            Ok(None) => {
-                // No executable code (e.g., only type definitions)
-                Ok(None)
-            }
-            Err(e) => Err(e),
-        };
-
-        let last_result_type = repl.get_last_result_type().clone();
-
-        TestResult {
-            result,
-            source: source.to_string(),
-            environment,
-            repl,
-            virtual_time_ms: virtual_time_ms.load(Ordering::Relaxed),
-            last_result_type,
-        }
+        evaluate(environment, repl, virtual_time_ms, source)
     }
 }
 
@@ -179,7 +195,7 @@ pub struct TestResult {
     source: String,
     environment: Environment<NativeEffect>,
     repl: Repl<NativeEffect>,
-    virtual_time_ms: u64,
+    virtual_time: Arc<AtomicU64>,
     last_result_type: quiver_core::types::Type,
 }
 
@@ -378,15 +394,21 @@ impl TestResult {
     }
 
     pub fn expect_duration(self, min_ms: u64, max_ms: u64) -> Self {
+        let time = self.virtual_time.load(Ordering::Relaxed);
         assert!(
-            self.virtual_time_ms >= min_ms && self.virtual_time_ms <= max_ms,
+            time >= min_ms && time <= max_ms,
             "Expected virtual time between {}ms and {}ms, but got {}ms for source: {}",
             min_ms,
             max_ms,
-            self.virtual_time_ms,
+            time,
             self.source
         );
         self
+    }
+
+    /// Evaluate another expression, chaining from the previous evaluation
+    pub fn then_evaluate(self, source: &str) -> Self {
+        evaluate(self.environment, self.repl, self.virtual_time, source)
     }
 }
 
