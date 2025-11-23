@@ -594,12 +594,9 @@ impl Repl {
         let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
             &quiver_core::builtins::core_modules(),
         );
-        let repl = quiver_environment::Repl::new(
-            &mut *env_rc.borrow_mut(),
-            module_loader,
-            builtins,
-        )
-        .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
+        let repl =
+            quiver_environment::Repl::new(&mut *env_rc.borrow_mut(), module_loader, builtins)
+                .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
 
         Ok(Self {
             environment: env_rc,

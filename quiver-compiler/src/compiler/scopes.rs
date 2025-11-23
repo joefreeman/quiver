@@ -1,13 +1,19 @@
-use crate::ast;
+use crate::{
+    ast,
+    compiler::{Error, Narrowings, Provenance, TypeAliasDef, helpers},
+};
 use quiver_core::types::Type;
 use std::collections::HashMap;
-
-use super::{Error, helpers, typing::TypeAliasDef};
 
 /// A binding can be either a variable or a type alias
 #[derive(Debug, Clone)]
 pub enum Binding {
-    Variable { ty: Type, index: usize },
+    Variable {
+        ty: Type,
+        index: usize,
+        /// Provenance of the value stored in this variable (for tuple field resolution).
+        provenance: super::Provenance,
+    },
     TypeAlias(TypeAliasDef),
 }
 
@@ -22,31 +28,55 @@ pub enum ScopeKind {
     Block,
 }
 
-/// Represents a scope in the compiler's variable environment
-/// Each scope tracks bindings (variables and type aliases) and an optional function parameter
+/// Block/function parameter with provenance tracking.
+///
+/// Stores the parameter type, its stack index, and where its value originated
+/// (for propagating narrowings back to the source).
+#[derive(Debug, Clone)]
+pub struct Parameter {
+    /// The parameter's type.
+    pub ty: Type,
+    /// Stack index for the parameter.
+    pub index: usize,
+    /// Where this parameter's value came from (for narrowing propagation).
+    pub provenance: Provenance,
+}
+
+/// Represents a scope in the compiler's variable environment.
+///
+/// Each scope tracks bindings (variables and type aliases), an optional parameter,
+/// and any type narrowings in effect for this scope.
 pub struct Scope {
+    /// Variable and type alias bindings.
     pub bindings: HashMap<String, Binding>,
-    pub parameter: Option<(Type, usize)>,
+    /// Type narrowings that overlay bindings (from type checks).
+    pub narrowings: Narrowings,
+    /// Block/function parameter.
+    pub parameter: Option<Parameter>,
+    /// Kind of scope (root, function, or block).
     pub kind: ScopeKind,
 }
 
 impl Scope {
+    /// Create a new scope with the given bindings, parameter, and kind.
     pub fn new(
         bindings: HashMap<String, Binding>,
-        parameter: Option<(Type, usize)>,
+        parameter: Option<Parameter>,
         kind: ScopeKind,
     ) -> Self {
         Self {
             bindings,
+            narrowings: Narrowings::default(),
             parameter,
             kind,
         }
     }
 
-    /// Create a new empty scope
+    /// Create a new empty scope.
     pub fn empty() -> Self {
         Self {
             bindings: HashMap::new(),
+            narrowings: Narrowings::default(),
             parameter: None,
             kind: ScopeKind::Root,
         }
@@ -61,6 +91,7 @@ pub fn define_variable(
     name: &str,
     accessors: &[ast::AccessPath],
     var_type: Type,
+    provenance: super::Provenance,
 ) -> Result<usize, Error> {
     // Only check base name (not captured field paths like "foo.x")
     if accessors.is_empty() && helpers::is_reserved_name(name) {
@@ -79,6 +110,7 @@ pub fn define_variable(
             Binding::Variable {
                 ty: var_type,
                 index,
+                provenance,
             },
         );
     }
@@ -92,17 +124,49 @@ pub fn define_type_alias(scopes: &mut [Scope], name: String, type_alias: TypeAli
     }
 }
 
-/// Look up a variable in the scope stack
-/// Searches from innermost to outermost scope
+/// Look up a variable in the scope stack, checking for narrowings.
+///
+/// Searches from innermost to outermost scope for the binding.
+/// If found, checks for any narrowing from current scope back to the binding's scope.
+/// Returns the narrowed type if one exists, otherwise the original type.
 pub fn lookup_variable(
     scopes: &[Scope],
     name: &str,
     accessors: &[ast::AccessPath],
 ) -> Option<(Type, usize)> {
     let full_name = helpers::make_capture_name(name, accessors);
+
+    // Find the scope containing the binding
+    let (binding_scope_idx, binding) = scopes
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, s)| s.bindings.get(&full_name).map(|b| (i, b)))?;
+
+    let Binding::Variable { ty, index, .. } = binding else {
+        return None;
+    };
+
+    // Check for narrowings from current scope back to binding scope
+    // (innermost narrowing takes precedence)
+    for scope in scopes[binding_scope_idx..].iter().rev() {
+        if let Some(narrowed) = scope.narrowings.variables.get(&full_name) {
+            return Some((narrowed.clone(), *index));
+        }
+    }
+
+    // No narrowing, return original type
+    Some((ty.clone(), *index))
+}
+
+/// Look up the provenance stored for a variable.
+/// Returns the provenance that was stored when the variable was defined.
+pub fn lookup_variable_provenance(scopes: &[Scope], name: &str) -> Option<super::Provenance> {
+    let full_name = helpers::make_capture_name(name, &[]);
+
     for scope in scopes.iter().rev() {
-        if let Some(Binding::Variable { ty, index }) = scope.bindings.get(&full_name) {
-            return Some((ty.clone(), *index));
+        if let Some(Binding::Variable { provenance, .. }) = scope.bindings.get(&full_name) {
+            return Some(provenance.clone());
         }
     }
     None
@@ -119,24 +183,48 @@ pub fn lookup_type_alias(scopes: &[Scope], name: &str) -> Option<TypeAliasDef> {
     None
 }
 
-/// Get the parameter from the current (innermost) scope
+/// Get the parameter from the current (innermost) scope.
+///
+/// Returns the (possibly narrowed) parameter type and its stack index.
+/// If a narrowing exists for the parameter in the current scope, returns the narrowed type.
 pub fn get_parameter(scopes: &[Scope]) -> Result<(Type, usize), Error> {
-    scopes
-        .last()
-        .and_then(|scope| scope.parameter.clone())
+    let scope = scopes.last().ok_or_else(|| Error::InternalError {
+        message: "No scope available".to_string(),
+    })?;
+
+    let param = scope
+        .parameter
+        .as_ref()
         .ok_or_else(|| Error::InternalError {
             message: "No parameter in current scope".to_string(),
-        })
+        })?;
+
+    // Check for parameter narrowing in current scope
+    let ty = scope
+        .narrowings
+        .parameter
+        .clone()
+        .unwrap_or_else(|| param.ty.clone());
+
+    Ok((ty, param.index))
 }
 
-/// Get the function parameter (for $ operator)
-/// Walks up scopes to find the nearest Function scope's parameter
+/// Get the function parameter (for $ operator).
+///
+/// Walks up scopes to find the nearest Function scope's parameter.
+/// Returns the (possibly narrowed) parameter type and its stack index.
 pub fn get_function_parameter(scopes: &[Scope]) -> Result<(Type, usize), Error> {
     for scope in scopes.iter().rev() {
         if scope.kind == ScopeKind::Function
             && let Some(param) = &scope.parameter
         {
-            return Ok(param.clone());
+            // Check for parameter narrowing
+            let ty = scope
+                .narrowings
+                .parameter
+                .clone()
+                .unwrap_or_else(|| param.ty.clone());
+            return Ok((ty, param.index));
         }
     }
     Err(Error::InternalError {

@@ -504,7 +504,8 @@ impl<E: Effect> Executor<E> {
                 send: Some(Box::new(function.function_type.receive.clone())),
                 receive: Some(Box::new(function.function_type.result.clone())),
             }));
-            self.process_types.insert(id, (process_type, function_index));
+            self.process_types
+                .insert(id, (process_type, function_index));
         }
     }
 

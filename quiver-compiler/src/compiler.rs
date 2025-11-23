@@ -3,7 +3,13 @@ use std::collections::{HashMap, HashSet};
 mod codegen;
 mod helpers;
 mod modules;
+mod narrowing;
+use narrowing::{
+    Narrowing, analyze_tuple_pattern_for_complement, apply_narrowing, compute_complement,
+    get_field_type, get_parameter_field_narrowing,
+};
 mod pattern;
+mod provenance;
 mod scopes;
 mod spread;
 mod type_queries;
@@ -12,7 +18,8 @@ mod variables;
 
 pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
-pub use scopes::{Binding, Scope, ScopeKind};
+pub use provenance::{Narrowings, Provenance};
+pub use scopes::{Binding, Parameter, Scope, ScopeKind};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_types};
 
 use crate::{
@@ -26,59 +33,6 @@ use quiver_core::{
     types::{CallableType, NIL, OK, ProcessType, TupleLookup, Type},
     value::Value,
 };
-
-/// Represents a guard that an expression performs on its input value.
-/// Used for exhaustiveness checking in pattern matching.
-#[derive(Debug, Clone, PartialEq)]
-enum Guard {
-    /// No guard - expression doesn't check the input
-    None,
-    /// Pure type guard - expression eliminates this type from the input
-    Type(Type),
-    /// Complex guard - has checks but can't be used for exhaustiveness
-    Complex,
-}
-
-/// Subtract a type from another type (for exhaustiveness checking).
-/// Returns the remaining variants after removing the subtracted type.
-fn subtract_type(from: &Type, subtract: &Type) -> Type {
-    match from {
-        Type::Union(types) => {
-            // For unions, filter out any variants that match the subtracted type
-            let remaining: Vec<Type> = types
-                .iter()
-                .filter(|t| !types_equal(t, subtract))
-                .cloned()
-                .collect();
-            Type::from_types(remaining)
-        }
-        single if types_equal(single, subtract) => {
-            // Single type matches - return never (empty union)
-            Type::never()
-        }
-        single => {
-            // Single type doesn't match - return it unchanged
-            single.clone()
-        }
-    }
-}
-
-/// Check if two types are equal (helper for subtract_type)
-fn types_equal(a: &Type, b: &Type) -> bool {
-    match (a, b) {
-        (Type::Tuple(id_a), Type::Tuple(id_b)) => id_a == id_b,
-        (Type::Partial(id_a), Type::Partial(id_b)) => id_a == id_b,
-        (Type::Integer, Type::Integer) => true,
-        (Type::Binary, Type::Binary) => true,
-        (Type::Union(types_a), Type::Union(types_b)) => {
-            types_a.len() == types_b.len()
-                && types_a
-                    .iter()
-                    .all(|t| types_b.iter().any(|u| types_equal(t, u)))
-        }
-        _ => false,
-    }
-}
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -202,6 +156,8 @@ struct RippleContext {
     stack_offset: usize,
     /// Whether this context owns the value and must clean it up
     owns_value: bool,
+    /// Provenance of the rippled value for type narrowing
+    provenance: Provenance,
 }
 
 pub struct Compiler<'a, E: quiver_core::effects::Effect> {
@@ -286,7 +242,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             compiler.codegen.add_instruction(Instruction::Store);
 
-            Some((parameter_type, param_local))
+            Some(scopes::Parameter {
+                ty: parameter_type,
+                index: param_local,
+                provenance: Provenance::Parameter,
+            })
         } else {
             None
         };
@@ -345,7 +305,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok(Type::nil())
             }
             ast::Statement::Expression(expression) => {
-                let (result_type, _) = self.compile_expression(expression, None)?;
+                let result_type = self.compile_expression(expression, None)?;
                 Ok(result_type)
             }
         }
@@ -471,7 +431,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         tuple_name: Option<String>,
         fields: Vec<ast::TupleField>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Provenance), Error> {
         helpers::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
         // Check if this tuple contains spreads
@@ -482,10 +442,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return spread::compile_tuple_with_spread(self, tuple_name, fields, ripple_context);
         }
 
-        // Compile field values and collect their types
+        // Compile field values and collect their types and provenances
         let mut field_types = Vec::new();
+        let mut field_provenances = Vec::new();
         for (fields_compiled, field) in fields.iter().enumerate() {
-            let field_type = match &field.value {
+            let (field_type, field_prov) = match &field.value {
                 ast::FieldValue::Chain(chain) => {
                     // Pass ripple_context to chains, incrementing offset for each field compiled
                     // Set owns_value=false since we're passing it through, not owning it
@@ -495,20 +456,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             value_type: ctx.value_type.clone(),
                             stack_offset: ctx.stack_offset + fields_compiled,
                             owns_value: false,
+                            provenance: ctx.provenance.clone(),
                         };
                         Some(&ripple_context_value)
                     } else {
                         None
                     };
-                    let (field_type, _) =
-                        self.compile_chain(chain.clone(), None, ripple_context_param)?;
-                    field_type
+                    self.compile_chain_with_provenance(chain.clone(), None, ripple_context_param)?
                 }
                 ast::FieldValue::Spread(_) => {
                     unreachable!("Spread should be handled by compile_tuple_with_spread")
                 }
             };
             field_types.push((field.name.clone(), field_type));
+            field_provenances.push(field_prov);
         }
 
         // Register the tuple type and emit instruction
@@ -523,7 +484,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.add_instruction(Instruction::Pop);
         }
 
-        Ok(Type::Tuple(tuple_id))
+        Ok((Type::Tuple(tuple_id), Provenance::Tuple(field_provenances)))
     }
 
     fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<Type, Error> {
@@ -882,8 +843,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.codegen.add_instruction(Instruction::Load(base_index));
 
                     // Apply accessors to get the final value
-                    let _accessed_type =
-                        self.compile_accessor(var_type, capture.accessors.clone(), &capture.base)?;
+                    let (_accessed_type, _) = self.compile_accessor(
+                        var_type,
+                        capture.accessors.clone(),
+                        &capture.base,
+                        Provenance::Unknown,
+                    )?;
 
                     // Store in temporary local
                     let temp_local = self.local_count;
@@ -997,6 +962,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 &capture.base,
                 &capture.accessors,
                 capture_type,
+                Provenance::Unknown, // Captures don't track provenance
             )?;
         }
 
@@ -1017,15 +983,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
             }
         }
-        let (body_type, _) = match function.body {
+        let body_type = match function.body {
             Some(body) => {
-                self.compile_block(body, parameter_type.clone(), None, ScopeKind::Function)?
+                // Function parameters have Provenance::Parameter since they come from callers
+                self.compile_block(
+                    body,
+                    parameter_type.clone(),
+                    Provenance::Parameter,
+                    None,
+                    ScopeKind::Function,
+                )?
             }
             None => {
                 // Identity function: just return the parameter
                 // The calling convention puts the parameter on the stack,
                 // so we don't need any instructions - just leave it there
-                (parameter_type.clone(), Guard::None)
+                parameter_type.clone()
             }
         };
 
@@ -1092,14 +1065,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(function_type)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_match(
         &mut self,
         pattern: ast::Match,
         value_type: Type,
+        value_provenance: Provenance,
         on_no_match: Option<usize>,
         mode: pattern::PatternMode,
         return_ok: bool,
-    ) -> Result<(Type, Guard), Error> {
+        mut narrowing: Option<&mut Narrowing>,
+    ) -> Result<Type, Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
 
@@ -1109,11 +1085,25 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let (bindings, binding_sets, result_type) =
             pattern::analyze_pattern(&mut self.program, &pattern, &value_type, mode, &self.scopes)?;
 
+        // Check if pattern has non-type requirements (literals, variable pins, path equality).
+        // Patterns with non-type requirements cannot use complement narrowing.
+        // Exception: tuple patterns with a single type-constraining field CAN use
+        // field-specific complement narrowing, so don't disable in that case.
+        let has_tuple_complement = mode == pattern::PatternMode::Bind
+            && analyze_tuple_pattern_for_complement(&pattern, &value_type, &self.program).is_some();
+
+        if pattern::has_non_type_requirements(&binding_sets)
+            && !has_tuple_complement
+            && let Some(n) = narrowing.as_mut()
+        {
+            n.disable();
+        }
+
         // If result type is never (empty union), pattern won't match - skip pattern matching code
         if result_type.is_never() {
             self.codegen.add_instruction(Instruction::Pop);
             self.codegen.add_instruction(Instruction::Tuple(NIL));
-            return Ok((Type::nil(), Guard::Complex));
+            return Ok(Type::nil());
         }
 
         // Register locals for all bindings (indices needed for Load)
@@ -1130,12 +1120,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.local_count += 1;
 
             // Register in scope
+            // For simple identifier bindings (single binding), preserve the value's provenance
+            // so tuple field provenance is preserved. For complex patterns (destructuring),
+            // use Unknown since path resolution is complex.
+            let var_provenance = if bindings.len() == 1 {
+                value_provenance.clone()
+            } else {
+                Provenance::Unknown
+            };
+
             if let Some(scope) = self.scopes.last_mut() {
                 scope.bindings.insert(
                     variable_name.clone(),
                     Binding::Variable {
                         ty: variable_type.clone(),
                         index: local_index,
+                        provenance: var_provenance,
                     },
                 );
             }
@@ -1151,6 +1151,59 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &binding_sets,
             fail_target,
         )?;
+
+        // Apply narrowing to the matched value's provenance if the pattern narrows the type.
+        // This is done here on the success path - the type has been narrowed by the pattern.
+        // Note: result_type is the narrowed type from analyze_pattern.
+        if !result_type.is_never() && !result_type.is_nil() {
+            apply_narrowing(
+                &mut self.scopes,
+                &value_provenance,
+                &result_type,
+                &self.program,
+            );
+
+            // Record the narrowing for complement narrowing in blocks
+            if let Some(n) = narrowing {
+                // For bind patterns with tuple structure, check if we should record
+                // field-specific narrowing instead of whole-value narrowing.
+                // This enables patterns like `=[Nil, ys]` to narrow the first field
+                // so subsequent branches know the first field is NOT Nil.
+                let field_complement_info = if mode == pattern::PatternMode::Bind {
+                    analyze_tuple_pattern_for_complement(&pattern, &value_type, &self.program)
+                        .and_then(|(field_idx, constrained_type)| {
+                            // Use narrowed field type if available (from complement of previous branch),
+                            // otherwise fall back to static field type from tuple definition.
+                            // This ensures that for subsequent branches, the "original" type
+                            // is the narrowed type, so complement calculation is correct.
+                            let original = get_parameter_field_narrowing(&self.scopes, field_idx)
+                                .or_else(|| {
+                                get_field_type(&value_type, field_idx, &self.program)
+                            })?;
+                            Some((field_idx, original, constrained_type))
+                        })
+                } else {
+                    None
+                };
+
+                if let Some((field_idx, original_field_type, constrained_type)) =
+                    field_complement_info
+                {
+                    // Record field-specific narrowing for complement
+                    let field_provenance =
+                        Provenance::Field(Box::new(value_provenance.clone()), field_idx);
+                    n.record(
+                        &field_provenance,
+                        &original_field_type,
+                        &constrained_type,
+                        &self.program,
+                    );
+                } else {
+                    // Standard whole-value narrowing
+                    n.record(&value_provenance, &value_type, &result_type, &self.program);
+                }
+            }
+        }
 
         // Success path: leave the value on the stack, or replace with Ok
         if return_ok {
@@ -1169,33 +1222,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         self.codegen.patch_jump_to_here(success_jump_addr);
 
-        // Determine the guard for this match
-        let guard = if result_type.contains_nil() {
-            // Match might fail - check if it's a pure type guard
-            if pattern::is_pure_type_guard(&binding_sets) {
-                // Extract narrowed type (remove nil from union)
-                // Special case: if result type is exactly nil, the guard is for nil itself
-                let narrowed = if result_type.is_nil() {
-                    result_type.clone()
-                } else {
-                    match &result_type {
-                        Type::Union(types) => {
-                            let non_nil: Vec<Type> =
-                                types.iter().filter(|t| !t.is_nil()).cloned().collect();
-                            Type::from_types(non_nil)
-                        }
-                        _ => result_type.clone(),
-                    }
-                };
-                Guard::Type(narrowed)
-            } else {
-                Guard::Complex
-            }
-        } else {
-            // Match always succeeds - no guard
-            Guard::None
-        };
-
         // Compute final type - if return_ok, replace value type with Ok
         let final_type = if return_ok {
             if result_type.contains_nil() {
@@ -1207,7 +1233,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result_type
         };
 
-        Ok((final_type, guard))
+        Ok(final_type)
     }
 
     /// Helper to check if an expression starts with a continuation (~>)
@@ -1222,9 +1248,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         block: ast::Block,
         parameter_type: Type,
+        parameter_provenance: Provenance,
         on_no_match: Option<usize>,
         scope_kind: ScopeKind,
-    ) -> Result<(Type, Guard), Error> {
+    ) -> Result<Type, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -1243,14 +1270,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Push new scope with parameter
         self.scopes.push(Scope::new(
             HashMap::new(),
-            Some((parameter_type.clone(), param_local)),
+            Some(scopes::Parameter {
+                ty: parameter_type.clone(),
+                index: param_local,
+                provenance: parameter_provenance,
+            }),
             scope_kind,
         ));
 
-        // Track remaining type for exhaustiveness checking
-        let mut remaining_type = parameter_type.clone();
-        // Track if previous branch had a nil guard (for scope parameter narrowing)
-        let mut prev_had_nil_guard = false;
+        // Track pending complement narrowing from previous branch
+        let mut pending_complement: Option<(Provenance, Type)> = None;
+
+        // Track whether the block exhaustively covers all type variants.
+        // Assume not exhaustive until proven otherwise by complement narrowing.
+        let mut is_exhaustive = false;
 
         for (i, branch) in block.branches.iter().enumerate() {
             let is_last_branch = i == block.branches.len() - 1;
@@ -1263,38 +1296,41 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // So if we jump to this branch, the previous branch's variables were never allocated
                 // Reset local count to after parameter (locals from previous branch are "forgotten")
                 self.local_count = param_local + 1;
-                // Clear scope and update parameter type if previous branch had a nil guard
-                // (This enables type narrowing for the Not operator without affecting
-                // complex pattern matching which uses Type guards)
+                // Clear scope bindings and narrowings from previous branch
                 let scope = self.scopes.last_mut().ok_or_else(|| Error::InternalError {
                     message: "No scope available when compiling block branch".to_string(),
                 })?;
                 scope.bindings.clear();
-                if prev_had_nil_guard
-                    && !remaining_type.is_never()
-                    && let Some((ref mut param_type, _)) = scope.parameter
-                {
-                    *param_type = remaining_type.clone();
+                scope.narrowings = provenance::Narrowings::default();
+
+                // Apply complement narrowing from previous branch (if available)
+                if let Some((prov, complement)) = pending_complement.take() {
+                    apply_narrowing(&mut self.scopes, &prov, &complement, &self.program);
                 }
             }
 
+            // Create a narrowing instance for this branch's condition
+            let mut narrowing = Narrowing::new();
+
             // Compile the condition expression - it can use ~> to access the parameter
-            let (condition_type, condition_guard) =
-                self.compile_expression(branch.condition.clone(), on_no_match)?;
+            let condition_type = self.compile_expression_with_input(
+                branch.condition.clone(),
+                on_no_match,
+                None,
+                Some(&mut narrowing),
+            )?;
 
-            // Update remaining type based on guard
-            if let Guard::Type(ref guarded_type) = condition_guard {
-                // Subtract the guarded type from remaining type
-                remaining_type = subtract_type(&remaining_type, guarded_type);
-            }
-
-            // Check if this is a fallback branch (doesn't examine the input)
-            let condition_uses_input = Self::expression_starts_with_continuation(&branch.condition);
-
-            // If this is the last branch and it's a fallback (doesn't check input),
-            // it handles all remaining cases - mark as exhaustive
-            if is_last_branch && !condition_uses_input {
-                remaining_type = Type::never();
+            // If complement narrowing is valid, compute complement for exhaustiveness check
+            // and (for non-last branches) to narrow subsequent branches
+            if let Some((prov, original, narrowed)) = narrowing.take() {
+                let complement = compute_complement(&original, &narrowed, &self.program);
+                if complement.is_never() {
+                    // All variants covered - block is exhaustive
+                    is_exhaustive = true;
+                } else if !is_last_branch {
+                    // Store complement for narrowing subsequent branches
+                    pending_complement = Some((prov, complement));
+                }
             }
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
@@ -1315,6 +1351,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             // Check if the condition is a multi-chain expression (relevant for cleanup)
             let is_multi_chain = branch.condition.chains.len() > 1;
+            // Check if condition starts with continuation (~>) - indicates pattern matching
+            let condition_is_pattern_match =
+                Self::expression_starts_with_continuation(&branch.condition);
 
             if let Some(ref consequence) = branch.consequence {
                 // Branch has a consequence - compile it
@@ -1325,27 +1364,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Use emit_duplicate_jump_if_nil (without pop) to keep the value on stack for consequence
                 let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil();
 
-                // Determine cleanup needs based on guard and expression structure:
-                // - Single-chain Guard::Type: pattern fails atomically, no cleanup (0)
-                // - Multi-chain Guard::Type: first chain stores bindings, need cleanup if later fails
-                // - Guard::Complex: later chain is pattern matching, fails atomically (0)
-                // - Guard::None: no pattern matching, always succeeds, cleanup all
-                let locals_to_clear = match condition_guard {
-                    Guard::Type(_) if !is_multi_chain => 0, // Single-chain pattern fails atomically
-                    Guard::Complex => 0, // Later chain's pattern fails atomically
-                    _ => branch_locals_count, // Multi-chain Type or None: clear all branch locals
+                // Determine cleanup needs based on expression structure:
+                // - Single-chain pattern matching (~> =...): fails atomically, no cleanup (0)
+                // - Block conditions ({ ... }): may allocate locals inside, need cleanup
+                // - Multi-chain expressions: first chain may allocate locals before later fails
+                let locals_to_clear = if !is_multi_chain && condition_is_pattern_match {
+                    0 // Single-chain pattern matching fails atomically
+                } else {
+                    branch_locals_count
                 };
 
                 // Track: jump address, target branch index, locals to clear
                 next_branch_jumps.push((next_branch_jump, i + 1, locals_to_clear));
 
                 // Only pass input_type if the consequence starts with a continuation (~>)
-                let (consequence_type, _) = if starts_with_continuation {
+                let consequence_type = if starts_with_continuation {
                     // Continuation receives the value on the stack
                     self.compile_expression_with_input(
                         consequence.clone(),
                         None,
                         Some(condition_type.clone()),
+                        None, // No narrowing for consequence
                     )?
                 } else {
                     // Other terms don't use the value, so pop it first
@@ -1363,18 +1402,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         .add_instruction(Instruction::Clear(branch_specific_locals));
                 }
 
-                // If this is the last branch, check if we need to add nil
-                // Add nil if:
-                // 1. There are remaining unchecked types (remaining_type is not never), AND
-                // 2. The condition can fail (condition_type contains nil)
-                // If the condition always succeeds, it's exhaustive even if it didn't narrow the type
-                // BUT: only if the consequence doesn't start with a continuation, because continuations
-                // perform their own narrowing and their result type already accounts for
-                // all possibilities (including the condition's nil being handled by next-branch jump)
+                // If this is the last branch and condition can fail, add nil to result type
+                // unless the block is exhaustive through complement narrowing
                 if is_last_branch
                     && !starts_with_continuation
-                    && !remaining_type.is_never()
                     && condition_type.contains_nil()
+                    && !is_exhaustive
                 {
                     branch_types.push(Type::nil());
                 }
@@ -1382,19 +1415,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // No consequence - use condition type
                 // For non-last branches, filter out nil since it causes fallthrough to next branch
                 if is_last_branch {
-                    branch_types.push(condition_type);
+                    branch_types.push(condition_type.clone());
                 } else {
                     // Only include non-nil types - nil will be handled by subsequent branches
-                    match condition_type {
+                    match &condition_type {
                         Type::Union(types) => {
                             let non_nil_types: Vec<Type> =
-                                types.into_iter().filter(|t| !t.is_nil()).collect();
+                                types.iter().filter(|t| !t.is_nil()).cloned().collect();
                             if !non_nil_types.is_empty() {
                                 branch_types.push(union_types(non_nil_types));
                             }
                         }
                         t if !t.is_nil() => {
-                            branch_types.push(t);
+                            branch_types.push(t.clone());
                         }
                         _ => {
                             // Condition is purely nil - will always fall through
@@ -1403,13 +1436,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
 
                 // Clear branch-specific locals, but keep the parameter
-                // For Guard::Type: bindings only stored on success path, so check if result
-                // is nil before clearing. For Guard::Complex/None: always clear because
-                // earlier chains may have stored bindings or condition always succeeds.
+                // If condition can fail (contains nil), locals may not be allocated on failure
+                // Use conditional clear to only clear when condition succeeded
                 let branch_specific_locals = self.local_count - (param_local + 1);
 
-                if branch_specific_locals > 0 && matches!(condition_guard, Guard::Type(_)) {
-                    // Guard::Type: check if result is nil (failure) - skip clear if so
+                if branch_specific_locals > 0 && condition_type.contains_nil() {
+                    // Condition can fail - check if result is nil before clearing
                     self.codegen.add_instruction(Instruction::Duplicate);
                     self.codegen.add_instruction(Instruction::Not);
                     let skip_clear_jump = self.codegen.emit_jump_if_placeholder();
@@ -1421,7 +1453,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Patch skip_clear_jump to here (failure path skips clear)
                     self.codegen.patch_jump_to_here(skip_clear_jump);
                 } else if branch_specific_locals > 0 {
-                    // Guard::None or Guard::Complex: always clear
+                    // Condition always succeeds - always clear
                     self.codegen
                         .add_instruction(Instruction::Clear(branch_specific_locals));
                 }
@@ -1437,9 +1469,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     end_jumps.push(success_jump);
                 }
             }
-
-            // Track if this branch had a nil guard for next iteration
-            prev_had_nil_guard = matches!(&condition_guard, Guard::Type(t) if t.is_nil());
         }
 
         // Clear the parameter (branches have already cleared their specific locals)
@@ -1517,16 +1546,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Pop scope
         self.scopes.pop();
 
-        // Blocks don't perform guards on their input (the parameter is stored, not checked)
-        Ok((union_types(branch_types), Guard::None))
+        Ok(union_types(branch_types))
     }
 
     fn compile_expression(
         &mut self,
         expression: ast::Expression,
         on_no_match: Option<usize>,
-    ) -> Result<(Type, Guard), Error> {
-        self.compile_expression_with_input(expression, on_no_match, None)
+    ) -> Result<Type, Error> {
+        self.compile_expression_with_input(expression, on_no_match, None, None)
     }
 
     fn compile_expression_with_input(
@@ -1534,26 +1562,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         expression: ast::Expression,
         on_no_match: Option<usize>,
         input_type: Option<Type>,
-    ) -> Result<(Type, Guard), Error> {
+        mut narrowing: Option<&mut Narrowing>,
+    ) -> Result<Type, Error> {
         let has_input = input_type.is_some();
         let mut last_type = input_type;
         let mut end_jumps = Vec::new();
-        let mut guard = Guard::None;
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            let (chain_type, chain_guard) = self.compile_chain_with_input(
+            let (chain_type, _prov) = self.compile_chain_with_input(
                 chain.clone(),
                 on_no_match,
                 None,
                 if i == 0 { last_type.clone() } else { None },
+                narrowing.as_deref_mut(),
             )?;
-
-            // Track guard from first chain only (multiple chains make it complex)
-            if i == 0 {
-                guard = chain_guard;
-            } else if !matches!(chain_guard, Guard::None) {
-                guard = Guard::Complex;
-            }
 
             // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil =
@@ -1608,7 +1630,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let result_type = last_type.ok_or_else(|| Error::InternalError {
             message: "Expression compiled with no chains".to_string(),
         })?;
-        Ok((result_type, guard))
+        Ok(result_type)
     }
 
     fn compile_chain(
@@ -1616,8 +1638,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         chain: ast::Chain,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<(Type, Guard), Error> {
-        self.compile_chain_with_input(chain, on_no_match, ripple_context, None)
+    ) -> Result<Type, Error> {
+        let (ty, _prov) = self.compile_chain_with_provenance(chain, on_no_match, ripple_context)?;
+        Ok(ty)
+    }
+
+    fn compile_chain_with_provenance(
+        &mut self,
+        chain: ast::Chain,
+        on_no_match: Option<usize>,
+        ripple_context: Option<&RippleContext>,
+    ) -> Result<(Type, Provenance), Error> {
+        self.compile_chain_with_input(chain, on_no_match, ripple_context, None, None)
     }
 
     fn compile_chain_with_input(
@@ -1626,49 +1658,50 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
         input_type: Option<Type>,
-    ) -> Result<(Type, Guard), Error> {
+        mut narrowing: Option<&mut Narrowing>,
+    ) -> Result<(Type, Provenance), Error> {
         // If this is a continuation chain (starts with ~>), load the parameter
-        let mut current_type = if chain.continuation {
+        let (mut current_type, mut current_prov) = if chain.continuation {
             // Continuation chains explicitly use the parameter from scope
             let (parameter_type, param_local) = scopes::get_parameter(&self.scopes)?;
             self.codegen.add_instruction(Instruction::Load(param_local));
-            Some(parameter_type)
+            (Some(parameter_type), Provenance::Parameter)
         } else {
             // Use input_type if provided (e.g., from a consequence receiving narrowed type)
-            input_type
+            (input_type, Provenance::Unknown)
         };
 
-        // Track guards from terms - for now, combine conservatively
-        let mut guard = Guard::None;
         for term in chain.terms {
-            let (term_type, term_guard) =
-                self.compile_term(term, current_type, on_no_match, ripple_context)?;
+            let (term_type, term_prov) = self.compile_term(
+                term,
+                current_type,
+                current_prov,
+                on_no_match,
+                ripple_context,
+                narrowing.as_deref_mut(),
+            )?;
             current_type = Some(term_type);
-
-            // Combine guards: if we have multiple guards, it's complex
-            guard = match (guard, term_guard) {
-                (Guard::None, g) => g,
-                (g, Guard::None) => g,
-                (Guard::Type(_), Guard::Type(_)) => Guard::Complex, // Multiple type guards - too complex for now
-                _ => Guard::Complex,
-            };
+            current_prov = term_prov;
         }
 
         let result_type = current_type.ok_or_else(|| Error::InternalError {
             message: "Chain compiled with no terms and no continuation".to_string(),
         })?;
 
-        // If there's a match pattern, apply it and use its guard
+        // If there's a match pattern, apply it
         if let Some(pattern) = chain.match_pattern {
-            self.compile_match(
+            let ty = self.compile_match(
                 pattern,
                 result_type,
+                current_prov.clone(),
                 on_no_match,
                 pattern::PatternMode::Bind,
                 true, // Direct assignment returns Ok
-            )
+                narrowing,
+            )?;
+            Ok((ty, current_prov))
         } else {
-            Ok((result_type, guard))
+            Ok((result_type, current_prov))
         }
     }
 
@@ -1908,13 +1941,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     value_type: val_type.clone(),
                     stack_offset: i,
                     owns_value: false,
+                    provenance: Provenance::Unknown, // Spawn context doesn't need narrowing
                 };
                 Some(&ripple_ctx)
             } else {
                 None
             };
 
-            let (source_type, _) = self.compile_chain(source.clone(), None, ripple_param)?;
+            let source_type = self.compile_chain(source.clone(), None, ripple_param)?;
 
             // Validate receive functions
             self.validate_receive_function(source, &source_type)?;
@@ -1936,7 +1970,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         // Compile the function term
-        let (fn_type, _) = self.compile_term(term, None, None, None)?;
+        let (fn_type, _prov) =
+            self.compile_term(term, None, Provenance::Unknown, None, None, None)?;
 
         if let Some(arg_type) = arg_type {
             // Case 2: arg ~> @f (spawn with argument)
@@ -2007,6 +2042,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         argument: Option<&Vec<ast::TupleField>>,
         value_type: Option<&Type>,
+        value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
         context_name: &str,
     ) -> Result<Option<Type>, Error> {
@@ -2032,17 +2068,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 value_type: vt.clone(),
                 stack_offset: 0,
                 owns_value: true,
+                provenance: value_provenance,
             };
             Some(&ripple_context_value)
         } else {
             ripple_context
         };
 
-        Ok(Some(self.compile_tuple(
-            None,
-            fields.clone(),
-            ripple_ctx,
-        )?))
+        let (ty, _prov) = self.compile_tuple(None, fields.clone(), ripple_ctx)?;
+        Ok(Some(ty))
     }
 
     /// Compile access expression: .x, $.x, foo.x, etc.
@@ -2050,8 +2084,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         access: ast::Access,
         value_type: Option<Type>,
+        value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Provenance), Error> {
         match access.source {
             None => {
                 // Field/positional access (.x, .0) requires a value
@@ -2061,15 +2096,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     )
                 })?;
 
-                let accessed_type = self.compile_accessor(val_type, access.accessors, "value")?;
+                // Track field provenance as we access fields
+                let (accessed_type, accessed_prov) =
+                    self.compile_accessor(val_type, access.accessors, "value", value_provenance)?;
 
                 if let Some(arg_fields) = &access.argument {
                     // Compile argument - no ripples allowed for bare accessor
-                    let arg_type = self.compile_tuple(None, arg_fields.clone(), None)?;
+                    let (arg_type, _) = self.compile_tuple(None, arg_fields.clone(), None)?;
                     self.codegen.add_instruction(Instruction::Rotate(2));
-                    self.apply_value_to_type(accessed_type, arg_type)
+                    // Function call result has unknown provenance
+                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
+                    Ok((ty, Provenance::Unknown))
                 } else {
-                    Ok(accessed_type)
+                    Ok((accessed_type, accessed_prov))
                 }
             }
             Some(ast::AccessSource::Parameter) => {
@@ -2077,20 +2116,29 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
                 self.codegen.add_instruction(Instruction::Load(param_local));
 
-                let accessed_type = self.compile_accessor(param_type, access.accessors, "$")?;
+                // Parameter access has Parameter provenance
+                let (accessed_type, accessed_prov) = self.compile_accessor(
+                    param_type,
+                    access.accessors,
+                    "$",
+                    Provenance::Parameter,
+                )?;
                 let arg_type = self.compile_argument(
                     access.argument.as_ref(),
                     value_type.as_ref(),
+                    value_provenance.clone(),
                     ripple_context,
                     "$",
                 )?;
 
                 if let Some(arg_type) = arg_type {
-                    self.apply_value_to_type(accessed_type, arg_type)
+                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
+                    Ok((ty, Provenance::Unknown))
                 } else if let Some(val_type) = value_type {
-                    self.apply_value_to_type(accessed_type, val_type)
+                    let ty = self.apply_value_to_type(accessed_type, val_type)?;
+                    Ok((ty, Provenance::Unknown))
                 } else {
-                    Ok(accessed_type)
+                    Ok((accessed_type, accessed_prov))
                 }
             }
             Some(ast::AccessSource::Identifier(name)) => {
@@ -2119,16 +2167,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         value_type: var_type,
                         stack_offset: 0,
                         owns_value: true,
+                        provenance: Provenance::Variable(name.clone()),
                     };
 
                     // Compile tuple with spread, using the variable as spread source
                     let arg_fields = access.argument.unwrap();
-                    return spread::compile_tuple_with_spread(
+                    let (ty, _) = spread::compile_tuple_with_spread(
                         self,
                         tuple_name,
                         arg_fields,
                         Some(&ripple_ctx),
-                    );
+                    )?;
+                    // Spread result has unknown provenance
+                    return Ok((ty, Provenance::Unknown));
                 }
 
                 // Normal function call path
@@ -2136,18 +2187,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let arg_type = self.compile_argument(
                     access.argument.as_ref(),
                     value_type.as_ref(),
+                    value_provenance.clone(),
                     ripple_context,
                     &name,
                 )?;
 
-                let accessed_type = self.compile_member_access(&name, access.accessors)?;
+                // compile_member_access loads the variable and handles accessors
+                // We need to track the provenance as Variable(name), then apply field accesses
+                let (accessed_type, accessed_prov) =
+                    self.compile_member_access(&name, access.accessors)?;
 
                 if let Some(arg_type) = arg_type {
-                    self.apply_value_to_type(accessed_type, arg_type)
+                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
+                    Ok((ty, Provenance::Unknown))
                 } else if let Some(val_type) = value_type {
-                    self.apply_value_to_type(accessed_type, val_type)
+                    let ty = self.apply_value_to_type(accessed_type, val_type)?;
+                    Ok((ty, Provenance::Unknown))
                 } else {
-                    Ok(accessed_type)
+                    Ok((accessed_type, accessed_prov))
                 }
             }
             Some(ast::AccessSource::Ripple) => {
@@ -2177,15 +2234,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             value_type: piped_type,
                             stack_offset: 0,
                             owns_value: true,
+                            provenance: value_provenance.clone(),
                         };
 
                         let arg_fields = access.argument.unwrap();
-                        return spread::compile_tuple_with_spread(
+                        let (ty, _) = spread::compile_tuple_with_spread(
                             self,
                             tuple_name,
                             arg_fields,
                             Some(&ripple_ctx),
-                        );
+                        )?;
+                        return Ok((ty, Provenance::Unknown));
                     } else {
                         return Err(Error::TypeMismatch {
                             expected: "tuple".to_string(),
@@ -2203,23 +2262,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     })?;
 
                     // Compile argument tuple (no ripple context needed, piped value IS the function)
-                    let arg_type = self.compile_tuple(None, arg_fields, None)?;
+                    let (arg_type, _) = self.compile_tuple(None, arg_fields, None)?;
 
                     // Rotate so piped value (function) is on top
                     self.codegen.add_instruction(Instruction::Rotate(2));
 
-                    self.apply_value_to_type(piped_type, arg_type)
+                    let ty = self.apply_value_to_type(piped_type, arg_type)?;
+                    Ok((ty, Provenance::Unknown))
                 } else {
                     // ~.field or ~.field[args] - access field on piped value
-                    let accessed_type = self.compile_accessor(piped_type, access.accessors, "~")?;
+                    let (accessed_type, accessed_prov) =
+                        self.compile_accessor(piped_type, access.accessors, "~", value_provenance)?;
 
                     if let Some(arg_fields) = access.argument {
                         // ~.field[args] - apply args to accessed value
-                        let arg_type = self.compile_tuple(None, arg_fields, None)?;
+                        let (arg_type, _) = self.compile_tuple(None, arg_fields, None)?;
                         self.codegen.add_instruction(Instruction::Rotate(2));
-                        self.apply_value_to_type(accessed_type, arg_type)
+                        let ty = self.apply_value_to_type(accessed_type, arg_type)?;
+                        Ok((ty, Provenance::Unknown))
                     } else {
-                        Ok(accessed_type)
+                        Ok((accessed_type, accessed_prov))
                     }
                 }
             }
@@ -2426,9 +2488,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         term: ast::Term,
         value_type: Option<Type>,
+        value_provenance: Provenance,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<(Type, Guard), Error> {
+        mut narrowing: Option<&mut Narrowing>,
+    ) -> Result<(Type, Provenance), Error> {
         match term {
             ast::Term::Literal(literal) => {
                 if value_type.is_some() {
@@ -2437,7 +2501,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             .to_string(),
                     ));
                 }
-                Ok((self.compile_literal(literal)?, Guard::None))
+                let ty = self.compile_literal(literal)?;
+                Ok((ty, Provenance::Unknown))
             }
             ast::Term::Tuple(tuple) => {
                 // Tuples without ripples or spreads when a value is present should use assignment patterns
@@ -2459,52 +2524,79 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         value_type: vt.clone(),
                         stack_offset: 0,
                         owns_value: true,
+                        provenance: value_provenance,
                     };
                     Some(&ripple_context_value)
                 } else {
                     ripple_context
                 };
 
-                Ok((
-                    self.compile_tuple(tuple.name, tuple.fields, ripple_context_param)?,
-                    Guard::None,
-                ))
+                let (ty, tuple_prov) =
+                    self.compile_tuple(tuple.name, tuple.fields, ripple_context_param)?;
+                // Return tuple provenance for field access tracking
+                Ok((ty, tuple_prov))
             }
             ast::Term::Block(block) => {
+                // Blocks can fail for non-type reasons (pattern matches, literal comparisons),
+                // so disable complement narrowing
+                if let Some(n) = narrowing.as_deref_mut() {
+                    n.disable();
+                }
+
                 // Blocks take their input as a parameter
                 let block_parameter = value_type.clone().unwrap_or_else(Type::nil);
+                // Pass the provenance from the chain to the block
+                let block_provenance = value_provenance.clone();
                 if value_type.is_none() {
                     // Blocks without a value need NIL on stack
                     self.codegen.add_instruction(Instruction::Tuple(NIL));
                 }
-                self.compile_block(block, block_parameter, None, ScopeKind::Block)
+                let ty = self.compile_block(
+                    block,
+                    block_parameter,
+                    block_provenance,
+                    None,
+                    ScopeKind::Block,
+                )?;
+                // Block results have unknown provenance
+                Ok((ty, Provenance::Unknown))
             }
             ast::Term::Function(func) => {
                 // Compile the function itself
                 let function_type = self.compile_function(func)?;
 
-                // If a value is being piped to it, apply the value
+                // If a value is being piped to it, apply the value (function call)
                 let result_type = if let Some(val_type) = value_type {
+                    // Function calls can fail for non-type reasons, disable complement narrowing
+                    if let Some(n) = narrowing.as_deref_mut() {
+                        n.disable();
+                    }
                     self.apply_value_to_type(function_type, val_type)?
                 } else {
                     function_type
                 };
-                Ok((result_type, Guard::None))
+                // Function call results have unknown provenance
+                Ok((result_type, Provenance::Unknown))
             }
-            ast::Term::Access(access) => Ok((
-                self.compile_access(access, value_type, ripple_context)?,
-                Guard::None,
-            )),
+            ast::Term::Access(access) => {
+                self.compile_access(access, value_type, value_provenance.clone(), ripple_context)
+            }
             ast::Term::Builtin(builtin) => {
                 // Compile argument first so ripples can access the piped value
                 let arg_type = self.compile_argument(
                     builtin.argument.as_ref(),
                     value_type.as_ref(),
+                    value_provenance,
                     ripple_context,
                     "__builtin__",
                 )?;
 
                 let builtin_type = self.compile_builtin(&builtin.name)?;
+
+                // Builtin calls can fail for non-type reasons, disable complement narrowing
+                if let Some(n) = narrowing.as_deref_mut() {
+                    n.disable();
+                }
 
                 let result_type = if let Some(arg_type) = arg_type {
                     self.apply_value_to_type(builtin_type, arg_type)?
@@ -2513,9 +2605,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 } else {
                     builtin_type
                 };
-                Ok((result_type, Guard::None))
+                // Builtin results have unknown provenance
+                Ok((result_type, Provenance::Unknown))
             }
             ast::Term::TailCall(tail_call) => {
+                // Tail calls can fail for non-type reasons, disable complement narrowing
+                if let Some(n) = narrowing.as_deref_mut() {
+                    n.disable();
+                }
+
                 // Compile argument if present (may contain ripples using value_type)
                 // TailCall doesn't check for ignored values - argument or piped value is used
                 let arg_type = if let Some(arg_fields) = &tail_call.argument {
@@ -2525,66 +2623,86 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             value_type: vt.clone(),
                             stack_offset: 0,
                             owns_value: true,
+                            provenance: value_provenance.clone(),
                         };
                         Some(&ripple_context_value)
                     } else {
                         ripple_context
                     };
-                    Some(self.compile_tuple(None, arg_fields.clone(), ripple_ctx)?)
+                    let (ty, _) = self.compile_tuple(None, arg_fields.clone(), ripple_ctx)?;
+                    Some(ty)
                 } else {
                     value_type
                 };
 
-                Ok((
-                    self.compile_tail_call(
-                        tail_call.identifier.as_deref(),
-                        &tail_call.accessors,
-                        arg_type,
-                    )?,
-                    Guard::None,
-                ))
+                let ty = self.compile_tail_call(
+                    tail_call.identifier.as_deref(),
+                    &tail_call.accessors,
+                    arg_type,
+                )?;
+                // Tail call results have unknown provenance
+                Ok((ty, Provenance::Unknown))
             }
             ast::Term::Equality => {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Equality operator requires a value".to_string())
                 })?;
-                Ok((self.compile_equality(val_type)?, Guard::None))
+                let ty = self.compile_equality(val_type)?;
+                Ok((ty, Provenance::Unknown))
             }
             ast::Term::Not => {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Not operator requires a value".to_string())
                 })?;
-                self.compile_not(val_type)
+                // The not operator narrows the type to [] (nil) when it succeeds
+                // Record this narrowing so subsequent branches can use the complement
+                if let Some(n) = narrowing.as_deref_mut() {
+                    n.record(&value_provenance, &val_type, &Type::nil(), &self.program);
+                }
+                let ty = self.compile_not(val_type)?;
+                Ok((ty, Provenance::Unknown))
             }
             ast::Term::BindMatch(pattern) => {
                 // Bind matches create new bindings
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Bind match requires a value".to_string())
                 })?;
-                self.compile_match(
+                let ty = self.compile_match(
                     pattern,
                     val_type,
+                    value_provenance.clone(),
                     on_no_match,
                     pattern::PatternMode::Bind,
                     false,
-                )
+                    narrowing,
+                )?;
+                // Match result preserves provenance of matched value
+                Ok((ty, value_provenance))
             }
             ast::Term::PinMatch(pattern) => {
                 // Pin matches check against existing variables
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Pin match requires a value".to_string())
                 })?;
-                self.compile_match(
+                let ty = self.compile_match(
                     pattern,
                     val_type,
+                    value_provenance.clone(),
                     on_no_match,
                     pattern::PatternMode::Pin,
                     false,
-                )
+                    narrowing,
+                )?;
+                // Match result preserves provenance of matched value
+                Ok((ty, value_provenance))
             }
-            ast::Term::Spawn(term) => Ok((self.compile_spawn(*term, value_type)?, Guard::None)),
+            ast::Term::Spawn(term) => {
+                let ty = self.compile_spawn(*term, value_type)?;
+                Ok((ty, Provenance::Unknown))
+            }
             ast::Term::Select(select) => {
-                Ok((self.compile_select(select, value_type)?, Guard::None))
+                let ty = self.compile_select(select, value_type)?;
+                Ok((ty, Provenance::Unknown))
             }
             ast::Term::Self_ => {
                 self.codegen.add_instruction(Instruction::Self_);
@@ -2602,7 +2720,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 } else {
                     self_type
                 };
-                Ok((result_type, Guard::None))
+                Ok((result_type, Provenance::Unknown))
             }
             ast::Term::Process(process_id) => {
                 // Look up process info from the map (REPL-only feature)
@@ -2624,7 +2742,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 } else {
                     process_type
                 };
-                Ok((result_type, Guard::None))
+                Ok((result_type, Provenance::Unknown))
             }
             ast::Term::Ripple => {
                 // Ripple evaluates to the chained value
@@ -2632,12 +2750,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if let Some(val_type) = value_type {
                     // Value was directly chained to this ripple - use it
                     // The value is already on the stack, no need to Pick
-                    Ok((val_type, Guard::None))
+                    // Preserve the provenance of the chained value
+                    Ok((val_type, value_provenance))
                 } else if let Some(ctx) = ripple_context {
                     // Inherit ripple context from parent tuple
                     self.codegen
                         .add_instruction(Instruction::Pick(ctx.stack_offset));
-                    Ok((ctx.value_type.clone(), Guard::None))
+                    // Preserve the provenance from the ripple context
+                    Ok((ctx.value_type.clone(), ctx.provenance.clone()))
                 } else {
                     // Neither value_type nor ripple_context available
                     Err(Error::FeatureUnsupported(
@@ -2943,7 +3063,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
             } else {
                 // Use member access compilation for accessors
-                self.compile_member_access(name, accessors.to_vec())?
+                self.compile_member_access(name, accessors.to_vec())?.0
             };
 
             // Verify it's a function
@@ -3063,23 +3183,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    fn compile_not(&mut self, _value_type: Type) -> Result<(Type, Guard), Error> {
+    fn compile_not(&mut self, _value_type: Type) -> Result<Type, Error> {
         // The ! operator works with any value on the stack
         // It converts [] to Ok and everything else to []
         self.codegen.add_instruction(Instruction::Not);
 
         // The Not instruction returns either Ok or NIL
-        // When Not succeeds (returns Ok), it proves the input was nil
         let result_type = Type::from_types(vec![Type::ok(), Type::nil()]);
-        Ok((result_type, Guard::Type(Type::nil())))
+        Ok(result_type)
     }
 
+    /// Compiles accessor chain and tracks field provenance.
     fn compile_accessor(
         &mut self,
         mut last_type: Type,
         accessors: Vec<ast::AccessPath>,
         target_name: &str,
-    ) -> Result<Type, Error> {
+        base_provenance: Provenance,
+    ) -> Result<(Type, Provenance), Error> {
+        let mut current_prov = base_provenance;
+
         for accessor in accessors {
             let tuples = last_type.extract_tuples();
 
@@ -3119,16 +3242,29 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             self.codegen.add_instruction(Instruction::Get(index));
             last_type = Type::from_types(field_types);
+            // Update provenance to track the field access
+            current_prov = current_prov.field(index);
+
+            // If the field provenance resolved to a Variable and that variable stores
+            // a Tuple provenance, use the Tuple provenance for nested tuple tracking.
+            // Keep Variable provenance for non-tuple variables so narrowing works correctly.
+            if let Provenance::Variable(ref var_name) = current_prov
+                && let Some(stored_prov @ Provenance::Tuple(_)) =
+                    scopes::lookup_variable_provenance(&self.scopes, var_name)
+            {
+                current_prov = stored_prov;
+            }
         }
 
-        Ok(last_type)
+        Ok((last_type, current_prov))
     }
 
+    /// Compiles member access and tracks provenance.
     fn compile_member_access(
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Provenance), Error> {
         // Check if we have a capture for the full path (base + accessors)
         if !accessors.is_empty()
             && let Some((capture_type, capture_index)) =
@@ -3137,7 +3273,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // We have a pre-evaluated capture for this exact path
             self.codegen
                 .add_instruction(Instruction::Load(capture_index));
-            return Ok(capture_type);
+            // Captures lose provenance tracking
+            return Ok((capture_type, Provenance::Unknown));
         }
 
         // No pre-evaluated capture, use standard member access
@@ -3145,6 +3282,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .ok_or(Error::VariableUndefined(target.to_string()))?;
         self.codegen.add_instruction(Instruction::Load(index));
 
-        self.compile_accessor(last_type, accessors, target)
+        // Determine the base provenance for this access:
+        // - If no field access (empty accessors), use Variable provenance so narrowing affects
+        //   this variable directly
+        // - If field access and the stored provenance is a Tuple, use it so field access can
+        //   resolve through to original source provenances
+        // - Otherwise use Variable provenance for proper field narrowing
+        let base_prov = if accessors.is_empty() {
+            Provenance::Variable(target.to_string())
+        } else {
+            match scopes::lookup_variable_provenance(&self.scopes, target) {
+                Some(prov @ Provenance::Tuple(_)) => prov,
+                _ => Provenance::Variable(target.to_string()),
+            }
+        };
+        self.compile_accessor(last_type, accessors, target, base_prov)
     }
 }

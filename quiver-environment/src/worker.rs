@@ -274,7 +274,14 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
         // Delegate to executor which handles heap injection and initialization
         self.executor
-            .spawn_process(id, Some(function_index), captures, argument, heap_data, false)
+            .spawn_process(
+                id,
+                Some(function_index),
+                captures,
+                argument,
+                heap_data,
+                false,
+            )
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 

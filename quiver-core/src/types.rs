@@ -83,6 +83,15 @@ impl Type {
         matches!(self, Type::Union(types) if types.is_empty())
     }
 
+    /// Get the variants of this type as a slice.
+    /// For unions, returns the union variants. For other types, returns a single-element slice.
+    pub fn variants(&self) -> &[Type] {
+        match self {
+            Type::Union(types) => types.as_slice(),
+            _ => std::slice::from_ref(self),
+        }
+    }
+
     /// Check if this type is NIL
     pub fn is_nil(&self) -> bool {
         matches!(self, Type::Tuple(id) if *id == NIL)
@@ -93,6 +102,19 @@ impl Type {
         match self {
             Type::Union(types) => types.iter().any(Type::is_nil),
             t => t.is_nil(),
+        }
+    }
+
+    /// Return a new type with NIL filtered out.
+    /// If this type is NIL, returns never type. If this type doesn't contain NIL, returns self.
+    pub fn without_nil(&self) -> Type {
+        match self {
+            Type::Tuple(id) if *id == NIL => Type::never(),
+            Type::Union(types) => {
+                let filtered: Vec<Type> = types.iter().filter(|t| !t.is_nil()).cloned().collect();
+                Type::from_types(filtered)
+            }
+            _ => self.clone(),
         }
     }
 

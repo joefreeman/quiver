@@ -44,9 +44,7 @@ impl<E: Effect> Repl<E> {
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
     ) -> Result<Self, ReplError> {
         // Create a sleeping process ready for resume
-        let pid = env
-            .start_process(None)
-            .map_err(ReplError::Environment)?;
+        let pid = env.start_process(None).map_err(ReplError::Environment)?;
 
         Ok(Self {
             repl_process_id: Some(pid),
@@ -195,7 +193,7 @@ impl<E: Effect> Repl<E> {
             .bindings
             .iter()
             .filter_map(|(name, binding)| {
-                if let Binding::Variable { ty, index } = binding {
+                if let Binding::Variable { ty, index, .. } = binding {
                     Some((name.clone(), ty.clone(), *index))
                 } else {
                     None

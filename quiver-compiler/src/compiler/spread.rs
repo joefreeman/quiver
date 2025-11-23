@@ -5,7 +5,7 @@ use quiver_core::{
     types::{TupleLookup, Type},
 };
 
-use super::{Compiler, Error, RippleContext};
+use super::{Compiler, Error, RippleContext, provenance::Provenance};
 
 /// Represents a compiled field or spread value on the stack
 #[derive(Debug)]
@@ -62,12 +62,13 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
                         value_type: ctx.value_type.clone(),
                         stack_offset: ctx.stack_offset + stack_size,
                         owns_value: false,
+                        provenance: ctx.provenance.clone(),
                     };
                     Some(&ripple_context_value)
                 } else {
                     None
                 };
-                let (ty, _) = compiler.compile_chain(chain.clone(), None, ripple_context_param)?;
+                let ty = compiler.compile_chain(chain.clone(), None, ripple_context_param)?;
                 compiled_values.push(CompiledValue::Field {
                     name: field.name.clone(),
                     ty,
@@ -362,7 +363,7 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     tuple_name: Option<String>,
     fields: Vec<ast::TupleField>,
     ripple_context: Option<&RippleContext>,
-) -> Result<Type, Error> {
+) -> Result<(Type, Provenance), Error> {
     // Validate: bare spreads require ripple context
     let has_chained_spread = fields
         .iter()
@@ -408,7 +409,9 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
         compiler.codegen.add_instruction(Instruction::Pop);
     }
 
-    Ok(result_type)
+    // Spread compilation is complex; return Unknown provenance for now
+    // TODO: Track provenance through spread fields for more precise narrowing
+    Ok((result_type, Provenance::Unknown))
 }
 
 /// Emit bytecode for a single variant tuple (no branching needed)

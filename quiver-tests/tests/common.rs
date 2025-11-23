@@ -182,8 +182,8 @@ impl TestBuilder {
             environment.set_effect_backend(backend);
         }
         let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
-        let repl = Repl::new(&mut environment, module_loader, builtins)
-            .expect("Failed to create REPL");
+        let repl =
+            Repl::new(&mut environment, module_loader, builtins).expect("Failed to create REPL");
 
         evaluate(environment, repl, virtual_time_ms, source)
     }

@@ -171,10 +171,10 @@ fn test_narrowing_no_matching_variants() {
 
 #[test]
 fn test_narrowing_all_variants_match() {
-    // All variants match structurally, but runtime checks can still fail
+    // All variants match structurally - exhaustive matching removes [] from result type
     quiver()
         .evaluate("A[1] ~> #(A[int] | A[bin]) { ~> =A[x] => x }")
-        .expect_type("[] | bin | int");
+        .expect_type("bin | int");
 }
 
 #[test]

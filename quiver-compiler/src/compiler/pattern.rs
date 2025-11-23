@@ -7,31 +7,11 @@ use quiver_core::{
     types::{TupleLookup, Type},
 };
 
-use super::{Error, codegen::InstructionBuilder};
+use super::{Error, codegen::InstructionBuilder, narrowing::intersect_types};
 
 // Type aliases for complex pattern matching types
 type PatternAnalysisResult = (Vec<(String, Type)>, Vec<BindingSet>, Type);
 type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
-
-/// Narrow a type by filtering to variants compatible with a type check
-fn narrow_type_by_type_check(value_type: &Type, check_type: &Type, program: &Program) -> Type {
-    let variants = match value_type {
-        Type::Union(types) => types.as_slice(),
-        single => std::slice::from_ref(single),
-    };
-
-    let matching_variants: Vec<Type> = variants
-        .iter()
-        .filter(|variant| variant.is_compatible(check_type, program))
-        .cloned()
-        .collect();
-
-    if matching_variants.is_empty() {
-        Type::never()
-    } else {
-        Type::from_types(matching_variants)
-    }
-}
 
 /// Helper for managing identifiers across variants
 /// Clones identifiers when processing multiple variants to avoid cross-contamination
@@ -113,12 +93,31 @@ pub struct BindingSet {
     bindings: Vec<Binding>,         // Variable bindings to create if requirements are met
 }
 
-/// Check if binding sets represent a pure type guard (only type checks, no value checks)
-pub fn is_pure_type_guard(binding_sets: &[BindingSet]) -> bool {
-    binding_sets.iter().all(|bs| {
-        bs.requirements
-            .iter()
-            .all(|req| matches!(req.check, RuntimeCheck::Type(_)))
+/// Check if any binding set has requirements that prevent complement narrowing.
+///
+/// Returns true if the pattern cannot use complement narrowing because:
+/// 1. It has non-type requirements (literals, variable pins, path equality) - these may fail
+///    for value-based reasons, not type-based reasons
+/// 2. It has type checks at non-root paths (nested structural patterns) - failure at an inner
+///    level doesn't mean we can narrow the outer type
+///
+/// For example:
+/// - `=Node[x, y]` - safe, type check at root only
+/// - `=Node[Leaf[x], _]` - NOT safe, nested type check at path [0]
+/// - `=5` - NOT safe, literal check
+pub fn has_non_type_requirements(binding_sets: &[BindingSet]) -> bool {
+    binding_sets.iter().any(|bs| {
+        bs.requirements.iter().any(|req| {
+            match &req.check {
+                // Non-type checks (literals, variable pins, path equality) prevent complement narrowing
+                RuntimeCheck::Literal(_) | RuntimeCheck::Variable(_) | RuntimeCheck::Path(_) => {
+                    true
+                }
+                // Type checks at non-root paths (nested structural patterns) prevent complement narrowing
+                // because failure at an inner level doesn't mean we can narrow the outer type
+                RuntimeCheck::Type(_) => !req.path.is_empty(),
+            }
+        })
     })
 }
 
@@ -376,15 +375,23 @@ fn analyze_match_pattern(
             let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
 
             // Narrow the type by filtering compatible variants
-            let narrowed_type = narrow_type_by_type_check(value_type, &resolved_type, program);
+            let narrowed_type = intersect_types(value_type, &resolved_type, program);
 
-            // Create a runtime check for the type (same as type aliases)
+            // Only add runtime check if value_type is not already exactly the resolved type
+            let requirements = if value_type.is_compatible(&resolved_type, program)
+                && narrowed_type == *value_type
+            {
+                vec![] // No runtime check needed - value_type is already compatible
+            } else {
+                vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Type(resolved_type),
+                }]
+            };
+
             Ok((
                 vec![BindingSet {
-                    requirements: vec![Requirement {
-                        path,
-                        check: RuntimeCheck::Type(resolved_type),
-                    }],
+                    requirements,
                     bindings: vec![],
                 }],
                 narrowed_type,
@@ -454,7 +461,7 @@ fn analyze_match_tuple_pattern(
             // Only Cycle(1) points to the immediate boundary (value_type)
             // Higher depths point to outer boundaries (e.g., enclosing function types)
             // and should be kept as-is since they refer to types outside this tuple
-            let field_type = if let Type::Cycle(1) = raw_field_type {
+            let mut field_type = if let Type::Cycle(1) = raw_field_type {
                 value_type.clone()
             } else {
                 raw_field_type.clone()
@@ -462,6 +469,18 @@ fn analyze_match_tuple_pattern(
 
             let mut field_path = path.clone();
             field_path.push(*actual_idx);
+
+            // Check for narrowed field type from complement narrowing.
+            // This enables patterns like `=[Cons[...], ys]` in the second branch to know
+            // that field 0 has been narrowed to Cons (from previous branch's `=[Nil, ys]`).
+            // Only applies when path is empty (we're at the root, matching against parameter).
+            if path.is_empty()
+                && let Some(narrowed) =
+                    super::narrowing::get_parameter_field_narrowing(scopes, *actual_idx)
+            {
+                // Intersect with the narrowed type
+                field_type = super::narrowing::intersect_types(&field_type, &narrowed, program);
+            }
 
             // Recursively analyze the field pattern
             let (field_binding_sets, _field_narrowed_type) = analyze_match_pattern(
@@ -595,7 +614,7 @@ fn analyze_literal_pattern(
     };
 
     // Narrow the type by filtering compatible variants
-    let narrowed_type = narrow_type_by_type_check(value_type, &literal_type, program);
+    let narrowed_type = intersect_types(value_type, &literal_type, program);
 
     Ok((
         vec![BindingSet {
@@ -624,13 +643,19 @@ fn analyze_identifier_pattern(
         // Check if this is a primitive type name
         if name == "int" {
             // Type narrowing for integer type - don't record as identifier
-            let narrowed_type = narrow_type_by_type_check(&value_type, &Type::Integer, program);
+            let narrowed_type = intersect_types(&value_type, &Type::Integer, program);
+            // Only add runtime check if value_type is not already exactly int
+            let requirements = if value_type == Type::Integer {
+                vec![] // No runtime check needed - already known to be int
+            } else {
+                vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Type(Type::Integer),
+                }]
+            };
             return Ok((
                 vec![BindingSet {
-                    requirements: vec![Requirement {
-                        path,
-                        check: RuntimeCheck::Type(Type::Integer),
-                    }],
+                    requirements,
                     bindings: vec![],
                 }],
                 narrowed_type,
@@ -639,13 +664,19 @@ fn analyze_identifier_pattern(
 
         if name == "bin" {
             // Type narrowing for binary type - don't record as identifier
-            let narrowed_type = narrow_type_by_type_check(&value_type, &Type::Binary, program);
+            let narrowed_type = intersect_types(&value_type, &Type::Binary, program);
+            // Only add runtime check if value_type is not already exactly bin
+            let requirements = if value_type == Type::Binary {
+                vec![] // No runtime check needed - already known to be bin
+            } else {
+                vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Type(Type::Binary),
+                }]
+            };
             return Ok((
                 vec![BindingSet {
-                    requirements: vec![Requirement {
-                        path,
-                        check: RuntimeCheck::Type(Type::Binary),
-                    }],
+                    requirements,
                     bindings: vec![],
                 }],
                 narrowed_type,
@@ -665,13 +696,21 @@ fn analyze_identifier_pattern(
             let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
 
             // Type narrowing for type alias - don't record as identifier
-            let narrowed_type = narrow_type_by_type_check(&value_type, &resolved_type, program);
+            let narrowed_type = intersect_types(&value_type, &resolved_type, program);
+            // Only add runtime check if value_type is not already exactly the resolved type
+            let requirements = if value_type.is_compatible(&resolved_type, program)
+                && narrowed_type == value_type
+            {
+                vec![] // No runtime check needed - value_type is already compatible
+            } else {
+                vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Type(resolved_type),
+                }]
+            };
             return Ok((
                 vec![BindingSet {
-                    requirements: vec![Requirement {
-                        path,
-                        check: RuntimeCheck::Type(resolved_type),
-                    }],
+                    requirements,
                     bindings: vec![],
                 }],
                 narrowed_type,
@@ -707,18 +746,31 @@ fn analyze_identifier_pattern(
 
         match mode {
             PatternMode::Bind => {
-                // Create a binding for this identifier
-                // No type narrowing in bind mode (binds any type)
+                // Strip [] from binding type when value type is a union containing []
+                // This reflects that [] represents potential failure, and if the binding
+                // executes (after successful chaining), the value is not []
+                //
+                // Exception: if value type is EXACTLY [], keep it (explicit nil assignment)
+                let var_type = if value_type.is_nil() {
+                    value_type.clone()
+                } else {
+                    value_type.without_nil()
+                };
+                // Narrowed type matches binding type
+                let narrowed_type = var_type.clone();
+
+                // No runtime requirements for identifier bindings - they match any value
+                // The chaining semantics handle nil propagation separately
                 Ok((
                     vec![BindingSet {
                         requirements: vec![],
                         bindings: vec![Binding {
                             name,
                             path,
-                            var_type: value_type.clone(),
+                            var_type,
                         }],
                     }],
-                    value_type,
+                    narrowed_type,
                 ))
             }
             PatternMode::Pin => {
@@ -815,10 +867,11 @@ fn analyze_partial_pattern(
                 match mode {
                     PatternMode::Bind => {
                         // Create a binding for this identifier
+                        // Strip [] from binding type because if the binding executes, the value is not []
                         bindings.push(Binding {
                             name: field_name.clone(),
                             path: field_path,
-                            var_type: field_type.clone(),
+                            var_type: field_type.without_nil(),
                         });
                     }
                     PatternMode::Pin => {
@@ -918,10 +971,11 @@ fn analyze_star_pattern(
                     match mode {
                         PatternMode::Bind => {
                             // Create a binding for this identifier
+                            // Strip [] from binding type because if the binding executes, the value is not []
                             bindings.push(Binding {
                                 name: field_name.clone(),
                                 path: field_path,
-                                var_type: field_type.clone(),
+                                var_type: field_type.without_nil(),
                             });
                         }
                         PatternMode::Pin => {
