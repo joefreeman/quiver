@@ -62,8 +62,21 @@ pub enum Term {
     Spawn(Box<Term>),
     Self_,
     Select(Select),
-    Ripple,
     Process(usize),
+}
+
+impl Term {
+    /// Returns true if this is a bare ripple placeholder (`~`)
+    pub fn is_bare_ripple(&self) -> bool {
+        matches!(
+            self,
+            Term::Access(Access {
+                source: Some(AccessSource::Ripple),
+                accessors,
+                argument: None,
+            }) if accessors.is_empty()
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

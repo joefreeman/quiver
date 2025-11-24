@@ -728,7 +728,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         for term in &source.terms {
             match term {
-                ast::Term::Ripple => {
+                term if term.is_bare_ripple() => {
                     // Ripple refers to the chained value - extract its receive type
                     if let Some(Type::Callable(callable)) = chained_type {
                         receive_types.push(callable.parameter.clone());
@@ -2124,7 +2124,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Compile spawn operation: @f, f ~> @, or arg ~> @f
     fn compile_spawn(&mut self, term: ast::Term, arg_type: Option<Type>) -> Result<Type, Error> {
         // Case 1: f ~> @ (function is the piped value, spawn with nil)
-        if matches!(term, ast::Term::Ripple) {
+        if term.is_bare_ripple() {
             let fn_type = arg_type.ok_or_else(|| {
                 Error::FeatureUnsupported("Ripple spawn requires piped value".to_string())
             })?;
@@ -2370,6 +2370,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
             }
             Some(ast::AccessSource::Ripple) => {
+                // Bare ~ - ripple placeholder that evaluates to the chained value
+                if access.accessors.is_empty() && access.argument.is_none() {
+                    // Prefer value_type (directly chained) over ripple_context (inherited from parent)
+                    if let Some(val_type) = value_type {
+                        // Value was directly chained to this ripple - use it
+                        // The value is already on the stack, no need to Pick
+                        return Ok((val_type, value_provenance));
+                    } else if let Some(ctx) = ripple_context {
+                        // Inherit ripple context from parent tuple
+                        self.codegen
+                            .add_instruction(Instruction::Pick(ctx.stack_offset));
+                        return Ok((ctx.value_type.clone(), ctx.provenance.clone()));
+                    } else {
+                        return Err(Error::FeatureUnsupported(
+                            "Ripple placeholder (~) can only be used when a value is being chained"
+                                .to_string(),
+                        ));
+                    }
+                }
+
                 // ~[args] or ~.field[args] - use piped value as source
                 let piped_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported(
@@ -2417,11 +2437,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 if access.accessors.is_empty() {
                     // ~[args] without spread - call piped value (must be callable)
-                    let arg_fields = access.argument.ok_or_else(|| {
-                        Error::FeatureUnsupported(
-                            "Ripple access ~ requires arguments or field access".to_string(),
-                        )
-                    })?;
+                    // argument must be Some here since bare ~ was handled above
+                    let arg_fields = access.argument.unwrap();
 
                     // Compile argument tuple (no ripple context needed, piped value IS the function)
                     let (arg_type, _) = self.compile_tuple(None, arg_fields, None)?;
@@ -2906,28 +2923,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     process_type
                 };
                 Ok((result_type, Provenance::Unknown))
-            }
-            ast::Term::Ripple => {
-                // Ripple evaluates to the chained value
-                // Prefer value_type (directly chained) over ripple_context (inherited from parent)
-                if let Some(val_type) = value_type {
-                    // Value was directly chained to this ripple - use it
-                    // The value is already on the stack, no need to Pick
-                    // Preserve the provenance of the chained value
-                    Ok((val_type, value_provenance))
-                } else if let Some(ctx) = ripple_context {
-                    // Inherit ripple context from parent tuple
-                    self.codegen
-                        .add_instruction(Instruction::Pick(ctx.stack_offset));
-                    // Preserve the provenance from the ripple context
-                    Ok((ctx.value_type.clone(), ctx.provenance.clone()))
-                } else {
-                    // Neither value_type nor ripple_context available
-                    Err(Error::FeatureUnsupported(
-                        "Ripple placeholder (~) can only be used when a value is being chained"
-                            .to_string(),
-                    ))
-                }
             }
         }
     }

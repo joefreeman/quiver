@@ -133,7 +133,6 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             },
-            ast::Term::Ripple => {}
         }
     }
 

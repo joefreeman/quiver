@@ -30,7 +30,7 @@ fn chain_starts_with_ripple(chain: &ast::Chain) -> bool {
     if let Some(first_term) = chain.terms.first() {
         match first_term {
             // Direct ripple - consumes outer piped value
-            ast::Term::Ripple => true,
+            term if term.is_bare_ripple() => true,
 
             // Tuples/blocks might contain ripple that consumes outer value
             ast::Term::Tuple(tuple) => tuple_contains_ripple(&tuple.fields),

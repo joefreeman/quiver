@@ -842,11 +842,7 @@ fn access(input: Span) -> IResult<Span, Access> {
             tuple((
                 opt(alt((
                     map(char('$'), |_| AccessSource::Parameter),
-                    // ~ followed by [ or . is an access, otherwise it's Term::Ripple
-                    map(
-                        terminated(char('~'), peek(alt((char('['), char('.'))))),
-                        |_| AccessSource::Ripple,
-                    ),
+                    map(char('~'), |_| AccessSource::Ripple),
                     // Import: %module or %module/submodule
                     map(import, AccessSource::Import),
                     map(identifier, AccessSource::Identifier),
@@ -997,7 +993,11 @@ fn select_term(input: Span) -> IResult<Span, Term> {
         map(char('!'), |_| {
             Term::Select(Select::Sources(vec![Chain {
                 match_pattern: None,
-                terms: vec![Term::Ripple],
+                terms: vec![Term::Access(Access {
+                    source: Some(AccessSource::Ripple),
+                    accessors: vec![],
+                    argument: None,
+                })],
                 continuation: false,
             }]))
         }),
@@ -1239,7 +1239,11 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
         ),
         // @<term> - Match @ followed by optional term (bare @ becomes @~)
         map(preceded(char('@'), opt(term)), |opt_t| {
-            Term::Spawn(Box::new(opt_t.unwrap_or(Term::Ripple)))
+            Term::Spawn(Box::new(opt_t.unwrap_or(Term::Access(Access {
+                source: Some(AccessSource::Ripple),
+                accessors: vec![],
+                argument: None,
+            }))))
         }),
     ))(input)
 }
@@ -1427,11 +1431,6 @@ fn term(input: Span) -> IResult<Span, Term> {
     alt((
         // String terms (before literals to handle quotes)
         string_term,
-        // Ripple placeholder (but not ~[...] or ~.field which are Access with Ripple source)
-        map(
-            terminated(char('~'), peek(not(alt((char('['), char('.')))))),
-            |_| Term::Ripple,
-        ),
         // Process operations (process_ref_term must come before spawn_term to match @N first)
         process_ref_term,
         spawn_term,
