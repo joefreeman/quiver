@@ -87,7 +87,7 @@ macro_rules! load_stdlib_modules {
         let mut modules = HashMap::new();
         $(
             modules.insert(
-                $name.to_string(),
+                vec![$name.to_string()],
                 include_str!(concat!("../../std/", $name, ".qv")).to_string()
             );
         )*
@@ -97,7 +97,7 @@ macro_rules! load_stdlib_modules {
 
 #[allow(dead_code)]
 pub struct TestBuilder {
-    modules: HashMap<String, String>,
+    modules: HashMap<Vec<String>, String>,
     with_io: bool,
 }
 
@@ -119,7 +119,7 @@ impl TestBuilder {
         Self::default()
     }
 
-    pub fn with_modules(mut self, mut modules: HashMap<String, String>) -> Self {
+    pub fn with_modules(mut self, mut modules: HashMap<Vec<String>, String>) -> Self {
         // Merge additional modules with standard library modules
         for (key, value) in self.modules {
             modules.entry(key).or_insert(value);

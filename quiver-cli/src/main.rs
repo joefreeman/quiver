@@ -148,7 +148,6 @@ fn compile_command(
 
     // Compile source to bytecode
     let module_loader = FileSystemModuleLoader::new();
-    let module_path = std::env::current_dir().ok();
 
     let ast = match parse(&source) {
         Ok(ast) => ast,
@@ -162,7 +161,6 @@ fn compile_command(
         ModuleCache::new(),
         &module_loader,
         vec![],
-        module_path,
         Type::nil(),
         &HashMap::new(), // No process types (not a REPL)
         &builtins,
@@ -248,7 +246,6 @@ fn compile_execute(
     profile: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let module_loader = FileSystemModuleLoader::new();
-    let module_path = std::env::current_dir().ok();
 
     let ast = match parse(source) {
         Ok(ast) => ast,
@@ -262,7 +259,6 @@ fn compile_execute(
         ModuleCache::new(),
         &module_loader,
         vec![],
-        module_path,
         Type::nil(),
         &HashMap::new(), // No process types (not a REPL)
         &builtins,

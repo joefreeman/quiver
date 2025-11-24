@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
 
 mod codegen;
 mod helpers;
@@ -144,16 +141,16 @@ pub enum Error {
     // Module errors
     ModuleLoad(ModuleError),
     ModuleParse {
-        module_path: String,
+        module: String,
         error: crate::parser::Error,
     },
     ModuleExecution {
-        module_path: String,
+        module: String,
         error: quiver_core::error::Error,
     },
     ModuleTypeMissing {
         type_name: String,
-        module_path: String,
+        module: String,
     },
 
     // Language feature errors
@@ -217,7 +214,6 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     local_count: usize,
     program: Program,
     module_loader: &'a dyn ModuleLoader,
-    module_path: Option<PathBuf>,
     builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
 
     process_types: &'a HashMap<usize, (Type, usize)>,
@@ -236,7 +232,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         module_cache: ModuleCache,
         module_loader: &'a dyn ModuleLoader,
         base_types: Vec<quiver_core::types::TupleTypeInfo>,
-        module_path: Option<PathBuf>,
         parameter_type: Type,
         process_types: &'a HashMap<usize, (Type, usize)>,
         builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
@@ -250,7 +245,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             local_count: 0,
             program,
             module_loader,
-            module_path,
             builtins,
             process_types,
             current_receive_type: Type::never(),
@@ -346,11 +340,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.compile_type_alias(&name, type_parameters, type_definition)?;
                 Ok(Type::nil())
             }
-            ast::Statement::TypeImport {
-                pattern,
-                module_path,
-            } => {
-                self.compile_type_import(pattern, &module_path)?;
+            ast::Statement::TypeImport { pattern, module } => {
+                self.compile_type_import(pattern, &module)?;
                 Ok(Type::nil())
             }
             ast::Statement::Expression(expression) => {
@@ -446,14 +437,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_type_import(
         &mut self,
         pattern: ast::TypeImportPattern,
-        module_path: &str,
+        module: &[String],
     ) -> Result<(), Error> {
         compile_type_import(
             pattern,
-            module_path,
+            module,
             &mut self.module_cache,
             self.module_loader,
-            self.module_path.as_ref(),
             &mut self.scopes,
             &mut self.program,
         )
@@ -1682,13 +1672,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    fn compile_import(&mut self, module_path: &str) -> Result<Type, Error> {
+    fn compile_import(&mut self, module: &[String]) -> Result<Type, Error> {
         // Check for circular imports
-        if self
-            .module_cache
-            .import_stack
-            .contains(&module_path.to_string())
-        {
+        if self.module_cache.import_stack.contains(&module.to_vec()) {
             return Err(Error::FeatureUnsupported(
                 "Circular import detected".to_string(),
             ));
@@ -1697,8 +1683,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Cannot cache instructions because Function instructions contain capture indices
         // that are relative to local_count at the time of generation. Each import must
         // regenerate instructions with correct local indices for the current context.
-        self.module_cache.import_stack.push(module_path.to_string());
-        let (instructions, result_type) = self.import_module(module_path)?;
+        self.module_cache.import_stack.push(module.to_vec());
+        let (instructions, result_type) = self.import_module(module)?;
         self.module_cache.import_stack.pop();
 
         // Emit the module reconstruction instructions
@@ -1709,13 +1695,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(result_type)
     }
 
-    fn import_module(&mut self, module_path: &str) -> Result<(Vec<Instruction>, Type), Error> {
+    fn import_module(&mut self, module: &[String]) -> Result<(Vec<Instruction>, Type), Error> {
         // Parse the module
-        let parsed = self.module_cache.load_and_cache_ast(
-            module_path,
-            self.module_loader,
-            self.module_path.as_ref(),
-        )?;
+        let parsed = self
+            .module_cache
+            .load_and_cache_ast(module, self.module_loader)?;
 
         // Save current compiler state
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
@@ -1748,7 +1732,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.builtins,
         )
         .map_err(|e| Error::ModuleExecution {
-            module_path: module_path.to_string(),
+            module: module.join("/"),
             error: e,
         })?;
 
@@ -2239,6 +2223,50 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     }
                 }
             }
+            Some(ast::AccessSource::Import(module)) => {
+                // %module or %module/submodule with optional .field accessors and [args]
+                if value_type.is_some() && access.argument.is_none() && access.accessors.is_empty() {
+                    return Err(Error::FeatureUnsupported(
+                        "Import cannot be applied to value".to_string(),
+                    ));
+                }
+
+                let module_name = format!("%{}", module.join("/"));
+
+                // Compile argument first (like Identifier case) so function ends up on top
+                let arg_type = self.compile_argument(
+                    access.argument.as_ref(),
+                    value_type.as_ref(),
+                    value_provenance.clone(),
+                    ripple_context,
+                    &module_name,
+                )?;
+
+                // Compile the import to get the module tuple
+                let import_type = self.compile_import(&module)?;
+
+                // Apply accessors if any
+                let (accessed_type, accessed_prov) = if access.accessors.is_empty() {
+                    (import_type, Provenance::Unknown)
+                } else {
+                    self.compile_accessor(
+                        import_type,
+                        access.accessors.clone(),
+                        &module_name,
+                        Provenance::Unknown,
+                    )?
+                };
+
+                if let Some(arg_type) = arg_type {
+                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
+                    Ok((ty, Provenance::Unknown))
+                } else if let Some(val_type) = value_type {
+                    let ty = self.apply_value_to_type(accessed_type, val_type)?;
+                    Ok((ty, Provenance::Unknown))
+                } else {
+                    Ok((accessed_type, accessed_prov))
+                }
+            }
         }
     }
 
@@ -2467,14 +2495,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.compile_access(access, value_type, ripple_context)?,
                 Guard::None,
             )),
-            ast::Term::Import(path) => {
-                if value_type.is_some() {
-                    return Err(Error::FeatureUnsupported(
-                        "Import cannot be applied to value".to_string(),
-                    ));
-                }
-                Ok((self.compile_import(&path)?, Guard::None))
-            }
             ast::Term::Builtin(builtin) => {
                 // Compile argument first so ripples can access the piped value
                 let arg_type = self.compile_argument(

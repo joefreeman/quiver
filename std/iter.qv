@@ -1,7 +1,5 @@
 iterator<t> : #[] -> ([t, &] | []);
 
-math = %"math",
-
 map' = #<t, u>[#& -> iterator<t>, iterator<t>, #t -> u] {
   ~> =[self, it, f],
   #{
@@ -33,7 +31,7 @@ take' = #<t>[#& -> iterator<t>, iterator<t>, int] {
     | {
       it[] ~> =[value, next],
       n
-      ~> math.sub[~, 1]
+      ~> %math.sub[~, 1]
       ~> self[self, next, ~]
       ~> [value, ~]
     }
@@ -46,7 +44,7 @@ drop' = #<t>[#& -> iterator<t>, iterator<t>, int] {
     | n ~> =0 => it[]
     | {
       it[] ~> =[_, next],
-      it = n ~> math.sub[~, 1] ~> self[self, next, ~],
+      it = n ~> %math.sub[~, 1] ~> self[self, next, ~],
       it[]
     }
   }
@@ -119,7 +117,7 @@ enumerate' = #<t>[#& -> iterator<[int, t]>, iterator<t>, int] {
   #{
     it[] ~> =[value, next],
     index
-    ~> math.add[~, 1]
+    ~> %math.add[~, 1]
     ~> self[self, next, ~]
     ~> [[index, value], ~]
   }
@@ -162,7 +160,7 @@ find_index' = #<t>[iterator<t>, #t -> (t | []), int] {
     | value ~> pred => index
     | {
       index
-      ~> math.add[~, 1]
+      ~> %math.add[~, 1]
       ~> &[next, pred, ~]
     }
   }
@@ -261,7 +259,7 @@ intersperse' = #<t>[#& -> iterator<t>, iterator<t>, t] {
   },
 
   count: #<t>iterator<t> {
-    ~> fold'[~, 0, #[int, int] { math.add[$.0, 1] }]
+    ~> fold'[~, 0, #[int, int] { %math.add[$.0, 1] }]
   },
 
   nth: #<t>[iterator<t>, int] {
@@ -271,7 +269,7 @@ intersperse' = #<t>[#& -> iterator<t>, iterator<t>, t] {
     }
     | ~> =[it, n] => {
       it[] ~> =[_, next],
-      n ~> math.sub[~, 1] ~> &[next, ~]
+      n ~> %math.sub[~, 1] ~> &[next, ~]
     }
   },
 

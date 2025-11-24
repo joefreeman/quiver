@@ -528,7 +528,7 @@ fn test_receive_type_from_module_builtin() {
     quiver()
         .evaluate(
             r#"
-            math = %"math",
+            math = %math,
             p1 = @#{ !math.add },
             [10, 32] ~> p1 ~> !
             "#,
@@ -634,8 +634,7 @@ fn test_receive_type_in_function_argument() {
     quiver()
         .evaluate(
             r#"
-            math = %"math",
-            p = 20 ~> @#int { ~> math.div[~, !#int] },
+            p = 20 ~> @#int { ~> %math.div[~, !#int] },
             2 ~> p ~> !
             "#,
         )

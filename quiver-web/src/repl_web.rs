@@ -128,7 +128,7 @@ fn create_std_module_loader() -> Box<InMemoryModuleLoader> {
 
             // Read file contents as UTF-8 string
             if let Some(contents) = file.contents_utf8() {
-                modules.insert(module_name.to_string(), contents.to_string());
+                modules.insert(vec![module_name.to_string()], contents.to_string());
             }
         }
     }

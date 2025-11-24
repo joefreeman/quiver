@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use crate::{ast, modules::ModuleLoader, parser};
 use quiver_core::program::Program;
@@ -7,8 +7,8 @@ use super::{Error, Scope, scopes};
 
 #[derive(Clone)]
 pub struct ModuleCache {
-    pub ast_cache: HashMap<String, ast::Program>,
-    pub import_stack: Vec<String>,
+    pub ast_cache: HashMap<Vec<String>, ast::Program>,
+    pub import_stack: Vec<Vec<String>>,
 }
 
 impl Default for ModuleCache {
@@ -27,25 +27,23 @@ impl ModuleCache {
 
     pub fn load_and_cache_ast(
         &mut self,
-        module_path: &str,
+        module: &[String],
         module_loader: &dyn ModuleLoader,
-        current_module_path: Option<&PathBuf>,
     ) -> Result<ast::Program, Error> {
-        if let Some(cached_ast) = self.ast_cache.get(module_path).cloned() {
+        if let Some(cached_ast) = self.ast_cache.get(module).cloned() {
             return Ok(cached_ast);
         }
 
         let content = module_loader
-            .load(module_path, current_module_path.map(|p| p.as_path()))
+            .load(module)
             .map_err(Error::ModuleLoad)?;
 
         let parsed = parser::parse(&content).map_err(|e| Error::ModuleParse {
-            module_path: module_path.to_string(),
+            module: module.join("/"),
             error: e,
         })?;
 
-        self.ast_cache
-            .insert(module_path.to_string(), parsed.clone());
+        self.ast_cache.insert(module.to_vec(), parsed.clone());
 
         Ok(parsed)
     }
@@ -53,15 +51,13 @@ impl ModuleCache {
 
 pub fn compile_type_import(
     pattern: ast::TypeImportPattern,
-    module_path: &str,
+    module: &[String],
     module_cache: &mut ModuleCache,
     module_loader: &dyn ModuleLoader,
-    current_module_path: Option<&PathBuf>,
     scopes_mut: &mut [Scope],
     _program: &mut Program,
 ) -> Result<(), Error> {
-    let parsed =
-        module_cache.load_and_cache_ast(module_path, module_loader, current_module_path)?;
+    let parsed = module_cache.load_and_cache_ast(module, module_loader)?;
 
     let found_aliases: Vec<_> = parsed
         .statements
@@ -75,6 +71,8 @@ pub fn compile_type_import(
             _ => None,
         })
         .collect();
+
+    let module_str = module.join("/");
 
     match &pattern {
         ast::TypeImportPattern::Star => {
@@ -118,7 +116,7 @@ pub fn compile_type_import(
                 } else {
                     return Err(Error::ModuleTypeMissing {
                         type_name: requested_name.clone(),
-                        module_path: module_path.to_string(),
+                        module: module_str.clone(),
                     });
                 }
             }

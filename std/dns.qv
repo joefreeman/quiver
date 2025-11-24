@@ -1,5 +1,5 @@
 ip : IPv4[bin] | IPv6[bin];
-(iterator) : %"iter";
+(iterator) : %iter;
 
 resolve' = #[#& -> iterator<ip>, \DnsResolver] {
   ~> =[self, resolver],

@@ -508,15 +508,14 @@ To specify a type that refers to a process, use `@type`. For example, `@int` is 
 
 ## Modules and imports
 
-Import modules using `%"path"` syntax. Relative imports must start with a ".". Standard library modules start with a letter.
+Import modules using `%name` or `%namespace/name` syntax. Module names are resolved through a manifest.
 
 Modules are evaluated at compile time, and the result (e.g., the final tuple) is the value that's imported.
 
 ```
-math = %"math"                   // Import standard library
-utils = %"./utils.qv"            // Import local file
-(add, mul) = %"math"             // Import specific functions
-* = %"./config.qv"               // Import all named exports
+math = %math                   // Import standard library module
+(add, mul) = %math             // Import specific functions
+* = %math                      // Import all named exports
 ```
 
 ### Type imports
@@ -524,8 +523,8 @@ utils = %"./utils.qv"            // Import local file
 Import types from modules using patterns:
 
 ```
-(circle, rectangle) : %"./shapes.qv";  // Import specific types
-* : %"./geometry.qv";                  // Import all types
+(circle, rectangle) : %shapes;   // Import specific types
+* : %geometry;                   // Import all types
 ```
 
 ## Standard library
@@ -563,8 +562,6 @@ add[x, y] ~> mul[~, 2] ~> sub[~, 1]
 ```
 point : Point[x: int, y: int];
 
-math = %"math",
-
 // Define points
 p0 = Point[x: 2, y: 3],
 p1 = Point[...p0, x: 5],
@@ -573,8 +570,8 @@ p2 = Point[...p1, y: 4],
 // Function to add points
 add_points = #[point, point] {
   Point[
-    x: math.add[$.0.x, $.1.x],
-    y: math.add[$.0.y, $.1.y],
+    x: %math.add[$.0.x, $.1.x],
+    y: %math.add[$.0.y, $.1.y],
   ]
 },
 
@@ -603,8 +600,8 @@ contains?[xs, 4]    // []
 ```
 // Clamp value to range [0, 100]
 clamp = #int {
-  | ~> math.gt[~, 100] => 100
-  | ~> math.lt[~, 0] => 0
+  | ~> %math.gt[~, 100] => 100
+  | ~> %math.lt[~, 0] => 0
   | ~>
 },
 
@@ -621,12 +618,10 @@ shape :
   | Circle[radius: int]
   | Rectangle[width: int, height: int];
 
-math = %"math",
-
 [
   bounding_box: #shape {
     | ~> =Circle[radius: r] => {
-      x = [r, 2] ~> math.mul,
+      x = %math.mul[r, 2],
       Rectangle[width: x, height: x]
     }
     | ~> =Rectangle[width: w, height: h] => {
@@ -642,7 +637,7 @@ math = %"math",
 
 ```
 // main.qv
-(bounding_box, is_square?) = %"./shapes.qv",
+(bounding_box, is_square?) = %shapes,
 
 circle = Circle[radius: 5],
 rectangle = Rectangle[width: 10, height: 10],
@@ -667,8 +662,7 @@ person.name,                           // Extract name field
 person ~> .date_of_birth ~> .month,    // Chain field access
 
 // Built-in operations
-math = %"math",
-next_year = person.age ~> math.add[~, 1],
+next_year = person.age ~> %math.add[~, 1],
 ```
 
 ### Concurrent processes

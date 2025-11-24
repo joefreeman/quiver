@@ -1,19 +1,17 @@
 range : Range[int, int | None, int];
-(iterator) : %"iter";
-
-math = %"math",
+(iterator) : %iter;
 
 iter' = #[#& -> iterator<int>, range] {
   ~> =[self, Range[value, stop, step]],
   #{
     {
       | stop ~> =None
-      | math.gt[step, 0], math.lt[value, stop]
-      | math.lt[step, 0], math.gt[value, stop]
+      | %math.gt[step, 0], %math.lt[value, stop]
+      | %math.lt[step, 0], %math.gt[value, stop]
       | step ~> =0
     },
     value
-    ~> math.add[~, step]
+    ~> %math.add[~, step]
     ~> Range[~, stop, step]
     ~> self[self, ~]
     ~> [value, ~]

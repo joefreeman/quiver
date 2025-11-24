@@ -94,7 +94,6 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             }
-            ast::Term::Import(_) => {}
             ast::Term::Builtin(_) => {}
             ast::Term::TailCall(tail_call) => {
                 if let Some(name) = &tail_call.identifier {

@@ -105,10 +105,9 @@ fn test_heterogeneous_list_via_widening() {
     quiver()
         .evaluate(
             r#"
-            list = %"list",
-            list.new[]
-              ~> list.append[~, 5]
-              ~> list.append[~, "a"],
+            %list.new[]
+              ~> %list.append[~, 5]
+              ~> %list.append[~, "a"],
             "#,
         )
         .expect_type("Cons[(Str[bin] | int), μ1] | Nil");

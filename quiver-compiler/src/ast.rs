@@ -12,7 +12,7 @@ pub enum Statement {
     },
     TypeImport {
         pattern: TypeImportPattern,
-        module_path: String,
+        module: Vec<String>,
     },
     Expression(Expression),
 }
@@ -55,7 +55,6 @@ pub enum Term {
     Block(Block),
     Function(Function),
     Access(Access),
-    Import(String),
     Builtin(Builtin),
     TailCall(TailCall),
     Equality,
@@ -109,6 +108,8 @@ pub enum AccessSource {
     Parameter,
     /// Ripple `~` - references the piped value
     Ripple,
+    /// Import like `%math` or `%math/trig`
+    Import(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

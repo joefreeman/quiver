@@ -835,7 +835,7 @@ fn type_definition(input: Span) -> IResult<Span, Type> {
 
 // Term parsers
 
-// Parse access patterns: identifier, $, ~, with optional .field accessors and [args]
+// Parse access patterns: identifier, $, ~, %import, with optional .field accessors and [args]
 fn access(input: Span) -> IResult<Span, Access> {
     verify(
         map(
@@ -847,6 +847,8 @@ fn access(input: Span) -> IResult<Span, Access> {
                         terminated(char('~'), peek(alt((char('['), char('.'))))),
                         |_| AccessSource::Ripple,
                     ),
+                    // Import: %module or %module/submodule
+                    map(import, AccessSource::Import),
                     map(identifier, AccessSource::Identifier),
                 ))),
                 many0(preceded(
@@ -1002,15 +1004,8 @@ fn select_term(input: Span) -> IResult<Span, Term> {
     ))(input)
 }
 
-fn import(input: Span) -> IResult<Span, String> {
-    preceded(
-        char('%'),
-        delimited(
-            char('"'),
-            map_res(take_while(|c| c != '"'), |s: Span| parse_string_content(s)),
-            char('"'),
-        ),
-    )(input)
+fn import(input: Span) -> IResult<Span, Vec<String>> {
+    preceded(char('%'), separated_list1(char('/'), identifier))(input)
 }
 
 fn tuple_field(input: Span) -> IResult<Span, TupleField> {
@@ -1450,11 +1445,9 @@ fn term(input: Span) -> IResult<Span, Term> {
         map(tuple_term, Term::Tuple),
         map(function, Term::Function),
         map(block, Term::Block),
-        // Import
-        map(import, Term::Import),
         // Builtins
         map(builtin, Term::Builtin),
-        // Access (includes field/positional access and bare identifiers with optional argument)
+        // Access (includes field/positional access, bare identifiers with optional argument, and imports)
         map(access, Term::Access),
         // Operations
         equality,
@@ -1562,10 +1555,7 @@ fn type_import(input: Span) -> IResult<Span, Statement> {
             type_import_pattern,
             preceded(tuple((ws0, tag(":"), ws0)), import),
         )),
-        |(pattern, module_path)| Statement::TypeImport {
-            pattern,
-            module_path,
-        },
+        |(pattern, module)| Statement::TypeImport { pattern, module },
     )(input)
 }
 

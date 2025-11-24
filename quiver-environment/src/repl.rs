@@ -86,7 +86,6 @@ impl<E: Effect> Repl<E> {
             self.module_cache.clone(),
             self.module_loader.as_ref(),
             self.types.clone(),
-            None,                          // module_path
             self.last_result_type.clone(), // parameter_type - use previous result type for continuations
             &process_types,
             &self.builtins,

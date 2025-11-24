@@ -79,9 +79,8 @@ fn test_closure_captures_member_accesses() {
     quiver()
         .evaluate(
             r#"
-            math = %"math",
             double_plus_one = #int {
-              ~> =x => [[x, 2] ~> math.mul, 1] ~> math.add
+              ~> =x => [[x, 2] ~> %math.mul, 1] ~> %math.add
             },
             5 ~> double_plus_one
             "#,
@@ -107,9 +106,8 @@ fn test_nested_function_captures() {
     quiver()
         .evaluate(
             r#"
-            math = %"math",
             f = #{
-              inc = #int { ~> [~, 1] ~> math.add },
+              inc = #int { ~> [~, 1] ~> %math.add },
               42 ~> inc
             },
             [] ~> f
@@ -120,15 +118,13 @@ fn test_nested_function_captures() {
 
 #[test]
 fn test_function_call_syntax() {
-    quiver()
-        .evaluate("math = %\"math\", math.add[3, 4]")
-        .expect("7");
+    quiver().evaluate("%math.add[3, 4]").expect("7");
 }
 
 #[test]
 fn test_function_call_with_ripple() {
     quiver()
-        .evaluate("math = %\"math\", math.add[1, 2] ~> math.mul[~, 3]")
+        .evaluate("%math.add[1, 2] ~> %math.mul[~, 3]")
         .expect("9");
 }
 
@@ -139,9 +135,7 @@ fn test_function_call_no_args() {
 
 #[test]
 fn test_function_call_field_access() {
-    quiver()
-        .evaluate("math = %\"math\", math ~> .add[1, 2]")
-        .expect("3");
+    quiver().evaluate("%math ~> .add[1, 2]").expect("3");
 }
 
 #[test]
@@ -149,11 +143,10 @@ fn test_function_call_with_spread() {
     quiver()
         .evaluate(
             r#"
-            math = %"math",
             f = #[int, int, int] {
               $.0
-              ~> math.add[~, $.1]
-              ~> math.add[~, $.2]
+              ~> %math.add[~, $.1]
+              ~> %math.add[~, $.2]
             },
             [1, 2] ~> f[..., 3]
             "#,
@@ -163,9 +156,7 @@ fn test_function_call_with_spread() {
 
 #[test]
 fn test_ripple_call_function() {
-    quiver()
-        .evaluate("math = %\"math\", math.add ~> ~[3, 4]")
-        .expect("7");
+    quiver().evaluate("%math.add ~> ~[3, 4]").expect("7");
 }
 
 #[test]
