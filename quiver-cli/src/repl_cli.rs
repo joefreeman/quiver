@@ -460,6 +460,8 @@ impl ReplCli {
     }
 
     fn print_error(&self, error: ReplError, source: &str) {
+        // Yellow for parser/compiler errors (non-fatal, no side effects)
+        // Red for runtime errors (fatal, terminates the REPL process)
         match error {
             ReplError::Parser(e) => {
                 // Check if stderr is a terminal and NO_COLOR is not set
@@ -471,11 +473,11 @@ impl ReplCli {
                     crate::diagnostics::eprint(&e, "repl", source);
                 } else {
                     // Plain text fallback
-                    eprintln!("{}", format!("Parse error: {}", e).red());
+                    eprintln!("{}", format!("Parse error: {}", e).yellow());
                 }
             }
             ReplError::Compiler(e) => {
-                eprintln!("{}", format!("Compile error: {:?}", e).red());
+                eprintln!("{}", format!("Compile error: {:?}", e).yellow());
             }
             ReplError::Runtime(e) => {
                 eprintln!("{}", format!("Runtime error: {:?}", e).red());

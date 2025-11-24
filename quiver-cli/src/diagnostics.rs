@@ -9,15 +9,20 @@ pub fn to_report<'a>(
 ) -> Report<'a, (&'a str, std::ops::Range<usize>)> {
     let offset = error.span.map(|s| s.offset).unwrap_or(0);
 
-    let mut report =
-        Report::build(ReportKind::Error, source_id, offset).with_message(format!("{}", error.kind));
+    // Use yellow for parser errors (non-fatal, no side effects)
+    let mut report = Report::build(
+        ReportKind::Custom("Error", Color::Yellow),
+        source_id,
+        offset,
+    )
+    .with_message(format!("{}", error.kind));
 
     // Add label with span if available
     if let Some(span) = error.span {
         let range = span.offset..span.offset + span.length.max(1);
         let label = Label::new((source_id, range))
             .with_message(hint(&error.kind))
-            .with_color(Color::Red);
+            .with_color(Color::Yellow);
         report = report.with_label(label);
     }
 
