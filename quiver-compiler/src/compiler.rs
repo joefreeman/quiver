@@ -1055,9 +1055,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Clean up temporary locals we allocated for captures with accessors
         if !capture_temps.is_empty() {
-            self.codegen
-                .add_instruction(Instruction::Clear(capture_temps.len()));
             self.local_count -= capture_temps.len();
+            self.codegen
+                .add_instruction(Instruction::Reset(self.local_count));
         }
 
         let function_type = Type::Callable(Box::new(func_type));
@@ -1255,32 +1255,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .is_some_and(|chain| chain.continuation)
     }
 
-    /// Check if a pattern can fail before storing bindings (atomic failure).
-    ///
-    /// Patterns that can fail atomically (before any Store executes):
-    /// - Structural tuple patterns: `=[Nil, zs]` - needs structure match
-    /// - Type patterns: `^int` - needs type check
-    /// - Pin patterns: `^x` - needs value equality
-    /// - Literal patterns: `=5` - needs value equality
-    ///
-    /// Patterns that always succeed (always store):
-    /// - Simple identifier bind: `=x` - matches anything
-    /// - Star/wildcard: `_` - matches anything
-    fn pattern_can_fail_before_storing(pattern: &ast::Match) -> bool {
-        match pattern {
-            // Simple bind identifier - always succeeds
-            ast::Match::Identifier(_) => false,
-            // Wildcard/star - always succeeds
-            ast::Match::Star | ast::Match::Placeholder => false,
-            // Structural patterns - can fail
-            ast::Match::Tuple(_) | ast::Match::Partial(_) => true,
-            // Type/literal/pin - can fail
-            ast::Match::Type(_) | ast::Match::Literal(_) | ast::Match::Pin(_) => true,
-            // Wrapped patterns - check inner
-            ast::Match::Bind(inner) => Self::pattern_can_fail_before_storing(inner),
-        }
-    }
-
     fn compile_block(
         &mut self,
         block: ast::Block,
@@ -1409,64 +1383,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             if let Some(ref consequence) = branch.consequence {
                 // Branch has a consequence - compile it
-                // Track how many branch-specific locals were allocated.
-                let branch_locals_count = self.local_count - (param_local + 1);
-
                 // Use emit_duplicate_jump_if_nil (without pop) to keep the value on stack for consequence
                 let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil();
 
-                // Determine cleanup needs based on expression structure.
-                // Pattern matching is atomic: all checks happen before any Store instructions.
-                // So if a pattern fails, no locals have been stored yet.
-                //
-                // Cases where cleanup is NOT needed (locals_to_clear = 0):
-                // 1. Single chain starting with ~> (original heuristic - covers ~> =pattern, ~> builtin)
-                // 2. Single chain ending with pattern that can fail, with no blocks before
-                //    (extends to expr ~> =pattern like t ~> =[Nil, zs])
-                let is_multi_chain = branch.condition.chains.len() > 1;
-                let condition_is_atomic = !is_multi_chain
-                    && branch.condition.chains.first().is_some_and(|chain| {
-                        // Case 1: Chain starts with ~> (original heuristic)
-                        if chain.continuation {
-                            return true;
-                        }
-
-                        // Case 2: Chain ends with pattern that can fail before storing
-                        let can_fail_pattern = if let Some(pattern) = &chain.match_pattern {
-                            Self::pattern_can_fail_before_storing(pattern)
-                        } else if let Some(
-                            ast::Term::BindMatch(pattern) | ast::Term::PinMatch(pattern),
-                        ) = chain.terms.last()
-                        {
-                            Self::pattern_can_fail_before_storing(pattern)
-                        } else {
-                            false
-                        };
-
-                        if !can_fail_pattern {
-                            return false;
-                        }
-
-                        // Check that no terms before the pattern can allocate locals.
-                        let pattern_idx = if chain.match_pattern.is_some() {
-                            chain.terms.len()
-                        } else {
-                            chain.terms.len().saturating_sub(1)
-                        };
-
-                        !chain.terms[..pattern_idx]
-                            .iter()
-                            .any(|t| matches!(t, ast::Term::Block(_)))
-                    });
-
-                let locals_to_clear = if condition_is_atomic {
-                    0 // Pattern matching fails atomically - no cleanup needed
-                } else {
-                    branch_locals_count
-                };
-
-                // Track: jump address, target branch index, locals to clear
-                next_branch_jumps.push((next_branch_jump, i + 1, locals_to_clear));
+                // Track: jump address, target branch index, whether cleanup needed
+                // Cleanup resets locals to branch start (param_local + 1)
+                let needs_cleanup = self.local_count > param_local + 1;
+                next_branch_jumps.push((next_branch_jump, i + 1, needs_cleanup));
 
                 // Apply forward narrowing: if condition succeeded (non-nil), narrow to exclude nil.
                 // This enables type refinement like { a => %math.add[a, 1] } when a: [] | int
@@ -1506,13 +1429,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
                 branch_types.push(consequence_type.clone());
 
-                // Clear branch-specific locals, but keep the parameter
-                // This is on the success path (after emit_duplicate_jump_if_nil),
-                // so bindings have been stored and we should clear them
-                let branch_specific_locals = self.local_count - (param_local + 1);
-                if branch_specific_locals > 0 {
+                // Reset to branch start (param_local + 1), keeping just the parameter
+                // This is on the success path - bindings have been stored and should be cleared
+                if self.local_count > param_local + 1 {
                     self.codegen
-                        .add_instruction(Instruction::Clear(branch_specific_locals));
+                        .add_instruction(Instruction::Reset(param_local + 1));
                 }
 
                 // If this is the last branch and condition can fail, add nil to result type
@@ -1548,27 +1469,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     }
                 }
 
-                // Clear branch-specific locals, but keep the parameter
-                // If condition can fail (contains nil), locals may not be allocated on failure
-                // Use conditional clear to only clear when condition succeeded
-                let branch_specific_locals = self.local_count - (param_local + 1);
-
-                if branch_specific_locals > 0 && condition_type.contains_nil() {
-                    // Condition can fail - check if result is nil before clearing
-                    self.codegen.add_instruction(Instruction::Duplicate);
-                    self.codegen.add_instruction(Instruction::Not);
-                    let skip_clear_jump = self.codegen.emit_jump_if_placeholder();
-
-                    // Success path: clear branch locals
+                // Reset to branch start (param_local + 1), keeping just the parameter
+                // Reset is safe regardless of whether condition succeeded: if pattern matching
+                // failed (returned nil), no bindings were stored so Reset is a no-op.
+                if self.local_count > param_local + 1 {
                     self.codegen
-                        .add_instruction(Instruction::Clear(branch_specific_locals));
-
-                    // Patch skip_clear_jump to here (failure path skips clear)
-                    self.codegen.patch_jump_to_here(skip_clear_jump);
-                } else if branch_specific_locals > 0 {
-                    // Condition always succeeds - always clear
-                    self.codegen
-                        .add_instruction(Instruction::Clear(branch_specific_locals));
+                        .add_instruction(Instruction::Reset(param_local + 1));
                 }
             }
 
@@ -1584,19 +1490,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        // Clear the parameter (branches have already cleared their specific locals)
+        // Reset to clear the parameter (branches have already reset their specific locals)
         // Save address for end_jumps patching
         let param_clear_addr = self.codegen.instructions.len();
-        self.codegen.add_instruction(Instruction::Clear(1));
+        self.codegen
+            .add_instruction(Instruction::Reset(locals_before));
 
-        // Emit cleanup blocks for branches that need to clear locals before jumping
+        // Emit cleanup blocks for branches that need to reset locals before jumping
         // Track jumps that need to be patched to the final end address
         let mut final_end_jumps = Vec::new();
 
-        // Check if we need cleanup blocks (any branch has locals to clear)
+        // Check if we need cleanup blocks (any branch needs cleanup)
         let has_cleanup_blocks = next_branch_jumps
             .iter()
-            .any(|(_, _, locals_to_clear)| *locals_to_clear > 0);
+            .any(|(_, _, needs_cleanup)| *needs_cleanup);
 
         // If there are cleanup blocks, emit a jump to skip them on the success path
         let skip_cleanup_jump = if has_cleanup_blocks {
@@ -1606,7 +1513,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Process each branch jump
-        for (jump_addr, next_branch_idx, locals_to_clear) in next_branch_jumps {
+        for (jump_addr, next_branch_idx, needs_cleanup) in next_branch_jumps {
             // Determine target: next branch start, on_no_match handler, or final end
             let target_addr = if next_branch_idx < branch_starts.len() {
                 Some(branch_starts[next_branch_idx])
@@ -1614,11 +1521,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 on_no_match
             };
 
-            if locals_to_clear > 0 {
-                // Emit cleanup block: Clear locals, then jump to target
+            if needs_cleanup {
+                // Emit cleanup block: Reset locals to branch start, then jump to target
                 let cleanup_addr = self.codegen.instructions.len();
                 self.codegen
-                    .add_instruction(Instruction::Clear(locals_to_clear));
+                    .add_instruction(Instruction::Reset(param_local + 1));
 
                 if let Some(addr) = target_addr {
                     self.codegen.emit_jump_to_addr(addr);

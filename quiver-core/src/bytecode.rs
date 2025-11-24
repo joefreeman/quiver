@@ -42,7 +42,7 @@ pub enum Instruction {
     Duplicate,
     Pick(usize),
     Rotate(usize),
-    Clear(usize),
+    Reset(usize),
     Load(usize),
     Store,
     Tuple(usize),

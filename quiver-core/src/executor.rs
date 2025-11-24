@@ -17,7 +17,7 @@ pub enum InstructionType {
     Duplicate,
     Pick,
     Rotate,
-    Clear,
+    Reset,
     Load,
     Store,
     Tuple,
@@ -46,7 +46,7 @@ impl InstructionType {
             Instruction::Duplicate => InstructionType::Duplicate,
             Instruction::Pick(_) => InstructionType::Pick,
             Instruction::Rotate(_) => InstructionType::Rotate,
-            Instruction::Clear(_) => InstructionType::Clear,
+            Instruction::Reset(_) => InstructionType::Reset,
             Instruction::Load(_) => InstructionType::Load,
             Instruction::Store => InstructionType::Store,
             Instruction::Tuple(_) => InstructionType::Tuple,
@@ -769,7 +769,7 @@ impl<E: Effect> Executor<E> {
             Instruction::Call => self.handle_call(pid),
             Instruction::TailCall(recurse) => self.handle_tail_call(pid, recurse),
             Instruction::Function(function_index) => self.handle_function(pid, function_index),
-            Instruction::Clear(count) => self.handle_clear(pid, count),
+            Instruction::Reset(index) => self.handle_reset(pid, index),
             Instruction::Builtin(index) => self.handle_builtin(pid, index),
             Instruction::Equal(count) => self.handle_equal(pid, count),
             Instruction::Not => self.handle_not(pid),
@@ -1271,19 +1271,18 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_clear(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_reset(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        if count > process.locals.len() {
+        let frame = process.frames.last_mut().ok_or(Error::FrameUnderflow)?;
+        let target = frame.locals_base + index;
+        if target > process.locals.len() {
             return Err(Error::StackUnderflow);
         }
-        process.locals.truncate(process.locals.len() - count);
-
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
+        process.locals.truncate(target);
+        frame.counter += 1;
         Ok(None)
     }
 
