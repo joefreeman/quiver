@@ -6,7 +6,7 @@ mod modules;
 mod narrowing;
 use narrowing::{
     Narrowing, analyze_tuple_pattern_for_complement, apply_narrowing, compute_complement,
-    get_field_type, get_parameter_field_narrowing,
+    get_field_narrowing, get_field_type, narrow_nil_from_new_bindings,
 };
 mod pattern;
 mod provenance;
@@ -305,7 +305,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok(Type::nil())
             }
             ast::Statement::Expression(expression) => {
-                let result_type = self.compile_expression(expression, None)?;
+                let (result_type, _) = self.compile_expression(expression, None)?;
                 Ok(result_type)
             }
         }
@@ -1082,8 +1082,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.patch_jump_to_here(start_jump_addr);
 
         // Analyze pattern to get bindings without generating code yet
-        let (bindings, binding_sets, result_type) =
-            pattern::analyze_pattern(&mut self.program, &pattern, &value_type, mode, &self.scopes)?;
+        let (bindings, binding_sets, result_type) = pattern::analyze_pattern(
+            &mut self.program,
+            &pattern,
+            &value_type,
+            mode,
+            &self.scopes,
+            &value_provenance,
+        )?;
 
         // Check if pattern has non-type requirements (literals, variable pins, path equality).
         // Patterns with non-type requirements cannot use complement narrowing.
@@ -1162,46 +1168,51 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 &result_type,
                 &self.program,
             );
+        }
 
-            // Record the narrowing for complement narrowing in blocks
-            if let Some(n) = narrowing {
-                // For bind patterns with tuple structure, check if we should record
-                // field-specific narrowing instead of whole-value narrowing.
-                // This enables patterns like `=[Nil, ys]` to narrow the first field
-                // so subsequent branches know the first field is NOT Nil.
-                let field_complement_info = if mode == pattern::PatternMode::Bind {
-                    analyze_tuple_pattern_for_complement(&pattern, &value_type, &self.program)
-                        .and_then(|(field_idx, constrained_type)| {
-                            // Use narrowed field type if available (from complement of previous branch),
-                            // otherwise fall back to static field type from tuple definition.
-                            // This ensures that for subsequent branches, the "original" type
-                            // is the narrowed type, so complement calculation is correct.
-                            let original = get_parameter_field_narrowing(&self.scopes, field_idx)
+        // Record the narrowing for complement narrowing in blocks.
+        // This must happen even when result_type is nil, so that subsequent branches
+        // know the value is NOT nil (complement narrowing).
+        if !result_type.is_never()
+            && let Some(n) = narrowing
+        {
+            // For bind patterns with tuple structure, check if we should record
+            // field-specific narrowing instead of whole-value narrowing.
+            // This enables patterns like `=[Nil, ys]` to narrow the first field
+            // so subsequent branches know the first field is NOT Nil.
+            let field_complement_info = if mode == pattern::PatternMode::Bind {
+                analyze_tuple_pattern_for_complement(&pattern, &value_type, &self.program).and_then(
+                    |(field_idx, constrained_type)| {
+                        // Use narrowed field type if available (from complement of previous branch),
+                        // otherwise fall back to static field type from tuple definition.
+                        // This ensures that for subsequent branches, the "original" type
+                        // is the narrowed type, so complement calculation is correct.
+                        let original =
+                            get_field_narrowing(&self.scopes, &value_provenance, field_idx)
                                 .or_else(|| {
-                                get_field_type(&value_type, field_idx, &self.program)
-                            })?;
-                            Some((field_idx, original, constrained_type))
-                        })
-                } else {
-                    None
-                };
+                                    get_field_type(&value_type, field_idx, &self.program)
+                                })?;
+                        Some((field_idx, original, constrained_type))
+                    },
+                )
+            } else {
+                None
+            };
 
-                if let Some((field_idx, original_field_type, constrained_type)) =
-                    field_complement_info
-                {
-                    // Record field-specific narrowing for complement
-                    let field_provenance =
-                        Provenance::Field(Box::new(value_provenance.clone()), field_idx);
-                    n.record(
-                        &field_provenance,
-                        &original_field_type,
-                        &constrained_type,
-                        &self.program,
-                    );
-                } else {
-                    // Standard whole-value narrowing
-                    n.record(&value_provenance, &value_type, &result_type, &self.program);
-                }
+            if let Some((field_idx, original_field_type, constrained_type)) = field_complement_info
+            {
+                // Record field-specific narrowing for complement
+                let field_provenance =
+                    Provenance::Field(Box::new(value_provenance.clone()), field_idx);
+                n.record(
+                    &field_provenance,
+                    &original_field_type,
+                    &constrained_type,
+                    &self.program,
+                );
+            } else {
+                // Standard whole-value narrowing
+                n.record(&value_provenance, &value_type, &result_type, &self.program);
             }
         }
 
@@ -1242,6 +1253,32 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .chains
             .first()
             .is_some_and(|chain| chain.continuation)
+    }
+
+    /// Check if a pattern can fail before storing bindings (atomic failure).
+    ///
+    /// Patterns that can fail atomically (before any Store executes):
+    /// - Structural tuple patterns: `=[Nil, zs]` - needs structure match
+    /// - Type patterns: `^int` - needs type check
+    /// - Pin patterns: `^x` - needs value equality
+    /// - Literal patterns: `=5` - needs value equality
+    ///
+    /// Patterns that always succeed (always store):
+    /// - Simple identifier bind: `=x` - matches anything
+    /// - Star/wildcard: `_` - matches anything
+    fn pattern_can_fail_before_storing(pattern: &ast::Match) -> bool {
+        match pattern {
+            // Simple bind identifier - always succeeds
+            ast::Match::Identifier(_) => false,
+            // Wildcard/star - always succeeds
+            ast::Match::Star | ast::Match::Placeholder => false,
+            // Structural patterns - can fail
+            ast::Match::Tuple(_) | ast::Match::Partial(_) => true,
+            // Type/literal/pin - can fail
+            ast::Match::Type(_) | ast::Match::Literal(_) | ast::Match::Pin(_) => true,
+            // Wrapped patterns - check inner
+            ast::Match::Bind(inner) => Self::pattern_can_fail_before_storing(inner),
+        }
     }
 
     fn compile_block(
@@ -1290,6 +1327,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             branch_starts.push(self.codegen.instructions.len());
 
+            // Track complement from previous branch for potential propagation
+            let mut applied_complement: Option<(Provenance, Type)> = None;
+
             if i > 0 {
                 self.codegen.add_instruction(Instruction::Pop);
                 // Don't emit Clear here - branch variables are only allocated if the branch matches
@@ -1304,16 +1344,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 scope.narrowings = provenance::Narrowings::default();
 
                 // Apply complement narrowing from previous branch (if available)
-                if let Some((prov, complement)) = pending_complement.take() {
-                    apply_narrowing(&mut self.scopes, &prov, &complement, &self.program);
+                // Keep a copy to propagate if this branch doesn't record its own narrowing
+                applied_complement = pending_complement.take();
+                if let Some((ref prov, ref complement)) = applied_complement {
+                    apply_narrowing(&mut self.scopes, prov, complement, &self.program);
                 }
             }
 
             // Create a narrowing instance for this branch's condition
             let mut narrowing = Narrowing::new();
+            // Track if we had a complement from previous branch (to propagate if needed)
+            let had_previous_complement = applied_complement.is_some();
+
+            // Record existing bindings before compiling condition - we'll narrow new ones later
+            let bindings_before_condition: std::collections::HashSet<String> = self
+                .scopes
+                .last()
+                .map(|s| s.bindings.keys().cloned().collect())
+                .unwrap_or_default();
 
             // Compile the condition expression - it can use ~> to access the parameter
-            let condition_type = self.compile_expression_with_input(
+            // We need both the type and provenance for forward narrowing
+            let (condition_type, condition_prov) = self.compile_expression_with_input(
                 branch.condition.clone(),
                 on_no_match,
                 None,
@@ -1331,6 +1383,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Store complement for narrowing subsequent branches
                     pending_complement = Some((prov, complement));
                 }
+            } else if had_previous_complement && !is_last_branch {
+                // This branch didn't record its own narrowing, but we had a complement
+                // from a previous branch. Propagate it to subsequent branches.
+                // This handles cases like { a ~> =None | f[a] | g[a] } where the
+                // narrowing from branch 1 should apply to branches 2 and 3.
+                pending_complement = applied_complement;
             }
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
@@ -1349,27 +1407,60 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 .as_ref()
                 .is_some_and(Self::expression_starts_with_continuation);
 
-            // Check if the condition is a multi-chain expression (relevant for cleanup)
-            let is_multi_chain = branch.condition.chains.len() > 1;
-            // Check if condition starts with continuation (~>) - indicates pattern matching
-            let condition_is_pattern_match =
-                Self::expression_starts_with_continuation(&branch.condition);
-
             if let Some(ref consequence) = branch.consequence {
                 // Branch has a consequence - compile it
-                // Track how many branch-specific locals were pushed by pattern matching
-                // This is needed for cleanup when jumping to next branch
+                // Track how many branch-specific locals were allocated.
                 let branch_locals_count = self.local_count - (param_local + 1);
 
                 // Use emit_duplicate_jump_if_nil (without pop) to keep the value on stack for consequence
                 let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil();
 
-                // Determine cleanup needs based on expression structure:
-                // - Single-chain pattern matching (~> =...): fails atomically, no cleanup (0)
-                // - Block conditions ({ ... }): may allocate locals inside, need cleanup
-                // - Multi-chain expressions: first chain may allocate locals before later fails
-                let locals_to_clear = if !is_multi_chain && condition_is_pattern_match {
-                    0 // Single-chain pattern matching fails atomically
+                // Determine cleanup needs based on expression structure.
+                // Pattern matching is atomic: all checks happen before any Store instructions.
+                // So if a pattern fails, no locals have been stored yet.
+                //
+                // Cases where cleanup is NOT needed (locals_to_clear = 0):
+                // 1. Single chain starting with ~> (original heuristic - covers ~> =pattern, ~> builtin)
+                // 2. Single chain ending with pattern that can fail, with no blocks before
+                //    (extends to expr ~> =pattern like t ~> =[Nil, zs])
+                let is_multi_chain = branch.condition.chains.len() > 1;
+                let condition_is_atomic = !is_multi_chain
+                    && branch.condition.chains.first().is_some_and(|chain| {
+                        // Case 1: Chain starts with ~> (original heuristic)
+                        if chain.continuation {
+                            return true;
+                        }
+
+                        // Case 2: Chain ends with pattern that can fail before storing
+                        let can_fail_pattern = if let Some(pattern) = &chain.match_pattern {
+                            Self::pattern_can_fail_before_storing(pattern)
+                        } else if let Some(
+                            ast::Term::BindMatch(pattern) | ast::Term::PinMatch(pattern),
+                        ) = chain.terms.last()
+                        {
+                            Self::pattern_can_fail_before_storing(pattern)
+                        } else {
+                            false
+                        };
+
+                        if !can_fail_pattern {
+                            return false;
+                        }
+
+                        // Check that no terms before the pattern can allocate locals.
+                        let pattern_idx = if chain.match_pattern.is_some() {
+                            chain.terms.len()
+                        } else {
+                            chain.terms.len().saturating_sub(1)
+                        };
+
+                        !chain.terms[..pattern_idx]
+                            .iter()
+                            .any(|t| matches!(t, ast::Term::Block(_)))
+                    });
+
+                let locals_to_clear = if condition_is_atomic {
+                    0 // Pattern matching fails atomically - no cleanup needed
                 } else {
                     branch_locals_count
                 };
@@ -1377,19 +1468,41 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Track: jump address, target branch index, locals to clear
                 next_branch_jumps.push((next_branch_jump, i + 1, locals_to_clear));
 
+                // Apply forward narrowing: if condition succeeded (non-nil), narrow to exclude nil.
+                // This enables type refinement like { a => %math.add[a, 1] } when a: [] | int
+                if condition_type.contains_nil() {
+                    let truthy_type = condition_type.without_nil();
+                    // Narrow the source variable if it has trackable provenance
+                    if !matches!(condition_prov, Provenance::Unknown) {
+                        apply_narrowing(
+                            &mut self.scopes,
+                            &condition_prov,
+                            &truthy_type,
+                            &self.program,
+                        );
+                    }
+                    // Narrow all bindings created during the condition that contain nil.
+                    // This handles cases like { 0 ~> f ~> =x => ... } where x has Unknown
+                    // provenance but should still be narrowed when the condition succeeds.
+                    narrow_nil_from_new_bindings(&mut self.scopes, &bindings_before_condition);
+                }
+
                 // Only pass input_type if the consequence starts with a continuation (~>)
                 let consequence_type = if starts_with_continuation {
                     // Continuation receives the value on the stack
-                    self.compile_expression_with_input(
+                    let (consequence_type, _) = self.compile_expression_with_input(
                         consequence.clone(),
                         None,
                         Some(condition_type.clone()),
                         None, // No narrowing for consequence
-                    )?
+                    )?;
+                    consequence_type
                 } else {
                     // Other terms don't use the value, so pop it first
                     self.codegen.add_instruction(Instruction::Pop);
-                    self.compile_expression(consequence.clone(), None)?
+                    let (consequence_type, _) =
+                        self.compile_expression(consequence.clone(), None)?;
+                    consequence_type
                 };
                 branch_types.push(consequence_type.clone());
 
@@ -1553,23 +1666,32 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         expression: ast::Expression,
         on_no_match: Option<usize>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Provenance), Error> {
         self.compile_expression_with_input(expression, on_no_match, None, None)
     }
 
+    /// Compile an expression and return both the result type and provenance.
     fn compile_expression_with_input(
         &mut self,
         expression: ast::Expression,
         on_no_match: Option<usize>,
         input_type: Option<Type>,
         mut narrowing: Option<&mut Narrowing>,
-    ) -> Result<Type, Error> {
+    ) -> Result<(Type, Provenance), Error> {
         let has_input = input_type.is_some();
         let mut last_type = input_type;
+        let mut last_prov = Provenance::Unknown;
         let mut end_jumps = Vec::new();
 
         for (i, chain) in expression.chains.iter().enumerate() {
-            let (chain_type, _prov) = self.compile_chain_with_input(
+            // Track bindings before this chain for inter-chain narrowing
+            let bindings_before_chain: std::collections::HashSet<String> = self
+                .scopes
+                .last()
+                .map(|s| s.bindings.keys().cloned().collect())
+                .unwrap_or_default();
+
+            let (chain_type, chain_prov) = self.compile_chain_with_input(
                 chain.clone(),
                 on_no_match,
                 None,
@@ -1598,15 +1720,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
 
                 let mut combined = prev_success_types;
-                combined.push(chain_type);
+                combined.push(chain_type.clone());
                 last_type = Some(union_types(combined));
+                // Multiple chains = unknown provenance
+                last_prov = Provenance::Unknown;
             } else {
                 // Normal case: propagate nil if previous chain could be nil
                 last_type = Some(if should_propagate_nil {
-                    union_types(vec![chain_type, Type::nil()])
+                    union_types(vec![chain_type.clone(), Type::nil()])
                 } else {
-                    chain_type
+                    chain_type.clone()
                 });
+                last_prov = chain_prov;
             }
 
             // If last_type is NIL, subsequent chains are unreachable - break early
@@ -1619,6 +1744,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             if i < expression.chains.len() - 1 {
                 let end_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 end_jumps.push(end_jump);
+
+                // After the jump, if chain could be nil, narrow bindings created in this chain.
+                // This handles cases like `a ~> =x, %math.add[x, 1]` where x needs to be
+                // narrowed before the next chain uses it.
+                if chain_type.contains_nil() {
+                    narrow_nil_from_new_bindings(&mut self.scopes, &bindings_before_chain);
+                }
             }
         }
 
@@ -1630,7 +1762,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let result_type = last_type.ok_or_else(|| Error::InternalError {
             message: "Expression compiled with no chains".to_string(),
         })?;
-        Ok(result_type)
+        Ok((result_type, last_prov))
     }
 
     fn compile_chain(
@@ -1671,16 +1803,46 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             (input_type, Provenance::Unknown)
         };
 
-        for term in chain.terms {
+        let terms: Vec<_> = chain.terms.into_iter().collect();
+        let num_terms = terms.len();
+        for (i, term) in terms.iter().enumerate() {
+            let is_last_term = i == num_terms - 1;
+            // Check if the NEXT term needs the full type including nil:
+            // - Blocks need it for proper pattern matching in branches
+            // - BindMatch/PinMatch need it for proper type checking
+            let next_needs_full_type = !is_last_term
+                && matches!(
+                    terms.get(i + 1),
+                    Some(ast::Term::Block(_))
+                        | Some(ast::Term::Select(_))
+                        | Some(ast::Term::BindMatch(_))
+                        | Some(ast::Term::PinMatch(_))
+                );
+
             let (term_type, term_prov) = self.compile_term(
-                term,
+                term.clone(),
                 current_type,
                 current_prov,
                 on_no_match,
                 ripple_context,
                 narrowing.as_deref_mut(),
             )?;
-            current_type = Some(term_type);
+            // For non-last terms that aren't followed by pattern matching terms: if the type
+            // contains nil as part of a union (not nil alone), strip nil for subsequent terms.
+            // At runtime, nil causes the chain to short-circuit (or fail), so subsequent
+            // non-pattern terms only see non-nil values.
+            // Pattern matching terms need the full type for proper type checking.
+            // Note: Don't strip if the type IS nil (not a union containing nil), as that
+            // would result in the never type which breaks pattern matching.
+            let should_strip_nil = !is_last_term
+                && !next_needs_full_type
+                && term_type.contains_nil()
+                && !term_type.is_nil(); // Don't strip if type IS nil
+            current_type = Some(if should_strip_nil {
+                term_type.without_nil()
+            } else {
+                term_type
+            });
             current_prov = term_prov;
         }
 
@@ -2287,7 +2449,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             Some(ast::AccessSource::Import(module)) => {
                 // %module or %module/submodule with optional .field accessors and [args]
-                if value_type.is_some() && access.argument.is_none() && access.accessors.is_empty() {
+                if value_type.is_some() && access.argument.is_none() && access.accessors.is_empty()
+                {
                     return Err(Error::FeatureUnsupported(
                         "Import cannot be applied to value".to_string(),
                     ));

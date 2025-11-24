@@ -9,7 +9,7 @@ use quiver_core::{
 };
 
 use super::provenance::Provenance;
-use super::scopes::{Scope, lookup_variable};
+use super::scopes::{Binding, Scope, lookup_variable};
 
 /// Narrowing information recorded during condition compilation.
 /// Used to compute complement types for subsequent branches.
@@ -129,35 +129,22 @@ pub fn apply_narrowing(
         }
 
         Provenance::Field(parent, field_idx) => {
-            // Special case: if parent is Parameter and parent is a tuple (not a union),
-            // store field-specific narrowing for tuple pattern complement narrowing.
-            if matches!(parent.as_ref(), Provenance::Parameter) {
-                let parent_type = get_type_for_provenance(scopes, parent, program);
-                // Check if parent is a single tuple type (not a union of tuples)
-                let is_single_tuple = matches!(parent_type, Type::Tuple(_));
-                if is_single_tuple {
-                    if let Some(scope) = scopes.last_mut() {
-                        // Get current field type, considering existing narrowings
-                        let current_field_type = scope
-                            .narrowings
-                            .parameter_fields
-                            .get(field_idx)
-                            .cloned()
-                            .or_else(|| get_field_type(&parent_type, *field_idx, program))
-                            .unwrap_or_else(Type::never);
-                        let intersected =
-                            intersect_types(&current_field_type, narrowed_to, program);
-                        scope
-                            .narrowings
-                            .parameter_fields
-                            .insert(*field_idx, intersected);
-                    }
-                    return;
-                }
+            // Check if parent is a single tuple type (not a union of tuples).
+            // If so, store field-specific narrowing for tuple pattern complement narrowing.
+            let parent_type = get_type_for_provenance(scopes, parent, program);
+            let is_single_tuple = matches!(parent_type, Type::Tuple(_));
+
+            if is_single_tuple {
+                // Get current field type, considering existing narrowings
+                let current_field_type = get_field_narrowing(scopes, parent, *field_idx)
+                    .or_else(|| get_field_type(&parent_type, *field_idx, program))
+                    .unwrap_or_else(Type::never);
+                let intersected = intersect_types(&current_field_type, narrowed_to, program);
+                set_field_narrowing(scopes, parent, *field_idx, intersected);
+                return;
             }
 
             // Standard case: Filter parent variants based on which have compatible field types
-            let parent_type = get_type_for_provenance(scopes, parent, program);
             let filtered = filter_variants_by_field(&parent_type, *field_idx, narrowed_to, program);
             // Recursively narrow the parent
             apply_narrowing(scopes, parent, &filtered, program);
@@ -188,6 +175,51 @@ pub fn apply_narrowing(
 
         Provenance::Tuple(_) | Provenance::Unknown => {
             // Cannot narrow unknown or tuple-as-a-whole
+        }
+    }
+
+    // Also narrow any bindings in the current scope whose provenance matches.
+    // This handles cases like `a ~> =x` where narrowing `a` should also narrow `x`,
+    // since `x` was bound to `a` and shares its provenance.
+    //
+    // We only narrow if the binding's type is compatible with narrowed_to, which ensures
+    // we don't incorrectly narrow field bindings that happen to share a parent provenance
+    // (e.g., `ys` in `=[Nil, ys]` has provenance Parameter but type list<t>, not tuple type).
+    if !matches!(provenance, Provenance::Unknown)
+        && let Some(scope) = scopes.last_mut()
+    {
+        // Collect bindings to narrow first to avoid borrow conflicts
+        let bindings_to_narrow: Vec<(String, Type)> = scope
+            .bindings
+            .iter()
+            .filter_map(|(name, binding)| {
+                // Only process Variable bindings with matching provenance
+                if let Binding::Variable {
+                    ty,
+                    provenance: prov,
+                    ..
+                } = binding
+                    && prov == provenance
+                {
+                    let current = scope
+                        .narrowings
+                        .variables
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| ty.clone());
+                    // Only narrow if the types are compatible - this prevents
+                    // narrowing field bindings with incompatible types
+                    let intersection = intersect_types(&current, narrowed_to, program);
+                    if !intersection.is_never() {
+                        return Some((name.clone(), intersection));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for (name, narrowed_type) in bindings_to_narrow {
+            scope.narrowings.variables.insert(name, narrowed_type);
         }
     }
 }
@@ -459,12 +491,87 @@ fn get_tuple_field_types(value_type: &Type, program: &Program) -> Option<Vec<Typ
     Some(tuple_info.fields.iter().map(|(_, ty)| ty.clone()).collect())
 }
 
-/// Get the narrowed type for a parameter field, if any.
+/// Get the narrowed type for a field of a provenance, if any.
 ///
 /// Returns the narrowed field type if one has been recorded in the current scope,
 /// otherwise returns None.
-pub fn get_parameter_field_narrowing(scopes: &[Scope], field_idx: usize) -> Option<Type> {
-    scopes
-        .last()
-        .and_then(|scope| scope.narrowings.parameter_fields.get(&field_idx).cloned())
+pub fn get_field_narrowing(
+    scopes: &[Scope],
+    provenance: &Provenance,
+    field_idx: usize,
+) -> Option<Type> {
+    scopes.last().and_then(|scope| {
+        scope
+            .narrowings
+            .fields
+            .iter()
+            .find(|(prov, idx, _)| prov == provenance && *idx == field_idx)
+            .map(|(_, _, ty)| ty.clone())
+    })
+}
+
+/// Record a field narrowing for a provenance.
+///
+/// Updates the field narrowing if it already exists, otherwise adds a new entry.
+pub fn set_field_narrowing(
+    scopes: &mut [Scope],
+    provenance: &Provenance,
+    field_idx: usize,
+    narrowed_type: Type,
+) {
+    if let Some(scope) = scopes.last_mut() {
+        if let Some(entry) = scope
+            .narrowings
+            .fields
+            .iter_mut()
+            .find(|(prov, idx, _)| prov == provenance && *idx == field_idx)
+        {
+            entry.2 = narrowed_type;
+        } else {
+            scope
+                .narrowings
+                .fields
+                .push((provenance.clone(), field_idx, narrowed_type));
+        }
+    }
+}
+
+/// Narrow nil from bindings created after a checkpoint.
+///
+/// When a chain/expression succeeds (doesn't short-circuit on nil), any bindings
+/// created during that chain that contain nil in their type can have nil removed,
+/// since we know execution continued past the potential failure point.
+///
+/// # Arguments
+/// * `scopes` - The scope stack (only the last scope is examined)
+/// * `bindings_before` - Set of binding names that existed before the chain
+///
+/// # Behavior
+/// For each binding created after the checkpoint (not in `bindings_before`):
+/// - If the binding is a variable with a nil-containing type
+/// - Add a narrowing that removes nil from its type
+pub fn narrow_nil_from_new_bindings(
+    scopes: &mut [Scope],
+    bindings_before: &std::collections::HashSet<String>,
+) {
+    if let Some(scope) = scopes.last_mut() {
+        let new_bindings_to_narrow: Vec<(String, Type)> = scope
+            .bindings
+            .iter()
+            .filter_map(|(name, binding)| {
+                if bindings_before.contains(name) {
+                    return None;
+                }
+                if let Binding::Variable { ty, .. } = binding
+                    && ty.contains_nil()
+                {
+                    return Some((name.clone(), ty.without_nil()));
+                }
+                None
+            })
+            .collect();
+        for (name, narrowed) in new_bindings_to_narrow {
+            scope.narrowings.variables.insert(name, narrowed);
+        }
+    }
 }

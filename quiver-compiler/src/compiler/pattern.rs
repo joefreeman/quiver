@@ -128,6 +128,7 @@ pub fn analyze_pattern(
     value_type: &Type,
     mode: PatternMode,
     scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
     let (binding_sets, narrowed_type) = analyze_match_pattern(
@@ -138,6 +139,7 @@ pub fn analyze_pattern(
         mode,
         &mut identifiers,
         scopes,
+        value_provenance,
     )?;
 
     if binding_sets.is_empty() {
@@ -307,6 +309,7 @@ fn analyze_match_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, Type), Error> {
     match pattern {
         ast::Match::Identifier(name) => analyze_identifier_pattern(
@@ -321,9 +324,16 @@ fn analyze_match_pattern(
         ast::Match::Literal(literal) => {
             analyze_literal_pattern(literal.clone(), path, value_type, program)
         }
-        ast::Match::Tuple(tuple) => {
-            analyze_match_tuple_pattern(program, tuple, value_type, path, mode, identifiers, scopes)
-        }
+        ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
+            program,
+            tuple,
+            value_type,
+            path,
+            mode,
+            identifiers,
+            scopes,
+            value_provenance,
+        ),
         ast::Match::Partial(partial) => analyze_partial_pattern(
             program,
             partial,
@@ -351,6 +361,7 @@ fn analyze_match_pattern(
             PatternMode::Pin,
             identifiers,
             scopes,
+            value_provenance,
         ),
         ast::Match::Bind(inner) => analyze_match_pattern(
             program,
@@ -360,6 +371,7 @@ fn analyze_match_pattern(
             PatternMode::Bind,
             identifiers,
             scopes,
+            value_provenance,
         ),
         ast::Match::Type(ast_type) => {
             // Type expressions should only appear in pin mode
@@ -409,6 +421,7 @@ fn analyze_match_tuple_pattern(
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, Type), Error> {
     let mut binding_sets = vec![];
     let mut successful_tuple_ids = vec![];
@@ -473,16 +486,17 @@ fn analyze_match_tuple_pattern(
             // Check for narrowed field type from complement narrowing.
             // This enables patterns like `=[Cons[...], ys]` in the second branch to know
             // that field 0 has been narrowed to Cons (from previous branch's `=[Nil, ys]`).
-            // Only applies when path is empty (we're at the root, matching against parameter).
+            // Only applies when path is empty (we're at the root).
             if path.is_empty()
                 && let Some(narrowed) =
-                    super::narrowing::get_parameter_field_narrowing(scopes, *actual_idx)
+                    super::narrowing::get_field_narrowing(scopes, value_provenance, *actual_idx)
             {
                 // Intersect with the narrowed type
                 field_type = super::narrowing::intersect_types(&field_type, &narrowed, program);
             }
 
             // Recursively analyze the field pattern
+            let field_provenance = value_provenance.field(*actual_idx);
             let (field_binding_sets, _field_narrowed_type) = analyze_match_pattern(
                 program,
                 &field.pattern,
@@ -491,6 +505,7 @@ fn analyze_match_tuple_pattern(
                 mode,
                 variant_identifiers,
                 scopes,
+                &field_provenance,
             )?;
 
             if field_binding_sets.is_empty() {
@@ -746,21 +761,12 @@ fn analyze_identifier_pattern(
 
         match mode {
             PatternMode::Bind => {
-                // Strip [] from binding type when value type is a union containing []
-                // This reflects that [] represents potential failure, and if the binding
-                // executes (after successful chaining), the value is not []
-                //
-                // Exception: if value type is EXACTLY [], keep it (explicit nil assignment)
-                let var_type = if value_type.is_nil() {
-                    value_type.clone()
-                } else {
-                    value_type.without_nil()
-                };
-                // Narrowed type matches binding type
+                // Binding gets the full value type, including nil if present.
+                // The binding executes regardless of whether the value is nil.
+                let var_type = value_type.clone();
                 let narrowed_type = var_type.clone();
 
                 // No runtime requirements for identifier bindings - they match any value
-                // The chaining semantics handle nil propagation separately
                 Ok((
                     vec![BindingSet {
                         requirements: vec![],

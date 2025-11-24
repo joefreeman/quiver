@@ -72,6 +72,102 @@ fn test_inner_scope_inherits_narrowing() {
         .expect("1");
 }
 
+#[test]
+fn test_truthiness_narrowing_in_branch_condition() {
+    // When a value of type [] | int is used as a condition, it should be
+    // narrowed to int in the consequence (since [] is falsy)
+    quiver()
+        .evaluate(
+            r#"
+            a = 0 ~> #int { ~> =0 },
+            { a => %math.add[a, 1] | 200 }
+            "#,
+        )
+        .expect("1");
+
+    // Test the nil case - should fall through to second branch
+    quiver()
+        .evaluate(
+            r#"
+            b = 1 ~> #int { ~> =0 },
+            { b => %math.add[b, 1] | 200 }
+            "#,
+        )
+        .expect("200");
+}
+
+#[test]
+fn test_truthiness_narrowing_with_binding() {
+    // When a value is bound via pattern match in a condition, the binding
+    // should also be narrowed when the condition succeeds
+    quiver()
+        .evaluate(
+            r#"
+            a = 0 ~> #int { ~> =0 },
+            { a ~> =x => %math.add[x, 1] | 200 }
+            "#,
+        )
+        .expect("1");
+
+    // Test the nil case
+    quiver()
+        .evaluate(
+            r#"
+            b = 1 ~> #int { ~> =0 },
+            { b ~> =x => %math.add[x, 1] | 200 }
+            "#,
+        )
+        .expect("200");
+}
+
+#[test]
+fn test_truthiness_narrowing_with_unknown_provenance() {
+    // When a binding is created from a function result (Unknown provenance),
+    // it should still be narrowed when the condition succeeds
+    quiver()
+        .evaluate(
+            r#"
+            f = #int { ~> =0 },
+            { 0 ~> f ~> =x => %math.add[x, 1] | 200 }
+            "#,
+        )
+        .expect("1");
+
+    // Test the nil case
+    quiver()
+        .evaluate(
+            r#"
+            f = #int { ~> =0 },
+            { 1 ~> f ~> =x => %math.add[x, 1] | 200 }
+            "#,
+        )
+        .expect("200");
+}
+
+#[test]
+fn test_inter_chain_narrowing() {
+    // When a binding is created in one chain and used in the next,
+    // it should be narrowed after the first chain succeeds
+    quiver()
+        .evaluate(
+            r#"
+            a = 0 ~> #int { ~> =0 },
+            { a ~> =x, %math.add[x, 1] }
+            "#,
+        )
+        .expect("1");
+
+    // Also test with function result
+    quiver()
+        .evaluate(
+            r#"
+            f = #int { ~> =0 },
+            { 0 ~> f ~> =x, %math.add[x, 1] }
+            "#,
+        )
+        .expect("1");
+}
+
 // =============================================================================
 // Complement Narrowing
 // =============================================================================
@@ -126,6 +222,32 @@ fn test_multiple_type_checks_same_provenance_complement() {
             "#,
         )
         .expect_type("A | int");
+}
+
+#[test]
+fn test_complement_propagates_across_multiple_branches() {
+    // Complement narrowing from branch 1 should propagate to branches 2 AND 3
+    // even if branch 2 doesn't record its own narrowing
+    quiver()
+        .evaluate(
+            r#"
+            value = 5,
+            stop = 10 ~> #int { ~> =0 => None | ~> },
+            { stop ~> =None | %math.lt[value, stop] | %math.gt[value, stop] }
+            "#,
+        )
+        .expect("-1");
+
+    // Test with None value - should match first branch
+    quiver()
+        .evaluate(
+            r#"
+            value = 5,
+            stop = 0 ~> #int { ~> =0 => None | ~> },
+            { stop ~> =None => 999 | %math.lt[value, stop] | %math.gt[value, stop] }
+            "#,
+        )
+        .expect("999");
 }
 
 #[test]
@@ -449,4 +571,47 @@ fn test_tuple_pattern_nested_pattern_not_complement() {
         "#,
         )
         .expect_type("[] | int");
+}
+
+#[test]
+fn test_tuple_pattern_complement_via_binding() {
+    // Tuple created from bindings - field narrowing works through the block parameter.
+    // The tuple [xs, ys] is piped to a block, and inside we use ~> (Parameter provenance).
+    quiver()
+        .evaluate(
+            r#"
+            list<t> : Nil | Cons[t, &];
+            f = #<t>[list<t>, list<t>] -> list<t> {
+              ~> =[xs, ys],
+              [xs, ys] ~> {
+                | ~> =[Nil, zs] => zs
+                | ~> =[Cons[head, tail], zs] => zs
+              }
+            },
+            f[Nil, Cons[1, Nil]]
+        "#,
+        )
+        .expect("Cons[1, Nil]");
+}
+
+#[test]
+fn test_tuple_pattern_complement_via_variable() {
+    // Tuple stored in variable then piped to block.
+    // Tests that field narrowing works when tuple has Variable provenance as block param source.
+    quiver()
+        .evaluate(
+            r#"
+            list<t> : Nil | Cons[t, &];
+            f = #<t>[list<t>, list<t>] -> list<t> {
+              ~> =[xs, ys],
+              t = [xs, ys],
+              t ~> {
+                | ~> =[Nil, zs] => zs
+                | ~> =[Cons[head, tail], zs] => zs
+              }
+            },
+            f[Cons[1, Nil], Cons[2, Nil]]
+        "#,
+        )
+        .expect("Cons[2, Nil]");
 }

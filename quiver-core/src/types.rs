@@ -360,6 +360,11 @@ impl Type {
                 result
             }
 
+            // When self is a union, ALL variants must be compatible with the pattern
+            (Type::Union(variants), pattern_type) => variants.iter().all(|variant| {
+                variant.is_compatible_with_impl(pattern_type, tuple_lookup, assumptions, type_stack)
+            }),
+
             // When self is concrete and pattern is a union, check if self matches any variant
             // Push the union pattern onto stack since cycles may reference it
             (concrete_type, Type::Union(variants)) => {
@@ -375,11 +380,6 @@ impl Type {
                 type_stack.pop();
                 result
             }
-
-            // When self is a union and pattern is concrete, check if any variant matches pattern
-            (Type::Union(variants), pattern_type) => variants.iter().any(|variant| {
-                variant.is_compatible_with_impl(pattern_type, tuple_lookup, assumptions, type_stack)
-            }),
 
             // Concrete tuple vs partial type: check if concrete satisfies partial constraint
             (Type::Tuple(concrete_id), Type::Partial(partial_id)) => {

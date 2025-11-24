@@ -34,9 +34,7 @@ impl ModuleCache {
             return Ok(cached_ast);
         }
 
-        let content = module_loader
-            .load(module)
-            .map_err(Error::ModuleLoad)?;
+        let content = module_loader.load(module).map_err(Error::ModuleLoad)?;
 
         let parsed = parser::parse(&content).map_err(|e| Error::ModuleParse {
             module: module.join("/"),

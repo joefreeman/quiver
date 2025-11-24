@@ -247,10 +247,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         function_index: Option<usize>,
     ) -> Result<(), EnvironmentError> {
         // Validate function exists (if provided)
-        if let Some(idx) = function_index {
-            if self.executor.get_function(idx).is_none() {
-                return Err(EnvironmentError::FunctionNotFound(idx));
-            }
+        if let Some(idx) = function_index
+            && self.executor.get_function(idx).is_none()
+        {
+            return Err(EnvironmentError::FunctionNotFound(idx));
         }
 
         // Spawn the persistent process (sleeping if no function)

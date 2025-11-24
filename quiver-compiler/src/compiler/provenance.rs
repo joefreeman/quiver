@@ -55,8 +55,8 @@ pub struct Narrowings {
     /// Narrowed type for the block/function parameter (if any).
     pub parameter: Option<Type>,
 
-    /// Narrowed types for individual fields of the parameter.
+    /// Field narrowings for any provenance, stored as (parent_provenance, field_index, narrowed_type).
     /// Used for tuple pattern complement narrowing where a specific field
-    /// has been constrained but the whole parameter type hasn't changed.
-    pub parameter_fields: HashMap<usize, Type>,
+    /// has been constrained but the parent type hasn't changed.
+    pub fields: Vec<(Provenance, usize, Type)>,
 }

@@ -358,3 +358,30 @@ fn test_not_operator_type_narrowing() {
         .evaluate("#(A | []) { ~> / | ~> ^A }")
         .expect_type("#(A | []) -> (A | Ok)");
 }
+
+#[test]
+fn test_variable_pattern_matching_in_branches() {
+    // Regression test for variable-based branch matching bug.
+    // When pattern matching on a variable (not ~>) in multi-branch blocks,
+    // the second branch should work correctly after the first branch fails.
+    // Previously this caused VariableUndefined("local[7]") because the
+    // cleanup code assumed pattern bindings were stored when they weren't.
+    quiver()
+        .evaluate(
+            r#"
+            list : Nil | Cons[int, &];
+
+            f = #[list, list] -> list {
+              ~> =[xs, ys],
+              t = [xs, ys],
+              {
+                | t ~> =[Nil, zs] => zs
+                | t ~> =[Cons[head, tail], zs] => zs
+              }
+            },
+
+            [f[Nil, Cons[1, Nil]], f[Cons[1, Nil], Cons[2, Nil]]]
+            "#,
+        )
+        .expect("[Cons[1, Nil], Cons[2, Nil]]");
+}
