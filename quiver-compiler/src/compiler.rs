@@ -405,7 +405,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &mut self.module_cache,
             self.module_loader,
             &mut self.scopes,
-            &mut self.program,
         )
     }
 
@@ -1744,7 +1743,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    fn compile_import(&mut self, module: &[String]) -> Result<Type, Error> {
+    /// Compile an import with optional accessor chain.
+    /// Resolves accessors statically on the cached module value, emitting only
+    /// instructions needed for the resolved value.
+    fn compile_import(
+        &mut self,
+        module: &[String],
+        accessors: &[ast::AccessPath],
+    ) -> Result<Type, Error> {
+        let module_name = module.join("/");
+
         // Check for circular imports
         if self.module_cache.import_stack.contains(&module.to_vec()) {
             return Err(Error::FeatureUnsupported(
@@ -1752,36 +1760,36 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ));
         }
 
-        // Check instruction cache first - with capture-by-value, function indices can be reused
-        if let Some((cached_instructions, cached_type)) =
-            self.module_cache.get_cached_instructions(module)
-        {
-            for instruction in cached_instructions.clone() {
-                self.codegen.add_instruction(instruction);
-            }
-            return Ok(cached_type.clone());
-        }
+        // Get or compute cached module value
+        let cached = if let Some(cached) = self.module_cache.get_cached_module(module) {
+            cached.clone()
+        } else {
+            self.module_cache.import_stack.push(module.to_vec());
+            let cached = self.import_and_cache_module(module)?;
+            self.module_cache.import_stack.pop();
+            cached
+        };
 
-        self.module_cache.import_stack.push(module.to_vec());
-        let (instructions, result_type) = self.import_module(module)?;
-        self.module_cache.import_stack.pop();
+        // Resolve accessor chain on the cached value
+        let (resolved_value, resolved_type) =
+            self.resolve_accessors(&cached.value, &cached.module_type, accessors, &module_name)?;
 
-        // Cache the instructions for future imports
-        self.module_cache.cache_instructions(
-            module.to_vec(),
-            instructions.clone(),
-            result_type.clone(),
-        );
+        // Emit instructions for just the resolved value
+        let (instructions, _) =
+            self.value_to_instructions_from_cache(&resolved_value, &cached.binary_data)?;
 
-        // Emit the module reconstruction instructions
         for instruction in instructions {
             self.codegen.add_instruction(instruction);
         }
 
-        Ok(result_type)
+        Ok(resolved_type)
     }
 
-    fn import_module(&mut self, module: &[String]) -> Result<(Vec<Instruction>, Type), Error> {
+    /// Import a module, execute it, and cache the result.
+    fn import_and_cache_module(
+        &mut self,
+        module: &[String],
+    ) -> Result<modules::CachedModule, Error> {
         // Parse the module
         let parsed = self
             .module_cache
@@ -1814,7 +1822,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let (module_value, executor) = quiver_core::execute_instructions_sync(
             &self.program,
             module_instructions,
-            last_type,
+            last_type.clone(),
             self.builtins,
         )
         .map_err(|e| Error::ModuleExecution {
@@ -1822,17 +1830,30 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             error: e,
         })?;
 
-        // Convert the runtime value back to instructions
-        let (instructions, module_type) = self.value_to_instructions(&module_value, &executor)?;
+        // Extract binary data and derive type from executor before discarding it
+        let mut binary_data = HashMap::new();
+        modules::extract_binary_data(&module_value, &executor, &mut binary_data);
+        let module_type = executor.value_to_type(&module_value);
 
-        Ok((instructions, module_type))
+        let cached = modules::CachedModule {
+            value: module_value,
+            module_type,
+            binary_data,
+        };
+
+        // Cache the module
+        self.module_cache
+            .cache_module(module.to_vec(), cached.clone());
+
+        Ok(cached)
     }
 
-    /// Convert a runtime value back to instructions that reconstruct it
-    fn value_to_instructions(
+    /// Convert a cached runtime value back to instructions that reconstruct it.
+    /// Uses pre-extracted binary data instead of an executor.
+    fn value_to_instructions_from_cache(
         &mut self,
         value: &Value,
-        executor: &quiver_core::executor::Executor<E>,
+        binary_data: &HashMap<usize, Vec<u8>>,
     ) -> Result<(Vec<Instruction>, Type), Error> {
         match value {
             Value::Integer(int_value) => {
@@ -1842,19 +1863,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((vec![Instruction::Constant(index)], Type::Integer))
             }
             Value::Binary(binary) => {
-                // Binary is already an index reference (Constant or Heap)
-                // For heap binaries, we need to extract bytes from executor
+                use quiver_core::value::Binary;
                 match binary {
-                    quiver_core::value::Binary::Constant(const_idx) => {
+                    Binary::Constant(const_idx) => {
                         // Just use the existing constant
                         Ok((vec![Instruction::Constant(*const_idx)], Type::Binary))
                     }
-                    quiver_core::value::Binary::Heap(heap_idx) => {
-                        // Extract from executor heap and create a new constant
-                        let binary_data = executor
-                            .get_heap_binary(*heap_idx)
-                            .expect("Heap binary index should be valid");
-                        let bytes = binary_data.to_vec();
+                    Binary::Heap(heap_idx) => {
+                        // Use pre-extracted binary data from cache
+                        let bytes = binary_data
+                            .get(heap_idx)
+                            .ok_or_else(|| {
+                                Error::FeatureUnsupported(format!(
+                                    "Missing cached binary data for heap index {}",
+                                    heap_idx
+                                ))
+                            })?
+                            .clone();
                         let constant = Constant::Binary(bytes);
                         let index = self.program.register_constant(constant);
                         Ok((vec![Instruction::Constant(index)], Type::Binary))
@@ -1864,7 +1889,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Value::Tuple(tuple_id, fields) => {
                 let mut instructions = Vec::new();
                 for field in fields {
-                    let (field_instructions, _) = self.value_to_instructions(field, executor)?;
+                    let (field_instructions, _) =
+                        self.value_to_instructions_from_cache(field, binary_data)?;
                     instructions.extend(field_instructions);
                 }
                 instructions.push(Instruction::Tuple(*tuple_id));
@@ -1881,8 +1907,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let mut instructions = Vec::new();
 
                 // Push capture values to stack (will be popped by Function instruction)
-                for value in captures {
-                    let (capture_instructions, _) = self.value_to_instructions(value, executor)?;
+                for capture_value in captures {
+                    let (capture_instructions, _) =
+                        self.value_to_instructions_from_cache(capture_value, binary_data)?;
                     instructions.extend(capture_instructions);
                 }
 
@@ -1918,6 +1945,72 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 "Cannot use resource in constant context".to_string(),
             )),
         }
+    }
+
+    /// Resolve an accessor chain on a compile-time known value.
+    /// Returns the resolved value and its type.
+    fn resolve_accessors(
+        &self,
+        value: &Value,
+        value_type: &Type,
+        accessors: &[ast::AccessPath],
+        module_name: &str,
+    ) -> Result<(Value, Type), Error> {
+        let mut current_value = value.clone();
+        let mut current_type = value_type.clone();
+
+        for accessor in accessors {
+            let Value::Tuple(_, fields) = &current_value else {
+                return Err(Error::MemberAccessOnNonTuple {
+                    target: module_name.to_string(),
+                });
+            };
+
+            let tuples = current_type.extract_tuples();
+
+            let (index, field_type) = match accessor {
+                ast::AccessPath::Field(name) => {
+                    let results =
+                        type_queries::get_field_types_by_name(&self.program, &tuples, name)
+                            .map_err(|_| Error::MemberFieldNotFound {
+                                field_name: name.clone(),
+                                target: module_name.to_string(),
+                            })?;
+
+                    if results.is_empty() {
+                        return Err(Error::MemberFieldNotFound {
+                            field_name: name.clone(),
+                            target: module_name.to_string(),
+                        });
+                    }
+
+                    let index = results[0].0;
+                    let field_type =
+                        Type::from_types(results.into_iter().map(|(_, t)| t).collect());
+                    (index, field_type)
+                }
+                ast::AccessPath::Index(index) => {
+                    let field_types =
+                        type_queries::get_field_types_at_position(&self.program, &tuples, *index)
+                            .map_err(|_| Error::MemberAccessOnNonTuple {
+                            target: module_name.to_string(),
+                        })?;
+
+                    (*index, Type::from_types(field_types))
+                }
+            };
+
+            current_value =
+                fields
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| Error::MemberAccessOnNonTuple {
+                        target: module_name.to_string(),
+                    })?;
+            current_type = field_type;
+        }
+
+        Ok((current_value, current_type))
     }
 
     /// Validate that a receive function in a select has the correct return type
@@ -2356,20 +2449,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     &module_name,
                 )?;
 
-                // Compile the import to get the module tuple
-                let import_type = self.compile_import(&module)?;
-
-                // Apply accessors if any
-                let (accessed_type, accessed_prov) = if access.accessors.is_empty() {
-                    (import_type, Provenance::Unknown)
-                } else {
-                    self.compile_accessor(
-                        import_type,
-                        access.accessors.clone(),
-                        &module_name,
-                        Provenance::Unknown,
-                    )?
-                };
+                // Compile the import with accessors - resolution happens inside compile_import
+                let accessed_type = self.compile_import(&module, &access.accessors)?;
 
                 if let Some(arg_type) = arg_type {
                     let ty = self.apply_value_to_type(accessed_type, arg_type)?;
@@ -2378,7 +2459,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let ty = self.apply_value_to_type(accessed_type, val_type)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
-                    Ok((accessed_type, accessed_prov))
+                    Ok((accessed_type, Provenance::Unknown))
                 }
             }
         }

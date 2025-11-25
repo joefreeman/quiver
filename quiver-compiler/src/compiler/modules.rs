@@ -1,19 +1,28 @@
 use std::collections::HashMap;
 
 use crate::{ast, modules::ModuleLoader, parser};
-use quiver_core::bytecode::Instruction;
-use quiver_core::program::Program;
+use quiver_core::effects::Effect;
 use quiver_core::types::Type;
+use quiver_core::value::{Binary, Value};
 
 use super::{Error, Scope, scopes};
+
+/// Cached module value with extracted binary data
+#[derive(Clone)]
+pub struct CachedModule {
+    pub value: Value,
+    pub module_type: Type,
+    /// Binary data extracted from executor heap, keyed by heap index
+    pub binary_data: HashMap<usize, Vec<u8>>,
+}
 
 #[derive(Clone)]
 pub struct ModuleCache {
     pub ast_cache: HashMap<Vec<String>, ast::Program>,
     pub import_stack: Vec<Vec<String>>,
-    /// Cache for module import instructions and types.
+    /// Cache for module values with their types and extracted binary data.
     /// With capture-by-value, function indices can be reused, making this cache valid.
-    pub instruction_cache: HashMap<Vec<String>, (Vec<Instruction>, Type)>,
+    pub value_cache: HashMap<Vec<String>, CachedModule>,
 }
 
 impl Default for ModuleCache {
@@ -27,23 +36,18 @@ impl ModuleCache {
         Self {
             ast_cache: HashMap::new(),
             import_stack: Vec::new(),
-            instruction_cache: HashMap::new(),
+            value_cache: HashMap::new(),
         }
     }
 
-    /// Get cached instructions for a module import
-    pub fn get_cached_instructions(&self, module: &[String]) -> Option<&(Vec<Instruction>, Type)> {
-        self.instruction_cache.get(module)
+    /// Get cached module value
+    pub fn get_cached_module(&self, module: &[String]) -> Option<&CachedModule> {
+        self.value_cache.get(module)
     }
 
-    /// Cache instructions for a module import
-    pub fn cache_instructions(
-        &mut self,
-        module: Vec<String>,
-        instructions: Vec<Instruction>,
-        ty: Type,
-    ) {
-        self.instruction_cache.insert(module, (instructions, ty));
+    /// Cache a module value with its type and extracted binary data
+    pub fn cache_module(&mut self, module: Vec<String>, cached: CachedModule) {
+        self.value_cache.insert(module, cached);
     }
 
     pub fn load_and_cache_ast(
@@ -68,13 +72,44 @@ impl ModuleCache {
     }
 }
 
+/// Extract all binary data from a Value tree that references the executor heap.
+/// Populates the provided map from heap index to the actual bytes.
+pub fn extract_binary_data<E: Effect>(
+    value: &Value,
+    executor: &quiver_core::executor::Executor<E>,
+    binary_data: &mut HashMap<usize, Vec<u8>>,
+) {
+    match value {
+        Value::Binary(Binary::Heap(heap_idx)) => {
+            if !binary_data.contains_key(heap_idx)
+                && let Some(data) = executor.get_heap_binary(*heap_idx)
+            {
+                binary_data.insert(*heap_idx, data.to_vec());
+            }
+        }
+        Value::Binary(Binary::Constant(_)) => {
+            // Constant binaries reference Program.constants which persists - no extraction needed
+        }
+        Value::Tuple(_, fields) => {
+            for field in fields {
+                extract_binary_data(field, executor, binary_data);
+            }
+        }
+        Value::Function(_, captures) => {
+            for capture in captures {
+                extract_binary_data(capture, executor, binary_data);
+            }
+        }
+        Value::Integer(_) | Value::Builtin(_) | Value::Process(..) | Value::Resource(..) => {}
+    }
+}
+
 pub fn compile_type_import(
     pattern: ast::TypeImportPattern,
     module: &[String],
     module_cache: &mut ModuleCache,
     module_loader: &dyn ModuleLoader,
     scopes_mut: &mut [Scope],
-    _program: &mut Program,
 ) -> Result<(), Error> {
     let parsed = module_cache.load_and_cache_ast(module, module_loader)?;
 

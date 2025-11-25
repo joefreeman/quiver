@@ -1986,7 +1986,7 @@ impl<E: Effect> Executor<E> {
     }
 
     /// Convert a runtime Value to its Type representation
-    fn value_to_type(&self, value: &Value) -> Type {
+    pub fn value_to_type(&self, value: &Value) -> Type {
         match value {
             Value::Integer(_) => Type::Integer,
             Value::Binary(_) => Type::Binary,
