@@ -259,7 +259,7 @@ impl Program {
         self.register_function(Function {
             instructions,
             function_type,
-            captures: Vec::new(),
+            captures: 0,
         })
     }
 

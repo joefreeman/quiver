@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{ast, modules::ModuleLoader, parser};
+use quiver_core::bytecode::Instruction;
 use quiver_core::program::Program;
+use quiver_core::types::Type;
 
 use super::{Error, Scope, scopes};
 
@@ -9,6 +11,9 @@ use super::{Error, Scope, scopes};
 pub struct ModuleCache {
     pub ast_cache: HashMap<Vec<String>, ast::Program>,
     pub import_stack: Vec<Vec<String>>,
+    /// Cache for module import instructions and types.
+    /// With capture-by-value, function indices can be reused, making this cache valid.
+    pub instruction_cache: HashMap<Vec<String>, (Vec<Instruction>, Type)>,
 }
 
 impl Default for ModuleCache {
@@ -22,7 +27,23 @@ impl ModuleCache {
         Self {
             ast_cache: HashMap::new(),
             import_stack: Vec::new(),
+            instruction_cache: HashMap::new(),
         }
+    }
+
+    /// Get cached instructions for a module import
+    pub fn get_cached_instructions(&self, module: &[String]) -> Option<&(Vec<Instruction>, Type)> {
+        self.instruction_cache.get(module)
+    }
+
+    /// Cache instructions for a module import
+    pub fn cache_instructions(
+        &mut self,
+        module: Vec<String>,
+        instructions: Vec<Instruction>,
+        ty: Type,
+    ) {
+        self.instruction_cache.insert(module, (instructions, ty));
     }
 
     pub fn load_and_cache_ast(

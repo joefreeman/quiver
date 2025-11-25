@@ -1242,25 +1242,18 @@ impl<E: Effect> Executor<E> {
         let func = self
             .get_function(function_index)
             .ok_or(Error::FunctionUndefined(function_index))?;
-        let capture_locals = func.captures.clone();
+        let capture_count = func.captures;
+
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
-        let locals_base = frame.locals_base;
-
-        // Collect captured values from current frame's locals using the function's capture list
-        let captures = capture_locals
-            .iter()
-            .map(|&index| {
-                process
-                    .locals
-                    .get(locals_base + index)
-                    .cloned()
-                    .ok_or(Error::VariableUndefined(format!("capture local {}", index)))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Pop capture values from stack (in reverse order, then reverse to restore)
+        let mut captures = Vec::with_capacity(capture_count);
+        for _ in 0..capture_count {
+            captures.push(process.stack.pop().ok_or(Error::StackUnderflow)?);
+        }
+        captures.reverse();
 
         let function_value = Value::Function(function_index, captures);
         process.stack.push(function_value);

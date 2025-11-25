@@ -801,7 +801,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        let captures = variables::collect_free_variables(
+        let unique_captures = variables::collect_free_variables(
             function.body.as_ref(),
             &function_params,
             &|name, accessors| {
@@ -810,56 +810,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     || scopes::lookup_variable(&self.scopes, name, &[]).is_some()
             },
         );
-
-        // Deduplicate captures (same base + accessors may appear multiple times)
-        let mut unique_captures: Vec<variables::Capture> = Vec::new();
-        for capture in captures {
-            if !unique_captures.contains(&capture) {
-                unique_captures.push(capture);
-            }
-        }
-
-        // Resolve capture values in current scope
-        // For captures with accessors, evaluate the access and store in temporary locals
-        let mut capture_locals = Vec::new();
-        let mut capture_temps = Vec::new(); // Track which locals we allocated for captures
-
-        for capture in &unique_captures {
-            // First check if the full path is available (for nested captures)
-            if let Some((_full_type, full_index)) =
-                scopes::lookup_variable(&self.scopes, &capture.base, &capture.accessors)
-            {
-                // The full path is already captured, just reuse it
-                capture_locals.push(full_index);
-            } else if let Some((var_type, base_index)) =
-                scopes::lookup_variable(&self.scopes, &capture.base, &[])
-            {
-                if capture.accessors.is_empty() {
-                    // Simple capture - just reference the existing local
-                    capture_locals.push(base_index);
-                } else {
-                    // Capture with accessors - evaluate the access
-                    // Load the base variable
-                    self.codegen.add_instruction(Instruction::Load(base_index));
-
-                    // Apply accessors to get the final value
-                    let (_accessed_type, _) = self.compile_accessor(
-                        var_type,
-                        capture.accessors.clone(),
-                        &capture.base,
-                        Provenance::Unknown,
-                    )?;
-
-                    // Store in temporary local
-                    let temp_local = self.local_count;
-                    self.local_count += 1;
-                    self.codegen.add_instruction(Instruction::Store);
-
-                    capture_locals.push(temp_local);
-                    capture_temps.push(temp_local);
-                }
-            }
-        }
 
         // Resolve parameter type with declared type parameters
         let parameter_type = match &function.parameter_type {
@@ -1042,7 +992,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
             function_type: func_type.clone(),
-            captures: capture_locals,
+            captures: unique_captures.len(),
         });
 
         self.codegen.instructions = saved_instructions;
@@ -1050,15 +1000,35 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.local_count = saved_local_count;
         self.current_receive_type = saved_receive_type;
 
+        // Emit instructions to push capture values onto the stack
+        // These will be popped by the Function instruction
+        for capture in &unique_captures {
+            // First check if the full path is available (for nested captures)
+            if let Some((_, full_index)) =
+                scopes::lookup_variable(&self.scopes, &capture.base, &capture.accessors)
+            {
+                // The full path is already captured, just load it
+                self.codegen.add_instruction(Instruction::Load(full_index));
+            } else if let Some((var_type, base_index)) =
+                scopes::lookup_variable(&self.scopes, &capture.base, &[])
+            {
+                // Load the base variable
+                self.codegen.add_instruction(Instruction::Load(base_index));
+
+                if !capture.accessors.is_empty() {
+                    // Apply accessors to get the final value
+                    self.compile_accessor(
+                        var_type,
+                        capture.accessors.clone(),
+                        &capture.base,
+                        Provenance::Unknown,
+                    )?;
+                }
+            }
+        }
+
         self.codegen
             .add_instruction(Instruction::Function(function_index));
-
-        // Clean up temporary locals we allocated for captures with accessors
-        if !capture_temps.is_empty() {
-            self.local_count -= capture_temps.len();
-            self.codegen
-                .add_instruction(Instruction::Reset(self.local_count));
-        }
 
         let function_type = Type::Callable(Box::new(func_type));
 
@@ -1782,12 +1752,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ));
         }
 
-        // Cannot cache instructions because Function instructions contain capture indices
-        // that are relative to local_count at the time of generation. Each import must
-        // regenerate instructions with correct local indices for the current context.
+        // Check instruction cache first - with capture-by-value, function indices can be reused
+        if let Some((cached_instructions, cached_type)) =
+            self.module_cache.get_cached_instructions(module)
+        {
+            for instruction in cached_instructions.clone() {
+                self.codegen.add_instruction(instruction);
+            }
+            return Ok(cached_type.clone());
+        }
+
         self.module_cache.import_stack.push(module.to_vec());
         let (instructions, result_type) = self.import_module(module)?;
         self.module_cache.import_stack.pop();
+
+        // Cache the instructions for future imports
+        self.module_cache.cache_instructions(
+            module.to_vec(),
+            instructions.clone(),
+            result_type.clone(),
+        );
 
         // Emit the module reconstruction instructions
         for instruction in instructions {
@@ -1887,43 +1871,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((instructions, Type::Tuple(*tuple_id)))
             }
             Value::Function(function, captures) => {
-                // Get the function definition
-                let func_def = self.program.get_function(*function).cloned().ok_or(
-                    Error::FeatureUnsupported("Invalid function reference".to_string()),
-                )?;
-
-                let mut instructions = Vec::new();
-                let mut capture_locals = Vec::new();
-
-                // Store each capture value in locals
-                for value in captures {
-                    // Recursively convert the captured value to instructions
-                    let (capture_instructions, _) = self.value_to_instructions(value, executor)?;
-                    instructions.extend(capture_instructions);
-
-                    // Store in local
-                    let local_index = self.local_count;
-                    self.local_count += 1;
-                    instructions.push(Instruction::Store);
-                    capture_locals.push(local_index);
-                }
-
-                // Register function with new capture locals for this context
-                let func_index = self.program.register_function(Function {
-                    instructions: func_def.instructions,
-                    function_type: func_def.function_type,
-                    captures: capture_locals,
-                });
-
-                // Emit the function instruction
-                instructions.push(Instruction::Function(func_index));
-
-                // Return the function type
+                // Get the function type
                 let func = self
                     .program
-                    .get_function(func_index)
-                    .ok_or(Error::FunctionUndefined(func_index))?;
+                    .get_function(*function)
+                    .ok_or(Error::FunctionUndefined(*function))?;
                 let function_type = func.function_type.clone();
+
+                let mut instructions = Vec::new();
+
+                // Push capture values to stack (will be popped by Function instruction)
+                for value in captures {
+                    let (capture_instructions, _) = self.value_to_instructions(value, executor)?;
+                    instructions.extend(capture_instructions);
+                }
+
+                // Reuse the same function index - no re-registration needed!
+                instructions.push(Instruction::Function(*function));
+
                 Ok((instructions, Type::Callable(Box::new(function_type))))
             }
             Value::Builtin(name) => {

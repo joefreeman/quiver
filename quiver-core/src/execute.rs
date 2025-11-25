@@ -30,7 +30,7 @@ pub fn execute_instructions_sync<E: Effect>(
             result: result_type,
             receive: crate::types::Type::Union(vec![]), // Bottom type (never)
         },
-        captures: vec![],
+        captures: 0,
     });
 
     // Skip the built-in types (NIL and OK at indices 0 and 1) since Executor::new() already has them

@@ -14,8 +14,8 @@ pub struct Function {
     pub instructions: Vec<Instruction>,
     #[serde(rename = "type")]
     pub function_type: types::CallableType,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub captures: Vec<usize>,
+    #[serde(default)]
+    pub captures: usize,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]

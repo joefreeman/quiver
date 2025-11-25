@@ -399,7 +399,7 @@ fn execute_with_environment(
             result: result_type,
             receive: Type::Union(vec![]), // Bottom type (never)
         },
-        captures: vec![],
+        captures: 0,
     };
     let function_index = prog.register_function(function);
 

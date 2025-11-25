@@ -110,7 +110,7 @@ impl<E: Effect> Repl<E> {
                     result: result_type.clone(),
                     receive: Type::Union(vec![]), // Bottom type (never)
                 },
-                captures: vec![],
+                captures: 0,
             };
             Some(program.register_function(function))
         } else {

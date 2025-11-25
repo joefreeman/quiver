@@ -7,6 +7,8 @@ pub struct Capture {
     pub accessors: Vec<ast::AccessPath>,
 }
 
+/// Collect free variables (captures) from a function body.
+/// Returns captures in deterministic order (order of first occurrence in AST traversal).
 pub fn collect_free_variables(
     block: Option<&ast::Block>,
     function_parameters: &HashSet<String>,
@@ -20,16 +22,17 @@ pub fn collect_free_variables(
     let mut collector = FreeVariableCollector {
         function_parameters,
         defined_variables,
-        captures: HashSet::new(),
+        captures: Vec::new(),
     };
     collector.visit_block(block);
-    collector.captures.into_iter().collect()
+    collector.captures
 }
 
 struct FreeVariableCollector<'a> {
     function_parameters: &'a HashSet<String>,
     defined_variables: &'a dyn Fn(&str, &[ast::AccessPath]) -> bool,
-    captures: HashSet<Capture>,
+    /// Captures in order of first occurrence (deterministic ordering)
+    captures: Vec<Capture>,
 }
 
 impl<'a> FreeVariableCollector<'a> {
@@ -202,10 +205,14 @@ impl<'a> FreeVariableCollector<'a> {
         if !self.function_parameters.contains(identifier)
             && (self.defined_variables)(identifier, &accessors)
         {
-            self.captures.insert(Capture {
+            let capture = Capture {
                 base: identifier.to_string(),
                 accessors,
-            });
+            };
+            // Only add if not already present (preserves first-occurrence order)
+            if !self.captures.contains(&capture) {
+                self.captures.push(capture);
+            }
         }
     }
 }
