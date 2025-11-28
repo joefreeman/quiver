@@ -1,6 +1,6 @@
 use crate::bytecode::Constant;
 use crate::program::Program;
-use crate::types::{TupleLookup, Type};
+use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, Value};
 
 /// Trait for looking up binary data from Binary references
@@ -36,28 +36,49 @@ fn try_format_as_string(bytes: &[u8]) -> Option<String> {
     Some(format!("\"{}\"", escaped))
 }
 
-pub fn format_type(program: &crate::program::Program, type_def: &Type) -> String {
-    format_type_impl(program, type_def, false)
+/// Format a type by its ID
+pub fn format_type_by_id(lookup: &impl TypeLookup, type_id: usize) -> String {
+    if let Some(type_def) = lookup.lookup_type(type_id) {
+        format_type(lookup, type_def)
+    } else {
+        format!("Type{}", type_id)
+    }
 }
 
-fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: bool) -> String {
+pub fn format_type(lookup: &impl TypeLookup, type_def: &Type) -> String {
+    format_type_impl(lookup, type_def, false)
+}
+
+fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> String {
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
-        Type::Process(process_type) => {
-            let formatted = match (&process_type.send, &process_type.receive) {
-                (Some(send), Some(receive)) => {
-                    format!(
-                        "@{} -> {}",
-                        format_type_impl(program, send, true),
-                        format_type_impl(program, receive, true)
-                    )
+        Type::Process { send, receive } => {
+            let formatted = match (send, receive) {
+                (Some(send_id), Some(receive_id)) => {
+                    let send_str = lookup
+                        .lookup_type(*send_id)
+                        .map(|t| format_type_impl(lookup, t, true))
+                        .unwrap_or_else(|| format!("Type{}", send_id));
+                    let receive_str = lookup
+                        .lookup_type(*receive_id)
+                        .map(|t| format_type_impl(lookup, t, true))
+                        .unwrap_or_else(|| format!("Type{}", receive_id));
+                    format!("@{} -> {}", send_str, receive_str)
                 }
-                (Some(send), None) => {
-                    format!("@{} -> ?", format_type_impl(program, send, true))
+                (Some(send_id), None) => {
+                    let send_str = lookup
+                        .lookup_type(*send_id)
+                        .map(|t| format_type_impl(lookup, t, true))
+                        .unwrap_or_else(|| format!("Type{}", send_id));
+                    format!("@{} -> ?", send_str)
                 }
-                (None, Some(receive)) => {
-                    format!("@-> {}", format_type_impl(program, receive, true))
+                (None, Some(receive_id)) => {
+                    let receive_str = lookup
+                        .lookup_type(*receive_id)
+                        .map(|t| format_type_impl(lookup, t, true))
+                        .unwrap_or_else(|| format!("Type{}", receive_id));
+                    format!("@-> {}", receive_str)
                 }
                 (None, None) => "@".to_string(),
             };
@@ -68,49 +89,21 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
                 formatted
             }
         }
-        Type::Tuple(type_id) | Type::Partial(type_id) => {
-            let is_partial = matches!(type_def, Type::Partial(_));
-            if let Some(type_info) = program.lookup_tuple(*type_id) {
-                let field_strs: Vec<String> = type_info
-                    .fields
-                    .iter()
-                    .map(|(field_name, field_type)| {
-                        if let Some(field_name) = field_name {
-                            format!(
-                                "{}: {}",
-                                field_name,
-                                format_type_impl(program, field_type, true)
-                            )
-                        } else {
-                            format_type_impl(program, field_type, true)
-                        }
-                    })
-                    .collect();
-
-                let bracket = if is_partial { ('(', ')') } else { ('[', ']') };
-
-                if let Some(type_name) = &type_info.name {
-                    if field_strs.is_empty() {
-                        type_name.to_string()
-                    } else {
-                        format!(
-                            "{}{}{}{}",
-                            type_name,
-                            bracket.0,
-                            field_strs.join(", "),
-                            bracket.1
-                        )
-                    }
-                } else {
-                    format!("{}{}{}", bracket.0, field_strs.join(", "), bracket.1)
-                }
-            } else {
-                format!("Type{}", type_id)
-            }
-        }
-        Type::Callable(func_type) => {
-            let param_str = format_type_impl(program, &func_type.parameter, true);
-            let result_str = format_type_impl(program, &func_type.result, true);
+        Type::Tuple(tuple_id) => format_tuple_type(lookup, *tuple_id),
+        Type::Partial { name, fields } => format_partial_type(lookup, name.as_ref(), fields),
+        Type::Callable {
+            parameter,
+            result,
+            receive: _,
+        } => {
+            let param_str = lookup
+                .lookup_type(*parameter)
+                .map(|t| format_type_impl(lookup, t, true))
+                .unwrap_or_else(|| format!("Type{}", parameter));
+            let result_str = lookup
+                .lookup_type(*result)
+                .map(|t| format_type_impl(lookup, t, true))
+                .unwrap_or_else(|| format!("Type{}", result));
             let formatted = format!("#{} -> {}", param_str, result_str);
 
             if nested {
@@ -120,13 +113,18 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
             }
         }
         Type::Cycle(depth) => format!("μ{}", depth),
-        Type::Union(types_list) => {
-            if types_list.is_empty() {
+        Type::Union(type_ids) => {
+            if type_ids.is_empty() {
                 "never".to_string()
             } else {
-                let mut type_strs: Vec<String> = types_list
+                let mut type_strs: Vec<String> = type_ids
                     .iter()
-                    .map(|t| format_type_impl(program, t, true))
+                    .map(|&id| {
+                        lookup
+                            .lookup_type(id)
+                            .map(|t| format_type_impl(lookup, t, true))
+                            .unwrap_or_else(|| format!("Type{}", id))
+                    })
                     .collect();
 
                 // Sort for consistent output
@@ -144,6 +142,72 @@ fn format_type_impl(program: &crate::program::Program, type_def: &Type, nested: 
     }
 }
 
+/// Format a tuple type by its tuple_id
+fn format_tuple_type(lookup: &impl TypeLookup, tuple_id: usize) -> String {
+    if let Some(type_info) = lookup.lookup_tuple(tuple_id) {
+        format_tuple_info(lookup, type_info)
+    } else {
+        format!("Tuple{}", tuple_id)
+    }
+}
+
+/// Format a partial type with inline fields
+fn format_partial_type(
+    lookup: &impl TypeLookup,
+    name: Option<&String>,
+    fields: &[(String, usize)],
+) -> String {
+    let field_strs: Vec<String> = fields
+        .iter()
+        .map(|(field_name, field_type_id)| {
+            let field_type_str = lookup
+                .lookup_type(*field_type_id)
+                .map(|t| format_type_impl(lookup, t, true))
+                .unwrap_or_else(|| format!("Type{}", field_type_id));
+            format!("{}: {}", field_name, field_type_str)
+        })
+        .collect();
+
+    if let Some(type_name) = name {
+        if field_strs.is_empty() {
+            format!("{}()", type_name)
+        } else {
+            format!("{}({})", type_name, field_strs.join(", "))
+        }
+    } else {
+        format!("({})", field_strs.join(", "))
+    }
+}
+
+/// Format a TupleTypeInfo using a TypeLookup for field type resolution
+pub fn format_tuple_info(lookup: &impl TypeLookup, tuple_info: &TupleTypeInfo) -> String {
+    let field_strs: Vec<String> = tuple_info
+        .fields
+        .iter()
+        .map(|(field_name, field_type_id)| {
+            let field_type_str = lookup
+                .lookup_type(*field_type_id)
+                .map(|t| format_type_impl(lookup, t, true))
+                .unwrap_or_else(|| format!("Type{}", field_type_id));
+            if let Some(field_name) = field_name {
+                format!("{}: {}", field_name, field_type_str)
+            } else {
+                field_type_str
+            }
+        })
+        .collect();
+
+    if let Some(type_name) = &tuple_info.name {
+        if field_strs.is_empty() {
+            type_name.to_string()
+        } else {
+            format!("{}[{}]", type_name, field_strs.join(", "))
+        }
+    } else {
+        format!("[{}]", field_strs.join(", "))
+    }
+}
+
 /// Format a binary value showing its actual content
 fn format_binary(bytes: &[u8]) -> String {
     if bytes.len() <= 64 {
@@ -155,13 +219,13 @@ fn format_binary(bytes: &[u8]) -> String {
     }
 }
 
-/// Standard implementation of BinaryLookup using heap and program
+/// Standard implementation of BinaryLookup using heap and program constants
 pub struct HeapAndProgramLookup<'a> {
     pub heap: &'a [Vec<u8>],
     pub program: &'a Program,
 }
 
-impl<'a> BinaryLookup for HeapAndProgramLookup<'a> {
+impl BinaryLookup for HeapAndProgramLookup<'_> {
     fn get_bytes(&self, binary: &Binary) -> Option<&[u8]> {
         match binary {
             Binary::Constant(idx) => {
@@ -176,66 +240,87 @@ impl<'a> BinaryLookup for HeapAndProgramLookup<'a> {
     }
 }
 
-pub fn format_value<L: BinaryLookup>(value: &Value, lookup: &L, program: &Program) -> String {
+/// Implementation of BinaryLookup using bytecode constants and heap
+pub struct BytecodeBinaryLookup<'a> {
+    pub constants: &'a [Constant],
+    pub heap: &'a [Vec<u8>],
+}
+
+impl BinaryLookup for BytecodeBinaryLookup<'_> {
+    fn get_bytes(&self, binary: &Binary) -> Option<&[u8]> {
+        match binary {
+            Binary::Constant(idx) => self.constants.get(*idx).and_then(|c| match c {
+                Constant::Binary(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            }),
+            Binary::Heap(idx) => self.heap.get(*idx).map(|v| v.as_slice()),
+        }
+    }
+}
+
+pub fn format_value<T: TypeLookup, B: BinaryLookup>(
+    value: &Value,
+    type_lookup: &T,
+    binary_lookup: &B,
+) -> String {
     match value {
         Value::Function(function, _) => format!("#{}", function),
         Value::Builtin(name) => format!("__{}__", name),
         Value::Integer(i) => i.to_string(),
         Value::Binary(binary) => {
-            if let Some(bytes) = lookup.get_bytes(binary) {
+            if let Some(bytes) = binary_lookup.get_bytes(binary) {
                 format_binary(bytes)
             } else {
-                "<invalid binary>".to_string()
+                "<binary>".to_string()
             }
         }
         Value::Process(process_id, _) => format!("@{}", process_id),
         Value::Resource(resource_id, _) => format!("\\#{}", resource_id),
-        Value::Tuple(type_id, elements) => {
-            if let Some(type_info) = program.lookup_tuple(*type_id) {
-                if type_info.name.as_deref() == Some("Str")
+        Value::Tuple(tuple_id, elements) => {
+            if let Some(tuple_info) = type_lookup.lookup_tuple(*tuple_id) {
+                // Check for Str type and format as string if possible
+                if tuple_info.name.as_deref() == Some("Str")
                     && let [Value::Binary(binary)] = elements.as_slice()
-                    && let Some(bytes) = lookup.get_bytes(binary)
-                    && let Some(formatted) = try_format_as_string(bytes)
+                    && let Some(bytes) = binary_lookup.get_bytes(binary)
+                    && let Some(s) = try_format_as_string(bytes)
                 {
-                    return formatted;
+                    return s;
                 }
 
-                if elements.is_empty() {
-                    type_info.name.as_deref().unwrap_or("[]").to_string()
-                } else {
-                    let formatted_elements = elements
-                        .iter()
-                        .enumerate()
-                        .map(|(i, elem)| {
-                            let formatted = format_value(elem, lookup, program);
-                            match type_info.fields.get(i).and_then(|(name, _)| name.as_ref()) {
-                                Some(name) => format!("{}: {}", name, formatted),
-                                None => formatted,
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                let name = tuple_info.name.as_deref();
+                let field_strs: Vec<String> = elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, elem)| {
+                        let formatted = format_value(elem, type_lookup, binary_lookup);
+                        if let Some((Some(field_name), _)) = tuple_info.fields.get(i) {
+                            format!("{}: {}", field_name, formatted)
+                        } else {
+                            formatted
+                        }
+                    })
+                    .collect();
 
-                    match type_info.name.as_deref() {
-                        Some(n) => format!("{}[{}]", n, formatted_elements),
-                        None => format!("[{}]", formatted_elements),
+                if let Some(name) = name {
+                    if field_strs.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{}[{}]", name, field_strs.join(", "))
                     }
+                } else {
+                    format!("[{}]", field_strs.join(", "))
                 }
             } else {
-                let type_name = format!("Type{}", type_id);
+                // Fallback to simple format
                 if elements.is_empty() {
-                    return type_name;
+                    format!("T{}", tuple_id)
+                } else {
+                    let formatted_elements: Vec<String> = elements
+                        .iter()
+                        .map(|e| format_value(e, type_lookup, binary_lookup))
+                        .collect();
+                    format!("T{}[{}]", tuple_id, formatted_elements.join(", "))
                 }
-
-                let mut result = format!("{}[", type_name);
-                for (i, element) in elements.iter().enumerate() {
-                    if i > 0 {
-                        result.push_str(", ");
-                    }
-                    result.push_str(&format_value(element, lookup, program));
-                }
-                result.push(']');
-                result
             }
         }
     }

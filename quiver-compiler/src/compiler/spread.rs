@@ -2,7 +2,7 @@ use crate::ast;
 use quiver_core::{
     bytecode::Instruction,
     program::Program,
-    types::{TupleLookup, Type},
+    types::{Type, TypeLookup},
 };
 
 use super::{Compiler, Error, RippleContext, provenance::Provenance};
@@ -12,11 +12,11 @@ use super::{Compiler, Error, RippleContext, provenance::Provenance};
 enum CompiledValue {
     Field {
         name: Option<String>,
-        ty: Type,
+        type_id: usize,
         stack_offset: usize,
     },
     Spread {
-        ty: Type,
+        type_id: usize,
         stack_offset: usize,
     },
 }
@@ -32,7 +32,8 @@ impl CompiledValue {
 /// Information about a result variant (used when spreads create multiple possibilities)
 #[derive(Debug, Clone)]
 struct VariantInfo {
-    fields: Vec<(Option<String>, Type)>,
+    /// Fields as (name, type_id) pairs
+    fields: Vec<(Option<String>, usize)>,
     spread_type_ids: Vec<usize>,
 }
 
@@ -41,6 +42,39 @@ struct VariantInfo {
 enum FieldSource {
     CompiledField(usize),
     SpreadField { spread_idx: usize, field_idx: usize },
+}
+
+/// Extract tuple IDs from a type (only concrete tuples, not partials)
+fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
+    let Some(ty) = program.lookup_type(type_id) else {
+        return vec![];
+    };
+    match ty {
+        Type::Tuple(id) => vec![*id],
+        Type::Union(type_ids) => type_ids
+            .iter()
+            .filter_map(|&tid| {
+                program.lookup_type(tid).and_then(|t| match t {
+                    Type::Tuple(id) => Some(*id),
+                    _ => None,
+                })
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Create a union type from a list of type IDs, simplifying single-element lists
+fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
+    // Deduplicate type IDs
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<usize> = type_ids.into_iter().filter(|id| seen.insert(*id)).collect();
+
+    match unique.len() {
+        0 => program.register_type(Type::never()),
+        1 => unique[0],
+        _ => program.register_type(Type::Union(unique)),
+    }
 }
 
 /// Compile all field values and spread sources, returning compiled values and stack size
@@ -59,7 +93,7 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
                 let ripple_context_value;
                 let ripple_context_param = if let Some(ctx) = ripple_context {
                     ripple_context_value = RippleContext {
-                        value_type: ctx.value_type.clone(),
+                        value_type_id: ctx.value_type_id,
                         stack_offset: ctx.stack_offset + stack_size,
                         owns_value: false,
                         provenance: ctx.provenance.clone(),
@@ -68,25 +102,25 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
                 } else {
                     None
                 };
-                let ty = compiler.compile_chain(chain.clone(), None, ripple_context_param)?;
+                let type_id = compiler.compile_chain(chain.clone(), None, ripple_context_param)?;
                 compiled_values.push(CompiledValue::Field {
                     name: field.name.clone(),
-                    ty,
+                    type_id,
                     stack_offset: stack_size,
                 });
                 stack_size += 1;
             }
             ast::FieldValue::Spread(spread_source) => {
-                let spread_type = match spread_source {
+                let spread_type_id = match spread_source {
                     Some(id) => {
                         // Named spread: ...identifier
-                        let (var_type, var_index) =
+                        let (var_type_id, var_index) =
                             super::scopes::lookup_variable(&compiler.scopes, id, &[])
                                 .ok_or_else(|| Error::VariableUndefined(id.clone()))?;
                         compiler
                             .codegen
                             .add_instruction(Instruction::Load(var_index));
-                        var_type
+                        var_type_id
                     }
                     None => {
                         // Bare spread: ...
@@ -98,12 +132,12 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
                         compiler
                             .codegen
                             .add_instruction(Instruction::Pick(ctx.stack_offset + stack_size));
-                        ctx.value_type.clone()
+                        ctx.value_type_id
                     }
                 };
 
                 compiled_values.push(CompiledValue::Spread {
-                    ty: spread_type,
+                    type_id: spread_type_id,
                     stack_offset: stack_size,
                 });
                 stack_size += 1;
@@ -147,7 +181,7 @@ fn build_field_variants(
                 let compiled_idx = field_to_compiled[field_count];
                 field_count += 1;
 
-                if let CompiledValue::Field { name, ty, .. } = &compiled_values[compiled_idx] {
+                if let CompiledValue::Field { name, type_id, .. } = &compiled_values[compiled_idx] {
                     // Add this field to all variants
                     for variant in &mut variants {
                         // Check if this named field should replace an existing one
@@ -157,10 +191,10 @@ fn build_field_variants(
                                 .iter()
                                 .position(|(n, _)| n.as_ref() == Some(field_name))
                         {
-                            variant.fields[pos].1 = ty.clone();
+                            variant.fields[pos].1 = *type_id;
                             continue;
                         }
-                        variant.fields.push((name.clone(), ty.clone()));
+                        variant.fields.push((name.clone(), *type_id));
                     }
                 }
             }
@@ -168,10 +202,11 @@ fn build_field_variants(
                 let compiled_idx = spread_to_compiled[spread_count];
                 spread_count += 1;
 
-                if let CompiledValue::Spread { ty, .. } = &compiled_values[compiled_idx] {
-                    let spread_type_ids = ty.extract_tuples();
+                if let CompiledValue::Spread { type_id, .. } = &compiled_values[compiled_idx] {
+                    let spread_tuple_ids = extract_tuple_ids(program, *type_id);
 
-                    if spread_type_ids.is_empty() {
+                    if spread_tuple_ids.is_empty() {
+                        let ty = program.lookup_type(*type_id);
                         return Err(Error::TypeMismatch {
                             expected: "tuple".to_string(),
                             found: format!("{:?}", ty),
@@ -182,7 +217,7 @@ fn build_field_variants(
                     let mut new_variants = Vec::new();
 
                     for existing_variant in &variants {
-                        for &spread_tuple_id in &spread_type_ids {
+                        for &spread_tuple_id in &spread_tuple_ids {
                             let spread_info = program.lookup_tuple(spread_tuple_id).ok_or(
                                 Error::TupleNotInRegistry {
                                     tuple_id: spread_tuple_id,
@@ -196,8 +231,8 @@ fn build_field_variants(
                             let insertion_point = new_variant.fields.len();
                             let mut inserted_count = 0;
 
-                            // Add each field from the spread
-                            for (field_name, field_type) in &spread_info.fields {
+                            // Add each field from the spread (fields already have type IDs)
+                            for (field_name, field_type_id) in &spread_info.fields {
                                 if let Some(name) = field_name
                                     && let Some(pos) = new_variant
                                         .fields
@@ -205,13 +240,13 @@ fn build_field_variants(
                                         .position(|(n, _)| n.as_ref() == Some(name))
                                 {
                                     // Field exists - replace it
-                                    new_variant.fields[pos].1 = field_type.clone();
+                                    new_variant.fields[pos].1 = *field_type_id;
                                     continue;
                                 }
                                 // Field doesn't exist - insert at insertion point
                                 new_variant.fields.insert(
                                     insertion_point + inserted_count,
-                                    (field_name.clone(), field_type.clone()),
+                                    (field_name.clone(), *field_type_id),
                                 );
                                 inserted_count += 1;
                             }
@@ -363,7 +398,7 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     tuple_name: Option<String>,
     fields: Vec<ast::TupleField>,
     ripple_context: Option<&RippleContext>,
-) -> Result<(Type, Provenance), Error> {
+) -> Result<(usize, Provenance), Error> {
     // Validate: bare spreads require ripple context
     let has_chained_spread = fields
         .iter()
@@ -383,7 +418,7 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     let variants = build_field_variants(&fields, &compiled_values, &compiler.program)?;
 
     // Step 3: Generate bytecode based on number of variants
-    let result_type = if variants.len() == 1 {
+    let result_type_id = if variants.len() == 1 {
         emit_single_variant_tuple(
             compiler,
             &variants[0],
@@ -411,7 +446,7 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
 
     // Spread compilation is complex; return Unknown provenance for now
     // TODO: Track provenance through spread fields for more precise narrowing
-    Ok((result_type, Provenance::Unknown))
+    Ok((result_type_id, Provenance::Unknown))
 }
 
 /// Emit bytecode for a single variant tuple (no branching needed)
@@ -421,21 +456,23 @@ fn emit_single_variant_tuple<E: quiver_core::effects::Effect>(
     compiled_values: &[CompiledValue],
     stack_size: usize,
     tuple_name: Option<String>,
-) -> Result<Type, Error> {
+) -> Result<usize, Error> {
     let field_sources =
         build_field_sources_for_variant(variant, compiled_values, &compiler.program);
     emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
+    // Register the tuple type (fields already have type IDs)
     let tuple_id = compiler
         .program
-        .register_tuple(tuple_name, variant.fields.clone(), false);
+        .register_tuple(tuple_name, variant.fields.clone());
     compiler
         .codegen
         .add_instruction(Instruction::Tuple(tuple_id));
 
     emit_stack_cleanup_code(compiler, stack_size);
 
-    Ok(Type::Tuple(tuple_id))
+    // Return a type ID for this tuple type
+    Ok(compiler.program.register_type(Type::Tuple(tuple_id)))
 }
 
 /// Emit bytecode for multiple variant tuples (with type checking and branching)
@@ -445,8 +482,9 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
     compiled_values: &[CompiledValue],
     stack_size: usize,
     tuple_name: Option<String>,
-) -> Result<Type, Error> {
+) -> Result<usize, Error> {
     let mut end_jumps = Vec::new();
+    let mut variant_type_ids = Vec::new();
 
     for (variant_idx, variant) in variants.iter().enumerate() {
         let is_last = variant_idx == variants.len() - 1;
@@ -470,10 +508,10 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 let depth = stack_size - 1 - spread_stack_idx;
                 compiler.codegen.add_instruction(Instruction::Pick(depth));
                 // Register the tuple type as a check type
-                let tuple_id = compiler.program.register_type(Type::Tuple(spread_tuple_id));
+                let type_id = compiler.program.register_type(Type::Tuple(spread_tuple_id));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::IsType(tuple_id));
+                    .add_instruction(Instruction::IsType(type_id));
                 compiler.codegen.add_instruction(Instruction::Not);
 
                 let fail_jump = compiler.codegen.emit_jump_if_placeholder();
@@ -483,13 +521,13 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
             // All checks passed - construct this variant
             emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
-            let tuple_id =
-                compiler
-                    .program
-                    .register_tuple(tuple_name.clone(), variant.fields.clone(), false);
+            let tuple_id = compiler
+                .program
+                .register_tuple(tuple_name.clone(), variant.fields.clone());
             compiler
                 .codegen
                 .add_instruction(Instruction::Tuple(tuple_id));
+            variant_type_ids.push(compiler.program.register_type(Type::Tuple(tuple_id)));
 
             end_jumps.push(compiler.codegen.emit_jump_placeholder());
 
@@ -501,13 +539,13 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
             // Last variant - no need to check, just construct it
             emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
-            let tuple_id =
-                compiler
-                    .program
-                    .register_tuple(tuple_name.clone(), variant.fields.clone(), false);
+            let tuple_id = compiler
+                .program
+                .register_tuple(tuple_name.clone(), variant.fields.clone());
             compiler
                 .codegen
                 .add_instruction(Instruction::Tuple(tuple_id));
+            variant_type_ids.push(compiler.program.register_type(Type::Tuple(tuple_id)));
         }
     }
 
@@ -519,16 +557,5 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
     emit_stack_cleanup_code(compiler, stack_size);
 
     // Build union type from all variants
-    let union_types: Vec<Type> = variants
-        .iter()
-        .map(|variant| {
-            let tuple_id =
-                compiler
-                    .program
-                    .register_tuple(tuple_name.clone(), variant.fields.clone(), false);
-            Type::Tuple(tuple_id)
-        })
-        .collect();
-
-    Ok(Type::from_types(union_types))
+    Ok(union_type_ids(&mut compiler.program, variant_type_ids))
 }

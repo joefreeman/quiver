@@ -1,10 +1,10 @@
-use crate::bytecode::{BuiltinInfo, Bytecode, Constant, Function, Instruction};
 use crate::executor::Executor;
-use crate::types::{NIL, OK, TupleLookup, TupleTypeInfo, Type};
+use crate::types::{BuiltinInfo, NIL, OK, TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, Value};
 use serde::{Deserialize, Serialize};
 
-mod optimisation;
+// Re-export bytecode types
+pub use crate::bytecode::{Bytecode, Constant, Function, Instruction};
 
 /// Program represents the compiled program data that is static during execution.
 /// It contains constants, functions, builtins, and type information.
@@ -18,7 +18,11 @@ pub struct Program {
     types: Vec<Type>,
 }
 
-impl TupleLookup for Program {
+impl TypeLookup for Program {
+    fn lookup_type(&self, type_id: usize) -> Option<&Type> {
+        self.types.get(type_id)
+    }
+
     fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {
         self.tuples.get(tuple_id)
     }
@@ -44,59 +48,14 @@ impl Program {
             types: Vec::new(),
         };
 
-        // Register built-in types
-        let nil_tuple_id = program.register_tuple(None, vec![], false);
+        // Register built-in tuple types
+        let nil_tuple_id = program.register_tuple(None, vec![]);
         assert_eq!(nil_tuple_id, NIL);
 
-        let ok_tuple_id = program.register_tuple(Some("Ok".to_string()), vec![], false);
+        let ok_tuple_id = program.register_tuple(Some("Ok".to_string()), vec![]);
         assert_eq!(ok_tuple_id, OK);
 
         program
-    }
-
-    /// Create a new Program seeded with existing types
-    /// If types is empty or doesn't include NIL/OK, they will be added automatically
-    pub fn with_types(tuples: Vec<TupleTypeInfo>) -> Self {
-        // Ensure NIL and OK are at indices 0 and 1
-        if tuples.is_empty() {
-            // Start from scratch
-            return Self::new();
-        }
-
-        // Validate that NIL and OK are at the expected indices if types are provided
-        assert!(
-            tuples.len() >= 2,
-            "Types must include NIL and OK at indices 0 and 1"
-        );
-        assert_eq!(
-            tuples[0].name, None,
-            "Type at index 0 must be NIL (unnamed)"
-        );
-        assert_eq!(tuples[0].fields.len(), 0, "NIL type must have no fields");
-        assert_eq!(
-            tuples[1].name,
-            Some("Ok".to_string()),
-            "Type at index 1 must be OK"
-        );
-        assert_eq!(tuples[1].fields.len(), 0, "OK type must have no fields");
-
-        Self {
-            constants: Vec::new(),
-            functions: Vec::new(),
-            builtins: Vec::new(),
-            tuples,
-            types: Vec::new(),
-        }
-    }
-
-    pub fn from_bytecode(bytecode: Bytecode) -> Self {
-        Self {
-            constants: bytecode.constants,
-            functions: bytecode.functions,
-            builtins: bytecode.builtins,
-            tuples: bytecode.tuples,
-            types: bytecode.types,
-        }
     }
 
     pub fn register_constant(&mut self, constant: Constant) -> usize {
@@ -112,6 +71,8 @@ impl Program {
         &self.constants
     }
 
+    /// Register a function and return its index.
+    /// Deduplicates based on full equality (instructions, captures, type_id).
     pub fn register_function(&mut self, function: Function) -> usize {
         if let Some(index) = self.functions.iter().position(|f| f == &function) {
             index
@@ -141,18 +102,22 @@ impl Program {
 
         // Look up type specs from the builtin registry and resolve them
         let builtin_info = if let Some((param_spec, result_spec)) = registry.get_specs(&name) {
+            let param_type = param_spec.resolve_to_id(self);
+            let result_type = result_spec.resolve_to_id(self);
+
             BuiltinInfo {
                 name: name.clone(),
-                parameter_type: param_spec.resolve(self),
-                result_type: result_spec.resolve(self),
+                param_type,
+                result_type,
             }
         } else {
             // Builtin not found in registry - this shouldn't happen in well-formed programs
-            // Create a placeholder with bottom types
+            // Create a placeholder with bottom types (never type)
+            let never_id = self.register_type(Type::Union(vec![]));
             BuiltinInfo {
                 name,
-                parameter_type: Type::Union(vec![]),
-                result_type: Type::Union(vec![]),
+                param_type: never_id,
+                result_type: never_id,
             }
         };
 
@@ -160,32 +125,37 @@ impl Program {
         self.builtins.len() - 1
     }
 
+    /// Register a builtin with pre-resolved type information.
+    /// Used when loading bytecode that already has resolved builtin types.
+    pub fn register_builtin_info(&mut self, info: BuiltinInfo) -> usize {
+        // Check if builtin already exists
+        if let Some(index) = self.builtins.iter().position(|b| b.name == info.name) {
+            return index;
+        }
+
+        self.builtins.push(info);
+        self.builtins.len() - 1
+    }
+
     pub fn get_builtins(&self) -> &Vec<BuiltinInfo> {
         &self.builtins
     }
 
+    /// Register a tuple type with field type IDs
     pub fn register_tuple(
         &mut self,
         name: Option<String>,
-        fields: Vec<(Option<String>, Type)>,
-        is_partial: bool,
+        fields: Vec<(Option<String>, usize)>,
     ) -> usize {
         // Check if type already exists
         for (index, existing_type) in self.tuples.iter().enumerate() {
-            if existing_type.name == name
-                && existing_type.fields == fields
-                && existing_type.is_partial == is_partial
-            {
+            if existing_type.name == name && existing_type.fields == fields {
                 return index;
             }
         }
 
         let tuple_id = self.tuples.len();
-        self.tuples.push(TupleTypeInfo {
-            name,
-            fields,
-            is_partial,
-        });
+        self.tuples.push(TupleTypeInfo { name, fields });
         tuple_id
     }
 
@@ -201,6 +171,12 @@ impl Program {
         type_id
     }
 
+    /// Get the type ID for the NEVER type (empty union / bottom type).
+    /// Registers it if not already present.
+    pub fn never(&mut self) -> usize {
+        self.register_type(Type::Union(vec![]))
+    }
+
     pub fn get_tuples(&self) -> &Vec<TupleTypeInfo> {
         &self.tuples
     }
@@ -209,29 +185,41 @@ impl Program {
         &self.types
     }
 
-    /// Convert this program to bytecode format with an optional entry point
-    /// Automatically performs tree shaking to remove unused functions, constants, and types
-    pub fn to_bytecode(&self, entry: Option<usize>) -> Bytecode {
-        // If there's no entry point, return as-is (nothing to tree shake)
-        let Some(entry_fn) = entry else {
-            return Bytecode {
-                constants: self.constants.clone(),
-                functions: self.functions.clone(),
-                builtins: self.builtins.clone(),
-                entry: None,
-                tuples: self.tuples.clone(),
-                types: self.types.clone(),
-            };
-        };
+    /// Collect unique resource type names from the types registry
+    pub fn collect_resource_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for typ in &self.types {
+            if let Type::Resource(name) = typ
+                && !names.contains(name)
+            {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
 
-        optimisation::tree_shake(
-            &self.functions,
-            &self.constants,
-            &self.tuples,
-            &self.types,
-            &self.builtins,
-            entry_fn,
-        )
+    /// Convert this program to bytecode format with an optional entry point.
+    /// Does not perform tree shaking - use `to_bytecode_optimized` for that.
+    /// Type compatibility is computed when the bytecode is loaded for execution.
+    pub fn to_bytecode(&self, entry: Option<usize>) -> Bytecode {
+        // Collect resource names for bytecode
+        let resource_names = self.collect_resource_names();
+
+        Bytecode {
+            constants: self.constants.clone(),
+            functions: self.functions.clone(),
+            builtins: self.builtins.clone(),
+            entry,
+            tuples: self.tuples.clone(),
+            types: self.types.clone(),
+            resources: resource_names,
+        }
+    }
+
+    /// Convert this program to optimized bytecode format.
+    /// Performs tree shaking to remove unused functions, constants, and types.
+    pub fn to_bytecode_optimized(&self, entry: usize) -> Bytecode {
+        crate::optimisation::tree_shake(self.to_bytecode(Some(entry)), entry)
     }
 
     /// Inject function captures into a function, returning a new function index.
@@ -254,13 +242,15 @@ impl Program {
             .get_function(function_index)
             .expect("Function should exist during capture injection");
         instructions.extend(func.instructions.clone());
-        let function_type = func.function_type.clone();
+        let type_id = func.type_id;
 
-        self.register_function(Function {
+        let new_func = Function {
             instructions,
-            function_type,
             captures: 0,
-        })
+            type_id,
+        };
+
+        self.register_function(new_func)
     }
 
     /// Convert a runtime value to instructions that reconstruct it.
@@ -308,10 +298,9 @@ impl Program {
                 };
                 vec![Instruction::Function(func_index)]
             }
-            Value::Builtin(name) => {
-                let builtin_idx =
-                    self.register_builtin(name.clone(), executor.get_builtins_registry());
-                vec![Instruction::Builtin(builtin_idx)]
+            Value::Builtin(builtin_id) => {
+                // Value::Builtin now contains the builtin_id directly
+                vec![Instruction::Builtin(*builtin_id)]
             }
             Value::Process(_, _) => {
                 panic!("Cannot convert pid to instructions")

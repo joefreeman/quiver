@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::ast;
 use quiver_core::{
     program::Program,
-    types::{CallableType, ProcessType, TupleLookup, Type},
+    types::{Type, TypeLookup},
 };
 
 use super::{Error, Scope, scopes};
@@ -14,19 +14,29 @@ pub enum TupleAccessor {
     Position(usize),
 }
 
-pub fn union_types(types: Vec<Type>) -> Type {
+/// Create a union type from a list of type IDs
+pub fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
+    // Flatten any unions and deduplicate
     let mut flattened = Vec::new();
-    for typ in types {
-        match typ {
-            Type::Union(variants) => flattened.extend(variants),
-            t => flattened.push(t),
+    for type_id in type_ids {
+        if let Some(Type::Union(variants)) = program.lookup_type(type_id) {
+            flattened.extend(variants.iter().cloned());
+        } else {
+            flattened.push(type_id);
         }
     }
 
-    if flattened.is_empty() {
-        Type::never()
-    } else {
-        Type::from_types(flattened)
+    // Deduplicate
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<usize> = flattened
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+        .collect();
+
+    match unique.len() {
+        0 => program.never(),
+        1 => unique[0],
+        _ => program.register_type(Type::Union(unique)),
     }
 }
 
@@ -39,14 +49,14 @@ fn instantiate_generic_type(
     name: &str,
     arguments: Vec<ast::Type>,
     program: &mut Program,
-    type_bindings: &HashMap<String, Type>,
-) -> Result<Type, Error> {
+    type_bindings: &HashMap<String, usize>,
+) -> Result<usize, Error> {
     // Look up generic definition
     let type_def = scopes::lookup_type_alias(scopes_ref, name)
         .ok_or_else(|| Error::TypeAliasMissing(name.to_string()))?;
 
     // Resolve all type arguments
-    let resolved_args: Vec<Type> = arguments
+    let resolved_args: Vec<usize> = arguments
         .into_iter()
         .map(|arg| resolve_ast_type_impl(recursion_depth, scopes_ref, arg, program, type_bindings))
         .collect::<Result<_, _>>()?;
@@ -64,7 +74,7 @@ fn instantiate_generic_type(
     // Build new type bindings for the parameters
     let mut new_bindings = HashMap::new();
     for (param, arg) in type_def.0.iter().zip(resolved_args.iter()) {
-        new_bindings.insert(param.clone(), arg.clone());
+        new_bindings.insert(param.clone(), *arg);
     }
 
     // Resolve the body with parameter bindings
@@ -111,7 +121,7 @@ pub fn resolve_ast_type(
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
-) -> Result<Type, Error> {
+) -> Result<usize, Error> {
     let bindings = HashMap::new();
     let mut recursion_depth = 0;
     resolve_ast_type_impl(
@@ -130,11 +140,12 @@ pub fn resolve_function_parameter_type(
     ast_type: ast::Type,
     type_parameters: &[String],
     program: &mut Program,
-) -> Result<Type, Error> {
+) -> Result<usize, Error> {
     // Create bindings for declared type parameters, mapping each to a Type::Variable
     let mut bindings = HashMap::new();
     for param in type_parameters {
-        bindings.insert(param.clone(), Type::Variable(param.clone()));
+        let var_type_id = program.register_type(Type::Variable(param.clone()));
+        bindings.insert(param.clone(), var_type_id);
     }
 
     // Start at depth 1 since this is a function parameter (the function creates a recursion boundary)
@@ -157,14 +168,15 @@ pub fn resolve_type_alias_for_display(
     scopes_ref: &[Scope],
     alias_name: &str,
     program: &mut Program,
-) -> Result<Type, Error> {
+) -> Result<usize, Error> {
     let (type_params, ast_type) = scopes::lookup_type_alias(scopes_ref, alias_name)
         .ok_or_else(|| Error::TypeAliasMissing(alias_name.to_string()))?;
 
     // Create Variable bindings for all type parameters
     let mut bindings = HashMap::new();
     for param in &type_params {
-        bindings.insert(param.clone(), Type::Variable(param.clone()));
+        let var_type_id = program.register_type(Type::Variable(param.clone()));
+        bindings.insert(param.clone(), var_type_id);
     }
 
     let mut recursion_depth = 0;
@@ -220,7 +232,7 @@ fn resolve_tuple_name(
     }
 }
 
-type FieldSet = Vec<(Option<String>, Type)>;
+type FieldSet = Vec<(Option<String>, usize)>;
 type NamedFieldVariants = Vec<(Option<String>, FieldSet)>; // (tuple_name, fields)
 
 /// Resolve tuple fields that contain spreads
@@ -230,7 +242,7 @@ fn resolve_tuple_fields_with_spread(
     scopes_ref: &[Scope],
     fields: &[ast::FieldType],
     program: &mut Program,
-    type_bindings: &HashMap<String, Type>,
+    type_bindings: &HashMap<String, usize>,
 ) -> Result<NamedFieldVariants, Error> {
     // Track all possible field combinations with their names (for union distribution)
     // Each variant is (tuple_name, fields)
@@ -241,7 +253,7 @@ fn resolve_tuple_fields_with_spread(
         match field {
             ast::FieldType::Field { name, type_def } => {
                 // Resolve the field type
-                let field_type = resolve_ast_type_impl(
+                let field_type_id = resolve_ast_type_impl(
                     recursion_depth,
                     scopes_ref,
                     type_def.clone(),
@@ -257,10 +269,10 @@ fn resolve_tuple_fields_with_spread(
                             .iter()
                             .position(|(field_name, _)| field_name.as_ref() == Some(n))
                     }) {
-                        variant_fields[pos].1 = field_type.clone();
+                        variant_fields[pos].1 = field_type_id;
                         continue;
                     }
-                    variant_fields.push((name.clone(), field_type.clone()));
+                    variant_fields.push((name.clone(), field_type_id));
                 }
             }
             ast::FieldType::Spread {
@@ -292,18 +304,18 @@ fn resolve_tuple_fields_with_spread(
                 // Create type bindings for the spread type
                 let mut spread_bindings = type_bindings.clone();
                 for (param, arg) in type_params.iter().zip(type_arguments.iter()) {
-                    let arg_type = resolve_ast_type_impl(
+                    let arg_type_id = resolve_ast_type_impl(
                         recursion_depth,
                         scopes_ref,
                         arg.clone(),
                         program,
                         type_bindings,
                     )?;
-                    spread_bindings.insert(param.clone(), arg_type);
+                    spread_bindings.insert(param.clone(), arg_type_id);
                 }
 
                 // Resolve the spread type with the bindings
-                let spread_type = resolve_ast_type_impl(
+                let spread_type_id = resolve_ast_type_impl(
                     recursion_depth,
                     scopes_ref,
                     type_def.clone(),
@@ -313,7 +325,7 @@ fn resolve_tuple_fields_with_spread(
 
                 // Extract tuple types with names from the spread (handling unions)
                 let spread_named_types =
-                    extract_tuples_from_type_with_names(&spread_type, program)?;
+                    extract_tuples_from_type_with_names(spread_type_id, program)?;
 
                 // For each existing variant, create new variants for each spread type
                 let mut new_variants = Vec::new();
@@ -324,18 +336,18 @@ fn resolve_tuple_fields_with_spread(
                         let new_name = existing_name.clone().or_else(|| spread_name.clone());
 
                         // Merge spread fields into variant fields
-                        for (spread_field_name, spread_field_type) in spread_fields {
+                        for (spread_field_name, spread_field_type_id) in spread_fields {
                             // Check if we should replace an existing field
                             if let Some(pos) = spread_field_name.as_ref().and_then(|n| {
                                 new_variant_fields
                                     .iter()
                                     .position(|(field_name, _)| field_name.as_ref() == Some(n))
                             }) {
-                                new_variant_fields[pos].1 = spread_field_type.clone();
+                                new_variant_fields[pos].1 = *spread_field_type_id;
                                 continue;
                             }
                             new_variant_fields
-                                .push((spread_field_name.clone(), spread_field_type.clone()));
+                                .push((spread_field_name.clone(), *spread_field_type_id));
                         }
 
                         new_variants.push((new_name, new_variant_fields));
@@ -352,22 +364,35 @@ fn resolve_tuple_fields_with_spread(
 
 /// Extract tuple field definitions with names from a type, handling unions
 fn extract_tuples_from_type_with_names(
-    typ: &Type,
+    type_id: usize,
     program: &Program,
 ) -> Result<NamedFieldVariants, Error> {
+    let Some(typ) = program.lookup_type(type_id) else {
+        return Err(Error::TypeUnresolved("Type not found".to_string()));
+    };
+
     match typ {
-        Type::Tuple(tuple_id) | Type::Partial(tuple_id) => {
+        Type::Tuple(tuple_id) => {
+            let tuple_id = *tuple_id;
             let tuple_info = program
-                .lookup_tuple(*tuple_id)
-                .ok_or(Error::TupleNotInRegistry {
-                    tuple_id: *tuple_id,
-                })?;
+                .lookup_tuple(tuple_id)
+                .ok_or(Error::TupleNotInRegistry { tuple_id })?;
             Ok(vec![(tuple_info.name.clone(), tuple_info.fields.clone())])
         }
+        Type::Partial { name, fields } => {
+            // Convert partial fields (all named) to tuple field format
+            let tuple_fields: Vec<(Option<String>, usize)> = fields
+                .iter()
+                .map(|(fname, ftype)| (Some(fname.clone()), *ftype))
+                .collect();
+            Ok(vec![(name.clone(), tuple_fields)])
+        }
         Type::Union(variants) => {
+            let variants = variants.clone();
             let mut all_named_fields = Vec::new();
-            for variant in variants {
-                let variant_named_fields = extract_tuples_from_type_with_names(variant, program)?;
+            for variant_id in variants {
+                let variant_named_fields =
+                    extract_tuples_from_type_with_names(variant_id, program)?;
                 all_named_fields.extend(variant_named_fields);
             }
             Ok(all_named_fields)
@@ -384,12 +409,12 @@ fn resolve_ast_type_impl(
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
-    type_bindings: &HashMap<String, Type>,
-) -> Result<Type, Error> {
+    type_bindings: &HashMap<String, usize>,
+) -> Result<usize, Error> {
     match ast_type {
-        ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(Type::Integer),
-        ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(Type::Binary),
-        ast::Type::Resource(name) => Ok(Type::Resource(name)),
+        ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(program.register_type(Type::Integer)),
+        ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(program.register_type(Type::Binary)),
+        ast::Type::Resource(name) => Ok(program.register_type(Type::Resource(name))),
         ast::Type::Tuple(tuple) => {
             // Resolve field types without distributing unions
             // Check if there are any spreads
@@ -413,7 +438,7 @@ fn resolve_ast_type_impl(
                 let is_partial = tuple.is_partial;
 
                 // Process all variants (may be 1 or many)
-                let mut variant_types = Vec::new();
+                let mut variant_type_ids = Vec::new();
                 for (variant_name, fields) in field_variants {
                     // Validate partial types
                     if is_partial {
@@ -440,16 +465,27 @@ fn resolve_ast_type_impl(
                         resolve_tuple_name(tuple.name.clone(), scopes_ref, program)?
                     };
 
-                    let tuple_id = program.register_tuple(final_name, fields, false);
-                    variant_types.push(if is_partial {
-                        Type::Partial(tuple_id)
+                    let type_id = if is_partial {
+                        // Create inline partial type (not in tuples registry)
+                        let partial_fields: Vec<(String, usize)> = fields
+                            .into_iter()
+                            .map(|(name, type_id)| {
+                                (name.expect("Partial fields must be named"), type_id)
+                            })
+                            .collect();
+                        program.register_type(Type::Partial {
+                            name: final_name,
+                            fields: partial_fields,
+                        })
                     } else {
-                        Type::Tuple(tuple_id)
-                    });
+                        let tuple_id = program.register_tuple(final_name, fields);
+                        program.register_type(Type::Tuple(tuple_id))
+                    };
+                    variant_type_ids.push(type_id);
                 }
 
                 // Return single type or union based on variant count
-                return Ok(Type::from_types(variant_types));
+                return Ok(union_type_ids(program, variant_type_ids));
             }
 
             // No spreads - process fields normally
@@ -457,14 +493,14 @@ fn resolve_ast_type_impl(
             for field in tuple.fields {
                 match field {
                     ast::FieldType::Field { name, type_def } => {
-                        let field_type = resolve_ast_type_impl(
+                        let field_type_id = resolve_ast_type_impl(
                             recursion_depth,
                             scopes_ref,
                             type_def,
                             program,
                             type_bindings,
                         )?;
-                        fields.push((name, field_type));
+                        fields.push((name, field_type_id));
                     }
                     ast::FieldType::Spread { .. } => unreachable!(),
                 }
@@ -485,28 +521,34 @@ fn resolve_ast_type_impl(
             // Resolve tuple name (may inherit from identifier spread)
             let resolved_name = resolve_tuple_name(tuple.name, scopes_ref, program)?;
 
-            // Register the tuple type with the is_partial flag
-            let tuple_id = program.register_tuple(resolved_name, fields, tuple.is_partial);
-
             // Return Type::Partial for partial types, Type::Tuple for concrete types
             if tuple.is_partial {
-                Ok(Type::Partial(tuple_id))
+                // Create inline partial type (not in tuples registry)
+                let partial_fields: Vec<(String, usize)> = fields
+                    .into_iter()
+                    .map(|(name, type_id)| (name.expect("Partial fields must be named"), type_id))
+                    .collect();
+                Ok(program.register_type(Type::Partial {
+                    name: resolved_name,
+                    fields: partial_fields,
+                }))
             } else {
-                Ok(Type::Tuple(tuple_id))
+                let tuple_id = program.register_tuple(resolved_name, fields);
+                Ok(program.register_type(Type::Tuple(tuple_id)))
             }
         }
         ast::Type::Function(function) => {
             // Increment recursion depth for function boundary
             *recursion_depth += 1;
 
-            let input_type = resolve_ast_type_impl(
+            let input_type_id = resolve_ast_type_impl(
                 recursion_depth,
                 scopes_ref,
                 *function.input,
                 program,
                 type_bindings,
             )?;
-            let output_type = resolve_ast_type_impl(
+            let output_type_id = resolve_ast_type_impl(
                 recursion_depth,
                 scopes_ref,
                 *function.output,
@@ -518,11 +560,12 @@ fn resolve_ast_type_impl(
             *recursion_depth -= 1;
 
             // Create function type without distributing unions
-            Ok(Type::Callable(Box::new(CallableType {
-                parameter: input_type,
-                result: output_type,
-                receive: Type::never(),
-            })))
+            let never_id = program.never();
+            Ok(program.register_type(Type::Callable {
+                parameter: input_type_id,
+                result: output_type_id,
+                receive: never_id,
+            }))
         }
         ast::Type::Union(union) => {
             // Validate that union has at least one base case before resolution
@@ -535,25 +578,27 @@ fn resolve_ast_type_impl(
             *recursion_depth += 1;
 
             // Resolve all union member types
-            let mut resolved_types = Vec::new();
+            let mut resolved_type_ids = Vec::new();
             for member_type in union.types {
-                let member_type = resolve_ast_type_impl(
+                let member_type_id = resolve_ast_type_impl(
                     recursion_depth,
                     scopes_ref,
                     member_type,
                     program,
                     type_bindings,
                 )?;
-                match member_type {
-                    Type::Union(variants) => resolved_types.extend(variants),
-                    t => resolved_types.push(t),
+                // Flatten nested unions
+                if let Some(Type::Union(variants)) = program.lookup_type(member_type_id) {
+                    resolved_type_ids.extend(variants.iter().cloned());
+                } else {
+                    resolved_type_ids.push(member_type_id);
                 }
             }
 
             // Decrement recursion depth
             *recursion_depth -= 1;
 
-            Ok(Type::from_types(resolved_types))
+            Ok(union_type_ids(program, resolved_type_ids))
         }
         ast::Type::Cycle(target_depth) => {
             // & or &N syntax for cycle references
@@ -579,10 +624,10 @@ fn resolve_ast_type_impl(
             // Cycle(depth) is upward from current position
             let cycle_depth = *recursion_depth - target_depth;
 
-            Ok(Type::Cycle(cycle_depth))
+            Ok(program.register_type(Type::Cycle(cycle_depth)))
         }
         ast::Type::Process(process) => {
-            let receive = process
+            let receive_id = process
                 .receive_type
                 .map(|receive_type| {
                     resolve_ast_type_impl(
@@ -593,9 +638,8 @@ fn resolve_ast_type_impl(
                         type_bindings,
                     )
                 })
-                .transpose()?
-                .map(Box::new);
-            let returns = process
+                .transpose()?;
+            let returns_id = process
                 .return_type
                 .map(|return_type| {
                     resolve_ast_type_impl(
@@ -606,19 +650,18 @@ fn resolve_ast_type_impl(
                         type_bindings,
                     )
                 })
-                .transpose()?
-                .map(Box::new);
-            Ok(Type::Process(Box::new(ProcessType {
-                send: receive,
-                receive: returns,
-            })))
+                .transpose()?;
+            Ok(program.register_type(Type::Process {
+                send: receive_id,
+                receive: returns_id,
+            }))
         }
         ast::Type::Identifier { name, arguments } => {
             // For bare identifiers (no arguments), check type parameter bindings first
             if arguments.is_empty() {
                 // Check type parameter bindings first (highest priority)
-                if let Some(bound_type) = type_bindings.get(&name) {
-                    return Ok(bound_type.clone());
+                if let Some(&bound_type_id) = type_bindings.get(&name) {
+                    return Ok(bound_type_id);
                 }
             }
 
@@ -636,155 +679,212 @@ fn resolve_ast_type_impl(
 }
 
 /// Check if a type contains any unbound type variables
-pub fn contains_variables(typ: &Type, tuple_lookup: &impl TupleLookup) -> bool {
+pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
+    let Some(typ) = lookup.lookup_type(type_id) else {
+        return false;
+    };
+
     match typ {
         Type::Variable(_) => true,
-        Type::Union(variants) => variants.iter().any(|v| contains_variables(v, tuple_lookup)),
-        Type::Callable(func_type) => {
-            contains_variables(&func_type.parameter, tuple_lookup)
-                || contains_variables(&func_type.result, tuple_lookup)
-                || contains_variables(&func_type.receive, tuple_lookup)
+        Type::Union(variants) => {
+            let variants = variants.clone();
+            variants.iter().any(|&v| contains_variables(v, lookup))
         }
-        Type::Process(process_type) => {
-            process_type
-                .send
-                .as_ref()
-                .is_some_and(|s| contains_variables(s, tuple_lookup))
-                || process_type
-                    .receive
-                    .as_ref()
-                    .is_some_and(|r| contains_variables(r, tuple_lookup))
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+        } => {
+            contains_variables(*parameter, lookup)
+                || contains_variables(*result, lookup)
+                || contains_variables(*receive, lookup)
         }
-        Type::Tuple(tuple_id) | Type::Partial(tuple_id) => {
+        Type::Process { send, receive } => {
+            send.is_some_and(|s| contains_variables(s, lookup))
+                || receive.is_some_and(|r| contains_variables(r, lookup))
+        }
+        Type::Tuple(tuple_id) => {
             // Check if any field contains variables
-            if let Some(type_info) = tuple_lookup.lookup_tuple(*tuple_id) {
+            if let Some(type_info) = lookup.lookup_tuple(*tuple_id) {
                 type_info
                     .fields
                     .iter()
-                    .any(|(_, field_type)| contains_variables(field_type, tuple_lookup))
+                    .any(|(_, field_type_id)| contains_variables(*field_type_id, lookup))
             } else {
                 // If we can't look up the type, conservatively assume it might have variables
                 false
             }
+        }
+        Type::Partial { fields, .. } => {
+            // Check if any field in the partial contains variables
+            fields
+                .iter()
+                .any(|(_, field_type_id)| contains_variables(*field_type_id, lookup))
         }
         Type::Integer | Type::Binary | Type::Cycle(_) | Type::Resource(_) => false,
     }
 }
 
 /// Substitute type variables in a type with their bindings
-pub fn substitute(typ: &Type, bindings: &HashMap<String, Type>, program: &mut Program) -> Type {
-    match typ {
-        Type::Variable(name) => bindings.get(name).cloned().unwrap_or_else(|| typ.clone()),
-        Type::Union(variants) => Type::from_types(
-            variants
-                .iter()
-                .map(|v| substitute(v, bindings, program))
-                .collect(),
-        ),
-        Type::Tuple(tuple_id) | Type::Partial(tuple_id) => {
-            let is_partial = matches!(typ, Type::Partial(_));
+pub fn substitute(
+    type_id: usize,
+    bindings: &HashMap<String, usize>,
+    program: &mut Program,
+) -> usize {
+    let Some(typ) = program.lookup_type(type_id).cloned() else {
+        return type_id;
+    };
 
+    match typ {
+        Type::Variable(name) => bindings.get(&name).copied().unwrap_or(type_id),
+        Type::Union(variants) => {
+            let new_variants: Vec<usize> = variants
+                .iter()
+                .map(|&v| substitute(v, bindings, program))
+                .collect();
+            union_type_ids(program, new_variants)
+        }
+        Type::Tuple(tuple_id) => {
             // Look up the tuple's fields and clone to avoid borrow issues
-            if let Some(type_info) = program.lookup_tuple(*tuple_id).cloned() {
+            if let Some(type_info) = program.lookup_tuple(tuple_id).cloned() {
                 // Substitute within each field type
                 let mut any_changed = false;
-                let new_fields: Vec<_> = type_info
+                let new_fields: Vec<(Option<String>, usize)> = type_info
                     .fields
                     .iter()
-                    .map(|(name, field_type)| {
-                        let new_type = substitute(field_type, bindings, program);
-                        if !any_changed && &new_type != field_type {
+                    .map(|(name, field_type_id)| {
+                        let new_type_id = substitute(*field_type_id, bindings, program);
+                        if !any_changed && new_type_id != *field_type_id {
                             any_changed = true;
                         }
-                        (name.clone(), new_type)
+                        (name.clone(), new_type_id)
                     })
                     .collect();
 
                 // If any field changed, register a new tuple type
                 if any_changed {
-                    let new_tuple_id =
-                        program.register_tuple(type_info.name.clone(), new_fields, is_partial);
-                    if is_partial {
-                        Type::Partial(new_tuple_id)
-                    } else {
-                        Type::Tuple(new_tuple_id)
-                    }
+                    let new_tuple_id = program.register_tuple(type_info.name.clone(), new_fields);
+                    program.register_type(Type::Tuple(new_tuple_id))
                 } else {
-                    typ.clone()
+                    type_id
                 }
             } else {
-                // Type not found in registry, just clone
-                typ.clone()
+                // Type not found in registry, just return original
+                type_id
             }
         }
-        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Resource(_) => typ.clone(),
-        Type::Callable(func_type) => Type::Callable(Box::new(CallableType {
-            parameter: substitute(&func_type.parameter, bindings, program),
-            result: substitute(&func_type.result, bindings, program),
-            receive: substitute(&func_type.receive, bindings, program),
-        })),
-        Type::Process(process_type) => Type::Process(Box::new(ProcessType {
-            send: process_type
-                .send
-                .as_ref()
-                .map(|s| Box::new(substitute(s, bindings, program))),
-            receive: process_type
-                .receive
-                .as_ref()
-                .map(|r| Box::new(substitute(r, bindings, program))),
-        })),
+        Type::Partial { name, fields } => {
+            // Substitute within each field type
+            let mut any_changed = false;
+            let new_fields: Vec<(String, usize)> = fields
+                .iter()
+                .map(|(fname, field_type_id)| {
+                    let new_type_id = substitute(*field_type_id, bindings, program);
+                    if !any_changed && new_type_id != *field_type_id {
+                        any_changed = true;
+                    }
+                    (fname.clone(), new_type_id)
+                })
+                .collect();
+
+            // If any field changed, register a new partial type
+            if any_changed {
+                program.register_type(Type::Partial {
+                    name: name.clone(),
+                    fields: new_fields,
+                })
+            } else {
+                type_id
+            }
+        }
+        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Resource(_) => type_id,
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+        } => {
+            let new_param = substitute(parameter, bindings, program);
+            let new_result = substitute(result, bindings, program);
+            let new_receive = substitute(receive, bindings, program);
+            if new_param == parameter && new_result == result && new_receive == receive {
+                type_id
+            } else {
+                program.register_type(Type::Callable {
+                    parameter: new_param,
+                    result: new_result,
+                    receive: new_receive,
+                })
+            }
+        }
+        Type::Process { send, receive } => {
+            let new_send = send.map(|s| substitute(s, bindings, program));
+            let new_receive = receive.map(|r| substitute(r, bindings, program));
+            if new_send == send && new_receive == receive {
+                type_id
+            } else {
+                program.register_type(Type::Process {
+                    send: new_send,
+                    receive: new_receive,
+                })
+            }
+        }
     }
 }
 
 /// Unify a pattern type (containing Type::Variable) with a concrete type.
-/// Builds up a mapping from type variable names to concrete types.
+/// Builds up a mapping from type variable names to concrete type IDs.
 /// Returns an error if there's a conflict (e.g., variable bound to two different types).
 pub fn unify(
-    bindings: &mut HashMap<String, Type>,
-    pattern: &Type,
-    concrete: &Type,
-    tuple_lookup: &impl TupleLookup,
+    bindings: &mut HashMap<String, usize>,
+    pattern_id: usize,
+    concrete_id: usize,
+    program: &mut Program,
 ) -> Result<(), Error> {
-    match (pattern, concrete) {
+    let pattern = program.lookup_type(pattern_id).cloned();
+    let concrete = program.lookup_type(concrete_id).cloned();
+
+    let (Some(pattern), Some(concrete)) = (pattern, concrete) else {
+        return Ok(()); // If we can't look up either type, assume compatible
+    };
+
+    match (&pattern, &concrete) {
         // When pattern is a variable, bind it or check consistency
-        (Type::Variable(name), concrete) => {
+        (Type::Variable(name), _) => {
             // First, resolve concrete if it's also a variable
-            let resolved_concrete = if let Type::Variable(concrete_name) = concrete {
-                bindings.get(concrete_name).unwrap_or(concrete)
+            let resolved_concrete_id = if let Type::Variable(concrete_name) = &concrete {
+                bindings.get(concrete_name).copied().unwrap_or(concrete_id)
             } else {
-                concrete
+                concrete_id
             };
 
-            if let Some(existing) = bindings.get(name).cloned() {
+            if let Some(existing_id) = bindings.get(name).copied() {
                 // Variable already bound - widen to union if different
-                if &existing != resolved_concrete {
+                if existing_id != resolved_concrete_id {
                     // Widen the type variable to a union
-                    // Important: Don't include the variable itself in the widened type
-                    // This would create a circular reference like `t: int | t`
-                    let widened = Type::from_types(vec![existing, resolved_concrete.clone()]);
+                    let widened = union_type_ids(program, vec![existing_id, resolved_concrete_id]);
                     bindings.insert(name.clone(), widened);
                 }
             } else {
                 // New binding - but make sure we're not binding a variable to itself
-                if let Type::Variable(resolved_name) = resolved_concrete
+                if let Some(Type::Variable(resolved_name)) =
+                    program.lookup_type(resolved_concrete_id)
                     && resolved_name == name
                 {
                     // Don't bind a variable to itself
                     return Ok(());
                 }
-                bindings.insert(name.clone(), resolved_concrete.clone());
+                bindings.insert(name.clone(), resolved_concrete_id);
             }
             Ok(())
         }
 
         // When concrete is a variable, resolve it and try unifying with the resolved type
-        (pattern, Type::Variable(name)) => {
-            if let Some(resolved) = bindings.get(name).cloned() {
+        (_, Type::Variable(name)) => {
+            if let Some(&resolved_id) = bindings.get(name) {
                 // Concrete variable is bound - unify with its binding
-                unify(bindings, pattern, &resolved, tuple_lookup)
+                unify(bindings, pattern_id, resolved_id, program)
             } else {
                 // Concrete variable is unbound - this shouldn't happen in normal unification
-                // but we can handle it by binding the variable to the pattern
                 Err(Error::TypeUnresolved(
                     "Cannot unify with unbound type variable in concrete position".to_string(),
                 ))
@@ -796,10 +896,19 @@ pub fn unify(
         (Type::Binary, Type::Binary) => Ok(()),
 
         // Process types must match in structure
-        (Type::Process(p1), Type::Process(p2)) => {
+        (
+            Type::Process {
+                send: send1,
+                receive: receive1,
+            },
+            Type::Process {
+                send: send2,
+                receive: receive2,
+            },
+        ) => {
             // Unify send types (what can be sent TO the process)
-            match (&p1.send, &p2.send) {
-                (Some(s1), Some(s2)) => unify(bindings, s1, s2, tuple_lookup)?,
+            match (send1, send2) {
+                (Some(s1), Some(s2)) => unify(bindings, *s1, *s2, program)?,
                 (None, None) => {}
                 _ => {
                     return Err(Error::TypeUnresolved(
@@ -808,8 +917,8 @@ pub fn unify(
                 }
             }
             // Unify receive types (what you GET from the process)
-            match (&p1.receive, &p2.receive) {
-                (Some(ret1), Some(ret2)) => unify(bindings, ret1, ret2, tuple_lookup)?,
+            match (receive1, receive2) {
+                (Some(ret1), Some(ret2)) => unify(bindings, *ret1, *ret2, program)?,
                 (None, None) => {}
                 _ => {
                     return Err(Error::TypeUnresolved(
@@ -826,10 +935,10 @@ pub fn unify(
                 return Ok(());
             }
 
-            let info1 = tuple_lookup
+            let info1 = program
                 .lookup_tuple(*id1)
                 .ok_or(Error::TupleNotInRegistry { tuple_id: *id1 })?;
-            let info2 = tuple_lookup
+            let info2 = program
                 .lookup_tuple(*id2)
                 .ok_or(Error::TupleNotInRegistry { tuple_id: *id2 })?;
 
@@ -854,55 +963,49 @@ pub fn unify(
             }
 
             // Unify each field
-            for ((fname1, ftype1), (fname2, ftype2)) in info1.fields.iter().zip(info2.fields.iter())
-            {
+            let fields1 = info1.fields.clone();
+            let fields2 = info2.fields.clone();
+            for ((fname1, ftype1_id), (fname2, ftype2_id)) in fields1.iter().zip(fields2.iter()) {
                 if fname1 != fname2 {
                     return Err(Error::TypeUnresolved(
                         "Tuple fields have different names".to_string(),
                     ));
                 }
-                unify(bindings, ftype1, ftype2, tuple_lookup)?;
+                unify(bindings, *ftype1_id, *ftype2_id, program)?;
             }
 
             Ok(())
         }
 
-        // Partial types - unify like tuples but only check pattern fields exist in concrete
-        (Type::Partial(pattern_id), Type::Tuple(concrete_id))
-        | (Type::Partial(pattern_id), Type::Partial(concrete_id)) => {
-            let pattern_info =
-                tuple_lookup
-                    .lookup_tuple(*pattern_id)
-                    .ok_or(Error::TupleNotInRegistry {
-                        tuple_id: *pattern_id,
-                    })?;
+        // Partial type vs concrete tuple - check pattern fields exist in concrete
+        (
+            Type::Partial {
+                name: pattern_name,
+                fields: pattern_fields,
+            },
+            Type::Tuple(concrete_tuple_id),
+        ) => {
             let concrete_info =
-                tuple_lookup
-                    .lookup_tuple(*concrete_id)
+                program
+                    .lookup_tuple(*concrete_tuple_id)
                     .ok_or(Error::TupleNotInRegistry {
-                        tuple_id: *concrete_id,
+                        tuple_id: *concrete_tuple_id,
                     })?;
 
             // If partial has a name, concrete must match
-            if let Some(pattern_name) = &pattern_info.name
-                && concrete_info.name.as_ref() != Some(pattern_name)
+            if let Some(pname) = pattern_name
+                && concrete_info.name.as_ref() != Some(pname)
             {
                 return Err(Error::TypeUnresolved(format!(
                     "Partial type expects name {:?}, got {:?}",
-                    pattern_name, concrete_info.name
+                    pname, concrete_info.name
                 )));
             }
 
             // Check all pattern fields exist in concrete with compatible types
-            for (pattern_fname, pattern_ftype) in &pattern_info.fields {
-                let Some(pattern_fname) = pattern_fname else {
-                    return Err(Error::TypeUnresolved(
-                        "Partial type has unnamed field".to_string(),
-                    ));
-                };
-
-                let Some((_, concrete_ftype)) = concrete_info
-                    .fields
+            let concrete_fields = concrete_info.fields.clone();
+            for (pattern_fname, pattern_ftype_id) in pattern_fields {
+                let Some((_, concrete_ftype_id)) = concrete_fields
                     .iter()
                     .find(|(fname, _)| fname.as_ref() == Some(pattern_fname))
                 else {
@@ -912,20 +1015,70 @@ pub fn unify(
                     )));
                 };
 
-                unify(bindings, pattern_ftype, concrete_ftype, tuple_lookup)?;
+                unify(bindings, *pattern_ftype_id, *concrete_ftype_id, program)?;
+            }
+
+            Ok(())
+        }
+
+        // Partial type vs partial type - check pattern fields exist in concrete partial
+        (
+            Type::Partial {
+                name: pattern_name,
+                fields: pattern_fields,
+            },
+            Type::Partial {
+                name: concrete_name,
+                fields: concrete_fields,
+            },
+        ) => {
+            // If partial has a name, concrete must match
+            if let Some(pname) = pattern_name
+                && concrete_name.as_ref() != Some(pname)
+            {
+                return Err(Error::TypeUnresolved(format!(
+                    "Partial type expects name {:?}, got {:?}",
+                    pname, concrete_name
+                )));
+            }
+
+            // Check all pattern fields exist in concrete with compatible types
+            for (pattern_fname, pattern_ftype_id) in pattern_fields {
+                let Some((_, concrete_ftype_id)) = concrete_fields
+                    .iter()
+                    .find(|(fname, _)| fname == pattern_fname)
+                else {
+                    return Err(Error::TypeUnresolved(format!(
+                        "Concrete partial missing field: {}",
+                        pattern_fname
+                    )));
+                };
+
+                unify(bindings, *pattern_ftype_id, *concrete_ftype_id, program)?;
             }
 
             Ok(())
         }
 
         // Function types - parameters are contravariant, results are covariant
-        (Type::Callable(f1), Type::Callable(f2)) => {
+        (
+            Type::Callable {
+                parameter: param1,
+                result: result1,
+                receive: receive1,
+            },
+            Type::Callable {
+                parameter: param2,
+                result: result2,
+                receive: receive2,
+            },
+        ) => {
             // Unify parameters (contravariant - swap order)
-            unify(bindings, &f1.parameter, &f2.parameter, tuple_lookup)?;
+            unify(bindings, *param1, *param2, program)?;
             // Unify results (covariant)
-            unify(bindings, &f1.result, &f2.result, tuple_lookup)?;
+            unify(bindings, *result1, *result2, program)?;
             // Unify receive types (contravariant - swap order)
-            unify(bindings, &f1.receive, &f2.receive, tuple_lookup)?;
+            unify(bindings, *receive1, *receive2, program)?;
             Ok(())
         }
 
@@ -934,19 +1087,16 @@ pub fn unify(
             // Cycles in patterns should unify with any concrete type
             // This is sound because cycles represent recursive occurrences
             // The actual structure is checked when constructing the concrete value
-            // For now, we accept any concrete type that matches the cycle
-            // We could be more precise by resolving the cycle, but that's complex
-            // and not strictly necessary for soundness
             Ok(())
         }
 
         // Handle cycles in concrete type - shouldn't happen in practice
-        (pattern_type, Type::Cycle(_depth)) => {
+        (_pattern_type, Type::Cycle(_depth)) => {
             // If concrete has a cycle, something went wrong - concrete types
             // shouldn't have unresolved cycles
             Err(Error::TypeUnresolved(format!(
                 "Concrete type contains cycle: pattern={:?}",
-                pattern_type
+                pattern
             )))
         }
 
@@ -963,23 +1113,26 @@ pub fn unify(
                 return Ok(());
             }
 
+            let pattern_variants = pattern_variants.clone();
+            let concrete_variants = concrete_variants.clone();
+
             // Try to unify each pattern variant with each concrete variant
-            for pattern_variant in pattern_variants {
+            for &pattern_variant in &pattern_variants {
                 let mut found_match = false;
-                for concrete_variant in concrete_variants {
+                for &concrete_variant in &concrete_variants {
                     let mut temp_bindings = bindings.clone();
                     if unify(
                         &mut temp_bindings,
                         pattern_variant,
                         concrete_variant,
-                        tuple_lookup,
+                        program,
                     )
                     .is_ok()
                     {
                         // Merge the bindings
                         for (k, v) in temp_bindings {
-                            if let Some(existing) = bindings.get(&k)
-                                && !v.is_compatible(existing, tuple_lookup)
+                            if let Some(&existing) = bindings.get(&k)
+                                && !quiver_core::types::is_compatible(v, existing, program)
                             {
                                 continue; // Skip incompatible binding
                             }
@@ -999,12 +1152,13 @@ pub fn unify(
         }
 
         // Pattern union with concrete non-union - try each variant
-        (Type::Union(variants), concrete_type) => {
+        (Type::Union(variants), _) => {
+            let variants = variants.clone();
             // Try to unify with at least one variant
             let mut errors = Vec::new();
-            for (i, variant) in variants.iter().enumerate() {
+            for (i, &variant) in variants.iter().enumerate() {
                 let mut temp_bindings = bindings.clone();
-                match unify(&mut temp_bindings, variant, concrete_type, tuple_lookup) {
+                match unify(&mut temp_bindings, variant, concrete_id, program) {
                     Ok(()) => {
                         *bindings = temp_bindings;
                         return Ok(());
@@ -1015,25 +1169,24 @@ pub fn unify(
                 }
             }
             Err(Error::TypeUnresolved(format!(
-                "Cannot unify union pattern ({} variants) with concrete type: {:?}. Errors: [{}]",
+                "Cannot unify union pattern ({} variants) with concrete type. Errors: [{}]",
                 variants.len(),
-                concrete_type,
                 errors.join(", ")
             )))
         }
 
         // Concrete union with pattern non-union - pattern must match one variant
-        (pattern_type, Type::Union(variants)) => {
-            for variant in variants {
+        (_, Type::Union(variants)) => {
+            let variants = variants.clone();
+            for &variant in &variants {
                 let mut temp_bindings = bindings.clone();
-                if unify(&mut temp_bindings, pattern_type, variant, tuple_lookup).is_ok() {
+                if unify(&mut temp_bindings, pattern_id, variant, program).is_ok() {
                     *bindings = temp_bindings;
                     return Ok(());
                 }
             }
             Err(Error::TypeUnresolved(format!(
-                "Cannot unify pattern {:?} with concrete union ({} variants)",
-                pattern_type,
+                "Cannot unify pattern with concrete union ({} variants)",
                 variants.len()
             )))
         }

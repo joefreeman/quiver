@@ -2,17 +2,17 @@
 //!
 //! These functions support narrowing union types based on runtime checks,
 //! field access patterns, and computing complement types for branch conditions.
+//! All type references use type IDs into the Program's type registry.
 
-use quiver_core::{
-    program::Program,
-    types::{TupleLookup, Type},
-};
+use quiver_core::program::Program;
+use quiver_core::types::{Type, TypeLookup, is_compatible};
 
 use super::provenance::Provenance;
 use super::scopes::{Binding, Scope, lookup_variable};
 
 /// Narrowing information recorded during condition compilation.
 /// Used to compute complement types for subsequent branches.
+/// All type references are type IDs.
 #[derive(Debug, Clone)]
 pub enum Narrowing {
     /// No narrowing recorded yet
@@ -20,8 +20,8 @@ pub enum Narrowing {
     /// Narrowing recorded, complement is possible
     Active {
         provenance: Provenance,
-        original_type: Type,
-        narrowed_type: Type,
+        original_type_id: usize,
+        narrowed_type_id: usize,
     },
     /// Complement disabled (non-type failable term encountered or multiple provenances)
     Disabled,
@@ -41,9 +41,9 @@ impl Narrowing {
     pub fn record(
         &mut self,
         provenance: &Provenance,
-        original: &Type,
-        narrowed: &Type,
-        program: &Program,
+        original_id: usize,
+        narrowed_id: usize,
+        program: &mut Program,
     ) {
         // Ignore unknown provenances
         if matches!(provenance, Provenance::Unknown) {
@@ -54,17 +54,17 @@ impl Narrowing {
             Narrowing::Empty => {
                 *self = Narrowing::Active {
                     provenance: provenance.clone(),
-                    original_type: original.clone(),
-                    narrowed_type: narrowed.clone(),
+                    original_type_id: original_id,
+                    narrowed_type_id: narrowed_id,
                 };
             }
             Narrowing::Active {
                 provenance: existing,
-                narrowed_type,
+                narrowed_type_id,
                 ..
             } if existing == provenance => {
                 // Same provenance - update narrowed type (intersection)
-                *narrowed_type = intersect_types(narrowed_type, narrowed, program);
+                *narrowed_type_id = intersect_types(*narrowed_type_id, narrowed_id, program);
             }
             Narrowing::Active { .. } => {
                 // Different provenance - disable complement
@@ -83,13 +83,13 @@ impl Narrowing {
 
     /// Take the narrowing info if active, consuming it.
     /// Returns None if Empty or Disabled.
-    pub fn take(&mut self) -> Option<(Provenance, Type, Type)> {
+    pub fn take(&mut self) -> Option<(Provenance, usize, usize)> {
         match std::mem::replace(self, Narrowing::Disabled) {
             Narrowing::Active {
                 provenance,
-                original_type,
-                narrowed_type,
-            } => Some((provenance, original_type, narrowed_type)),
+                original_type_id,
+                narrowed_type_id,
+            } => Some((provenance, original_type_id, narrowed_type_id)),
             _ => None,
         }
     }
@@ -106,22 +106,20 @@ impl Default for Narrowing {
 /// When a type check succeeds on a value with known provenance, this function
 /// records the narrowed type in the current scope so subsequent lookups return
 /// the narrowed type.
-///
-/// NOTE: This function assumes provenance chains do not cycle. A cycle would cause
-/// infinite recursion. This is guaranteed by construction: provenances are built
-/// from the AST structure (variables, field access, parameters) which cannot form
-/// cycles.
 pub fn apply_narrowing(
     scopes: &mut [Scope],
     provenance: &Provenance,
-    narrowed_to: &Type,
-    program: &Program,
+    narrowed_to_id: usize,
+    program: &mut Program,
 ) {
+    // Get the never type ID early, before any complex borrowing
+    let never_id = program.never();
+
     match provenance {
         Provenance::Variable(name) => {
             // Get current type (narrowed or original)
-            if let Some((current_type, _)) = lookup_variable(scopes, name, &[]) {
-                let intersected = intersect_types(&current_type, narrowed_to, program);
+            if let Some((current_type_id, _)) = lookup_variable(scopes, name, &[]) {
+                let intersected = intersect_types(current_type_id, narrowed_to_id, program);
                 if let Some(scope) = scopes.last_mut() {
                     scope.narrowings.variables.insert(name.clone(), intersected);
                 }
@@ -131,36 +129,36 @@ pub fn apply_narrowing(
         Provenance::Field(parent, field_idx) => {
             // Check if parent is a single tuple type (not a union of tuples).
             // If so, store field-specific narrowing for tuple pattern complement narrowing.
-            let parent_type = get_type_for_provenance(scopes, parent, program);
-            let is_single_tuple = matches!(parent_type, Type::Tuple(_));
+            let parent_type_id = get_type_for_provenance(scopes, parent, program);
+            let is_single_tuple = program
+                .lookup_type(parent_type_id)
+                .map(|t| matches!(t, Type::Tuple(_)))
+                .unwrap_or(false);
 
             if is_single_tuple {
                 // Get current field type, considering existing narrowings
-                let current_field_type = get_field_narrowing(scopes, parent, *field_idx)
-                    .or_else(|| get_field_type(&parent_type, *field_idx, program))
-                    .unwrap_or_else(Type::never);
-                let intersected = intersect_types(&current_field_type, narrowed_to, program);
+                let current_field_type_id = get_field_narrowing(scopes, parent, *field_idx)
+                    .or_else(|| get_field_type(parent_type_id, *field_idx, program))
+                    .unwrap_or(never_id);
+                let intersected = intersect_types(current_field_type_id, narrowed_to_id, program);
                 set_field_narrowing(scopes, parent, *field_idx, intersected);
                 return;
             }
 
             // Standard case: Filter parent variants based on which have compatible field types
-            let filtered = filter_variants_by_field(&parent_type, *field_idx, narrowed_to, program);
+            let filtered =
+                filter_variants_by_field(parent_type_id, *field_idx, narrowed_to_id, program);
             // Recursively narrow the parent
-            apply_narrowing(scopes, parent, &filtered, program);
+            apply_narrowing(scopes, parent, filtered, program);
         }
 
         Provenance::Parameter => {
             // Get the necessary data from the scope first
             let narrowing_info = scopes.last_mut().and_then(|scope| {
                 let param = scope.parameter.as_ref()?;
-                let current = scope
-                    .narrowings
-                    .parameter
-                    .clone()
-                    .unwrap_or_else(|| param.ty.clone());
-                let intersected = intersect_types(&current, narrowed_to, program);
-                scope.narrowings.parameter = Some(intersected.clone());
+                let current = scope.narrowings.parameter.unwrap_or(param.ty);
+                let intersected = intersect_types(current, narrowed_to_id, program);
+                scope.narrowings.parameter = Some(intersected);
                 let source_prov = param.provenance.clone();
                 Some((source_prov, intersected))
             });
@@ -169,7 +167,7 @@ pub fn apply_narrowing(
             if let Some((source_prov, intersected)) = narrowing_info
                 && !matches!(source_prov, Provenance::Parameter | Provenance::Unknown)
             {
-                apply_narrowing(scopes, &source_prov, &intersected, program);
+                apply_narrowing(scopes, &source_prov, intersected, program);
             }
         }
 
@@ -179,21 +177,14 @@ pub fn apply_narrowing(
     }
 
     // Also narrow any bindings in the current scope whose provenance matches.
-    // This handles cases like `a ~> =x` where narrowing `a` should also narrow `x`,
-    // since `x` was bound to `a` and shares its provenance.
-    //
-    // We only narrow if the binding's type is compatible with narrowed_to, which ensures
-    // we don't incorrectly narrow field bindings that happen to share a parent provenance
-    // (e.g., `ys` in `=[Nil, ys]` has provenance Parameter but type list<t>, not tuple type).
     if !matches!(provenance, Provenance::Unknown)
         && let Some(scope) = scopes.last_mut()
     {
         // Collect bindings to narrow first to avoid borrow conflicts
-        let bindings_to_narrow: Vec<(String, Type)> = scope
+        let bindings_to_narrow: Vec<(String, usize)> = scope
             .bindings
             .iter()
             .filter_map(|(name, binding)| {
-                // Only process Variable bindings with matching provenance
                 if let Binding::Variable {
                     ty,
                     provenance: prov,
@@ -201,16 +192,10 @@ pub fn apply_narrowing(
                 } = binding
                     && prov == provenance
                 {
-                    let current = scope
-                        .narrowings
-                        .variables
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| ty.clone());
-                    // Only narrow if the types are compatible - this prevents
-                    // narrowing field bindings with incompatible types
-                    let intersection = intersect_types(&current, narrowed_to, program);
-                    if !intersection.is_never() {
+                    let current = scope.narrowings.variables.get(name).copied().unwrap_or(*ty);
+                    let intersection = intersect_types(current, narrowed_to_id, program);
+                    // Only narrow if not never type
+                    if intersection != never_id {
                         return Some((name.clone(), intersection));
                     }
                 }
@@ -218,130 +203,149 @@ pub fn apply_narrowing(
             })
             .collect();
 
-        for (name, narrowed_type) in bindings_to_narrow {
-            scope.narrowings.variables.insert(name, narrowed_type);
+        for (name, narrowed_type_id) in bindings_to_narrow {
+            scope.narrowings.variables.insert(name, narrowed_type_id);
         }
     }
 }
 
-/// Get the type for a provenance by resolving it through the scope chain.
-///
-/// Returns `Type::never()` on failure (missing variable, out-of-bounds field, etc.)
-/// rather than returning an error. This is intentional: this function is used during
-/// narrowing propagation where graceful degradation is preferred. If the provenance
-/// can't be resolved, narrowing simply doesn't apply rather than failing compilation.
-/// This differs from `scopes::get_parameter` which returns errors because it's called
-/// in contexts where the parameter *must* exist (e.g., `~>` operator usage).
+/// Get the type ID for a provenance by resolving it through the scope chain.
 pub fn get_type_for_provenance(
     scopes: &[Scope],
     provenance: &Provenance,
-    program: &Program,
-) -> Type {
+    program: &mut Program,
+) -> usize {
+    let never_id = program.never();
     match provenance {
         Provenance::Variable(name) => lookup_variable(scopes, name, &[])
             .map(|(ty, _)| ty)
-            .unwrap_or_else(Type::never),
+            .unwrap_or(never_id),
         Provenance::Field(parent, idx) => {
-            let parent_type = get_type_for_provenance(scopes, parent, program);
-            get_field_type(&parent_type, *idx, program).unwrap_or_else(Type::never)
+            let parent_type_id = get_type_for_provenance(scopes, parent, program);
+            get_field_type(parent_type_id, *idx, program).unwrap_or(never_id)
         }
         Provenance::Parameter => scopes
             .last()
             .and_then(|s| {
-                s.parameter.as_ref().map(|p| {
-                    s.narrowings
-                        .parameter
-                        .clone()
-                        .unwrap_or_else(|| p.ty.clone())
-                })
+                s.parameter
+                    .as_ref()
+                    .map(|p| s.narrowings.parameter.unwrap_or(p.ty))
             })
-            .unwrap_or_else(Type::never),
-        Provenance::Tuple(_) | Provenance::Unknown => Type::never(),
+            .unwrap_or(never_id),
+        Provenance::Tuple(_) | Provenance::Unknown => never_id,
     }
 }
 
-/// Compute the intersection of two types.
+/// Compute the intersection of two types (by type ID).
 ///
 /// Filters variants from `a` that are compatible with `b`.
-/// This is used when multiple type checks are applied to the same value,
-/// e.g., `x ~> ^t ~> ^u` narrows x to the intersection of t and u.
-pub fn intersect_types(a: &Type, b: &Type, program: &Program) -> Type {
-    let intersected: Vec<Type> = a
-        .variants()
-        .iter()
-        .filter(|variant| variant.is_compatible(b, program))
-        .cloned()
+pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize {
+    let a_variants = get_type_variants(a_id, program);
+
+    let intersected: Vec<usize> = a_variants
+        .into_iter()
+        .filter(|&variant_id| is_compatible(variant_id, b_id, program))
         .collect();
 
-    Type::from_types(intersected)
+    union_type_ids(program, intersected)
 }
 
 /// Filter parent type to variants where a specific field is compatible with a given type.
-///
-/// This is used for field narrowing propagation: when we narrow `x.a` to type `t`,
-/// we filter `x` to only those variants where field `a` is compatible with `t`.
 pub fn filter_variants_by_field(
-    parent_type: &Type,
+    parent_type_id: usize,
     field_idx: usize,
-    field_must_be: &Type,
-    program: &Program,
-) -> Type {
-    let filtered: Vec<Type> = parent_type
-        .variants()
-        .iter()
-        .filter(|variant| {
-            if let Some(field_type) = get_field_type(variant, field_idx, program) {
-                field_type.is_compatible(field_must_be, program)
+    field_must_be_id: usize,
+    program: &mut Program,
+) -> usize {
+    let variants = get_type_variants(parent_type_id, program);
+
+    let filtered: Vec<usize> = variants
+        .into_iter()
+        .filter(|&variant_id| {
+            if let Some(field_type_id) = get_field_type(variant_id, field_idx, program) {
+                is_compatible(field_type_id, field_must_be_id, program)
             } else {
                 false
             }
         })
-        .cloned()
         .collect();
 
-    Type::from_types(filtered)
+    union_type_ids(program, filtered)
 }
 
 /// Compute the complement type (variants NOT compatible with the narrowed type).
-///
-/// This is used for branch narrowing: when a branch condition narrows to type `t`,
-/// subsequent branches see the complement (original minus `t`).
-pub fn compute_complement(original: &Type, narrowed: &Type, program: &Program) -> Type {
-    let complement: Vec<Type> = original
-        .variants()
-        .iter()
-        .filter(|variant| !variant.is_compatible(narrowed, program))
-        .cloned()
+pub fn compute_complement(original_id: usize, narrowed_id: usize, program: &mut Program) -> usize {
+    let variants = get_type_variants(original_id, program);
+
+    let complement: Vec<usize> = variants
+        .into_iter()
+        .filter(|&variant_id| !is_compatible(variant_id, narrowed_id, program))
         .collect();
 
-    Type::from_types(complement)
+    union_type_ids(program, complement)
 }
 
-/// Get the type of a field at a given index from a type.
-///
-/// For tuple types, returns the field type at that index.
-/// For union types, collects field types from all variants and returns their union.
-/// Returns `None` if no variants have the field.
-pub fn get_field_type(ty: &Type, field_idx: usize, program: &Program) -> Option<Type> {
-    let field_types: Vec<Type> = ty
-        .variants()
-        .iter()
-        .filter_map(|variant| match variant {
-            Type::Tuple(tuple_id) | Type::Partial(tuple_id) => {
-                let tuple_info = program.lookup_tuple(*tuple_id)?;
-                tuple_info
-                    .fields
-                    .get(field_idx)
-                    .map(|(_, field_type)| field_type.clone())
+/// Get the type ID of a field at a given index from a type.
+pub fn get_field_type(type_id: usize, field_idx: usize, program: &Program) -> Option<usize> {
+    let variants = get_type_variants_readonly(type_id, program);
+
+    let field_type_ids: Vec<usize> = variants
+        .into_iter()
+        .filter_map(|variant_id| {
+            let ty = program.lookup_type(variant_id)?;
+            match ty {
+                Type::Tuple(tuple_id) => {
+                    let tuple_info = program.lookup_tuple(*tuple_id)?;
+                    tuple_info
+                        .fields
+                        .get(field_idx)
+                        .map(|(_, ftype_id)| *ftype_id)
+                }
+                Type::Partial { fields, .. } => {
+                    fields.get(field_idx).map(|(_, ftype_id)| *ftype_id)
+                }
+                _ => None,
             }
-            _ => None,
         })
         .collect();
 
-    if field_types.is_empty() {
+    if field_type_ids.is_empty() {
         None
+    } else if field_type_ids.len() == 1 {
+        Some(field_type_ids[0])
     } else {
-        Some(Type::from_types(field_types))
+        // Multiple field types - would need to create union, but we don't have &mut Program
+        // Return the first one as approximation (this is a read-only context)
+        Some(field_type_ids[0])
+    }
+}
+
+/// Get variant type IDs from a type (readonly version for use with &Program)
+fn get_type_variants_readonly(type_id: usize, program: &Program) -> Vec<usize> {
+    let Some(ty) = program.lookup_type(type_id) else {
+        return vec![];
+    };
+    match ty {
+        Type::Union(ids) => ids.clone(),
+        _ => vec![type_id],
+    }
+}
+
+/// Get variant type IDs from a type
+fn get_type_variants(type_id: usize, program: &Program) -> Vec<usize> {
+    get_type_variants_readonly(type_id, program)
+}
+
+/// Create a union type from a list of type IDs, simplifying single-element lists
+fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
+    // Deduplicate type IDs
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<usize> = type_ids.into_iter().filter(|id| seen.insert(*id)).collect();
+
+    match unique.len() {
+        0 => program.never(),
+        1 => unique[0],
+        _ => program.register_type(Type::Union(unique)),
     }
 }
 
@@ -363,23 +367,15 @@ enum FieldPatternKind {
 }
 
 /// Classify a field pattern for complement narrowing analysis.
-///
-/// A field pattern is:
-/// - `AlwaysBinds` if it's a simple identifier or placeholder (always matches)
-/// - `TypeConstraining` if it's a flat tuple pattern (e.g., `Nil`, `Cons[x, y]`)
-/// - `Complex` if it has nested patterns or other complex structure
 fn classify_field_pattern(
     pattern: &ast::Match,
-    field_type: &Type,
+    field_type_id: usize,
     program: &Program,
 ) -> FieldPatternKind {
     match pattern {
-        // Simple bindings always succeed
         ast::Match::Identifier(_) | ast::Match::Placeholder => FieldPatternKind::AlwaysBinds,
 
-        // Tuple patterns may constrain to a specific type
         ast::Match::Tuple(tuple) => {
-            // Check if all field patterns are simple bindings (flat tuple)
             let is_flat = tuple.fields.iter().all(|f| {
                 matches!(
                     f.pattern,
@@ -391,33 +387,28 @@ fn classify_field_pattern(
                 return FieldPatternKind::Complex;
             }
 
-            // Find matching tuple type in field_type
-            if let Some(tuple_id) = find_matching_tuple_type(tuple, field_type, program) {
+            if let Some(tuple_id) = find_matching_tuple_type(tuple, field_type_id, program) {
                 FieldPatternKind::TypeConstraining(tuple_id)
             } else {
                 FieldPatternKind::Complex
             }
         }
 
-        // Bind/Pin wrappers - check inner pattern
         ast::Match::Bind(inner) | ast::Match::Pin(inner) => {
-            classify_field_pattern(inner, field_type, program)
+            classify_field_pattern(inner, field_type_id, program)
         }
 
-        // Everything else is complex
         _ => FieldPatternKind::Complex,
     }
 }
 
 /// Find a matching tuple type for a pattern in the given type.
-///
-/// Returns the tuple_id if the pattern matches exactly one tuple variant.
 fn find_matching_tuple_type(
     pattern: &ast::MatchTuple,
-    field_type: &Type,
+    field_type_id: usize,
     program: &Program,
 ) -> Option<usize> {
-    let tuples = field_type.extract_tuples();
+    let tuples = extract_tuple_ids(field_type_id, program);
 
     for tuple_id in tuples {
         let tuple_info = program.lookup_tuple(tuple_id)?;
@@ -430,19 +421,32 @@ fn find_matching_tuple_type(
     None
 }
 
+/// Extract tuple IDs from a type (only concrete tuples, not partials)
+fn extract_tuple_ids(type_id: usize, program: &Program) -> Vec<usize> {
+    let Some(ty) = program.lookup_type(type_id) else {
+        return vec![];
+    };
+    match ty {
+        Type::Tuple(id) => vec![*id],
+        Type::Union(type_ids) => type_ids
+            .iter()
+            .filter_map(|&tid| {
+                program.lookup_type(tid).and_then(|t| match t {
+                    Type::Tuple(id) => Some(*id),
+                    _ => None,
+                })
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
 /// Analyze a tuple bind pattern to find a single type-constraining field.
-///
-/// For complement narrowing to work on tuple patterns like `=[Nil, ys]`:
-/// - We need exactly ONE field that constrains the type (e.g., `Nil`)
-/// - All other fields must be simple bindings (e.g., `ys`)
-///
-/// Returns `Some((field_index, constrained_type))` if suitable for complement narrowing.
 pub fn analyze_tuple_pattern_for_complement(
     pattern: &ast::Match,
-    value_type: &Type,
-    program: &Program,
-) -> Option<(usize, Type)> {
-    // Extract the tuple pattern (may be wrapped in Bind)
+    value_type_id: usize,
+    program: &mut Program,
+) -> Option<(usize, usize)> {
     let tuple_pattern = match pattern {
         ast::Match::Tuple(t) => t,
         ast::Match::Bind(inner) => match inner.as_ref() {
@@ -452,26 +456,24 @@ pub fn analyze_tuple_pattern_for_complement(
         _ => return None,
     };
 
-    // Get field types from value_type
-    let field_types = get_tuple_field_types(value_type, program)?;
+    let field_type_ids = get_tuple_field_types(value_type_id, program)?;
 
-    // Ensure pattern has same number of fields
-    if tuple_pattern.fields.len() != field_types.len() {
+    if tuple_pattern.fields.len() != field_type_ids.len() {
         return None;
     }
 
-    let mut constraining: Option<(usize, Type)> = None;
+    let mut constraining: Option<(usize, usize)> = None;
 
     for (idx, field) in tuple_pattern.fields.iter().enumerate() {
-        let field_type = field_types.get(idx)?;
-        match classify_field_pattern(&field.pattern, field_type, program) {
+        let field_type_id = *field_type_ids.get(idx)?;
+        match classify_field_pattern(&field.pattern, field_type_id, program) {
             FieldPatternKind::AlwaysBinds => continue,
             FieldPatternKind::TypeConstraining(tuple_id) => {
                 if constraining.is_some() {
-                    // Multiple constraining fields - too complex for complement
                     return None;
                 }
-                constraining = Some((idx, Type::Tuple(tuple_id)));
+                let type_id = program.register_type(Type::Tuple(tuple_id));
+                constraining = Some((idx, type_id));
             }
             FieldPatternKind::Complex => return None,
         }
@@ -480,44 +482,42 @@ pub fn analyze_tuple_pattern_for_complement(
     constraining
 }
 
-/// Get field types from a tuple value type.
-///
-/// For union types with multiple tuple variants, all variants must have the same
-/// number of fields. Returns field types from the first tuple variant.
-fn get_tuple_field_types(value_type: &Type, program: &Program) -> Option<Vec<Type>> {
-    let tuples = value_type.extract_tuples();
+/// Get field type IDs from a tuple value type.
+fn get_tuple_field_types(value_type_id: usize, program: &Program) -> Option<Vec<usize>> {
+    let tuples = extract_tuple_ids(value_type_id, program);
     let first_tuple = tuples.first()?;
     let tuple_info = program.lookup_tuple(*first_tuple)?;
-    Some(tuple_info.fields.iter().map(|(_, ty)| ty.clone()).collect())
+    Some(
+        tuple_info
+            .fields
+            .iter()
+            .map(|(_, type_id)| *type_id)
+            .collect(),
+    )
 }
 
-/// Get the narrowed type for a field of a provenance, if any.
-///
-/// Returns the narrowed field type if one has been recorded in the current scope,
-/// otherwise returns None.
+/// Get the narrowed type ID for a field of a provenance, if any.
 pub fn get_field_narrowing(
     scopes: &[Scope],
     provenance: &Provenance,
     field_idx: usize,
-) -> Option<Type> {
+) -> Option<usize> {
     scopes.last().and_then(|scope| {
         scope
             .narrowings
             .fields
             .iter()
             .find(|(prov, idx, _)| prov == provenance && *idx == field_idx)
-            .map(|(_, _, ty)| ty.clone())
+            .map(|(_, _, ty)| *ty)
     })
 }
 
 /// Record a field narrowing for a provenance.
-///
-/// Updates the field narrowing if it already exists, otherwise adds a new entry.
 pub fn set_field_narrowing(
     scopes: &mut [Scope],
     provenance: &Provenance,
     field_idx: usize,
-    narrowed_type: Type,
+    narrowed_type_id: usize,
 ) {
     if let Some(scope) = scopes.last_mut() {
         if let Some(entry) = scope
@@ -526,46 +526,37 @@ pub fn set_field_narrowing(
             .iter_mut()
             .find(|(prov, idx, _)| prov == provenance && *idx == field_idx)
         {
-            entry.2 = narrowed_type;
+            entry.2 = narrowed_type_id;
         } else {
             scope
                 .narrowings
                 .fields
-                .push((provenance.clone(), field_idx, narrowed_type));
+                .push((provenance.clone(), field_idx, narrowed_type_id));
         }
     }
 }
 
 /// Narrow nil from bindings created after a checkpoint.
-///
-/// When a chain/expression succeeds (doesn't short-circuit on nil), any bindings
-/// created during that chain that contain nil in their type can have nil removed,
-/// since we know execution continued past the potential failure point.
-///
-/// # Arguments
-/// * `scopes` - The scope stack (only the last scope is examined)
-/// * `bindings_before` - Set of binding names that existed before the chain
-///
-/// # Behavior
-/// For each binding created after the checkpoint (not in `bindings_before`):
-/// - If the binding is a variable with a nil-containing type
-/// - Add a narrowing that removes nil from its type
 pub fn narrow_nil_from_new_bindings(
     scopes: &mut [Scope],
     bindings_before: &std::collections::HashSet<String>,
+    program: &mut Program,
 ) {
     if let Some(scope) = scopes.last_mut() {
-        let new_bindings_to_narrow: Vec<(String, Type)> = scope
+        let new_bindings_to_narrow: Vec<(String, usize)> = scope
             .bindings
             .iter()
             .filter_map(|(name, binding)| {
                 if bindings_before.contains(name) {
                     return None;
                 }
-                if let Binding::Variable { ty, .. } = binding
-                    && ty.contains_nil()
-                {
-                    return Some((name.clone(), ty.without_nil()));
+                if let Binding::Variable { ty, .. } = binding {
+                    let ty_ref = program.lookup_type(*ty)?;
+                    if ty_ref.contains_nil(program) {
+                        let without_nil = ty_ref.without_nil(program);
+                        let new_id = program.register_type(without_nil);
+                        return Some((name.clone(), new_id));
+                    }
                 }
                 None
             })

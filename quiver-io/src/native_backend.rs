@@ -1,14 +1,16 @@
 use crate::effects::NativeEffect;
 use io_uring::{IoUring as IoUringRing, opcode, types};
 use quiver_core::ProcessId;
-use quiver_core::effects::{EffectBackend, EffectResult};
+use quiver_core::effects::{EffectBackend, EffectError, EffectResult};
 use quiver_core::error::Error;
 use quiver_core::value::{ResourceId, Value};
 use socket2::Socket;
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::ErrorKind;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::FromRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 
 /// Resource metadata stored by the io_uring backend
@@ -73,6 +75,8 @@ pub struct NativeEffectBackend {
     resources: HashMap<ResourceId, Resource>,
     /// Counter for allocating resource IDs
     next_resource_id: ResourceId,
+    /// Mapping from resource type name to type ID (set from bytecode)
+    resource_type_ids: HashMap<String, usize>,
 }
 
 impl NativeEffectBackend {
@@ -87,7 +91,23 @@ impl NativeEffectBackend {
             next_completion_id: 1,
             resources: HashMap::new(),
             next_resource_id: 1,
+            resource_type_ids: HashMap::new(),
         })
+    }
+
+    /// Set the resource type ID mapping from bytecode resources list
+    pub fn set_resource_type_ids(&mut self, resources: &[String]) {
+        self.resource_type_ids.clear();
+        for (type_id, name) in resources.iter().enumerate() {
+            self.resource_type_ids.insert(name.clone(), type_id);
+        }
+    }
+
+    /// Get the type ID for a resource type name
+    fn get_resource_type_id(&self, name: &str) -> usize {
+        // Return the type ID if known, or 0 as a fallback
+        // (type ID 0 is a valid fallback since type checking happens at compile time)
+        *self.resource_type_ids.get(name).unwrap_or(&0)
     }
 }
 
@@ -206,8 +226,6 @@ impl NativeEffectBackend {
         flags: i32,
         mode: u32,
     ) -> Result<Option<EffectResult>, Error> {
-        use std::os::unix::fs::OpenOptionsExt;
-
         // Convert path bytes to string
         let path_str = String::from_utf8(path)
             .map_err(|_| Error::InvalidArgument("Path contains invalid UTF-8".to_string()))?;
@@ -263,10 +281,8 @@ impl NativeEffectBackend {
         self.resources.insert(resource_id, metadata);
 
         // Return immediate completion with the resource
-        Ok(Some(Ok((
-            Value::Resource(resource_id, "File".to_string()),
-            vec![],
-        ))))
+        let type_id = self.get_resource_type_id("File");
+        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
     }
 
     fn execute_dns_resolve(&mut self, hostname: Vec<u8>) -> Result<Option<EffectResult>, Error> {
@@ -285,7 +301,6 @@ impl NativeEffectBackend {
                 .collect(),
             Err(e) => {
                 // Distinguish between "not found" and other errors
-                use std::io::ErrorKind;
                 match e.kind() {
                     // Host not found - create empty resolver
                     ErrorKind::NotFound | ErrorKind::InvalidInput => vec![],
@@ -313,10 +328,8 @@ impl NativeEffectBackend {
             },
         );
 
-        Ok(Some(Ok((
-            Value::Resource(resource_id, "DnsResolver".to_string()),
-            vec![],
-        ))))
+        let type_id = self.get_resource_type_id("DnsResolver");
+        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
     }
 
     fn execute_dns_next(&mut self, resource_id: ResourceId) -> Result<Option<EffectResult>, Error> {
@@ -472,10 +485,8 @@ impl NativeEffectBackend {
         };
         self.resources.insert(resource_id, metadata);
 
-        Ok(Some(Ok((
-            Value::Resource(resource_id, "TcpListener".to_string()),
-            vec![],
-        ))))
+        let type_id = self.get_resource_type_id("TcpListener");
+        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
     }
 
     fn execute_file_read(
@@ -759,8 +770,6 @@ impl NativeEffectBackend {
     }
 
     fn handle_read_completion(&self, result_code: i32, mut buffer: Vec<u8>) -> EffectResult {
-        use quiver_core::effects::EffectError;
-
         if result_code < 0 {
             // Map common errno values to structured errors
             return Err(match -result_code {
@@ -785,8 +794,6 @@ impl NativeEffectBackend {
     }
 
     fn handle_write_completion(&self, result_code: i32, _buffer_len: usize) -> EffectResult {
-        use quiver_core::effects::EffectError;
-
         if result_code < 0 {
             // Map common errno values to structured errors
             return Err(match -result_code {
@@ -805,8 +812,6 @@ impl NativeEffectBackend {
     }
 
     fn handle_flush_completion(&self, result_code: i32) -> EffectResult {
-        use quiver_core::effects::EffectError;
-
         if result_code < 0 {
             Err(match -result_code {
                 9 => EffectError::InvalidArgument("Bad file descriptor".to_string()),
@@ -819,8 +824,6 @@ impl NativeEffectBackend {
     }
 
     fn handle_accept_completion(&mut self, result_code: i32) -> EffectResult {
-        use quiver_core::effects::EffectError;
-
         if result_code < 0 {
             return Err(match -result_code {
                 9 => EffectError::InvalidArgument("Bad file descriptor".to_string()),
@@ -850,10 +853,8 @@ impl NativeEffectBackend {
         self.resources
             .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
 
-        Ok((
-            Value::Resource(new_resource_id, "TcpSocket".to_string()),
-            vec![],
-        ))
+        let type_id = self.get_resource_type_id("TcpSocket");
+        Ok((Value::Resource(new_resource_id, type_id), vec![]))
     }
 
     fn handle_connect_completion(
@@ -862,8 +863,6 @@ impl NativeEffectBackend {
         socket: Socket,
         peer_addr: SocketAddr,
     ) -> EffectResult {
-        use quiver_core::effects::EffectError;
-
         if result_code < 0 {
             // Connect failed - socket will be dropped automatically
             return Err(match -result_code {
@@ -883,9 +882,7 @@ impl NativeEffectBackend {
         self.resources
             .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
 
-        Ok((
-            Value::Resource(new_resource_id, "TcpSocket".to_string()),
-            vec![],
-        ))
+        let type_id = self.get_resource_type_id("TcpSocket");
+        Ok((Value::Resource(new_resource_id, type_id), vec![]))
     }
 }

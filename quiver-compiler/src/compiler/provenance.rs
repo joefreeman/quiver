@@ -3,7 +3,6 @@
 //! Provenance tracks where a value originated, enabling narrowing to affect
 //! the original binding when type checks succeed.
 
-use quiver_core::types::Type;
 use std::collections::HashMap;
 
 /// Tracks where a value originated, enabling type narrowing.
@@ -47,16 +46,17 @@ impl Provenance {
 ///
 /// Narrowings overlay the original bindings, providing refined types based on
 /// runtime checks that have succeeded on the current control flow path.
+/// All type references are type IDs into the Program's type registry.
 #[derive(Debug, Clone, Default)]
 pub struct Narrowings {
-    /// Narrowed types for variables, keyed by variable name.
-    pub variables: HashMap<String, Type>,
+    /// Narrowed types for variables, keyed by variable name (values are type IDs).
+    pub variables: HashMap<String, usize>,
 
-    /// Narrowed type for the block/function parameter (if any).
-    pub parameter: Option<Type>,
+    /// Narrowed type for the block/function parameter (if any) - type ID.
+    pub parameter: Option<usize>,
 
-    /// Field narrowings for any provenance, stored as (parent_provenance, field_index, narrowed_type).
+    /// Field narrowings for any provenance, stored as (parent_provenance, field_index, narrowed_type_id).
     /// Used for tuple pattern complement narrowing where a specific field
     /// has been constrained but the parent type hasn't changed.
-    pub fields: Vec<(Provenance, usize, Type)>,
+    pub fields: Vec<(Provenance, usize, usize)>,
 }

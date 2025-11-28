@@ -1,13 +1,34 @@
 use crate::binary::BinaryData;
-use crate::bytecode::{BuiltinInfo, Constant, Function, Instruction};
+use crate::bytecode::{ConcreteType, Constant, Function, Instruction};
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
-use crate::types::{CallableType, ProcessType, TupleLookup, TupleTypeInfo, Type};
+use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
+
+/// Bundled program update data for incremental compilation.
+/// Contains full tuple type information for merging with Environment's Program state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramUpdate {
+    pub constants: Vec<Constant>,
+    pub functions: Vec<Function>,
+    /// Full tuple type information (name, fields, is_partial)
+    pub tuples: Vec<TupleTypeInfo>,
+    /// Types used by IsType instructions for pattern matching
+    pub types: Vec<Type>,
+    /// Builtin information (name and resolved types)
+    pub builtins: Vec<BuiltinInfo>,
+    pub resources: Vec<String>,
+    /// For each type_id, the set of concrete types compatible with it (for IsType checks)
+    pub type_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each function_id, the set of concrete types compatible with its parameter
+    pub function_param_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each builtin_id, the set of concrete types compatible with its parameter
+    pub builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
+}
 
 /// Instruction type for profiling statistics (groups parameterized instructions)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,7 +143,7 @@ enum SelectResult {
 
 pub struct Executor<E: Effect> {
     processes: HashMap<ProcessId, Process>,
-    process_types: HashMap<ProcessId, (Type, usize)>, // Cached types for REPL process references
+    process_function_indices: HashMap<ProcessId, usize>, // Maps process ID to its function index (for REPL)
     queue: VecDeque<ProcessId>,
     spawning: HashSet<ProcessId>,
     selecting: HashSet<ProcessId>,
@@ -130,9 +151,15 @@ pub struct Executor<E: Effect> {
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
-    builtins: Vec<BuiltinInfo>,
-    tuples: Vec<TupleTypeInfo>,
-    types: Vec<Type>,
+    builtins: Vec<String>,  // Builtin names (for effect dispatch)
+    tuples: Vec<usize>,     // Tuple arities
+    resources: Vec<String>, // Resource type names
+    /// For each type_id, the set of concrete types compatible with it (for IsType checks)
+    type_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each function_id, the set of concrete types compatible with its parameter
+    function_param_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each builtin_id, the set of concrete types compatible with its parameter
+    builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
     // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
     heap: Vec<BinaryData>,
     // Builtin registry for executing builtin functions
@@ -142,11 +169,8 @@ pub struct Executor<E: Effect> {
     profile: bool,
 }
 
-impl<E: Effect> TupleLookup for Executor<E> {
-    fn lookup_tuple(&self, type_id: usize) -> Option<&TupleTypeInfo> {
-        self.tuples.get(type_id)
-    }
-}
+// Note: TupleLookup is not implemented for Executor anymore since tuples only stores arities
+// Type compatibility is now precomputed at compile time
 impl<E: Effect> Executor<E> {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
@@ -205,23 +229,11 @@ impl<E: Effect> Executor<E> {
     }
 
     pub fn new(builtins_registry: crate::builtins::BuiltinRegistry<E>, profile: bool) -> Self {
-        // Create NIL type (index 0)
-        let nil_type = TupleTypeInfo {
-            name: None,
-            fields: vec![],
-            is_partial: false,
-        };
-
-        // Create OK type (index 1)
-        let ok_type = TupleTypeInfo {
-            name: Some("Ok".to_string()),
-            fields: vec![],
-            is_partial: false,
-        };
-
+        // Pre-initialize with NIL (index 0) and OK (index 1) tuple arities.
+        // This matches Program::new() so incremental updates are consistent.
         Self {
             processes: HashMap::new(),
-            process_types: HashMap::new(),
+            process_function_indices: HashMap::new(),
             queue: VecDeque::new(),
             spawning: HashSet::new(),
             selecting: HashSet::new(),
@@ -229,8 +241,11 @@ impl<E: Effect> Executor<E> {
             constants: vec![],
             functions: vec![],
             builtins: vec![],
-            tuples: vec![nil_type, ok_type],
-            types: vec![],
+            tuples: vec![0, 0], // NIL and OK have 0 fields
+            resources: vec![],
+            type_compatibility: vec![],
+            function_param_compatibility: vec![],
+            builtin_param_compatibility: vec![],
             heap: vec![],
             builtins_registry,
             stats: ExecutionStats::new(),
@@ -290,8 +305,8 @@ impl<E: Effect> Executor<E> {
             captures_count,
         ));
 
-        // Cache the process type for REPL references
-        self.update_process_type(id, function_index);
+        // Cache the function index for REPL references
+        self.set_process_function_index(id, function_index);
 
         // Add to queue
         self.queue.push_back(id);
@@ -493,20 +508,15 @@ impl<E: Effect> Executor<E> {
             .collect()
     }
 
-    pub fn get_process_types(&self) -> HashMap<ProcessId, (Type, usize)> {
-        self.process_types.clone()
+    /// Get process function indices for REPL process references
+    /// Returns a map from process ID to the function index that process is running
+    pub fn get_process_function_indices(&self) -> HashMap<ProcessId, usize> {
+        self.process_function_indices.clone()
     }
 
-    /// Update the cached type for a process (called on spawn and resume)
-    pub fn update_process_type(&mut self, id: ProcessId, function_index: usize) {
-        if let Some(function) = self.get_function(function_index) {
-            let process_type = Type::Process(Box::new(ProcessType {
-                send: Some(Box::new(function.function_type.receive.clone())),
-                receive: Some(Box::new(function.function_type.result.clone())),
-            }));
-            self.process_types
-                .insert(id, (process_type, function_index));
-        }
+    /// Record the function index for a process (called on spawn and resume)
+    pub fn set_process_function_index(&mut self, id: ProcessId, function_index: usize) {
+        self.process_function_indices.insert(id, function_index);
     }
 
     pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
@@ -521,10 +531,18 @@ impl<E: Effect> Executor<E> {
                 None => None,
             };
 
+            // Get function_index from cached entry point (preferred for process type)
+            // Falls back to frames for processes that weren't tracked (shouldn't happen normally)
+            let function_index = self
+                .process_function_indices
+                .get(&id)
+                .copied()
+                .or_else(|| process.frames.first().map(|f| f.function_index));
+
             ProcessInfo {
                 id,
                 status: self.get_status(id, process),
-                function_index: process.frames.first().map(|f| f.function_index),
+                function_index,
                 stack_size: process.stack.len(),
                 locals_count: process.locals.len(),
                 frames_count: process.frames.len(),
@@ -540,8 +558,9 @@ impl<E: Effect> Executor<E> {
         self.functions.get(index)
     }
 
-    pub fn get_builtin(&self, index: usize) -> Option<&BuiltinInfo> {
-        self.builtins.get(index)
+    /// Get builtin name by index
+    pub fn get_builtin_name(&self, index: usize) -> Option<&str> {
+        self.builtins.get(index).map(|s| s.as_str())
     }
 
     /// Re-queue a process for execution (e.g., after I/O completion)
@@ -554,19 +573,24 @@ impl<E: Effect> Executor<E> {
         self.queue.retain(|&p| p != process_id);
     }
 
-    pub fn update_program(
-        &mut self,
-        mut constants: Vec<Constant>,
-        mut functions: Vec<Function>,
-        mut tuples: Vec<TupleTypeInfo>,
-        mut types: Vec<Type>,
-        mut builtins: Vec<BuiltinInfo>,
-    ) {
-        self.constants.append(&mut constants);
-        self.functions.append(&mut functions);
-        self.tuples.append(&mut tuples);
-        self.types.append(&mut types);
-        self.builtins.append(&mut builtins);
+    /// Update executor with program data (appends to existing data).
+    ///
+    /// Appends new constants, functions, tuples, and builtins to the existing program state.
+    /// Compatibility tables are replaced (they should be recomputed for the full program).
+    ///
+    /// On a fresh executor (empty state), this is equivalent to initializing with complete data.
+    pub fn update_program(&mut self, update: ProgramUpdate) {
+        self.constants.extend(update.constants);
+        self.functions.extend(update.functions);
+        // Extract arities from TupleTypeInfo - executor only needs arities at runtime
+        self.tuples
+            .extend(update.tuples.iter().map(|t| t.fields.len()));
+        self.builtins
+            .extend(update.builtins.iter().map(|b| b.name.clone()));
+        self.resources = update.resources;
+        self.type_compatibility = update.type_compatibility;
+        self.function_param_compatibility = update.function_param_compatibility;
+        self.builtin_param_compatibility = update.builtin_param_compatibility;
     }
 
     /// Execute up to max_units instruction units for a single process.
@@ -926,14 +950,14 @@ impl<E: Effect> Executor<E> {
     }
 
     fn handle_tuple(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action<E>>, Error> {
-        let type_info = self
+        // tuples now stores arities directly
+        let size = *self
             .tuples
             .get(type_id)
             .ok_or_else(|| Error::TypeMismatch {
                 expected: "known tuple type".to_string(),
                 found: format!("unknown type ({:?})", type_id),
             })?;
-        let size = type_info.fields.len();
 
         let process = self
             .get_process_mut(pid)
@@ -983,7 +1007,7 @@ impl<E: Effect> Executor<E> {
     fn handle_is_type(
         &mut self,
         pid: ProcessId,
-        type_id: usize,
+        pattern_type_id: usize,
     ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
@@ -991,19 +1015,8 @@ impl<E: Effect> Executor<E> {
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        // Look up the expected type from types registry
-        let expected_type = self
-            .types
-            .get(type_id)
-            .ok_or_else(|| {
-                Error::InvalidArgument(format!("Type ID {} not found in types registry", type_id))
-            })?
-            .clone();
-
-        // Convert value to its Type representation
-        let actual_type = self.value_to_type(&value);
-
-        let is_match = actual_type.is_compatible(&expected_type, self);
+        // Use precomputed type compatibility instead of runtime type checking
+        let is_match = self.check_type_compatible(&value, pattern_type_id);
 
         let process = self
             .get_process_mut(pid)
@@ -1017,6 +1030,46 @@ impl<E: Effect> Executor<E> {
             frame.counter += 1;
         }
         Ok(None)
+    }
+
+    /// Check if a value is compatible with a pattern type using precomputed compatibility table
+    fn check_type_compatible(&self, value: &Value, pattern_type_id: usize) -> bool {
+        let concrete = self.get_concrete_type(value);
+        self.type_compatibility
+            .get(pattern_type_id)
+            .map(|set| set.contains(&concrete))
+            .unwrap_or(false)
+    }
+
+    /// Get the concrete type for a runtime value using O(1) lookup
+    fn get_concrete_type(&self, value: &Value) -> ConcreteType {
+        match value {
+            Value::Integer(_) => ConcreteType::Integer,
+            Value::Binary(_) => ConcreteType::Binary,
+            Value::Tuple(tuple_id, _) => ConcreteType::Tuple(*tuple_id),
+            Value::Function(func_id, _) => ConcreteType::Function(*func_id),
+            Value::Builtin(builtin_id) => ConcreteType::Builtin(*builtin_id),
+            Value::Process(_, func_id) => ConcreteType::Process(*func_id),
+            Value::Resource(_, resource_type_id) => ConcreteType::Resource(*resource_type_id),
+        }
+    }
+
+    /// Check if a message is compatible with a function/builtin's parameter type
+    fn check_message_compatible(&self, message: &Value, source: &Value) -> bool {
+        let concrete = self.get_concrete_type(message);
+        match source {
+            Value::Function(func_id, _) => self
+                .function_param_compatibility
+                .get(*func_id)
+                .map(|set| set.contains(&concrete))
+                .unwrap_or(true),
+            Value::Builtin(builtin_id) => self
+                .builtin_param_compatibility
+                .get(*builtin_id)
+                .map(|set| set.contains(&concrete))
+                .unwrap_or(true),
+            _ => true,
+        }
     }
 
     fn handle_jump(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action<E>>, Error> {
@@ -1094,7 +1147,7 @@ impl<E: Effect> Executor<E> {
                 // Don't increment counter - new frame starts at 0
                 Ok(None)
             }
-            Value::Builtin(name) => {
+            Value::Builtin(builtin_id) => {
                 // Pop function and parameter
                 let parameter = {
                     let process = self
@@ -1104,14 +1157,20 @@ impl<E: Effect> Executor<E> {
                     process.stack.pop().ok_or(Error::StackUnderflow)?
                 };
 
-                // Find builtin index for profiling
-                let builtin_index = self.builtins.iter().position(|b| b.name == name);
+                // Look up builtin name for registry lookup
+                let builtin_name = self
+                    .builtins
+                    .get(builtin_id)
+                    .ok_or_else(|| {
+                        Error::InvalidArgument(format!("Unknown builtin id: {}", builtin_id))
+                    })?
+                    .clone();
 
                 let builtin = self
                     .builtins_registry
-                    .get_implementation(&name)
+                    .get_implementation(&builtin_name)
                     .ok_or_else(|| {
-                        Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
+                        Error::InvalidArgument(format!("Unrecognised builtin: {}", builtin_name))
                     })?;
 
                 let start = if self.profile {
@@ -1124,11 +1183,9 @@ impl<E: Effect> Executor<E> {
 
                 if let Some(start) = start {
                     let elapsed = start.elapsed().as_nanos() as u64;
-                    if let Some(idx) = builtin_index {
-                        let entry = self.stats.builtin_stats.entry(idx).or_insert((0, 0));
-                        entry.0 += 1;
-                        entry.1 += elapsed;
-                    }
+                    let entry = self.stats.builtin_stats.entry(builtin_id).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 += elapsed;
                 }
 
                 // Handle both immediate and action results
@@ -1280,16 +1337,16 @@ impl<E: Effect> Executor<E> {
     }
 
     fn handle_builtin(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
-        let builtin_name = self
-            .get_builtin(index)
-            .ok_or(Error::BuiltinUndefined(index))?
-            .name
-            .clone();
+        // Verify builtin exists
+        if index >= self.builtins.len() {
+            return Err(Error::BuiltinUndefined(index));
+        }
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        process.stack.push(Value::Builtin(builtin_name));
+        // Push builtin by index
+        process.stack.push(Value::Builtin(index));
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -1837,24 +1894,8 @@ impl<E: Effect> Executor<E> {
 
         // Loop through all messages starting from cursor
         for (msg_idx, message) in process.mailbox.iter().enumerate().skip(cursor) {
-            // Check if type is compatible
-            let expected_type = match source {
-                Value::Function(func_id, _) => self
-                    .functions
-                    .get(*func_id)
-                    .map(|f| &f.function_type.parameter),
-                Value::Builtin(name) => self
-                    .builtins
-                    .iter()
-                    .find(|b| &b.name == name)
-                    .map(|b| &b.parameter_type),
-                _ => unreachable!(),
-            };
-
-            let message_type = self.value_to_type(message);
-            let type_compatible = expected_type
-                .map(|expected| message_type.is_compatible(expected, self))
-                .unwrap_or(true);
+            // Check if type is compatible using precomputed parameter compatibility
+            let type_compatible = self.check_message_compatible(message, source);
 
             if type_compatible {
                 // Found a compatible message
@@ -1983,60 +2024,6 @@ impl<E: Effect> Executor<E> {
         }
 
         Ok(None)
-    }
-
-    /// Convert a runtime Value to its Type representation
-    pub fn value_to_type(&self, value: &Value) -> Type {
-        match value {
-            Value::Integer(_) => Type::Integer,
-            Value::Binary(_) => Type::Binary,
-            Value::Tuple(type_id, _) => {
-                // Check if this is a partial type
-                if self
-                    .lookup_tuple(*type_id)
-                    .is_some_and(|info| info.is_partial)
-                {
-                    Type::Partial(*type_id)
-                } else {
-                    Type::Tuple(*type_id)
-                }
-            }
-            Value::Function(func_idx, _) => {
-                // Get the function's type signature
-                let func_type = &self
-                    .functions
-                    .get(*func_idx)
-                    .expect("Function should exist")
-                    .function_type;
-                Type::Callable(Box::new(func_type.clone()))
-            }
-            Value::Builtin(name) => {
-                // Look up builtin type from the resolved builtins list
-                let builtin_info = self
-                    .builtins
-                    .iter()
-                    .find(|b| &b.name == name)
-                    .expect("Builtin should be registered");
-                Type::Callable(Box::new(CallableType {
-                    parameter: builtin_info.parameter_type.clone(),
-                    result: builtin_info.result_type.clone(),
-                    receive: Type::Union(vec![]), // Builtins don't receive messages
-                }))
-            }
-            Value::Process(_, function_idx) => {
-                // Get the process type from the function that spawned it
-                let func_type = &self
-                    .functions
-                    .get(*function_idx)
-                    .expect("Function should exist")
-                    .function_type;
-                Type::Process(Box::new(ProcessType {
-                    send: Some(Box::new(func_type.receive.clone())),
-                    receive: Some(Box::new(func_type.result.clone())),
-                }))
-            }
-            Value::Resource(_, type_name) => Type::Resource(type_name.clone()),
-        }
     }
 
     fn check_expired_timeouts(&mut self, current_time_ms: u64) {
@@ -2223,9 +2210,9 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
             Ok(Value::Function(*func_idx, remapped_captures?))
         }
         Value::Integer(i) => Ok(Value::Integer(*i)),
-        Value::Builtin(name) => Ok(Value::Builtin(name.clone())),
+        Value::Builtin(name) => Ok(Value::Builtin(*name)),
         Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
-        Value::Resource(id, type_name) => Ok(Value::Resource(*id, type_name.clone())),
+        Value::Resource(id, type_name) => Ok(Value::Resource(*id, *type_name)),
     }
 }
 

@@ -1,11 +1,9 @@
 use crate::environment::{EnvironmentError, ProcessResultsMap, RuntimeResult};
 use crate::messages::{Command, Event};
 use crate::transport::{CommandReceiver, EventSender};
-use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
 use quiver_core::effects::Effect;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, Frame, ProcessId, ProcessStatus};
-use quiver_core::types::{TupleTypeInfo, Type};
 use quiver_core::value::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -65,14 +63,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
     fn handle_command(&mut self, command: Command<E>) -> Result<(), EnvironmentError> {
         match command {
-            Command::UpdateProgram {
-                constants,
-                functions,
-                tuples,
-                types,
-                builtins,
-            } => {
-                self.update_program(constants, functions, tuples, types, builtins)?;
+            Command::UpdateProgram(update) => {
+                self.update_program(update)?;
             }
             Command::StartProcess { id, function_index } => {
                 self.start_process(id, function_index)?;
@@ -229,15 +221,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
     fn update_program(
         &mut self,
-        constants: Vec<Constant>,
-        functions: Vec<Function>,
-        tuples: Vec<TupleTypeInfo>,
-        types: Vec<Type>,
-        builtins: Vec<BuiltinInfo>,
+        update: quiver_core::executor::ProgramUpdate,
     ) -> Result<(), EnvironmentError> {
-        self.executor
-            .update_program(constants, functions, tuples, types, builtins);
-
+        self.executor.update_program(update);
         Ok(())
     }
 
@@ -315,8 +301,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         process.stack.push(result_value);
         process.frames.push(Frame::new(function_index, 0, 0));
 
-        // Update the cached process type for REPL references
-        self.executor.update_process_type(id, function_index);
+        // Update the cached function index for REPL references
+        self.executor.set_process_function_index(id, function_index);
 
         // Add back to queue
         self.executor.add_to_queue(id);
@@ -510,10 +496,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     }
 
     fn get_process_types(&mut self, request_id: u64) -> Result<(), EnvironmentError> {
-        let process_types = self.executor.get_process_types();
+        let function_indices = self.executor.get_process_function_indices();
         self.sender.send(Event::ProcessTypesResponse {
             request_id,
-            result: Ok(process_types),
+            result: Ok(function_indices),
         })?;
         Ok(())
     }

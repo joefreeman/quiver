@@ -20,7 +20,7 @@ pub use codegen::InstructionBuilder;
 pub use modules::{ModuleCache, compile_type_import};
 pub use provenance::{Narrowings, Provenance};
 pub use scopes::{Binding, Parameter, Scope, ScopeKind};
-pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_types};
+pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_type_ids};
 
 use crate::{
     ast,
@@ -30,8 +30,8 @@ use crate::{
 use quiver_core::{
     bytecode::{Constant, Function, Instruction},
     program::Program,
-    types::{CallableType, NIL, OK, ProcessType, TupleLookup, Type},
-    value::Value,
+    types::{NIL, OK, Type, TypeLookup},
+    value::{Binary, Value},
 };
 
 #[derive(Debug, PartialEq)]
@@ -141,7 +141,7 @@ pub enum Error {
 /// Result of compilation containing all outputs
 pub struct CompilationResult {
     pub instructions: Vec<Instruction>,
-    pub result_type: Type,
+    pub result_type: usize,
     pub bindings: HashMap<String, Binding>,
     pub program: Program,
     pub module_cache: ModuleCache,
@@ -150,8 +150,8 @@ pub struct CompilationResult {
 /// Context for ripple operator (~) usage
 /// Tracks the value being rippled and where it is on the stack
 struct RippleContext {
-    /// Type of the value being rippled
-    value_type: Type,
+    /// Type ID of the value being rippled
+    value_type_id: usize,
     /// Stack offset where the ripple value is located
     stack_offset: usize,
     /// Whether this context owns the value and must clean it up
@@ -172,10 +172,10 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     module_loader: &'a dyn ModuleLoader,
     builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
 
-    process_types: &'a HashMap<usize, (Type, usize)>,
+    process_types: &'a HashMap<usize, (usize, usize)>,
 
-    // Track the receive type of the function currently being compiled
-    current_receive_type: Type,
+    // Track the receive type ID of the function currently being compiled
+    current_receive_type_id: usize,
 
     _phantom: std::marker::PhantomData<E>,
 }
@@ -187,12 +187,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         existing_bindings: &HashMap<String, Binding>,
         module_cache: ModuleCache,
         module_loader: &'a dyn ModuleLoader,
-        base_types: Vec<quiver_core::types::TupleTypeInfo>,
-        parameter_type: Type,
-        process_types: &'a HashMap<usize, (Type, usize)>,
+        mut program: Program,
+        parameter_type_id: usize,
+        process_types: &'a HashMap<usize, (usize, usize)>,
         builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
     ) -> Result<CompilationResult, Error> {
-        let program = Program::with_types(base_types);
+        let never_id = program.never();
 
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
@@ -203,7 +203,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             module_loader,
             builtins,
             process_types,
-            current_receive_type: Type::never(),
+            current_receive_type_id: never_id,
             _phantom: std::marker::PhantomData,
         };
 
@@ -230,7 +230,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .unwrap_or(0);
 
         // Only allocate parameter slot if we have expressions
-        // (Type definitions and imports don't need parameters)
+        // (CType definitions and imports don't need parameters)
         let has_expressions = ast_program
             .statements
             .iter()
@@ -243,7 +243,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             compiler.codegen.add_instruction(Instruction::Store);
 
             Some(scopes::Parameter {
-                ty: parameter_type,
+                ty: parameter_type_id,
                 index: param_local,
                 provenance: Provenance::Parameter,
             })
@@ -255,16 +255,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         compiler.scopes = vec![Scope::new(scope_bindings, scope_parameter, ScopeKind::Root)];
 
         let num_statements = ast_program.statements.len();
-        let mut result_type = Type::nil();
+        let mut result_type_id = compiler.program.register_type(Type::nil());
         for (i, statement) in ast_program.statements.into_iter().enumerate() {
             let is_last = i == num_statements - 1;
             let is_expression = matches!(&statement, ast::Statement::Expression(_));
 
-            let statement_type = compiler.compile_statement(statement)?;
+            let statement_type_id = compiler.compile_statement(statement)?;
 
             // Track the type of the last statement
             if is_last {
-                result_type = statement_type;
+                result_type_id = statement_type_id;
             }
 
             // Pop intermediate expression results, keeping only the last one
@@ -283,14 +283,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         Ok(CompilationResult {
             instructions: compiler.codegen.instructions,
-            result_type,
+            result_type: result_type_id,
             bindings,
             program: compiler.program,
             module_cache: compiler.module_cache,
         })
     }
 
-    fn compile_statement(&mut self, statement: ast::Statement) -> Result<Type, Error> {
+    fn compile_statement(&mut self, statement: ast::Statement) -> Result<usize, Error> {
         match statement {
             ast::Statement::TypeAlias {
                 name,
@@ -298,11 +298,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 type_definition,
             } => {
                 self.compile_type_alias(&name, type_parameters, type_definition)?;
-                Ok(Type::nil())
+                Ok(self.program.register_type(Type::nil()))
             }
             ast::Statement::TypeImport { pattern, module } => {
                 self.compile_type_import(pattern, &module)?;
-                Ok(Type::nil())
+                Ok(self.program.register_type(Type::nil()))
             }
             ast::Statement::Expression(expression) => {
                 let (result_type, _) = self.compile_expression(expression, None)?;
@@ -408,19 +408,73 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         )
     }
 
-    fn compile_literal(&mut self, literal: ast::Literal) -> Result<Type, Error> {
+    // Helper methods for type operations on type IDs
+
+    /// Check if a type ID represents the never type (empty union)
+    fn is_never(&self, type_id: usize) -> bool {
+        self.program
+            .lookup_type(type_id)
+            .map(|t| t.is_never())
+            .unwrap_or(false)
+    }
+
+    /// Check if a type ID represents the nil type
+    fn is_nil(&self, type_id: usize) -> bool {
+        self.program
+            .lookup_type(type_id)
+            .map(|t| t.is_nil())
+            .unwrap_or(false)
+    }
+
+    /// Check if a type ID is nil, Ok, or a union containing only nil/Ok
+    fn is_nil_or_ok(&self, type_id: usize) -> bool {
+        match self.program.lookup_type(type_id) {
+            Some(Type::Tuple(id))
+                if *id == quiver_core::types::NIL || *id == quiver_core::types::OK =>
+            {
+                true
+            }
+            Some(Type::Union(members)) => members.iter().all(|&member_id| {
+                self.program
+                    .lookup_type(member_id)
+                    .map(|t| t.is_nil() || t.is_ok())
+                    .unwrap_or(false)
+            }),
+            _ => false,
+        }
+    }
+
+    /// Check if a type ID contains nil (either is nil or is a union containing nil)
+    fn contains_nil(&self, type_id: usize) -> bool {
+        self.program
+            .lookup_type(type_id)
+            .map(|t| t.contains_nil(&self.program))
+            .unwrap_or(false)
+    }
+
+    /// Get type without nil variants
+    fn without_nil(&mut self, type_id: usize) -> usize {
+        if let Some(ty) = self.program.lookup_type(type_id) {
+            let without_nil = ty.without_nil(&self.program);
+            self.program.register_type(without_nil)
+        } else {
+            self.program.never()
+        }
+    }
+
+    fn compile_literal(&mut self, literal: ast::Literal) -> Result<usize, Error> {
         match literal {
             ast::Literal::Integer(integer) => {
                 let index = self.program.register_constant(Constant::Integer(integer));
                 self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Integer)
+                Ok(self.program.register_type(Type::Integer))
             }
             ast::Literal::Binary(bytes) => {
                 let index = self
                     .program
                     .register_constant(Constant::Binary(bytes.clone()));
                 self.codegen.add_instruction(Instruction::Constant(index));
-                Ok(Type::Binary)
+                Ok(self.program.register_type(Type::Binary))
             }
         }
     }
@@ -430,7 +484,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         tuple_name: Option<String>,
         fields: Vec<ast::TupleField>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         helpers::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
         // Check if this tuple contains spreads
@@ -452,7 +506,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let ripple_context_value;
                     let ripple_context_param = if let Some(ctx) = ripple_context {
                         ripple_context_value = RippleContext {
-                            value_type: ctx.value_type.clone(),
+                            value_type_id: ctx.value_type_id,
                             stack_offset: ctx.stack_offset + fields_compiled,
                             owns_value: false,
                             provenance: ctx.provenance.clone(),
@@ -472,7 +526,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         // Register the tuple type and emit instruction
-        let tuple_id = self.program.register_tuple(tuple_name, field_types, false);
+        let tuple_id = self.program.register_tuple(tuple_name, field_types);
         self.codegen.add_instruction(Instruction::Tuple(tuple_id));
 
         // Clean up ripple value if we own it
@@ -483,17 +537,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.add_instruction(Instruction::Pop);
         }
 
-        Ok((Type::Tuple(tuple_id), Provenance::Tuple(field_provenances)))
+        Ok((
+            self.program.register_type(Type::Tuple(tuple_id)),
+            Provenance::Tuple(field_provenances),
+        ))
     }
 
-    fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<Type, Error> {
+    fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<usize, Error> {
         let mut receive_types = Vec::new();
         if let Some(block) = block {
             self.collect_receive_types(block, &mut receive_types)?;
         }
 
         if receive_types.is_empty() {
-            return Ok(Type::never());
+            return Ok(self.program.never());
         }
 
         // Check all receives have the same type
@@ -501,19 +558,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         for ty in &receive_types[1..] {
             if ty != first_type {
                 return Err(Error::ReceiveTypeMismatch {
-                    first: format!("{:?}", first_type),
-                    second: format!("{:?}", ty),
+                    first: quiver_core::format::format_type_by_id(&self.program, *first_type),
+                    second: quiver_core::format::format_type_by_id(&self.program, *ty),
                 });
             }
         }
 
-        Ok(first_type.clone())
+        Ok(*first_type)
     }
 
     fn collect_receive_types(
         &mut self,
         block: &ast::Block,
-        receive_types: &mut Vec<Type>,
+        receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
         for branch in &block.branches {
             self.collect_receive_types_from_expression(&branch.condition, receive_types)?;
@@ -527,7 +584,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn collect_receive_types_from_expression(
         &mut self,
         expression: &ast::Expression,
-        receive_types: &mut Vec<Type>,
+        receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
         for chain in &expression.chains {
             self.collect_receive_types_from_chain(chain, receive_types)?;
@@ -538,10 +595,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn collect_receive_types_from_chain(
         &mut self,
         chain: &ast::Chain,
-        receive_types: &mut Vec<Type>,
+        receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
         // Track the chained type as we traverse the chain
-        let mut chained_type: Option<Type> = None;
+        let mut chained_type: Option<usize> = None;
 
         for term in &chain.terms {
             chained_type =
@@ -553,9 +610,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn collect_receive_types_from_term(
         &mut self,
         term: &ast::Term,
-        chained_type: Option<Type>,
-        receive_types: &mut Vec<Type>,
-    ) -> Result<Option<Type>, Error> {
+        chained_type: Option<usize>,
+        receive_types: &mut Vec<usize>,
+    ) -> Result<Option<usize>, Error> {
         match term {
             ast::Term::Select(select) => {
                 // Extract receive types based on select variant
@@ -564,9 +621,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         // Implement semantic resolution to get the receive type from the identifier
                         // Check if it's a primitive type, type alias, or variable
                         if ident == "int" {
-                            receive_types.push(Type::Integer);
+                            receive_types.push(self.program.register_type(Type::Integer));
                         } else if ident == "bin" {
-                            receive_types.push(Type::Binary);
+                            receive_types.push(self.program.register_type(Type::Binary));
                         } else if let Some((_, ast_type)) =
                             scopes::lookup_type_alias(&self.scopes, ident)
                         {
@@ -628,10 +685,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         // If this select has receive sources, add the unified type
                         if !select_sources.is_empty() {
                             if select_sources.len() == 1 {
-                                receive_types.push(select_sources[0].clone());
+                                receive_types.push(select_sources[0]);
                             } else {
                                 // Multiple sources in same select - create union
-                                receive_types.push(Type::Union(select_sources));
+                                receive_types
+                                    .push(self.program.register_type(Type::Union(select_sources)));
                             }
                         }
                     }
@@ -658,7 +716,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 let (base_type, _) =
                                     scopes::lookup_variable(&self.scopes, identifier, &[])?;
                                 type_queries::resolve_accessor_type(
-                                    &self.program,
+                                    &mut self.program,
                                     base_type,
                                     &access.accessors,
                                     identifier,
@@ -716,8 +774,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn extract_receive_type_from_source(
         &mut self,
         source: &ast::Chain,
-        chained_type: Option<&Type>,
-        receive_types: &mut Vec<Type>,
+        chained_type: Option<&usize>,
+        receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
         // A source can be:
         // 1. A function literal: #int { ... } -> extract int
@@ -729,8 +787,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             match term {
                 term if term.is_bare_ripple() => {
                     // Ripple refers to the chained value - extract its receive type
-                    if let Some(Type::Callable(callable)) = chained_type {
-                        receive_types.push(callable.parameter.clone());
+                    if let Some(chained_type_id) = chained_type
+                        && let Some(Type::Callable { parameter, .. }) =
+                            self.program.lookup_type(*chained_type_id)
+                    {
+                        receive_types.push(*parameter);
                     }
                 }
                 ast::Term::Function(func) => {
@@ -764,7 +825,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 let (base_type, _) =
                                     scopes::lookup_variable(&self.scopes, identifier, &[])?;
                                 type_queries::resolve_accessor_type(
-                                    &self.program,
+                                    &mut self.program,
                                     base_type,
                                     &access.accessors,
                                     identifier,
@@ -772,8 +833,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 .ok()
                             });
 
-                    if let Some(Type::Callable(callable)) = var_type {
-                        receive_types.push(callable.parameter.clone());
+                    if let Some(var_type_id) = var_type
+                        && let Some(Type::Callable { parameter, .. }) =
+                            self.program.lookup_type(var_type_id)
+                    {
+                        receive_types.push(*parameter);
                     }
                 }
                 _ => {
@@ -785,7 +849,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
-    fn compile_function(&mut self, function: ast::Function) -> Result<Type, Error> {
+    fn compile_function(&mut self, function: ast::Function) -> Result<usize, Error> {
         let mut function_params: HashSet<String> = HashSet::new();
 
         if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
@@ -818,7 +882,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 &function.type_parameters,
                 &mut self.program,
             )?,
-            None => Type::nil(),
+            None => self.program.register_type(Type::nil()),
         };
 
         // Extract receive type from function body
@@ -827,7 +891,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_local_count = self.local_count;
-        let saved_receive_type = self.current_receive_type.clone();
+        let saved_receive_type = self.current_receive_type_id;
 
         // Extract type aliases from parent scopes to preserve in function scope
         let mut function_scope_bindings = HashMap::new();
@@ -842,7 +906,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes = vec![Scope::new(function_scope_bindings, None, ScopeKind::Root)];
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
-        self.current_receive_type = receive_type.clone();
+        self.current_receive_type_id = receive_type;
 
         // Define captures as first locals in function body scope
         for capture in &unique_captures {
@@ -872,32 +936,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let mut last_type = var_type;
 
                     for accessor in &capture.accessors {
-                        let tuples = last_type.extract_tuples();
                         let field_types = match accessor {
                             ast::AccessPath::Field(field_name) => {
-                                match type_queries::get_field_types_by_name(
+                                match type_queries::get_field_by_name(
                                     &self.program,
-                                    &tuples,
+                                    last_type,
                                     field_name,
+                                    &capture.base,
                                 ) {
-                                    Ok(results) if !results.is_empty() => {
-                                        results.into_iter().map(|(_, t)| t).collect()
-                                    }
+                                    Ok((_, types)) => types,
                                     _ => continue,
                                 }
                             }
                             ast::AccessPath::Index(index) => {
-                                match type_queries::get_field_types_at_position(
+                                match type_queries::get_field_at_index(
                                     &self.program,
-                                    &tuples,
+                                    last_type,
                                     *index,
+                                    &capture.base,
                                 ) {
                                     Ok(types) => types,
                                     _ => continue,
                                 }
                             }
                         };
-                        last_type = Type::from_types(field_types);
+                        last_type = typing::union_type_ids(&mut self.program, field_types);
                     }
                     last_type
                 } else {
@@ -937,7 +1000,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Function parameters have Provenance::Parameter since they come from callers
                 self.compile_block(
                     body,
-                    parameter_type.clone(),
+                    parameter_type,
                     Provenance::Parameter,
                     None,
                     ScopeKind::Function,
@@ -947,7 +1010,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Identity function: just return the parameter
                 // The calling convention puts the parameter on the stack,
                 // so we don't need any instructions - just leave it there
-                parameter_type.clone()
+                parameter_type
             }
         };
 
@@ -967,37 +1030,39 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 body_type == expected_return_type
             } else {
                 // For non-generic functions: use compatibility check
-                body_type.is_compatible(&expected_return_type, &self.program)
+                quiver_core::types::is_compatible(body_type, expected_return_type, &self.program)
             };
 
             if !types_match {
+                // Get types for error message
+                let expected_type = self.program.lookup_type(expected_return_type).unwrap();
+                let found_type = self.program.lookup_type(body_type).unwrap();
                 return Err(Error::TypeMismatch {
-                    expected: quiver_core::format::format_type(
-                        &self.program,
-                        &expected_return_type,
-                    ),
-                    found: quiver_core::format::format_type(&self.program, &body_type),
+                    expected: quiver_core::format::format_type(&self.program, expected_type),
+                    found: quiver_core::format::format_type(&self.program, found_type),
                 });
             }
         }
 
-        let func_type = CallableType {
+        let function_instructions = std::mem::take(&mut self.codegen.instructions);
+
+        // Create type information for the function
+        let callable_type_id = self.program.register_type(Type::Callable {
             parameter: parameter_type,
             result: body_type,
-            receive: receive_type.clone(),
-        };
+            receive: receive_type,
+        });
 
-        let function_instructions = std::mem::take(&mut self.codegen.instructions);
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
-            function_type: func_type.clone(),
             captures: unique_captures.len(),
+            type_id: callable_type_id,
         });
 
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
-        self.current_receive_type = saved_receive_type;
+        self.current_receive_type_id = saved_receive_type;
 
         // Emit instructions to push capture values onto the stack
         // These will be popped by the Function instruction
@@ -1029,22 +1094,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen
             .add_instruction(Instruction::Function(function_index));
 
-        let function_type = Type::Callable(Box::new(func_type));
-
-        Ok(function_type)
+        Ok(callable_type_id)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn compile_match(
         &mut self,
         pattern: ast::Match,
-        value_type: Type,
+        value_type: usize,
         value_provenance: Provenance,
         on_no_match: Option<usize>,
         mode: pattern::PatternMode,
         return_ok: bool,
         mut narrowing: Option<&mut Narrowing>,
-    ) -> Result<Type, Error> {
+    ) -> Result<usize, Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
 
@@ -1054,7 +1117,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let (bindings, binding_sets, result_type) = pattern::analyze_pattern(
             &mut self.program,
             &pattern,
-            &value_type,
+            value_type,
             mode,
             &self.scopes,
             &value_provenance,
@@ -1065,7 +1128,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Exception: tuple patterns with a single type-constraining field CAN use
         // field-specific complement narrowing, so don't disable in that case.
         let has_tuple_complement = mode == pattern::PatternMode::Bind
-            && analyze_tuple_pattern_for_complement(&pattern, &value_type, &self.program).is_some();
+            && analyze_tuple_pattern_for_complement(&pattern, value_type, &mut self.program)
+                .is_some();
 
         if pattern::has_non_type_requirements(&binding_sets)
             && !has_tuple_complement
@@ -1075,10 +1139,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         // If result type is never (empty union), pattern won't match - skip pattern matching code
-        if result_type.is_never() {
+        if self.is_never(result_type) {
             self.codegen.add_instruction(Instruction::Pop);
             self.codegen.add_instruction(Instruction::Tuple(NIL));
-            return Ok(Type::nil());
+            return Ok(self.program.register_type(Type::nil()));
         }
 
         // Register locals for all bindings (indices needed for Load)
@@ -1108,7 +1172,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 scope.bindings.insert(
                     variable_name.clone(),
                     Binding::Variable {
-                        ty: variable_type.clone(),
+                        ty: *variable_type,
                         index: local_index,
                         provenance: var_provenance,
                     },
@@ -1130,19 +1194,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Apply narrowing to the matched value's provenance if the pattern narrows the type.
         // This is done here on the success path - the type has been narrowed by the pattern.
         // Note: result_type is the narrowed type from analyze_pattern.
-        if !result_type.is_never() && !result_type.is_nil() {
+        if !self.is_never(result_type) && !self.is_nil(result_type) {
             apply_narrowing(
                 &mut self.scopes,
                 &value_provenance,
-                &result_type,
-                &self.program,
+                result_type,
+                &mut self.program,
             );
         }
 
         // Record the narrowing for complement narrowing in blocks.
         // This must happen even when result_type is nil, so that subsequent branches
         // know the value is NOT nil (complement narrowing).
-        if !result_type.is_never()
+        if !self.is_never(result_type)
             && let Some(n) = narrowing
         {
             // For bind patterns with tuple structure, check if we should record
@@ -1150,20 +1214,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // This enables patterns like `=[Nil, ys]` to narrow the first field
             // so subsequent branches know the first field is NOT Nil.
             let field_complement_info = if mode == pattern::PatternMode::Bind {
-                analyze_tuple_pattern_for_complement(&pattern, &value_type, &self.program).and_then(
-                    |(field_idx, constrained_type)| {
+                analyze_tuple_pattern_for_complement(&pattern, value_type, &mut self.program)
+                    .and_then(|(field_idx, constrained_type)| {
                         // Use narrowed field type if available (from complement of previous branch),
                         // otherwise fall back to static field type from tuple definition.
                         // This ensures that for subsequent branches, the "original" type
                         // is the narrowed type, so complement calculation is correct.
                         let original =
                             get_field_narrowing(&self.scopes, &value_provenance, field_idx)
-                                .or_else(|| {
-                                    get_field_type(&value_type, field_idx, &self.program)
-                                })?;
+                                .or_else(|| get_field_type(value_type, field_idx, &self.program))?;
                         Some((field_idx, original, constrained_type))
-                    },
-                )
+                    })
             } else {
                 None
             };
@@ -1175,13 +1236,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Provenance::Field(Box::new(value_provenance.clone()), field_idx);
                 n.record(
                     &field_provenance,
-                    &original_field_type,
-                    &constrained_type,
-                    &self.program,
+                    original_field_type,
+                    constrained_type,
+                    &mut self.program,
                 );
             } else {
                 // Standard whole-value narrowing
-                n.record(&value_provenance, &value_type, &result_type, &self.program);
+                n.record(
+                    &value_provenance,
+                    value_type,
+                    result_type,
+                    &mut self.program,
+                );
             }
         }
 
@@ -1204,10 +1270,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Compute final type - if return_ok, replace value type with Ok
         let final_type = if return_ok {
-            if result_type.contains_nil() {
-                Type::from_types(vec![Type::ok(), Type::nil()])
+            if self.contains_nil(result_type) {
+                let ok_type_id = self.program.register_type(Type::ok());
+                let nil_type_id = self.program.register_type(Type::nil());
+                typing::union_type_ids(&mut self.program, vec![ok_type_id, nil_type_id])
             } else {
-                Type::ok()
+                self.program.register_type(Type::ok())
             }
         } else {
             result_type
@@ -1227,11 +1295,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_block(
         &mut self,
         block: ast::Block,
-        parameter_type: Type,
+        parameter_type: usize,
         parameter_provenance: Provenance,
         on_no_match: Option<usize>,
         scope_kind: ScopeKind,
-    ) -> Result<Type, Error> {
+    ) -> Result<usize, Error> {
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -1251,7 +1319,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes.push(Scope::new(
             HashMap::new(),
             Some(scopes::Parameter {
-                ty: parameter_type.clone(),
+                ty: parameter_type,
                 index: param_local,
                 provenance: parameter_provenance,
             }),
@@ -1259,7 +1327,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         ));
 
         // Track pending complement narrowing from previous branch
-        let mut pending_complement: Option<(Provenance, Type)> = None;
+        let mut pending_complement: Option<(Provenance, usize)> = None;
 
         // Track whether the block exhaustively covers all type variants.
         // Assume not exhaustive until proven otherwise by complement narrowing.
@@ -1271,7 +1339,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             branch_starts.push(self.codegen.instructions.len());
 
             // Track complement from previous branch for potential propagation
-            let mut applied_complement: Option<(Provenance, Type)> = None;
+            let mut applied_complement: Option<(Provenance, usize)> = None;
 
             if i > 0 {
                 self.codegen.add_instruction(Instruction::Pop);
@@ -1289,8 +1357,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Apply complement narrowing from previous branch (if available)
                 // Keep a copy to propagate if this branch doesn't record its own narrowing
                 applied_complement = pending_complement.take();
-                if let Some((ref prov, ref complement)) = applied_complement {
-                    apply_narrowing(&mut self.scopes, prov, complement, &self.program);
+                if let Some((ref prov, complement)) = applied_complement {
+                    apply_narrowing(&mut self.scopes, prov, complement, &mut self.program);
                 }
             }
 
@@ -1318,8 +1386,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // If complement narrowing is valid, compute complement for exhaustiveness check
             // and (for non-last branches) to narrow subsequent branches
             if let Some((prov, original, narrowed)) = narrowing.take() {
-                let complement = compute_complement(&original, &narrowed, &self.program);
-                if complement.is_never() {
+                let complement = compute_complement(original, narrowed, &mut self.program);
+                if self.is_never(complement) {
                     // All variants covered - block is exhaustive
                     is_exhaustive = true;
                 } else if !is_last_branch {
@@ -1335,7 +1403,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
-            if condition_type.is_nil() {
+            if self.is_nil(condition_type) {
                 // Only include nil in result type if this is the last branch
                 // Otherwise, nil causes fallthrough to the next branch
                 if is_last_branch {
@@ -1362,21 +1430,25 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Apply forward narrowing: if condition succeeded (non-nil), narrow to exclude nil.
                 // This enables type refinement like { a => %math.add[a, 1] } when a: [] | int
-                if condition_type.contains_nil() {
-                    let truthy_type = condition_type.without_nil();
+                if self.contains_nil(condition_type) {
+                    let truthy_type = self.without_nil(condition_type);
                     // Narrow the source variable if it has trackable provenance
                     if !matches!(condition_prov, Provenance::Unknown) {
                         apply_narrowing(
                             &mut self.scopes,
                             &condition_prov,
-                            &truthy_type,
-                            &self.program,
+                            truthy_type,
+                            &mut self.program,
                         );
                     }
                     // Narrow all bindings created during the condition that contain nil.
                     // This handles cases like { 0 ~> f ~> =x => ... } where x has Unknown
                     // provenance but should still be narrowed when the condition succeeds.
-                    narrow_nil_from_new_bindings(&mut self.scopes, &bindings_before_condition);
+                    narrow_nil_from_new_bindings(
+                        &mut self.scopes,
+                        &bindings_before_condition,
+                        &mut self.program,
+                    );
                 }
 
                 // Only pass input_type if the consequence starts with a continuation (~>)
@@ -1385,7 +1457,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let (consequence_type, _) = self.compile_expression_with_input(
                         consequence.clone(),
                         None,
-                        Some(condition_type.clone()),
+                        Some(condition_type),
                         None, // No narrowing for consequence
                     )?;
                     consequence_type
@@ -1396,7 +1468,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         self.compile_expression(consequence.clone(), None)?;
                     consequence_type
                 };
-                branch_types.push(consequence_type.clone());
+                branch_types.push(consequence_type);
 
                 // Reset to branch start (param_local + 1), keeping just the parameter
                 // This is on the success path - bindings have been stored and should be cleared
@@ -1409,31 +1481,39 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // unless the block is exhaustive through complement narrowing
                 if is_last_branch
                     && !starts_with_continuation
-                    && condition_type.contains_nil()
+                    && self.contains_nil(condition_type)
                     && !is_exhaustive
                 {
-                    branch_types.push(Type::nil());
+                    branch_types.push(self.program.register_type(Type::nil()));
                 }
             } else {
                 // No consequence - use condition type
                 // For non-last branches, filter out nil since it causes fallthrough to next branch
                 if is_last_branch {
-                    branch_types.push(condition_type.clone());
+                    branch_types.push(condition_type);
                 } else {
                     // Only include non-nil types - nil will be handled by subsequent branches
-                    match &condition_type {
-                        Type::Union(types) => {
-                            let non_nil_types: Vec<Type> =
-                                types.iter().filter(|t| !t.is_nil()).cloned().collect();
-                            if !non_nil_types.is_empty() {
-                                branch_types.push(union_types(non_nil_types));
+                    if let Some(ty) = self.program.lookup_type(condition_type) {
+                        match ty {
+                            Type::Union(types) => {
+                                let non_nil_types: Vec<usize> = types
+                                    .iter()
+                                    .filter(|&type_id| !self.is_nil(*type_id))
+                                    .copied()
+                                    .collect();
+                                if !non_nil_types.is_empty() {
+                                    branch_types.push(typing::union_type_ids(
+                                        &mut self.program,
+                                        non_nil_types,
+                                    ));
+                                }
                             }
-                        }
-                        t if !t.is_nil() => {
-                            branch_types.push(t.clone());
-                        }
-                        _ => {
-                            // Condition is purely nil - will always fall through
+                            _ if !self.is_nil(condition_type) => {
+                                branch_types.push(condition_type);
+                            }
+                            _ => {
+                                // Condition is purely nil - will always fall through
+                            }
                         }
                     }
                 }
@@ -1535,14 +1615,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Pop scope
         self.scopes.pop();
 
-        Ok(union_types(branch_types))
+        Ok(typing::union_type_ids(&mut self.program, branch_types))
     }
 
     fn compile_expression(
         &mut self,
         expression: ast::Expression,
         on_no_match: Option<usize>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         self.compile_expression_with_input(expression, on_no_match, None, None)
     }
 
@@ -1551,9 +1631,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         expression: ast::Expression,
         on_no_match: Option<usize>,
-        input_type: Option<Type>,
+        input_type: Option<usize>,
         mut narrowing: Option<&mut Narrowing>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         let has_input = input_type.is_some();
         let mut last_type = input_type;
         let mut last_prov = Provenance::Unknown;
@@ -1571,48 +1651,55 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 chain.clone(),
                 on_no_match,
                 None,
-                if i == 0 { last_type.clone() } else { None },
+                if i == 0 { last_type } else { None },
                 narrowing.as_deref_mut(),
             )?;
 
             // Check if the previous type contained nil and we're not on the first chain
             let should_propagate_nil =
-                i > 0 && last_type.as_ref().is_some_and(|t| t.contains_nil());
+                i > 0 && last_type.as_ref().is_some_and(|&t| self.contains_nil(t));
 
             // Special handling when input_type was provided (consequence with multiple chains)
             // In this case, chains are alternatives and we should combine their success types
             if has_input && i > 0 {
                 // Strip nil from previous chains since it causes jump to next chain
-                let prev_success_types: Vec<Type> = if let Some(ref prev) = last_type {
-                    match prev {
-                        Type::Union(types) => {
-                            types.iter().filter(|t| !t.is_nil()).cloned().collect()
+                let prev_success_types: Vec<usize> = if let Some(prev) = last_type {
+                    if let Some(ty) = self.program.lookup_type(prev) {
+                        match ty {
+                            Type::Union(types) => types
+                                .iter()
+                                .filter(|&type_id| !self.is_nil(*type_id))
+                                .copied()
+                                .collect(),
+                            _ if !self.is_nil(prev) => vec![prev],
+                            _ => vec![],
                         }
-                        t if !t.is_nil() => vec![t.clone()],
-                        _ => vec![],
+                    } else {
+                        vec![]
                     }
                 } else {
                     vec![]
                 };
 
                 let mut combined = prev_success_types;
-                combined.push(chain_type.clone());
-                last_type = Some(union_types(combined));
+                combined.push(chain_type);
+                last_type = Some(typing::union_type_ids(&mut self.program, combined));
                 // Multiple chains = unknown provenance
                 last_prov = Provenance::Unknown;
             } else {
                 // Normal case: propagate nil if previous chain could be nil
                 last_type = Some(if should_propagate_nil {
-                    union_types(vec![chain_type.clone(), Type::nil()])
+                    let nil_type_id = self.program.register_type(Type::nil());
+                    typing::union_type_ids(&mut self.program, vec![chain_type, nil_type_id])
                 } else {
-                    chain_type.clone()
+                    chain_type
                 });
                 last_prov = chain_prov;
             }
 
             // If last_type is NIL, subsequent chains are unreachable - break early
-            if let Some(ref last_type) = last_type
-                && last_type.is_nil()
+            if let Some(last_type_id) = last_type
+                && self.is_nil(last_type_id)
             {
                 break;
             }
@@ -1624,8 +1711,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // After the jump, if chain could be nil, narrow bindings created in this chain.
                 // This handles cases like `a ~> =x, %math.add[x, 1]` where x needs to be
                 // narrowed before the next chain uses it.
-                if chain_type.contains_nil() {
-                    narrow_nil_from_new_bindings(&mut self.scopes, &bindings_before_chain);
+                if self.contains_nil(chain_type) {
+                    narrow_nil_from_new_bindings(
+                        &mut self.scopes,
+                        &bindings_before_chain,
+                        &mut self.program,
+                    );
                 }
             }
         }
@@ -1646,7 +1737,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         chain: ast::Chain,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<Type, Error> {
+    ) -> Result<usize, Error> {
         let (ty, _prov) = self.compile_chain_with_provenance(chain, on_no_match, ripple_context)?;
         Ok(ty)
     }
@@ -1656,7 +1747,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         chain: ast::Chain,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         self.compile_chain_with_input(chain, on_no_match, ripple_context, None, None)
     }
 
@@ -1665,9 +1756,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         chain: ast::Chain,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-        input_type: Option<Type>,
+        input_type: Option<usize>,
         mut narrowing: Option<&mut Narrowing>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         // If this is a continuation chain (starts with ~>), load the parameter
         let (mut current_type, mut current_prov) = if chain.continuation {
             // Continuation chains explicitly use the parameter from scope
@@ -1712,10 +1803,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // would result in the never type which breaks pattern matching.
             let should_strip_nil = !is_last_term
                 && !next_needs_full_type
-                && term_type.contains_nil()
-                && !term_type.is_nil(); // Don't strip if type IS nil
+                && self.contains_nil(term_type)
+                && !self.is_nil(term_type); // Don't strip if type IS nil
             current_type = Some(if should_strip_nil {
-                term_type.without_nil()
+                self.without_nil(term_type)
             } else {
                 term_type
             });
@@ -1750,7 +1841,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         module: &[String],
         accessors: &[ast::AccessPath],
-    ) -> Result<Type, Error> {
+    ) -> Result<usize, Error> {
         let module_name = module.join("/");
 
         // Check for circular imports
@@ -1771,8 +1862,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Resolve accessor chain on the cached value
+        let module_type_id = self.program.register_type(cached.module_type);
         let (resolved_value, resolved_type) =
-            self.resolve_accessors(&cached.value, &cached.module_type, accessors, &module_name)?;
+            self.resolve_accessors(&cached.value, &module_type_id, accessors, &module_name)?;
 
         // Emit instructions for just the resolved value
         let (instructions, _) =
@@ -1804,11 +1896,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes = vec![Scope::empty()];
         self.local_count = 0;
 
-        // Track the last statement's type for execute_instructions_sync
-        let mut last_type = Type::nil();
+        // Compile statements and track the result type of the last statement
+        let mut result_type_id = self.program.register_type(Type::nil());
         for statement in parsed.statements {
-            last_type = self.compile_statement(statement)?;
+            result_type_id = self.compile_statement(statement)?;
         }
+        let module_type = self
+            .program
+            .lookup_type(result_type_id)
+            .cloned()
+            .unwrap_or_else(Type::nil);
 
         // Get the compiled module instructions
         let module_instructions = std::mem::take(&mut self.codegen.instructions);
@@ -1818,22 +1915,37 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
 
-        // Execute the module instructions to get the result value
-        let (module_value, executor) = quiver_core::execute_instructions_sync(
-            &self.program,
-            module_instructions,
-            last_type.clone(),
-            self.builtins,
-        )
-        .map_err(|e| Error::ModuleExecution {
-            module: module.join("/"),
-            error: e,
-        })?;
+        // Register the callable type for this module wrapper function
+        // (modules take no arguments and return the module value)
+        let nil_type_id = self.program.register_type(Type::nil());
+        let never_id = self.program.never();
+        let callable_type_id = self.program.register_type(Type::Callable {
+            parameter: nil_type_id,
+            result: result_type_id,
+            receive: never_id,
+        });
 
-        // Extract binary data and derive type from executor before discarding it
+        // Generate bytecode, then add the module function
+        let mut bytecode = self.program.to_bytecode(None);
+        bytecode.functions.push(quiver_core::bytecode::Function {
+            instructions: module_instructions,
+            captures: 0,
+            type_id: callable_type_id,
+        });
+        bytecode.entry = Some(bytecode.functions.len() - 1);
+
+        // Execute the module to get the result value
+        let (module_value, executor) =
+            quiver_core::execute_bytecode_sync(bytecode, self.builtins, false).map_err(|e| {
+                Error::ModuleExecution {
+                    module: module.join("/"),
+                    error: e,
+                }
+            })?;
+
+        // Extract binary data from the executor
         let mut binary_data = HashMap::new();
         modules::extract_binary_data(&module_value, &executor, &mut binary_data);
-        let module_type = executor.value_to_type(&module_value);
 
         let cached = modules::CachedModule {
             value: module_value,
@@ -1854,38 +1966,44 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         value: &Value,
         binary_data: &HashMap<usize, Vec<u8>>,
-    ) -> Result<(Vec<Instruction>, Type), Error> {
+    ) -> Result<(Vec<Instruction>, usize), Error> {
         match value {
             Value::Integer(int_value) => {
                 let index = self
                     .program
                     .register_constant(Constant::Integer(*int_value));
-                Ok((vec![Instruction::Constant(index)], Type::Integer))
+                Ok((
+                    vec![Instruction::Constant(index)],
+                    self.program.register_type(Type::Integer),
+                ))
             }
-            Value::Binary(binary) => {
-                use quiver_core::value::Binary;
-                match binary {
-                    Binary::Constant(const_idx) => {
-                        // Just use the existing constant
-                        Ok((vec![Instruction::Constant(*const_idx)], Type::Binary))
-                    }
-                    Binary::Heap(heap_idx) => {
-                        // Use pre-extracted binary data from cache
-                        let bytes = binary_data
-                            .get(heap_idx)
-                            .ok_or_else(|| {
-                                Error::FeatureUnsupported(format!(
-                                    "Missing cached binary data for heap index {}",
-                                    heap_idx
-                                ))
-                            })?
-                            .clone();
-                        let constant = Constant::Binary(bytes);
-                        let index = self.program.register_constant(constant);
-                        Ok((vec![Instruction::Constant(index)], Type::Binary))
-                    }
+            Value::Binary(binary) => match binary {
+                Binary::Constant(const_idx) => {
+                    // Just use the existing constant
+                    Ok((
+                        vec![Instruction::Constant(*const_idx)],
+                        self.program.register_type(Type::Binary),
+                    ))
                 }
-            }
+                Binary::Heap(heap_idx) => {
+                    // Use pre-extracted binary data from cache
+                    let bytes = binary_data
+                        .get(heap_idx)
+                        .ok_or_else(|| {
+                            Error::FeatureUnsupported(format!(
+                                "Missing cached binary data for heap index {}",
+                                heap_idx
+                            ))
+                        })?
+                        .clone();
+                    let constant = Constant::Binary(bytes);
+                    let index = self.program.register_constant(constant);
+                    Ok((
+                        vec![Instruction::Constant(index)],
+                        self.program.register_type(Type::Binary),
+                    ))
+                }
+            },
             Value::Tuple(tuple_id, fields) => {
                 let mut instructions = Vec::new();
                 for field in fields {
@@ -1894,15 +2012,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     instructions.extend(field_instructions);
                 }
                 instructions.push(Instruction::Tuple(*tuple_id));
-                Ok((instructions, Type::Tuple(*tuple_id)))
+                Ok((
+                    instructions,
+                    self.program.register_type(Type::Tuple(*tuple_id)),
+                ))
             }
             Value::Function(function, captures) => {
-                // Get the function type
-                let func = self
+                // Get the function's callable type directly from the function's type_id
+                let callable_type_id = self
                     .program
                     .get_function(*function)
-                    .ok_or(Error::FunctionUndefined(*function))?;
-                let function_type = func.function_type.clone();
+                    .ok_or(Error::FunctionUndefined(*function))?
+                    .type_id;
 
                 let mut instructions = Vec::new();
 
@@ -1916,27 +2037,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Reuse the same function index - no re-registration needed!
                 instructions.push(Instruction::Function(*function));
 
-                Ok((instructions, Type::Callable(Box::new(function_type))))
+                Ok((instructions, callable_type_id))
             }
-            Value::Builtin(name) => {
-                let builtin_index = self
+            Value::Builtin(builtin_id) => {
+                // Get the builtin info to retrieve its type signature
+                let builtin_info = self
                     .program
-                    .register_builtin(name.to_string(), self.builtins);
+                    .get_builtins()
+                    .get(*builtin_id)
+                    .ok_or_else(|| Error::BuiltinUndefined(format!("builtin_id {}", builtin_id)))?;
+                let param_type = builtin_info.param_type;
+                let result_type = builtin_info.result_type;
 
-                if let Some((param_type, result_type)) =
-                    self.builtins.resolve_signature(name, &mut self.program)
-                {
-                    Ok((
-                        vec![Instruction::Builtin(builtin_index)],
-                        Type::Callable(Box::new(CallableType {
-                            parameter: param_type,
-                            result: result_type,
-                            receive: Type::never(),
-                        })),
-                    ))
-                } else {
-                    Err(Error::BuiltinUndefined(name.to_string()))
-                }
+                let never_id = self.program.never();
+                let callable_type_id = self.program.register_type(Type::Callable {
+                    parameter: param_type,
+                    result: result_type,
+                    receive: never_id,
+                });
+
+                Ok((vec![Instruction::Builtin(*builtin_id)], callable_type_id))
             }
             Value::Process(_, _) => Err(Error::FeatureUnsupported(
                 "Cannot use process in constant context".to_string(),
@@ -1950,14 +2070,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Resolve an accessor chain on a compile-time known value.
     /// Returns the resolved value and its type.
     fn resolve_accessors(
-        &self,
+        &mut self,
         value: &Value,
-        value_type: &Type,
+        value_type: &usize,
         accessors: &[ast::AccessPath],
         module_name: &str,
-    ) -> Result<(Value, Type), Error> {
+    ) -> Result<(Value, usize), Error> {
         let mut current_value = value.clone();
-        let mut current_type = value_type.clone();
+        let mut current_type = *value_type;
 
         for accessor in accessors {
             let Value::Tuple(_, fields) = &current_value else {
@@ -1966,37 +2086,30 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 });
             };
 
-            let tuples = current_type.extract_tuples();
-
             let (index, field_type) = match accessor {
                 ast::AccessPath::Field(name) => {
-                    let results =
-                        type_queries::get_field_types_by_name(&self.program, &tuples, name)
-                            .map_err(|_| Error::MemberFieldNotFound {
-                                field_name: name.clone(),
-                                target: module_name.to_string(),
-                            })?;
-
-                    if results.is_empty() {
-                        return Err(Error::MemberFieldNotFound {
-                            field_name: name.clone(),
-                            target: module_name.to_string(),
-                        });
-                    }
-
-                    let index = results[0].0;
-                    let field_type =
-                        Type::from_types(results.into_iter().map(|(_, t)| t).collect());
-                    (index, field_type)
+                    let (index, field_types) = type_queries::get_field_by_name(
+                        &self.program,
+                        current_type,
+                        name,
+                        module_name,
+                    )?;
+                    (
+                        index,
+                        typing::union_type_ids(&mut self.program, field_types),
+                    )
                 }
                 ast::AccessPath::Index(index) => {
-                    let field_types =
-                        type_queries::get_field_types_at_position(&self.program, &tuples, *index)
-                            .map_err(|_| Error::MemberAccessOnNonTuple {
-                            target: module_name.to_string(),
-                        })?;
-
-                    (*index, Type::from_types(field_types))
+                    let field_types = type_queries::get_field_at_index(
+                        &self.program,
+                        current_type,
+                        *index,
+                        module_name,
+                    )?;
+                    (
+                        *index,
+                        typing::union_type_ids(&mut self.program, field_types),
+                    )
                 }
             };
 
@@ -2015,14 +2128,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     /// Validate that a receive function in a select has the correct return type
     fn validate_receive_function(
-        &self,
+        &mut self,
         source: &ast::Chain,
-        source_type: &Type,
+        source_type_id: usize,
     ) -> Result<(), Error> {
         // Only validate if this is a callable (receive function)
-        let Type::Callable(callable) = source_type else {
+        let Some(Type::Callable { result, .. }) = self.program.lookup_type(source_type_id) else {
             return Ok(());
         };
+        let result_id = *result;
 
         // Identity functions (no body) and variable references are always allowed
         if !source
@@ -2034,16 +2148,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         // For functions with bodies, the result type must be nil, Ok, or a union of them
-        let is_valid = match &callable.result {
-            t if t.is_nil() || t.is_ok() => true,
-            Type::Union(variants) => variants.iter().all(|v| v.is_nil() || v.is_ok()),
-            _ => false,
-        };
+        let is_valid = self.is_nil_or_ok(result_id);
 
         if !is_valid {
             return Err(Error::TypeMismatch {
                 expected: "receive function with body must return [] or Ok".to_string(),
-                found: quiver_core::format::format_type(&self.program, &callable.result),
+                found: quiver_core::format::format_type_by_id(&self.program, result_id),
             });
         }
 
@@ -2054,8 +2164,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_select_sources(
         &mut self,
         sources: &[ast::Chain],
-        value_type: Option<&Type>,
-    ) -> Result<Vec<Type>, Error> {
+        value_type: Option<&usize>,
+    ) -> Result<Vec<usize>, Error> {
         let mut source_types = Vec::new();
 
         for (i, source) in sources.iter().enumerate() {
@@ -2065,7 +2175,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let ripple_ctx;
             let ripple_param = if let Some(val_type) = value_type {
                 ripple_ctx = RippleContext {
-                    value_type: val_type.clone(),
+                    value_type_id: *val_type,
                     stack_offset: i,
                     owns_value: false,
                     provenance: Provenance::Unknown, // Spawn context doesn't need narrowing
@@ -2078,7 +2188,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let source_type = self.compile_chain(source.clone(), None, ripple_param)?;
 
             // Validate receive functions
-            self.validate_receive_function(source, &source_type)?;
+            self.validate_receive_function(source, source_type)?;
 
             source_types.push(source_type);
         }
@@ -2087,7 +2197,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Compile spawn operation: @f, f ~> @, or arg ~> @f
-    fn compile_spawn(&mut self, term: ast::Term, arg_type: Option<Type>) -> Result<Type, Error> {
+    fn compile_spawn(&mut self, term: ast::Term, arg_type: Option<usize>) -> Result<usize, Error> {
         // Case 1: f ~> @ (function is the piped value, spawn with nil)
         if term.is_bare_ripple() {
             let fn_type = arg_type.ok_or_else(|| {
@@ -2111,19 +2221,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     /// Emit spawn for nil-parameter function (cases 1 and 3)
     /// Stack before: [function]
-    fn emit_nil_param_spawn(&mut self, fn_type: Type) -> Result<Type, Error> {
-        let Type::Callable(callable) = &fn_type else {
+    fn emit_nil_param_spawn(&mut self, fn_type_id: usize) -> Result<usize, Error> {
+        let Some(Type::Callable {
+            parameter,
+            result,
+            receive,
+        }) = self.program.lookup_type(fn_type_id)
+        else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
             ));
         };
+        let (parameter, result, receive) = (*parameter, *result, *receive);
 
-        if callable.parameter != Type::nil() {
+        let nil_type_id = self.program.register_type(Type::nil());
+        if parameter != nil_type_id {
             return Err(Error::TypeMismatch {
                 expected: "function with nil parameter".to_string(),
                 found: format!(
                     "function with parameter {}",
-                    quiver_core::format::format_type(&self.program, &callable.parameter)
+                    quiver_core::format::format_type_by_id(&self.program, parameter)
                 ),
             });
         }
@@ -2133,34 +2250,40 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.add_instruction(Instruction::Rotate(2));
         self.codegen.add_instruction(Instruction::Spawn);
 
-        Ok(Type::Process(Box::new(ProcessType {
-            send: Some(Box::new(callable.receive.clone())),
-            receive: Some(Box::new(callable.result.clone())),
-        })))
+        Ok(self.program.register_type(Type::Process {
+            send: Some(receive),
+            receive: Some(result),
+        }))
     }
 
     /// Emit spawn with argument (case 2)
     /// Stack before: [argument, function]
-    fn emit_arg_spawn(&mut self, fn_type: Type, arg_type: Type) -> Result<Type, Error> {
-        let Type::Callable(callable) = &fn_type else {
+    fn emit_arg_spawn(&mut self, fn_type_id: usize, arg_type: usize) -> Result<usize, Error> {
+        let Some(Type::Callable {
+            parameter,
+            result,
+            receive,
+        }) = self.program.lookup_type(fn_type_id)
+        else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
             ));
         };
+        let (parameter, result, receive) = (*parameter, *result, *receive);
 
-        if !arg_type.is_compatible(&callable.parameter, &self.program) {
+        if !quiver_core::types::is_compatible(arg_type, parameter, &self.program) {
             return Err(Error::TypeMismatch {
-                expected: quiver_core::format::format_type(&self.program, &callable.parameter),
-                found: quiver_core::format::format_type(&self.program, &arg_type),
+                expected: quiver_core::format::format_type_by_id(&self.program, parameter),
+                found: quiver_core::format::format_type_by_id(&self.program, arg_type),
             });
         }
 
         self.codegen.add_instruction(Instruction::Spawn);
 
-        Ok(Type::Process(Box::new(ProcessType {
-            send: Some(Box::new(callable.receive.clone())),
-            receive: Some(Box::new(callable.result.clone())),
-        })))
+        Ok(self.program.register_type(Type::Process {
+            send: Some(receive),
+            receive: Some(result),
+        }))
     }
 
     /// Compile an argument tuple, handling ripple context conversion
@@ -2168,11 +2291,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_argument(
         &mut self,
         argument: Option<&Vec<ast::TupleField>>,
-        value_type: Option<&Type>,
+        value_type: Option<&usize>,
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
         context_name: &str,
-    ) -> Result<Option<Type>, Error> {
+    ) -> Result<Option<usize>, Error> {
         let Some(fields) = argument else {
             return Ok(None);
         };
@@ -2192,7 +2315,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let ripple_context_value;
         let ripple_ctx = if let Some(vt) = value_type {
             ripple_context_value = RippleContext {
-                value_type: vt.clone(),
+                value_type_id: *vt,
                 stack_offset: 0,
                 owns_value: true,
                 provenance: value_provenance,
@@ -2210,10 +2333,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_access(
         &mut self,
         access: ast::Access,
-        value_type: Option<Type>,
+        value_type: Option<usize>,
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         match access.source {
             None => {
                 // Field/positional access (.x, .0) requires a value
@@ -2277,10 +2400,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 if has_spread
                     && access.accessors.is_empty()
-                    && let Some((var_type, var_index)) =
+                    && let Some((var_type_id, var_index)) =
                         scopes::lookup_variable(&self.scopes, &name, &[])
-                    && let Type::Tuple(tuple_id) = var_type
+                    && let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(var_type_id)
                 {
+                    let tuple_id = *tuple_id;
                     // This is tuple spread: a[..., y] where a is a tuple
                     // Get the tuple name for inheritance
                     let tuple_name = self
@@ -2291,7 +2415,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Load the tuple variable and create ripple context
                     self.codegen.add_instruction(Instruction::Load(var_index));
                     let ripple_ctx = RippleContext {
-                        value_type: var_type,
+                        value_type_id: var_type_id,
                         stack_offset: 0,
                         owns_value: true,
                         provenance: Provenance::Variable(name.clone()),
@@ -2346,7 +2470,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         // Inherit ripple context from parent tuple
                         self.codegen
                             .add_instruction(Instruction::Pick(ctx.stack_offset));
-                        return Ok((ctx.value_type.clone(), ctx.provenance.clone()));
+                        return Ok((ctx.value_type_id, ctx.provenance.clone()));
                     } else {
                         return Err(Error::FeatureUnsupported(
                             "Ripple placeholder (~) can only be used when a value is being chained"
@@ -2369,16 +2493,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 if access.accessors.is_empty() && has_spread {
                     // ~[..., y] - tuple spread from piped value (must be tuple)
-                    if let Type::Tuple(tuple_id) = &piped_type {
+                    if let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(piped_type) {
+                        let tuple_id = *tuple_id;
                         // Get tuple name for inheritance
                         let tuple_name = self
                             .program
-                            .lookup_tuple(*tuple_id)
+                            .lookup_tuple(tuple_id)
                             .and_then(|t| t.name.clone());
 
                         // Piped value is already on stack, create ripple context
                         let ripple_ctx = RippleContext {
-                            value_type: piped_type,
+                            value_type_id: piped_type,
                             stack_offset: 0,
                             owns_value: true,
                             provenance: value_provenance.clone(),
@@ -2395,7 +2520,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     } else {
                         return Err(Error::TypeMismatch {
                             expected: "tuple".to_string(),
-                            found: quiver_core::format::format_type(&self.program, &piped_type),
+                            found: quiver_core::format::format_type_by_id(
+                                &self.program,
+                                piped_type,
+                            ),
                         });
                     }
                 }
@@ -2469,8 +2597,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_select(
         &mut self,
         select: ast::Select,
-        value_type: Option<Type>,
-    ) -> Result<Type, Error> {
+        value_type: Option<usize>,
+    ) -> Result<usize, Error> {
         // Check if we need to validate ripple usage (only for Sources variant)
         let is_sources_variant = matches!(select, ast::Select::Sources(_));
 
@@ -2575,34 +2703,46 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Compute the return type of a select operation from source types
-    fn compute_select_return_type(&self, source_types: &[Type]) -> Result<Type, Error> {
+    fn compute_select_return_type(&mut self, source_types: &[usize]) -> Result<usize, Error> {
         let mut result_types = Vec::new();
 
-        for source_type in source_types {
+        for &source_type_id in source_types {
+            let source_type =
+                self.program
+                    .lookup_type(source_type_id)
+                    .ok_or_else(|| Error::InternalError {
+                        message: format!("Type ID {} not found", source_type_id),
+                    })?;
+
             match source_type {
-                Type::Process(process_type) => {
+                Type::Process {
+                    receive: Some(recv_type),
+                    ..
+                } => {
                     // Process (process or resource) - get its receive type
-                    if let Some(receive_type) = &process_type.receive {
-                        result_types.push((**receive_type).clone());
-                    } else {
-                        return Err(Error::TypeMismatch {
-                            expected: "process with receive type (awaitable/readable)".to_string(),
-                            found: "process without receive type (cannot select)".to_string(),
-                        });
-                    }
+                    result_types.push(*recv_type);
                 }
-                Type::Callable(callable) => {
+                Type::Process { receive: None, .. } => {
+                    return Err(Error::TypeMismatch {
+                        expected: "process with receive type (awaitable/readable)".to_string(),
+                        found: "process without receive type (cannot select)".to_string(),
+                    });
+                }
+                Type::Callable { result, .. } => {
                     // Receive function - use its result type
-                    result_types.push(callable.result.clone());
+                    result_types.push(*result);
                 }
                 Type::Integer => {
                     // Timeout source
-                    result_types.push(Type::Tuple(NIL))
+                    result_types.push(self.program.register_type(Type::nil()));
                 }
                 _ => {
                     return Err(Error::TypeMismatch {
                         expected: "process, function, resource, or integer (timeout)".to_string(),
-                        found: quiver_core::format::format_type(&self.program, source_type),
+                        found: quiver_core::format::format_type_by_id(
+                            &self.program,
+                            source_type_id,
+                        ),
                     });
                 }
             }
@@ -2614,18 +2754,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ));
         }
 
-        Ok(union_types(result_types))
+        Ok(typing::union_type_ids(&mut self.program, result_types))
     }
 
     fn compile_term(
         &mut self,
         term: ast::Term,
-        value_type: Option<Type>,
+        value_type: Option<usize>,
         value_provenance: Provenance,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
         mut narrowing: Option<&mut Narrowing>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         match term {
             ast::Term::Literal(literal) => {
                 if value_type.is_some() {
@@ -2654,7 +2794,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let ripple_context_value;
                 let ripple_context_param = if let Some(vt) = value_type.as_ref() {
                     ripple_context_value = RippleContext {
-                        value_type: vt.clone(),
+                        value_type_id: *vt,
                         stack_offset: 0,
                         owns_value: true,
                         provenance: value_provenance,
@@ -2677,7 +2817,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
 
                 // Blocks take their input as a parameter
-                let block_parameter = value_type.clone().unwrap_or_else(Type::nil);
+                let block_parameter =
+                    value_type.unwrap_or_else(|| self.program.register_type(Type::nil()));
                 // Pass the provenance from the chain to the block
                 let block_provenance = value_provenance.clone();
                 if value_type.is_none() {
@@ -2753,7 +2894,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let ripple_context_value;
                     let ripple_ctx = if let Some(vt) = value_type.as_ref() {
                         ripple_context_value = RippleContext {
-                            value_type: vt.clone(),
+                            value_type_id: *vt,
                             stack_offset: 0,
                             owns_value: true,
                             provenance: value_provenance.clone(),
@@ -2790,7 +2931,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // The not operator narrows the type to [] (nil) when it succeeds
                 // Record this narrowing so subsequent branches can use the complement
                 if let Some(n) = narrowing.as_deref_mut() {
-                    n.record(&value_provenance, &val_type, &Type::nil(), &self.program);
+                    let nil_type_id = self.program.register_type(Type::nil());
+                    n.record(&value_provenance, val_type, nil_type_id, &mut self.program);
                 }
                 let ty = self.compile_not(val_type)?;
                 Ok((ty, Provenance::Unknown))
@@ -2841,11 +2983,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.codegen.add_instruction(Instruction::Self_);
                 // Return a process type with the current function's receive type
                 // Return type is None since a process can't know its own return type
-                let process_type = ProcessType {
-                    send: Some(Box::new(self.current_receive_type.clone())),
+                let self_type = self.program.register_type(Type::Process {
+                    send: Some(self.current_receive_type_id),
                     receive: None,
-                };
-                let self_type = Type::Process(Box::new(process_type));
+                });
 
                 // Apply value if present (for message sends like `10 ~> .`)
                 let result_type = if let Some(val_type) = value_type {
@@ -2892,10 +3033,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// - Otherwise, keep the cycle as-is
     fn resolve_function_cycles(
         &mut self,
-        typ: Type,
-        function_type: &Type,
+        type_id: usize,
+        function_type_id: usize,
         depth_from_function: usize,
-    ) -> Type {
+    ) -> usize {
+        let typ = match self.program.lookup_type(type_id) {
+            Some(t) => t,
+            None => return type_id,
+        };
+
         match typ {
             Type::Cycle(n) => {
                 // Cycle(n) means "n boundaries upward from here"
@@ -2903,227 +3049,248 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // To reach the function: need to go up (depth_from_function + 1) boundaries
                 //   - depth_from_function to exit the result's boundaries
                 //   - +1 to exit the function boundary itself
-                if n == depth_from_function + 1 {
-                    function_type.clone()
+                if *n == depth_from_function + 1 {
+                    function_type_id
                 } else {
                     // Cycle points elsewhere (could be to a boundary inside the result,
                     // or to something even further out)
-                    Type::Cycle(n)
+                    type_id
                 }
             }
             Type::Union(variants) => {
                 // Union is a boundary - increment depth
-                Type::from_types(
-                    variants
-                        .into_iter()
-                        .map(|v| {
-                            self.resolve_function_cycles(v, function_type, depth_from_function + 1)
-                        })
-                        .collect(),
-                )
+                let variants_clone = variants.clone();
+                let mut resolved_variants = Vec::new();
+                for v in variants_clone {
+                    let resolved =
+                        self.resolve_function_cycles(v, function_type_id, depth_from_function + 1);
+                    resolved_variants.push(resolved);
+                }
+                typing::union_type_ids(&mut self.program, resolved_variants)
             }
-            Type::Callable(inner_func) => {
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+            } => {
                 // Nested function is a boundary - increment depth
+                let param_id = *parameter;
+                let result_id = *result;
+                let receive_id = *receive;
                 let resolved_param = self.resolve_function_cycles(
-                    inner_func.parameter,
-                    function_type,
+                    param_id,
+                    function_type_id,
                     depth_from_function + 1,
                 );
                 let resolved_result = self.resolve_function_cycles(
-                    inner_func.result,
-                    function_type,
+                    result_id,
+                    function_type_id,
                     depth_from_function + 1,
                 );
                 let resolved_receive = self.resolve_function_cycles(
-                    inner_func.receive,
-                    function_type,
+                    receive_id,
+                    function_type_id,
                     depth_from_function + 1,
                 );
-                Type::Callable(Box::new(CallableType {
+                self.program.register_type(Type::Callable {
                     parameter: resolved_param,
                     result: resolved_result,
                     receive: resolved_receive,
-                }))
+                })
             }
-            Type::Tuple(tuple_id) | Type::Partial(tuple_id) => {
+            Type::Tuple(tuple_id) => {
                 // Tuples are not boundaries - maintain depth
-                if let Some(type_info) = self.program.lookup_tuple(tuple_id).cloned() {
+                if let Some(type_info) = self.program.lookup_tuple(*tuple_id).cloned() {
                     let new_fields: Vec<_> = type_info
                         .fields
                         .into_iter()
-                        .map(|(name, field_type)| {
-                            (
-                                name,
-                                self.resolve_function_cycles(
-                                    field_type,
-                                    function_type,
-                                    depth_from_function,
-                                ),
-                            )
+                        .map(|(name, field_type_id)| {
+                            let resolved_field_type = self.resolve_function_cycles(
+                                field_type_id,
+                                function_type_id,
+                                depth_from_function,
+                            );
+                            (name, resolved_field_type)
                         })
                         .collect();
-                    let new_tuple_id = self.program.register_tuple(
-                        type_info.name,
-                        new_fields,
-                        type_info.is_partial,
-                    );
-                    if matches!(typ, Type::Partial(_)) {
-                        Type::Partial(new_tuple_id)
-                    } else {
-                        Type::Tuple(new_tuple_id)
-                    }
+                    let new_tuple_id = self.program.register_tuple(type_info.name, new_fields);
+                    self.program.register_type(Type::Tuple(new_tuple_id))
                 } else {
-                    typ
+                    type_id
                 }
             }
-            Type::Process(process_type) => {
+            Type::Partial { name, fields } => {
+                // Partials are not boundaries - maintain depth
+                // Clone upfront to avoid borrow issues with self.resolve_function_cycles
+                let partial_name = name.clone();
+                let partial_fields = fields.clone();
+                let new_fields: Vec<_> = partial_fields
+                    .into_iter()
+                    .map(|(fname, field_type_id)| {
+                        let resolved_field_type = self.resolve_function_cycles(
+                            field_type_id,
+                            function_type_id,
+                            depth_from_function,
+                        );
+                        (fname, resolved_field_type)
+                    })
+                    .collect();
+                self.program.register_type(Type::Partial {
+                    name: partial_name,
+                    fields: new_fields,
+                })
+            }
+            Type::Process { send, receive } => {
                 // Process types don't create boundaries but may contain types with cycles
-                let resolved_send = process_type.send.map(|t| {
-                    Box::new(self.resolve_function_cycles(*t, function_type, depth_from_function))
+                let send_id = *send;
+                let receive_id = *receive;
+                let resolved_send = send_id.map(|t| {
+                    self.resolve_function_cycles(t, function_type_id, depth_from_function)
                 });
-                let resolved_receive = process_type.receive.map(|t| {
-                    Box::new(self.resolve_function_cycles(*t, function_type, depth_from_function))
+                let resolved_receive = receive_id.map(|t| {
+                    self.resolve_function_cycles(t, function_type_id, depth_from_function)
                 });
-                Type::Process(Box::new(ProcessType {
+                self.program.register_type(Type::Process {
                     send: resolved_send,
                     receive: resolved_receive,
-                }))
+                })
             }
-            _ => typ, // Integer, Binary, Variable, Resource don't contain nested types
+            _ => type_id, // Integer, Binary, Variable, Resource don't contain nested types
         }
     }
 
-    fn apply_value_to_type(&mut self, target_type: Type, value_type: Type) -> Result<Type, Error> {
-        match target_type {
-            Type::Callable(func_type) => {
-                // Function call
+    fn apply_value_to_type(
+        &mut self,
+        target_type_id: usize,
+        value_type: usize,
+    ) -> Result<usize, Error> {
+        let target_type =
+            self.program
+                .lookup_type(target_type_id)
+                .ok_or_else(|| Error::InternalError {
+                    message: format!("Type ID {} not found", target_type_id),
+                })?;
 
-                // Check if function has type variables - if so, perform unification
-                let has_vars_param =
-                    typing::contains_variables(&func_type.parameter, &self.program);
-                let has_vars_result = typing::contains_variables(&func_type.result, &self.program);
+        if let Type::Callable {
+            parameter,
+            result,
+            receive,
+        } = target_type
+        {
+            // Function call
+            let param_id = *parameter;
+            let result_id = *result;
+            let receive_id = *receive;
 
-                let result_type = if has_vars_param || has_vars_result {
-                    // Perform unification to bind type variables
-                    let mut bindings = HashMap::new();
+            // Check if function has type variables - if so, perform unification
+            let has_vars_param = typing::contains_variables(param_id, &self.program);
+            let has_vars_result = typing::contains_variables(result_id, &self.program);
 
-                    typing::unify(
-                        &mut bindings,
-                        &func_type.parameter,
-                        &value_type,
-                        &self.program,
-                    )?;
+            let result_type = if has_vars_param || has_vars_result {
+                // Perform unification to bind type variables
+                let mut bindings = HashMap::new();
 
-                    // Substitute bindings in the result type
-                    typing::substitute(&func_type.result, &bindings, &mut self.program)
-                } else {
-                    // No type variables - just check compatibility
-                    if !value_type.is_compatible(&func_type.parameter, &self.program) {
-                        return Err(Error::TypeMismatch {
-                            expected: format!(
-                                "function parameter compatible with {}",
-                                quiver_core::format::format_type(
-                                    &self.program,
-                                    &func_type.parameter
-                                )
-                            ),
-                            found: quiver_core::format::format_type(&self.program, &value_type),
-                        });
-                    }
-                    func_type.result.clone()
-                };
+                typing::unify(&mut bindings, param_id, value_type, &mut self.program)?;
 
-                // Resolve cycles in result type that refer to the function itself
-                // Start at depth 0 since we haven't descended into any boundaries yet
-                let function_type = Type::Callable(func_type.clone());
-                let result_type = self.resolve_function_cycles(result_type, &function_type, 0);
-
-                // Check receive type compatibility
-                let called_receive_type = &func_type.receive;
-
-                // Check if called function has receives (not Type::never())
-                if !matches!(called_receive_type, Type::Union(v) if v.is_empty()) {
-                    // Called function has receives - verify current context matches
-                    // Check if current context is never (empty union = can't receive)
-                    if let Type::Union(variants) = &self.current_receive_type
-                        && variants.is_empty()
-                    {
-                        // Current context can't receive - can't call a receiving function
-                        return Err(Error::TypeMismatch {
-                            expected: "function without receive type".to_string(),
-                            found: format!(
-                                "function with receive type {}",
-                                quiver_core::format::format_type(
-                                    &self.program,
-                                    called_receive_type
-                                )
-                            ),
-                        });
-                    }
-
-                    // Check compatibility
-                    if !called_receive_type.is_compatible(&self.current_receive_type, &self.program)
-                    {
-                        return Err(Error::TypeMismatch {
-                            expected: format!(
-                                "function with receive type compatible with {}",
-                                quiver_core::format::format_type(
-                                    &self.program,
-                                    &self.current_receive_type
-                                )
-                            ),
-                            found: format!(
-                                "function with receive type {}",
-                                quiver_core::format::format_type(
-                                    &self.program,
-                                    called_receive_type
-                                )
-                            ),
-                        });
-                    }
-                }
-
-                // Execute the call
-                self.codegen.add_instruction(Instruction::Call);
-                Ok(result_type)
-            }
-            Type::Process(ref process_type) => {
-                // Send to process
-                // Type check: ensure it has a send type and value type matches
-                if let Some(expected_send_type) = &process_type.send {
-                    // Check if it's the empty union (never accepts sends)
-                    if matches!(expected_send_type.as_ref(), Type::Union(v) if v.is_empty()) {
-                        return Err(Error::TypeMismatch {
-                            expected: "process with send type".to_string(),
-                            found: "process without send type (cannot send to it)".to_string(),
-                        });
-                    }
-                    if !value_type.is_compatible(expected_send_type, &self.program) {
-                        return Err(Error::TypeMismatch {
-                            expected: quiver_core::format::format_type(
-                                &self.program,
-                                expected_send_type,
-                            ),
-                            found: quiver_core::format::format_type(&self.program, &value_type),
-                        });
-                    }
-                } else {
-                    // None means unknown send type
+                // Substitute bindings in the result type
+                typing::substitute(result_id, &bindings, &mut self.program)
+            } else {
+                // No type variables - just check compatibility
+                if !quiver_core::types::is_compatible(value_type, param_id, &self.program) {
                     return Err(Error::TypeMismatch {
-                        expected: "process with known send type".to_string(),
-                        found: "process with unknown send type".to_string(),
+                        expected: format!(
+                            "function parameter compatible with {}",
+                            quiver_core::format::format_type_by_id(&self.program, param_id)
+                        ),
+                        found: quiver_core::format::format_type_by_id(&self.program, value_type),
+                    });
+                }
+                result_id
+            };
+
+            // Resolve cycles in result type that refer to the function itself
+            // Start at depth 0 since we haven't descended into any boundaries yet
+            let result_type = self.resolve_function_cycles(result_type, target_type_id, 0);
+
+            // Check receive type compatibility
+            let called_receive_type = receive_id;
+
+            // Check if called function has receives (not NEVER)
+            if !self.is_never(called_receive_type) {
+                // Called function has receives - verify current context matches
+                // Check if current context is never (empty union = can't receive)
+                if self.is_never(self.current_receive_type_id) {
+                    // Current context can't receive - can't call a receiving function
+                    return Err(Error::TypeMismatch {
+                        expected: "function without receive type".to_string(),
+                        found: format!("function with receive type {:?}", called_receive_type),
                     });
                 }
 
-                // Emit send instruction (expects [value, process] on stack)
-                self.codegen.add_instruction(Instruction::Send);
-
-                Ok(target_type)
+                // Check compatibility
+                if !quiver_core::types::is_compatible(
+                    called_receive_type,
+                    self.current_receive_type_id,
+                    &self.program,
+                ) {
+                    return Err(Error::TypeMismatch {
+                        expected: format!(
+                            "function with receive type compatible with {:?}",
+                            self.current_receive_type_id
+                        ),
+                        found: format!("function with receive type {:?}", called_receive_type),
+                    });
+                }
             }
-            _ => Err(Error::TypeMismatch {
+
+            // Execute the call
+            self.codegen.add_instruction(Instruction::Call);
+            Ok(result_type)
+        } else if let Type::Process {
+            send: send_type, ..
+        } = target_type
+        {
+            // Send to process
+            // Type check: ensure it has a send type and value type matches
+            let send_id = *send_type;
+            if let Some(expected_send_type_id) = send_id {
+                // Check if it's the empty union (never accepts sends)
+                if self.is_never(expected_send_type_id) {
+                    return Err(Error::TypeMismatch {
+                        expected: "process with send type".to_string(),
+                        found: "process without send type (cannot send to it)".to_string(),
+                    });
+                }
+                if !quiver_core::types::is_compatible(
+                    value_type,
+                    expected_send_type_id,
+                    &self.program,
+                ) {
+                    return Err(Error::TypeMismatch {
+                        expected: quiver_core::format::format_type_by_id(
+                            &self.program,
+                            expected_send_type_id,
+                        ),
+                        found: quiver_core::format::format_type_by_id(&self.program, value_type),
+                    });
+                }
+            } else {
+                // None means unknown send type
+                return Err(Error::TypeMismatch {
+                    expected: "process with known send type".to_string(),
+                    found: "process with unknown send type".to_string(),
+                });
+            }
+
+            // Emit send instruction (expects [value, process] on stack)
+            self.codegen.add_instruction(Instruction::Send);
+
+            Ok(target_type_id)
+        } else {
+            Err(Error::TypeMismatch {
                 expected: "function, process, or resource".to_string(),
-                found: quiver_core::format::format_type(&self.program, &target_type),
-            }),
+                found: quiver_core::format::format_type_by_id(&self.program, target_type_id),
+            })
         }
     }
 
@@ -3131,19 +3298,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         identifier: Option<&str>,
         accessors: &[ast::AccessPath],
-        arg_type: Option<Type>,
-    ) -> Result<Type, Error> {
+        arg_type: Option<usize>,
+    ) -> Result<usize, Error> {
         // Handle argument - if none provided, check if function parameter is nil and use that
         let _arg_type = if let Some(arg_t) = arg_type {
             arg_t
         } else {
             let (func_param_type, _) = scopes::get_function_parameter(&self.scopes)?;
-            if func_param_type == Type::nil() {
+            if func_param_type == self.program.register_type(Type::nil()) {
                 // Push nil onto stack for tail call
-                let nil_tuple_id = self.program.register_tuple(None, vec![], false);
+                let nil_tuple_id = self.program.register_tuple(None, vec![]);
                 self.codegen
                     .add_instruction(Instruction::Tuple(nil_tuple_id));
-                Type::nil()
+                self.program.register_type(Type::nil())
             } else {
                 return Err(Error::FeatureUnsupported(
                     "Tail call requires a value".to_string(),
@@ -3154,7 +3321,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if identifier.is_none() && accessors.is_empty() {
             // Tail call to parameter - argument is already on stack, just emit tail call
             self.codegen.add_instruction(Instruction::TailCall(true));
-            Ok(Type::never())
+            Ok(self.program.never())
         } else {
             // Tail call to identifier with accessors
             let name = identifier.ok_or_else(|| {
@@ -3178,24 +3345,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
 
             // Verify it's a function
-            match func_type {
-                Type::Callable(func_type) => {
+            match self.program.lookup_type(func_type) {
+                Some(Type::Callable { result, .. }) => {
                     self.codegen.add_instruction(Instruction::TailCall(false));
-                    Ok(func_type.result)
+                    Ok(*result)
                 }
-                other_type => Err(Error::TypeMismatch {
+                _ => Err(Error::TypeMismatch {
                     expected: "function".to_string(),
-                    found: quiver_core::format::format_type(&self.program, &other_type),
+                    found: quiver_core::format::format_type_by_id(&self.program, func_type),
                 }),
             }
         }
     }
 
-    fn compile_builtin(&mut self, name: &str) -> Result<Type, Error> {
+    fn compile_builtin(&mut self, name: &str) -> Result<usize, Error> {
         let (param_type, result_type) = self
             .builtins
             .resolve_signature(name, &mut self.program)
             .ok_or_else(|| Error::BuiltinUndefined(name.to_string()))?;
+
+        // Register the types
+        let param_type_id = self.program.register_type(param_type);
+        let result_type_id = self.program.register_type(result_type);
 
         let builtin_index = self
             .program
@@ -3204,155 +3375,87 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen
             .add_instruction(Instruction::Builtin(builtin_index));
 
-        Ok(Type::Callable(Box::new(CallableType {
-            parameter: param_type,
-            result: result_type,
-            receive: Type::never(),
-        })))
+        let never_id = self.program.never();
+        Ok(self.program.register_type(Type::Callable {
+            parameter: param_type_id,
+            result: result_type_id,
+            receive: never_id,
+        }))
     }
 
-    fn compile_equality(&mut self, value_type: Type) -> Result<Type, Error> {
+    fn compile_equality(&mut self, value_type: usize) -> Result<usize, Error> {
         // The == operator works with a tuple on the stack
         // We need to extract the tuple elements and call Equal(count)
 
-        // Extract tuple type IDs from the value type
-        let tuples = value_type.extract_tuples();
+        // Get field count and first field types (handles both tuples and partials)
+        let (field_count, first_field_types) =
+            type_queries::get_field_count_and_first_types(&self.program, value_type)?;
 
-        if tuples.is_empty() {
-            return Err(Error::TypeMismatch {
-                expected: "tuple".to_string(),
-                found: "unknown".to_string(),
-            });
-        }
-
-        // Verify all tuples have the same field count and collect field types
-        let mut common_field_count = None;
-        let mut first_field_types = Vec::new();
-
-        for tuple_id in &tuples {
-            let type_info =
-                self.program
-                    .lookup_tuple(*tuple_id)
-                    .ok_or(Error::TupleNotInRegistry {
-                        tuple_id: *tuple_id,
-                    })?;
-            let fields = &type_info.fields;
-
-            let field_count = fields.len();
-
-            if field_count == 0 {
-                return Err(Error::TypeMismatch {
-                    expected: "non-empty tuple".to_string(),
-                    found: "empty tuple".to_string(),
-                });
+        // Extract tuple fields and push them individually to the stack
+        // Following the established pattern from compile_operator
+        for i in 0..field_count {
+            if i < field_count - 1 {
+                self.codegen.add_instruction(Instruction::Duplicate);
             }
-
-            if let Some(prev_count) = common_field_count {
-                if prev_count != field_count {
-                    return Err(Error::TypeMismatch {
-                        expected: format!("tuple with {} fields", prev_count),
-                        found: format!("tuple with {} fields", field_count),
-                    });
-                }
-            } else {
-                common_field_count = Some(field_count);
-                // Collect first field types for return type
-                if let Some((_, first_field_type)) = fields.first() {
-                    first_field_types.push(first_field_type.clone());
-                }
+            self.codegen.add_instruction(Instruction::Get(i));
+            if i < field_count - 1 {
+                self.codegen.add_instruction(Instruction::Rotate(2));
             }
         }
 
-        if let Some(field_count) = common_field_count {
-            // Extract tuple fields and push them individually to the stack
-            // Following the established pattern from compile_operator
-            for i in 0..field_count {
-                if i < field_count - 1 {
-                    self.codegen.add_instruction(Instruction::Duplicate);
-                }
-                self.codegen.add_instruction(Instruction::Get(i));
-                if i < field_count - 1 {
-                    self.codegen.add_instruction(Instruction::Rotate(2));
-                }
-            }
+        // Now compare the field_count individual values on the stack
+        self.codegen
+            .add_instruction(Instruction::Equal(field_count));
 
-            // Now compare the field_count individual values on the stack
-            self.codegen
-                .add_instruction(Instruction::Equal(field_count));
-
-            // Return type is union of field types and NIL
-            let mut result_types = first_field_types;
-            result_types.push(Type::nil());
-            Ok(Type::from_types(result_types))
-        } else {
-            // For unresolved types or non-tuple types, we can't know the field count at compile time
-            // This would require runtime inspection - for now, return an error
-            Err(Error::TypeMismatch {
-                expected: "tuple".to_string(),
-                found: "unknown".to_string(),
-            })
-        }
+        // Return type is union of field types and NIL
+        let mut result_types = first_field_types;
+        result_types.push(self.program.register_type(Type::nil()));
+        Ok(typing::union_type_ids(&mut self.program, result_types))
     }
 
-    fn compile_not(&mut self, _value_type: Type) -> Result<Type, Error> {
+    fn compile_not(&mut self, _value_type: usize) -> Result<usize, Error> {
         // The ! operator works with any value on the stack
         // It converts [] to Ok and everything else to []
         self.codegen.add_instruction(Instruction::Not);
 
         // The Not instruction returns either Ok or NIL
-        let result_type = Type::from_types(vec![Type::ok(), Type::nil()]);
+        let ok_type = self.program.register_type(Type::ok());
+        let nil_type = self.program.register_type(Type::nil());
+        let result_type = typing::union_type_ids(&mut self.program, vec![ok_type, nil_type]);
         Ok(result_type)
     }
 
     /// Compiles accessor chain and tracks field provenance.
     fn compile_accessor(
         &mut self,
-        mut last_type: Type,
+        mut last_type: usize,
         accessors: Vec<ast::AccessPath>,
         target_name: &str,
         base_provenance: Provenance,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         let mut current_prov = base_provenance;
 
         for accessor in accessors {
-            let tuples = last_type.extract_tuples();
-
-            if tuples.is_empty() {
-                return Err(Error::MemberAccessOnNonTuple {
-                    target: target_name.to_string(),
-                });
-            }
-
             let (index, field_types) = match accessor {
-                ast::AccessPath::Field(field_name) => {
-                    let results =
-                        type_queries::get_field_types_by_name(&self.program, &tuples, &field_name)
-                            .map_err(|_| Error::MemberFieldNotFound {
-                                field_name: field_name.clone(),
-                                target: target_name.to_string(),
-                            })?;
-                    if results.is_empty() {
-                        return Err(Error::MemberFieldNotFound {
-                            field_name,
-                            target: target_name.to_string(),
-                        });
-                    }
-                    let index = results[0].0;
-                    let field_types: Vec<Type> = results.into_iter().map(|(_, t)| t).collect();
-                    (index, field_types)
-                }
+                ast::AccessPath::Field(field_name) => type_queries::get_field_by_name(
+                    &self.program,
+                    last_type,
+                    &field_name,
+                    target_name,
+                )?,
                 ast::AccessPath::Index(index) => {
-                    let field_types =
-                        type_queries::get_field_types_at_position(&self.program, &tuples, index)
-                            .map_err(|_| Error::MemberAccessOnNonTuple {
-                                target: target_name.to_string(),
-                            })?;
+                    let field_types = type_queries::get_field_at_index(
+                        &self.program,
+                        last_type,
+                        index,
+                        target_name,
+                    )?;
                     (index, field_types)
                 }
             };
 
             self.codegen.add_instruction(Instruction::Get(index));
-            last_type = Type::from_types(field_types);
+            last_type = typing::union_type_ids(&mut self.program, field_types);
             // Update provenance to track the field access
             current_prov = current_prov.field(index);
 
@@ -3375,7 +3478,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         target: &str,
         accessors: Vec<ast::AccessPath>,
-    ) -> Result<(Type, Provenance), Error> {
+    ) -> Result<(usize, Provenance), Error> {
         // Check if we have a capture for the full path (base + accessors)
         if !accessors.is_empty()
             && let Some((capture_type, capture_index)) =

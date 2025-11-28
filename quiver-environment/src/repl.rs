@@ -5,7 +5,8 @@ use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
 use quiver_core::effects::Effect;
 use quiver_core::process::ProcessId;
-use quiver_core::types::Type;
+use quiver_core::program::Program;
+use quiver_core::types::{Type, TypeLookup};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -29,10 +30,10 @@ impl std::fmt::Display for ReplError {
 
 pub struct Repl<E: Effect> {
     repl_process_id: Option<ProcessId>,
-    types: Vec<quiver_core::types::TupleTypeInfo>, // Accumulated types across evaluations
+    program: Program, // Accumulated program state across evaluations (needed for module caching)
     bindings: HashMap<String, Binding>, // variables and type aliases persisted across sessions
-    module_cache: ModuleCache,          // persistent module cache across evaluations
-    last_result_type: Type,             // Type of the last evaluated result, for continuations
+    module_cache: ModuleCache, // persistent module cache across evaluations
+    last_result_type: Type, // Type of the last evaluated result, for continuations
     module_loader: Box<dyn ModuleLoader>,
     builtins: quiver_core::builtins::BuiltinRegistry<E>,
 }
@@ -48,7 +49,7 @@ impl<E: Effect> Repl<E> {
 
         Ok(Self {
             repl_process_id: Some(pid),
-            types: vec![],
+            program: Program::new(),
             bindings: HashMap::new(),
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
@@ -78,69 +79,87 @@ impl<E: Effect> Repl<E> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
+        // Clone the program for compilation (on success we'll replace self.program)
+        let mut program = self.program.clone();
+
+        // Convert process types from Type to type IDs for the compiler
+        let process_type_ids: HashMap<usize, (usize, usize)> = process_types
+            .into_iter()
+            .map(|(pid, (ty, func_idx))| (pid, (program.register_type(ty), func_idx)))
+            .collect();
+
+        // Convert last_result_type from Type to type ID for the compiler
+        let last_result_type_id = program.register_type(self.last_result_type.clone());
+
         let result = Compiler::compile(
             parsed,
             &self.bindings,
             self.module_cache.clone(),
             self.module_loader.as_ref(),
-            self.types.clone(),
-            self.last_result_type.clone(), // parameter_type - use previous result type for continuations
-            &process_types,
+            program,
+            last_result_type_id, // parameter_type - use previous result type for continuations
+            &process_type_ids,
             &self.builtins,
         )
         .map_err(ReplError::Compiler)?;
 
         let instructions = result.instructions;
-        let result_type = result.result_type;
+        let result_type_id = result.result_type;
         let bindings = result.bindings;
         let module_cache = result.module_cache;
         let mut program = result.program;
 
+        // Convert result_type_id to Type for storage
+        let result_type = program
+            .lookup_type(result_type_id)
+            .cloned()
+            .unwrap_or_else(Type::nil);
+
         // Update REPL state
         self.bindings = bindings;
         self.module_cache = module_cache;
-        self.last_result_type = result_type.clone();
+        self.last_result_type = result_type;
 
         // Only create function wrapper if we have instructions to execute
         let function_index = if !instructions.is_empty() {
+            // Register the callable type for this REPL wrapper function
+            let never_id = program.never();
+            let callable_type_id = program.register_type(Type::Callable {
+                parameter: last_result_type_id,
+                result: result_type_id,
+                receive: never_id,
+            });
             let function = Function {
                 instructions,
-                function_type: quiver_core::types::CallableType {
-                    parameter: self.last_result_type.clone(),
-                    result: result_type.clone(),
-                    receive: Type::Union(vec![]), // Bottom type (never)
-                },
                 captures: 0,
+                type_id: callable_type_id,
             };
             Some(program.register_function(function))
         } else {
             None
         };
 
-        // Store types for next iteration
-        self.types = program.get_tuples().to_vec();
+        // Update program state for next iteration
+        self.program = program;
 
         // If no function was created (type definitions only), we're done
         let Some(function_index) = function_index else {
             return Ok(None);
         };
 
-        // Create bytecode from the program (without tree-shaking to preserve module imports)
-        let mut bytecode = program.to_bytecode(None);
-        // Set the entry function
-        bytecode.entry = Some(function_index);
-
         // Create or resume the REPL process
         let repl_process_id = match self.repl_process_id {
             Some(pid) => {
                 // Resume existing process with new function
                 // resume_process will push the previous result from process.result onto the stack
+                let bytecode = self.program.to_bytecode(Some(function_index));
                 env.resume_process(pid, bytecode)
                     .map_err(ReplError::Environment)?;
                 pid
             }
             None => {
                 // Create the persistent REPL process on first evaluation
+                let bytecode = self.program.to_bytecode(Some(function_index));
                 let pid = env
                     .start_process(Some(bytecode))
                     .map_err(ReplError::Environment)?;
@@ -187,14 +206,14 @@ impl<E: Effect> Repl<E> {
         env.request_locals(repl_process_id, vec![local_index])
     }
 
-    /// Get all variable names and their types, ordered by local index
-    pub fn get_variables(&self) -> Vec<(String, Type)> {
+    /// Get all variable names and their type IDs, ordered by local index
+    pub fn get_variables(&self) -> Vec<(String, usize)> {
         let mut vars: Vec<_> = self
             .bindings
             .iter()
             .filter_map(|(name, binding)| {
                 if let Binding::Variable { ty, index, .. } = binding {
-                    Some((name.clone(), ty.clone(), *index))
+                    Some((name.clone(), *ty, *index))
                 } else {
                     None
                 }
@@ -250,14 +269,14 @@ impl<E: Effect> Repl<E> {
         let _ = env.compact_locals(repl_process_id, keep_indices);
     }
 
-    /// Resolve a type alias and return the resolved Type.
-    /// Type parameters are resolved to Type::Variable placeholders.
+    /// Resolve a type alias and return the resolved type ID.
+    /// Type parameters are resolved to type variable placeholders.
     /// This is useful for testing and displaying type aliases.
     pub fn resolve_type_alias(
         &mut self,
         env: &mut Environment<E>,
         alias_name: &str,
-    ) -> Result<Type, String> {
+    ) -> Result<usize, String> {
         // Extract type aliases from bindings
         let type_aliases: HashMap<String, quiver_compiler::compiler::TypeAliasDef> = self
             .bindings

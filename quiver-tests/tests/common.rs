@@ -175,7 +175,7 @@ impl TestBuilder {
         };
 
         // Create environment and REPL
-        let mut environment = Environment::<NativeEffect>::new(workers, builtins.clone());
+        let mut environment = Environment::<NativeEffect>::new(workers);
 
         // Set the effect backend
         if let Some(backend) = effect_backend {
@@ -312,8 +312,8 @@ impl TestResult {
             .map(|(_, ty)| ty);
 
         match variable_type {
-            Some(ty) => {
-                let actual = self.environment.format_type(ty);
+            Some(type_id) => {
+                let actual = self.environment.format_type_by_id(*type_id);
                 assert_eq!(
                     actual, expected,
                     "Expected variable '{}' to have type '{}', but got '{}' for source: {}",
@@ -337,8 +337,8 @@ impl TestResult {
             .repl
             .resolve_type_alias(&mut self.environment, alias_name)
         {
-            Ok(ty) => {
-                let actual = self.environment.format_type(&ty);
+            Ok(type_id) => {
+                let actual = self.environment.format_type_by_id(type_id);
                 assert_eq!(
                     actual, expected,
                     "Expected type alias '{}' to resolve to '{}', but got '{}' for source: {}",

@@ -22,9 +22,9 @@ pub enum Value {
     Binary(Binary),
     Tuple(usize, Vec<Value>),
     Function(usize, Vec<Value>),
-    Builtin(String),
+    Builtin(usize), // builtin_id (index into builtins table)
     Process(ProcessId, usize),
-    Resource(ResourceId, String),
+    Resource(ResourceId, usize), // resource_id, resource_type_id
 }
 
 impl Value {

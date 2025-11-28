@@ -4,11 +4,15 @@ use crate::transport::WorkerHandle;
 use quiver_compiler::compiler::{
     Binding, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
 };
-use quiver_core::bytecode::{Bytecode, Function, Instruction};
+use quiver_core::bytecode::{Bytecode, Constant, Function, Instruction};
+use quiver_core::compatibility::{
+    CompatibilityInput, compute_param_compatibility, compute_type_compatibility,
+};
 use quiver_core::effects::{Effect, EffectBackend};
+use quiver_core::executor::ProgramUpdate;
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
-use quiver_core::types::{CallableType, ProcessType, Type};
+use quiver_core::types::{Type, TypeLookup};
 use quiver_core::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -17,30 +21,42 @@ type WorkerRequestMap<T> = HashMap<u64, Option<HashMap<ProcessId, T>>>;
 
 enum Aggregation {
     Statuses(WorkerRequestMap<ProcessStatus>),
-    ProcessTypes(WorkerRequestMap<(Type, usize)>),
+    ProcessTypes(WorkerRequestMap<usize>), // Maps request_id -> Option<HashMap<ProcessId, function_index>>
+}
+
+fn remap_type_id(id: usize, type_remap: &HashMap<usize, usize>) -> usize {
+    *type_remap.get(&id).unwrap_or(&id)
 }
 
 fn remap_type(ty: Type, type_remap: &HashMap<usize, usize>) -> Type {
     match ty {
-        Type::Tuple(old_id) => Type::Tuple(*type_remap.get(&old_id).unwrap_or(&old_id)),
-        Type::Partial(old_id) => Type::Partial(*type_remap.get(&old_id).unwrap_or(&old_id)),
-        Type::Union(types) => Type::Union(
-            types
+        Type::Tuple(old_id) => Type::Tuple(remap_type_id(old_id, type_remap)),
+        Type::Partial { name, fields } => Type::Partial {
+            name,
+            fields: fields
                 .into_iter()
-                .map(|t| remap_type(t, type_remap))
+                .map(|(fname, ftype)| (fname, remap_type_id(ftype, type_remap)))
+                .collect(),
+        },
+        Type::Union(type_ids) => Type::Union(
+            type_ids
+                .into_iter()
+                .map(|t| remap_type_id(t, type_remap))
                 .collect(),
         ),
-        Type::Callable(callable) => Type::Callable(Box::new(CallableType {
-            parameter: remap_type(callable.parameter, type_remap),
-            result: remap_type(callable.result, type_remap),
-            receive: remap_type(callable.receive, type_remap),
-        })),
-        Type::Process(process) => Type::Process(Box::new(ProcessType {
-            send: process.send.map(|t| Box::new(remap_type(*t, type_remap))),
-            receive: process
-                .receive
-                .map(|t| Box::new(remap_type(*t, type_remap))),
-        })),
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+        } => Type::Callable {
+            parameter: remap_type_id(parameter, type_remap),
+            result: remap_type_id(result, type_remap),
+            receive: remap_type_id(receive, type_remap),
+        },
+        Type::Process { send, receive } => Type::Process {
+            send: send.map(|t| remap_type_id(t, type_remap)),
+            receive: receive.map(|t| remap_type_id(t, type_remap)),
+        },
         other => other,
     }
 }
@@ -79,12 +95,10 @@ fn remap_function(
 
     Function {
         instructions: remapped_instructions,
-        function_type: CallableType {
-            parameter: remap_type(function.function_type.parameter, tuple_remap),
-            result: remap_type(function.function_type.result, tuple_remap),
-            receive: remap_type(function.function_type.receive, tuple_remap),
-        },
         captures: function.captures,
+        type_id: *type_remap
+            .get(&function.type_id)
+            .unwrap_or(&function.type_id),
     }
 }
 
@@ -186,8 +200,8 @@ struct PendingAwait {
 
 pub struct Environment<E: Effect> {
     workers: Vec<Box<dyn WorkerHandle<E>>>,
+    // Accumulated program state with full type information
     program: Program,
-    builtins: quiver_core::builtins::BuiltinRegistry<E>,
     process_router: HashMap<ProcessId, WorkerId>,
     pending_awaits: HashMap<ProcessId, PendingAwait>, // awaiter -> pending await state
     pending_requests: HashMap<u64, Option<RequestResult>>,
@@ -202,23 +216,17 @@ pub struct Environment<E: Effect> {
 }
 
 impl<E: Effect> Environment<E> {
-    pub fn new(
-        workers: Vec<Box<dyn WorkerHandle<E>>>,
-        builtins: quiver_core::builtins::BuiltinRegistry<E>,
-    ) -> Self {
-        let program = Program::new();
-
+    pub fn new(workers: Vec<Box<dyn WorkerHandle<E>>>) -> Self {
         Self {
             workers,
-            program: program.clone(),
-            builtins,
+            program: Program::new(),
             process_router: HashMap::new(),
             pending_awaits: HashMap::new(),
             pending_requests: HashMap::new(),
             aggregations: HashMap::new(),
             next_request_id: 0,
             next_process_id: 0,
-            effect_backend: None, // Will be set when we move I/O to effects
+            effect_backend: None,
             resource_ownership: HashMap::new(),
         }
     }
@@ -295,7 +303,7 @@ impl<E: Effect> Environment<E> {
         pid: ProcessId,
         bytecode: Bytecode,
     ) -> Result<(), EnvironmentError> {
-        // Merge bytecode into program and get remapped function index
+        // Merge bytecode and get remapped function index
         let function_index = self.merge_bytecode(bytecode)?;
 
         let worker_id = self
@@ -509,67 +517,69 @@ impl<E: Effect> Environment<E> {
         id
     }
 
-    /// Merge bytecode into the environment's program with deduplication
+    /// Merge bytecode into the environment's accumulated state with deduplication
     /// Returns the remapped entry function index
     fn merge_bytecode(&mut self, bytecode: Bytecode) -> Result<usize, EnvironmentError> {
-        // Track old program sizes
+        let entry_fn = bytecode.entry.expect("Bytecode must have an entry point");
+
+        // Track old sizes for computing deltas
         let old_constants_len = self.program.get_constants().len();
         let old_functions_len = self.program.get_functions().len();
         let old_tuples_len = self.program.get_tuples().len();
-        let old_types_len = self.program.get_types().len();
         let old_builtins_len = self.program.get_builtins().len();
+        let old_types_len = self.program.get_types().len();
 
-        // Build remapping tables
+        // Build remapping tables using Program::register_* methods
         let mut constant_remap: HashMap<usize, usize> = HashMap::new();
-        let mut function_remap: HashMap<usize, usize> = HashMap::new();
         let mut tuple_remap: HashMap<usize, usize> = HashMap::new();
         let mut type_remap: HashMap<usize, usize> = HashMap::new();
         let mut builtin_remap: HashMap<usize, usize> = HashMap::new();
+        let mut function_remap: HashMap<usize, usize> = HashMap::new();
 
-        // Merge constants (register_constant handles deduplication)
+        // Merge constants using Program::register_constant
         for (old_idx, constant) in bytecode.constants.iter().enumerate() {
             let new_idx = self.program.register_constant(constant.clone());
             constant_remap.insert(old_idx, new_idx);
         }
 
-        for (old_idx, type_info) in bytecode.tuples.iter().enumerate() {
-            let old_type_id = old_idx;
-
-            let remapped_fields: Vec<_> = type_info
+        // Merge tuples using Program::register_tuple
+        // Tuples are processed in order, so type references to earlier tuples are already remapped
+        for (old_idx, tuple_info) in bytecode.tuples.iter().enumerate() {
+            // Remap type ID references in fields
+            let remapped_fields: Vec<_> = tuple_info
                 .fields
                 .iter()
-                .map(|(name, ty)| (name.clone(), remap_type(ty.clone(), &tuple_remap)))
+                .map(|(name, type_id)| (name.clone(), remap_type_id(*type_id, &type_remap)))
                 .collect();
 
-            // register_tuple will deduplicate based on name, fields, and is_partial
-            let new_type_id = self.program.register_tuple(
-                type_info.name.clone(),
-                remapped_fields,
-                type_info.is_partial,
-            );
-            tuple_remap.insert(old_type_id, new_type_id);
-        }
-
-        // Merge check types (register_tuple handles deduplication)
-        for (old_idx, check_type) in bytecode.types.iter().enumerate() {
-            let old_type_id = old_idx;
-            // Remap tuple type references within the check type
-            let remapped_type = remap_type(check_type.clone(), &tuple_remap);
-            let new_type_id = self.program.register_type(remapped_type);
-            type_remap.insert(old_type_id, new_type_id);
-        }
-
-        // Merge builtins (register_builtin handles deduplication by name)
-        for (old_idx, builtin_info) in bytecode.builtins.iter().enumerate() {
             let new_idx = self
                 .program
-                .register_builtin(builtin_info.name.clone(), &self.builtins);
+                .register_tuple(tuple_info.name.clone(), remapped_fields);
+            tuple_remap.insert(old_idx, new_idx);
+        }
+
+        // Merge types (used by IsType instructions) using Program::register_type
+        for (old_idx, typ) in bytecode.types.iter().enumerate() {
+            // Remap tuple type references within the type
+            let remapped_type = remap_type(typ.clone(), &type_remap);
+            let new_idx = self.program.register_type(remapped_type);
+            type_remap.insert(old_idx, new_idx);
+        }
+
+        // Merge builtins using Program::register_builtin_info
+        for (old_idx, builtin_info) in bytecode.builtins.iter().enumerate() {
+            // Remap type ID references within the builtin info
+            let remapped_info = quiver_core::types::BuiltinInfo {
+                name: builtin_info.name.clone(),
+                param_type: remap_type_id(builtin_info.param_type, &type_remap),
+                result_type: remap_type_id(builtin_info.result_type, &type_remap),
+            };
+            let new_idx = self.program.register_builtin_info(remapped_info);
             builtin_remap.insert(old_idx, new_idx);
         }
 
-        // Merge functions (register_function handles deduplication after we remap indices)
+        // Merge functions (type_id is remapped by remap_function)
         for (old_idx, function) in bytecode.functions.iter().enumerate() {
-            // Remap all indices in the function before registering
             let remapped_function = remap_function(
                 function.clone(),
                 &constant_remap,
@@ -579,32 +589,56 @@ impl<E: Effect> Environment<E> {
                 &builtin_remap,
             );
 
-            // register_function will deduplicate if the function already exists
             let new_idx = self.program.register_function(remapped_function);
             function_remap.insert(old_idx, new_idx);
         }
 
-        // Get new program data to send to workers
-        let new_constants: Vec<_> = self.program.get_constants()[old_constants_len..].to_vec();
-        let new_functions: Vec<_> = self.program.get_functions()[old_functions_len..].to_vec();
-        let new_tuples: Vec<_> = self.program.get_tuples()[old_tuples_len..].to_vec();
-        let new_types: Vec<_> = self.program.get_types()[old_types_len..].to_vec();
-        let new_builtins: Vec<_> = self.program.get_builtins()[old_builtins_len..].to_vec();
+        // Compute deltas - only new items since before the merge
+        let new_constants: Vec<Constant> =
+            self.program.get_constants()[old_constants_len..].to_vec();
+        let new_functions: Vec<Function> =
+            self.program.get_functions()[old_functions_len..].to_vec();
+        let new_tuples: Vec<quiver_core::types::TupleTypeInfo> =
+            self.program.get_tuples()[old_tuples_len..].to_vec();
+        let new_types: Vec<Type> = self.program.get_types()[old_types_len..].to_vec();
+        let new_builtins: Vec<quiver_core::types::BuiltinInfo> =
+            self.program.get_builtins()[old_builtins_len..].to_vec();
 
-        // Send updates to workers
+        // Only send update if there's new data
         if !new_constants.is_empty()
             || !new_functions.is_empty()
             || !new_tuples.is_empty()
             || !new_types.is_empty()
             || !new_builtins.is_empty()
         {
-            let update_cmd = Command::UpdateProgram {
+            // Recompute compatibility tables for the FULL merged program state
+            let resource_names = self.program.collect_resource_names();
+
+            let input = CompatibilityInput {
+                types: self.program.get_types(),
+                tuples: self.program.get_tuples(),
+                functions: self.program.get_functions(),
+                builtins: self.program.get_builtins(),
+                resource_names: &resource_names,
+            };
+
+            let type_compatibility = compute_type_compatibility(&input);
+            let (function_param_compatibility, builtin_param_compatibility) =
+                compute_param_compatibility(&input);
+
+            let update = ProgramUpdate {
                 constants: new_constants,
                 functions: new_functions,
                 tuples: new_tuples,
                 types: new_types,
                 builtins: new_builtins,
+                resources: resource_names,
+                type_compatibility,
+                function_param_compatibility,
+                builtin_param_compatibility,
             };
+
+            let update_cmd = Command::UpdateProgram(update);
 
             for worker in &mut self.workers {
                 worker
@@ -614,11 +648,8 @@ impl<E: Effect> Environment<E> {
         }
 
         // Return remapped entry function index
-        let entry_idx = bytecode
-            .entry
-            .expect("Bytecode must have an entry function");
         Ok(*function_remap
-            .get(&entry_idx)
+            .get(&entry_fn)
             .expect("Entry function should be in remap table"))
     }
 
@@ -963,9 +994,9 @@ impl<E: Effect> Environment<E> {
     fn handle_process_types_response(
         &mut self,
         request_id: u64,
-        result: Result<HashMap<ProcessId, (Type, usize)>, EnvironmentError>,
+        result: Result<HashMap<ProcessId, usize>, EnvironmentError>,
     ) -> Result<(), EnvironmentError> {
-        let process_types = result?;
+        let function_indices = result?;
 
         // Check if this request is part of an aggregation
         let mut aggregation_id = None;
@@ -979,42 +1010,88 @@ impl<E: Effect> Environment<E> {
         }
 
         if let Some(agg_id) = aggregation_id {
-            // This is part of an aggregation - store the result
-            if let Some(Aggregation::ProcessTypes(worker_requests)) =
-                self.aggregations.get_mut(&agg_id)
-            {
-                worker_requests.insert(request_id, Some(process_types));
+            // This is part of an aggregation - store the raw function indices
+            // First, insert and check if all results are collected
+            let (all_collected, merged_indices, worker_req_ids) = {
+                if let Some(Aggregation::ProcessTypes(worker_requests)) =
+                    self.aggregations.get_mut(&agg_id)
+                {
+                    worker_requests.insert(request_id, Some(function_indices));
 
-                // Check if all results are collected
-                if worker_requests.values().all(|v| v.is_some()) {
-                    // Merge all results into a single HashMap
-                    let mut merged = HashMap::new();
-                    for types in worker_requests.values().flatten() {
-                        merged.extend(types.clone());
-                    }
-
-                    // Store the aggregated result
-                    self.pending_requests
-                        .insert(agg_id, Some(RequestResult::ProcessTypes(merged)));
-
-                    // Clean up aggregation and individual worker requests
-                    let worker_req_ids: Vec<u64> = worker_requests.keys().copied().collect();
-                    self.aggregations.remove(&agg_id);
-                    for worker_req_id in worker_req_ids {
-                        self.pending_requests.remove(&worker_req_id);
+                    if worker_requests.values().all(|v| v.is_some()) {
+                        // Merge all function indices from workers
+                        let mut merged = HashMap::new();
+                        for indices in worker_requests.values().flatten() {
+                            merged.extend(indices.clone());
+                        }
+                        let req_ids: Vec<u64> = worker_requests.keys().copied().collect();
+                        (true, Some(merged), req_ids)
+                    } else {
+                        // Still waiting for more results
+                        self.pending_requests.insert(request_id, None);
+                        (false, None, vec![])
                     }
                 } else {
-                    // Still waiting for more results - mark this individual request as complete
-                    self.pending_requests.insert(request_id, None);
+                    (false, None, vec![])
+                }
+            };
+
+            if all_collected && let Some(merged) = merged_indices {
+                // Enrich with actual types (now outside the mutable borrow)
+                let enriched = self.enrich_process_types(merged);
+
+                // Store the aggregated result
+                self.pending_requests
+                    .insert(agg_id, Some(RequestResult::ProcessTypes(enriched)));
+
+                // Clean up aggregation and individual worker requests
+                self.aggregations.remove(&agg_id);
+                for worker_req_id in worker_req_ids {
+                    self.pending_requests.remove(&worker_req_id);
                 }
             }
         } else {
-            // Single (non-aggregated) request
+            // Single (non-aggregated) request - enrich and store
+            let enriched = self.enrich_process_types(function_indices);
             self.pending_requests
-                .insert(request_id, Some(RequestResult::ProcessTypes(process_types)));
+                .insert(request_id, Some(RequestResult::ProcessTypes(enriched)));
         }
 
         Ok(())
+    }
+
+    /// Convert function indices to full process types by looking up callable types
+    fn enrich_process_types(
+        &self,
+        function_indices: HashMap<ProcessId, usize>,
+    ) -> HashMap<ProcessId, (Type, usize)> {
+        function_indices
+            .into_iter()
+            .map(|(pid, function_index)| {
+                // Try to get the actual process type from the function's callable type
+                let process_type = self
+                    .program
+                    .get_function(function_index)
+                    .and_then(|func| self.program.lookup_type(func.type_id))
+                    .map(|callable| match callable {
+                        Type::Callable {
+                            result, receive, ..
+                        } => Type::Process {
+                            send: Some(*receive),
+                            receive: Some(*result),
+                        },
+                        _ => Type::Process {
+                            send: None,
+                            receive: None,
+                        },
+                    })
+                    .unwrap_or(Type::Process {
+                        send: None,
+                        receive: None,
+                    });
+                (pid, (process_type, function_index))
+            })
+            .collect()
     }
 
     fn handle_stats_response(
@@ -1058,16 +1135,21 @@ impl<E: Effect> Environment<E> {
 
     /// Format a value for display
     pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
-        let lookup = quiver_core::format::HeapAndProgramLookup {
+        let binary_lookup = quiver_core::format::HeapAndProgramLookup {
             heap,
             program: &self.program,
         };
-        quiver_core::format::format_value(value, &lookup, &self.program)
+        quiver_core::format::format_value(value, &self.program, &binary_lookup)
     }
 
     /// Format a type for display
     pub fn format_type(&self, ty: &Type) -> String {
         quiver_core::format::format_type(&self.program, ty)
+    }
+
+    /// Format a type by its ID for display
+    pub fn format_type_by_id(&self, type_id: usize) -> String {
+        quiver_core::format::format_type_by_id(&self.program, type_id)
     }
 
     /// Get a reference to the program
@@ -1077,74 +1159,77 @@ impl<E: Effect> Environment<E> {
 
     /// Get the formatted type for a process given its function index
     pub fn format_process_type(&self, function_index: usize) -> Option<String> {
-        let function = self.program.get_function(function_index)?;
-        let process_type = Type::Process(Box::new(ProcessType {
-            send: Some(Box::new(function.function_type.receive.clone())),
-            receive: Some(Box::new(function.function_type.result.clone())),
-        }));
+        let process_type = self.get_process_type(function_index)?;
         Some(self.format_type(&process_type))
     }
 
     /// Get the type for a process given its function index
     pub fn get_process_type(&self, function_index: usize) -> Option<Type> {
-        let function = self.program.get_function(function_index)?;
-        let process_type = Type::Process(Box::new(ProcessType {
-            send: Some(Box::new(function.function_type.receive.clone())),
-            receive: Some(Box::new(function.function_type.result.clone())),
-        }));
-        Some(process_type)
+        let func = self.program.get_function(function_index)?;
+        let callable = self.program.lookup_type(func.type_id)?;
+        match callable {
+            Type::Callable {
+                result, receive, ..
+            } => Some(Type::Process {
+                send: Some(*receive),
+                receive: Some(*result),
+            }),
+            _ => None,
+        }
     }
 
     /// Convert a runtime Value to its Type representation
-    pub fn value_to_type(&self, value: &Value) -> Type {
+    pub fn value_to_type(&mut self, value: &Value) -> Type {
         match value {
             Value::Integer(_) => Type::Integer,
             Value::Binary(_) => Type::Binary,
             Value::Tuple(type_id, _) => Type::Tuple(*type_id),
             Value::Function(func_idx, _) => {
-                let func_type = &self
-                    .program
+                // Get the callable type directly from function's type_id
+                self.program
                     .get_function(*func_idx)
-                    .expect("Function should exist")
-                    .function_type;
-                Type::Callable(Box::new(func_type.clone()))
+                    .and_then(|func| self.program.lookup_type(func.type_id).cloned())
+                    .unwrap_or_else(|| Type::Union(vec![])) // Fallback for unknown functions
             }
-            Value::Builtin(name) => {
+            Value::Builtin(builtin_id) => {
+                // Get the builtin info by index
                 let builtin_info = self
                     .program
                     .get_builtins()
-                    .iter()
-                    .find(|b| &b.name == name)
+                    .get(*builtin_id)
                     .expect("Builtin should be registered");
-                Type::Callable(Box::new(CallableType {
-                    parameter: builtin_info.parameter_type.clone(),
-                    result: builtin_info.result_type.clone(),
-                    receive: Type::Union(vec![]),
-                }))
+                let param_type = builtin_info.param_type;
+                let result_type = builtin_info.result_type;
+                Type::Callable {
+                    parameter: param_type,
+                    result: result_type,
+                    receive: self.program.never(), // Builtins don't receive values
+                }
             }
             Value::Process(_, function_idx) => {
-                let func_type = &self
-                    .program
-                    .get_function(*function_idx)
-                    .expect("Function should exist")
-                    .function_type;
-                Type::Process(Box::new(ProcessType {
-                    send: Some(Box::new(func_type.receive.clone())),
-                    receive: Some(Box::new(func_type.result.clone())),
-                }))
+                // Get the process type from function's callable type
+                self.get_process_type(*function_idx)
+                    .unwrap_or_else(|| Type::Union(vec![])) // Fallback for unknown functions
             }
-            Value::Resource(_, type_name) => Type::Resource(type_name.clone()),
+            Value::Resource(_, resource_type_id) => {
+                // Look up resource name from program's resource names
+                let resource_names = self.program.collect_resource_names();
+                resource_names
+                    .get(*resource_type_id)
+                    .map(|name| Type::Resource(name.clone()))
+                    .unwrap_or_else(|| Type::Resource(format!("Resource#{}", resource_type_id)))
+            }
         }
     }
 
-    /// Resolve a type alias and return the resolved Type.
-    /// Type parameters are resolved to Type::Variable placeholders.
+    /// Resolve a type alias and return the resolved type ID.
+    /// Type parameters are resolved to type variable placeholders.
     /// This is useful for testing and displaying type aliases.
     pub fn resolve_type_alias(
         &mut self,
         type_aliases: &std::collections::HashMap<String, TypeAliasDef>,
         alias_name: &str,
-    ) -> Result<Type, String> {
+    ) -> Result<usize, String> {
         // Convert type_aliases HashMap to a single scope for resolution
         let mut bindings = std::collections::HashMap::new();
         for (name, type_alias) in type_aliases {

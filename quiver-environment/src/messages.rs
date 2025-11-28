@@ -1,8 +1,7 @@
 use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
-use quiver_core::bytecode::{BuiltinInfo, Constant, Function};
 use quiver_core::effects::Effect;
+use quiver_core::executor::ProgramUpdate;
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
-use quiver_core::types::{TupleTypeInfo, Type};
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,13 +11,7 @@ use std::collections::HashMap;
 #[serde(bound(serialize = "", deserialize = ""))]
 pub enum Command<E: Effect> {
     /// Update program data (additive only)
-    UpdateProgram {
-        constants: Vec<Constant>,
-        functions: Vec<Function>,
-        tuples: Vec<TupleTypeInfo>,
-        types: Vec<Type>,
-        builtins: Vec<BuiltinInfo>,
-    },
+    UpdateProgram(ProgramUpdate),
 
     /// Start a new persistent process (e.g., from REPL)
     /// If function_index is None, the process starts in a sleeping state ready for resume
@@ -163,10 +156,10 @@ pub enum Event<E: Effect> {
         result: Result<HashMap<ProcessId, ProcessStatus>, crate::environment::EnvironmentError>,
     },
 
-    /// Response to GetProcessTypes
+    /// Response to GetProcessTypes (returns function indices, Environment reconstructs types)
     ProcessTypesResponse {
         request_id: u64,
-        result: Result<HashMap<ProcessId, (Type, usize)>, crate::environment::EnvironmentError>,
+        result: Result<HashMap<ProcessId, usize>, crate::environment::EnvironmentError>,
     },
 
     /// Response to GetProcessInfo

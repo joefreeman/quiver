@@ -201,8 +201,8 @@ fn test_multiple_receives_same_type() {
 fn test_multiple_receives_different_types_error() {
     quiver().evaluate("#{ !#int, !#bin }").expect_compile_error(
         quiver_compiler::compiler::Error::ReceiveTypeMismatch {
-            first: "Integer".to_string(),
-            second: "Binary".to_string(),
+            first: "int".to_string(),
+            second: "bin".to_string(),
         },
     );
 }

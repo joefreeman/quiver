@@ -4,7 +4,7 @@ use quiver_compiler::{Compiler, FileSystemModuleLoader, parse};
 use quiver_core::bytecode;
 use quiver_core::format;
 use quiver_core::program::Program;
-use quiver_core::types::{NIL, Type};
+use quiver_core::types::Type;
 use quiver_core::value::Value;
 use quiver_environment::{Environment, WorkerHandle};
 use std::collections::HashMap;
@@ -16,16 +16,6 @@ mod native_transport;
 mod repl_cli;
 use native_transport::spawn_worker;
 use repl_cli::ReplCli;
-
-/// Execution result with optional profiling stats
-type ExecutionResult = Result<
-    (
-        Value,
-        Vec<Vec<u8>>,
-        Option<quiver_core::executor::ExecutionStats>,
-    ),
-    Box<dyn std::error::Error>,
->;
 
 /// Build complete builtin registry including core builtins and network builtins
 pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect> {
@@ -131,6 +121,75 @@ fn handle_parse_error(err: quiver_compiler::parser::Error, source: &str, source_
     std::process::exit(1);
 }
 
+/// Compile source code and extract the entry function, returning a Program and entry index.
+/// This handles the common pattern of compiling instructions, executing them to get a function value,
+/// and handling captures by injecting them into the program.
+fn compile_and_extract_entry(
+    source: &str,
+    module_loader: &dyn quiver_compiler::ModuleLoader,
+    builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
+) -> Result<(Program, usize), Box<dyn std::error::Error>> {
+    let ast = match parse(source) {
+        Ok(ast) => ast,
+        Err(e) => handle_parse_error(e, source, "input"),
+    };
+
+    let compilation_result = Compiler::compile(
+        ast,
+        &HashMap::new(),
+        ModuleCache::new(),
+        module_loader,
+        Program::new(),
+        quiver_core::types::NIL, // parameter_type_id - use pre-registered nil type
+        &HashMap::new(),
+        builtins,
+    )
+    .map_err(|e| format!("Compile error: {:?}", e))?;
+
+    let instructions = compilation_result.instructions;
+    let mut program = compilation_result.program;
+
+    // Register the callable type for this wrapper function
+    let nil_type_id = program.register_type(Type::nil());
+    let never_id = program.never();
+    let callable_type_id = program.register_type(Type::Callable {
+        parameter: nil_type_id,
+        result: compilation_result.result_type,
+        receive: never_id,
+    });
+
+    // Register the instructions as a temporary function
+    let function_index = program.register_function(quiver_core::bytecode::Function {
+        instructions,
+        captures: 0,
+        type_id: callable_type_id,
+    });
+
+    // Create bytecode with this function as entry
+    let bytecode = program.to_bytecode(Some(function_index));
+
+    // Execute to get the function value
+    let (result, executor) = quiver_core::execute_bytecode_sync(bytecode, builtins, false)
+        .map_err(|e| format!("Execution error: {:?}", e))?;
+
+    // Extract the entry function from the result
+    let entry = match result {
+        Value::Function(func_index, captures) => {
+            if !captures.is_empty() {
+                // Inject captures into the program to create a new function
+                program.inject_function_captures(func_index, captures, &executor)
+            } else {
+                func_index
+            }
+        }
+        _ => {
+            return Err("Program is not executable. Must evaluate to a function.".into());
+        }
+    };
+
+    Ok((program, entry))
+}
+
 fn compile_command(
     input: Option<String>,
     output: Option<String>,
@@ -146,50 +205,39 @@ fn compile_command(
         (buffer, "stdin".to_string())
     };
 
-    // Compile source to bytecode
-    let module_loader = FileSystemModuleLoader::new();
-
-    let ast = match parse(&source) {
-        Ok(ast) => ast,
-        Err(e) => handle_parse_error(e, &source, &source_id),
-    };
     // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
-    let result = Compiler::compile(
-        ast,
-        &HashMap::new(), // No existing bindings
-        ModuleCache::new(),
-        &module_loader,
-        vec![],
-        Type::nil(),
-        &HashMap::new(), // No process types (not a REPL)
-        &builtins,
-    )
-    .map_err(|e| format!("Compile error: {:?}", e))?;
+    let module_loader = FileSystemModuleLoader::new();
 
-    let instructions = result.instructions;
-    let result_type = result.result_type;
-    let mut program = result.program;
-
-    // Execute the instructions synchronously to get the function value
-    let (result, executor) =
-        quiver_core::execute_instructions_sync(&program, instructions, result_type, &builtins)
-            .map_err(|e| format!("Execution error: {:?}", e))?;
-
-    // Extract the entry function from the result
-    let entry = match result {
-        Value::Function(func_index, captures) => {
-            if !captures.is_empty() {
-                // Inject captures into the program to create a new function
-                Some(program.inject_function_captures(func_index, captures, &executor))
-            } else {
-                Some(func_index)
-            }
+    // Compile and extract entry function
+    // Note: compile_command allows programs that don't evaluate to a function
+    let (program, entry) = match compile_and_extract_entry(&source, &module_loader, &builtins) {
+        Ok((program, entry)) => (program, Some(entry)),
+        Err(_) => {
+            // If it doesn't evaluate to a function, compile without an entry point
+            let ast = match parse(&source) {
+                Ok(ast) => ast,
+                Err(e) => handle_parse_error(e, &source, &source_id),
+            };
+            let result = Compiler::compile(
+                ast,
+                &HashMap::new(),
+                ModuleCache::new(),
+                &module_loader,
+                Program::new(),
+                quiver_core::types::NIL, // parameter_type_id
+                &HashMap::new(),
+                &builtins,
+            )
+            .map_err(|e| format!("Compile error: {:?}", e))?;
+            (result.program, None)
         }
-        _ => None, // Program didn't evaluate to a function
     };
 
-    let bytecode = program.to_bytecode(entry);
+    let bytecode = match entry {
+        Some(entry_fn) => program.to_bytecode_optimized(entry_fn),
+        None => program.to_bytecode(None),
+    };
     let json = serde_json::to_string_pretty(&bytecode)?;
 
     if let Some(output_path) = output {
@@ -245,126 +293,36 @@ fn compile_execute(
     quiet: bool,
     profile: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let module_loader = FileSystemModuleLoader::new();
-
-    let ast = match parse(source) {
-        Ok(ast) => ast,
-        Err(e) => handle_parse_error(e, source, "input"),
-    };
     // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
-    let compilation_result = Compiler::compile(
-        ast,
-        &HashMap::new(), // No existing bindings
-        ModuleCache::new(),
-        &module_loader,
-        vec![],
-        Type::nil(),
-        &HashMap::new(), // No process types (not a REPL)
-        &builtins,
-    )
-    .map_err(|e| format!("Compile error: {:?}", e))?;
+    let module_loader = FileSystemModuleLoader::new();
 
-    let instructions = compilation_result.instructions;
-    let result_type = compilation_result.result_type;
-    let mut program = compilation_result.program;
+    // Compile and extract entry function (this will error if not a function)
+    let (program, entry) = compile_and_extract_entry(source, &module_loader, &builtins)?;
 
-    // Execute the instructions synchronously to get the function value
-    let (result, executor) =
-        quiver_core::execute_instructions_sync(&program, instructions, result_type, &builtins)
-            .map_err(|e| format!("Execution error: {:?}", e))?;
+    // Convert to bytecode
+    let bytecode = program.to_bytecode_optimized(entry);
 
-    // Extract the entry function from the result
-    let entry = match result {
-        Value::Function(func_index, captures) => {
-            if !captures.is_empty() {
-                // Inject captures into the program to create a new function
-                Some(program.inject_function_captures(func_index, captures, &executor))
-            } else {
-                Some(func_index)
-            }
-        }
-        _ => None, // Program didn't evaluate to a function
-    };
-
-    let bytecode = program.to_bytecode(entry);
-
-    if bytecode.entry.is_none() {
-        eprintln!("Error: Program is not executable. Must evaluate to a function.");
-        std::process::exit(1);
-    }
-
-    let json = serde_json::to_string(&bytecode)?;
-    execute_bytecode(&json, quiet, profile)
+    // Execute using shared bytecode execution path
+    execute_bytecode_with_environment(bytecode, quiet, profile)
 }
 
-fn execute_bytecode(
-    bytecode_json: &str,
+/// Execute bytecode using the Environment architecture with multi-worker support and effects.
+/// This is the unified execution path for both direct bytecode and compiled source.
+fn execute_bytecode_with_environment(
+    bytecode: bytecode::Bytecode,
     quiet: bool,
     profile: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bytecode_data: bytecode::Bytecode = serde_json::from_str(bytecode_json)?;
-    let entry = bytecode_data.entry;
-    let program = Program::from_bytecode(bytecode_data);
-
-    if let Some(entry_idx) = entry {
-        // Build instructions to call the entry function with NIL
-        let instructions = vec![
-            bytecode::Instruction::Tuple(NIL),
-            bytecode::Instruction::Function(entry_idx),
-            bytecode::Instruction::Call,
-        ];
-
-        // Get the result type from the entry function
-        let result_type = program
-            .get_function(entry_idx)
-            .map(|f| f.function_type.result.clone())
-            .unwrap_or_else(|| Type::Union(vec![])); // Top type as fallback
-
-        let start_time = std::time::Instant::now();
-        let (value, heap, stats_opt) =
-            execute_with_environment(&program, instructions, result_type, profile)
-                .map_err(|e| format!("Execution error: {:?}", e))?;
-        let wall_time = start_time.elapsed();
-
-        // Print profiling report if enabled
-        if let Some(stats) = stats_opt {
-            print_profile_report(&stats, &program, wall_time);
-        }
-
-        // Check if result is NIL tuple (exit with error)
-        if value.is_nil() {
-            std::process::exit(1);
-        }
-
-        // Print result unless quiet or OK/NIL
-        if !quiet && !value.is_ok() && !value.is_nil() {
-            let lookup = format::HeapAndProgramLookup {
-                heap: &heap,
-                program: &program,
-            };
-            println!("{}", format::format_value(&value, &lookup, &program));
-        }
+    if bytecode.entry.is_none() {
+        return Err("Bytecode has no entry point".into());
     }
 
-    Ok(())
-}
-
-/// Execute instructions using the Environment architecture with multi-worker support.
-/// This is similar to execute_instructions_sync but uses the Environment/worker infrastructure
-/// needed for process spawning and other concurrent operations.
-fn execute_with_environment(
-    program: &Program,
-    instructions: Vec<bytecode::Instruction>,
-    result_type: Type,
-    profile: bool,
-) -> ExecutionResult {
     // Create workers
     let num_workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
 
-    // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
 
     let mut workers: Vec<Box<dyn WorkerHandle<quiver_io::NativeEffect>>> = Vec::new();
@@ -381,48 +339,60 @@ fn execute_with_environment(
         )));
     }
 
-    // Create environment with effect backend (new system)
+    // Create environment with effect backend
     let effect_backend = create_effect_backend();
-    let mut environment = Environment::<quiver_io::NativeEffect>::new(workers, builtins);
+    let mut environment = Environment::<quiver_io::NativeEffect>::new(workers);
 
-    // Set the effect backend
     if let Some(backend) = effect_backend {
         environment.set_effect_backend(backend);
     }
 
-    // Create a wrapper function with our instructions
-    let mut prog = program.clone();
-    let function = bytecode::Function {
-        instructions,
-        function_type: quiver_core::types::CallableType {
-            parameter: Type::nil(),
-            result: result_type,
-            receive: Type::Union(vec![]), // Bottom type (never)
-        },
-        captures: 0,
-    };
-    let function_index = prog.register_function(function);
+    // Extract data before consuming bytecode
+    let builtin_names: Vec<String> = bytecode.builtins.iter().map(|b| b.name.clone()).collect();
+    let bytecode_for_format = bytecode.clone();
 
-    // Create bytecode with this function as the entry point
-    let mut bytecode_data = prog.to_bytecode(Some(function_index));
-    bytecode_data.entry = Some(function_index);
-
-    // Start the process in the environment
+    // Start process from bytecode
+    let start_time = std::time::Instant::now();
     let process_id = environment
-        .start_process(Some(bytecode_data))
+        .start_process(Some(bytecode))
         .map_err(|e| format!("Failed to start process: {:?}", e))?;
 
-    // Request the result (stats are automatically included if profiling is enabled)
+    // Request the result
     let request_id = environment
         .request_result(process_id)
         .map_err(|e| format!("Failed to request result: {:?}", e))?;
 
+    // Event loop
     loop {
         let did_work = environment.step().unwrap_or(false);
 
         match environment.poll_request(request_id) {
             Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap)), stats))) => {
-                return Ok((value, heap, stats));
+                let wall_time = start_time.elapsed();
+
+                // Print profiling report if enabled
+                if let Some(stats) = stats {
+                    print_bytecode_profile_report(&stats, &builtin_names, wall_time);
+                }
+
+                // Check if result is NIL tuple (exit with error)
+                if value.is_nil() {
+                    std::process::exit(1);
+                }
+
+                // Print result unless quiet or OK/NIL
+                if !quiet && !value.is_ok() && !value.is_nil() {
+                    let binary_lookup = format::BytecodeBinaryLookup {
+                        constants: &bytecode_for_format.constants,
+                        heap: &heap,
+                    };
+                    println!(
+                        "{}",
+                        format::format_value(&value, &bytecode_for_format, &binary_lookup)
+                    );
+                }
+
+                return Ok(());
             }
             Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
                 return Err(format!("Runtime error: {:?}", e).into());
@@ -440,7 +410,21 @@ fn execute_with_environment(
     }
 }
 
-fn print_profile_report(
+fn execute_bytecode(
+    bytecode_json: &str,
+    quiet: bool,
+    profile: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytecode: bytecode::Bytecode = serde_json::from_str(bytecode_json)?;
+
+    if bytecode.entry.is_none() {
+        return Err("Bytecode has no entry point".into());
+    }
+
+    execute_bytecode_with_environment(bytecode, quiet, profile)
+}
+
+fn _print_profile_report(
     stats: &quiver_core::executor::ExecutionStats,
     program: &Program,
     wall_time: std::time::Duration,
@@ -528,6 +512,95 @@ fn print_profile_report(
     eprintln!();
 }
 
+/// Print a profile report for bytecode execution (without full Program type info).
+/// Uses builtin names from the bytecode instead of looking them up in Program.
+fn print_bytecode_profile_report(
+    stats: &quiver_core::executor::ExecutionStats,
+    builtin_names: &[String],
+    wall_time: std::time::Duration,
+) {
+    // Calculate totals
+    let total_instr_count: u64 = stats.instruction_stats.values().map(|(c, _)| c).sum();
+    let total_instr_time: u64 = stats.instruction_stats.values().map(|(_, t)| t).sum();
+    let total_builtin_count: u64 = stats.builtin_stats.values().map(|(c, _)| c).sum();
+    let total_builtin_time: u64 = stats.builtin_stats.values().map(|(_, t)| t).sum();
+
+    let wall_ms = wall_time.as_secs_f64() * 1000.0;
+    let exec_ms = (total_instr_time + total_builtin_time) as f64 / 1_000_000.0;
+    let exec_percent = if wall_ms > 0.0 {
+        (exec_ms / wall_ms) * 100.0
+    } else {
+        0.0
+    };
+
+    eprintln!(
+        "Total time: {:.2}ms (execution: {:.2}ms; {:.1}%)",
+        wall_ms, exec_ms, exec_percent
+    );
+
+    // Instructions sorted by time
+    if !stats.instruction_stats.is_empty() {
+        let mut instrs: Vec<_> = stats.instruction_stats.iter().collect();
+        instrs.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
+
+        eprintln!(
+            "\nInstructions ({}; {:.2}ms):",
+            total_instr_count,
+            total_instr_time as f64 / 1_000_000.0
+        );
+        for (instr_type, (count, time)) in instrs.iter().take(10) {
+            let time_percent = if total_instr_time > 0 {
+                (*time as f64 / total_instr_time as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_ns = if *count > 0 { *time / *count } else { 0 };
+            eprintln!(
+                "  {:?}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
+                instr_type,
+                count,
+                *time as f64 / 1_000_000.0,
+                time_percent,
+                avg_ns
+            );
+        }
+    }
+
+    // Builtins sorted by time
+    if !stats.builtin_stats.is_empty() {
+        let mut builtins: Vec<_> = stats.builtin_stats.iter().collect();
+        builtins.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
+
+        eprintln!(
+            "\nBuiltins ({}; {:.2}ms):",
+            total_builtin_count,
+            total_builtin_time as f64 / 1_000_000.0
+        );
+        for (builtin_idx, (count, time)) in builtins.iter().take(10) {
+            let builtin_name = builtin_names
+                .get(**builtin_idx)
+                .map(|s| s.as_str())
+                .unwrap_or("<unknown>");
+            let time_percent = if total_builtin_time > 0 {
+                (*time as f64 / total_builtin_time as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_ns = if *count > 0 { *time / *count } else { 0 };
+            eprintln!(
+                "  {}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
+                builtin_name,
+                count,
+                *time as f64 / 1_000_000.0,
+                time_percent,
+                avg_ns
+            );
+        }
+    }
+
+    eprintln!();
+}
+
 fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let content = if let Some(path) = input {
         fs::read_to_string(&path)?
@@ -550,22 +623,32 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
 
     let entry = bytecode_data.entry;
 
-    // Create program from bytecode
-    let program = Program::from_bytecode(bytecode_data);
-
-    let types_vec = program.get_tuples();
-    if !types_vec.is_empty() {
-        println!("\nTypes:");
-        for (index, _type_info) in types_vec.iter().enumerate() {
-            println!(
-                "  {}: {}",
-                index,
-                format::format_type(&program, &Type::Tuple(index))
-            );
+    // Print tuple type information
+    if !bytecode_data.tuples.is_empty() {
+        println!("\nTuples:");
+        for (index, tuple_info) in bytecode_data.tuples.iter().enumerate() {
+            let formatted = format::format_tuple_info(&bytecode_data, tuple_info);
+            println!("  {}: {}", index, formatted);
         }
     }
 
-    for (i, function) in program.get_functions().iter().enumerate() {
+    // Print builtin names
+    if !bytecode_data.builtins.is_empty() {
+        println!("\nBuiltins:");
+        for (index, builtin) in bytecode_data.builtins.iter().enumerate() {
+            println!("  {}: {}", index, builtin.name);
+        }
+    }
+
+    // Print resource names
+    if !bytecode_data.resources.is_empty() {
+        println!("\nResources:");
+        for (index, name) in bytecode_data.resources.iter().enumerate() {
+            println!("  {}: {}", index, name);
+        }
+    }
+
+    for (i, function) in bytecode_data.functions.iter().enumerate() {
         let mut header = format!("\nFunction{}", i);
 
         if entry == Some(i) {

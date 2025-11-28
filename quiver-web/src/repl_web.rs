@@ -250,12 +250,8 @@ impl Environment {
         }
 
         // Create environment
-        // For WASM, use core modules only (no network builtins)
-        let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
-            &quiver_core::builtins::core_modules(),
-        );
         // WASM doesn't use old io_backend (no io_uring available)
-        let environment = quiver_environment::Environment::new(workers, builtins);
+        let environment = quiver_environment::Environment::new(workers);
         let environment_rc = Rc::new(RefCell::new(environment));
         let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let cached_process_types = Rc::new(RefCell::new(HashMap::new()));
@@ -482,7 +478,7 @@ impl Environment {
         let web_value: crate::types::Value = serde_wasm_bindgen::from_value(value)?;
         // Convert to core value with empty heap (formatting doesn't need actual binary data)
         let (core_value, _heap) = web_value.to_core_for_formatting(&[]);
-        let ty = self.environment.borrow().value_to_type(&core_value);
+        let ty = self.environment.borrow_mut().value_to_type(&core_value);
         Ok(self.environment.borrow().format_type(&ty))
     }
 
@@ -659,9 +655,9 @@ impl Repl {
         let vars = repl.get_variables();
         let js_vars: Vec<Variable> = vars
             .into_iter()
-            .map(|(name, ty)| Variable {
+            .map(|(name, type_id)| Variable {
                 name,
-                var_type: environment.format_type(&ty),
+                var_type: environment.format_type_by_id(type_id),
             })
             .collect();
 

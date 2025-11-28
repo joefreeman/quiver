@@ -232,10 +232,6 @@ fn test_binary_data_over_socket() {
 
 #[test]
 fn test_write_to_closed_socket() {
-    use std::net::TcpListener;
-    use std::thread;
-    use std::time::Duration;
-
     // Start a simple echo server
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind");
     let addr = listener.local_addr().unwrap();

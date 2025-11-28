@@ -4,13 +4,13 @@ use crate::ast;
 use quiver_core::{
     bytecode::{Constant, Instruction},
     program::Program,
-    types::{TupleLookup, Type},
+    types::{Type, TypeLookup},
 };
 
 use super::{Error, codegen::InstructionBuilder, narrowing::intersect_types};
 
-// Type aliases for complex pattern matching types
-type PatternAnalysisResult = (Vec<(String, Type)>, Vec<BindingSet>, Type);
+// Type aliases for complex pattern matching types (using type IDs)
+type PatternAnalysisResult = (Vec<(String, usize)>, Vec<BindingSet>, usize);
 type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
 
 /// Helper for managing identifiers across variants
@@ -53,7 +53,7 @@ pub enum PatternMode {
 /// Represents a check that must be performed at runtime
 #[derive(Debug, Clone)]
 enum RuntimeCheck {
-    Type(Type), // Type to check against - will be registered during code generation
+    TypeId(usize), // Type ID to check against
     Literal(ast::Literal),
     Variable(String),
     Path(AccessPath),
@@ -83,7 +83,7 @@ struct Identifier {
 struct Binding {
     name: String,
     path: AccessPath,
-    var_type: Type,
+    var_type_id: usize,
 }
 
 /// A set of bindings that can be created if certain requirements are met
@@ -115,7 +115,7 @@ pub fn has_non_type_requirements(binding_sets: &[BindingSet]) -> bool {
                 }
                 // Type checks at non-root paths (nested structural patterns) prevent complement narrowing
                 // because failure at an inner level doesn't mean we can narrow the outer type
-                RuntimeCheck::Type(_) => !req.path.is_empty(),
+                RuntimeCheck::TypeId(_) => !req.path.is_empty(),
             }
         })
     })
@@ -125,16 +125,16 @@ pub fn has_non_type_requirements(binding_sets: &[BindingSet]) -> bool {
 pub fn analyze_pattern(
     program: &mut Program,
     pattern: &ast::Match,
-    value_type: &Type,
+    value_type_id: usize,
     mode: PatternMode,
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
-    let (binding_sets, narrowed_type) = analyze_match_pattern(
+    let (binding_sets, narrowed_type_id) = analyze_match_pattern(
         program,
         pattern,
-        value_type,
+        value_type_id,
         vec![],
         mode,
         &mut identifiers,
@@ -144,7 +144,7 @@ pub fn analyze_pattern(
 
     if binding_sets.is_empty() {
         // Won't match - return never type (empty union)
-        return Ok((Vec::new(), Vec::new(), Type::never()));
+        return Ok((Vec::new(), Vec::new(), program.never()));
     }
 
     // Validate: check for single-occurrence pins with no variable in scope
@@ -163,31 +163,32 @@ pub fn analyze_pattern(
     let will_match = binding_sets.iter().any(|bs| bs.requirements.is_empty());
 
     // Collect all bindings and union their types across all binding sets
-    let mut bindings_map: HashMap<String, Vec<Type>> = HashMap::new();
+    let mut bindings_map: HashMap<String, Vec<usize>> = HashMap::new();
     for binding_set in &binding_sets {
         for binding in &binding_set.bindings {
             bindings_map
                 .entry(binding.name.clone())
                 .or_default()
-                .push(binding.var_type.clone());
+                .push(binding.var_type_id);
         }
     }
 
     // Sort by name to ensure consistent ordering (must match generate_pattern_code)
-    let mut all_bindings: Vec<(String, Type)> = bindings_map
+    let mut all_bindings: Vec<(String, usize)> = bindings_map
         .into_iter()
-        .map(|(name, types)| (name, Type::from_types(types)))
+        .map(|(name, types)| (name, union_type_ids(program, types)))
         .collect();
     all_bindings.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Include [] in the result type if there are runtime requirements (might match)
-    let result_type = if will_match {
-        narrowed_type
+    let result_type_id = if will_match {
+        narrowed_type_id
     } else {
-        Type::from_types(vec![Type::nil(), narrowed_type])
+        let nil_id = program.register_type(Type::nil());
+        union_type_ids(program, vec![nil_id, narrowed_type_id])
     };
 
-    Ok((all_bindings, binding_sets, result_type))
+    Ok((all_bindings, binding_sets, result_type_id))
 }
 
 /// Generate bytecode for pattern matching
@@ -223,11 +224,9 @@ pub fn generate_pattern_code(
                     }
                     codegen.add_instruction(Instruction::Equal(2));
                 }
-                RuntimeCheck::Type(check_type) => {
+                RuntimeCheck::TypeId(type_id) => {
                     generate_value_access(codegen, &requirement.path);
-                    // Register the type in the check_types registry and emit IsType instruction
-                    let type_id = program.register_type(check_type.clone());
-                    codegen.add_instruction(Instruction::IsType(type_id));
+                    codegen.add_instruction(Instruction::IsType(*type_id));
                 }
                 RuntimeCheck::Literal(literal) => {
                     generate_value_access(codegen, &requirement.path);
@@ -304,30 +303,30 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
 fn analyze_match_pattern(
     program: &mut Program,
     pattern: &ast::Match,
-    value_type: &Type,
+    value_type_id: usize,
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
-) -> Result<(Vec<BindingSet>, Type), Error> {
+) -> Result<(Vec<BindingSet>, usize), Error> {
     match pattern {
         ast::Match::Identifier(name) => analyze_identifier_pattern(
             program,
             name.clone(),
-            value_type.clone(),
+            value_type_id,
             path,
             mode,
             identifiers,
             scopes,
         ),
         ast::Match::Literal(literal) => {
-            analyze_literal_pattern(literal.clone(), path, value_type, program)
+            analyze_literal_pattern(literal.clone(), path, value_type_id, program)
         }
         ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
             program,
             tuple,
-            value_type,
+            value_type_id,
             path,
             mode,
             identifiers,
@@ -337,26 +336,26 @@ fn analyze_match_pattern(
         ast::Match::Partial(partial) => analyze_partial_pattern(
             program,
             partial,
-            value_type,
+            value_type_id,
             path,
             mode,
             identifiers,
             scopes,
         ),
         ast::Match::Star => {
-            analyze_star_pattern(program, value_type, path, mode, identifiers, scopes)
+            analyze_star_pattern(program, value_type_id, path, mode, identifiers, scopes)
         }
         ast::Match::Placeholder => Ok((
             vec![BindingSet {
                 requirements: vec![],
                 bindings: vec![],
             }],
-            value_type.clone(),
+            value_type_id,
         )),
         ast::Match::Pin(inner) => analyze_match_pattern(
             program,
             inner,
-            value_type,
+            value_type_id,
             path,
             PatternMode::Pin,
             identifiers,
@@ -366,7 +365,7 @@ fn analyze_match_pattern(
         ast::Match::Bind(inner) => analyze_match_pattern(
             program,
             inner,
-            value_type,
+            value_type_id,
             path,
             PatternMode::Bind,
             identifiers,
@@ -383,21 +382,22 @@ fn analyze_match_pattern(
                 ));
             }
 
-            // Resolve the ast::Type to a Type
-            let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
+            // Resolve the ast::Type to a type ID
+            let resolved_type_id =
+                super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
 
             // Narrow the type by filtering compatible variants
-            let narrowed_type = intersect_types(value_type, &resolved_type, program);
+            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
 
             // Only add runtime check if value_type is not already exactly the resolved type
-            let requirements = if value_type.is_compatible(&resolved_type, program)
-                && narrowed_type == *value_type
+            let requirements = if is_compatible(value_type_id, resolved_type_id, program)
+                && narrowed_type_id == value_type_id
             {
                 vec![] // No runtime check needed - value_type is already compatible
             } else {
                 vec![Requirement {
                     path,
-                    check: RuntimeCheck::Type(resolved_type),
+                    check: RuntimeCheck::TypeId(resolved_type_id),
                 }]
             };
 
@@ -406,7 +406,7 @@ fn analyze_match_pattern(
                     requirements,
                     bindings: vec![],
                 }],
-                narrowed_type,
+                narrowed_type_id,
             ))
         }
     }
@@ -416,18 +416,18 @@ fn analyze_match_pattern(
 fn analyze_match_tuple_pattern(
     program: &mut Program,
     tuple: &ast::MatchTuple,
-    value_type: &Type,
+    value_type_id: usize,
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
-) -> Result<(Vec<BindingSet>, Type), Error> {
+) -> Result<(Vec<BindingSet>, usize), Error> {
     let mut binding_sets = vec![];
     let mut successful_tuple_ids = vec![];
 
     // Find matching tuple types
-    let matching_types = find_matching_match_tuples(program, tuple, value_type)?;
+    let matching_types = find_matching_match_tuples(program, tuple, value_type_id)?;
 
     // For each matching type, create binding sets
     for (tuple_id, field_mappings) in &matching_types {
@@ -437,14 +437,18 @@ fn analyze_match_tuple_pattern(
             IdentifierScope::new(identifiers, matching_types.len() > 1);
         let variant_identifiers = variant_identifiers_scope.get_mut();
 
-        // Get tuple info and extract field types upfront to avoid borrow issues
-        let tuple_fields: Vec<Type> = {
+        // Get tuple info and extract field type IDs upfront to avoid borrow issues
+        let tuple_fields: Vec<usize> = {
             let tuple_info = program
                 .lookup_tuple(*tuple_id)
                 .ok_or(Error::TupleNotInRegistry {
                     tuple_id: *tuple_id,
                 })?;
-            tuple_info.fields.iter().map(|(_, t)| t.clone()).collect()
+            tuple_info
+                .fields
+                .iter()
+                .map(|(_, type_id)| *type_id)
+                .collect()
         };
 
         // Start with a binding set for this type
@@ -452,11 +456,12 @@ fn analyze_match_tuple_pattern(
         // Add runtime check if needed
         // We need a runtime check if value_type is a union (even if it contains only one tuple type)
         // because the value could be a non-tuple type (like int or bin)
-        if matches!(value_type, Type::Union(_)) || matching_types.len() > 1 {
+        if is_union(value_type_id, program) || matching_types.len() > 1 {
             // Need to check the type at runtime since value could be one of multiple types
+            let tuple_type_id = program.register_type(Type::Tuple(*tuple_id));
             base_requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::Type(Type::Tuple(*tuple_id)),
+                check: RuntimeCheck::TypeId(tuple_type_id),
             });
         }
 
@@ -468,17 +473,18 @@ fn analyze_match_tuple_pattern(
         // Process each field pattern
         for (pattern_idx, actual_idx) in field_mappings {
             let field = &tuple.fields[*pattern_idx];
-            let raw_field_type = &tuple_fields[*actual_idx];
+            let raw_field_type_id = tuple_fields[*actual_idx];
 
             // Resolve Type::Cycle references to the actual type
             // Only Cycle(1) points to the immediate boundary (value_type)
             // Higher depths point to outer boundaries (e.g., enclosing function types)
             // and should be kept as-is since they refer to types outside this tuple
-            let mut field_type = if let Type::Cycle(1) = raw_field_type {
-                value_type.clone()
-            } else {
-                raw_field_type.clone()
-            };
+            let mut field_type_id =
+                if let Some(Type::Cycle(1)) = program.lookup_type(raw_field_type_id) {
+                    value_type_id
+                } else {
+                    raw_field_type_id
+                };
 
             let mut field_path = path.clone();
             field_path.push(*actual_idx);
@@ -488,19 +494,19 @@ fn analyze_match_tuple_pattern(
             // that field 0 has been narrowed to Cons (from previous branch's `=[Nil, ys]`).
             // Only applies when path is empty (we're at the root).
             if path.is_empty()
-                && let Some(narrowed) =
+                && let Some(narrowed_id) =
                     super::narrowing::get_field_narrowing(scopes, value_provenance, *actual_idx)
             {
                 // Intersect with the narrowed type
-                field_type = super::narrowing::intersect_types(&field_type, &narrowed, program);
+                field_type_id = intersect_types(field_type_id, narrowed_id, program);
             }
 
             // Recursively analyze the field pattern
             let field_provenance = value_provenance.field(*actual_idx);
-            let (field_binding_sets, _field_narrowed_type) = analyze_match_pattern(
+            let (field_binding_sets, _field_narrowed_type_id) = analyze_match_pattern(
                 program,
                 &field.pattern,
-                &field_type,
+                field_type_id,
                 field_path,
                 mode,
                 variant_identifiers,
@@ -541,47 +547,41 @@ fn analyze_match_tuple_pattern(
         }
     }
 
-    if matches!(&value_type, Type::Union(types) if types.is_empty()) {
+    if is_never(value_type_id, program) {
         return Err(Error::InternalError {
             message: format!(
-                "analyze_assignment_tuple_pattern received empty Type for tuple: {:?}",
+                "analyze_assignment_tuple_pattern received empty type for tuple: {:?}",
                 tuple
             ),
         });
     }
 
     // Construct narrowed type only from tuples that successfully produced binding sets
-    let narrowed_variants: Vec<Type> = successful_tuple_ids
-        .iter()
-        .map(|tuple_id| Type::Tuple(*tuple_id))
-        .collect();
-
-    let narrowed_type = if narrowed_variants.is_empty() {
-        Type::never()
+    let narrowed_type_id = if successful_tuple_ids.is_empty() {
+        program.never()
     } else {
-        Type::from_types(narrowed_variants)
+        let tuple_type_ids: Vec<usize> = successful_tuple_ids
+            .iter()
+            .map(|tuple_id| program.register_type(Type::Tuple(*tuple_id)))
+            .collect();
+        union_type_ids(program, tuple_type_ids)
     };
 
-    Ok((binding_sets, narrowed_type))
+    Ok((binding_sets, narrowed_type_id))
 }
 
 fn find_matching_match_tuples(
     program: &mut Program,
     tuple: &ast::MatchTuple,
-    value_type: &Type,
+    value_type_id: usize,
 ) -> Result<TupleMatchResult, Error> {
     let mut matching_types = Vec::new();
 
-    let types_to_check = match value_type {
-        Type::Union(types) => types.as_slice(),
-        single => std::slice::from_ref(single),
-    };
+    let tuple_ids = extract_tuple_ids(program, value_type_id);
 
-    for typ in types_to_check {
-        if let Type::Tuple(tuple_id) = typ
-            && let Some(field_mappings) = check_match_tuple_match(program, tuple, *tuple_id)?
-        {
-            matching_types.push((*tuple_id, field_mappings));
+    for tuple_id in tuple_ids {
+        if let Some(field_mappings) = check_match_tuple_match(program, tuple, tuple_id)? {
+            matching_types.push((tuple_id, field_mappings));
         }
     }
 
@@ -619,17 +619,17 @@ fn check_match_tuple_match(
 fn analyze_literal_pattern(
     literal: ast::Literal,
     path: AccessPath,
-    value_type: &Type,
-    program: &Program,
-) -> Result<(Vec<BindingSet>, Type), Error> {
+    value_type_id: usize,
+    program: &mut Program,
+) -> Result<(Vec<BindingSet>, usize), Error> {
     // Determine the type of the literal
-    let literal_type = match &literal {
-        ast::Literal::Integer(_) => Type::Integer,
-        ast::Literal::Binary(_) => Type::Binary,
+    let literal_type_id = match &literal {
+        ast::Literal::Integer(_) => program.register_type(Type::Integer),
+        ast::Literal::Binary(_) => program.register_type(Type::Binary),
     };
 
     // Narrow the type by filtering compatible variants
-    let narrowed_type = intersect_types(value_type, &literal_type, program);
+    let narrowed_type_id = intersect_types(value_type_id, literal_type_id, program);
 
     Ok((
         vec![BindingSet {
@@ -639,7 +639,7 @@ fn analyze_literal_pattern(
             }],
             bindings: vec![],
         }],
-        narrowed_type,
+        narrowed_type_id,
     ))
 }
 
@@ -647,25 +647,26 @@ fn analyze_literal_pattern(
 fn analyze_identifier_pattern(
     program: &mut Program,
     name: String,
-    value_type: Type,
+    value_type_id: usize,
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<(Vec<BindingSet>, Type), Error> {
+) -> Result<(Vec<BindingSet>, usize), Error> {
     // In pin mode, check for type names FIRST (before recording as identifier)
     if mode == PatternMode::Pin {
         // Check if this is a primitive type name
         if name == "int" {
+            let int_type_id = program.register_type(Type::Integer);
             // Type narrowing for integer type - don't record as identifier
-            let narrowed_type = intersect_types(&value_type, &Type::Integer, program);
+            let narrowed_type_id = intersect_types(value_type_id, int_type_id, program);
             // Only add runtime check if value_type is not already exactly int
-            let requirements = if value_type == Type::Integer {
+            let requirements = if value_type_id == int_type_id {
                 vec![] // No runtime check needed - already known to be int
             } else {
                 vec![Requirement {
                     path,
-                    check: RuntimeCheck::Type(Type::Integer),
+                    check: RuntimeCheck::TypeId(int_type_id),
                 }]
             };
             return Ok((
@@ -673,20 +674,21 @@ fn analyze_identifier_pattern(
                     requirements,
                     bindings: vec![],
                 }],
-                narrowed_type,
+                narrowed_type_id,
             ));
         }
 
         if name == "bin" {
+            let bin_type_id = program.register_type(Type::Binary);
             // Type narrowing for binary type - don't record as identifier
-            let narrowed_type = intersect_types(&value_type, &Type::Binary, program);
+            let narrowed_type_id = intersect_types(value_type_id, bin_type_id, program);
             // Only add runtime check if value_type is not already exactly bin
-            let requirements = if value_type == Type::Binary {
+            let requirements = if value_type_id == bin_type_id {
                 vec![] // No runtime check needed - already known to be bin
             } else {
                 vec![Requirement {
                     path,
-                    check: RuntimeCheck::Type(Type::Binary),
+                    check: RuntimeCheck::TypeId(bin_type_id),
                 }]
             };
             return Ok((
@@ -694,7 +696,7 @@ fn analyze_identifier_pattern(
                     requirements,
                     bindings: vec![],
                 }],
-                narrowed_type,
+                narrowed_type_id,
             ));
         }
 
@@ -707,20 +709,21 @@ fn analyze_identifier_pattern(
                 )));
             }
 
-            // Resolve the ast::Type to a Type
-            let resolved_type = super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
+            // Resolve the ast::Type to a type ID
+            let resolved_type_id =
+                super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
 
             // Type narrowing for type alias - don't record as identifier
-            let narrowed_type = intersect_types(&value_type, &resolved_type, program);
+            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
             // Only add runtime check if value_type is not already exactly the resolved type
-            let requirements = if value_type.is_compatible(&resolved_type, program)
-                && narrowed_type == value_type
+            let requirements = if is_compatible(value_type_id, resolved_type_id, program)
+                && narrowed_type_id == value_type_id
             {
                 vec![] // No runtime check needed - value_type is already compatible
             } else {
                 vec![Requirement {
                     path,
-                    check: RuntimeCheck::Type(resolved_type),
+                    check: RuntimeCheck::TypeId(resolved_type_id),
                 }]
             };
             return Ok((
@@ -728,7 +731,7 @@ fn analyze_identifier_pattern(
                     requirements,
                     bindings: vec![],
                 }],
-                narrowed_type,
+                narrowed_type_id,
             ));
         }
     }
@@ -746,7 +749,7 @@ fn analyze_identifier_pattern(
                 }],
                 bindings: vec![],
             }],
-            value_type,
+            value_type_id,
         ))
     } else {
         // First occurrence - record it
@@ -763,8 +766,8 @@ fn analyze_identifier_pattern(
             PatternMode::Bind => {
                 // Binding gets the full value type, including nil if present.
                 // The binding executes regardless of whether the value is nil.
-                let var_type = value_type.clone();
-                let narrowed_type = var_type.clone();
+                let var_type_id = value_type_id;
+                let narrowed_type_id = var_type_id;
 
                 // No runtime requirements for identifier bindings - they match any value
                 Ok((
@@ -773,10 +776,10 @@ fn analyze_identifier_pattern(
                         bindings: vec![Binding {
                             name,
                             path,
-                            var_type,
+                            var_type_id,
                         }],
                     }],
-                    narrowed_type,
+                    narrowed_type_id,
                 ))
             }
             PatternMode::Pin => {
@@ -796,7 +799,7 @@ fn analyze_identifier_pattern(
                         requirements,
                         bindings: vec![],
                     }],
-                    value_type,
+                    value_type_id,
                 ))
             }
         }
@@ -806,24 +809,28 @@ fn analyze_identifier_pattern(
 fn analyze_partial_pattern(
     program: &mut Program,
     partial_pattern: &ast::PartialPattern,
-    value_type: &Type,
+    value_type_id: usize,
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<(Vec<BindingSet>, Type), Error> {
+) -> Result<(Vec<BindingSet>, usize), Error> {
     let mut binding_sets = vec![];
 
-    // Find types that have all required fields (and optionally matching tuple name)
-    let matching_types = find_tuples_with_fields_and_name(
+    // Find types that have all required fields (and optionally matching type name)
+    let matching_types = find_types_with_fields_and_name(
         program,
         &partial_pattern.fields,
         partial_pattern.name.as_ref(),
-        value_type,
+        value_type_id,
     )?;
 
+    // Check if the original value type could be multiple types (for adding type checks)
+    let value_type_sources = extract_field_sources(program, value_type_id);
+    let needs_type_check = value_type_sources.len() > 1;
+
     // Create a binding set for each matching type
-    for (tuple_id, field_indices) in &matching_types {
+    for field_match in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         let mut variant_identifiers_scope =
             IdentifierScope::new(identifiers, matching_types.len() > 1);
@@ -831,23 +838,49 @@ fn analyze_partial_pattern(
 
         let mut requirements = vec![];
 
-        if value_type.extract_tuples().len() > 1 {
-            requirements.push(Requirement {
-                path: path.clone(),
-                check: RuntimeCheck::Type(Type::Tuple(*tuple_id)),
-            });
-        }
+        // Get field info based on match type
+        let (fields, field_indices): (Vec<(Option<String>, usize)>, &Vec<usize>) = match field_match
+        {
+            FieldMatch::Tuple {
+                tuple_id,
+                field_indices,
+            } => {
+                // Add type check if the value could be multiple types
+                if needs_type_check {
+                    let tuple_type_id = program.register_type(Type::Tuple(*tuple_id));
+                    requirements.push(Requirement {
+                        path: path.clone(),
+                        check: RuntimeCheck::TypeId(tuple_type_id),
+                    });
+                }
 
-        let tuple_info = program
-            .lookup_tuple(*tuple_id)
-            .ok_or(Error::TupleNotInRegistry {
-                tuple_id: *tuple_id,
-            })?;
+                let tuple_fields = program
+                    .lookup_tuple(*tuple_id)
+                    .ok_or(Error::TupleNotInRegistry {
+                        tuple_id: *tuple_id,
+                    })?
+                    .fields
+                    .clone();
+                (tuple_fields, field_indices)
+            }
+            FieldMatch::Partial {
+                fields,
+                field_indices,
+            } => {
+                // Convert partial fields to (Option<String>, usize) format
+                let converted: Vec<(Option<String>, usize)> = fields
+                    .iter()
+                    .map(|(name, type_id)| (Some(name.clone()), *type_id))
+                    .collect();
+                // No type check needed for partials - they're type constraints, not concrete types
+                (converted, field_indices)
+            }
+        };
 
         let mut bindings = Vec::new();
         for (i, field_name) in partial_pattern.fields.iter().enumerate() {
             let idx = field_indices[i];
-            let field_type = &tuple_info.fields[idx].1;
+            let field_type_id = fields[idx].1;
             let mut field_path = path.clone();
             field_path.push(idx);
 
@@ -874,10 +907,11 @@ fn analyze_partial_pattern(
                     PatternMode::Bind => {
                         // Create a binding for this identifier
                         // Strip [] from binding type because if the binding executes, the value is not []
+                        let var_type_id = without_nil(field_type_id, program);
                         bindings.push(Binding {
                             name: field_name.clone(),
                             path: field_path,
-                            var_type: field_type.without_nil(),
+                            var_type_id,
                         });
                     }
                     PatternMode::Pin => {
@@ -901,62 +935,93 @@ fn analyze_partial_pattern(
         });
     }
 
-    // Construct narrowed type from matching tuple types
-    let narrowed_variants: Vec<Type> = matching_types
-        .iter()
-        .map(|(tuple_id, _)| Type::Partial(*tuple_id))
-        .collect();
-
-    let narrowed_type = if narrowed_variants.is_empty() {
-        Type::never()
+    // Construct narrowed type from matching types
+    // For tuples, narrow to concrete tuple types; for partials, keep the input type
+    let narrowed_type_id = if matching_types.is_empty() {
+        program.never()
     } else {
-        Type::from_types(narrowed_variants)
+        let mut narrowed_type_ids: Vec<usize> = Vec::new();
+        for field_match in &matching_types {
+            match field_match {
+                FieldMatch::Tuple { tuple_id, .. } => {
+                    narrowed_type_ids.push(program.register_type(Type::Tuple(*tuple_id)));
+                }
+                FieldMatch::Partial { .. } => {
+                    // For partials, keep the original partial type
+                    narrowed_type_ids.push(value_type_id);
+                }
+            }
+        }
+        union_type_ids(program, narrowed_type_ids)
     };
 
-    Ok((binding_sets, narrowed_type))
+    Ok((binding_sets, narrowed_type_id))
 }
 
 fn analyze_star_pattern(
     program: &mut Program,
-    value_type: &Type,
+    value_type_id: usize,
     path: AccessPath,
     mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
-) -> Result<(Vec<BindingSet>, Type), Error> {
-    // Collect all tuple types
-    let tuples = value_type.extract_tuples();
+) -> Result<(Vec<BindingSet>, usize), Error> {
+    // Collect all field sources (tuples and partials)
+    let field_sources = extract_field_sources(program, value_type_id);
 
-    // Create a binding set for each tuple type
+    // Create a binding set for each field source
     let mut binding_sets = vec![];
-    for tuple_id in &tuples {
+    for source in &field_sources {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
-        let mut variant_identifiers_scope = IdentifierScope::new(identifiers, tuples.len() > 1);
+        let mut variant_identifiers_scope =
+            IdentifierScope::new(identifiers, field_sources.len() > 1);
         let variant_identifiers = variant_identifiers_scope.get_mut();
 
-        let tuple_info = program
-            .lookup_tuple(*tuple_id)
-            .ok_or(Error::TupleNotInRegistry {
-                tuple_id: *tuple_id,
-            })?;
+        // Get fields from the source
+        let (fields, type_check): (Vec<(Option<String>, usize)>, Option<usize>) = match source {
+            FieldSource::Tuple(tuple_id) => {
+                let tuple_fields = program
+                    .lookup_tuple(*tuple_id)
+                    .ok_or(Error::TupleNotInRegistry {
+                        tuple_id: *tuple_id,
+                    })?
+                    .fields
+                    .clone();
+                let tuple_type_id = if field_sources.len() > 1 {
+                    Some(program.register_type(Type::Tuple(*tuple_id)))
+                } else {
+                    None
+                };
+                (tuple_fields, tuple_type_id)
+            }
+            FieldSource::Partial { fields, .. } => {
+                // Partial fields are all named, convert to (Option<String>, usize) format
+                let converted: Vec<(Option<String>, usize)> = fields
+                    .iter()
+                    .map(|(name, type_id)| (Some(name.clone()), *type_id))
+                    .collect();
+                // No type check needed for partials since they're type constraints
+                (converted, None)
+            }
+        };
 
-        // Add type check if there are multiple tuple types
+        // Add type check if needed
         let mut requirements = vec![];
-        if tuples.len() > 1 {
+        if let Some(type_id) = type_check {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::Type(Type::Tuple(*tuple_id)),
+                check: RuntimeCheck::TypeId(type_id),
             });
         }
 
         let mut bindings = Vec::new();
-        for (idx, (name, field_type)) in tuple_info.fields.iter().enumerate() {
+        for (idx, (name, field_type_id)) in fields.iter().enumerate() {
             if let Some(field_name) = name {
                 let mut field_path = path.clone();
                 field_path.push(idx);
 
                 // Check if we've seen this identifier before
-                if let Some(info) = variant_identifiers.get_mut(field_name) {
+                if let Some(info) = variant_identifiers.get_mut(field_name.as_str()) {
                     // Repeated identifier - mark as repeated and add Path requirement
                     info.is_repeated = true;
                     requirements.push(Requirement {
@@ -978,10 +1043,11 @@ fn analyze_star_pattern(
                         PatternMode::Bind => {
                             // Create a binding for this identifier
                             // Strip [] from binding type because if the binding executes, the value is not []
+                            let var_type_id = without_nil(*field_type_id, program);
                             bindings.push(Binding {
                                 name: field_name.clone(),
                                 path: field_path,
-                                var_type: field_type.without_nil(),
+                                var_type_id,
                             });
                         }
                         PatternMode::Pin => {
@@ -1007,50 +1073,83 @@ fn analyze_star_pattern(
     }
 
     // Star pattern matches all variants, so narrowed type is the full input type
-    Ok((binding_sets, value_type.clone()))
+    Ok((binding_sets, value_type_id))
 }
 
-fn find_tuples_with_fields_and_name(
+/// Represents a match against either a concrete tuple or a partial type
+enum FieldMatch {
+    Tuple {
+        tuple_id: usize,
+        field_indices: Vec<usize>,
+    },
+    Partial {
+        fields: Vec<(String, usize)>, // (field_name, type_id)
+        field_indices: Vec<usize>,
+    },
+}
+
+fn find_types_with_fields_and_name(
     program: &mut Program,
     field_names: &[String],
-    tuple_name: Option<&String>,
-    value_type: &Type,
-) -> Result<Vec<(usize, Vec<usize>)>, Error> {
-    let mut match_tuples = Vec::new();
+    type_name: Option<&String>,
+    value_type_id: usize,
+) -> Result<Vec<FieldMatch>, Error> {
+    let mut matches = Vec::new();
 
-    let types_to_check = match value_type {
-        Type::Union(types) => types.as_slice(),
-        single => std::slice::from_ref(single),
-    };
+    let field_sources = extract_field_sources(program, value_type_id);
 
-    for typ in types_to_check {
-        if let Type::Tuple(tuple_id) | Type::Partial(tuple_id) = typ {
-            let tuple_info = program
-                .lookup_tuple(*tuple_id)
-                .ok_or(Error::TupleNotInRegistry {
-                    tuple_id: *tuple_id,
-                })?;
+    for source in field_sources {
+        match source {
+            FieldSource::Tuple(tuple_id) => {
+                let tuple_info = program
+                    .lookup_tuple(tuple_id)
+                    .ok_or(Error::TupleNotInRegistry { tuple_id })?;
 
-            // Check if tuple name matches (if specified)
-            if let Some(expected_name) = tuple_name
-                && tuple_info.name.as_ref() != Some(expected_name)
-            {
-                continue; // Skip this type if name doesn't match
+                // Check if tuple name matches (if specified)
+                if let Some(expected_name) = type_name
+                    && tuple_info.name.as_ref() != Some(expected_name)
+                {
+                    continue; // Skip this type if name doesn't match
+                }
+
+                if let Some(indices) = find_field_indices(field_names, &tuple_info.fields) {
+                    matches.push(FieldMatch::Tuple {
+                        tuple_id,
+                        field_indices: indices,
+                    });
+                }
             }
+            FieldSource::Partial { name, fields } => {
+                // Check if partial name matches (if specified)
+                if let Some(expected_name) = type_name
+                    && name.as_ref() != Some(expected_name)
+                {
+                    continue; // Skip this partial if name doesn't match
+                }
 
-            if let Some(indices) = find_field_indices(field_names, &tuple_info.fields) {
-                match_tuples.push((*tuple_id, indices));
+                // Convert partial fields to (Option<String>, usize) format for find_field_indices
+                let converted_fields: Vec<(Option<String>, usize)> = fields
+                    .iter()
+                    .map(|(name, type_id)| (Some(name.clone()), *type_id))
+                    .collect();
+
+                if let Some(indices) = find_field_indices(field_names, &converted_fields) {
+                    matches.push(FieldMatch::Partial {
+                        fields,
+                        field_indices: indices,
+                    });
+                }
             }
         }
     }
 
-    Ok(match_tuples)
+    Ok(matches)
 }
 
 /// Find indices of specified fields in a tuple type
 fn find_field_indices(
     field_names: &[String],
-    tuple_fields: &[(Option<String>, Type)],
+    tuple_fields: &[(Option<String>, usize)],
 ) -> Option<Vec<usize>> {
     let mut indices = Vec::new();
 
@@ -1065,4 +1164,141 @@ fn find_field_indices(
     }
 
     Some(indices)
+}
+
+// ============================================================================
+// Helper functions for ID-based type operations
+// ============================================================================
+
+/// Represents field information from either a tuple or partial type
+#[derive(Clone)]
+enum FieldSource {
+    Tuple(usize), // tuple_id
+    Partial {
+        name: Option<String>,
+        fields: Vec<(String, usize)>, // (field_name, type_id) - all partial fields are named
+    },
+}
+
+/// Extract field sources from a type (tuples and partials)
+fn extract_field_sources(program: &Program, type_id: usize) -> Vec<FieldSource> {
+    let Some(ty) = program.lookup_type(type_id) else {
+        return vec![];
+    };
+    match ty {
+        Type::Tuple(id) => vec![FieldSource::Tuple(*id)],
+        Type::Partial { name, fields } => vec![FieldSource::Partial {
+            name: name.clone(),
+            fields: fields.clone(),
+        }],
+        Type::Union(type_ids) => type_ids
+            .iter()
+            .flat_map(|&tid| extract_field_sources(program, tid))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Extract tuple IDs from a type (only concrete tuples, not partials)
+fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
+    let Some(ty) = program.lookup_type(type_id) else {
+        return vec![];
+    };
+    match ty {
+        Type::Tuple(id) => vec![*id],
+        Type::Union(type_ids) => type_ids
+            .iter()
+            .filter_map(|&tid| {
+                program.lookup_type(tid).and_then(|t| match t {
+                    Type::Tuple(id) => Some(*id),
+                    _ => None,
+                })
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Create a union type from a list of type IDs, simplifying single-element lists
+fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
+    // Deduplicate type IDs
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<usize> = type_ids.into_iter().filter(|id| seen.insert(*id)).collect();
+
+    match unique.len() {
+        0 => program.never(),
+        1 => unique[0],
+        _ => program.register_type(Type::Union(unique)),
+    }
+}
+
+/// Check if a type is a union
+fn is_union(type_id: usize, program: &Program) -> bool {
+    matches!(program.lookup_type(type_id), Some(Type::Union(_)))
+}
+
+/// Check if a type is the never type (empty union)
+fn is_never(type_id: usize, program: &Program) -> bool {
+    matches!(program.lookup_type(type_id), Some(Type::Union(ids)) if ids.is_empty())
+}
+
+/// Check if type a is compatible with type b (simplified version for pattern matching)
+fn is_compatible(a_id: usize, b_id: usize, program: &Program) -> bool {
+    if a_id == b_id {
+        return true;
+    }
+
+    let (Some(a), Some(b)) = (program.lookup_type(a_id), program.lookup_type(b_id)) else {
+        return false;
+    };
+
+    match (a, b) {
+        (Type::Integer, Type::Integer) => true,
+        (Type::Binary, Type::Binary) => true,
+        (Type::Tuple(id1), Type::Tuple(id2)) => id1 == id2,
+        (Type::Union(ids), _) => ids.iter().all(|&id| is_compatible(id, b_id, program)),
+        (_, Type::Union(ids)) => ids.iter().any(|&id| is_compatible(a_id, id, program)),
+        // For partial compatibility, use the full is_compatible from types module
+        _ => quiver_core::types::is_compatible(a_id, b_id, program),
+    }
+}
+
+/// Remove nil from a type (for bindings that strip nil)
+fn without_nil(type_id: usize, program: &mut Program) -> usize {
+    let Some(ty) = program.lookup_type(type_id) else {
+        return type_id;
+    };
+
+    match ty {
+        Type::Union(ids) => {
+            let ids = ids.clone();
+            let filtered: Vec<usize> = ids
+                .into_iter()
+                .filter(|&id| {
+                    if let Some(Type::Tuple(tuple_id)) = program.lookup_type(id) {
+                        // Check if this is the nil tuple (empty tuple with no name)
+                        if let Some(info) = program.lookup_tuple(*tuple_id) {
+                            !(info.fields.is_empty() && info.name.is_none())
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            union_type_ids(program, filtered)
+        }
+        Type::Tuple(tuple_id) => {
+            // Check if this is nil
+            if let Some(info) = program.lookup_tuple(*tuple_id)
+                && info.fields.is_empty()
+                && info.name.is_none()
+            {
+                return program.never();
+            }
+            type_id
+        }
+        _ => type_id,
+    }
 }

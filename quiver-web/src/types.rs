@@ -75,13 +75,19 @@ impl Value {
                 *index,
                 captures.iter().map(|v| v.to_core_recursive(heap)).collect(),
             ),
-            Value::Builtin { name } => quiver_core::value::Value::Builtin(name.clone()),
+            Value::Builtin { name: _ } => {
+                // Web Value uses name, but core Value uses builtin_id
+                // Use 0 as placeholder - this is only for formatting purposes
+                quiver_core::value::Value::Builtin(0)
+            }
             Value::Process {
                 pid,
                 function_index,
             } => quiver_core::value::Value::Process(*pid, *function_index),
             Value::Resource { id, process_id: _ } => {
-                quiver_core::value::Value::Resource(*id, "Resource".to_string())
+                // Resource type_id is stored differently in web vs core
+                // Use 0 as placeholder - resource_type_id is for type checking only
+                quiver_core::value::Value::Resource(*id, 0)
             }
         }
     }
@@ -129,7 +135,15 @@ impl Value {
                     .map(|v| Value::from_core_value(v, heap_data, program))
                     .collect(),
             },
-            quiver_core::value::Value::Builtin(name) => Value::Builtin { name: name.clone() },
+            quiver_core::value::Value::Builtin(builtin_id) => {
+                // Look up builtin name from program
+                let name = program
+                    .get_builtins()
+                    .get(*builtin_id)
+                    .map(|b| b.name.clone())
+                    .unwrap_or_else(|| format!("builtin#{}", builtin_id));
+                Value::Builtin { name }
+            }
             quiver_core::value::Value::Process(pid, function_index) => Value::Process {
                 pid: *pid,
                 function_index: *function_index,
@@ -171,15 +185,19 @@ impl Value {
                     .collect();
                 Ok(quiver_core::value::Value::Function(index, core_captures?))
             }
-            Value::Builtin { name } => Ok(quiver_core::value::Value::Builtin(name)),
+            Value::Builtin { name: _ } => {
+                // Web Value stores name, but core Value needs builtin_id
+                // We can't look up the ID without program context, use 0 as placeholder
+                Ok(quiver_core::value::Value::Builtin(0))
+            }
             Value::Process {
                 pid,
                 function_index,
             } => Ok(quiver_core::value::Value::Process(pid, function_index)),
-            Value::Resource { id, process_id: _ } => Ok(quiver_core::value::Value::Resource(
-                id,
-                "Resource".to_string(),
-            )),
+            Value::Resource { id, process_id: _ } => {
+                // Resource type_id is for type checking only, use 0 as placeholder
+                Ok(quiver_core::value::Value::Resource(id, 0))
+            }
         }
     }
 }

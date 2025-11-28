@@ -53,7 +53,7 @@ impl ReplCli {
             )));
         }
         let effect_backend = crate::create_effect_backend();
-        let mut environment = Environment::<NativeEffect>::new(workers, builtins.clone());
+        let mut environment = Environment::<NativeEffect>::new(workers);
 
         // Set the effect backend
         if let Some(backend) = effect_backend {
@@ -264,8 +264,8 @@ impl ReplCli {
             println!("{}", "No variables defined".bright_black());
         } else {
             println!("{}", "Variables:".bright_black());
-            for (name, ty) in vars {
-                let formatted_type = self.environment.lock().unwrap().format_type(&ty);
+            for (name, type_id) in vars {
+                let formatted_type = self.environment.lock().unwrap().format_type_by_id(type_id);
                 println!(
                     "{}",
                     format!("  {}: {}", name, formatted_type).bright_black()
@@ -339,18 +339,11 @@ impl ReplCli {
                 );
 
                 // Show type
-                if let Some(function_index) = info.function_index {
-                    if let Some(type_str) = self
-                        .environment
-                        .lock()
-                        .unwrap()
-                        .format_process_type(function_index)
-                    {
-                        println!("{}", format!("  Type: {}", type_str).bright_black());
-                    }
-                } else {
-                    println!("{}", "  Type: ―".bright_black());
-                }
+                let type_str = info
+                    .function_index
+                    .and_then(|idx| self.environment.lock().unwrap().format_process_type(idx))
+                    .unwrap_or_else(|| "―".to_string());
+                println!("{}", format!("  Type: {}", type_str).bright_black());
 
                 if let Some(Ok((ref value, ref heap))) = info.result {
                     println!(
@@ -439,7 +432,7 @@ impl ReplCli {
                 // Show type for functions, builtins, and processes
                 let output = match &value {
                     Value::Function(_, _) | Value::Builtin(_) | Value::Process(_, _) => {
-                        let env = self.environment.lock().unwrap();
+                        let mut env = self.environment.lock().unwrap();
                         let value_type = env.value_to_type(&value);
                         let formatted_type = env.format_type(&value_type);
                         format!(

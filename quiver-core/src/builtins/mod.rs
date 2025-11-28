@@ -32,30 +32,76 @@ pub enum TypeSpec {
 }
 
 impl TypeSpec {
+    /// Resolve this type specification to a type ID in the Program's type registry
+    pub fn resolve_to_id(&self, program: &mut Program) -> usize {
+        match self {
+            TypeSpec::Integer => program.register_type(Type::Integer),
+            TypeSpec::Binary => program.register_type(Type::Binary),
+            TypeSpec::Tuple(name, field_specs) => {
+                let fields: Vec<(Option<String>, usize)> = field_specs
+                    .iter()
+                    .map(|(field_name, spec)| {
+                        (
+                            field_name.map(|s| s.to_string()),
+                            spec.resolve_to_id(program),
+                        )
+                    })
+                    .collect();
+                let tuple_id = program.register_tuple(name.map(|s| s.to_string()), fields);
+                program.register_type(Type::Tuple(tuple_id))
+            }
+            TypeSpec::Union(specs) => {
+                let type_ids: Vec<usize> = specs
+                    .iter()
+                    .map(|spec| spec.resolve_to_id(program))
+                    .collect();
+                program.register_type(Type::Union(type_ids))
+            }
+            TypeSpec::Process(send, receive) => {
+                let send_id = send.as_ref().map(|s| s.resolve_to_id(program));
+                let receive_id = receive.as_ref().map(|r| r.resolve_to_id(program));
+                program.register_type(Type::Process {
+                    send: send_id,
+                    receive: receive_id,
+                })
+            }
+            TypeSpec::Resource(name) => program.register_type(Type::Resource(name.clone())),
+        }
+    }
+
     /// Resolve this type specification to a concrete Type using the Program's type registry
+    /// Note: This returns the Type itself, not a type ID
     pub fn resolve(&self, program: &mut Program) -> Type {
         match self {
             TypeSpec::Integer => Type::Integer,
             TypeSpec::Binary => Type::Binary,
             TypeSpec::Tuple(name, field_specs) => {
-                let fields: Vec<(Option<String>, Type)> = field_specs
+                let fields: Vec<(Option<String>, usize)> = field_specs
                     .iter()
                     .map(|(field_name, spec)| {
-                        (field_name.map(|s| s.to_string()), spec.resolve(program))
+                        (
+                            field_name.map(|s| s.to_string()),
+                            spec.resolve_to_id(program),
+                        )
                     })
                     .collect();
-                let tuple_id = program.register_tuple(name.map(|s| s.to_string()), fields, false);
+                let tuple_id = program.register_tuple(name.map(|s| s.to_string()), fields);
                 Type::Tuple(tuple_id)
             }
             TypeSpec::Union(specs) => {
-                let types: Vec<Type> = specs.iter().map(|spec| spec.resolve(program)).collect();
-                Type::Union(types)
+                let type_ids: Vec<usize> = specs
+                    .iter()
+                    .map(|spec| spec.resolve_to_id(program))
+                    .collect();
+                Type::Union(type_ids)
             }
             TypeSpec::Process(send, receive) => {
-                Type::Process(Box::new(crate::types::ProcessType {
-                    send: send.as_ref().map(|s| Box::new(s.resolve(program))),
-                    receive: receive.as_ref().map(|r| Box::new(r.resolve(program))),
-                }))
+                let send_id = send.as_ref().map(|s| s.resolve_to_id(program));
+                let receive_id = receive.as_ref().map(|r| r.resolve_to_id(program));
+                Type::Process {
+                    send: send_id,
+                    receive: receive_id,
+                }
             }
             TypeSpec::Resource(name) => Type::Resource(name.clone()),
         }
