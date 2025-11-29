@@ -79,6 +79,6 @@ pub enum Instruction {
     Spawn,
     Send,
     Self_,
-    Select(usize),
+    Select,
     Process(usize, usize), // (process_id, function_index)
 }

@@ -117,25 +117,12 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::Self_ => {}
             ast::Term::Process(_) => {}
-            ast::Term::Select(select) => match select {
-                ast::Select::Identifier(ident) => {
-                    // Record the identifier as a variable reference
-                    self.visit_identifier(ident, vec![]);
+            ast::Term::Select(sources) => {
+                // Visit all source chains
+                for source in sources {
+                    self.visit_chain(source);
                 }
-                ast::Select::Type(_) => {
-                    // Type doesn't contain variables to visit
-                }
-                ast::Select::Function(func) => {
-                    if let Some(body) = &func.body {
-                        self.visit_block(body);
-                    }
-                }
-                ast::Select::Sources(sources) => {
-                    for source in sources {
-                        self.visit_chain(source);
-                    }
-                }
-            },
+            }
         }
     }
 

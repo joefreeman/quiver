@@ -4,7 +4,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, digit1, multispace0, multispace1, satisfy},
-    combinator::{map, map_res, not, opt, peek, recognize, value as nom_value, verify},
+    combinator::{map, map_res, not, opt, peek, recognize, success, value as nom_value, verify},
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
 };
@@ -869,139 +869,109 @@ fn access(input: Span) -> IResult<Span, Access> {
     )(input)
 }
 
-// Parse select operator with four forms:
-// 1. !identifier - Identifier (needs semantic resolution)
-// 2. !identifier { ... } - Function (with identifier type)
-// 3. !(type) or !(type) { ... } - Type or Function (with explicit type)
-// 4. !(source1, source2, ...) - Sources (comma-separated)
-// 5. !<term> - Sources with single term (e.g., !#int, !@process)
+// Helper to wrap a term in a single-element source chain
+fn make_source_chain(term: Term) -> Chain {
+    Chain {
+        match_pattern: None,
+        terms: vec![term],
+        continuation: false,
+    }
+}
+
+// Helper to check if an identifier looks like a type (primitive or capitalized)
+fn is_type_identifier(ident: &str) -> bool {
+    ident == "int" || ident == "bin" || ident.chars().next().is_some_and(|c| c.is_uppercase())
+}
+
+// Helper to convert an identifier to a type
+fn identifier_to_type(ident: String) -> Type {
+    match ident.as_str() {
+        "int" => Type::Primitive(PrimitiveType::Int),
+        "bin" => Type::Primitive(PrimitiveType::Bin),
+        _ => Type::Identifier {
+            name: ident,
+            arguments: vec![],
+        },
+    }
+}
+
+// Wrap a term as a single-source select: ![term]
+fn single_source(term: Term) -> Term {
+    Term::Select(vec![make_source_chain(term)])
+}
+
+// Create a receive function from a type and optional body
+fn make_receive(param_type: Type, body: Option<Block>) -> Term {
+    let func = Function {
+        type_parameters: vec![],
+        parameter_type: Some(param_type),
+        return_type: None,
+        body,
+    };
+    single_source(Term::Function(func))
+}
+
+// Parse select operator - all forms desugar to Vec<Chain>
+//
+// Syntax forms:
+// - ![...]           - Tuple of source chains (canonical form)
+// - !                - Bare select (postfix form, empty sources)
+// - !(type) { ... }  - Receive function with explicit type
+// - !(type)          - Identity receive with explicit type
+// - !ident { ... }   - Receive function with identifier type
+// - !ident           - Identity receive (if type-like) or single source (if variable)
+// - !#f              - Single source (function)
+// - !@p              - Single source (spawn)
+// - !1000            - Single source (timeout literal)
 fn select_term(input: Span) -> IResult<Span, Term> {
-    alt((
-        // !identifier { ... } - Function with identifier type
-        map(
-            tuple((preceded(char('!'), identifier), preceded(opt(ws1), block))),
-            |(ident, body)| {
-                // Check if identifier is a primitive type
-                let param_type = match ident.as_str() {
-                    "int" => Type::Primitive(PrimitiveType::Int),
-                    "bin" => Type::Primitive(PrimitiveType::Bin),
-                    _ => Type::Identifier {
-                        name: ident,
-                        arguments: vec![],
-                    },
-                };
-                Term::Select(Select::Function(Function {
-                    type_parameters: vec![],
-                    parameter_type: Some(param_type),
-                    return_type: None,
-                    body: Some(body),
-                }))
-            },
-        ),
-        // !(type) { ... } - Function with explicit type
-        // Note: If type is just an identifier, still treat as Function (not Identifier with block)
-        // because the block indicates it's definitely a receive function
-        map(
-            tuple((
+    preceded(
+        char('!'),
+        alt((
+            // [...] - Tuple of source chains
+            map(
                 delimited(
-                    pair(char('!'), pair(char('('), wsc)),
-                    type_definition,
-                    pair(wsc, char(')')),
+                    pair(char('['), wsc),
+                    separated_list0(tuple((wsc, char(','), wsc)), chain),
+                    pair(wsc, char(']')),
                 ),
-                preceded(opt(ws1), block),
-            )),
-            |(param_type, body)| {
-                Term::Select(Select::Function(Function {
-                    type_parameters: vec![],
-                    parameter_type: Some(param_type),
-                    return_type: None,
-                    body: Some(body),
-                }))
-            },
-        ),
-        // ![...] or ![..., optional] - Tuple type without body
-        map(preceded(char('!'), tuple_type), |tuple_ty| {
-            Term::Select(Select::Type(tuple_ty))
-        }),
-        // !(type) - Type without body
-        // Note: !(identifier) is treated as Identifier, not Type, to allow semantic resolution
-        map(
-            delimited(
-                pair(char('!'), pair(char('('), wsc)),
-                type_definition,
-                pair(wsc, char(')')),
+                Term::Select,
             ),
-            |param_type| {
-                // If the type is just a bare identifier, treat it as Identifier for semantic resolution
-                if let Type::Identifier {
-                    ref name,
-                    ref arguments,
-                } = param_type
-                    && arguments.is_empty()
+            // (type) with optional body
+            map(
+                pair(
+                    delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+                    opt(preceded(opt(ws1), block)),
+                ),
+                |(param_type, body)| make_receive(param_type, body),
+            ),
+            // ident with optional body - must check for body first due to parsing order
+            map(
+                pair(identifier, preceded(opt(ws1), block)),
+                |(ident, body)| make_receive(identifier_to_type(ident), Some(body)),
+            ),
+            // access - could be type identifier or variable
+            map(access, |acc| {
+                // Bare type identifier → identity receive
+                if acc.accessors.is_empty()
+                    && acc.argument.is_none()
+                    && let Some(AccessSource::Identifier(ref ident)) = acc.source
+                    && is_type_identifier(ident)
                 {
-                    return Term::Select(Select::Identifier(name.clone()));
+                    return make_receive(identifier_to_type(ident.clone()), None);
                 }
-                Term::Select(Select::Type(param_type))
-            },
-        ),
-        // !(source1, source2, ...) - Sources (comma-separated chains)
-        map(
-            delimited(
-                pair(char('!'), pair(char('('), wsc)),
-                separated_list1(tuple((wsc, char(','), wsc)), chain),
-                pair(wsc, char(')')),
-            ),
-            |sources| Term::Select(Select::Sources(sources)),
-        ),
-        // !<access> - Sources with accessor OR identifier (e.g., !math.add, !p1, !receiver_func)
-        // access parser matches both bare identifiers and identifiers with accessors
-        map(preceded(char('!'), access), |acc| {
-            // Check if it's a bare identifier without accessors - use Identifier variant
-            if acc.accessors.is_empty()
-                && acc.argument.is_none()
-                && let Some(AccessSource::Identifier(id)) = acc.source
-            {
-                return Term::Select(Select::Identifier(id));
-            }
-            // Otherwise, it's a Sources with the access term
-            Term::Select(Select::Sources(vec![Chain {
-                match_pattern: None,
-                terms: vec![Term::Access(acc)],
-                continuation: false,
-            }]))
-        }),
-        // !<non-select-term> - Sources with single term (e.g., !#int, !@process)
-        map(
-            preceded(
-                char('!'),
-                alt((
-                    // Parse non-select terms to avoid infinite recursion
-                    map(function, Term::Function),
-                    map(spawn_term, |t| t), // spawn_term returns Term directly
-                    map(literal, Term::Literal),
-                )),
-            ),
-            |t| {
-                Term::Select(Select::Sources(vec![Chain {
-                    match_pattern: None,
-                    terms: vec![t],
-                    continuation: false,
-                }]))
-            },
-        ),
-        // Bare ! - becomes Sources with implicit ripple
-        map(char('!'), |_| {
-            Term::Select(Select::Sources(vec![Chain {
-                match_pattern: None,
-                terms: vec![Term::Access(Access {
-                    source: Some(AccessSource::Ripple),
-                    accessors: vec![],
-                    argument: None,
-                })],
-                continuation: false,
-            }]))
-        }),
-    ))(input)
+                // Variable or complex access → single source
+                single_source(Term::Access(acc))
+            }),
+            // #function
+            map(function, |f| single_source(Term::Function(f))),
+            // @spawn
+            map(spawn_term, single_source),
+            // literal (timeout)
+            map(literal, |l| single_source(Term::Literal(l))),
+            // nothing - bare ! for postfix form
+            success(Term::Select(vec![])),
+        )),
+    )(input)
 }
 
 fn import(input: Span) -> IResult<Span, Vec<String>> {

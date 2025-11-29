@@ -614,84 +614,36 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         receive_types: &mut Vec<usize>,
     ) -> Result<Option<usize>, Error> {
         match term {
-            ast::Term::Select(select) => {
-                // Extract receive types based on select variant
-                match select {
-                    ast::Select::Identifier(ident) => {
-                        // Implement semantic resolution to get the receive type from the identifier
-                        // Check if it's a primitive type, type alias, or variable
-                        if ident == "int" {
-                            receive_types.push(self.program.register_type(Type::Integer));
-                        } else if ident == "bin" {
-                            receive_types.push(self.program.register_type(Type::Binary));
-                        } else if let Some((_, ast_type)) =
-                            scopes::lookup_type_alias(&self.scopes, ident)
-                        {
-                            // It's a type alias - resolve its definition
-                            let resolved = typing::resolve_ast_type(
-                                &self.scopes,
-                                ast_type,
-                                &mut self.program,
-                            )?;
-                            receive_types.push(resolved);
-                        } else {
-                            // It's a variable - treat as a source and extract receive type from it
-                            let source_chain = ast::Chain {
-                                match_pattern: None,
-                                terms: vec![ast::Term::Access(ast::Access {
-                                    source: Some(ast::AccessSource::Identifier(ident.clone())),
-                                    accessors: vec![],
-                                    argument: None,
-                                })],
-                                continuation: false,
-                            };
-                            let mut source_types = Vec::new();
-                            self.extract_receive_type_from_source(
-                                &source_chain,
-                                chained_type.as_ref(),
-                                &mut source_types,
-                            )?;
-                            receive_types.extend(source_types);
-                        }
-                    }
-                    ast::Select::Type(ty) => {
-                        // Identity receive function with explicit type
-                        let resolved_type =
-                            typing::resolve_ast_type(&self.scopes, ty.clone(), &mut self.program)?;
-                        receive_types.push(resolved_type);
-                    }
-                    ast::Select::Function(func) => {
-                        // Receive function with body
-                        if let Some(param_type) = &func.parameter_type {
-                            let resolved_type = typing::resolve_ast_type(
-                                &self.scopes,
-                                param_type.clone(),
-                                &mut self.program,
-                            )?;
-                            receive_types.push(resolved_type);
-                        }
-                    }
-                    ast::Select::Sources(sources) => {
-                        // Multiple sources - collect all receive types
-                        let mut select_sources = Vec::new();
-                        for source in sources {
-                            self.extract_receive_type_from_source(
-                                source,
-                                chained_type.as_ref(),
-                                &mut select_sources,
-                            )?;
-                        }
+            ast::Term::Select(sources) => {
+                // Extract receive types from all sources
+                let mut select_sources = Vec::new();
 
-                        // If this select has receive sources, add the unified type
-                        if !select_sources.is_empty() {
-                            if select_sources.len() == 1 {
-                                receive_types.push(select_sources[0]);
-                            } else {
-                                // Multiple sources in same select - create union
-                                receive_types
-                                    .push(self.program.register_type(Type::Union(select_sources)));
-                            }
-                        }
+                // Handle postfix form: `receiver ~> !` where sources is empty
+                // In this case, extract receive type from the chained value
+                if sources.is_empty() {
+                    if let Some(chained) = chained_type
+                        && let Some(Type::Callable { parameter, .. }) =
+                            self.program.lookup_type(chained)
+                    {
+                        select_sources.push(*parameter);
+                    }
+                } else {
+                    for source in sources {
+                        self.extract_receive_type_from_source(
+                            source,
+                            chained_type.as_ref(),
+                            &mut select_sources,
+                        )?;
+                    }
+                }
+
+                // If this select has receive sources, add the unified type
+                if !select_sources.is_empty() {
+                    if select_sources.len() == 1 {
+                        receive_types.push(select_sources[0]);
+                    } else {
+                        // Multiple sources in same select - create union
+                        receive_types.push(self.program.register_type(Type::Union(select_sources)));
                     }
                 }
                 // Select doesn't produce a chainable type for receive extraction
@@ -2593,27 +2545,33 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Compile select expression: !identifier, !(type), !{ body }, !(sources...)
+    /// Compile select expression: ![sources...] or postfix form (empty sources with piped value)
+    ///
+    /// Select expects either a single value or a tuple on the stack:
+    /// - Single value (process, function, or int): used as the sole source
+    /// - Tuple: each element is used as a source
     fn compile_select(
         &mut self,
-        select: ast::Select,
+        sources: Vec<ast::Chain>,
         value_type: Option<usize>,
     ) -> Result<usize, Error> {
-        // Check if we need to validate ripple usage (only for Sources variant)
-        let is_sources_variant = matches!(select, ast::Select::Sources(_));
-
-        // Normalize all select forms into sources: Vec<Chain>
-        let sources = self.normalize_select_sources(select)?;
-
+        // Handle postfix form: `value ~> !` or `[a, b] ~> !`
+        // When sources is empty and there's a piped value, use the piped value directly
+        // (could be a single source OR a tuple of sources - executor handles both)
         if sources.is_empty() {
-            return Err(Error::FeatureUnsupported(
-                "Select requires at least one source".to_string(),
-            ));
+            if let Some(val_type) = value_type {
+                // Postfix form: piped value is already on stack
+                self.codegen.add_instruction(Instruction::Select);
+                return self.compute_select_return_type(&[val_type]);
+            } else {
+                // ![] with no piped value is a no-op, returns nil
+                self.codegen.add_instruction(Instruction::Tuple(NIL));
+                return Ok(self.program.register_type(Type::nil()));
+            }
         }
 
         // If there's a chained value, check that it's used (via ripple) in at least one source
-        if value_type.is_some() && is_sources_variant && !helpers::select_contains_ripple(&sources)
-        {
+        if value_type.is_some() && !helpers::select_contains_ripple(&sources) {
             return Err(Error::FeatureUnsupported(
                 "Chained value must be used in select sources (use ripple operator ~)".to_string(),
             ));
@@ -2627,79 +2585,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.emit_rotate_pop(sources.len() + 1);
         }
 
-        // Emit Select(n) instruction
-        self.codegen
-            .add_instruction(Instruction::Select(sources.len()));
+        // For multiple sources, create a tuple; for single source, leave as-is
+        if sources.len() > 1 {
+            let fields: Vec<(Option<String>, usize)> =
+                source_types.iter().map(|&t| (None, t)).collect();
+            let tuple_id = self.program.register_tuple(None, fields);
+            self.codegen.add_instruction(Instruction::Tuple(tuple_id));
+        }
+
+        // Emit Select instruction (handles both single value and tuple)
+        self.codegen.add_instruction(Instruction::Select);
 
         self.compute_select_return_type(&source_types)
-    }
-
-    /// Normalize different select forms into a common Vec<Chain> representation
-    fn normalize_select_sources(&self, select: ast::Select) -> Result<Vec<ast::Chain>, Error> {
-        Ok(match select {
-            ast::Select::Identifier(ident) => {
-                // Semantic resolution: type or variable?
-                let param_type = if ident == "int" {
-                    Some(ast::Type::Primitive(ast::PrimitiveType::Int))
-                } else if ident == "bin" {
-                    Some(ast::Type::Primitive(ast::PrimitiveType::Bin))
-                } else if scopes::lookup_type_alias(&self.scopes, ident.as_str()).is_some() {
-                    Some(ast::Type::Identifier {
-                        name: ident.clone(),
-                        arguments: vec![],
-                    })
-                } else {
-                    None
-                };
-
-                if let Some(param_type) = param_type {
-                    // It's a type - convert to identity function
-                    vec![ast::Chain {
-                        match_pattern: None,
-                        terms: vec![ast::Term::Function(ast::Function {
-                            type_parameters: vec![],
-                            parameter_type: Some(param_type),
-                            return_type: None,
-                            body: None,
-                        })],
-                        continuation: false,
-                    }]
-                } else {
-                    // It's a variable - treat as variable access
-                    vec![ast::Chain {
-                        match_pattern: None,
-                        terms: vec![ast::Term::Access(ast::Access {
-                            source: Some(ast::AccessSource::Identifier(ident)),
-                            accessors: vec![],
-                            argument: None,
-                        })],
-                        continuation: false,
-                    }]
-                }
-            }
-            ast::Select::Type(ty) => {
-                // Identity receive function
-                vec![ast::Chain {
-                    match_pattern: None,
-                    terms: vec![ast::Term::Function(ast::Function {
-                        type_parameters: vec![],
-                        parameter_type: Some(ty),
-                        return_type: None,
-                        body: None,
-                    })],
-                    continuation: false,
-                }]
-            }
-            ast::Select::Function(func) => {
-                // Receive function with body
-                vec![ast::Chain {
-                    match_pattern: None,
-                    terms: vec![ast::Term::Function(func)],
-                    continuation: false,
-                }]
-            }
-            ast::Select::Sources(sources) => sources,
-        })
     }
 
     /// Compute the return type of a select operation from source types

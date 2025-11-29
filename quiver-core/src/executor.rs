@@ -84,7 +84,7 @@ impl InstructionType {
             Instruction::Spawn => InstructionType::Spawn,
             Instruction::Send => InstructionType::Send,
             Instruction::Self_ => InstructionType::Self_,
-            Instruction::Select(_) => InstructionType::Select,
+            Instruction::Select => InstructionType::Select,
             Instruction::Process(_, _) => InstructionType::Process,
         }
     }
@@ -800,7 +800,7 @@ impl<E: Effect> Executor<E> {
             Instruction::Spawn => self.handle_spawn(pid),
             Instruction::Send => self.handle_send(pid),
             Instruction::Self_ => self.handle_self(pid),
-            Instruction::Select(n) => self.handle_select(pid, n, current_time_ms),
+            Instruction::Select => self.handle_select(pid, current_time_ms),
             Instruction::Process(process_id, function_index) => {
                 self.handle_process_ref(pid, process_id, function_index)
             }
@@ -1587,25 +1587,20 @@ impl<E: Effect> Executor<E> {
     fn initialize_select(
         &mut self,
         pid: ProcessId,
-        n: usize,
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        // Validate stack has enough sources
-        if process.stack.len() < n {
-            return Err(Error::InvalidArgument(format!(
-                "Select requires {} sources on stack, found {}",
-                n,
-                process.stack.len()
-            )));
-        }
+        // Pop a single value from stack (either a tuple of sources or a single source)
+        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
-        // Pop sources from stack
-        let start_idx = process.stack.len() - n;
-        let sources: Vec<Value> = process.stack.drain(start_idx..).collect();
+        // Extract sources: if it's a tuple, use its elements; otherwise use the value itself
+        let sources: Vec<Value> = match value {
+            Value::Tuple(_, elements) => elements,
+            single => vec![single],
+        };
 
         // Count receive sources to initialize cursors
         let receive_count = sources
@@ -1617,8 +1612,8 @@ impl<E: Effect> Executor<E> {
         let pid_targets: Vec<ProcessId> = sources
             .iter()
             .filter_map(|s| {
-                if let Value::Process(p, _) = s {
-                    Some(*p)
+                if let Value::Process(p, _) = *s {
+                    Some(p)
                 } else {
                     None
                 }
@@ -1976,7 +1971,6 @@ impl<E: Effect> Executor<E> {
     fn handle_select(
         &mut self,
         pid: ProcessId,
-        n: usize,
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
         // Phase 1: Check if we're continuing from a receive function call
@@ -1991,7 +1985,7 @@ impl<E: Effect> Executor<E> {
                 .is_some();
 
             if !has_select_state {
-                return self.initialize_select(pid, n, current_time_ms);
+                return self.initialize_select(pid, current_time_ms);
             }
         }
 
