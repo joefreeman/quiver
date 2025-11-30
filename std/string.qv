@@ -1,6 +1,6 @@
 str : Str[bin];
-list<t> : Nil | Cons[t, ^];
-iterator<t> : #[] -> ([t, ^] | []);
+(list) : %list;
+(iterator) : %iter;
 
 is_continuation' = #[bin, int] {
   =[data, byte_pos],
