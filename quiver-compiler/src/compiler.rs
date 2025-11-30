@@ -2352,7 +2352,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 if has_spread
                     && access.accessors.is_empty()
-                    && let Some((var_type_id, var_index)) =
+                    && let Some((var_type_id, _var_index)) =
                         scopes::lookup_variable(&self.scopes, &name, &[])
                     && let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(var_type_id)
                 {
@@ -2364,22 +2364,38 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         .lookup_tuple(tuple_id)
                         .and_then(|t| t.name.clone());
 
-                    // Load the tuple variable and create ripple context
-                    self.codegen.add_instruction(Instruction::Load(var_index));
-                    let ripple_ctx = RippleContext {
-                        value_type_id: var_type_id,
-                        stack_offset: 0,
-                        owns_value: true,
-                        provenance: Provenance::Variable(name.clone()),
+                    // Transform bare spreads (...) into named spreads (...a)
+                    // so they load from the prefix variable
+                    let mut arg_fields = access.argument.unwrap();
+                    for field in &mut arg_fields {
+                        if matches!(&field.value, ast::FieldValue::Spread(None)) {
+                            field.value = ast::FieldValue::Spread(Some(name.clone()));
+                        }
+                    }
+
+                    // Determine ripple context for field values:
+                    // - If there's a chained value, ripples (~) should resolve to it
+                    // - Otherwise use outer ripple_context if available
+                    let chained_ripple_ctx;
+                    let effective_ripple_ctx = if let Some(val_type) = value_type {
+                        // Value is chained directly to this spread - create context for it
+                        chained_ripple_ctx = RippleContext {
+                            value_type_id: val_type,
+                            stack_offset: 0,
+                            owns_value: true,
+                            provenance: value_provenance.clone(),
+                        };
+                        Some(&chained_ripple_ctx)
+                    } else {
+                        ripple_context
                     };
 
-                    // Compile tuple with spread, using the variable as spread source
-                    let arg_fields = access.argument.unwrap();
+                    // Compile tuple with spread
                     let (ty, _) = spread::compile_tuple_with_spread(
                         self,
                         tuple_name,
                         arg_fields,
-                        Some(&ripple_ctx),
+                        effective_ripple_ctx,
                     )?;
                     // Spread result has unknown provenance
                     return Ok((ty, Provenance::Unknown));

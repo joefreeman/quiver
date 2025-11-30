@@ -193,3 +193,19 @@ fn test_nested_spread_with_ripple_context() {
         .evaluate("[1, 2, 3] ~> [outer: ~, nested: [inner: ~, ...]]")
         .expect("[outer: [1, 2, 3], nested: [inner: [1, 2, 3], 1, 2, 3]]");
 }
+
+#[test]
+fn test_identifier_spread_with_ripple_in_field() {
+    // Ripple in field value should resolve to the chained value, not the spread source
+    quiver()
+        .evaluate("a = A[x: 1, y: 2], 3 ~> a[..., y: ~]")
+        .expect("A[x: 1, y: 3]");
+}
+
+#[test]
+fn test_identifier_spread_with_ripple_replacing_multiple_fields() {
+    // Ripple can be used in multiple fields
+    quiver()
+        .evaluate("a = A[x: 1, y: 2, z: 3], 99 ~> a[..., y: ~, z: ~]")
+        .expect("A[x: 1, y: 99, z: 99]");
+}
