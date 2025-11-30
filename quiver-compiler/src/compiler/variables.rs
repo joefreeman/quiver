@@ -68,13 +68,10 @@ impl<'a> FreeVariableCollector<'a> {
                     // Ripple doesn't introduce variables
                 }
             }
-            ast::Term::BindMatch(_) => {
-                // Bind matches don't reference variables, they define them
-            }
-            ast::Term::PinMatch(pattern) => {
-                // Pin matches reference existing variables
-                // The ^x syntax means we're already in pin mode
-                self.visit_pin_pattern(pattern);
+            ast::Term::Match(pattern) => {
+                // Match patterns can define variables or reference them (via &)
+                // We need to traverse the pattern to find Match::Reference nodes
+                self.visit_match(pattern);
             }
             ast::Term::Block(block) => {
                 self.visit_block(block);
@@ -126,68 +123,6 @@ impl<'a> FreeVariableCollector<'a> {
         }
     }
 
-    fn visit_match_pattern(&mut self, pattern: &ast::Match) {
-        match pattern {
-            ast::Match::Identifier(_) => {
-                // Regular identifiers in matches define variables, not reference them
-            }
-            ast::Match::Literal(_) => {}
-            ast::Match::Tuple(tuple) => {
-                for field in &tuple.fields {
-                    self.visit_match_pattern(&field.pattern);
-                }
-            }
-            ast::Match::Partial(_) => {
-                // Partial patterns define variables, not reference them
-            }
-            ast::Match::Star => {}
-            ast::Match::Placeholder => {}
-            ast::Match::Pin(inner) => {
-                // Pin patterns reference existing variables
-                self.visit_pin_pattern(inner);
-            }
-            ast::Match::Bind(inner) => {
-                // Bind patterns define variables (explicitly switch back to bind mode)
-                self.visit_match_pattern(inner);
-            }
-            ast::Match::Type(_) => {
-                // Type expressions don't reference variables
-            }
-        }
-    }
-
-    fn visit_pin_pattern(&mut self, pattern: &ast::Match) {
-        match pattern {
-            ast::Match::Identifier(name) => {
-                // Pinned identifiers reference variables
-                self.visit_identifier(name, vec![]);
-            }
-            ast::Match::Literal(_) => {}
-            ast::Match::Tuple(tuple) => {
-                // In pin mode, recurse with pin semantics
-                for field in &tuple.fields {
-                    self.visit_pin_pattern(&field.pattern);
-                }
-            }
-            ast::Match::Partial(_) => {
-                // Partial patterns in pin mode still reference fields, not the base
-            }
-            ast::Match::Star => {}
-            ast::Match::Placeholder => {}
-            ast::Match::Pin(inner) => {
-                // Nested pin - continue with pin semantics
-                self.visit_pin_pattern(inner);
-            }
-            ast::Match::Bind(inner) => {
-                // Explicit bind in pin context - switch back to bind mode
-                self.visit_match_pattern(inner);
-            }
-            ast::Match::Type(_) => {
-                // Type expressions don't reference variables
-            }
-        }
-    }
-
     fn visit_identifier(&mut self, identifier: &str, accessors: Vec<ast::AccessPath>) {
         if !self.function_parameters.contains(identifier)
             && (self.defined_variables)(identifier, &accessors)
@@ -200,6 +135,40 @@ impl<'a> FreeVariableCollector<'a> {
             if !self.captures.contains(&capture) {
                 self.captures.push(capture);
             }
+        }
+    }
+
+    fn visit_match(&mut self, pattern: &ast::Match) {
+        match pattern {
+            ast::Match::Reference(ty) => {
+                // Check if this is a bare identifier reference (could be a variable)
+                if let ast::Type::Identifier { name, arguments } = ty
+                    && arguments.is_empty()
+                {
+                    // This could be a variable reference like &x
+                    self.visit_identifier(name, vec![]);
+                }
+            }
+            ast::Match::Tuple(tuple) => {
+                // Recursively visit fields in tuple patterns
+                for field in &tuple.fields {
+                    self.visit_match(&field.pattern);
+                }
+            }
+            ast::Match::Partial(partial) => {
+                // Visit nested patterns in partial pattern fields
+                for (_, nested_pattern) in &partial.fields {
+                    if let Some(nested_pattern) = nested_pattern {
+                        self.visit_match(nested_pattern);
+                    }
+                }
+            }
+            // These don't contain nested patterns or references
+            ast::Match::Identifier(_)
+            | ast::Match::Literal(_)
+            | ast::Match::Star
+            | ast::Match::Placeholder
+            | ast::Match::Type(_) => {}
         }
     }
 }

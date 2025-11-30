@@ -680,7 +680,7 @@ fn test_receive_type_in_tail_call_argument() {
         .evaluate(
             r#"
             f = #[int, int] { ~> __add__ },
-            p = 10 ~> @#int { ~> &f[~, !#int] },
+            p = 10 ~> @#int { ~> ^f[~, !#int] },
             32 ~> p ~> !
             "#,
         )

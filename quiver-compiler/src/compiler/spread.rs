@@ -5,7 +5,7 @@ use quiver_core::{
     types::{Type, TypeLookup},
 };
 
-use super::{Compiler, Error, RippleContext, provenance::Provenance};
+use super::{Compiler, Error, RippleContext, provenance::Provenance, typing::union_type_ids};
 
 /// Represents a compiled field or spread value on the stack
 #[derive(Debug)]
@@ -61,19 +61,6 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
             })
             .collect(),
         _ => vec![],
-    }
-}
-
-/// Create a union type from a list of type IDs, simplifying single-element lists
-fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
-    // Deduplicate type IDs
-    let mut seen = std::collections::HashSet::new();
-    let unique: Vec<usize> = type_ids.into_iter().filter(|id| seen.insert(*id)).collect();
-
-    match unique.len() {
-        0 => program.register_type(Type::never()),
-        1 => unique[0],
-        _ => program.register_type(Type::Union(unique)),
     }
 }
 

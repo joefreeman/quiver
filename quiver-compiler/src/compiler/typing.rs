@@ -601,20 +601,20 @@ fn resolve_ast_type_impl(
             Ok(union_type_ids(program, resolved_type_ids))
         }
         ast::Type::Cycle(target_depth) => {
-            // & or &N syntax for cycle references
+            // ^ or ^N syntax for cycle references
             let target_depth = target_depth.unwrap_or(0);
 
             // Validate: cycles require enclosing union or function
             if *recursion_depth == 0 {
                 return Err(Error::TypeUnresolved(
-                    "Cycle reference '&' requires enclosing union or function type".to_string(),
+                    "Cycle reference '^' requires enclosing union or function type".to_string(),
                 ));
             }
 
             // Validate: target_depth must be < recursion_depth
             if target_depth >= *recursion_depth {
                 return Err(Error::TypeUnresolved(format!(
-                    "Invalid cycle reference &{}: only {} recursion level(s) deep",
+                    "Invalid cycle reference ^{}: only {} recursion level(s) deep",
                     target_depth, *recursion_depth
                 )));
             }

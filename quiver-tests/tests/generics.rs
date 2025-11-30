@@ -6,7 +6,7 @@ fn test_basic_generic_type() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             xs = Cons[42, Cons[99, Nil]],
             xs.0
             "#,
@@ -19,7 +19,7 @@ fn test_generic_type_with_different_instantiations() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             Cons[1, Cons[2, Nil]]
             "#,
         )
@@ -28,7 +28,7 @@ fn test_generic_type_with_different_instantiations() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             Cons['aa', Cons['bb', Nil]],
             "#,
         )
@@ -74,7 +74,7 @@ fn test_generic_function_with_recursive_type() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             head = #<t>list<t> {
               | ~> =Cons[h, _] => h
               | ~> =Nil => 0
@@ -90,7 +90,7 @@ fn test_generic_type_structural_equivalence() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             f = #list<int> { ~> =xs => xs },
             g = #list<int> { ~> =xs => xs },
             xs = Cons[42, Nil],
@@ -118,7 +118,7 @@ fn test_nested_generic_types() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             pair<a, b> : Pair[fst: a, snd: b];
 
             xs = Cons[Pair[fst: 1, snd: 2], Cons[Pair[fst: 3, snd: 4], Nil]],
@@ -182,7 +182,7 @@ fn test_generic_function_pattern_matching() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             sum_first_two = #list<int> {
               | ~> =Cons[a, Cons[b, _]] => [a, b] ~> __add__
               | 0
@@ -212,7 +212,7 @@ fn test_generic_type_cycle_reference() {
     quiver()
         .evaluate(
             r#"
-            tree<t> : Leaf[t] | Node[&, &];
+            tree<t> : Leaf[t] | Node[^, ^];
             t = Node[Node[Leaf[1], Leaf[2]], Leaf[3]],
             t.0.0.0
             "#,
@@ -238,7 +238,7 @@ fn test_generic_nested_function_calls() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
+            list<t> : Nil | Cons[t, ^];
             singleton = #<t>t { ~> =x => Cons[x, Nil] },
             head = #<t>list<t> { ~> =Cons[h, _] => h },
             42 ~> singleton ~> head

@@ -454,6 +454,35 @@ fn literal(input: Span) -> IResult<Span, Literal> {
 
 // Pattern parsers for terms
 
+/// Parse a single partial pattern field: either `name` or `name: pattern`
+fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
+    // Forward reference for nested patterns within partial pattern fields
+    // We use a limited pattern parser here to avoid left recursion
+    fn nested_pattern(input: Span) -> IResult<Span, Match> {
+        alt((
+            // Reference pattern with & prefix
+            map(preceded(char('&'), base_type), Match::Reference),
+            // Literals
+            map(literal, Match::Literal),
+            // Star and placeholder
+            map(char('*'), |_| Match::Star),
+            map(char('_'), |_| Match::Placeholder),
+            // Identifier
+            map(identifier, Match::Identifier),
+        ))(input)
+    }
+
+    alt((
+        // Field with nested pattern: name: pattern
+        map(
+            tuple((identifier, ws0, char(':'), ws0, nested_pattern)),
+            |(name, _, _, _, pattern)| (name, Some(pattern)),
+        ),
+        // Simple field name binding
+        map(identifier, |name| (name, None)),
+    ))(input)
+}
+
 fn partial_pattern_inner(input: Span) -> IResult<Span, PartialPattern> {
     alt((
         // Named partial pattern: TupleName(field1, field2, ...)
@@ -463,7 +492,7 @@ fn partial_pattern_inner(input: Span) -> IResult<Span, PartialPattern> {
                 delimited(
                     pair(char('('), ws0),
                     terminated(
-                        separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                        separated_list1(tuple((ws0, char(','), ws1)), partial_pattern_field),
                         opt(pair(ws0, char(','))),
                     ),
                     pair(ws0, char(')')),
@@ -479,7 +508,7 @@ fn partial_pattern_inner(input: Span) -> IResult<Span, PartialPattern> {
             delimited(
                 pair(char('('), ws0),
                 terminated(
-                    separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                    separated_list1(tuple((ws0, char(','), ws1)), partial_pattern_field),
                     opt(pair(ws0, char(','))),
                 ),
                 pair(ws0, char(')')),
@@ -705,7 +734,7 @@ fn type_identifier(input: Span) -> IResult<Span, Type> {
 fn type_cycle(input: Span) -> IResult<Span, Type> {
     map(
         preceded(
-            char('&'),
+            char('^'),
             opt(map_res(digit1, |s: Span| s.fragment().parse::<usize>())),
         ),
         Type::Cycle,
@@ -1098,7 +1127,7 @@ fn function(input: Span) -> IResult<Span, Function> {
 }
 
 fn tail_call(input: Span) -> IResult<Span, Term> {
-    let (input, _) = char('&')(input)?;
+    let (input, _) = char('^')(input)?;
     let (input, ident) = opt(identifier)(input)?;
     let (input, accessors) = many0(preceded(
         char('.'),
@@ -1234,11 +1263,7 @@ fn self_term(input: Span) -> IResult<Span, Term> {
 }
 
 fn bind_match(input: Span) -> IResult<Span, Term> {
-    map(preceded(char('='), match_pattern), Term::BindMatch)(input)
-}
-
-fn pin_match(input: Span) -> IResult<Span, Term> {
-    map(preceded(char('^'), match_pattern), Term::PinMatch)(input)
+    map(preceded(char('='), match_pattern), Term::Match)(input)
 }
 
 fn match_field(input: Span) -> IResult<Span, MatchField> {
@@ -1304,18 +1329,10 @@ fn inline_type_expression(input: Span) -> IResult<Span, Type> {
 
 fn match_pattern(input: Span) -> IResult<Span, Match> {
     alt((
-        // Inline type with ^ prefix: ^(type-expression) or ^list<int>
-        // The ^ switches to pin mode, wrapping the type in Pin
-        map(preceded(char('^'), inline_type_expression), |type_def| {
-            Match::Pin(Box::new(Match::Type(type_def)))
-        }),
-        // Pin pattern (must come after inline type to allow recursive patterns)
-        map(preceded(char('^'), match_pattern), |inner| {
-            Match::Pin(Box::new(inner))
-        }),
-        // Bind pattern (explicitly switches to bind mode)
-        map(preceded(char('='), match_pattern), |inner| {
-            Match::Bind(Box::new(inner))
+        // Reference pattern with & prefix: &<type-expression>
+        // The & precedes a type expression (not a pattern), used to check against existing value/type
+        map(preceded(char('&'), base_type), |type_def| {
+            Match::Reference(type_def)
         }),
         // Try string literals first (before tuples and literals)
         match_string,
@@ -1323,8 +1340,7 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         map(match_tuple, Match::Tuple),
         // Try partial patterns before inline types (partial patterns use parentheses too)
         map(partial_pattern_inner, Match::Partial),
-        // Inline type without ^ prefix: (type-expression) or list<int>
-        // For pin_match contexts where ^ is already consumed: 42 ~> ^(int | bin) or 42 ~> ^list<int>
+        // Inline type without & prefix: (type-expression) or list<int>
         // Must come after partial patterns to avoid ambiguity with (identifier)
         map(inline_type_expression, Match::Type),
         // Then try literals
@@ -1405,8 +1421,7 @@ fn term(input: Span) -> IResult<Span, Term> {
         process_ref_term,
         spawn_term,
         self_term,
-        // Pin match and bind match (must be before literals and identifiers)
-        pin_match,
+        // Bind match (must be before literals and identifiers)
         bind_match,
         // Literals
         map(literal, Term::Literal),

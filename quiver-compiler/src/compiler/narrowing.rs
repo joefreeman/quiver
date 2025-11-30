@@ -9,6 +9,7 @@ use quiver_core::types::{Type, TypeLookup, is_compatible};
 
 use super::provenance::Provenance;
 use super::scopes::{Binding, Scope, lookup_variable};
+use super::typing::union_type_ids;
 
 /// Narrowing information recorded during condition compilation.
 /// Used to compute complement types for subsequent branches.
@@ -336,19 +337,6 @@ fn get_type_variants(type_id: usize, program: &Program) -> Vec<usize> {
     get_type_variants_readonly(type_id, program)
 }
 
-/// Create a union type from a list of type IDs, simplifying single-element lists
-fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
-    // Deduplicate type IDs
-    let mut seen = std::collections::HashSet::new();
-    let unique: Vec<usize> = type_ids.into_iter().filter(|id| seen.insert(*id)).collect();
-
-    match unique.len() {
-        0 => program.never(),
-        1 => unique[0],
-        _ => program.register_type(Type::Union(unique)),
-    }
-}
-
 // =============================================================================
 // Tuple Pattern Complement Narrowing
 // =============================================================================
@@ -394,8 +382,9 @@ fn classify_field_pattern(
             }
         }
 
-        ast::Match::Bind(inner) | ast::Match::Pin(inner) => {
-            classify_field_pattern(inner, field_type_id, program)
+        ast::Match::Reference(_) => {
+            // Reference patterns are type-checking patterns
+            FieldPatternKind::Complex
         }
 
         _ => FieldPatternKind::Complex,
@@ -449,10 +438,6 @@ pub fn analyze_tuple_pattern_for_complement(
 ) -> Option<(usize, usize)> {
     let tuple_pattern = match pattern {
         ast::Match::Tuple(t) => t,
-        ast::Match::Bind(inner) => match inner.as_ref() {
-            ast::Match::Tuple(t) => t,
-            _ => return None,
-        },
         _ => return None,
     };
 

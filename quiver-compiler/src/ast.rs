@@ -50,8 +50,7 @@ pub struct Chain {
 pub enum Term {
     Literal(Literal),
     Tuple(Tuple),
-    BindMatch(Match),
-    PinMatch(Match),
+    Match(Match),
     Block(Block),
     Function(Function),
     Access(Access),
@@ -144,10 +143,14 @@ pub struct Builtin {
     pub argument: Option<Vec<TupleField>>,
 }
 
+/// Partial pattern field: (field_name, optional_nested_pattern)
+/// None = bind field by name, Some = match field against nested pattern
+pub type PartialPatternField = (String, Option<Match>);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartialPattern {
     pub name: Option<String>,
-    pub fields: Vec<String>,
+    pub fields: Vec<PartialPatternField>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,8 +168,7 @@ pub enum Match {
     Partial(PartialPattern),
     Star,
     Placeholder,
-    Pin(Box<Match>),
-    Bind(Box<Match>),
+    Reference(Type),
     Type(Type),
 }
 

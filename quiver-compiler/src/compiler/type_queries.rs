@@ -4,7 +4,7 @@ use quiver_core::{
     types::{Type, TypeLookup},
 };
 
-use super::Error;
+use super::{Error, typing::union_type_ids};
 
 /// Resolve the type ID of an accessor path applied to a given type
 /// Used to determine the resulting type after accessing nested fields
@@ -130,19 +130,6 @@ fn get_field_at_position_from_source(
             tuple_info.fields.get(position).map(|(_, ftype)| *ftype)
         }
         FieldSource::Partial { fields } => fields.get(position).map(|(_, ftype)| *ftype),
-    }
-}
-
-/// Create a union type from a list of type IDs, simplifying single-element lists
-fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
-    // Deduplicate type IDs
-    let mut seen = std::collections::HashSet::new();
-    let unique: Vec<usize> = type_ids.into_iter().filter(|id| seen.insert(*id)).collect();
-
-    match unique.len() {
-        0 => program.register_type(Type::never()),
-        1 => unique[0],
-        _ => program.register_type(Type::Union(unique)),
     }
 }
 

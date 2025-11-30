@@ -1,6 +1,6 @@
 str : Str[bin];
-list<t> : Nil | Cons[t, &];
-iterator<t> : #[] -> ([t, &] | []);
+list<t> : Nil | Cons[t, ^];
+iterator<t> : #[] -> ([t, ^] | []);
 
 is_continuation_byte' = #[bin, int] {
   ~> =[data, byte_pos],
@@ -17,7 +17,7 @@ skip_continuation_bytes' = #[bin, int, int] {
   | [data, byte_pos] ~> is_continuation_byte' =>
     byte_pos
     ~> %math.add[~, 1]
-    ~> &[data, ~, data_len]
+    ~> ^[data, ~, data_len]
   | byte_pos
   }
 },
@@ -33,12 +33,12 @@ find_index = #[bin, bin, int, int] {
       ~> %math.add[offset, ~]
       ~> [haystack, offset, ~]
       ~> %binary.slice
-      ~> =^needle
+      ~> =&needle
       => offset
 
     | offset
       ~> %math.add[~, 1]
-      ~> &[haystack, needle, ~, end]
+      ~> ^[haystack, needle, ~, end]
   }
 },
 
@@ -51,13 +51,13 @@ byte_pos_to_char_idx' = #[bin, int, int, int] {
   | [data, current_pos] ~> is_continuation_byte' =>
     current_pos
     ~> %math.add[~, 1]
-    ~> &[data, ~, target_pos, char_idx]
+    ~> ^[data, ~, target_pos, char_idx]
   | {
     // Start of character - count it
     new_char_idx = %math.add[char_idx, 1],
     current_pos
     ~> %math.add[~, 1]
-    ~> &[data, ~, target_pos, new_char_idx]
+    ~> ^[data, ~, target_pos, new_char_idx]
   }
   }
 },
@@ -76,7 +76,7 @@ split' = #[bin, bin, int, list<str>] {
       haystack
       ~> %binary.slice[~, start, index]
       ~> %list.prepend[acc, Str[~]]
-      ~> &[haystack, delim, match_end, ~]
+      ~> ^[haystack, delim, match_end, ~]
 
     | [haystack, start, haystack_len]
       ~> %binary.slice
@@ -86,7 +86,7 @@ split' = #[bin, bin, int, list<str>] {
   }
 },
 
-iter' = #[#& -> iterator<int>, bin, int, int] {
+iter' = #[#^ -> iterator<int>, bin, int, int] {
   ~> =[self, data, byte_pos, data_len],
 
   byte_pos = [data, byte_pos, data_len] ~> skip_continuation_bytes',
@@ -125,7 +125,7 @@ collect' = #[iterator<int>, bin] {
       },
       [acc, char_int, byte_count]
       ~> %binary.append
-      ~> &[next, ~]
+      ~> ^[next, ~]
     }
   }
 },
@@ -154,7 +154,7 @@ collect' = #[iterator<int>, bin] {
 
     [target, 0, prefix_len]
     ~> %binary.slice
-    ~> =^prefix,
+    ~> =&prefix,
 
     Ok
   },
@@ -170,7 +170,7 @@ collect' = #[iterator<int>, bin] {
     %math.sub[target_len, suffix_len]
     ~> [target, ~, target_len]
     ~> %binary.slice
-    ~> =^suffix,
+    ~> =&suffix,
 
     Ok
   },

@@ -54,8 +54,8 @@ fn test_exhaustive_union_matching() {
         .evaluate(
             r#"
             f = #(A[int] | B[int]) {
-              | ~> ^A[int] => 10
-              | ~> ^B[int] => 20
+              | ~> =&A[int] => 10
+              | ~> =&B[int] => 20
             },
             A[5] ~> f
             "#,
@@ -71,8 +71,8 @@ fn test_non_exhaustive_union_matching() {
         .evaluate(
             r#"
             f = #(A[int] | B[int] | C[int]) {
-              | ~> ^A[int] => 10
-              | ~> ^B[int] => 20
+              | ~> =&A[int] => 10
+              | ~> =&B[int] => 20
             },
             C[99] ~> f
             "#,
@@ -88,8 +88,8 @@ fn test_value_guard_with_full_coverage() {
         .evaluate(
             r#"
             f = #A[int] {
-              | ~> ^A[10] => 100
-              | ~> ^A[int] => 999
+              | ~> =A[10] => 100
+              | ~> =&A[int] => 999
             },
             A[10] ~> f
             "#,
@@ -103,7 +103,7 @@ fn test_recursive_list_type() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
             xs = Cons[1, Cons[2, Cons[3, Nil]]],
             [xs.1.0, xs.1.1.0] ~> __add__
             "#,
@@ -117,7 +117,7 @@ fn test_cycle_ref_with_pattern_matching() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
             get_head = #list {
               | ~> =Cons[h, _] => h
               | ~> =Nil => 0
@@ -134,7 +134,7 @@ fn test_cycle_ref_nested_depth() {
     quiver()
         .evaluate(
             r#"
-            json : True | False | Array[(Nil | Cons[&0, &1])];
+            json : True | False | Array[(Nil | Cons[^0, ^1])];
             f = #json { ~> =Array[Cons[a, Cons[b, Nil]]] => [a, b] },
             Array[Cons[False, Cons[True, Nil]]] ~> f
             "#,
@@ -146,7 +146,7 @@ fn test_cycle_ref_nested_depth() {
 fn test_cycle_ref_error_no_union() {
     // Should fail: cycle without enclosing union
     let result = std::panic::catch_unwind(|| {
-        quiver().evaluate("bad : Bad[&]").expect("should error");
+        quiver().evaluate("bad : Bad[^]").expect("should error");
     });
     assert!(result.is_err(), "Expected error for cycle without union");
 }
@@ -156,7 +156,7 @@ fn test_cycle_ref_error_no_base_case() {
     // Should fail: union without base case
     let result = std::panic::catch_unwind(|| {
         quiver()
-            .evaluate("bad : A[&] | B[&]")
+            .evaluate("bad : A[^] | B[^]")
             .expect("should error");
     });
     assert!(
@@ -170,7 +170,7 @@ fn test_cycle_ref_error_no_base_case_nested() {
     // Should fail: cycle nested in tuple field, but no base case in union
     let result = std::panic::catch_unwind(|| {
         quiver()
-            .evaluate("bad : A[x: int, next: &] | B[y: int, next: &]")
+            .evaluate("bad : A[x: int, next: ^] | B[y: int, next: ^]")
             .expect("should error");
     });
     assert!(
@@ -184,7 +184,7 @@ fn test_nested_union_pattern_matching_in_block() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
 
             Cons[10, Cons[20, Cons[30, Nil]]] ~> {
               | ~> =Cons[_, Cons[h, _]] => h
@@ -200,7 +200,7 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
 
             // Test extracting second element with nested pattern
             get_second = #list {
@@ -216,7 +216,7 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
 
             get_first_two = #list {
               | ~> =Cons[first, Cons[second, _]] => [first, second]
@@ -231,7 +231,7 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
 
             get_third = #list {
               | ~> =Cons[_, Cons[_, Cons[h, _]]] => h
@@ -251,7 +251,7 @@ fn test_multiple_runtime_type_checks_with_nested_patterns() {
     quiver()
         .evaluate(
             r#"
-            tree : Leaf[int] | Node[&, &];
+            tree : Leaf[int] | Node[^, ^];
 
             // Function with multiple nested patterns requiring runtime checks
             extract_left_leaf = #tree {
@@ -279,7 +279,7 @@ fn test_recursive_type_as_function_parameter() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
             get_head = #list {
               | ~> =Cons[h, _] => h
               | ~> =Nil => 0
@@ -295,7 +295,7 @@ fn test_recursive_tree_type() {
     quiver()
         .evaluate(
             r#"
-            tree : Node[left: &, right: &] | Leaf[int];
+            tree : Node[left: ^, right: ^] | Leaf[int];
             t = Node[
               left: Node[
                 left: Leaf[1],
@@ -324,7 +324,7 @@ fn test_recursive_type_with_cycle() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
             prepend = #list { ~> =x => Cons[10, x] },
             Cons[20, Cons[30, Nil]] ~> prepend ~> .0
             "#,
@@ -342,7 +342,7 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[&];
+            t : Empty | Full[^];
 
             // This function matches on a tuple where the first element is a recursive type
             // The bug would occur when the pattern compiler tried to access field 0 of Empty
@@ -370,7 +370,7 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            tree : Leaf[int] | Node[&, &];
+            tree : Leaf[int] | Node[^, ^];
 
             // Function that matches on first element of tuple
             match_first = #[tree, int] {
@@ -390,7 +390,7 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
+            list : Nil | Cons[int, ^];
 
             // Pattern matching that would trigger the bug
             process_list = #[list, int] {
@@ -414,7 +414,7 @@ fn test_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[&];
+            t : Empty | Full[^];
             f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
@@ -427,7 +427,7 @@ fn test_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[&];
+            t : Empty | Full[^];
             f = #[t, int] {
               | ~> =[Empty, _] => 100
               | ~> =[Full[rest], n] => 200
@@ -443,10 +443,10 @@ fn test_recursive_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[&];
+            t : Empty | Full[^];
             f = #[t, int] {
               | ~> =[Empty, _] => 100
-              | ~> =[Full[rest], n] => &[rest, 0]
+              | ~> =[Full[rest], n] => ^[rest, 0]
             },
             f[Full[Empty], 1]
             "#,
@@ -1008,8 +1008,8 @@ fn test_pin_with_type_alias_primitive() {
     quiver()
         .evaluate(
             r#"
-            int_or_bin : int | bin;
-            42 ~> ^int_or_bin
+            number_or_bytes : int | bin;
+            42 ~> =&number_or_bytes
             "#,
         )
         .expect("42");
@@ -1017,8 +1017,8 @@ fn test_pin_with_type_alias_primitive() {
     quiver()
         .evaluate(
             r#"
-            int_or_bin : int | bin;
-            '0a' ~> ^int_or_bin
+            number_or_bytes : int | bin;
+            '0a' ~> =&number_or_bytes
             "#,
         )
         .expect("'0a'");
@@ -1029,8 +1029,8 @@ fn test_pin_with_type_alias_union() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
-            Nil ~> ^list
+            list : Nil | Cons[int, ^];
+            Nil ~> =&list
             "#,
         )
         .expect("Nil");
@@ -1038,8 +1038,8 @@ fn test_pin_with_type_alias_union() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, &];
-            Cons[1, Cons[2, Nil]] ~> ^list
+            list : Nil | Cons[int, ^];
+            Cons[1, Cons[2, Nil]] ~> =&list
             "#,
         )
         .expect("Cons[1, Cons[2, Nil]]");
@@ -1050,8 +1050,8 @@ fn test_pin_with_type_alias_mismatch() {
     quiver()
         .evaluate(
             r#"
-            int_only : int;
-            '0a' ~> ^int_only
+            number : int;
+            '0a' ~> =&number
             "#,
         )
         .expect("[]");
@@ -1060,7 +1060,7 @@ fn test_pin_with_type_alias_mismatch() {
         .evaluate(
             r#"
             point : Point[x: int, y: int];
-            42 ~> ^point
+            42 ~> =&point
             "#,
         )
         .expect("[]");
@@ -1072,7 +1072,7 @@ fn test_pin_with_type_alias_in_pattern() {
         .evaluate(
             r#"
             shape : Circle[r: int] | Square[s: int];
-            Circle[r: 5] ~> =^shape
+            Circle[r: 5] ~> =&shape
             "#,
         )
         .expect("Circle[r: 5]");
@@ -1084,7 +1084,7 @@ fn test_pin_with_type_alias_nested() {
         .evaluate(
             r#"
             inner : int | bin;
-            Wrapper[value: 42] ~> =Wrapper[value: ^inner]
+            Wrapper[value: 42] ~> =Wrapper[value: &inner]
             "#,
         )
         .expect("Wrapper[value: 42]");
@@ -1095,7 +1095,7 @@ fn test_pin_with_inline_type_primitive() {
     quiver()
         .evaluate(
             r#"
-            42 ~> ^(int | bin)
+            42 ~> =&(int | bin)
             "#,
         )
         .expect("42");
@@ -1103,7 +1103,7 @@ fn test_pin_with_inline_type_primitive() {
     quiver()
         .evaluate(
             r#"
-            '0a' ~> ^(int | bin)
+            '0a' ~> =&(int | bin)
             "#,
         )
         .expect("'0a'");
@@ -1114,7 +1114,7 @@ fn test_pin_with_inline_type_mismatch() {
     quiver()
         .evaluate(
             r#"
-            A ~> ^(int | bin)
+            A ~> =&(int | bin)
             "#,
         )
         .expect("[]");
@@ -1125,7 +1125,7 @@ fn test_pin_with_inline_type_nested() {
     quiver()
         .evaluate(
             r#"
-            A[value: 42] ~> =A[value: ^(int | bin)]
+            A[value: 42] ~> =A[value: &(int | bin)]
             "#,
         )
         .expect("A[value: 42]");
@@ -1136,23 +1136,22 @@ fn test_pin_with_inline_type_complex() {
     quiver()
         .evaluate(
             r#"
-            Rectangle[w: 5, h: 10] ~> ^(Rectangle[w: int, h: int] | Circle[r: int])
+            Rectangle[w: 5, h: 10] ~> =&(Rectangle[w: int, h: int] | Circle[r: int])
             "#,
         )
         .expect("Rectangle[w: 5, h: 10]");
 }
 
 #[test]
-fn test_inline_type_in_bind_mode_error() {
+fn test_inline_type_without_ampersand() {
+    // Type expressions work with just = (no & needed for inline types)
     quiver()
         .evaluate(
             r#"
             42 ~> =(int | bin)
             "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::FeatureUnsupported(
-            "Type expressions can only be used in pin mode (^), not bind mode (=)".to_string(),
-        ));
+        .expect("42");
 }
 
 #[test]
@@ -1160,8 +1159,8 @@ fn test_generic_type_explicit_instantiation() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
-            Cons[42, Nil] ~> ^(list<int>)
+            list<t> : Nil | Cons[t, ^];
+            Cons[42, Nil] ~> =&list<int>
             "#,
         )
         .expect("Cons[42, Nil]");
@@ -1172,8 +1171,8 @@ fn test_generic_type_explicit_instantiation_mismatch() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
-            Cons['aa', Nil] ~> ^(list<int>)
+            list<t> : Nil | Cons[t, ^];
+            Cons['aa', Nil] ~> =&list<int>
             "#,
         )
         .expect("[]");
@@ -1184,8 +1183,8 @@ fn test_generic_type_explicit_instantiation_in_pattern() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
-            Cons[42, Cons[99, Nil]] ~> =Cons[x, ^(list<int>)]
+            list<t> : Nil | Cons[t, ^];
+            Cons[42, Cons[99, Nil]] ~> =Cons[x, &list<int>]
             "#,
         )
         .expect("Cons[42, Cons[99, Nil]]");
@@ -1196,12 +1195,12 @@ fn test_generic_type_without_instantiation_error() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
-            Cons[42, Nil] ~> ^list
+            list<t> : Nil | Cons[t, ^];
+            Cons[42, Nil] ~> =&list
             "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::FeatureUnsupported(
-            "Parameterized type alias 'list' requires explicit type arguments. Use ^(list<...>) with type arguments specified".to_string(),
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Generic type 'list' expects 1 type argument(s), got 0".to_string(),
         ));
 }
 
@@ -1210,8 +1209,8 @@ fn test_generic_type_short_syntax() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
-            Cons[42, Nil] ~> ^list<int>
+            list<t> : Nil | Cons[t, ^];
+            Cons[42, Nil] ~> =&list<int>
             "#,
         )
         .expect("Cons[42, Nil]");
@@ -1222,8 +1221,8 @@ fn test_generic_type_short_syntax_mismatch() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, &];
-            Cons['aa', Nil] ~> ^list<int>
+            list<t> : Nil | Cons[t, ^];
+            Cons['aa', Nil] ~> =&list<int>
             "#,
         )
         .expect("[]");
@@ -1231,39 +1230,39 @@ fn test_generic_type_short_syntax_mismatch() {
 
 #[test]
 fn test_named_partial_type_without_parens() {
-    // Named partial type without extra parentheses: ^A(x: int)
+    // Named partial type without extra parentheses: =&A(x: int)
     quiver()
-        .evaluate("A[x: 1, y: 2] ~> ^A(x: int)")
+        .evaluate("A[x: 1, y: 2] ~> =&A(x: int)")
         .expect("A[x: 1, y: 2]");
 
     // Type mismatch should fail
     quiver()
-        .evaluate("A[x: 'ff', y: 2] ~> ^A(x: int)")
+        .evaluate("A[x: 'ff', y: 2] ~> =&A(x: int)")
         .expect("[]");
 
     // Missing field should fail
     quiver()
-        .evaluate("A[y: 2, z: 3] ~> ^A(x: int)")
+        .evaluate("A[y: 2, z: 3] ~> =&A(x: int)")
         .expect("[]");
 }
 
 #[test]
 fn test_unnamed_partial_type_without_parens() {
-    // Unnamed partial type without extra parentheses: ^(x: int)
-    quiver().evaluate("A[x: 1] ~> ^(x: int)").expect("A[x: 1]");
+    // Unnamed partial type without extra parentheses: =&(x: int)
+    quiver().evaluate("A[x: 1] ~> =&(x: int)").expect("A[x: 1]");
 
     quiver()
-        .evaluate("[x: 1, y: 2] ~> ^(x: int)")
+        .evaluate("[x: 1, y: 2] ~> =&(x: int)")
         .expect("[x: 1, y: 2]");
 
     // Type mismatch should fail
-    quiver().evaluate("A[x: 'ff'] ~> ^(x: int)").expect("[]");
+    quiver().evaluate("A[x: 'ff'] ~> =&(x: int)").expect("[]");
 }
 
 #[test]
 fn test_empty_partial_type_without_parens() {
-    // Empty partial type matches any tuple: ^()
-    quiver().evaluate("A[1] ~> ^()").expect("A[1]");
-    quiver().evaluate("[1, 2, 3] ~> ^()").expect("[1, 2, 3]");
-    quiver().evaluate("42 ~> ^()").expect("[]");
+    // Empty partial type matches any tuple: =&()
+    quiver().evaluate("A[1] ~> =&()").expect("A[1]");
+    quiver().evaluate("[1, 2, 3] ~> =&()").expect("[1, 2, 3]");
+    quiver().evaluate("42 ~> =&()").expect("[]");
 }

@@ -168,7 +168,7 @@ fn test_import_generic() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
-        "list<t> : Nil | Cons[t, &];".to_string(),
+        "list<t> : Nil | Cons[t, ^];".to_string(),
     );
     quiver()
         .with_modules(modules)

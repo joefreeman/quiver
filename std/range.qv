@@ -1,7 +1,7 @@
 range : Range[int, int | None, int];
 (iterator) : %iter;
 
-iter' = #[#& -> iterator<int>, range] {
+iter' = #[#^ -> iterator<int>, range] {
   ~> =[self, Range[value, stop, step]],
   #{
     {

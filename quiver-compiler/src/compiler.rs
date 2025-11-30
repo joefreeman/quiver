@@ -1056,7 +1056,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: usize,
         value_provenance: Provenance,
         on_no_match: Option<usize>,
-        mode: pattern::PatternMode,
         return_ok: bool,
         mut narrowing: Option<&mut Narrowing>,
     ) -> Result<usize, Error> {
@@ -1070,7 +1069,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &mut self.program,
             &pattern,
             value_type,
-            mode,
             &self.scopes,
             &value_provenance,
         )?;
@@ -1079,9 +1077,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Patterns with non-type requirements cannot use complement narrowing.
         // Exception: tuple patterns with a single type-constraining field CAN use
         // field-specific complement narrowing, so don't disable in that case.
-        let has_tuple_complement = mode == pattern::PatternMode::Bind
-            && analyze_tuple_pattern_for_complement(&pattern, value_type, &mut self.program)
-                .is_some();
+        let has_tuple_complement =
+            analyze_tuple_pattern_for_complement(&pattern, value_type, &mut self.program).is_some();
 
         if pattern::has_non_type_requirements(&binding_sets)
             && !has_tuple_complement
@@ -1161,11 +1158,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if !self.is_never(result_type)
             && let Some(n) = narrowing
         {
-            // For bind patterns with tuple structure, check if we should record
-            // field-specific narrowing instead of whole-value narrowing.
+            // For tuple patterns, check if we should record field-specific narrowing
+            // instead of whole-value narrowing.
             // This enables patterns like `=[Nil, ys]` to narrow the first field
             // so subsequent branches know the first field is NOT Nil.
-            let field_complement_info = if mode == pattern::PatternMode::Bind {
+            let field_complement_info =
                 analyze_tuple_pattern_for_complement(&pattern, value_type, &mut self.program)
                     .and_then(|(field_idx, constrained_type)| {
                         // Use narrowed field type if available (from complement of previous branch),
@@ -1176,10 +1173,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             get_field_narrowing(&self.scopes, &value_provenance, field_idx)
                                 .or_else(|| get_field_type(value_type, field_idx, &self.program))?;
                         Some((field_idx, original, constrained_type))
-                    })
-            } else {
-                None
-            };
+                    });
 
             if let Some((field_idx, original_field_type, constrained_type)) = field_complement_info
             {
@@ -1728,14 +1722,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let is_last_term = i == num_terms - 1;
             // Check if the NEXT term needs the full type including nil:
             // - Blocks need it for proper pattern matching in branches
-            // - BindMatch/PinMatch need it for proper type checking
+            // - Match needs it for proper type checking
             let next_needs_full_type = !is_last_term
                 && matches!(
                     terms.get(i + 1),
                     Some(ast::Term::Block(_))
                         | Some(ast::Term::Select(_))
-                        | Some(ast::Term::BindMatch(_))
-                        | Some(ast::Term::PinMatch(_))
+                        | Some(ast::Term::Match(_))
                 );
 
             let (term_type, term_prov) = self.compile_term(
@@ -1776,7 +1769,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 result_type,
                 current_prov.clone(),
                 on_no_match,
-                pattern::PatternMode::Bind,
                 true, // Direct assignment returns Ok
                 narrowing,
             )?;
@@ -2850,34 +2842,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let ty = self.compile_not(val_type)?;
                 Ok((ty, Provenance::Unknown))
             }
-            ast::Term::BindMatch(pattern) => {
-                // Bind matches create new bindings
+            ast::Term::Match(pattern) => {
+                // Match patterns can create new bindings or check against existing values/types
                 let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Bind match requires a value".to_string())
+                    Error::FeatureUnsupported("Match requires a value".to_string())
                 })?;
                 let ty = self.compile_match(
                     pattern,
                     val_type,
                     value_provenance.clone(),
                     on_no_match,
-                    pattern::PatternMode::Bind,
-                    false,
-                    narrowing,
-                )?;
-                // Match result preserves provenance of matched value
-                Ok((ty, value_provenance))
-            }
-            ast::Term::PinMatch(pattern) => {
-                // Pin matches check against existing variables
-                let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Pin match requires a value".to_string())
-                })?;
-                let ty = self.compile_match(
-                    pattern,
-                    val_type,
-                    value_provenance.clone(),
-                    on_no_match,
-                    pattern::PatternMode::Pin,
                     false,
                     narrowing,
                 )?;

@@ -7,7 +7,9 @@ use quiver_core::{
     types::{Type, TypeLookup},
 };
 
-use super::{Error, codegen::InstructionBuilder, narrowing::intersect_types};
+use super::{
+    Error, codegen::InstructionBuilder, narrowing::intersect_types, typing::union_type_ids,
+};
 
 // Type aliases for complex pattern matching types (using type IDs)
 type PatternAnalysisResult = (Vec<(String, usize)>, Vec<BindingSet>, usize);
@@ -41,15 +43,6 @@ impl<'a> IdentifierScope<'a> {
     }
 }
 
-/// Represents the mode of pattern matching
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PatternMode {
-    /// Bind mode - identifiers create new bindings (default)
-    Bind,
-    /// Pin mode - identifiers are checked against existing variables
-    Pin,
-}
-
 /// Represents a check that must be performed at runtime
 #[derive(Debug, Clone)]
 enum RuntimeCheck {
@@ -74,7 +67,6 @@ type AccessPath = Vec<usize>;
 #[derive(Debug, Clone)]
 struct Identifier {
     first_path: AccessPath,
-    is_pin_mode: bool,
     is_repeated: bool,
 }
 
@@ -126,7 +118,6 @@ pub fn analyze_pattern(
     program: &mut Program,
     pattern: &ast::Match,
     value_type_id: usize,
-    mode: PatternMode,
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<PatternAnalysisResult, Error> {
@@ -136,7 +127,6 @@ pub fn analyze_pattern(
         pattern,
         value_type_id,
         vec![],
-        mode,
         &mut identifiers,
         scopes,
         value_provenance,
@@ -145,18 +135,6 @@ pub fn analyze_pattern(
     if binding_sets.is_empty() {
         // Won't match - return never type (empty union)
         return Ok((Vec::new(), Vec::new(), program.never()));
-    }
-
-    // Validate: check for single-occurrence pins with no variable in scope
-    for (name, info) in &identifiers {
-        if info.is_pin_mode
-            && !info.is_repeated
-            && super::scopes::lookup_variable(scopes, name, &[]).is_none()
-        {
-            return Err(Error::InternalError {
-                message: format!("Pin variable '{}' not found in scope", name),
-            });
-        }
     }
 
     // Check if all binding sets have requirements (might match) or some have none (will match)
@@ -305,21 +283,14 @@ fn analyze_match_pattern(
     pattern: &ast::Match,
     value_type_id: usize,
     path: AccessPath,
-    mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     match pattern {
-        ast::Match::Identifier(name) => analyze_identifier_pattern(
-            program,
-            name.clone(),
-            value_type_id,
-            path,
-            mode,
-            identifiers,
-            scopes,
-        ),
+        ast::Match::Identifier(name) => {
+            analyze_identifier_pattern(name.clone(), value_type_id, path, identifiers)
+        }
         ast::Match::Literal(literal) => {
             analyze_literal_pattern(literal.clone(), path, value_type_id, program)
         }
@@ -328,7 +299,6 @@ fn analyze_match_pattern(
             tuple,
             value_type_id,
             path,
-            mode,
             identifiers,
             scopes,
             value_provenance,
@@ -338,13 +308,11 @@ fn analyze_match_pattern(
             partial,
             value_type_id,
             path,
-            mode,
             identifiers,
             scopes,
+            value_provenance,
         ),
-        ast::Match::Star => {
-            analyze_star_pattern(program, value_type_id, path, mode, identifiers, scopes)
-        }
+        ast::Match::Star => analyze_star_pattern(program, value_type_id, path, identifiers),
         ast::Match::Placeholder => Ok((
             vec![BindingSet {
                 requirements: vec![],
@@ -352,36 +320,66 @@ fn analyze_match_pattern(
             }],
             value_type_id,
         )),
-        ast::Match::Pin(inner) => analyze_match_pattern(
-            program,
-            inner,
-            value_type_id,
-            path,
-            PatternMode::Pin,
-            identifiers,
-            scopes,
-            value_provenance,
-        ),
-        ast::Match::Bind(inner) => analyze_match_pattern(
-            program,
-            inner,
-            value_type_id,
-            path,
-            PatternMode::Bind,
-            identifiers,
-            scopes,
-            value_provenance,
-        ),
-        ast::Match::Type(ast_type) => {
-            // Type expressions should only appear in pin mode
-            // This can happen if someone writes =(type-expression)
-            if mode == PatternMode::Bind {
-                return Err(Error::FeatureUnsupported(
-                    "Type expressions can only be used in pin mode (^), not bind mode (=)"
-                        .to_string(),
-                ));
+        ast::Match::Reference(ast_type) => {
+            // Reference pattern: &<type-expression>
+            // Checks against the type (or variable if it's an identifier)
+
+            // Special case: if it's a bare identifier, check if it's a variable first
+            if let ast::Type::Identifier { name, arguments } = &ast_type
+                && arguments.is_empty()
+            {
+                // Try to find variable in scopes (with no accessors)
+                if let Some((var_type_id, _var_index)) =
+                    super::scopes::lookup_variable(scopes, name, &[])
+                {
+                    // It's a variable reference - check against the variable's value at runtime
+                    let requirements = vec![Requirement {
+                        path,
+                        check: RuntimeCheck::Variable(name.clone()),
+                    }];
+
+                    // Narrow the type by filtering compatible variants with the variable's type
+                    let narrowed_type_id = intersect_types(value_type_id, var_type_id, program);
+
+                    return Ok((
+                        vec![BindingSet {
+                            requirements,
+                            bindings: vec![],
+                        }],
+                        narrowed_type_id,
+                    ));
+                }
             }
 
+            // It's a type reference - resolve the ast::Type to a type ID
+            let resolved_type_id =
+                super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
+
+            // Narrow the type by filtering compatible variants
+            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
+
+            // Only add runtime check if value_type is not already exactly the resolved type
+            let requirements = if is_compatible(value_type_id, resolved_type_id, program)
+                && narrowed_type_id == value_type_id
+            {
+                vec![] // No runtime check needed - value_type is already compatible
+            } else {
+                vec![Requirement {
+                    path,
+                    check: RuntimeCheck::TypeId(resolved_type_id),
+                }]
+            };
+
+            Ok((
+                vec![BindingSet {
+                    requirements,
+                    bindings: vec![],
+                }],
+                narrowed_type_id,
+            ))
+        }
+        ast::Match::Type(ast_type) => {
+            // Inline type expression without & prefix
             // Resolve the ast::Type to a type ID
             let resolved_type_id =
                 super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
@@ -418,7 +416,6 @@ fn analyze_match_tuple_pattern(
     tuple: &ast::MatchTuple,
     value_type_id: usize,
     path: AccessPath,
-    mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
@@ -508,7 +505,6 @@ fn analyze_match_tuple_pattern(
                 &field.pattern,
                 field_type_id,
                 field_path,
-                mode,
                 variant_identifiers,
                 scopes,
                 &field_provenance,
@@ -643,99 +639,12 @@ fn analyze_literal_pattern(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn analyze_identifier_pattern(
-    program: &mut Program,
     name: String,
     value_type_id: usize,
     path: AccessPath,
-    mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
-    scopes: &[super::scopes::Scope],
 ) -> Result<(Vec<BindingSet>, usize), Error> {
-    // In pin mode, check for type names FIRST (before recording as identifier)
-    if mode == PatternMode::Pin {
-        // Check if this is a primitive type name
-        if name == "int" {
-            let int_type_id = program.register_type(Type::Integer);
-            // Type narrowing for integer type - don't record as identifier
-            let narrowed_type_id = intersect_types(value_type_id, int_type_id, program);
-            // Only add runtime check if value_type is not already exactly int
-            let requirements = if value_type_id == int_type_id {
-                vec![] // No runtime check needed - already known to be int
-            } else {
-                vec![Requirement {
-                    path,
-                    check: RuntimeCheck::TypeId(int_type_id),
-                }]
-            };
-            return Ok((
-                vec![BindingSet {
-                    requirements,
-                    bindings: vec![],
-                }],
-                narrowed_type_id,
-            ));
-        }
-
-        if name == "bin" {
-            let bin_type_id = program.register_type(Type::Binary);
-            // Type narrowing for binary type - don't record as identifier
-            let narrowed_type_id = intersect_types(value_type_id, bin_type_id, program);
-            // Only add runtime check if value_type is not already exactly bin
-            let requirements = if value_type_id == bin_type_id {
-                vec![] // No runtime check needed - already known to be bin
-            } else {
-                vec![Requirement {
-                    path,
-                    check: RuntimeCheck::TypeId(bin_type_id),
-                }]
-            };
-            return Ok((
-                vec![BindingSet {
-                    requirements,
-                    bindings: vec![],
-                }],
-                narrowed_type_id,
-            ));
-        }
-
-        // Check for type alias
-        if let Some((type_params, ast_type)) = super::scopes::lookup_type_alias(scopes, &name) {
-            if !type_params.is_empty() {
-                return Err(Error::FeatureUnsupported(format!(
-                    "Parameterized type alias '{}' requires explicit type arguments. Use ^({}<...>) with type arguments specified",
-                    name, name
-                )));
-            }
-
-            // Resolve the ast::Type to a type ID
-            let resolved_type_id =
-                super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
-
-            // Type narrowing for type alias - don't record as identifier
-            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
-            // Only add runtime check if value_type is not already exactly the resolved type
-            let requirements = if is_compatible(value_type_id, resolved_type_id, program)
-                && narrowed_type_id == value_type_id
-            {
-                vec![] // No runtime check needed - value_type is already compatible
-            } else {
-                vec![Requirement {
-                    path,
-                    check: RuntimeCheck::TypeId(resolved_type_id),
-                }]
-            };
-            return Ok((
-                vec![BindingSet {
-                    requirements,
-                    bindings: vec![],
-                }],
-                narrowed_type_id,
-            ));
-        }
-    }
-
     // Check if we've seen this identifier before
     if let Some(info) = identifiers.get_mut(&name) {
         // Second or later occurrence - mark as repeated and create Path requirement
@@ -752,57 +661,32 @@ fn analyze_identifier_pattern(
             value_type_id,
         ))
     } else {
-        // First occurrence - record it
+        // First occurrence - record it and create binding
         identifiers.insert(
             name.clone(),
             Identifier {
                 first_path: path.clone(),
-                is_pin_mode: mode == PatternMode::Pin,
                 is_repeated: false,
             },
         );
 
-        match mode {
-            PatternMode::Bind => {
-                // Binding gets the full value type, including nil if present.
-                // The binding executes regardless of whether the value is nil.
-                let var_type_id = value_type_id;
-                let narrowed_type_id = var_type_id;
+        // Binding gets the full value type, including nil if present.
+        // The binding executes regardless of whether the value is nil.
+        let var_type_id = value_type_id;
+        let narrowed_type_id = var_type_id;
 
-                // No runtime requirements for identifier bindings - they match any value
-                Ok((
-                    vec![BindingSet {
-                        requirements: vec![],
-                        bindings: vec![Binding {
-                            name,
-                            path,
-                            var_type_id,
-                        }],
-                    }],
-                    narrowed_type_id,
-                ))
-            }
-            PatternMode::Pin => {
-                // Not a type - treat as variable pin
-                // In pin mode, only create Variable requirement if variable exists in scope
-                // If it doesn't exist and this is the only occurrence, we'll error later
-                // No type narrowing for variable pins (runtime value check)
-                let mut requirements = vec![];
-                if super::scopes::lookup_variable(scopes, &name, &[]).is_some() {
-                    requirements.push(Requirement {
-                        path,
-                        check: RuntimeCheck::Variable(name),
-                    });
-                }
-                Ok((
-                    vec![BindingSet {
-                        requirements,
-                        bindings: vec![],
-                    }],
-                    value_type_id,
-                ))
-            }
-        }
+        // No runtime requirements for identifier bindings - they match any value
+        Ok((
+            vec![BindingSet {
+                requirements: vec![],
+                bindings: vec![Binding {
+                    name,
+                    path,
+                    var_type_id,
+                }],
+            }],
+            narrowed_type_id,
+        ))
     }
 }
 
@@ -811,16 +695,23 @@ fn analyze_partial_pattern(
     partial_pattern: &ast::PartialPattern,
     value_type_id: usize,
     path: AccessPath,
-    mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     let mut binding_sets = vec![];
+
+    // Extract field names from the partial pattern fields
+    let field_names: Vec<String> = partial_pattern
+        .fields
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
 
     // Find types that have all required fields (and optionally matching type name)
     let matching_types = find_types_with_fields_and_name(
         program,
-        &partial_pattern.fields,
+        &field_names,
         partial_pattern.name.as_ref(),
         value_type_id,
     )?;
@@ -878,53 +769,59 @@ fn analyze_partial_pattern(
         };
 
         let mut bindings = Vec::new();
-        for (i, field_name) in partial_pattern.fields.iter().enumerate() {
+        for (i, (field_name, nested_pattern)) in partial_pattern.fields.iter().enumerate() {
             let idx = field_indices[i];
             let field_type_id = fields[idx].1;
             let mut field_path = path.clone();
             field_path.push(idx);
 
-            // Check if we've seen this identifier before
-            if let Some(info) = variant_identifiers.get_mut(field_name) {
-                // Repeated identifier - mark as repeated and add Path requirement
-                info.is_repeated = true;
-                requirements.push(Requirement {
-                    path: info.first_path.clone(),
-                    check: RuntimeCheck::Path(field_path),
-                });
-            } else {
-                // First occurrence - record it
-                variant_identifiers.insert(
-                    field_name.clone(),
-                    Identifier {
-                        first_path: field_path.clone(),
-                        is_pin_mode: mode == PatternMode::Pin,
-                        is_repeated: false,
-                    },
-                );
+            // If the field has a nested pattern, analyze it recursively
+            if let Some(nested_pattern) = nested_pattern {
+                let field_provenance = value_provenance.field(idx);
+                let (nested_binding_sets, _) = analyze_match_pattern(
+                    program,
+                    nested_pattern,
+                    field_type_id,
+                    field_path,
+                    variant_identifiers,
+                    scopes,
+                    &field_provenance,
+                )?;
 
-                match mode {
-                    PatternMode::Bind => {
-                        // Create a binding for this identifier
-                        // Strip [] from binding type because if the binding executes, the value is not []
-                        let var_type_id = without_nil(field_type_id, program);
-                        bindings.push(Binding {
-                            name: field_name.clone(),
-                            path: field_path,
-                            var_type_id,
-                        });
-                    }
-                    PatternMode::Pin => {
-                        // In pin mode, check against existing variable if it exists
-                        if super::scopes::lookup_variable(scopes, field_name, &[]).is_some() {
-                            requirements.push(Requirement {
-                                path: field_path,
-                                check: RuntimeCheck::Variable(field_name.clone()),
-                            });
-                        }
-                        // If variable doesn't exist and this is the only occurrence,
-                        // validation will error later in analyze_pattern
-                    }
+                // Merge nested binding sets into current requirements and bindings
+                for nested_set in nested_binding_sets {
+                    requirements.extend(nested_set.requirements);
+                    bindings.extend(nested_set.bindings);
+                }
+            } else {
+                // No nested pattern - use field name for binding/checking
+
+                // Check if we've seen this identifier before
+                if let Some(info) = variant_identifiers.get_mut(field_name) {
+                    // Repeated identifier - mark as repeated and add Path requirement
+                    info.is_repeated = true;
+                    requirements.push(Requirement {
+                        path: info.first_path.clone(),
+                        check: RuntimeCheck::Path(field_path),
+                    });
+                } else {
+                    // First occurrence - record it
+                    variant_identifiers.insert(
+                        field_name.clone(),
+                        Identifier {
+                            first_path: field_path.clone(),
+                            is_repeated: false,
+                        },
+                    );
+
+                    // Create a binding for this identifier
+                    // Strip [] from binding type because if the binding executes, the value is not []
+                    let var_type_id = without_nil(field_type_id, program);
+                    bindings.push(Binding {
+                        name: field_name.clone(),
+                        path: field_path,
+                        var_type_id,
+                    });
                 }
             }
         }
@@ -962,9 +859,7 @@ fn analyze_star_pattern(
     program: &mut Program,
     value_type_id: usize,
     path: AccessPath,
-    mode: PatternMode,
     identifiers: &mut HashMap<String, Identifier>,
-    scopes: &[super::scopes::Scope],
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     // Collect all field sources (tuples and partials)
     let field_sources = extract_field_sources(program, value_type_id);
@@ -1034,34 +929,18 @@ fn analyze_star_pattern(
                         field_name.clone(),
                         Identifier {
                             first_path: field_path.clone(),
-                            is_pin_mode: mode == PatternMode::Pin,
                             is_repeated: false,
                         },
                     );
 
-                    match mode {
-                        PatternMode::Bind => {
-                            // Create a binding for this identifier
-                            // Strip [] from binding type because if the binding executes, the value is not []
-                            let var_type_id = without_nil(*field_type_id, program);
-                            bindings.push(Binding {
-                                name: field_name.clone(),
-                                path: field_path,
-                                var_type_id,
-                            });
-                        }
-                        PatternMode::Pin => {
-                            // In pin mode, check against existing variable if it exists
-                            if super::scopes::lookup_variable(scopes, field_name, &[]).is_some() {
-                                requirements.push(Requirement {
-                                    path: field_path,
-                                    check: RuntimeCheck::Variable(field_name.clone()),
-                                });
-                            }
-                            // If variable doesn't exist and this is the only occurrence,
-                            // validation will error later in analyze_pattern
-                        }
-                    }
+                    // Create a binding for this identifier
+                    // Strip [] from binding type because if the binding executes, the value is not []
+                    let var_type_id = without_nil(*field_type_id, program);
+                    bindings.push(Binding {
+                        name: field_name.clone(),
+                        path: field_path,
+                        var_type_id,
+                    });
                 }
             }
         }
@@ -1216,19 +1095,6 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
             })
             .collect(),
         _ => vec![],
-    }
-}
-
-/// Create a union type from a list of type IDs, simplifying single-element lists
-fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
-    // Deduplicate type IDs
-    let mut seen = std::collections::HashSet::new();
-    let unique: Vec<usize> = type_ids.into_iter().filter(|id| seen.insert(*id)).collect();
-
-    match unique.len() {
-        0 => program.never(),
-        1 => unique[0],
-        _ => program.register_type(Type::Union(unique)),
     }
 }
 

@@ -104,8 +104,8 @@ shape :
 Use `&` to refer back to the root of the types, or `&1`/`&2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
 
 ```
-list<t> : Nil | Cons[t, &];
-tree<t> : Leaf[t] | Node[&, &];
+list<t> : Nil | Cons[t, ^];
+tree<t> : Leaf[t] | Node[^, ^];
 json :
   | Null
   | bool
@@ -243,25 +243,25 @@ Point[x: 0, y] = Point[1, 10]    // Fails (evaluates to [])
 role ~> ="admin"                 // String matching
 ```
 
-### Pinning
+### References
 
-Use `^` to check against existing variables or types, instead of binding:
+Use `&` to check against existing variables or types, instead of binding:
 
 ```
 y = 2
-2 ~> ^y                          // 2 (matches)
-3 ~> ^y                          // [] (doesn't match)
+2 ~> =&y                          // 2 (matches)
+3 ~> =&y                          // [] (doesn't match)
 
-Point[x, ^y] = Point[1, 2]       // Binds x, checks y is 2
-Point[1, 2] ~> ^Point[=x, y]     // x bound, y pinned
-A[x, ^B[y, =C[z]]]               // Mixed; x and z bound; y pinned
+Point[x, &y] = Point[1, 2]       // Binds x, checks y is 2
+Point[1, 2] ~> =Point[x, &y]     // x bound, y pinned
+A[x, B[&y, C[z]]]                // Mixed; x and z bound; y pinned
 
-42 ~> ^int                       // 42
-A[2] ~> ^A[y]                    // A[2]
-P[x: 1, y: 2] ~> ^P(x: int)      // P[x: 1, y: 2]
+42 ~> =&int                       // 42
+A[2] ~> =A[&y]                   // A[2]
+P[x: 1, y: 2] ~> =(x: &int)      // P[x: 1, y: 2]
 ```
 
-Patterns default to bind mode. Use `^` to switch to pin mode, or `=` within `^` to switch back to bind mode.
+Identifiers in patterns bind by default. Use `&` to reference an existing variable or type instead of binding.
 
 ## Blocks
 
@@ -403,7 +403,7 @@ f = #[int, int] {
   | ~> =[x, y] => [
     =[x, 1] ~> math.sub,
     =[x, y] ~> math.mul
-  ] ~> &
+  ] ~> ^
 }
 ```
 
@@ -417,7 +417,7 @@ Tail calls also support the shorthand argument syntax:
 
 ```
 g = #[int, int] { ~> math.mul },
-f = #int { ~> math.add[~, 1] ~> &g[~, 2] },
+f = #int { ~> math.add[~, 1] ~> ^g[~, 2] },
 10 ~> f   // 22
 ```
 
@@ -596,7 +596,7 @@ add_points[p1, p2]   // Point[x: 10, y: 7]
 ### Pattern matching
 
 ```
-list<t> : Nil | Cons[t, &];
+list<t> : Nil | Cons[t, ^];
 
 // Determine whether a list contains an item
 contains? = #<t>[list<t>, t] {
@@ -689,7 +689,7 @@ pid = @{
     | ~> ="" => []           // Stop on empty string
     | ~> =s => {
       s ~> __println__,      // (not implemented!)
-      [] ~> &                // Receive another message
+      [] ~> ^                // Receive another message
     }
   }
 },
