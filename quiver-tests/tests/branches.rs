@@ -29,20 +29,21 @@ fn test_branch_with_failing_consequence() {
 #[test]
 fn test_branch_pattern_matching() {
     quiver()
-        .evaluate("B[42] ~> { ~> =A[a] => 1 | ~> =B[b] => 2 }")
+        .evaluate("B[42] ~> { =A[a] => 1 | =B[b] => 2 }")
         .expect("2");
 }
 
 #[test]
 fn test_use_continuation_in_consequence() {
+    // Consequence receives the condition value via implicit continuation
     quiver()
-        .evaluate("42 ~> { ~> =10 => 100 | ~> =42 => ~> [~, ~] }")
+        .evaluate("42 ~> { =10 => 100 | =42 => [~, ~] }")
         .expect("[42, 42]");
 }
 
 #[test]
 fn test_string_match() {
     quiver()
-        .evaluate("\"bar\" ~> { ~> =\"foo\" => 1 | ~> =\"bar\" => 2 }")
+        .evaluate("\"bar\" ~> { =\"foo\" => 1 | =\"bar\" => 2 }")
         .expect("2");
 }

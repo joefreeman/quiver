@@ -45,11 +45,6 @@ fn chain_starts_with_ripple(chain: &ast::Chain) -> bool {
     }
 }
 
-/// Check if any source in a select operation uses the outer piped value via ripple
-pub fn select_contains_ripple(sources: &[ast::Chain]) -> bool {
-    sources.iter().any(chain_starts_with_ripple)
-}
-
 /// Check if a block contains ripple operations that would consume an outer piped value
 pub fn block_contains_ripple(block: &ast::Block) -> bool {
     block.branches.iter().any(|branch| {

@@ -86,7 +86,7 @@ fn test_import_tuple_with_captured_function() {
 
     quiver()
         .with_modules(modules)
-        .evaluate("t = %tuple_capture, f = t.1, f[]")
+        .evaluate("t = %tuple_capture, f = &t.1, f[]")
         .expect("8");
 }
 
@@ -116,12 +116,12 @@ fn test_multi_level_import_with_captures() {
 
     quiver()
         .with_modules(modules.clone())
-        .evaluate("funcs = %level3, f1 = funcs.0, f1[]")
+        .evaluate("funcs = %level3, f1 = &funcs.0, f1[]")
         .expect("303"); // (100 + 1) * 3 = 303
 
     quiver()
         .with_modules(modules)
-        .evaluate("funcs = %level3, f2 = funcs.1, f2[]")
+        .evaluate("funcs = %level3, f2 = &funcs.1, f2[]")
         .expect("308"); // ((100 + 1) * 3) + 5 = 308
 }
 
@@ -137,7 +137,7 @@ fn test_partial_type_import() {
         .evaluate(
             r#"
             (ok, err) : %types;
-            double = #ok { ~> =Ok[x] => [x, 2] ~> __multiply__ },
+            double = #ok { =Ok[x] => [x, 2] ~> __multiply__ },
             Ok[21] ~> double
             "#,
         )
@@ -156,7 +156,7 @@ fn test_star_type_import() {
         .evaluate(
             r#"
             * : %types;
-            unwrap = #result { ~> =Ok[x] => x | ~> =Err[x] => 0 },
+            unwrap = #result { =Ok[x] => x | =Err[x] => 0 },
             Ok[42] ~> unwrap
             "#,
         )

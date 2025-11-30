@@ -4,41 +4,35 @@
   mul: __multiply__,
 
   div: #[int, int] {
-    | ~> =[a, 0] => []
-    | ~> __divide__
+    | =[a, 0] => []
+    | __divide__
   },
 
   mod: #[int, int] {
-    | ~> =[a, 0] => []
-    | ~> __modulo__
+    | =[a, 0] => []
+    | __modulo__
   },
 
   lt: #[int, int] {
-    ~> __compare__ ~> =-1
+    __compare__ ~> =-1
   },
 
   le: #[int, int] {
-    ~> __compare__ ~> {
-      | ~> =-1
-      | ~> =0
-    }
+    __compare__ ~> { =-1 | =0 }
   },
 
   gt: #[int, int] {
-    ~> __compare__ ~> { ~> =1 }
+    __compare__ ~> { =1 }
   },
 
   ge: #[int, int] {
-    ~> __compare__ ~> {
-      | ~> =0
-      | ~> =1
-    }
+    __compare__ ~> { =0 | =1 }
   },
 
   abs: __abs__,
 
   sqrt: #int {
-    | ~> [~, 0] ~> __compare__ ~> =-1 => []
-    | ~> __sqrt__
+    | __compare__[~, 0] ~> =-1 => []
+    | __sqrt__
   }
 ]

@@ -3,16 +3,15 @@ list<t> : Nil | Cons[t, ^];
 
 // Compute the sum of a list using tail recursion
 sum' = #[list<int>, int] {
-  | ~> =[Nil, acc] => acc
-  | ~> =[Cons[head, tail], acc] => {
+  | =[Nil, acc] => acc
+  | =[Cons[head, tail], acc] => {
     %math.add[head, acc] ~> ^[tail, ~]
   }
 },
 
-sum = #list<int> { ~> [~, 0] ~> sum' },
+sum = #list<int> { sum'[~, 0] },
 
 #{
   // Build and sum a list
-  xs = Cons[1, Cons[2, Cons[3, Nil]]],
-  xs ~> sum
+  Cons[1, Cons[2, Cons[3, Nil]]] ~> sum
 }

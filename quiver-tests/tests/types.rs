@@ -31,8 +31,8 @@ fn test_function_with_type_pattern() {
               | Rectangle[w: int, h: int];
 
             area = #shape {
-              | ~> =Circle[r: r] => [r, r] ~> __multiply__
-              | ~> =Rectangle[w: w, h: h] => [w, h] ~> __multiply__
+              | =Circle[r: r] => [r, r] ~> __multiply__
+              | =Rectangle[w: w, h: h] => [w, h] ~> __multiply__
             },
 
             a1 = Circle[r: 5] ~> area,
@@ -54,8 +54,8 @@ fn test_exhaustive_union_matching() {
         .evaluate(
             r#"
             f = #(A[int] | B[int]) {
-              | ~> =&A[int] => 10
-              | ~> =&B[int] => 20
+              | =&A[int] => 10
+              | =&B[int] => 20
             },
             A[5] ~> f
             "#,
@@ -71,8 +71,8 @@ fn test_non_exhaustive_union_matching() {
         .evaluate(
             r#"
             f = #(A[int] | B[int] | C[int]) {
-              | ~> =&A[int] => 10
-              | ~> =&B[int] => 20
+              | =&A[int] => 10
+              | =&B[int] => 20
             },
             C[99] ~> f
             "#,
@@ -88,8 +88,8 @@ fn test_value_guard_with_full_coverage() {
         .evaluate(
             r#"
             f = #A[int] {
-              | ~> =A[10] => 100
-              | ~> =&A[int] => 999
+              | =A[10] => 100
+              | =&A[int] => 999
             },
             A[10] ~> f
             "#,
@@ -119,8 +119,8 @@ fn test_cycle_ref_with_pattern_matching() {
             r#"
             list : Nil | Cons[int, ^];
             get_head = #list {
-              | ~> =Cons[h, _] => h
-              | ~> =Nil => 0
+              | =Cons[h, _] => h
+              | =Nil => 0
             },
             Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head
             "#,
@@ -135,7 +135,7 @@ fn test_cycle_ref_nested_depth() {
         .evaluate(
             r#"
             json : True | False | Array[(Nil | Cons[^0, ^1])];
-            f = #json { ~> =Array[Cons[a, Cons[b, Nil]]] => [a, b] },
+            f = #json { =Array[Cons[a, Cons[b, Nil]]] => [a, b] },
             Array[Cons[False, Cons[True, Nil]]] ~> f
             "#,
         )
@@ -187,7 +187,7 @@ fn test_nested_union_pattern_matching_in_block() {
             list : Nil | Cons[int, ^];
 
             Cons[10, Cons[20, Cons[30, Nil]]] ~> {
-              | ~> =Cons[_, Cons[h, _]] => h
+              | =Cons[_, Cons[h, _]] => h
               | 999
             }
             "#,
@@ -204,7 +204,7 @@ fn test_nested_union_pattern_matching_in_function() {
 
             // Test extracting second element with nested pattern
             get_second = #list {
-              | ~> =Cons[_, Cons[h, _]] => h
+              | =Cons[_, Cons[h, _]] => h
               | 999
             },
 
@@ -219,7 +219,7 @@ fn test_nested_union_pattern_matching_in_function() {
             list : Nil | Cons[int, ^];
 
             get_first_two = #list {
-              | ~> =Cons[first, Cons[second, _]] => [first, second]
+              | =Cons[first, Cons[second, _]] => [first, second]
               | [0, 0]
             },
 
@@ -234,7 +234,7 @@ fn test_nested_union_pattern_matching_in_function() {
             list : Nil | Cons[int, ^];
 
             get_third = #list {
-              | ~> =Cons[_, Cons[_, Cons[h, _]]] => h
+              | =Cons[_, Cons[_, Cons[h, _]]] => h
               | 999
             },
 
@@ -255,9 +255,9 @@ fn test_multiple_runtime_type_checks_with_nested_patterns() {
 
             // Function with multiple nested patterns requiring runtime checks
             extract_left_leaf = #tree {
-              | ~> =Node[Node[Leaf[x], _], _] => x
-              | ~> =Node[Leaf[x], _] => x
-              | ~> =Leaf[x] => x
+              | =Node[Node[Leaf[x], _], _] => x
+              | =Node[Leaf[x], _] => x
+              | =Leaf[x] => x
             },
 
             t1 = Node[Node[Leaf[42], Leaf[99]], Leaf[7]],
@@ -281,8 +281,8 @@ fn test_recursive_type_as_function_parameter() {
             r#"
             list : Nil | Cons[int, ^];
             get_head = #list {
-              | ~> =Cons[h, _] => h
-              | ~> =Nil => 0
+              | =Cons[h, _] => h
+              | =Nil => 0
             },
             Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head
             "#,
@@ -325,7 +325,7 @@ fn test_recursive_type_with_cycle() {
         .evaluate(
             r#"
             list : Nil | Cons[int, ^];
-            prepend = #list { ~> =x => Cons[10, x] },
+            prepend = #list { =x => Cons[10, x] },
             Cons[20, Cons[30, Nil]] ~> prepend ~> .0
             "#,
         )
@@ -348,8 +348,8 @@ fn test_recursive_type_pattern_matching_bug() {
             // The bug would occur when the pattern compiler tried to access field 0 of Empty
             // (which has no fields) when matching the pattern [Full[rest], n]
             match_recursive = #[t, int] {
-              | ~> =[Empty, n] => n
-              | ~> =[Full[rest], n] => [n, 100] ~> __add__
+              | =[Empty, n] => n
+              | =[Full[rest], n] => [n, 100] ~> __add__
             },
 
             // Test with Empty - should return n
@@ -374,8 +374,8 @@ fn test_recursive_type_pattern_matching_bug() {
 
             // Function that matches on first element of tuple
             match_first = #[tree, int] {
-              | ~> =[Leaf[x], n] => [x, n] ~> __add__
-              | ~> =[Node[l, r], n] => n
+              | =[Leaf[x], n] => [x, n] ~> __add__
+              | =[Node[l, r], n] => n
             },
 
             t1 = [Leaf[42], 10] ~> match_first,
@@ -394,8 +394,8 @@ fn test_recursive_type_pattern_matching_bug() {
 
             // Pattern matching that would trigger the bug
             process_list = #[list, int] {
-              | ~> =[Nil, x] => x
-              | ~> =[Cons[head, tail], x] => [head, x] ~> __add__
+              | =[Nil, x] => x
+              | =[Cons[head, tail], x] => [head, x] ~> __add__
             },
 
             // These should all work without FieldAccessInvalid errors
@@ -416,8 +416,8 @@ fn test_union_pattern() {
             r#"
             t : Empty | Full[^];
             f = #[t, int] {
-              | ~> =[Empty, _] => 100
-              | ~> =[Full[rest], n] => 200
+              | =[Empty, _] => 100
+              | =[Full[rest], n] => 200
             },
             f[Empty, 1]
             "#,
@@ -429,8 +429,8 @@ fn test_union_pattern() {
             r#"
             t : Empty | Full[^];
             f = #[t, int] {
-              | ~> =[Empty, _] => 100
-              | ~> =[Full[rest], n] => 200
+              | =[Empty, _] => 100
+              | =[Full[rest], n] => 200
             },
             f[Full[Empty], 1]
             "#,
@@ -445,8 +445,8 @@ fn test_recursive_union_pattern() {
             r#"
             t : Empty | Full[^];
             f = #[t, int] {
-              | ~> =[Empty, _] => 100
-              | ~> =[Full[rest], n] => ^[rest, 0]
+              | =[Empty, _] => 100
+              | =[Full[rest], n] => ^[rest, 0]
             },
             f[Full[Empty], 1]
             "#,
@@ -459,7 +459,7 @@ fn test_unnamed_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(x: int, y: int) { ~> =(x, y) => [x, y] },
+            f = #(x: int, y: int) { =(x, y) => [x, y] },
             a = [x: 1, y: 2] ~> f,
             b = [x: 3, y: 4, z: 5] ~> f,
             c = Point[x: 6, y: 7] ~> f,
@@ -473,7 +473,7 @@ fn test_unnamed_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(x: int, y: int) { ~> =(x, y) => [x, y] },
+            f = #(x: int, y: int) { =(x, y) => [x, y] },
             [x: 1, z: 3] ~> f
             "#,
         )
@@ -486,19 +486,19 @@ fn test_unnamed_partial_type() {
 #[test]
 fn test_named_partial_type() {
     quiver()
-        .evaluate("f = #Point(x: int) { ~> .x }, Point[x: 1] ~> f")
+        .evaluate("f = #Point(x: int) { .x }, Point[x: 1] ~> f")
         .expect("1")
         .expect_variable("f", "#Point(x: int) -> int");
 
     quiver()
-        .evaluate("f = #Point(x: int) { ~> .x }, [x: 1] ~> f")
+        .evaluate("f = #Point(x: int) { .x }, [x: 1] ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function parameter compatible with Point(x: int)".to_string(),
             found: "[x: int]".to_string(),
         });
 
     quiver()
-        .evaluate("f = #Point(x: int) { ~> .x }, Other[x: 1] ~> f")
+        .evaluate("f = #Point(x: int) { .x }, Other[x: 1] ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function parameter compatible with Point(x: int)".to_string(),
             found: "Other[x: int]".to_string(),
@@ -510,7 +510,7 @@ fn test_empty_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #() { ~> },
+            f = #() { $ },
             a = [1, 2, 3] ~> f,
             b = [x: 4, y: 5] ~> f,
             c = Point[x: 6, y: 7] ~> f,
@@ -528,7 +528,7 @@ fn test_nested_partial_type() {
         .evaluate(
             r#"
             container : (value: (x: int, y: int));
-            f = #container { ~> =c => [c.value.x, c.value.y] },
+            f = #container { =c => [c.value.x, c.value.y] },
             f[value: [x: 1, y: 2, z: 3], extra: 42]
             "#,
         )
@@ -541,7 +541,7 @@ fn test_union_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(A(x: int) | B(x: int)) { ~> .x },
+            f = #(A(x: int) | B(x: int)) { .x },
             a = A[x: 10, y: 20] ~> f,
             b = B[x: 42, z: 99] ~> f,
             [a, b]
@@ -552,7 +552,7 @@ fn test_union_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(A(x: int) | B(x: int)) { ~> .x },
+            f = #(A(x: int) | B(x: int)) { .x },
             C[x: 10] ~> f
             "#,
         )
@@ -564,7 +564,7 @@ fn test_union_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(A(x: int) | B(x: int)) { ~> .x },
+            f = #(A(x: int) | B(x: int)) { .x },
             B[y: 10] ~> f
             "#,
         )

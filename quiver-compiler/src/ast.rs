@@ -43,7 +43,6 @@ pub struct Expression {
 pub struct Chain {
     pub match_pattern: Option<Match>,
     pub terms: Vec<Term>,
-    pub continuation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,8 +59,12 @@ pub enum Term {
     Not,
     Spawn(Box<Term>),
     Self_,
-    Select(Vec<Chain>),
+    /// Select operation. None means bare `!` (postfix form using chained value).
+    /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
+    Select(Option<Vec<Chain>>),
     Process(usize),
+    /// Explicit reference to a value without calling it (e.g., `&f`)
+    Reference(Access),
 }
 
 impl Term {
@@ -122,6 +125,8 @@ pub enum AccessSource {
     Ripple,
     /// Import like `%math` or `%math/trig`
     Import(Vec<String>),
+    /// Self reference `.` - the current process
+    Self_,
 }
 
 #[derive(Debug, Clone, PartialEq)]

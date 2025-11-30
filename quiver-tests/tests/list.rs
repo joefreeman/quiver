@@ -253,7 +253,7 @@ fn test_map_empty_list() {
     quiver()
         .evaluate(
             r#"
-            double = #int { ~> %math.mul[~, 2] },
+            double = #int { %math.mul[~, 2] },
             %list.new[] ~> %list.map[~, double]
             "#,
         )
@@ -266,7 +266,7 @@ fn test_map_single_element() {
         .evaluate(
             r#"
 
-            double = #int { ~> %math.mul[~, 2] },
+            double = #int { %math.mul[~, 2] },
             %list.new[]
             ~> %list.prepend[~, 5]
             ~> %list.map[~, double]
@@ -281,7 +281,7 @@ fn test_map_multiple_elements() {
         .evaluate(
             r#"
 
-            double = #int { ~> %math.mul[~, 2] },
+            double = #int { %math.mul[~, 2] },
             %list.new[]
             ~> %list.prepend[~, 1]
             ~> %list.prepend[~, 2]
@@ -298,7 +298,7 @@ fn test_map_increment() {
         .evaluate(
             r#"
 
-            inc = #int { ~> %math.add[~, 1] },
+            inc = #int { %math.add[~, 1] },
             %list.new[]
             ~> %list.prepend[~, 10]
             ~> %list.prepend[~, 20]
@@ -331,7 +331,7 @@ fn test_map_square() {
         .evaluate(
             r#"
 
-            square = #int { ~> %math.mul[~, ~] },
+            square = #int { %math.mul[~, ~] },
             %list.new[]
             ~> %list.prepend[~, 2]
             ~> %list.prepend[~, 3]
@@ -348,7 +348,7 @@ fn test_filter_empty_list() {
         .evaluate(
             r#"
 
-            even? = #int { ~> %math.mod[~, 2] ~> =0 },
+            even? = #int { %math.mod[~, 2] ~> =0 },
             %list.new[] ~> %list.filter[~, even?]
             "#,
         )
@@ -361,7 +361,7 @@ fn test_filter_no_matches() {
         .evaluate(
             r#"
 
-            negative? = #int { ~> %math.lt[~, 0] }
+            negative? = #int { %math.lt[~, 0] }
             %list.new[]
             ~> %list.prepend[~, 1]
             ~> %list.prepend[~, 2]
@@ -378,7 +378,7 @@ fn test_filter_all_match() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] }
+            positive? = #int { %math.gt[~, 0] }
             %list.new[]
             ~> %list.prepend[~, 1]
             ~> %list.prepend[~, 2]
@@ -395,7 +395,7 @@ fn test_filter_even_numbers() {
         .evaluate(
             r#"
 
-            even? = #int { ~> %math.mod[~, 2] ~> =0 }
+            even? = #int { %math.mod[~, 2] ~> =0 }
             %list.new[]
             ~> %list.prepend[~, 1]
             ~> %list.prepend[~, 2]
@@ -415,7 +415,7 @@ fn test_filter_greater_than() {
         .evaluate(
             r#"
 
-            gt_10? = #int { ~> %math.gt[~, 10] }
+            gt_10? = #int { %math.gt[~, 10] }
             %list.new[]
             ~> %list.prepend[~, 5]
             ~> %list.prepend[~, 10]
@@ -434,7 +434,7 @@ fn test_filter_single_match() {
         .evaluate(
             r#"
 
-            eq_5? = #int { ~> [~, 5] ~> == },
+            eq_5? = #int { [~, 5] ~> == },
             %list.new[]
             ~> %list.prepend[~, 1]
             ~> %list.prepend[~, 5]
@@ -727,7 +727,7 @@ fn test_all_empty_list() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[] ~> %list.all?[~, positive?]
             "#,
         )
@@ -740,7 +740,7 @@ fn test_all_single_true() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, 5]
             ~> %list.all?[~, positive?]
@@ -755,7 +755,7 @@ fn test_all_single_false() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, -5]
             ~> %list.all?[~, positive?]
@@ -770,7 +770,7 @@ fn test_all_multiple_all_true() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, 1]
             ~> %list.prepend[~, 2]
@@ -787,7 +787,7 @@ fn test_all_multiple_some_false() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, 1]
             ~> %list.prepend[~, -2]
@@ -804,7 +804,7 @@ fn test_all_even_numbers() {
         .evaluate(
             r#"
 
-            even? = #int { ~> %math.mod[~, 2] ~> =0 },
+            even? = #int { %math.mod[~, 2] ~> =0 },
             %list.new[]
             ~> %list.prepend[~, 2]
             ~> %list.prepend[~, 4]
@@ -818,7 +818,7 @@ fn test_all_even_numbers() {
         .evaluate(
             r#"
 
-            even? = #int { ~> %math.mod[~, 2] ~> =0 },
+            even? = #int { %math.mod[~, 2] ~> =0 },
             %list.new[]
             ~> %list.prepend[~, 2]
             ~> %list.prepend[~, 3]
@@ -835,7 +835,7 @@ fn test_any_empty_list() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[] ~> %list.any?[~, positive?]
             "#,
         )
@@ -848,7 +848,7 @@ fn test_any_single_true() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, 5]
             ~> %list.any?[~, positive?]
@@ -863,7 +863,7 @@ fn test_any_single_false() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, -5]
             ~> %list.any?[~, positive?]
@@ -878,7 +878,7 @@ fn test_any_multiple_all_false() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, -1]
             ~> %list.prepend[~, -2]
@@ -895,7 +895,7 @@ fn test_any_multiple_some_true() {
         .evaluate(
             r#"
 
-            positive? = #int { ~> %math.gt[~, 0] },
+            positive? = #int { %math.gt[~, 0] },
             %list.new[]
             ~> %list.prepend[~, -1]
             ~> %list.prepend[~, 2]
@@ -912,7 +912,7 @@ fn test_any_first_matches() {
         .evaluate(
             r#"
 
-            even? = #int { ~> %math.mod[~, 2] ~> =0 },
+            even? = #int { %math.mod[~, 2] ~> =0 },
             %list.new[]
             ~> %list.prepend[~, 3]
             ~> %list.prepend[~, 5]
@@ -929,7 +929,7 @@ fn test_any_last_matches() {
         .evaluate(
             r#"
 
-            even? = #int { ~> %math.mod[~, 2] ~> =0 },
+            even? = #int { %math.mod[~, 2] ~> =0 },
             %list.new[]
             ~> %list.prepend[~, 2]
             ~> %list.prepend[~, 3]

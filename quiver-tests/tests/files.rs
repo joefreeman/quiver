@@ -79,7 +79,7 @@ fn test_file_type_checking() {
             r#"
             // Function that takes a file and returns data
             read_from_file = #\File {
-                ~> =f,
+                =f,
                 data = __file_read__[f, 0, 1024],
                 data
             },

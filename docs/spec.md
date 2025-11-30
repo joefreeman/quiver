@@ -28,8 +28,8 @@ Pattern matching allows destructuring values and branching based on their struct
 response : Success[bin] | Error[code: int];
 
 handle_response = #response {
-  | ~> =Success[content] => content
-  | ~> =Error[code: 404] => default_page
+  | =Success[content] => content
+  | =Error[code: 404] => default_page
   | error_page
 }
 ```
@@ -84,7 +84,7 @@ pair<a, b> : Pair[first: a, second: b];
 Functions can also declare type parameters:
 
 ```
-id = #<t>t { ~> }
+id = #<t>t { $ }
 map = #<t, u>[list<t>, #t -> u] { ... }
 ```
 
@@ -146,7 +146,16 @@ Programs are made up of multiple statements separated by new lines or semicolons
 
 ### Chains
 
-A chain is a `~>`-separated sequence of terms. A chain that starts with a `~>` is a 'continuation', which implicitly captures an initial value. This initial value would typically come from the surrounding block's parameter. For a chain without a continuation, the first term takes a special (but generally intuitive) meaning - for example, reading from a variable rather than writing to it.
+A chain is a `~>`-separated sequence of terms. Every chain implicitly starts with the surrounding block's parameter value. This value flows through the chain, being transformed by each term.
+
+When a term receives a value:
+- **Callable terms** (functions, processes) are called with the value
+- **Literals and tuples** replace the value (discarding it)
+- **Variables** depend on their type: callable variables are called, others replace the value
+
+To explicitly control this behavior:
+- `f[]` calls `f` with nil, discarding any incoming value
+- `&f` references `f` without calling it
 
 ### Control flow
 
@@ -281,13 +290,13 @@ A block may contain multiple branches, separated by `|`. If a sequence evaluates
 
 ```
 // If item is valid, try to process it, otherwise show error
-item ~> { ~> is_valid? ~> process | show_error[] }
+item ~> { is_valid? ~> process | show_error[] }
 
 // Try multiple sources with fallback
 value = id ~> {
-  | ~> read_cache         // try using the id to read from the cache
-  | ~> query_database     // try using the id to query the database
-  | default_value         // fall back to using a default value
+  | read_cache         // try using the id to read from the cache
+  | query_database     // try using the id to query the database
+  | default_value      // fall back to using a default value
 }
 ```
 
@@ -297,8 +306,8 @@ Branches in a block can use 'condition-consequence' syntax - `{ ... => ... | ...
 
 ```
 value ~> {
-  | ~> =0 => "zero"
-  | ~> [~, 0] ~> math.gt => "positive"
+  | =0 => "zero"
+  | [~, 0] ~> math.gt => "positive"
   | "negative"
 }
 ```
@@ -306,7 +315,7 @@ value ~> {
 This allows 'guard'-style checks to be added to a condition:
 
 ```
-{ ~> =Square[x] ~> math.gt[x, 10] => "large" | "small" }
+{ =Square[x] ~> math.gt[x, 10] => "large" | "small" }
 ```
 
 ## Field access
@@ -351,16 +360,16 @@ Identity functions (that simply return their input unchanged) can be defined wit
 
 ```
 // Single parameter function
-double = #int { ~> math.mul[~, 2] }
+double = #int { math.mul[~, 2] }
 
 // Pattern matching on union types
 area = #shape {
-  | ~> =Circle[radius: r] => math.mul[r, r]
-  | ~> =Rectangle[width: w, height: h] => math.mul[w, h]
-},
+  | =Circle[radius: r] => math.mul[r, r]
+  | =Rectangle[width: w, height: h] => math.mul[w, h]
+}
 
 // Using a tuple for multiple values
-#[int, int] { ~> =[a, b] => [b, a] } ~> swap
+swap = #[int, int] { =[a, b] => [b, a] }
 
 // Shorthand for nil parameter
 #{ 42 }
@@ -374,35 +383,47 @@ sum = #[int, int] { [$.0, $.1] ~> math.add }
 
 ### Function application
 
-Functions are called by applying a value to them in a chain. The type system determines whether to call the function or just reference it.
+Functions are called when a value is applied to them in a chain:
 
 ```
 5 ~> double              // Apply double to 5
 [3, 4] ~> math.add       // Apply add to tuple [3, 4]
-[] ~> list.new           // For parameterless functions, explicitly pass []
 ```
 
-Alternatively, functions can be called using shorthand syntax `f[...]` where `[...]` is an unnamed tuple. This is equivalent to `[...] ~> f`:
+To call a function with nil, or to discard an incoming value, use explicit argument syntax:
+
+```
+f[]                      // Call f with nil
+list.new[]               // Call list.new with nil
+```
+
+To reference a function without calling it, use `&`:
+
+```
+&double                  // Reference to double (not called)
+map[xs, &double]         // Pass double as an argument
+```
+
+Functions can also be called using shorthand syntax `f[...]` where `[...]` is an unnamed tuple:
 
 ```
 math.add[3, 4]                     // Equivalent to [3, 4] ~> math.add
-math.add[1, 2] ~> math.mul[~, 3]   // Equivalent to [1, 2] ~> math.add ~> [~, 3] ~> math.mul
-f[]                                // Equivalent to [] ~> f
-math ~> .add[1, 2]                 // Equivalent to math.add[1, 2]
+math.add[1, 2] ~> math.mul[~, 3]   // Chained calls
+math ~> .add[1, 2]                 // Field access with call
 ```
 
 When used with field access (`.field[...]`), ripples are not allowed in the argument.
 
 ### Tail recursion
 
-Use `&` for tail-recursive calls:
+Use `^` for tail-recursive calls:
 
 ```
 f = #[int, int] {
-  | ~> =[1, y] => y
-  | ~> =[x, y] => [
-    =[x, 1] ~> math.sub,
-    =[x, y] ~> math.mul
+  | =[1, y] => y
+  | =[x, y] => [
+    [~, 1] ~> math.sub,
+    math.mul
   ] ~> ^
 }
 ```
@@ -410,14 +431,15 @@ f = #[int, int] {
 Named tail calls to other functions:
 
 ```
-fact = #int { ~> [~, 1] ~> &f }
+f = #[int, int] { math.mul },
+fact = #int { [~, 1] ~> ^f }
 ```
 
 Tail calls also support the shorthand argument syntax:
 
 ```
-g = #[int, int] { ~> math.mul },
-f = #int { ~> math.add[~, 1] ~> ^g[~, 2] },
+g = #[int, int] { math.mul },
+f = #int { math.add[~, 1] ~> ^g[~, 2] },
 10 ~> f   // 22
 ```
 
@@ -450,8 +472,8 @@ The function's parameter type defines the message type to be received. And this 
 // Spawn a process with an int receive type
 p1 = @{
   !int ~> {
-    | ~> =0 => "done"
-    | &[]
+    | =0 => "done"
+    | ^[]
   }
 }
 ```
@@ -502,13 +524,6 @@ A select operator can be used in a chain by including the ripple operator (`~`) 
 p1 ~> ![~, 1000]
 ```
 
-The postfix form `~> !` can also be used for single sources:
-
-```
-p1 ~> !            // Equivalent to ![p1]
-receiver ~> !      // Equivalent to ![receiver]
-```
-
 Shorthand forms:
 - `!p` is sugar for `![p]`
 - `!int` is sugar for `![#int]` (identity receive for type)
@@ -517,7 +532,9 @@ Shorthand forms:
 
 ### Referring to processes
 
-When spawning, a process identifier is returned. And the `.` operator can be used by the current process to refer to itself.
+When spawning, a process identifier is returned. The current process can refer to itself using:
+- `.` to send a message to self: `42 ~> .`
+- `&.` to get a reference to self without sending: `&. ~> =self_pid`
 
 To specify a type that refers to a process, use `@type`. For example, `@int` is a process that receives integers.
 
@@ -600,9 +617,9 @@ list<t> : Nil | Cons[t, ^];
 
 // Determine whether a list contains an item
 contains? = #<t>[list<t>, t] {
-  | ~> =[Nil, _] => []
-  | ~> =[Cons[^value, _], ^value] => Ok
-  | ~> =[Cons[_, tail], value] => &[tail, value]
+  | =[Nil, _] => []
+  | =[Cons[^value, _], ^value] => Ok
+  | =[Cons[_, tail], value] => ^[tail, value]
 },
 
 xs = Cons[1, Cons[2, Cons[3, Nil]]],
@@ -615,9 +632,9 @@ contains?[xs, 4]    // []
 ```
 // Clamp value to range [0, 100]
 clamp = #int {
-  | ~> %math.gt[~, 100] => 100
-  | ~> %math.lt[~, 0] => 0
-  | ~>
+  | %math.gt[~, 100] => 100
+  | %math.lt[~, 0] => 0
+  | $
 },
 
 150 ~> clamp,   // 100
@@ -635,17 +652,17 @@ shape :
 
 [
   bounding_box: #shape {
-    | ~> =Circle[radius: r] => {
+    | =Circle[radius: r] => {
       x = %math.mul[r, 2],
       Rectangle[width: x, height: x]
     }
-    | ~> =Rectangle[width: w, height: h] => {
+    | =Rectangle[width: w, height: h] => {
       Rectangle[width: w, height: h]
     }
   },
 
   is_square?: #shape {
-    ~> =Rectangle[width: ^x, height: ^x]
+    =Rectangle[width: ^x, height: ^x]
   }
 ]
 ```
@@ -686,10 +703,10 @@ next_year = person.age ~> %math.add[~, 1],
 // Spawn process that receives strings
 pid = @{
   !Str[bin] ~> {
-    | ~> ="" => []           // Stop on empty string
-    | ~> =s => {
+    | ="" => []              // Stop on empty string
+    | =s => {
       s ~> __println__,      // (not implemented!)
-      [] ~> ^                // Receive another message
+      ^[]                    // Receive another message
     }
   }
 },

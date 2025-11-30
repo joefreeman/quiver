@@ -164,7 +164,7 @@ fn test_socket_type_checking() {
             r#"
             // Function that handles a socket
             handle_socket = #\TcpSocket {
-                ~> =s,
+                =s,
                 data = __tcp_socket_read__[s, 4096],
                 __tcp_socket_write__[s, data],
                 __tcp_socket_close__[s]
@@ -172,7 +172,7 @@ fn test_socket_type_checking() {
 
             // Function that handles a listener
             handle_listener = #\TcpListener {
-                ~> =l,
+                =l,
                 client = __tcp_listener_accept__[l],
                 __tcp_socket_close__[client],
                 __tcp_listener_close__[l]

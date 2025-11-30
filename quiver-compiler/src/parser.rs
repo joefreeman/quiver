@@ -374,7 +374,6 @@ fn string_term(input: Span) -> IResult<Span, Term> {
                     value: FieldValue::Chain(Chain {
                         match_pattern: None,
                         terms: vec![Term::Literal(Literal::Binary(bytes))],
-                        continuation: false,
                     }),
                 }],
             })
@@ -903,7 +902,6 @@ fn make_source_chain(term: Term) -> Chain {
     Chain {
         match_pattern: None,
         terms: vec![term],
-        continuation: false,
     }
 }
 
@@ -926,7 +924,7 @@ fn identifier_to_type(ident: String) -> Type {
 
 // Wrap a term as a single-source select: ![term]
 fn single_source(term: Term) -> Term {
-    Term::Select(vec![make_source_chain(term)])
+    Term::Select(Some(vec![make_source_chain(term)]))
 }
 
 // Create a receive function from a type and optional body
@@ -956,14 +954,14 @@ fn select_term(input: Span) -> IResult<Span, Term> {
     preceded(
         char('!'),
         alt((
-            // [...] - Tuple of source chains
+            // [...] - Tuple of source chains (explicit sources)
             map(
                 delimited(
                     pair(char('['), wsc),
                     separated_list0(tuple((wsc, char(','), wsc)), chain),
                     pair(wsc, char(']')),
                 ),
-                Term::Select,
+                |sources| Term::Select(Some(sources)),
             ),
             // (type) with optional body
             map(
@@ -993,12 +991,14 @@ fn select_term(input: Span) -> IResult<Span, Term> {
             }),
             // #function
             map(function, |f| single_source(Term::Function(f))),
+            // @N process reference (must come before spawn_term to match @1 before @f)
+            map(process_ref_term, single_source),
             // @spawn
             map(spawn_term, single_source),
             // literal (timeout)
             map(literal, |l| single_source(Term::Literal(l))),
-            // nothing - bare ! for postfix form
-            success(Term::Select(vec![])),
+            // nothing - bare ! for postfix form (uses chained value)
+            success(Term::Select(None)),
         )),
     )(input)
 }
@@ -1413,6 +1413,25 @@ fn process_ref_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
+/// Reference term: &identifier, &module.func, or &. (explicit reference without calling)
+fn reference_term(input: Span) -> IResult<Span, Term> {
+    preceded(
+        char('&'),
+        alt((
+            // &. - reference to self
+            map(char('.'), |_| {
+                Term::Reference(Access {
+                    source: Some(AccessSource::Self_),
+                    accessors: vec![],
+                    argument: None,
+                })
+            }),
+            // &identifier or &module.func
+            map(access, Term::Reference),
+        )),
+    )(input)
+}
+
 fn term(input: Span) -> IResult<Span, Term> {
     alt((
         // String terms (before literals to handle quotes)
@@ -1431,6 +1450,8 @@ fn term(input: Span) -> IResult<Span, Term> {
         map(block, Term::Block),
         // Builtins
         map(builtin, Term::Builtin),
+        // Reference (must come before access to parse &f before f)
+        reference_term,
         // Access (includes field/positional access, bare identifiers with optional argument, and imports)
         map(access, Term::Access),
         // Operations
@@ -1449,40 +1470,22 @@ fn chain(input: Span) -> IResult<Span, Chain> {
                 terminated(match_pattern, tuple((ws1, char('='), ws1))),
                 chain_inner,
             ),
-            |(match_pattern, (terms, continuation))| Chain {
+            |(match_pattern, terms)| Chain {
                 match_pattern: Some(match_pattern),
                 terms,
-                continuation,
             },
         ),
         // Plain chain
-        map(chain_inner, |(terms, continuation)| Chain {
+        map(chain_inner, |terms| Chain {
             match_pattern: None,
             terms,
-            continuation,
         }),
     ))(input)
 }
 
-fn chain_inner(input: Span) -> IResult<Span, (Vec<Term>, bool)> {
-    alt((
-        // Continuation chain: starts with ~>, terms are optional
-        map(
-            pair(
-                tag("~>"),
-                opt(preceded(
-                    ws1,
-                    separated_list1(tuple((ws1, tag("~>"), ws1)), term),
-                )),
-            ),
-            |(_, terms)| (terms.unwrap_or_default(), true),
-        ),
-        // Normal chain: must have at least one term
-        map(
-            separated_list1(tuple((ws1, tag("~>"), ws1)), term),
-            |terms| (terms, false),
-        ),
-    ))(input)
+fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {
+    // Chain is a sequence of terms separated by ~>
+    separated_list1(tuple((ws1, tag("~>"), ws1)), term)(input)
 }
 
 fn expression(input: Span) -> IResult<Span, Expression> {

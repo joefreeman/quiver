@@ -115,9 +115,24 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::Self_ => {}
             ast::Term::Process(_) => {}
             ast::Term::Select(sources) => {
-                // Visit all source chains
-                for source in sources {
-                    self.visit_chain(source);
+                // Visit all source chains (if explicit sources provided)
+                if let Some(sources) = sources {
+                    for source in sources {
+                        self.visit_chain(source);
+                    }
+                }
+            }
+            ast::Term::Reference(access) => {
+                // Reference to a value - same variable capture as Access
+                if let Some(ast::AccessSource::Identifier(name)) = &access.source {
+                    self.visit_identifier(name, access.accessors.clone());
+                }
+                if let Some(argument) = &access.argument {
+                    for field in argument {
+                        if let ast::FieldValue::Chain(chain) = &field.value {
+                            self.visit_chain(chain);
+                        }
+                    }
                 }
             }
         }

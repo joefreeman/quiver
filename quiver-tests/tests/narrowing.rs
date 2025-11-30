@@ -11,7 +11,8 @@ fn test_basic_variable_narrowing_in_chain() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             x ~> =&A[a: int], x.a
             "#,
         )
@@ -24,7 +25,8 @@ fn test_field_narrowing_propagates_to_parent() {
     quiver()
         .evaluate(
             r#"
-            y = 0 ~> #int { ~> =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            make_ab = #int { =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            y = 0 ~> make_ab,
             y.a ~> =&int, y.b
             "#,
         )
@@ -37,8 +39,9 @@ fn test_parameter_provenance_narrowing() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
-            x ~> { ~> =&A[a: int] => x.a }
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
+            x ~> { =&A[a: int] => x.a }
             "#,
         )
         .expect("1");
@@ -65,7 +68,8 @@ fn test_inner_scope_inherits_narrowing() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             x ~> =&A[a: int], { x.a }
             "#,
         )
@@ -79,7 +83,8 @@ fn test_truthiness_narrowing_in_branch_condition() {
     quiver()
         .evaluate(
             r#"
-            a = 0 ~> #int { ~> =0 },
+            match0 = #int { =0 },
+            a = 0 ~> match0,
             { a => %math.add[a, 1] | 200 }
             "#,
         )
@@ -89,7 +94,8 @@ fn test_truthiness_narrowing_in_branch_condition() {
     quiver()
         .evaluate(
             r#"
-            b = 1 ~> #int { ~> =0 },
+            match0 = #int { =0 },
+            b = 1 ~> match0,
             { b => %math.add[b, 1] | 200 }
             "#,
         )
@@ -103,7 +109,8 @@ fn test_truthiness_narrowing_with_binding() {
     quiver()
         .evaluate(
             r#"
-            a = 0 ~> #int { ~> =0 },
+            match0 = #int { =0 },
+            a = 0 ~> match0,
             { a ~> =x => %math.add[x, 1] | 200 }
             "#,
         )
@@ -113,7 +120,8 @@ fn test_truthiness_narrowing_with_binding() {
     quiver()
         .evaluate(
             r#"
-            b = 1 ~> #int { ~> =0 },
+            match0 = #int { =0 },
+            b = 1 ~> match0,
             { b ~> =x => %math.add[x, 1] | 200 }
             "#,
         )
@@ -127,7 +135,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
     quiver()
         .evaluate(
             r#"
-            f = #int { ~> =0 },
+            f = #int { =0 },
             { 0 ~> f ~> =x => %math.add[x, 1] | 200 }
             "#,
         )
@@ -137,7 +145,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
     quiver()
         .evaluate(
             r#"
-            f = #int { ~> =0 },
+            f = #int { =0 },
             { 1 ~> f ~> =x => %math.add[x, 1] | 200 }
             "#,
         )
@@ -151,7 +159,8 @@ fn test_inter_chain_narrowing() {
     quiver()
         .evaluate(
             r#"
-            a = 0 ~> #int { ~> =0 },
+            match0 = #int { =0 },
+            a = 0 ~> match0,
             { a ~> =x, %math.add[x, 1] }
             "#,
         )
@@ -161,7 +170,7 @@ fn test_inter_chain_narrowing() {
     quiver()
         .evaluate(
             r#"
-            f = #int { ~> =0 },
+            f = #int { =0 },
             { 0 ~> f ~> =x, %math.add[x, 1] }
             "#,
         )
@@ -179,7 +188,8 @@ fn test_basic_complement_narrowing() {
     quiver()
         .evaluate(
             r#"
-            y = 0 ~> #int { ~> =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            make_ab = #int { =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            y = 0 ~> make_ab,
             { y.a ~> =&int => y.b | y.c }
             "#,
         )
@@ -189,7 +199,8 @@ fn test_basic_complement_narrowing() {
     quiver()
         .evaluate(
             r#"
-            y = 1 ~> #int { ~> =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            make_ab = #int { =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            y = 1 ~> make_ab,
             { y.a ~> =&int => y.b | y.c }
             "#,
         )
@@ -202,7 +213,8 @@ fn test_complement_from_condition_failure() {
     quiver()
         .evaluate(
             r#"
-            x = 1 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 1 ~> make_ab,
             { x ~> =&A[a: int] => 0 | x.b }
             "#,
         )
@@ -233,7 +245,8 @@ fn test_complement_propagates_across_multiple_branches() {
         .evaluate(
             r#"
             value = 5,
-            stop = 10 ~> #int { ~> =0 => None | ~> },
+            to_option = #int { =0 => None | ~ },
+            stop = 10 ~> to_option,
             { stop ~> =None | %math.lt[value, stop] | %math.gt[value, stop] }
             "#,
         )
@@ -244,7 +257,8 @@ fn test_complement_propagates_across_multiple_branches() {
         .evaluate(
             r#"
             value = 5,
-            stop = 0 ~> #int { ~> =0 => None | ~> },
+            to_option = #int { =0 => None | ~ },
+            stop = 0 ~> to_option,
             { stop ~> =None => 999 | %math.lt[value, stop] | %math.gt[value, stop] }
             "#,
         )
@@ -257,8 +271,9 @@ fn test_non_type_failable_disables_complement() {
     quiver()
         .evaluate(
             r#"
-            some_func = #(A[a: int]) -> A[a: int] { ~> },
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            some_func = #(A[a: int]) -> A[a: int] { $ },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             { x ~> =&A[a: int] ~> some_func => 1 | x.a }
             "#,
         )
@@ -274,8 +289,10 @@ fn test_multiple_provenances_disables_complement() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
-            y = 0 ~> #int { ~> =0 => C[c: 3] | D[d: 4] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_cd = #int { =0 => C[c: 3] | D[d: 4] },
+            x = 0 ~> make_ab,
+            y = 0 ~> make_cd,
             { x ~> =&A[a: int], y ~> =&C[c: int] => 1 | x.b }
             "#,
         )
@@ -291,7 +308,8 @@ fn test_literal_match_disables_complement() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[val: 1, a: 10] | B[val: 2, b: 20] },
+            make_ab = #int { =0 => A[val: 1, a: 10] | B[val: 2, b: 20] },
+            x = 0 ~> make_ab,
             { x.val ~> =1 => 2 | x.b }
             "#,
         )
@@ -311,7 +329,8 @@ fn test_shadowing_does_not_affect_outer_narrowing() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             x ~> =&A[a: int],
             {
                 x = B[b: 99],
@@ -329,7 +348,8 @@ fn test_complement_with_three_branches() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | ~> =1 => B[b: 2] | C[c: 3] },
+            make_abc = #int { =0 => A[a: 1] | =1 => B[b: 2] | C[c: 3] },
+            x = 0 ~> make_abc,
             { x ~> =&A[a: int] => 10 | x ~> =&B[b: int] => 20 | x.c }
             "#,
         )
@@ -342,7 +362,8 @@ fn test_complement_union_with_common_field() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[val: 1, a: 10] | B[val: '00', b: 20] },
+            make_ab = #int { =0 => A[val: 1, a: 10] | B[val: '00', b: 20] },
+            x = 0 ~> make_ab,
             { x.val ~> =&int => x.a | x.b }
             "#,
         )
@@ -359,7 +380,8 @@ fn test_field_access_on_union_without_narrowing_fails() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             x.a
             "#,
         )
@@ -375,7 +397,8 @@ fn test_field_access_on_wrong_branch_fails() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             x ~> =&A[a: int], x.b
             "#,
         )
@@ -393,7 +416,7 @@ fn test_fallback_branch_does_not_require_nil() {
         .evaluate(
             r#"
             f = #(A[int] | B[int]) -> int {
-              | ~> =&A[int] => 1
+              | =&A[int] => 1
               | 2
             },
             A[1] ~> f
@@ -412,7 +435,8 @@ fn test_tuple_field_narrowing() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             y = C[c: 3],
             t = [x, y],
             t.0 ~> =&A[a: int], x.a
@@ -427,7 +451,8 @@ fn test_tuple_ripple_preserves_provenance() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             t = x ~> [~, 1],
             t.0 ~> =&A[a: int], x.a
             "#,
@@ -441,7 +466,8 @@ fn test_nested_tuple_field_access() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             inner = [x],
             outer = [inner],
             outer.0.0 ~> =&A[a: int], x.a
@@ -456,7 +482,8 @@ fn test_named_tuple_field_narrowing() {
     quiver()
         .evaluate(
             r#"
-            x = 0 ~> #int { ~> =0 => A[a: 1] | B[b: 2] },
+            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            x = 0 ~> make_ab,
             t = [first: x, second: 0],
             t.first ~> =&A[a: int], x.a
             "#,
@@ -477,8 +504,8 @@ fn test_tuple_pattern_complement_first_field() {
             r#"
             list<t> : Nil | Cons[t, ^];
             f = #<t>[list<t>, list<t>] -> list<t> {
-              | ~> =[Nil, ys] => ys
-              | ~> =[Cons[head, tail], ys] => ys
+              | =[Nil, ys] => ys
+              | =[Cons[head, tail], ys] => ys
             },
             f[Nil, Cons[1, Nil]]
         "#,
@@ -494,8 +521,8 @@ fn test_tuple_pattern_complement_second_field() {
             r#"
             list<t> : Nil | Cons[t, ^];
             f = #<t>[int, list<t>] -> int {
-              | ~> =[n, Nil] => n
-              | ~> =[n, Cons[_, _]] => n
+              | =[n, Nil] => n
+              | =[n, Cons[_, _]] => n
             },
             f[42, Cons[1, Nil]]
         "#,
@@ -511,9 +538,9 @@ fn test_tuple_pattern_complement_three_variants() {
             r#"
             tri<t> : A[t] | B[t] | C[t];
             f = #<t>[tri<t>, int] -> int {
-              | ~> =[A[_], n] => n
-              | ~> =[B[_], n] => n
-              | ~> =[C[_], n] => n
+              | =[A[_], n] => n
+              | =[B[_], n] => n
+              | =[C[_], n] => n
             },
             f[B[1], 42]
         "#,
@@ -529,8 +556,8 @@ fn test_tuple_pattern_complement_exhaustive() {
             r#"
             list<t> : Nil | Cons[t, ^];
             reverse' = #<t>[list<t>, list<t>] -> list<t> {
-              | ~> =[Nil, ys] => ys
-              | ~> =[Cons[head, tail], ys] => Cons[head, ys] ~> ^[tail, ~]
+              | =[Nil, ys] => ys
+              | =[Cons[head, tail], ys] => Cons[head, ys] ~> ^[tail, ~]
             },
             reverse'[Cons[1, Cons[2, Nil]], Nil]
         "#,
@@ -548,8 +575,8 @@ fn test_tuple_pattern_multiple_constraining_fields_not_exhaustive() {
             r#"
             list<t> : Nil | Cons[t, ^];
             f = #<t>[list<t>, list<t>] {
-              | ~> =[Nil, Nil] => 0
-              | ~> =[Cons[_, _], Cons[_, _]] => 1
+              | =[Nil, Nil] => 0
+              | =[Cons[_, _], Cons[_, _]] => 1
             },
             f[Nil, Nil]
         "#,
@@ -565,8 +592,8 @@ fn test_tuple_pattern_nested_pattern_not_complement() {
             r#"
             list<t> : Nil | Cons[t, ^];
             f = #<t>[list<list<t>>, int] {
-              | ~> =[Nil, n] => n
-              | ~> =[Cons[Nil, _], n] => n
+              | =[Nil, n] => n
+              | =[Cons[Nil, _], n] => n
             },
             f[Nil, 42]
         "#,
@@ -583,10 +610,10 @@ fn test_tuple_pattern_complement_via_binding() {
             r#"
             list<t> : Nil | Cons[t, ^];
             f = #<t>[list<t>, list<t>] -> list<t> {
-              ~> =[xs, ys],
+              =[xs, ys],
               [xs, ys] ~> {
-                | ~> =[Nil, zs] => zs
-                | ~> =[Cons[head, tail], zs] => zs
+                | =[Nil, zs] => zs
+                | =[Cons[head, tail], zs] => zs
               }
             },
             f[Nil, Cons[1, Nil]]
@@ -604,11 +631,11 @@ fn test_tuple_pattern_complement_via_variable() {
             r#"
             list<t> : Nil | Cons[t, ^];
             f = #<t>[list<t>, list<t>] -> list<t> {
-              ~> =[xs, ys],
+              =[xs, ys],
               t = [xs, ys],
               t ~> {
-                | ~> =[Nil, zs] => zs
-                | ~> =[Cons[head, tail], zs] => zs
+                | =[Nil, zs] => zs
+                | =[Cons[head, tail], zs] => zs
               }
             },
             f[Cons[1, Nil], Cons[2, Nil]]

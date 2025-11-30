@@ -138,5 +138,5 @@ fn test_sqrt_negative_returns_nil() {
 
 #[test]
 fn test_sqrt_negative_with_fallback() {
-    quiver().evaluate("-4 ~> { ~> %math.sqrt | 0 }").expect("0");
+    quiver().evaluate("-4 ~> { %math.sqrt | 0 }").expect("0");
 }

@@ -110,10 +110,6 @@ pub enum Error {
     // Language feature errors
     FeatureUnsupported(String),
 
-    // Compilation flow errors
-    ChainValueUnused,
-    ValueIgnored(String),
-
     // Destructuring errors
     DestructuringOnNonTuple(String),
     DestructuringFieldMissing {
@@ -618,22 +614,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Extract receive types from all sources
                 let mut select_sources = Vec::new();
 
-                // Handle postfix form: `receiver ~> !` where sources is empty
-                // In this case, extract receive type from the chained value
-                if sources.is_empty() {
-                    if let Some(chained) = chained_type
-                        && let Some(Type::Callable { parameter, .. }) =
-                            self.program.lookup_type(chained)
-                    {
-                        select_sources.push(*parameter);
+                match sources {
+                    // Handle postfix form: `receiver ~> !` (bare !)
+                    // In this case, extract receive type from the chained value
+                    None => {
+                        if let Some(chained) = chained_type
+                            && let Some(Type::Callable { parameter, .. }) =
+                                self.program.lookup_type(chained)
+                        {
+                            select_sources.push(*parameter);
+                        }
                     }
-                } else {
-                    for source in sources {
-                        self.extract_receive_type_from_source(
-                            source,
-                            chained_type.as_ref(),
-                            &mut select_sources,
-                        )?;
+                    // Explicit empty `![]` - no receive types
+                    Some(sources) if sources.is_empty() => {}
+                    // Explicit sources
+                    Some(sources) => {
+                        for source in sources {
+                            self.extract_receive_type_from_source(
+                                source,
+                                chained_type.as_ref(),
+                                &mut select_sources,
+                            )?;
+                        }
                     }
                 }
 
@@ -1230,14 +1232,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(final_type)
     }
 
-    /// Helper to check if an expression starts with a continuation (~>)
-    fn expression_starts_with_continuation(expression: &ast::Expression) -> bool {
-        expression
-            .chains
-            .first()
-            .is_some_and(|chain| chain.continuation)
-    }
-
     fn compile_block(
         &mut self,
         block: ast::Block,
@@ -1358,12 +1352,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 continue;
             }
 
-            // Check if the consequence starts with a continuation (~>)
-            let starts_with_continuation = branch
-                .consequence
-                .as_ref()
-                .is_some_and(Self::expression_starts_with_continuation);
-
             if let Some(ref consequence) = branch.consequence {
                 // Branch has a consequence - compile it
                 // Use emit_duplicate_jump_if_nil (without pop) to keep the value on stack for consequence
@@ -1397,24 +1385,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     );
                 }
 
-                // Only pass input_type if the consequence starts with a continuation (~>)
-                let consequence_type = if starts_with_continuation {
-                    // Continuation receives the value on the stack
-                    let (consequence_type, _) = self.compile_expression_with_input(
-                        consequence.clone(),
-                        None,
-                        Some(condition_type),
-                        None, // No narrowing for consequence
-                    )?;
-                    consequence_type
-                } else {
-                    // Other terms don't use the value, so pop it first
-                    self.codegen.add_instruction(Instruction::Pop);
-                    let (consequence_type, _) =
-                        self.compile_expression(consequence.clone(), None)?;
-                    consequence_type
-                };
+                // Consequence receives the condition value (implicit continuation)
+                let (consequence_type, _) = self.compile_expression_with_input(
+                    consequence.clone(),
+                    None,
+                    Some(condition_type),
+                    None, // No narrowing for consequence
+                )?;
                 branch_types.push(consequence_type);
+
+                // If this is the last branch and condition always succeeds (non-nil), block is exhaustive
+                if is_last_branch && !self.contains_nil(condition_type) {
+                    is_exhaustive = true;
+                }
 
                 // Reset to branch start (param_local + 1), keeping just the parameter
                 // This is on the success path - bindings have been stored and should be cleared
@@ -1422,21 +1405,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.codegen
                         .add_instruction(Instruction::Reset(param_local + 1));
                 }
-
-                // If this is the last branch and condition can fail, add nil to result type
-                // unless the block is exhaustive through complement narrowing
-                if is_last_branch
-                    && !starts_with_continuation
-                    && self.contains_nil(condition_type)
-                    && !is_exhaustive
-                {
-                    branch_types.push(self.program.register_type(Type::nil()));
-                }
             } else {
                 // No consequence - use condition type
                 // For non-last branches, filter out nil since it causes fallthrough to next branch
                 if is_last_branch {
                     branch_types.push(condition_type);
+                    // If the last branch's condition never returns nil, block is exhaustive
+                    if !self.contains_nil(condition_type) {
+                        is_exhaustive = true;
+                    }
                 } else {
                     // Only include non-nil types - nil will be handled by subsequent branches
                     if let Some(ty) = self.program.lookup_type(condition_type) {
@@ -1561,6 +1538,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Pop scope
         self.scopes.pop();
 
+        // If the block is not exhaustive, add nil to the result type
+        // (since some inputs might not match any branch)
+        if !is_exhaustive {
+            let nil_type = self.program.register_type(Type::nil());
+            branch_types.push(nil_type);
+        }
+
         Ok(typing::union_type_ids(&mut self.program, branch_types))
     }
 
@@ -1599,6 +1583,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 None,
                 if i == 0 { last_type } else { None },
                 narrowing.as_deref_mut(),
+                true, // implicit_continuation: block-level chains load parameter
             )?;
 
             // Check if the previous type contained nil and we're not on the first chain
@@ -1688,13 +1673,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(ty)
     }
 
+    /// Compile a chain within a tuple field (no implicit continuation).
+    /// The field chain has no initial input - it uses ripple_context for `~`.
     fn compile_chain_with_provenance(
         &mut self,
         chain: ast::Chain,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
     ) -> Result<(usize, Provenance), Error> {
-        self.compile_chain_with_input(chain, on_no_match, ripple_context, None, None)
+        // Tuple fields don't have implicit continuation - they start with no input
+        self.compile_chain_with_input(chain, on_no_match, ripple_context, None, None, false)
     }
 
     fn compile_chain_with_input(
@@ -1704,16 +1692,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         ripple_context: Option<&RippleContext>,
         input_type: Option<usize>,
         mut narrowing: Option<&mut Narrowing>,
+        implicit_continuation: bool,
     ) -> Result<(usize, Provenance), Error> {
-        // If this is a continuation chain (starts with ~>), load the parameter
-        let (mut current_type, mut current_prov) = if chain.continuation {
-            // Continuation chains explicitly use the parameter from scope
+        // Determine initial value:
+        // - If input_type is provided, use it (value already on stack)
+        // - If implicit_continuation is true, load the parameter from scope
+        // - Otherwise, no initial value (for tuple field chains)
+        let (mut current_type, mut current_prov) = if let Some(input) = input_type {
+            // Input provided (e.g., from a consequence or previous term in expression)
+            (Some(input), Provenance::Unknown)
+        } else if implicit_continuation {
+            // Load the parameter from scope (implicit continuation)
             let (parameter_type, param_local) = scopes::get_parameter(&self.scopes)?;
             self.codegen.add_instruction(Instruction::Load(param_local));
             (Some(parameter_type), Provenance::Parameter)
         } else {
-            // Use input_type if provided (e.g., from a consequence receiving narrowed type)
-            (input_type, Provenance::Unknown)
+            // No initial input (tuple field chains use ripple_context for ~)
+            (None, Provenance::Unknown)
         };
 
         let terms: Vec<_> = chain.terms.into_iter().collect();
@@ -1778,14 +1773,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Compile an import with optional accessor chain.
-    /// Resolves accessors statically on the cached module value, emitting only
-    /// instructions needed for the resolved value.
-    fn compile_import(
+    /// Resolve an import with optional accessor chain, returning the cached module,
+    /// resolved value, and type. Does not emit any instructions.
+    fn resolve_import(
         &mut self,
         module: &[String],
         accessors: &[ast::AccessPath],
-    ) -> Result<usize, Error> {
+    ) -> Result<(modules::CachedModule, Value, usize), Error> {
         let module_name = module.join("/");
 
         // Check for circular imports
@@ -1806,9 +1800,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Resolve accessor chain on the cached value
-        let module_type_id = self.program.register_type(cached.module_type);
+        let module_type_id = self.program.register_type(cached.module_type.clone());
         let (resolved_value, resolved_type) =
             self.resolve_accessors(&cached.value, &module_type_id, accessors, &module_name)?;
+
+        Ok((cached, resolved_value, resolved_type))
+    }
+
+    /// Compile an import with optional accessor chain.
+    /// Resolves accessors statically on the cached module value, emitting only
+    /// instructions needed for the resolved value.
+    fn compile_import(
+        &mut self,
+        module: &[String],
+        accessors: &[ast::AccessPath],
+    ) -> Result<usize, Error> {
+        let (cached, resolved_value, resolved_type) = self.resolve_import(module, accessors)?;
 
         // Emit instructions for just the resolved value
         let (instructions, _) =
@@ -1837,13 +1844,43 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_local_count = self.local_count;
 
         // Reset to clean state for module compilation
-        self.scopes = vec![Scope::empty()];
         self.local_count = 0;
 
+        // Check if module has expressions (needs a parameter scope for implicit continuation)
+        let has_expressions = parsed
+            .statements
+            .iter()
+            .any(|s| matches!(s, ast::Statement::Expression(_)));
+
+        let scope_parameter = if has_expressions {
+            let param_local = self.local_count;
+            self.local_count += 1;
+            self.codegen.add_instruction(Instruction::Store);
+            let nil_type_id = self.program.register_type(Type::nil());
+            Some(scopes::Parameter {
+                ty: nil_type_id,
+                index: param_local,
+                provenance: Provenance::Parameter,
+            })
+        } else {
+            None
+        };
+
+        self.scopes = vec![Scope::new(HashMap::new(), scope_parameter, ScopeKind::Root)];
+
         // Compile statements and track the result type of the last statement
+        let num_statements = parsed.statements.len();
         let mut result_type_id = self.program.register_type(Type::nil());
-        for statement in parsed.statements {
+        for (i, statement) in parsed.statements.into_iter().enumerate() {
+            let is_last = i == num_statements - 1;
+            let is_expression = matches!(&statement, ast::Statement::Expression(_));
+
             result_type_id = self.compile_statement(statement)?;
+
+            // Pop intermediate expression results, keeping only the last one
+            if !is_last && is_expression {
+                self.codegen.add_instruction(Instruction::Pop);
+            }
         }
         let module_type = self
             .program
@@ -2150,15 +2187,30 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return self.emit_nil_param_spawn(fn_type);
         }
 
+        // For nil-parameter spawn sugar (@{ ... }), the inline function definition
+        // ignores the incoming value - it's not passed as an argument.
+        // But for typed spawn sugar (@int { ... }), the incoming value IS the argument.
+        let is_nil_param_inline =
+            matches!(&term, ast::Term::Function(f) if f.parameter_type.is_none());
+        let effective_arg_type = if is_nil_param_inline {
+            // Pop the incoming value if present (nil-parameter spawn ignores it)
+            if arg_type.is_some() {
+                self.codegen.add_instruction(Instruction::Pop);
+            }
+            None
+        } else {
+            arg_type
+        };
+
         // Compile the function term
         let (fn_type, _prov) =
             self.compile_term(term, None, Provenance::Unknown, None, None, None)?;
 
-        if let Some(arg_type) = arg_type {
+        if let Some(arg_type) = effective_arg_type {
             // Case 2: arg ~> @f (spawn with argument)
             self.emit_arg_spawn(fn_type, arg_type)
         } else {
-            // Case 3: @f (spawn with nil)
+            // Case 3: @f (spawn with nil) or @{ ... } (spawn sugar)
             self.emit_nil_param_spawn(fn_type)
         }
     }
@@ -2238,33 +2290,36 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: Option<&usize>,
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
-        context_name: &str,
+        _context_name: &str,
     ) -> Result<Option<usize>, Error> {
         let Some(fields) = argument else {
             return Ok(None);
         };
 
-        // Check if argument would silently drop piped value
-        if value_type.is_some()
-            && !helpers::tuple_contains_ripple(fields)
-            && !helpers::tuple_contains_spread(fields)
-        {
-            return Err(Error::ValueIgnored(format!(
-                "{} argument ignores piped value; use ripple (e.g., {}[~, 2])",
-                context_name, context_name
-            )));
+        // Check if argument uses the piped value (via ripple or spread)
+        let uses_piped_value =
+            helpers::tuple_contains_ripple(fields) || helpers::tuple_contains_spread(fields);
+
+        // If argument doesn't use the piped value, drop it
+        if value_type.is_some() && !uses_piped_value {
+            self.codegen.add_instruction(Instruction::Pop);
         }
 
-        // Convert value_type to ripple_context if present
+        // Convert value_type to ripple_context if present AND argument uses it
         let ripple_context_value;
         let ripple_ctx = if let Some(vt) = value_type {
-            ripple_context_value = RippleContext {
-                value_type_id: *vt,
-                stack_offset: 0,
-                owns_value: true,
-                provenance: value_provenance,
-            };
-            Some(&ripple_context_value)
+            if uses_piped_value {
+                ripple_context_value = RippleContext {
+                    value_type_id: *vt,
+                    stack_offset: 0,
+                    owns_value: true,
+                    provenance: value_provenance,
+                };
+                Some(&ripple_context_value)
+            } else {
+                // Value was popped, use parent ripple context if any
+                ripple_context
+            }
         } else {
             ripple_context
         };
@@ -2308,6 +2363,30 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(ast::AccessSource::Parameter) => {
                 // $ accesses the function parameter
                 let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
+
+                // Check if there's an explicit argument
+                let has_argument = access.argument.is_some();
+
+                // Peek at the accessed type to determine if callable (without emitting code)
+                let peeked_type = type_queries::resolve_accessor_type(
+                    &mut self.program,
+                    param_type,
+                    &access.accessors,
+                    "$",
+                );
+                let is_callable = peeked_type.is_ok_and(|ty| {
+                    matches!(
+                        self.program.lookup_type(ty),
+                        Some(Type::Callable { .. }) | Some(Type::Process { .. })
+                    )
+                });
+
+                // If not callable and no explicit argument, drop incoming value first
+                if !is_callable && !has_argument && value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+
+                // Now load and compile
                 self.codegen.add_instruction(Instruction::Load(param_local));
 
                 // Parameter access has Parameter provenance
@@ -2326,12 +2405,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
 
                 if let Some(arg_type) = arg_type {
+                    // Explicit argument → call
                     let ty = self.apply_value_to_type(accessed_type, arg_type)?;
                     Ok((ty, Provenance::Unknown))
-                } else if let Some(val_type) = value_type {
+                } else if let (true, Some(val_type)) = (is_callable, value_type) {
+                    // Callable with implicit input → call
                     let ty = self.apply_value_to_type(accessed_type, val_type)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
+                    // Non-callable → already popped incoming value, just return reference
                     Ok((accessed_type, accessed_prov))
                 }
             }
@@ -2403,18 +2485,50 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     &name,
                 )?;
 
+                // For non-callable lookups, we need to know before loading whether to pop
+                // the incoming value. Peek at the type first.
+                // First try the full path as a variable (for captures), then resolve through type system.
+                let peeked_type = scopes::lookup_variable(&self.scopes, &name, &access.accessors)
+                    .map(|(ty, _)| ty)
+                    .or_else(|| {
+                        // Full path not found - resolve base variable + accessors through type system
+                        let (base_type, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
+                        type_queries::resolve_accessor_type(
+                            &mut self.program,
+                            base_type,
+                            &access.accessors,
+                            &name,
+                        )
+                        .ok()
+                    });
+
+                // Check if the final accessed type will be callable
+                let is_callable = peeked_type.is_some_and(|ty| {
+                    matches!(
+                        self.program.lookup_type(ty),
+                        Some(Type::Callable { .. }) | Some(Type::Process { .. })
+                    )
+                });
+
+                // If not callable and no explicit argument, drop incoming value first
+                if !is_callable && arg_type.is_none() && value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+
                 // compile_member_access loads the variable and handles accessors
-                // We need to track the provenance as Variable(name), then apply field accesses
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
 
                 if let Some(arg_type) = arg_type {
+                    // Explicit argument → always try to call
                     let ty = self.apply_value_to_type(accessed_type, arg_type)?;
                     Ok((ty, Provenance::Unknown))
-                } else if let Some(val_type) = value_type {
+                } else if let (true, Some(val_type)) = (is_callable, value_type) {
+                    // Callable with implicit input → call
                     let ty = self.apply_value_to_type(accessed_type, val_type)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
+                    // Non-callable → already popped incoming value, just return reference
                     Ok((accessed_type, accessed_prov))
                 }
             }
@@ -2519,16 +2633,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             Some(ast::AccessSource::Import(module)) => {
                 // %module or %module/submodule with optional .field accessors and [args]
-                if value_type.is_some() && access.argument.is_none() && access.accessors.is_empty()
-                {
-                    return Err(Error::FeatureUnsupported(
-                        "Import cannot be applied to value".to_string(),
-                    ));
-                }
-
                 let module_name = format!("%{}", module.join("/"));
 
-                // Compile argument first (like Identifier case) so function ends up on top
+                // Compile argument first so ripples can access the piped value
                 let arg_type = self.compile_argument(
                     access.argument.as_ref(),
                     value_type.as_ref(),
@@ -2537,18 +2644,46 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     &module_name,
                 )?;
 
-                // Compile the import with accessors - resolution happens inside compile_import
-                let accessed_type = self.compile_import(&module, &access.accessors)?;
+                // Resolve import type first (no code emission yet) to check if callable
+                let (cached, resolved_value, accessed_type) =
+                    self.resolve_import(&module, &access.accessors)?;
+
+                let is_callable = matches!(
+                    self.program.lookup_type(accessed_type),
+                    Some(Type::Callable { .. }) | Some(Type::Process { .. })
+                );
+
+                // If not callable and no explicit argument, drop incoming value BEFORE loading
+                if !is_callable && arg_type.is_none() && value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+
+                // Now emit instructions for the resolved import value
+                let (instructions, _) =
+                    self.value_to_instructions_from_cache(&resolved_value, &cached.binary_data)?;
+                for instruction in instructions {
+                    self.codegen.add_instruction(instruction);
+                }
 
                 if let Some(arg_type) = arg_type {
+                    // Explicit argument → always try to call
                     let ty = self.apply_value_to_type(accessed_type, arg_type)?;
                     Ok((ty, Provenance::Unknown))
-                } else if let Some(val_type) = value_type {
+                } else if let (true, Some(val_type)) = (is_callable, value_type) {
+                    // Callable with implicit input → call
                     let ty = self.apply_value_to_type(accessed_type, val_type)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
+                    // Non-callable → already popped incoming value, just return reference
                     Ok((accessed_type, Provenance::Unknown))
                 }
+            }
+            Some(ast::AccessSource::Self_) => {
+                // Self_ should only appear in Term::Reference, not Term::Access
+                Err(Error::InternalError {
+                    message: "Self_ source in Access (should use Term::Self_ or Term::Reference)"
+                        .to_string(),
+                })
             }
         }
     }
@@ -2560,32 +2695,35 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// - Tuple: each element is used as a source
     fn compile_select(
         &mut self,
-        sources: Vec<ast::Chain>,
+        sources: Option<Vec<ast::Chain>>,
         value_type: Option<usize>,
     ) -> Result<usize, Error> {
-        // Handle postfix form: `value ~> !` or `[a, b] ~> !`
-        // When sources is empty and there's a piped value, use the piped value directly
-        // (could be a single source OR a tuple of sources - executor handles both)
-        if sources.is_empty() {
-            if let Some(val_type) = value_type {
-                // Postfix form: piped value is already on stack
+        // Handle the different select forms:
+        // - None (bare `!`): postfix form, use chained value as source
+        // - Some(vec![]): explicit empty `![]`, discard chained value, return nil
+        // - Some(sources): explicit sources, discard chained value
+        let sources = match sources {
+            None => {
+                // Bare `!` - postfix form using chained value
+                let val_type = value_type.ok_or_else(|| {
+                    Error::FeatureUnsupported("Bare ! requires a piped value".to_string())
+                })?;
+                // Value is already on stack
                 self.codegen.add_instruction(Instruction::Select);
                 return self.compute_select_return_type(&[val_type]);
-            } else {
-                // ![] with no piped value is a no-op, returns nil
+            }
+            Some(sources) if sources.is_empty() => {
+                // Explicit `![]` - discard chained value, return nil
+                if value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
                 self.codegen.add_instruction(Instruction::Tuple(NIL));
                 return Ok(self.program.register_type(Type::nil()));
             }
-        }
+            Some(sources) => sources,
+        };
 
-        // If there's a chained value, check that it's used (via ripple) in at least one source
-        if value_type.is_some() && !helpers::select_contains_ripple(&sources) {
-            return Err(Error::FeatureUnsupported(
-                "Chained value must be used in select sources (use ripple operator ~)".to_string(),
-            ));
-        }
-
-        // Compile all sources
+        // Compile all sources (explicit sources discard chained value)
         let source_types = self.compile_select_sources(&sources, value_type.as_ref())?;
 
         // If there was a chained value, remove it from the bottom of the stack
@@ -2673,38 +2811,38 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     ) -> Result<(usize, Provenance), Error> {
         match term {
             ast::Term::Literal(literal) => {
+                // Literals don't use the piped value, drop it
                 if value_type.is_some() {
-                    return Err(Error::FeatureUnsupported(
-                        "Literal cannot be used as pattern; use assignment pattern (e.g., =42)"
-                            .to_string(),
-                    ));
+                    self.codegen.add_instruction(Instruction::Pop);
                 }
                 let ty = self.compile_literal(literal)?;
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Tuple(tuple) => {
-                // Tuples without ripples or spreads when a value is present should use assignment patterns
-                if value_type.is_some()
-                    && !helpers::tuple_contains_ripple(&tuple.fields)
-                    && !helpers::tuple_contains_spread(&tuple.fields)
-                {
-                    return Err(Error::ValueIgnored(
-                        "Tuple construction ignores piped value; use ripple (e.g., [~, 2]) or assignment pattern (e.g., =[x, y])"
-                            .to_string(),
-                    ));
+                // Check if tuple uses the piped value
+                let uses_piped_value = helpers::tuple_contains_ripple(&tuple.fields)
+                    || helpers::tuple_contains_spread(&tuple.fields);
+
+                // If tuple doesn't use the piped value, drop it
+                if value_type.is_some() && !uses_piped_value {
+                    self.codegen.add_instruction(Instruction::Pop);
                 }
 
-                // Convert value_type to ripple_context if present, otherwise use existing ripple_context
-                // Set owns_value=true when converting from value_type (we own it and must clean up)
+                // Convert value_type to ripple_context if present AND tuple uses it
                 let ripple_context_value;
                 let ripple_context_param = if let Some(vt) = value_type.as_ref() {
-                    ripple_context_value = RippleContext {
-                        value_type_id: *vt,
-                        stack_offset: 0,
-                        owns_value: true,
-                        provenance: value_provenance,
-                    };
-                    Some(&ripple_context_value)
+                    if uses_piped_value {
+                        ripple_context_value = RippleContext {
+                            value_type_id: *vt,
+                            stack_offset: 0,
+                            owns_value: true,
+                            provenance: value_provenance,
+                        };
+                        Some(&ripple_context_value)
+                    } else {
+                        // Value was popped, use parent ripple context if any
+                        ripple_context
+                    }
                 } else {
                     ripple_context
                 };
@@ -2741,21 +2879,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Function(func) => {
-                // Compile the function itself
-                let function_type = self.compile_function(func)?;
+                // Function literals always produce functions - they don't auto-call.
+                // To call an inline function, bind it first: f = #int {...}, 5 ~> f
+                if value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
 
-                // If a value is being piped to it, apply the value (function call)
-                let result_type = if let Some(val_type) = value_type {
-                    // Function calls can fail for non-type reasons, disable complement narrowing
-                    if let Some(n) = narrowing.as_deref_mut() {
-                        n.disable();
-                    }
-                    self.apply_value_to_type(function_type, val_type)?
-                } else {
-                    function_type
-                };
-                // Function call results have unknown provenance
-                Ok((result_type, Provenance::Unknown))
+                let function_type = self.compile_function(func)?;
+                Ok((function_type, Provenance::Unknown))
             }
             ast::Term::Access(access) => {
                 self.compile_access(access, value_type, value_provenance.clone(), ripple_context)
@@ -2904,6 +3035,53 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     process_type
                 };
                 Ok((result_type, Provenance::Unknown))
+            }
+            ast::Term::Reference(access) => {
+                // Explicit reference: drop incoming value and load the referenced value without calling
+                if value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+
+                // Load the referenced value
+                match access.source {
+                    Some(ast::AccessSource::Identifier(ref name)) => {
+                        let (accessed_type, accessed_prov) =
+                            self.compile_member_access(name, access.accessors)?;
+                        Ok((accessed_type, accessed_prov))
+                    }
+                    Some(ast::AccessSource::Parameter) => {
+                        // &$ - reference to function parameter
+                        let (param_type, param_local) =
+                            scopes::get_function_parameter(&self.scopes)?;
+                        self.codegen.add_instruction(Instruction::Load(param_local));
+                        let (accessed_type, accessed_prov) = self.compile_accessor(
+                            param_type,
+                            access.accessors,
+                            "$",
+                            Provenance::Parameter,
+                        )?;
+                        Ok((accessed_type, accessed_prov))
+                    }
+                    Some(ast::AccessSource::Import(ref module)) => {
+                        let ty = self.compile_import(module, &access.accessors)?;
+                        Ok((ty, Provenance::Unknown))
+                    }
+                    Some(ast::AccessSource::Self_) => {
+                        // &. - reference to self (current process)
+                        self.codegen.add_instruction(Instruction::Self_);
+                        let self_type = self.program.register_type(Type::Process {
+                            send: Some(self.current_receive_type_id),
+                            receive: None,
+                        });
+                        Ok((self_type, Provenance::Unknown))
+                    }
+                    Some(ast::AccessSource::Ripple) => Err(Error::FeatureUnsupported(
+                        "Cannot reference ripple (~) - use it directly".to_string(),
+                    )),
+                    None => Err(Error::FeatureUnsupported(
+                        "Reference requires an identifier (e.g., &f)".to_string(),
+                    )),
+                }
             }
         }
     }

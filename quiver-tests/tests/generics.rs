@@ -38,15 +38,16 @@ fn test_generic_type_with_different_instantiations() {
 #[test]
 fn test_generic_function_single_type_param() {
     quiver()
-        .evaluate("#<t>t { ~> =x => x }")
+        .evaluate("#<t>t { =x => x }")
         .expect_type("#t -> t");
 
+    // Inline functions are not auto-called; bind first, then call
     quiver()
-        .evaluate("42 ~> #<t>t { ~> =x => x }")
+        .evaluate("f = #<t>t { =x => x }, 42 ~> f")
         .expect_type("int");
 
     quiver()
-        .evaluate("'00' ~> #<t>t { ~> =x => x }")
+        .evaluate("f = #<t>t { =x => x }, '00' ~> f")
         .expect_type("bin");
 }
 
@@ -55,7 +56,7 @@ fn test_generic_function_multiple_type_params() {
     quiver()
         .evaluate(
             r#"
-            pair = #<a, b>[a, b] { ~> =[x, y] => [y, x] },
+            pair = #<a, b>[a, b] { =[x, y] => [y, x] },
             pair[1, '00']
             "#,
         )
@@ -64,8 +65,9 @@ fn test_generic_function_multiple_type_params() {
 
 #[test]
 fn test_generic_function_with_same_type_param_widening() {
+    // Inline functions are not auto-called; bind first, then call
     quiver()
-        .evaluate("[1, '00'] ~> #<t>[t, t] { ~> =[a, _] => a }")
+        .evaluate("f = #<t>[t, t] { =[a, _] => a }, [1, '00'] ~> f")
         .expect_type("bin | int");
 }
 
@@ -76,8 +78,8 @@ fn test_generic_function_with_recursive_type() {
             r#"
             list<t> : Nil | Cons[t, ^];
             head = #<t>list<t> {
-              | ~> =Cons[h, _] => h
-              | ~> =Nil => 0
+              | =Cons[h, _] => h
+              | =Nil => 0
             },
             Cons[42, Cons[99, Nil]] ~> head
             "#,
@@ -91,8 +93,8 @@ fn test_generic_type_structural_equivalence() {
         .evaluate(
             r#"
             list<t> : Nil | Cons[t, ^];
-            f = #list<int> { ~> =xs => xs },
-            g = #list<int> { ~> =xs => xs },
+            f = #list<int> { =xs => xs },
+            g = #list<int> { =xs => xs },
             xs = Cons[42, Nil],
             xs ~> f ~> g
             "#,
@@ -131,7 +133,7 @@ fn test_nested_generic_types() {
 #[test]
 fn test_generic_function_return_type_inference() {
     quiver()
-        .evaluate("#<t>t { ~> =x => A[x] }")
+        .evaluate("#<t>t { =x => A[x] }")
         .expect_type("#t -> A[t]");
 }
 
@@ -142,7 +144,7 @@ fn test_generic_function_with_tuple_fields() {
             r#"
             pair<a, b> : Pair[fst: a, snd: b];
             swap = #<a, b>pair<a, b> {
-              ~> =Pair[fst: x, snd: y] => Pair[fst: y, snd: x]
+              =Pair[fst: x, snd: y] => Pair[fst: y, snd: x]
             },
             Pair[fst: 1, snd: "a"] ~> swap
             "#,
@@ -170,7 +172,7 @@ fn test_generic_type_with_partial_type() {
         .evaluate(
             r#"
             pair<t> : Pair[fst: t, snd: t];
-            get_fst = #<t>pair<t> { ~> .fst },
+            get_fst = #<t>pair<t> { .fst },
             Pair[fst: 42, snd: 99] ~> get_fst
             "#,
         )
@@ -184,7 +186,7 @@ fn test_generic_function_pattern_matching() {
             r#"
             list<t> : Nil | Cons[t, ^];
             sum_first_two = #list<int> {
-              | ~> =Cons[a, Cons[b, _]] => [a, b] ~> __add__
+              | =Cons[a, Cons[b, _]] => [a, b] ~> __add__
               | 0
             },
             Cons[10, Cons[20, Cons[30, Nil]]] ~> sum_first_two
@@ -199,7 +201,7 @@ fn test_wrong_number_of_type_arguments() {
         .evaluate(
             r#"
             pair<a, b> : Pair[a, b];
-            f = #pair<int> { ~> =x => x }
+            f = #pair<int> { =x => x }
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
@@ -226,7 +228,7 @@ fn test_generic_function_with_union_result() {
         .evaluate(
             r#"
             maybe<t> : None | Some[t];
-            wrap_some = #<t>t { ~> =x => Some[x] },
+            wrap_some = #<t>t { =x => Some[x] },
             42 ~> wrap_some
             "#,
         )
@@ -239,8 +241,8 @@ fn test_generic_nested_function_calls() {
         .evaluate(
             r#"
             list<t> : Nil | Cons[t, ^];
-            singleton = #<t>t { ~> =x => Cons[x, Nil] },
-            head = #<t>list<t> { ~> =Cons[h, _] => h },
+            singleton = #<t>t { =x => Cons[x, Nil] },
+            head = #<t>list<t> { =Cons[h, _] => h },
             42 ~> singleton ~> head
             "#,
         )

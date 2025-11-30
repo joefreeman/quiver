@@ -10,21 +10,20 @@
 
 ```quiver
 // Define a recursive list type
-list<t> : Nil | Cons[t, &];
+list<t> : Nil | Cons[t, ^];
 
 // Compute the sum of a list using tail recursion
 sum' = #[list<int>, int] {
-  | ~> =[Nil, acc] => acc
-  | ~> =[Cons[head, tail], acc] => {
-     %math.add[head, acc] ~> &[tail, ~]
+  | =[Nil, acc] => acc
+  | =[Cons[head, tail], acc] => {
+     %math.add[head, acc] ~> ^[tail, ~]
   }
 },
 
-sum = #list<int> { ~> sum'[~, 0] },
+sum = #list<int> { sum'[~, 0] },
 
 // Build and sum a list
-xs = Cons[1, Cons[2, Cons[3, Nil]]],
-xs ~> sum  // 6
+Cons[1, Cons[2, Cons[3, Nil]]] ~> sum  // 6
 ```
 
 > Run the example above in the REPL (`quiv repl`, or at [quiver.run](https://quiver.run)), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
