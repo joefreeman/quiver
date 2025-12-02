@@ -650,15 +650,11 @@ impl Repl {
     #[wasm_bindgen(js_name = "getVariables")]
     pub fn get_variables(&self, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
-        let environment = self.environment.borrow();
         let repl = self.repl.borrow();
         let vars = repl.get_variables();
         let js_vars: Vec<Variable> = vars
             .into_iter()
-            .map(|(name, type_id)| Variable {
-                name,
-                var_type: environment.format_type_by_id(type_id),
-            })
+            .map(|(name, var_type)| Variable { name, var_type })
             .collect();
 
         let cb = CallbackHandle::new(callback);

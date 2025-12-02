@@ -312,8 +312,7 @@ impl TestResult {
             .map(|(_, ty)| ty);
 
         match variable_type {
-            Some(type_id) => {
-                let actual = self.environment.format_type_by_id(*type_id);
+            Some(actual) => {
                 assert_eq!(
                     actual, expected,
                     "Expected variable '{}' to have type '{}', but got '{}' for source: {}",

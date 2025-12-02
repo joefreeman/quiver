@@ -206,14 +206,16 @@ impl<E: Effect> Repl<E> {
         env.request_locals(repl_process_id, vec![local_index])
     }
 
-    /// Get all variable names and their type IDs, ordered by local index
-    pub fn get_variables(&self) -> Vec<(String, usize)> {
+    /// Get all variable names and their formatted types, ordered by local index
+    pub fn get_variables(&self) -> Vec<(String, String)> {
         let mut vars: Vec<_> = self
             .bindings
             .iter()
             .filter_map(|(name, binding)| {
                 if let Binding::Variable { ty, index, .. } = binding {
-                    Some((name.clone(), *ty, *index))
+                    // Format the type using the Repl's own program
+                    let formatted_type = quiver_core::format::format_type_by_id(&self.program, *ty);
+                    Some((name.clone(), formatted_type, *index))
                 } else {
                     None
                 }

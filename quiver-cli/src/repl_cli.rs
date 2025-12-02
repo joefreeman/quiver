@@ -264,8 +264,7 @@ impl ReplCli {
             println!("{}", "No variables defined".bright_black());
         } else {
             println!("{}", "Variables:".bright_black());
-            for (name, type_id) in vars {
-                let formatted_type = self.environment.lock().unwrap().format_type_by_id(type_id);
+            for (name, formatted_type) in vars {
                 println!(
                     "{}",
                     format!("  {}: {}", name, formatted_type).bright_black()
