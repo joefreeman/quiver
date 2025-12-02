@@ -98,6 +98,15 @@ pub struct ExecutionStats {
 
     /// Per-builtin statistics by index: (count, total_time_ns)
     pub builtin_stats: HashMap<usize, (u64, u64)>,
+
+    /// Peak stack size across all processes
+    pub peak_stack_size: usize,
+
+    /// Peak locals size across all processes
+    pub peak_locals_size: usize,
+
+    /// Peak frame count across all processes
+    pub peak_frame_count: usize,
 }
 
 impl ExecutionStats {
@@ -117,6 +126,17 @@ impl ExecutionStats {
             entry.0 += count;
             entry.1 += time;
         }
+        // Take max of peaks
+        self.peak_stack_size = self.peak_stack_size.max(other.peak_stack_size);
+        self.peak_locals_size = self.peak_locals_size.max(other.peak_locals_size);
+        self.peak_frame_count = self.peak_frame_count.max(other.peak_frame_count);
+    }
+
+    /// Update peak memory statistics if current values exceed previous peaks
+    pub fn update_peaks(&mut self, stack_size: usize, locals_size: usize, frame_count: usize) {
+        self.peak_stack_size = self.peak_stack_size.max(stack_size);
+        self.peak_locals_size = self.peak_locals_size.max(locals_size);
+        self.peak_frame_count = self.peak_frame_count.max(frame_count);
     }
 
     pub fn total_instructions(&self) -> u64 {
@@ -816,6 +836,15 @@ impl<E: Effect> Executor<E> {
                 .or_insert((0, 0));
             entry.0 += 1;
             entry.1 += elapsed;
+
+            // Track memory peaks
+            if let Some(process) = self.processes.get(&pid) {
+                self.stats.update_peaks(
+                    process.stack.len(),
+                    process.locals.len(),
+                    process.frames.len(),
+                );
+            }
         }
 
         result

@@ -424,94 +424,6 @@ fn execute_bytecode(
     execute_bytecode_with_environment(bytecode, quiet, profile)
 }
 
-fn _print_profile_report(
-    stats: &quiver_core::executor::ExecutionStats,
-    program: &Program,
-    wall_time: std::time::Duration,
-) {
-    // Calculate totals
-    let total_instr_count: u64 = stats.instruction_stats.values().map(|(c, _)| c).sum();
-    let total_instr_time: u64 = stats.instruction_stats.values().map(|(_, t)| t).sum();
-    let total_builtin_count: u64 = stats.builtin_stats.values().map(|(c, _)| c).sum();
-    let total_builtin_time: u64 = stats.builtin_stats.values().map(|(_, t)| t).sum();
-
-    let wall_ms = wall_time.as_secs_f64() * 1000.0;
-    let exec_ms = (total_instr_time + total_builtin_time) as f64 / 1_000_000.0;
-    let exec_percent = if wall_ms > 0.0 {
-        (exec_ms / wall_ms) * 100.0
-    } else {
-        0.0
-    };
-
-    eprintln!(
-        "Total time: {:.2}ms (execution: {:.2}ms; {:.1}%)",
-        wall_ms, exec_ms, exec_percent
-    );
-
-    // Instructions sorted by time
-    if !stats.instruction_stats.is_empty() {
-        let mut instrs: Vec<_> = stats.instruction_stats.iter().collect();
-        instrs.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
-
-        eprintln!(
-            "\nInstructions ({}; {:.2}ms):",
-            total_instr_count,
-            total_instr_time as f64 / 1_000_000.0
-        );
-        for (instr_type, (count, time)) in instrs.iter().take(10) {
-            let time_percent = if total_instr_time > 0 {
-                (*time as f64 / total_instr_time as f64) * 100.0
-            } else {
-                0.0
-            };
-            let avg_ns = if *count > 0 { *time / *count } else { 0 };
-            eprintln!(
-                "  {:?}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
-                instr_type,
-                count,
-                *time as f64 / 1_000_000.0,
-                time_percent,
-                avg_ns
-            );
-        }
-    }
-
-    // Builtins sorted by time
-    if !stats.builtin_stats.is_empty() {
-        let mut builtins: Vec<_> = stats.builtin_stats.iter().collect();
-        builtins.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
-
-        eprintln!(
-            "\nBuiltins ({}; {:.2}ms):",
-            total_builtin_count,
-            total_builtin_time as f64 / 1_000_000.0
-        );
-        for (builtin_idx, (count, time)) in builtins.iter().take(10) {
-            let builtin_name = program
-                .get_builtins()
-                .get(**builtin_idx)
-                .map(|b| b.name.as_str())
-                .unwrap_or("<unknown>");
-            let time_percent = if total_builtin_time > 0 {
-                (*time as f64 / total_builtin_time as f64) * 100.0
-            } else {
-                0.0
-            };
-            let avg_ns = if *count > 0 { *time / *count } else { 0 };
-            eprintln!(
-                "  {}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
-                builtin_name,
-                count,
-                *time as f64 / 1_000_000.0,
-                time_percent,
-                avg_ns
-            );
-        }
-    }
-
-    eprintln!();
-}
-
 /// Print a profile report for bytecode execution (without full Program type info).
 /// Uses builtin names from the bytecode instead of looking them up in Program.
 fn print_bytecode_profile_report(
@@ -596,6 +508,14 @@ fn print_bytecode_profile_report(
                 avg_ns
             );
         }
+    }
+
+    // Memory peaks
+    if stats.peak_stack_size > 0 || stats.peak_locals_size > 0 || stats.peak_frame_count > 0 {
+        eprintln!("\nMemory peaks:");
+        eprintln!("  Stack: {}", stats.peak_stack_size);
+        eprintln!("  Locals: {}", stats.peak_locals_size);
+        eprintln!("  Frames: {}", stats.peak_frame_count);
     }
 
     eprintln!();
