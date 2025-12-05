@@ -23,6 +23,8 @@ pub enum Type {
     Integer,
     #[serde(rename = "bin")]
     Binary,
+    #[serde(rename = "ref")]
+    Reference,
     #[serde(rename = "tuple")]
     Tuple(usize),
     #[serde(rename = "partial")]
@@ -233,6 +235,7 @@ fn is_compatible_impl<T: TypeLookup>(
         // Basic types must match exactly
         (Type::Integer, Type::Integer) => true,
         (Type::Binary, Type::Binary) => true,
+        (Type::Reference, Type::Reference) => true,
 
         // Process types are compatible if their send and receive types are compatible
         (

@@ -21,7 +21,8 @@ pub fn execute_bytecode_sync<E: Effect>(
         .entry
         .ok_or_else(|| Error::InvalidArgument("Bytecode has no entry point".to_string()))?;
 
-    let mut executor = Executor::new(builtins.clone(), profile);
+    // Use worker_id 0 for single-threaded execution
+    let mut executor = Executor::new(builtins.clone(), profile, 0);
 
     // Compute type compatibility for O(1) runtime type checks
     assert!(

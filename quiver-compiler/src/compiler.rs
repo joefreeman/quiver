@@ -2051,6 +2051,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Value::Resource(..) => Err(Error::FeatureUnsupported(
                 "Cannot use resource in constant context".to_string(),
             )),
+            Value::Reference(_) => Err(Error::FeatureUnsupported(
+                "Cannot use ref in constant context".to_string(),
+            )),
         }
     }
 
@@ -3042,7 +3045,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
                 Ok((result_type, Provenance::Unknown))
             }
-            ast::Term::Reference(access) => {
+            ast::Term::Reference(Some(access)) => {
                 // Explicit reference: drop incoming value and load the referenced value without calling
                 if value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
@@ -3088,6 +3091,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         "Reference requires an identifier (e.g., &f)".to_string(),
                     )),
                 }
+            }
+            ast::Term::Reference(None) => {
+                // Standalone & - create a new unique ref
+                // Drop incoming value if present
+                if value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+                self.codegen.add_instruction(Instruction::Reference);
+                let ref_type = self.program.register_type(Type::Reference);
+                Ok((ref_type, Provenance::Unknown))
             }
         }
     }

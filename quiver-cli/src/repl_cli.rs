@@ -40,7 +40,7 @@ impl ReplCli {
         let builtins = crate::build_builtin_registry();
 
         let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
-        for _ in 0..num_workers {
+        for i in 0..num_workers {
             workers.push(Box::new(spawn_worker(
                 || {
                     std::time::SystemTime::now()
@@ -50,6 +50,7 @@ impl ReplCli {
                 },
                 builtins.clone(),
                 false, // Don't enable profiling in REPL
+                i as u16,
             )));
         }
         let effect_backend = crate::create_effect_backend();

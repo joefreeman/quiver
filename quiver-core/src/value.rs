@@ -20,6 +20,7 @@ pub enum Binary {
 pub enum Value {
     Integer(i64),
     Binary(Binary),
+    Reference(u64), // Unique ref: (worker_id << 48) | counter
     Tuple(usize, Vec<Value>),
     Function(usize, Vec<Value>),
     Builtin(usize), // builtin_id (index into builtins table)
@@ -52,6 +53,7 @@ impl Value {
         match self {
             Value::Integer(_) => "integer",
             Value::Binary(_) => "binary",
+            Value::Reference(_) => "ref",
             Value::Tuple(_, _) => "tuple",
             Value::Function(_, _) => "function",
             Value::Builtin(_) => "builtin",

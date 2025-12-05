@@ -15,6 +15,7 @@ pub enum Constant {
 pub enum ConcreteType {
     Integer,
     Binary,
+    Reference,
     Tuple(usize),    // tuple_id
     Function(usize), // func_id
     Builtin(usize),  // builtin_id
@@ -80,5 +81,6 @@ pub enum Instruction {
     Send,
     Self_,
     Select,
+    Reference,
     Process(usize, usize), // (process_id, function_index)
 }

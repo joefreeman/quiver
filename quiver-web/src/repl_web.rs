@@ -193,7 +193,7 @@ impl Environment {
 
         // Create workers by calling the factory function
         let mut workers: Vec<Box<dyn WorkerHandle<WebEffect>>> = Vec::new();
-        for _ in 0..num_workers {
+        for i in 0..num_workers {
             let worker = worker_factory
                 .call0(&JsValue::NULL)
                 .map_err(|e| JsValue::from_str(&format!("Failed to create worker: {:?}", e)))?;
@@ -213,12 +213,17 @@ impl Environment {
             let pending_commands = handle.pending_commands();
             let event_queue_for_closure = event_queue.clone();
             let worker_for_closure = worker.clone();
+            let worker_id = i;
 
             // Set up message handler for worker events
             let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
                 if let Some(text) = event.data().as_string() {
                     if text == "ready" {
-                        // Worker is ready - mark it and flush pending commands
+                        // Worker is ready - send init message with worker_id
+                        let init_msg = format!("init:{}", worker_id);
+                        let _ = worker_for_closure.post_message(&JsValue::from_str(&init_msg));
+
+                        // Mark as ready and flush pending commands
                         *ready_flag.borrow_mut() = true;
 
                         // Send all pending commands

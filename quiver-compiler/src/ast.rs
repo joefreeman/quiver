@@ -63,8 +63,8 @@ pub enum Term {
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
     Select(Option<Vec<Chain>>),
     Process(usize),
-    /// Explicit reference to a value without calling it (e.g., `&f`)
-    Reference(Access),
+    /// Reference operator (`&`). None creates a new unique ref, Some references a value.
+    Reference(Option<Access>),
 }
 
 impl Term {
@@ -211,6 +211,7 @@ pub struct ProcessType {
 pub enum PrimitiveType {
     Int,
     Bin,
+    Ref,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -122,7 +122,7 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             }
-            ast::Term::Reference(access) => {
+            ast::Term::Reference(Some(access)) => {
                 // Reference to a value - same variable capture as Access
                 if let Some(ast::AccessSource::Identifier(name)) = &access.source {
                     self.visit_identifier(name, access.accessors.clone());
@@ -134,6 +134,9 @@ impl<'a> FreeVariableCollector<'a> {
                         }
                     }
                 }
+            }
+            ast::Term::Reference(None) => {
+                // Ref creation doesn't capture any variables
             }
         }
     }

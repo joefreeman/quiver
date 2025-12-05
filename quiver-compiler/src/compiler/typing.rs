@@ -414,6 +414,7 @@ fn resolve_ast_type_impl(
     match ast_type {
         ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(program.register_type(Type::Integer)),
         ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(program.register_type(Type::Binary)),
+        ast::Type::Primitive(ast::PrimitiveType::Ref) => Ok(program.register_type(Type::Reference)),
         ast::Type::Resource(name) => Ok(program.register_type(Type::Resource(name))),
         ast::Type::Tuple(tuple) => {
             // Resolve field types without distributing unions
@@ -721,7 +722,9 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
                 .iter()
                 .any(|(_, field_type_id)| contains_variables(*field_type_id, lookup))
         }
-        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Resource(_) => false,
+        Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Resource(_) => {
+            false
+        }
     }
 }
 
@@ -797,7 +800,9 @@ pub fn substitute(
                 type_id
             }
         }
-        Type::Integer | Type::Binary | Type::Cycle(_) | Type::Resource(_) => type_id,
+        Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Resource(_) => {
+            type_id
+        }
         Type::Callable {
             parameter,
             result,

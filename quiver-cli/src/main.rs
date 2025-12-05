@@ -326,7 +326,7 @@ fn execute_bytecode_with_environment(
     let builtins = build_builtin_registry();
 
     let mut workers: Vec<Box<dyn WorkerHandle<quiver_io::NativeEffect>>> = Vec::new();
-    for _ in 0..num_workers {
+    for i in 0..num_workers {
         workers.push(Box::new(spawn_worker(
             || {
                 std::time::SystemTime::now()
@@ -336,6 +336,7 @@ fn execute_bytecode_with_environment(
             },
             builtins.clone(),
             profile,
+            i as u16,
         )));
     }
 

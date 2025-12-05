@@ -42,6 +42,9 @@ pub enum Value {
         #[serde(rename = "processId")]
         process_id: usize,
     },
+    Ref {
+        value: String, // Hex-encoded ref value for JSON serialization
+    },
 }
 
 impl Value {
@@ -88,6 +91,11 @@ impl Value {
                 // Resource type_id is stored differently in web vs core
                 // Use 0 as placeholder - resource_type_id is for type checking only
                 quiver_core::value::Value::Resource(*id, 0)
+            }
+            Value::Ref { value } => {
+                // Decode hex ref value
+                let ref_value = u64::from_str_radix(value, 16).unwrap_or(0);
+                quiver_core::value::Value::Reference(ref_value)
             }
         }
     }
@@ -152,6 +160,9 @@ impl Value {
                 id: *id,
                 process_id: 0, // Resources are now tracked by Environment, not processes
             },
+            quiver_core::value::Value::Reference(r) => Value::Ref {
+                value: format!("{:x}", r),
+            },
         }
     }
 
@@ -197,6 +208,12 @@ impl Value {
             Value::Resource { id, process_id: _ } => {
                 // Resource type_id is for type checking only, use 0 as placeholder
                 Ok(quiver_core::value::Value::Resource(id, 0))
+            }
+            Value::Ref { value } => {
+                // Decode hex ref value
+                let ref_value = u64::from_str_radix(&value, 16)
+                    .map_err(|e| format!("Invalid ref hex: {}", e))?;
+                Ok(quiver_core::value::Value::Reference(ref_value))
             }
         }
     }

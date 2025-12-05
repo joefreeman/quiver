@@ -40,6 +40,7 @@ handle_response = #response {
 
 - `int` - Integer values
 - `bin` - Binary data (bytes)
+- `ref` - Unique opaque identifiers
 
 ### Tuple types
 
@@ -344,6 +345,16 @@ x = coords ~> .0         // Positional access in pipeline
 [5, 6, 5] ~> ==      // Returns [] (not equal)
 [] ~> /              // Returns Ok (negation of nil)
 5 ~> /               // Returns [] (negation of non-nil)
+```
+
+### Ref creation
+
+Standalone `&` creates a unique, opaque identifier. Refs support equality and pattern matching.
+
+```
+tag = &,
+[tag, 42] ~> =[&tag, x],
+x   // 42
 ```
 
 ## Functions

@@ -308,6 +308,9 @@ impl Program {
             Value::Resource(..) => {
                 panic!("Cannot convert resource to instructions")
             }
+            Value::Reference(_) => {
+                panic!("Cannot convert ref to instructions")
+            }
         }
     }
 }

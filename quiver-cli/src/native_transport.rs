@@ -61,6 +61,7 @@ pub fn spawn_worker<F>(
     time_fn: F,
     builtins: quiver_core::builtins::BuiltinRegistry<NativeEffect>,
     profile: bool,
+    worker_id: u16,
 ) -> NativeWorkerHandle
 where
     F: Fn() -> u64 + Send + 'static,
@@ -75,8 +76,13 @@ where
         let error_sender = evt_tx.clone();
         let evt_sender = NativeEventSender { sender: evt_tx };
 
-        let mut worker =
-            Worker::<NativeEffect, _, _>::new(cmd_receiver, evt_sender, builtins, profile);
+        let mut worker = Worker::<NativeEffect, _, _>::new(
+            cmd_receiver,
+            evt_sender,
+            builtins,
+            profile,
+            worker_id,
+        );
 
         // Run the worker loop
         loop {

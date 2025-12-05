@@ -523,6 +523,7 @@ fn primitive_type(input: Span) -> IResult<Span, Type> {
     alt((
         nom_value(Type::Primitive(PrimitiveType::Int), tag("int")),
         nom_value(Type::Primitive(PrimitiveType::Bin), tag("bin")),
+        nom_value(Type::Primitive(PrimitiveType::Ref), tag("ref")),
     ))(input)
 }
 
@@ -907,7 +908,10 @@ fn make_source_chain(term: Term) -> Chain {
 
 // Helper to check if an identifier looks like a type (primitive or capitalized)
 fn is_type_identifier(ident: &str) -> bool {
-    ident == "int" || ident == "bin" || ident.chars().next().is_some_and(|c| c.is_uppercase())
+    ident == "int"
+        || ident == "bin"
+        || ident == "ref"
+        || ident.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 // Helper to convert an identifier to a type
@@ -915,6 +919,7 @@ fn identifier_to_type(ident: String) -> Type {
     match ident.as_str() {
         "int" => Type::Primitive(PrimitiveType::Int),
         "bin" => Type::Primitive(PrimitiveType::Bin),
+        "ref" => Type::Primitive(PrimitiveType::Ref),
         _ => Type::Identifier {
             name: ident,
             arguments: vec![],
@@ -1211,6 +1216,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 let param_type = match ident.as_str() {
                     "int" => Type::Primitive(PrimitiveType::Int),
                     "bin" => Type::Primitive(PrimitiveType::Bin),
+                    "ref" => Type::Primitive(PrimitiveType::Ref),
                     _ => Type::Identifier {
                         name: ident,
                         arguments: vec![],
@@ -1413,21 +1419,23 @@ fn process_ref_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
-/// Reference term: &identifier, &module.func, or &. (explicit reference without calling)
+/// Reference term: &identifier, &module.func, &. (explicit reference without calling), or standalone & (create ref)
 fn reference_term(input: Span) -> IResult<Span, Term> {
     preceded(
         char('&'),
         alt((
             // &. - reference to self
             map(char('.'), |_| {
-                Term::Reference(Access {
+                Term::Reference(Some(Access {
                     source: Some(AccessSource::Self_),
                     accessors: vec![],
                     argument: None,
-                })
+                }))
             }),
             // &identifier or &module.func
-            map(access, Term::Reference),
+            map(access, |a| Term::Reference(Some(a))),
+            // Standalone & - create a new unique ref
+            success(Term::Reference(None)),
         )),
     )(input)
 }

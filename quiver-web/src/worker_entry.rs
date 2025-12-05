@@ -44,21 +44,50 @@ pub fn worker_main() {
 
     let evt_sender = WebEventSender::new(post_message_fn.clone());
 
-    // Signal that worker is ready to receive commands
+    // Signal that worker is ready to receive init message
     global
         .post_message(&JsValue::from_str("ready"))
         .expect("Failed to send ready signal");
 
-    // Set up message handler for commands
+    // State for initialization
+    let initialized = Rc::new(RefCell::new(false));
+    let initialized_clone = initialized.clone();
+    let evt_sender_clone = Rc::new(RefCell::new(Some(evt_sender)));
+    let evt_sender_for_closure = evt_sender_clone.clone();
+    let command_queue_for_init = command_queue.clone();
+
+    // Set up message handler - handles both init and commands
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
-            // Parse as Command
-            match serde_json::from_str::<Command<WebEffect>>(&text) {
-                Ok(cmd) => {
-                    command_queue_clone.borrow_mut().push_back(cmd);
+            if !*initialized_clone.borrow() {
+                // Waiting for init message: "init:N" where N is worker_id
+                if let Some(id_str) = text.strip_prefix("init:") {
+                    let worker_id: u16 = id_str.parse().unwrap_or(0);
+
+                    // Create and initialize worker now that we have the ID
+                    let cmd_receiver = WebCommandReceiver::new(command_queue_for_init.clone());
+                    let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
+                        &quiver_core::builtins::core_modules(),
+                    );
+                    let evt_sender = evt_sender_for_closure.borrow_mut().take().unwrap();
+                    let worker = Worker::new(cmd_receiver, evt_sender, builtins, false, worker_id);
+
+                    *initialized_clone.borrow_mut() = true;
+
+                    // Start the worker loop
+                    start_worker_loop(worker);
                 }
-                Err(e) => {
-                    web_sys::console::error_1(&format!("Failed to parse command: {}", e).into());
+            } else {
+                // Already initialized - parse as Command
+                match serde_json::from_str::<Command<WebEffect>>(&text) {
+                    Ok(cmd) => {
+                        command_queue_clone.borrow_mut().push_back(cmd);
+                    }
+                    Err(e) => {
+                        web_sys::console::error_1(
+                            &format!("Failed to parse command: {}", e).into(),
+                        );
+                    }
                 }
             }
         }
@@ -66,18 +95,6 @@ pub fn worker_main() {
 
     global.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     onmessage.forget(); // Keep closure alive
-
-    // Create and initialize worker immediately
-    let cmd_receiver = WebCommandReceiver::new(command_queue);
-    // Use core-only modules for web REPL (no network builtins)
-    let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
-        &quiver_core::builtins::core_modules(),
-    );
-    // Workers no longer manage io_backend - it's owned by Environment
-    let worker = Worker::new(cmd_receiver, evt_sender, builtins, false);
-
-    // Start the worker loop
-    start_worker_loop(worker);
 }
 
 fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSender>) {

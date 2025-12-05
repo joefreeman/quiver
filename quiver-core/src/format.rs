@@ -53,6 +53,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
     match type_def {
         Type::Integer => "int".to_string(),
         Type::Binary => "bin".to_string(),
+        Type::Reference => "ref".to_string(),
         Type::Process { send, receive } => {
             let formatted = match (send, receive) {
                 (Some(send_id), Some(receive_id)) => {
@@ -276,6 +277,11 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
         }
         Value::Process(process_id, _) => format!("@{}", process_id),
         Value::Resource(resource_id, _) => format!("\\#{}", resource_id),
+        Value::Reference(r) => {
+            let worker_id = r >> 48;
+            let counter = r & 0xFFFFFFFFFFFF;
+            format!("&{}:{}", worker_id, counter)
+        }
         Value::Tuple(tuple_id, elements) => {
             if let Some(tuple_info) = type_lookup.lookup_tuple(*tuple_id) {
                 // Check for Str type and format as string if possible

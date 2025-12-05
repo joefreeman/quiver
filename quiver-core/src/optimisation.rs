@@ -20,7 +20,8 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
             return;
         };
         match typ {
-            Type::Integer | Type::Binary | Type::Variable(_) | Type::Cycle(_) => {}
+            Type::Integer | Type::Binary | Type::Reference | Type::Variable(_) | Type::Cycle(_) => {
+            }
             Type::Tuple(tuple_id) => {
                 used_tuples.insert(*tuple_id);
             }
@@ -215,6 +216,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         match typ {
             Type::Integer => Type::Integer,
             Type::Binary => Type::Binary,
+            Type::Reference => Type::Reference,
             Type::Tuple(id) => Type::Tuple(*tuple_remap.get(id).unwrap_or(id)),
             Type::Partial { name, fields } => Type::Partial {
                 name: name.clone(),

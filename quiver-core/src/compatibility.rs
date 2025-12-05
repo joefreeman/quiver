@@ -154,6 +154,21 @@ fn compute_compatible_concrete_types(
         compat_set.insert(ConcreteType::Binary);
     }
 
+    // Check Reference
+    if let Some(ref_id) = input
+        .types
+        .iter()
+        .position(|t| matches!(t, Type::Reference))
+    {
+        if is_compatible(ref_id, pattern_id, lookup) {
+            compat_set.insert(ConcreteType::Reference);
+        }
+    } else if let Some(pattern) = lookup.lookup_type(pattern_id)
+        && (matches!(pattern, Type::Reference) || matches!(pattern, Type::Union(v) if v.is_empty()))
+    {
+        compat_set.insert(ConcreteType::Reference);
+    }
+
     // Check all Tuples - find or construct type IDs for each tuple
     for tuple_id in 0..input.tuples.len() {
         if let Some(type_id) = input

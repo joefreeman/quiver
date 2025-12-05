@@ -1183,6 +1183,7 @@ impl<E: Effect> Environment<E> {
         match value {
             Value::Integer(_) => Type::Integer,
             Value::Binary(_) => Type::Binary,
+            Value::Reference(_) => Type::Reference,
             Value::Tuple(type_id, _) => Type::Tuple(*type_id),
             Value::Function(func_idx, _) => {
                 // Get the callable type directly from function's type_id

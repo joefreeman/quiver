@@ -151,7 +151,7 @@ impl TestBuilder {
         // Create workers with virtual time function
         let num_workers = 2;
         let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
-        for _ in 0..num_workers {
+        for i in 0..num_workers {
             let time = virtual_time_ms.clone();
             let builtins_clone = builtins.clone();
 
@@ -159,6 +159,7 @@ impl TestBuilder {
                 move || time.load(Ordering::Relaxed),
                 builtins_clone,
                 false, // Don't enable profiling in tests
+                i as u16,
             )));
         }
 

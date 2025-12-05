@@ -24,9 +24,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         sender: S,
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
         profile: bool,
+        worker_id: u16,
     ) -> Self {
         Self {
-            executor: Executor::new(builtins, profile),
+            executor: Executor::new(builtins, profile, worker_id),
             awaited: HashSet::new(),
             awaiters_for_target: HashMap::new(),
             pending_result_requests: HashMap::new(),

@@ -56,6 +56,7 @@ pub enum InstructionType {
     Send,
     Self_,
     Select,
+    Reference,
     Process,
 }
 
@@ -85,6 +86,7 @@ impl InstructionType {
             Instruction::Send => InstructionType::Send,
             Instruction::Self_ => InstructionType::Self_,
             Instruction::Select => InstructionType::Select,
+            Instruction::Reference => InstructionType::Reference,
             Instruction::Process(_, _) => InstructionType::Process,
         }
     }
@@ -187,6 +189,9 @@ pub struct Executor<E: Effect> {
     // Profiling
     pub stats: ExecutionStats,
     profile: bool,
+    // Ref generation: worker_id (upper 16 bits) combined with counter (lower 48 bits)
+    worker_id: u16,
+    next_ref: u64,
 }
 
 // Note: TupleLookup is not implemented for Executor anymore since tuples only stores arities
@@ -248,7 +253,11 @@ impl<E: Effect> Executor<E> {
         self.allocate_binary_data(BinaryData::new(bytes))
     }
 
-    pub fn new(builtins_registry: crate::builtins::BuiltinRegistry<E>, profile: bool) -> Self {
+    pub fn new(
+        builtins_registry: crate::builtins::BuiltinRegistry<E>,
+        profile: bool,
+        worker_id: u16,
+    ) -> Self {
         // Pre-initialize with NIL (index 0) and OK (index 1) tuple arities.
         // This matches Program::new() so incremental updates are consistent.
         Self {
@@ -270,7 +279,16 @@ impl<E: Effect> Executor<E> {
             builtins_registry,
             stats: ExecutionStats::new(),
             profile,
+            worker_id,
+            next_ref: 0,
         }
+    }
+
+    /// Create a new unique ref value
+    fn create_ref(&mut self) -> Value {
+        let ref_value = ((self.worker_id as u64) << 48) | self.next_ref;
+        self.next_ref += 1;
+        Value::Reference(ref_value)
     }
 
     /// Spawn a new process
@@ -821,6 +839,7 @@ impl<E: Effect> Executor<E> {
             Instruction::Send => self.handle_send(pid),
             Instruction::Self_ => self.handle_self(pid),
             Instruction::Select => self.handle_select(pid, current_time_ms),
+            Instruction::Reference => self.handle_ref(pid),
             Instruction::Process(process_id, function_index) => {
                 self.handle_process_ref(pid, process_id, function_index)
             }
@@ -1075,6 +1094,7 @@ impl<E: Effect> Executor<E> {
         match value {
             Value::Integer(_) => ConcreteType::Integer,
             Value::Binary(_) => ConcreteType::Binary,
+            Value::Reference(_) => ConcreteType::Reference,
             Value::Tuple(tuple_id, _) => ConcreteType::Tuple(*tuple_id),
             Value::Function(func_id, _) => ConcreteType::Function(*func_id),
             Value::Builtin(builtin_id) => ConcreteType::Builtin(*builtin_id),
@@ -1554,6 +1574,21 @@ impl<E: Effect> Executor<E> {
             .ok_or(Error::FrameUnderflow)?
             .function_index;
         process.stack.push(Value::Process(pid, function_index));
+
+        if let Some(frame) = process.frames.last_mut() {
+            frame.counter += 1;
+        }
+        Ok(None)
+    }
+
+    fn handle_ref(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
+        let ref_value = self.create_ref();
+
+        let process = self
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
+        process.stack.push(ref_value);
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -2143,6 +2178,7 @@ impl<E: Effect> Executor<E> {
             }
             (Value::Builtin(a), Value::Builtin(b)) => a == b,
             (Value::Process(a, func_a), Value::Process(b, func_b)) => a == b && func_a == func_b,
+            (Value::Reference(a), Value::Reference(b)) => a == b,
             _ => false,
         }
     }
@@ -2236,6 +2272,7 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
         Value::Builtin(name) => Ok(Value::Builtin(*name)),
         Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
         Value::Resource(id, type_name) => Ok(Value::Resource(*id, *type_name)),
+        Value::Reference(r) => Ok(Value::Reference(*r)),
     }
 }
 
