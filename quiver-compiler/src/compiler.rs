@@ -1385,11 +1385,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     );
                 }
 
-                // Consequence receives the condition value (implicit continuation)
+                // Pop the condition result - consequence starts fresh with block parameter
+                self.codegen.add_instruction(Instruction::Pop);
+
+                // Consequence is a new chain that starts with the block's parameter value
+                // (not the condition's result). Every chain implicitly starts with the
+                // surrounding block's parameter. Pass None for input_type so the consequence
+                // loads the parameter via implicit_continuation.
                 let (consequence_type, _) = self.compile_expression_with_input(
                     consequence.clone(),
                     None,
-                    Some(condition_type),
+                    None, // No input - consequence loads parameter via implicit_continuation
                     None, // No narrowing for consequence
                 )?;
                 branch_types.push(consequence_type);

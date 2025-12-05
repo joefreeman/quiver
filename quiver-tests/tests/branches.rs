@@ -35,7 +35,7 @@ fn test_branch_pattern_matching() {
 
 #[test]
 fn test_use_continuation_in_consequence() {
-    // Consequence receives the condition value via implicit continuation
+    // Consequence receives the block parameter via implicit continuation
     quiver()
         .evaluate("42 ~> { =10 => 100 | =42 => [~, ~] }")
         .expect("[42, 42]");
@@ -46,4 +46,45 @@ fn test_string_match() {
     quiver()
         .evaluate("\"bar\" ~> { =\"foo\" => 1 | =\"bar\" => 2 }")
         .expect("2");
+}
+
+#[test]
+fn test_consequence_ripple_is_block_parameter_not_condition_result() {
+    // When a condition transforms its input (e.g., returns Ok), the consequence's
+    // ripple (~) should still refer to the block parameter, not the condition result.
+    // Here ok? returns Ok when input is 0, but ~ in the consequence should be 0.
+    quiver()
+        .evaluate(
+            r#"
+            ok? = #int { =0 => Ok },
+            0 ~> { | ok? => ~ | 999 }
+            "#,
+        )
+        .expect("0");
+}
+
+#[test]
+fn test_consequence_ripple_in_tuple() {
+    // Verify ripple works correctly in tuple construction within consequence
+    quiver()
+        .evaluate(
+            r#"
+            ok? = #int { =0 => Ok },
+            0 ~> { | ok? => [~, 1] | [~, 2] }
+            "#,
+        )
+        .expect("[0, 1]");
+}
+
+#[test]
+fn test_consequence_ripple_fallback_branch() {
+    // When first branch fails, fallback branch should also get block parameter
+    quiver()
+        .evaluate(
+            r#"
+            ok? = #int { =0 => Ok },
+            5 ~> { | ok? => [~, 1] | [~, 2] }
+            "#,
+        )
+        .expect("[5, 2]");
 }
