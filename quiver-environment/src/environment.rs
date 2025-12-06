@@ -1239,8 +1239,7 @@ impl<E: Effect> Environment<E> {
         let scope = Scope::new(bindings, None, ScopeKind::Root);
         let scopes = vec![scope];
 
-        resolve_type_alias_for_display(&scopes, alias_name, &mut self.program)
-            .map_err(|e| format!("{:?}", e))
+        resolve_type_alias_for_display(&scopes, alias_name).map_err(|e| format!("{:?}", e))
     }
 
     /// Handle effect request from a worker

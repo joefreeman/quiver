@@ -1,6 +1,8 @@
 use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
-use quiver_compiler::compiler::{Binding, ModuleCache};
+use quiver_compiler::compiler::{
+    Binding, ModuleCache, Scope, ScopeKind, resolve_type_alias_for_display,
+};
 use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
 use quiver_core::effects::Effect;
@@ -276,7 +278,7 @@ impl<E: Effect> Repl<E> {
     /// This is useful for testing and displaying type aliases.
     pub fn resolve_type_alias(
         &mut self,
-        env: &mut Environment<E>,
+        _env: &mut Environment<E>,
         alias_name: &str,
     ) -> Result<usize, String> {
         // Extract type aliases from bindings
@@ -292,7 +294,24 @@ impl<E: Effect> Repl<E> {
             })
             .collect();
 
-        env.resolve_type_alias(&type_aliases, alias_name)
+        // Convert type_aliases HashMap to a single scope for resolution
+        let mut bindings = std::collections::HashMap::new();
+        for (name, type_alias) in type_aliases {
+            bindings.insert(name, Binding::TypeAlias(type_alias));
+        }
+        let scope = Scope::new(bindings, None, ScopeKind::Root);
+        let scopes = vec![scope];
+
+        // Use the REPL's program for resolution (not the environment's)
+        // because TypeAliasDef::Resolved type IDs are registered in the REPL's program
+        resolve_type_alias_for_display(&scopes, alias_name).map_err(|e| format!("{:?}", e))
+    }
+
+    /// Format a type by its ID using the REPL's program.
+    /// This is needed because type IDs in TypeAliasDef::Resolved are registered
+    /// in the REPL's program, not the Environment's.
+    pub fn format_type_by_id(&self, type_id: usize) -> String {
+        quiver_core::format::format_type_by_id(&self.program, type_id)
     }
 
     /// Get the type of the last evaluated result

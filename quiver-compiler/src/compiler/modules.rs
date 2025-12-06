@@ -2,10 +2,11 @@ use std::collections::HashMap;
 
 use crate::{ast, modules::ModuleLoader, parser};
 use quiver_core::effects::Effect;
+use quiver_core::program::Program;
 use quiver_core::types::Type;
 use quiver_core::value::{Binary, Value};
 
-use super::{Error, Scope, scopes};
+use super::{Error, Scope, ScopeKind, scopes, typing, typing::TypeAliasDef};
 
 /// Cached module value with extracted binary data
 #[derive(Clone)]
@@ -114,67 +115,98 @@ pub fn compile_type_import(
     module_cache: &mut ModuleCache,
     module_loader: &dyn ModuleLoader,
     scopes_mut: &mut [Scope],
+    program: &mut Program,
 ) -> Result<(), Error> {
     let parsed = module_cache.load_and_cache_ast(module, module_loader)?;
 
-    let found_aliases: Vec<_> = parsed
-        .statements
-        .iter()
-        .filter_map(|stmt| match stmt {
+    // Build a module-local scope with all type definitions from the module
+    // This allows us to resolve types using the module's context
+    let mut module_scope = vec![Scope::new(HashMap::new(), None, ScopeKind::Root)];
+
+    // Process all type-related statements in order
+    for statement in &parsed.statements {
+        match statement {
+            ast::Statement::TypeImport {
+                pattern: import_pattern,
+                module: import_module,
+            } => {
+                // Recursively import types into the module scope
+                compile_type_import(
+                    import_pattern.clone(),
+                    import_module,
+                    module_cache,
+                    module_loader,
+                    &mut module_scope,
+                    program,
+                )?;
+            }
             ast::Statement::TypeAlias {
                 name,
                 type_parameters,
                 type_definition,
-            } => Some((name, type_parameters, type_definition)),
-            _ => None,
-        })
-        .collect();
+            } => {
+                // Create Type::Variable bindings for type parameters
+                let mut bindings = HashMap::new();
+                for param in type_parameters {
+                    let var_type_id = program.register_type(Type::Variable(param.clone()));
+                    bindings.insert(param.clone(), var_type_id);
+                }
 
-    let module_str = module.join("/");
+                // Resolve the type definition using the module scope built so far
+                let type_id = typing::resolve_ast_type_with_bindings(
+                    &module_scope,
+                    type_definition.clone(),
+                    program,
+                    &bindings,
+                )?;
+
+                // Store the resolved type in module scope
+                scopes::define_type_alias(
+                    &mut module_scope,
+                    name.to_string(),
+                    TypeAliasDef {
+                        parameters: type_parameters.clone(),
+                        type_id,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // Helper to copy a resolved type alias from module scope to caller's scope
+    let mut copy_type_alias = |name: &str| -> Result<(), Error> {
+        let type_alias = scopes::lookup_type_alias(&module_scope, name)
+            .ok_or_else(|| Error::TypeAliasMissing(name.to_string()))?;
+        scopes::define_type_alias(scopes_mut, name.to_string(), type_alias);
+        Ok(())
+    };
 
     match &pattern {
         ast::TypeImportPattern::Star => {
-            for (name, type_parameters, type_definition) in found_aliases {
-                // Prevent shadowing primitive types
-                if matches!(name.as_str(), "int" | "bin") {
-                    return Err(Error::TypeUnresolved(format!(
-                        "Cannot redefine primitive type '{}'",
-                        name
-                    )));
+            for stmt in &parsed.statements {
+                if let ast::Statement::TypeAlias { name, .. } = stmt {
+                    copy_type_alias(name)?;
                 }
-
-                // Store all types as type aliases in current scope
-                scopes::define_type_alias(
-                    scopes_mut,
-                    name.to_string(),
-                    (type_parameters.clone(), type_definition.clone()),
-                );
             }
         }
         ast::TypeImportPattern::Partial(requested_names) => {
-            for requested_name in requested_names {
-                // Prevent shadowing primitive types
-                if matches!(requested_name.as_str(), "int" | "bin") {
-                    return Err(Error::TypeUnresolved(format!(
-                        "Cannot redefine primitive type '{}'",
-                        requested_name
-                    )));
-                }
+            let found_alias_names: Vec<_> = parsed
+                .statements
+                .iter()
+                .filter_map(|stmt| match stmt {
+                    ast::Statement::TypeAlias { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
 
-                if let Some((name, type_parameters, type_definition)) = found_aliases
-                    .iter()
-                    .find(|alias| alias.0.as_str() == *requested_name)
-                {
-                    // Store all types as type aliases in current scope
-                    scopes::define_type_alias(
-                        scopes_mut,
-                        name.to_string(),
-                        ((*type_parameters).clone(), (*type_definition).clone()),
-                    );
+            for requested_name in requested_names {
+                if found_alias_names.contains(&requested_name.as_str()) {
+                    copy_type_alias(requested_name)?;
                 } else {
                     return Err(Error::ModuleTypeMissing {
                         type_name: requested_name.clone(),
-                        module: module_str.clone(),
+                        module: module.join("/"),
                     });
                 }
             }

@@ -338,7 +338,9 @@ impl TestResult {
             .resolve_type_alias(&mut self.environment, alias_name)
         {
             Ok(type_id) => {
-                let actual = self.environment.format_type_by_id(type_id);
+                // Use REPL's format_type_by_id since type IDs from TypeAliasDef::Resolved
+                // are registered in the REPL's program, not the Environment's
+                let actual = self.repl.format_type_by_id(type_id);
                 assert_eq!(
                     actual, expected,
                     "Expected type alias '{}' to resolve to '{}', but got '{}' for source: {}",

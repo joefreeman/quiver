@@ -40,8 +40,13 @@ pub fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
     }
 }
 
-/// Type alias definition: (type parameters, body)
-pub type TypeAliasDef = (Vec<String>, ast::Type);
+/// Type alias definition - a pre-resolved type ID with type parameters.
+/// The type_id may contain Type::Variable for generic parameters.
+#[derive(Debug, Clone)]
+pub struct TypeAliasDef {
+    pub parameters: Vec<String>,
+    pub type_id: usize,
+}
 
 fn instantiate_generic_type(
     recursion_depth: &mut usize,
@@ -51,7 +56,7 @@ fn instantiate_generic_type(
     program: &mut Program,
     type_bindings: &HashMap<String, usize>,
 ) -> Result<usize, Error> {
-    // Look up generic definition
+    // Look up type alias definition
     let type_def = scopes::lookup_type_alias(scopes_ref, name)
         .ok_or_else(|| Error::TypeAliasMissing(name.to_string()))?;
 
@@ -62,31 +67,23 @@ fn instantiate_generic_type(
         .collect::<Result<_, _>>()?;
 
     // Validate argument count
-    if resolved_args.len() != type_def.0.len() {
+    if resolved_args.len() != type_def.parameters.len() {
         return Err(Error::TypeUnresolved(format!(
             "Generic type '{}' expects {} type argument(s), got {}",
             name,
-            type_def.0.len(),
+            type_def.parameters.len(),
             resolved_args.len()
         )));
     }
 
-    // Build new type bindings for the parameters
+    // Build type bindings for substitution
     let mut new_bindings = HashMap::new();
-    for (param, arg) in type_def.0.iter().zip(resolved_args.iter()) {
+    for (param, arg) in type_def.parameters.iter().zip(resolved_args.iter()) {
         new_bindings.insert(param.clone(), *arg);
     }
 
-    // Resolve the body with parameter bindings
-    // Reset recursion depth to 0 so cycles in the type alias are relative to the alias definition
-    let mut alias_depth = 0;
-    resolve_ast_type_impl(
-        &mut alias_depth,
-        scopes_ref,
-        type_def.1,
-        program,
-        &new_bindings,
-    )
+    // Substitute Type::Variable placeholders with concrete types
+    Ok(substitute(type_def.type_id, &new_bindings, program))
 }
 
 /// Check if an AST type contains any cycle references
@@ -133,6 +130,25 @@ pub fn resolve_ast_type(
     )
 }
 
+/// Resolve an AST type with pre-defined type variable bindings.
+/// Used when importing types from modules where type parameters should be
+/// resolved as Type::Variable.
+pub fn resolve_ast_type_with_bindings(
+    scopes_ref: &[Scope],
+    ast_type: ast::Type,
+    program: &mut Program,
+    bindings: &HashMap<String, usize>,
+) -> Result<usize, Error> {
+    let mut recursion_depth = 0;
+    resolve_ast_type_impl(
+        &mut recursion_depth,
+        scopes_ref,
+        ast_type,
+        program,
+        bindings,
+    )
+}
+
 /// Resolve a function parameter type with explicitly declared type parameters.
 /// Type parameters are resolved to Type::Variable, while undefined types cause errors.
 pub fn resolve_function_parameter_type(
@@ -161,39 +177,22 @@ pub fn resolve_function_parameter_type(
 }
 
 /// Resolve a type alias for display purposes (e.g., in tests or REPL).
-/// Type parameters are resolved to Type::Variable placeholders.
-/// This allows formatting of parameterized types like `point<t> :: Point[x: t, y: t]`
-/// as `Point[x: t, y: t]` where `t` is a type variable.
+/// Returns the type ID which already has Type::Variable placeholders for type parameters.
 pub fn resolve_type_alias_for_display(
     scopes_ref: &[Scope],
     alias_name: &str,
-    program: &mut Program,
 ) -> Result<usize, Error> {
-    let (type_params, ast_type) = scopes::lookup_type_alias(scopes_ref, alias_name)
+    let type_def = scopes::lookup_type_alias(scopes_ref, alias_name)
         .ok_or_else(|| Error::TypeAliasMissing(alias_name.to_string()))?;
 
-    // Create Variable bindings for all type parameters
-    let mut bindings = HashMap::new();
-    for param in &type_params {
-        let var_type_id = program.register_type(Type::Variable(param.clone()));
-        bindings.insert(param.clone(), var_type_id);
-    }
-
-    let mut recursion_depth = 0;
-    resolve_ast_type_impl(
-        &mut recursion_depth,
-        scopes_ref,
-        ast_type.clone(),
-        program,
-        &bindings,
-    )
+    Ok(type_def.type_id)
 }
 
 /// Resolve tuple name - distinguishes between literal names (capitalized) and type aliases (lowercase)
 fn resolve_tuple_name(
     name: Option<String>,
     scopes_ref: &[Scope],
-    _program: &Program,
+    program: &Program,
 ) -> Result<Option<String>, Error> {
     match name {
         None => Ok(None),
@@ -203,23 +202,27 @@ fn resolve_tuple_name(
         }
         Some(identifier) => {
             // Lowercase: type alias reference like "event[..., x: int]"
-            let (type_params, type_def) = scopes::lookup_type_alias(scopes_ref, &identifier)
+            let type_alias = scopes::lookup_type_alias(scopes_ref, &identifier)
                 .ok_or_else(|| Error::TypeAliasMissing(identifier.to_string()))?;
 
             // Type parameters must be empty for name inheritance (for now)
-            if !type_params.is_empty() {
+            if !type_alias.parameters.is_empty() {
                 return Err(Error::FeatureUnsupported(format!(
                     "Type alias '{}' has type parameters - name inheritance from parameterized types requires explicit instantiation",
                     identifier
                 )));
             }
 
-            // Resolve the type to get the actual tuple name
-            match type_def {
-                ast::Type::Tuple(tuple_type) => {
-                    resolve_tuple_name(tuple_type.name.clone(), scopes_ref, _program)
+            // Look up the resolved type to get the tuple name
+            match program.lookup_type(type_alias.type_id) {
+                Some(Type::Tuple(tuple_id)) => {
+                    if let Some(info) = program.lookup_tuple(*tuple_id) {
+                        Ok(info.name.clone())
+                    } else {
+                        Ok(None)
+                    }
                 }
-                ast::Type::Union(_) => {
+                Some(Type::Union(_)) => {
                     // For unions, don't try to extract a single name
                     Ok(None)
                 }
@@ -288,22 +291,22 @@ fn resolve_tuple_fields_with_spread(
                 })?;
 
                 // Look up the spread type
-                let (type_params, type_def) = scopes::lookup_type_alias(scopes_ref, spread_id)
+                let type_alias = scopes::lookup_type_alias(scopes_ref, spread_id)
                     .ok_or_else(|| Error::TypeAliasMissing(spread_id.clone()))?;
 
                 // Check type parameter count matches
-                if type_params.len() != type_arguments.len() {
+                if type_alias.parameters.len() != type_arguments.len() {
                     return Err(Error::TypeUnresolved(format!(
                         "Type alias '{}' expects {} type parameters, got {}",
                         spread_id,
-                        type_params.len(),
+                        type_alias.parameters.len(),
                         type_arguments.len()
                     )));
                 }
 
                 // Create type bindings for the spread type
-                let mut spread_bindings = type_bindings.clone();
-                for (param, arg) in type_params.iter().zip(type_arguments.iter()) {
+                let mut spread_bindings = HashMap::new();
+                for (param, arg) in type_alias.parameters.iter().zip(type_arguments.iter()) {
                     let arg_type_id = resolve_ast_type_impl(
                         recursion_depth,
                         scopes_ref,
@@ -314,14 +317,8 @@ fn resolve_tuple_fields_with_spread(
                     spread_bindings.insert(param.clone(), arg_type_id);
                 }
 
-                // Resolve the spread type with the bindings
-                let spread_type_id = resolve_ast_type_impl(
-                    recursion_depth,
-                    scopes_ref,
-                    type_def.clone(),
-                    program,
-                    &spread_bindings,
-                )?;
+                // Substitute type variables in the resolved type
+                let spread_type_id = substitute(type_alias.type_id, &spread_bindings, program);
 
                 // Extract tuple types with names from the spread (handling unions)
                 let spread_named_types =

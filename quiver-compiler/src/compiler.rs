@@ -321,14 +321,32 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             )));
         }
 
-        // Validate the AST before storing (even though we won't resolve it yet)
+        // Validate the AST structure
         Self::validate_type_ast(&type_definition)?;
 
-        // Store type alias in the current scope
+        // Create Type::Variable bindings for type parameters
+        let mut bindings = HashMap::new();
+        for param in &type_parameters {
+            let var_type_id = self.program.register_type(Type::Variable(param.clone()));
+            bindings.insert(param.clone(), var_type_id);
+        }
+
+        // Resolve the type definition immediately
+        let type_id = typing::resolve_ast_type_with_bindings(
+            &self.scopes,
+            type_definition,
+            &mut self.program,
+            &bindings,
+        )?;
+
+        // Store the resolved type alias
         scopes::define_type_alias(
             &mut self.scopes,
             name.to_string(),
-            (type_parameters, type_definition),
+            TypeAliasDef {
+                parameters: type_parameters,
+                type_id,
+            },
         );
         Ok(())
     }
@@ -401,6 +419,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &mut self.module_cache,
             self.module_loader,
             &mut self.scopes,
+            &mut self.program,
         )
     }
 
