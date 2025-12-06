@@ -171,10 +171,11 @@ fn compute_compatible_concrete_types(
 
     // Check all Tuples - find or construct type IDs for each tuple
     for tuple_id in 0..input.tuples.len() {
-        if let Some(type_id) = input
+        let found_type_id = input
             .types
             .iter()
-            .position(|t| matches!(t, Type::Tuple(id) if *id == tuple_id))
+            .position(|t| matches!(t, Type::Tuple(id) if *id == tuple_id));
+        if let Some(type_id) = found_type_id
             && is_compatible(type_id, pattern_id, lookup)
         {
             compat_set.insert(ConcreteType::Tuple(tuple_id));

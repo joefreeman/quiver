@@ -88,26 +88,36 @@ pub struct BindingSet {
 /// Check if any binding set has requirements that prevent complement narrowing.
 ///
 /// Returns true if the pattern cannot use complement narrowing because:
-/// 1. It has non-type requirements (literals, variable pins, path equality) - these may fail
+/// 1. It has value-based requirements (literals, variable pins, path equality) - these may fail
 ///    for value-based reasons, not type-based reasons
 /// 2. It has type checks at non-root paths (nested structural patterns) - failure at an inner
 ///    level doesn't mean we can narrow the outer type
+/// 3. It has partial type checks at the root - a partial pattern like `(x: A)` may fail because
+///    the field value doesn't match, not because the tuple type is wrong
 ///
 /// For example:
 /// - `=Node[x, y]` - safe, type check at root only
 /// - `=Node[Leaf[x], _]` - NOT safe, nested type check at path [0]
 /// - `=5` - NOT safe, literal check
-pub fn has_non_type_requirements(binding_sets: &[BindingSet]) -> bool {
+/// - `=(x: A)` - NOT safe, partial type check (field value could fail)
+pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Program) -> bool {
     binding_sets.iter().any(|bs| {
         bs.requirements.iter().any(|req| {
             match &req.check {
-                // Non-type checks (literals, variable pins, path equality) prevent complement narrowing
+                // Value-based checks prevent complement narrowing
                 RuntimeCheck::Literal(_) | RuntimeCheck::Variable(_) | RuntimeCheck::Path(_) => {
                     true
                 }
-                // Type checks at non-root paths (nested structural patterns) prevent complement narrowing
+                // Type checks at non-root paths prevent complement narrowing
                 // because failure at an inner level doesn't mean we can narrow the outer type
-                RuntimeCheck::TypeId(_) => !req.path.is_empty(),
+                RuntimeCheck::TypeId(type_id) => {
+                    if !req.path.is_empty() {
+                        return true;
+                    }
+                    // Partial type checks at root also prevent complement narrowing because
+                    // they check field compatibility, not concrete type identity
+                    matches!(program.lookup_type(*type_id), Some(Type::Partial { .. }))
+                }
             }
         })
     })

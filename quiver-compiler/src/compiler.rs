@@ -1082,7 +1082,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let has_tuple_complement =
             analyze_tuple_pattern_for_complement(&pattern, value_type, &mut self.program).is_some();
 
-        if pattern::has_non_type_requirements(&binding_sets)
+        if pattern::prevents_complement_narrowing(&binding_sets, &self.program)
             && !has_tuple_complement
             && let Some(n) = narrowing.as_mut()
         {

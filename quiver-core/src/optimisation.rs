@@ -109,6 +109,14 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 }
                 Instruction::Tuple(id) => {
                     used_tuples.insert(*id);
+                    // Also mark the corresponding Type::Tuple as used for IsType compatibility checks
+                    if let Some(type_id) = bytecode
+                        .types
+                        .iter()
+                        .position(|t| matches!(t, Type::Tuple(tid) if *tid == *id))
+                    {
+                        used_types.insert(type_id);
+                    }
                 }
                 Instruction::IsType(id) => {
                     collect_type_refs(

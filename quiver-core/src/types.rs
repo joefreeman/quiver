@@ -184,42 +184,82 @@ pub fn from_type_ids(type_ids: Vec<usize>) -> Type {
     }
 }
 
-/// Check if two type IDs are compatible.
-/// This is the main compatibility check used throughout the system.
+/// Mode for handling unions in type compatibility checks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnionMode {
+    /// All variants must be compatible (for type assignment/subtyping).
+    /// Used by `is_compatible`: "Is type A assignable to type B?"
+    All,
+    /// Any variant could match (for pattern matching).
+    /// Used by `types_overlap`: "Could a value of type A match pattern B?"
+    Any,
+}
+
+/// Check if type `self_id` is compatible with (assignable to) type `pattern_id`.
+///
+/// Uses ALL-variant semantics: for `A | B` to be compatible with `C`,
+/// both `A` and `C` must be compatible AND `B` and `C` must be compatible.
+///
+/// This is used for type checking (can I assign this value to this variable?).
 pub fn is_compatible<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
     let mut assumptions = HashSet::new();
     let mut type_stack = Vec::new();
-    is_compatible_impl(
+    check_type_relation(
         self_id,
         pattern_id,
         lookup,
+        UnionMode::All,
         &mut assumptions,
         &mut type_stack,
     )
 }
 
-/// Internal implementation of type compatibility checking.
-/// This uses coinductive reasoning to handle recursive types.
-fn is_compatible_impl<T: TypeLookup>(
+/// Check if types `self_id` and `pattern_id` overlap (have any common values).
+///
+/// Uses ANY-variant semantics: for `A | B` to overlap with `C`,
+/// either `A` overlaps with `C` OR `B` overlaps with `C`.
+///
+/// This is used for pattern matching (could this value possibly match this pattern?).
+pub fn types_overlap<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
+    let mut assumptions = HashSet::new();
+    let mut type_stack = Vec::new();
+    check_type_relation(
+        self_id,
+        pattern_id,
+        lookup,
+        UnionMode::Any,
+        &mut assumptions,
+        &mut type_stack,
+    )
+}
+
+/// Unified implementation of type relation checking.
+///
+/// When `mode` is `All` (used by `is_compatible`):
+/// - Empty union is compatible with anything (bottom type)
+/// - Union on left: ALL variants must satisfy the relation
+///
+/// When `mode` is `Any` (used by `types_overlap`):
+/// - Empty union can't match anything
+/// - Union on left: ANY variant could satisfy the relation
+fn check_type_relation<T: TypeLookup>(
     self_id: usize,
     pattern_id: usize,
     lookup: &T,
-    assumptions: &mut std::collections::HashSet<(usize, usize)>,
+    mode: UnionMode,
+    assumptions: &mut HashSet<(usize, usize)>,
     type_stack: &mut Vec<usize>,
 ) -> bool {
-    // Fast path: same ID means definitely compatible
+    // Fast path: same ID always satisfies the relation
     if self_id == pattern_id {
         return true;
     }
 
-    // Check if we've already assumed these types are compatible (coinductive hypothesis)
+    // Check if we've already assumed this relation holds (coinductive hypothesis)
     let key = (self_id, pattern_id);
     if assumptions.contains(&key) {
         return true;
     }
-
-    // Add assumption for coinductive reasoning
-    assumptions.insert(key);
 
     let Some(self_type) = lookup.lookup_type(self_id) else {
         return false;
@@ -229,51 +269,109 @@ fn is_compatible_impl<T: TypeLookup>(
     };
 
     match (self_type, pattern_type) {
-        // Empty union (never type) is bottom type - compatible with anything
-        (Type::Union(variants), _) if variants.is_empty() => true,
+        // Empty union (never type) handling depends on mode
+        (Type::Union(variants), _) if variants.is_empty() => {
+            match mode {
+                UnionMode::All => true,  // Bottom type is subtype of everything
+                UnionMode::Any => false, // Empty type can't match anything
+            }
+        }
 
         // Basic types must match exactly
         (Type::Integer, Type::Integer) => true,
         (Type::Binary, Type::Binary) => true,
         (Type::Reference, Type::Reference) => true,
 
-        // Process types are compatible if their send and receive types are compatible
-        (
-            Type::Process {
-                send: send1,
-                receive: receive1,
-            },
-            Type::Process {
-                send: send2,
-                receive: receive2,
-            },
-        ) => {
-            let send_compatible = match (send1, send2) {
-                (Some(s1), Some(s2)) => {
-                    is_compatible_impl(*s1, *s2, lookup, assumptions, type_stack)
-                }
-                (None, _) | (_, None) => true,
-            };
-
-            let receive_compatible = match (receive1, receive2) {
-                (Some(r1), Some(r2)) => {
-                    is_compatible_impl(*r1, *r2, lookup, assumptions, type_stack)
-                }
-                (None, _) | (_, None) => true,
-            };
-
-            send_compatible && receive_compatible
-        }
-
         // Resource types must have matching identifiers
         (Type::Resource(r1), Type::Resource(r2)) => r1 == r2,
 
-        // For tuples, check structural compatibility
+        // Type variables match anything
+        (Type::Variable(_), _) | (_, Type::Variable(_)) => true,
+
+        // When both are cycles with same depth, they refer to the same recursive type
+        (Type::Cycle(d1), Type::Cycle(d2)) if d1 == d2 => true,
+
+        // Handle cycles by looking up the type in the stack
+        (Type::Cycle(depth), _) => {
+            if type_stack.len() < *depth {
+                return true; // Coinductive reasoning
+            }
+            let lookup_index = type_stack.len() - *depth;
+            if let Some(&stack_id) = type_stack.get(lookup_index) {
+                check_type_relation(stack_id, pattern_id, lookup, mode, assumptions, type_stack)
+            } else {
+                true
+            }
+        }
+
+        (_, Type::Cycle(depth)) => {
+            if type_stack.len() < *depth {
+                return true;
+            }
+            let lookup_index = type_stack.len() - *depth;
+            if let Some(&stack_id) = type_stack.get(lookup_index) {
+                check_type_relation(self_id, stack_id, lookup, mode, assumptions, type_stack)
+            } else {
+                true
+            }
+        }
+
+        // Union on left side: mode determines ALL vs ANY semantics
+        (Type::Union(variants), _) => {
+            // Insert assumption for recursive types
+            assumptions.insert(key);
+
+            match mode {
+                UnionMode::All => variants.iter().all(|&variant_id| {
+                    check_type_relation(
+                        variant_id,
+                        pattern_id,
+                        lookup,
+                        mode,
+                        assumptions,
+                        type_stack,
+                    )
+                }),
+                UnionMode::Any => variants.iter().any(|&variant_id| {
+                    check_type_relation(
+                        variant_id,
+                        pattern_id,
+                        lookup,
+                        mode,
+                        assumptions,
+                        type_stack,
+                    )
+                }),
+            }
+        }
+
+        // Union on right side: self must match ANY variant (same for both modes)
+        (_, Type::Union(variants)) => {
+            let already_on_stack = type_stack.contains(&pattern_id);
+            if !already_on_stack {
+                type_stack.push(pattern_id);
+            }
+            let result = variants.iter().any(|&variant_id| {
+                check_type_relation(self_id, variant_id, lookup, mode, assumptions, type_stack)
+            });
+            if !already_on_stack {
+                type_stack.pop();
+            }
+            result
+        }
+
+        // Tuple vs Tuple: structural compatibility (only for ALL mode, ANY delegates)
         (Type::Tuple(id1), Type::Tuple(id2)) => {
             if id1 == id2 {
                 return true;
             }
 
+            // In ANY mode, different tuple IDs means no overlap
+            if mode == UnionMode::Any {
+                return false;
+            }
+
+            // In ALL mode, check structural compatibility
             let Some(info1) = lookup.lookup_tuple(*id1) else {
                 return false;
             };
@@ -286,89 +384,16 @@ fn is_compatible_impl<T: TypeLookup>(
                 && info1.fields.iter().zip(info2.fields.iter()).all(
                     |((fname1, ftype1), (fname2, ftype2))| {
                         fname1 == fname2
-                            && is_compatible_impl(*ftype1, *ftype2, lookup, assumptions, type_stack)
+                            && check_type_relation(
+                                *ftype1,
+                                *ftype2,
+                                lookup,
+                                mode,
+                                assumptions,
+                                type_stack,
+                            )
                     },
                 )
-        }
-
-        // When both are cycles with same depth, they refer to the same recursive type
-        (Type::Cycle(d1), Type::Cycle(d2)) if d1 == d2 => true,
-
-        // Handle cycles by looking up the type in the stack
-        (Type::Cycle(depth), _) => {
-            if type_stack.len() < *depth {
-                return true; // Coinductive reasoning
-            }
-            let lookup_index = type_stack.len() - *depth;
-            if let Some(&stack_type_id) = type_stack.get(lookup_index) {
-                is_compatible_impl(stack_type_id, pattern_id, lookup, assumptions, type_stack)
-            } else {
-                true
-            }
-        }
-
-        (_, Type::Cycle(depth)) => {
-            if type_stack.len() < *depth {
-                return true;
-            }
-            let lookup_index = type_stack.len() - *depth;
-            if let Some(&stack_type_id) = type_stack.get(lookup_index) {
-                is_compatible_impl(self_id, stack_type_id, lookup, assumptions, type_stack)
-            } else {
-                true
-            }
-        }
-
-        // Callable types
-        (
-            Type::Callable {
-                parameter: param1,
-                result: result1,
-                receive: receive1,
-            },
-            Type::Callable {
-                parameter: param2,
-                result: result2,
-                receive: receive2,
-            },
-        ) => {
-            // Only push if not already on stack - prevents stack growth during recursive traversal
-            let already_on_stack = type_stack.contains(&pattern_id);
-            if !already_on_stack {
-                type_stack.push(pattern_id);
-            }
-
-            // Parameters are contravariant, results are covariant, receive is contravariant
-            let result = is_compatible_impl(*param2, *param1, lookup, assumptions, type_stack)
-                && is_compatible_impl(*result1, *result2, lookup, assumptions, type_stack)
-                && is_compatible_impl(*receive2, *receive1, lookup, assumptions, type_stack);
-
-            if !already_on_stack {
-                type_stack.pop();
-            }
-            result
-        }
-
-        // When self is a union, ALL variants must be compatible with the pattern
-        (Type::Union(variants), _) => variants.iter().all(|&variant_id| {
-            is_compatible_impl(variant_id, pattern_id, lookup, assumptions, type_stack)
-        }),
-
-        // When pattern is a union, self must match ANY variant
-        (_, Type::Union(variants)) => {
-            // Only push if not already on stack - prevents stack growth during recursive traversal
-            // Cycle depths are relative to type definition structure, not traversal depth
-            let already_on_stack = type_stack.contains(&pattern_id);
-            if !already_on_stack {
-                type_stack.push(pattern_id);
-            }
-            let result = variants.iter().any(|&variant_id| {
-                is_compatible_impl(self_id, variant_id, lookup, assumptions, type_stack)
-            });
-            if !already_on_stack {
-                type_stack.pop();
-            }
-            result
         }
 
         // Concrete tuple vs partial type
@@ -397,10 +422,11 @@ fn is_compatible_impl<T: TypeLookup>(
                     .iter()
                     .any(|(concrete_fname, concrete_ftype)| {
                         concrete_fname.as_ref() == Some(partial_fname)
-                            && is_compatible_impl(
+                            && check_type_relation(
                                 *concrete_ftype,
                                 *partial_ftype,
                                 lookup,
+                                mode,
                                 assumptions,
                                 type_stack,
                             )
@@ -424,17 +450,93 @@ fn is_compatible_impl<T: TypeLookup>(
                 return false;
             }
 
-            // All fields in pattern (fields2) must exist in self (fields1) with compatible types
+            // All fields in pattern must exist in self with compatible types
             fields2.iter().all(|(fname2, ftype2)| {
                 fields1.iter().any(|(fname1, ftype1)| {
                     fname1 == fname2
-                        && is_compatible_impl(*ftype1, *ftype2, lookup, assumptions, type_stack)
+                        && check_type_relation(
+                            *ftype1,
+                            *ftype2,
+                            lookup,
+                            mode,
+                            assumptions,
+                            type_stack,
+                        )
                 })
             })
         }
 
-        // Type variables are compatible with anything
-        (Type::Variable(_), _) | (_, Type::Variable(_)) => true,
+        // Process types
+        (
+            Type::Process {
+                send: send1,
+                receive: receive1,
+            },
+            Type::Process {
+                send: send2,
+                receive: receive2,
+            },
+        ) => {
+            let send_ok = match (send1, send2) {
+                (Some(s1), Some(s2)) => {
+                    check_type_relation(*s1, *s2, lookup, mode, assumptions, type_stack)
+                }
+                (None, _) | (_, None) => true,
+            };
+
+            let receive_ok = match (receive1, receive2) {
+                (Some(r1), Some(r2)) => {
+                    check_type_relation(*r1, *r2, lookup, mode, assumptions, type_stack)
+                }
+                (None, _) | (_, None) => true,
+            };
+
+            send_ok && receive_ok
+        }
+
+        // Callable types
+        (
+            Type::Callable {
+                parameter: param1,
+                result: result1,
+                receive: receive1,
+            },
+            Type::Callable {
+                parameter: param2,
+                result: result2,
+                receive: receive2,
+            },
+        ) => {
+            let already_on_stack = type_stack.contains(&pattern_id);
+            if !already_on_stack {
+                type_stack.push(pattern_id);
+            }
+
+            // Parameters are contravariant, results are covariant, receive is contravariant
+            let result =
+                check_type_relation(*param2, *param1, lookup, mode, assumptions, type_stack)
+                    && check_type_relation(
+                        *result1,
+                        *result2,
+                        lookup,
+                        mode,
+                        assumptions,
+                        type_stack,
+                    )
+                    && check_type_relation(
+                        *receive2,
+                        *receive1,
+                        lookup,
+                        mode,
+                        assumptions,
+                        type_stack,
+                    );
+
+            if !already_on_stack {
+                type_stack.pop();
+            }
+            result
+        }
 
         _ => false,
     }

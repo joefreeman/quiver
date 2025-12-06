@@ -5,7 +5,7 @@
 //! All type references use type IDs into the Program's type registry.
 
 use quiver_core::program::Program;
-use quiver_core::types::{Type, TypeLookup, is_compatible};
+use quiver_core::types::{Type, TypeLookup, is_compatible, types_overlap};
 
 use super::provenance::Provenance;
 use super::scopes::{Binding, Scope, lookup_variable};
@@ -239,13 +239,15 @@ pub fn get_type_for_provenance(
 
 /// Compute the intersection of two types (by type ID).
 ///
-/// Filters variants from `a` that are compatible with `b`.
+/// Filters variants from `a` that could possibly match `b`.
+/// Uses `types_overlap` (ANY-variant semantics) because for pattern matching
+/// we need to know if a match is *possible*, not if it's *certain*.
 pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize {
     let a_variants = get_type_variants(a_id, program);
 
     let intersected: Vec<usize> = a_variants
         .into_iter()
-        .filter(|&variant_id| is_compatible(variant_id, b_id, program))
+        .filter(|&variant_id| types_overlap(variant_id, b_id, program))
         .collect();
 
     union_type_ids(program, intersected)
