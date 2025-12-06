@@ -107,6 +107,7 @@ impl<E: Effect> Repl<E> {
 
         let instructions = result.instructions;
         let result_type_id = result.result_type;
+        let receive_type_id = result.receive_type;
         let bindings = result.bindings;
         let module_cache = result.module_cache;
         let mut program = result.program;
@@ -125,11 +126,11 @@ impl<E: Effect> Repl<E> {
         // Only create function wrapper if we have instructions to execute
         let function_index = if !instructions.is_empty() {
             // Register the callable type for this REPL wrapper function
-            let never_id = program.never();
+            // Use the receive type extracted from the expression (allows REPL to receive messages)
             let callable_type_id = program.register_type(Type::Callable {
                 parameter: last_result_type_id,
                 result: result_type_id,
-                receive: never_id,
+                receive: receive_type_id,
             });
             let function = Function {
                 instructions,

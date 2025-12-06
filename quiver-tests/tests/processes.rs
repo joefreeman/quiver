@@ -205,13 +205,11 @@ fn test_multiple_receives_same_type() {
 }
 
 #[test]
-fn test_multiple_receives_different_types_error() {
-    quiver().evaluate("#{ !#int, !#bin }").expect_compile_error(
-        quiver_compiler::compiler::Error::ReceiveTypeMismatch {
-            first: "int".to_string(),
-            second: "bin".to_string(),
-        },
-    );
+fn test_multiple_receives_different_types_widens() {
+    // Multiple receives with different types should widen to a union
+    // The function receives int | bin, and the receives return those types
+    // Since we receive int first, then bin, the result is bin (last value)
+    quiver().evaluate("@#{ !#int, !#bin }").expect("@1");
 }
 
 #[test]

@@ -122,12 +122,6 @@ pub enum Error {
         pattern: String,
     },
 
-    // Process messaging errors
-    ReceiveTypeMismatch {
-        first: String,
-        second: String,
-    },
-
     // Internal consistency errors
     InternalError {
         message: String,
@@ -138,6 +132,7 @@ pub enum Error {
 pub struct CompilationResult {
     pub instructions: Vec<Instruction>,
     pub result_type: usize,
+    pub receive_type: usize,
     pub bindings: HashMap<String, Binding>,
     pub program: Program,
     pub module_cache: ModuleCache,
@@ -250,6 +245,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Initialize scope with bindings and optional parameter
         compiler.scopes = vec![Scope::new(scope_bindings, scope_parameter, ScopeKind::Root)];
 
+        // Extract receive type from statements (like we do for function bodies)
+        // This seeds the receive type from explicit selects in the code.
+        // Additional receive types may be adopted during compilation when calling
+        // functions that have receive types.
+        compiler.current_receive_type_id =
+            compiler.extract_receive_type_from_statements(&ast_program.statements)?;
+
         let num_statements = ast_program.statements.len();
         let mut result_type_id = compiler.program.register_type(Type::nil());
         for (i, statement) in ast_program.statements.into_iter().enumerate() {
@@ -280,6 +282,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(CompilationResult {
             instructions: compiler.codegen.instructions,
             result_type: result_type_id,
+            // Use the final receive type, which may have been widened during compilation
+            // when calling functions that have receive types
+            receive_type: compiler.current_receive_type_id,
             bindings,
             program: compiler.program,
             module_cache: compiler.module_cache,
@@ -558,28 +563,55 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         ))
     }
 
+    /// Unify multiple receive types into a single type.
+    /// If there's one type, return it. If multiple, create a union.
+    /// Deduplicates types to avoid redundant unions.
+    fn unify_receive_types(&mut self, receive_types: Vec<usize>) -> usize {
+        if receive_types.is_empty() {
+            return self.program.never();
+        }
+
+        if receive_types.len() == 1 {
+            return receive_types[0];
+        }
+
+        // Deduplicate types
+        let mut unique_types: Vec<usize> = Vec::new();
+        for ty in receive_types {
+            if !unique_types.contains(&ty) {
+                unique_types.push(ty);
+            }
+        }
+
+        if unique_types.len() == 1 {
+            return unique_types[0];
+        }
+
+        // Create union of all receive types
+        self.program.register_type(Type::Union(unique_types))
+    }
+
     fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<usize, Error> {
         let mut receive_types = Vec::new();
         if let Some(block) = block {
             self.collect_receive_types(block, &mut receive_types)?;
         }
 
-        if receive_types.is_empty() {
-            return Ok(self.program.never());
-        }
+        Ok(self.unify_receive_types(receive_types))
+    }
 
-        // Check all receives have the same type
-        let first_type = &receive_types[0];
-        for ty in &receive_types[1..] {
-            if ty != first_type {
-                return Err(Error::ReceiveTypeMismatch {
-                    first: quiver_core::format::format_type_by_id(&self.program, *first_type),
-                    second: quiver_core::format::format_type_by_id(&self.program, *ty),
-                });
+    fn extract_receive_type_from_statements(
+        &mut self,
+        statements: &[ast::Statement],
+    ) -> Result<usize, Error> {
+        let mut receive_types = Vec::new();
+        for statement in statements {
+            if let ast::Statement::Expression(expression) = statement {
+                self.collect_receive_types_from_expression(expression, &mut receive_types)?;
             }
         }
 
-        Ok(*first_type)
+        Ok(self.unify_receive_types(receive_types))
     }
 
     fn collect_receive_types(
@@ -3320,30 +3352,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             // Check if called function has receives (not NEVER)
             if !self.is_never(called_receive_type) {
-                // Called function has receives - verify current context matches
-                // Check if current context is never (empty union = can't receive)
+                // Called function has receives - widen current context's receive type
                 if self.is_never(self.current_receive_type_id) {
-                    // Current context can't receive - can't call a receiving function
-                    return Err(Error::TypeMismatch {
-                        expected: "function without receive type".to_string(),
-                        found: format!("function with receive type {:?}", called_receive_type),
-                    });
-                }
-
-                // Check compatibility
-                if !quiver_core::types::is_compatible(
+                    // Current context has no receive type yet - adopt the called function's receive type
+                    self.current_receive_type_id = called_receive_type;
+                } else if !quiver_core::types::is_compatible(
                     called_receive_type,
                     self.current_receive_type_id,
                     &self.program,
                 ) {
-                    return Err(Error::TypeMismatch {
-                        expected: format!(
-                            "function with receive type compatible with {:?}",
-                            self.current_receive_type_id
-                        ),
-                        found: format!("function with receive type {:?}", called_receive_type),
-                    });
+                    // Current context has a receive type but it's incompatible - widen to union
+                    self.current_receive_type_id = self.unify_receive_types(vec![
+                        self.current_receive_type_id,
+                        called_receive_type,
+                    ]);
                 }
+                // If compatible, no change needed - current type already includes called type
             }
 
             // Execute the call

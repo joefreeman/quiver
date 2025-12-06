@@ -147,15 +147,16 @@ fn compile_and_extract_entry(
     .map_err(|e| format!("Compile error: {:?}", e))?;
 
     let instructions = compilation_result.instructions;
+    let receive_type = compilation_result.receive_type;
     let mut program = compilation_result.program;
 
     // Register the callable type for this wrapper function
+    // Use the receive type extracted from the program (allows top-level code to receive messages)
     let nil_type_id = program.register_type(Type::nil());
-    let never_id = program.never();
     let callable_type_id = program.register_type(Type::Callable {
         parameter: nil_type_id,
         result: compilation_result.result_type,
-        receive: never_id,
+        receive: receive_type,
     });
 
     // Register the instructions as a temporary function
