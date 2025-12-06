@@ -2780,9 +2780,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         found: "process without receive type (cannot select)".to_string(),
                     });
                 }
-                Type::Callable { result, .. } => {
-                    // Receive function - use its result type
-                    result_types.push(*result);
+                Type::Callable { parameter, .. } => {
+                    // Receive function - use its parameter type (the message type being received)
+                    result_types.push(*parameter);
                 }
                 Type::Integer => {
                     // Timeout source

@@ -158,6 +158,15 @@ fn test_receive_filter_returns_original_message() {
 }
 
 #[test]
+fn test_receive_filter_type_is_parameter_not_result() {
+    // The type of a receive with a filter should be the parameter type (the message type),
+    // not the filter's result type (Ok or [])
+    quiver()
+        .evaluate("#{ !int { Ok } }")
+        .expect_type("#[] -> int");
+}
+
+#[test]
 fn test_receive_function_cannot_spawn() {
     quiver()
         .evaluate(
