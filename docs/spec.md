@@ -102,7 +102,7 @@ shape :
 
 ### Recursive types
 
-Use `&` to refer back to the root of the types, or `&1`/`&2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
+Use `^` to refer back to the root of the types, or `^1`/`^2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
 
 ```
 list<t> : Nil | Cons[t, ^];
@@ -112,7 +112,7 @@ json :
   | bool
   | int
   | Str[bin]
-  | Array[(Nil | Cons[&, &1])];
+  | Array[(Nil | Cons[^, ^1])];
 ```
 
 ### Type spreads
@@ -629,7 +629,7 @@ list<t> : Nil | Cons[t, ^];
 // Determine whether a list contains an item
 contains? = #<t>[list<t>, t] {
   | =[Nil, _] => []
-  | =[Cons[^value, _], ^value] => Ok
+  | =[Cons[value, _], value] => Ok
   | =[Cons[_, tail], value] => ^[tail, value]
 },
 
@@ -673,7 +673,7 @@ shape :
   },
 
   is_square?: #shape {
-    =Rectangle[width: ^x, height: ^x]
+    =Rectangle[width: x, height: x]
   }
 ]
 ```
