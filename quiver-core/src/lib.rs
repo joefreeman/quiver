@@ -16,7 +16,7 @@ pub mod value;
 pub use binary::{BinaryData, MAX_BINARY_SIZE};
 pub use builtins::BuiltinResult;
 pub use error::Error;
-pub use execute::execute_bytecode_sync;
+pub use execute::{execute_bytecode_sync, execute_bytecode_sync_with};
 pub use executor::Executor;
 pub use process::{Action, ProcessId, ProcessInfo, ProcessStatus};
 pub use value::{Binary, ResourceId, Value};

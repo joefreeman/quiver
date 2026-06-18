@@ -284,7 +284,7 @@ impl Program {
             }
             Value::Tuple(tuple_id, elements) => {
                 let mut instrs = Vec::new();
-                for elem in elements {
+                for elem in elements.iter() {
                     instrs.extend(self.value_to_instructions(elem, executor));
                 }
                 instrs.push(Instruction::Tuple(*tuple_id));
@@ -292,7 +292,7 @@ impl Program {
             }
             Value::Function(function, captures) => {
                 let func_index = if !captures.is_empty() {
-                    self.inject_function_captures(*function, captures.clone(), executor)
+                    self.inject_function_captures(*function, (**captures).clone(), executor)
                 } else {
                     *function
                 };

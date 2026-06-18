@@ -6,7 +6,9 @@ use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStat
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
 use serde::{Deserialize, Serialize};
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Bundled program update data for incremental compilation.
@@ -164,8 +166,8 @@ enum SelectResult {
 }
 
 pub struct Executor<E: Effect> {
-    processes: HashMap<ProcessId, Process>,
-    process_function_indices: HashMap<ProcessId, usize>, // Maps process ID to its function index (for REPL)
+    processes: FxHashMap<ProcessId, Process>,
+    process_function_indices: FxHashMap<ProcessId, usize>, // Maps process ID to its function index (for REPL)
     queue: VecDeque<ProcessId>,
     spawning: HashSet<ProcessId>,
     selecting: HashSet<ProcessId>,
@@ -173,7 +175,10 @@ pub struct Executor<E: Effect> {
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
-    builtins: Vec<String>,  // Builtin names (for effect dispatch)
+    builtins: Vec<String>, // Builtin names (for effect dispatch)
+    // Resolved builtin implementations, indexed by builtin_id (parallel to `builtins`).
+    // Resolved once at update_program time to avoid a String clone + HashMap lookup per call.
+    builtin_impls: Vec<Option<crate::builtins::BuiltinFn<E>>>,
     tuples: Vec<usize>,     // Tuple arities
     resources: Vec<String>, // Resource type names
     /// For each type_id, the set of concrete types compatible with it (for IsType checks)
@@ -184,6 +189,9 @@ pub struct Executor<E: Effect> {
     builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
     // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
     heap: Vec<BinaryData>,
+    // Cache of constant binaries already materialised on the heap, keyed by constant index,
+    // so a binary literal in a loop is allocated once rather than on every load.
+    constant_binaries: Vec<Option<Binary>>,
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
     // Profiling
@@ -261,8 +269,8 @@ impl<E: Effect> Executor<E> {
         // Pre-initialize with NIL (index 0) and OK (index 1) tuple arities.
         // This matches Program::new() so incremental updates are consistent.
         Self {
-            processes: HashMap::new(),
-            process_function_indices: HashMap::new(),
+            processes: FxHashMap::default(),
+            process_function_indices: FxHashMap::default(),
             queue: VecDeque::new(),
             spawning: HashSet::new(),
             selecting: HashSet::new(),
@@ -270,12 +278,14 @@ impl<E: Effect> Executor<E> {
             constants: vec![],
             functions: vec![],
             builtins: vec![],
+            builtin_impls: vec![],
             tuples: vec![0, 0], // NIL and OK have 0 fields
             resources: vec![],
             type_compatibility: vec![],
             function_param_compatibility: vec![],
             builtin_param_compatibility: vec![],
             heap: vec![],
+            constant_binaries: vec![],
             builtins_registry,
             stats: ExecutionStats::new(),
             profile,
@@ -359,7 +369,7 @@ impl<E: Effect> Executor<E> {
                 self.functions[f.function_index]
                     .instructions
                     .get(f.counter)
-                    .cloned()
+                    .copied()
             })
     }
 
@@ -549,7 +559,10 @@ impl<E: Effect> Executor<E> {
     /// Get process function indices for REPL process references
     /// Returns a map from process ID to the function index that process is running
     pub fn get_process_function_indices(&self) -> HashMap<ProcessId, usize> {
-        self.process_function_indices.clone()
+        self.process_function_indices
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect()
     }
 
     /// Record the function index for a process (called on spawn and resume)
@@ -623,8 +636,11 @@ impl<E: Effect> Executor<E> {
         // Extract arities from TupleTypeInfo - executor only needs arities at runtime
         self.tuples
             .extend(update.tuples.iter().map(|t| t.fields.len()));
-        self.builtins
-            .extend(update.builtins.iter().map(|b| b.name.clone()));
+        for b in &update.builtins {
+            self.builtin_impls
+                .push(self.builtins_registry.get_implementation(&b.name));
+            self.builtins.push(b.name.clone());
+        }
         self.resources = update.resources;
         self.type_compatibility = update.type_compatibility;
         self.function_param_compatibility = update.function_param_compatibility;
@@ -641,16 +657,35 @@ impl<E: Effect> Executor<E> {
             return (false, None); // No processes to run
         };
 
+        // Take the running process out of the map for the duration of the time-slice so that
+        // instruction handlers can borrow it directly (as a local) alongside `&mut self`,
+        // avoiding a hash lookup on every access. It is reinserted before the bookkeeping below.
+        let Some(mut proc) = self.processes.remove(&current_pid) else {
+            return (false, None);
+        };
+
         let mut units_executed = 0;
         let mut pending_request = None;
 
         // Execute instructions for current process
         while units_executed < max_units {
-            let Some(instruction) = self.get_current_instruction(current_pid) else {
+            let Some(instruction) = Self::current_instruction(&proc, &self.functions) else {
                 break; // Process finished or no more instructions in current frame
             };
 
-            let step_result = self.execute_instruction(current_pid, instruction, current_time_ms);
+            let step_result = if Self::is_cold(instruction) {
+                // Rare control/concurrency ops use the existing handlers, which expect the
+                // process to be present in the map (they may also touch other processes).
+                self.processes.insert(current_pid, proc);
+                let r = self.execute_cold(current_pid, instruction, current_time_ms);
+                proc = self
+                    .processes
+                    .remove(&current_pid)
+                    .expect("process should remain in map after a cold instruction");
+                r
+            } else {
+                self.execute_hot(&mut proc, current_pid, instruction)
+            };
 
             units_executed += 1;
 
@@ -660,10 +695,8 @@ impl<E: Effect> Executor<E> {
                     pending_request = request;
                 }
                 Err(error) => {
-                    if let Some(process) = self.get_process_mut(current_pid) {
-                        process.result = Some(Err(error.clone()));
-                        process.frames.clear();
-                    }
+                    proc.result = Some(Err(error.clone()));
+                    proc.frames.clear();
                 }
             }
 
@@ -677,6 +710,9 @@ impl<E: Effect> Executor<E> {
                 break;
             }
         }
+
+        // Return the process to the map; the bookkeeping below operates via the map as before.
+        self.processes.insert(current_pid, proc);
 
         // Auto-pop any exhausted frames before checking if process is finished
         loop {
@@ -803,11 +839,36 @@ impl<E: Effect> Executor<E> {
         (true, pending_request)
     }
 
-    fn execute_instruction(
+    /// Whether an instruction is a "cold" control/concurrency op handled via the process map
+    /// (rather than the hot, process-as-local fast path).
+    fn is_cold(instruction: Instruction) -> bool {
+        matches!(
+            instruction,
+            Instruction::Spawn
+                | Instruction::Send
+                | Instruction::Self_
+                | Instruction::Select
+                | Instruction::Reference
+                | Instruction::Process(_, _)
+        )
+    }
+
+    /// Fetch the instruction at the current frame's counter without a process-map lookup.
+    fn current_instruction(proc: &Process, functions: &[Function]) -> Option<Instruction> {
+        let frame = proc.frames.last()?;
+        functions[frame.function_index]
+            .instructions
+            .get(frame.counter)
+            .copied()
+    }
+
+    /// Hot path: execute an instruction against the running process held as a local,
+    /// avoiding a process-map lookup per access.
+    fn execute_hot(
         &mut self,
+        proc: &mut Process,
         pid: ProcessId,
         instruction: Instruction,
-        current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
         let start = if self.profile {
             Some(Instant::now())
@@ -816,33 +877,26 @@ impl<E: Effect> Executor<E> {
         };
 
         let result = match instruction {
-            Instruction::Constant(index) => self.handle_constant(pid, index),
-            Instruction::Pop => self.handle_pop(pid),
-            Instruction::Duplicate => self.handle_duplicate(pid),
-            Instruction::Pick(n) => self.handle_pick(pid, n),
-            Instruction::Rotate(n) => self.handle_rotate(pid, n),
-            Instruction::Load(index) => self.handle_load(pid, index),
-            Instruction::Store => self.handle_store(pid),
-            Instruction::Tuple(type_id) => self.handle_tuple(pid, type_id),
-            Instruction::Get(index) => self.handle_get(pid, index),
-            Instruction::IsType(type_id) => self.handle_is_type(pid, type_id),
-            Instruction::Jump(offset) => self.handle_jump(pid, offset),
-            Instruction::JumpIf(offset) => self.handle_jump_if(pid, offset),
-            Instruction::Call => self.handle_call(pid),
-            Instruction::TailCall(recurse) => self.handle_tail_call(pid, recurse),
-            Instruction::Function(function_index) => self.handle_function(pid, function_index),
-            Instruction::Reset(index) => self.handle_reset(pid, index),
-            Instruction::Builtin(index) => self.handle_builtin(pid, index),
-            Instruction::Equal(count) => self.handle_equal(pid, count),
-            Instruction::Not => self.handle_not(pid),
-            Instruction::Spawn => self.handle_spawn(pid),
-            Instruction::Send => self.handle_send(pid),
-            Instruction::Self_ => self.handle_self(pid),
-            Instruction::Select => self.handle_select(pid, current_time_ms),
-            Instruction::Reference => self.handle_ref(pid),
-            Instruction::Process(process_id, function_index) => {
-                self.handle_process_ref(pid, process_id, function_index)
-            }
+            Instruction::Constant(index) => self.handle_constant(proc, index),
+            Instruction::Pop => self.handle_pop(proc),
+            Instruction::Duplicate => self.handle_duplicate(proc),
+            Instruction::Pick(n) => self.handle_pick(proc, n),
+            Instruction::Rotate(n) => self.handle_rotate(proc, n),
+            Instruction::Load(index) => self.handle_load(proc, index),
+            Instruction::Store => self.handle_store(proc),
+            Instruction::Tuple(type_id) => self.handle_tuple(proc, type_id),
+            Instruction::Get(index) => self.handle_get(proc, index),
+            Instruction::IsType(type_id) => self.handle_is_type(proc, type_id),
+            Instruction::Jump(offset) => self.handle_jump(proc, offset),
+            Instruction::JumpIf(offset) => self.handle_jump_if(proc, offset),
+            Instruction::Call => self.handle_call(proc, pid),
+            Instruction::TailCall(recurse) => self.handle_tail_call(proc, recurse),
+            Instruction::Function(function_index) => self.handle_function(proc, function_index),
+            Instruction::Reset(index) => self.handle_reset(proc, index),
+            Instruction::Builtin(index) => self.handle_builtin(proc, index),
+            Instruction::Equal(count) => self.handle_equal(proc, count),
+            Instruction::Not => self.handle_not(proc),
+            _ => unreachable!("cold instruction routed to execute_hot"),
         };
 
         if let Some(start) = start {
@@ -856,7 +910,50 @@ impl<E: Effect> Executor<E> {
             entry.0 += 1;
             entry.1 += elapsed;
 
-            // Track memory peaks
+            self.stats
+                .update_peaks(proc.stack.len(), proc.locals.len(), proc.frames.len());
+        }
+
+        result
+    }
+
+    /// Cold path: control/concurrency ops that need the process in the map (and may touch
+    /// other processes). The running process has been reinserted before this is called.
+    fn execute_cold(
+        &mut self,
+        pid: ProcessId,
+        instruction: Instruction,
+        current_time_ms: u64,
+    ) -> Result<Option<Action<E>>, Error> {
+        let start = if self.profile {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        let result = match instruction {
+            Instruction::Spawn => self.handle_spawn(pid),
+            Instruction::Send => self.handle_send(pid),
+            Instruction::Self_ => self.handle_self(pid),
+            Instruction::Select => self.handle_select(pid, current_time_ms),
+            Instruction::Reference => self.handle_ref(pid),
+            Instruction::Process(process_id, function_index) => {
+                self.handle_process_ref(pid, process_id, function_index)
+            }
+            _ => unreachable!("hot instruction routed to execute_cold"),
+        };
+
+        if let Some(start) = start {
+            let elapsed = start.elapsed().as_nanos() as u64;
+            let instr_type = InstructionType::from_instruction(&instruction);
+            let entry = self
+                .stats
+                .instruction_stats
+                .entry(instr_type)
+                .or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += elapsed;
+
             if let Some(process) = self.processes.get(&pid) {
                 self.stats.update_peaks(
                     process.stack.len(),
@@ -869,27 +966,41 @@ impl<E: Effect> Executor<E> {
         result
     }
 
+    /// Resolve a binary constant to a heap reference, materialising and caching it on first use.
+    fn cached_constant_binary(&mut self, index: usize) -> Result<Binary, Error> {
+        if let Some(Some(binary)) = self.constant_binaries.get(index) {
+            return Ok(*binary);
+        }
+        let bytes = match self.get_constant(index) {
+            Some(Constant::Binary(bytes)) => bytes.clone(),
+            _ => return Err(Error::ConstantUndefined(index)),
+        };
+        let binary = self.allocate_binary(bytes)?;
+        if self.constant_binaries.len() <= index {
+            self.constant_binaries.resize(index + 1, None);
+        }
+        self.constant_binaries[index] = Some(binary);
+        Ok(binary)
+    }
+
     fn handle_constant(
         &mut self,
-        pid: ProcessId,
+        proc: &mut Process,
         index: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let constant = self
-            .get_constant(index)
-            .ok_or(Error::ConstantUndefined(index))?;
-        let value = match constant {
-            Constant::Integer(integer) => Value::Integer(*integer),
-            Constant::Binary(bytes) => {
-                // Allocate constant binary to heap and get reference
-                // TODO: Cache this so we don't re-allocate the same constant multiple times
-                let binary_ref = self.allocate_binary(bytes.clone())?;
-                Value::Binary(binary_ref)
-            }
+        // Resolve integers directly; binaries go through the constant cache. Determine which
+        // up front so the constants borrow ends before the (mutable) cache call.
+        let integer = match self.get_constant(index) {
+            Some(Constant::Integer(integer)) => Some(*integer),
+            Some(Constant::Binary(_)) => None,
+            None => return Err(Error::ConstantUndefined(index)),
+        };
+        let value = match integer {
+            Some(integer) => Value::Integer(integer),
+            None => Value::Binary(self.cached_constant_binary(index)?),
         };
 
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        let process = &mut *proc;
         process.stack.push(value);
 
         if let Some(frame) = process.frames.last_mut() {
@@ -898,10 +1009,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_pop(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_pop(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
         process.stack.pop().ok_or(Error::StackUnderflow)?;
 
         if let Some(frame) = process.frames.last_mut() {
@@ -910,10 +1019,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_duplicate(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_duplicate(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
         let value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
         process.stack.push(value);
 
@@ -923,10 +1030,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_pick(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_pick(&mut self, proc: &mut Process, n: usize) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         if process.stack.len() <= n {
             return Err(Error::StackUnderflow);
@@ -941,10 +1046,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_rotate(&mut self, pid: ProcessId, n: usize) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_rotate(&mut self, proc: &mut Process, n: usize) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         let len = process.stack.len();
         if len < n {
@@ -961,10 +1064,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_load(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_load(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
         let actual_index = frame.locals_base + index;
@@ -983,10 +1084,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_store(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_store(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
         process.locals.push(value);
@@ -997,7 +1096,11 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_tuple(&mut self, pid: ProcessId, type_id: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_tuple(
+        &mut self,
+        proc: &mut Process,
+        type_id: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         // tuples now stores arities directly
         let size = *self
             .tuples
@@ -1007,9 +1110,7 @@ impl<E: Effect> Executor<E> {
                 found: format!("unknown type ({:?})", type_id),
             })?;
 
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        let process = &mut *proc;
 
         let mut values = Vec::new();
         for _ in 0..size {
@@ -1017,7 +1118,7 @@ impl<E: Effect> Executor<E> {
             values.push(value);
         }
         values.reverse();
-        process.stack.push(Value::Tuple(type_id, values));
+        process.stack.push(Value::tuple(type_id, values));
 
         if let Some(frame) = process.frames.last_mut() {
             frame.counter += 1;
@@ -1025,10 +1126,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_get(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_get(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -1054,21 +1153,15 @@ impl<E: Effect> Executor<E> {
 
     fn handle_is_type(
         &mut self,
-        pid: ProcessId,
+        proc: &mut Process,
         pattern_type_id: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let value = proc.stack.pop().ok_or(Error::StackUnderflow)?;
 
         // Use precomputed type compatibility instead of runtime type checking
         let is_match = self.check_type_compatible(&value, pattern_type_id);
 
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        let process = &mut *proc;
 
         process
             .stack
@@ -1121,10 +1214,8 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    fn handle_jump(&mut self, pid: ProcessId, offset: isize) -> Result<Option<Action<E>>, Error> {
-        if let Some(process) = self.get_process_mut(pid)
-            && let Some(frame) = process.frames.last_mut()
-        {
+    fn handle_jump(&mut self, proc: &mut Process, offset: isize) -> Result<Option<Action<E>>, Error> {
+        if let Some(frame) = proc.frames.last_mut() {
             // Jump modifies counter directly
             // Add 1 to offset because in the old code, Jump got the centralized increment
             frame.counter = frame.counter.wrapping_add_signed(offset + 1);
@@ -1134,12 +1225,10 @@ impl<E: Effect> Executor<E> {
 
     fn handle_jump_if(
         &mut self,
-        pid: ProcessId,
+        proc: &mut Process,
         offset: isize,
     ) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        let process = &mut *proc;
 
         let condition = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -1159,11 +1248,13 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_call(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
+    fn handle_call(
+        &mut self,
+        proc: &mut Process,
+        pid: ProcessId,
+    ) -> Result<Option<Action<E>>, Error> {
         let function_value = {
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            let process = &mut *proc;
             process.stack.last().ok_or(Error::StackUnderflow)?.clone()
         };
 
@@ -1175,9 +1266,7 @@ impl<E: Effect> Executor<E> {
                     .ok_or(Error::FunctionUndefined(function_index))?;
 
                 // Now modify process
-                let process = self
-                    .get_process_mut(pid)
-                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                let process = &mut *proc;
 
                 // Pop function and parameter
                 process.stack.pop();
@@ -1187,7 +1276,7 @@ impl<E: Effect> Executor<E> {
                 let captures_count = captures.len();
 
                 process.stack.push(parameter);
-                process.locals.extend(captures);
+                process.locals.extend(captures.iter().cloned());
 
                 process
                     .frames
@@ -1199,27 +1288,24 @@ impl<E: Effect> Executor<E> {
             Value::Builtin(builtin_id) => {
                 // Pop function and parameter
                 let parameter = {
-                    let process = self
-                        .get_process_mut(pid)
-                        .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                    let process = &mut *proc;
                     process.stack.pop(); // Pop function
                     process.stack.pop().ok_or(Error::StackUnderflow)?
                 };
 
-                // Look up builtin name for registry lookup
-                let builtin_name = self
-                    .builtins
-                    .get(builtin_id)
-                    .ok_or_else(|| {
-                        Error::InvalidArgument(format!("Unknown builtin id: {}", builtin_id))
-                    })?
-                    .clone();
-
+                // Resolve the implementation directly by id (no String clone / HashMap lookup).
                 let builtin = self
-                    .builtins_registry
-                    .get_implementation(&builtin_name)
+                    .builtin_impls
+                    .get(builtin_id)
+                    .copied()
+                    .flatten()
                     .ok_or_else(|| {
-                        Error::InvalidArgument(format!("Unrecognised builtin: {}", builtin_name))
+                        let name = self
+                            .builtins
+                            .get(builtin_id)
+                            .map(String::as_str)
+                            .unwrap_or("<unknown>");
+                        Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
                     })?;
 
                 let start = if self.profile {
@@ -1241,9 +1327,7 @@ impl<E: Effect> Executor<E> {
                 match result {
                     crate::builtins::BuiltinResult::Value(value) => {
                         // Immediate result: push value and increment counter
-                        let process = self
-                            .get_process_mut(pid)
-                            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                        let process = &mut *proc;
 
                         process.stack.push(value);
 
@@ -1275,13 +1359,11 @@ impl<E: Effect> Executor<E> {
 
     fn handle_tail_call(
         &mut self,
-        pid: ProcessId,
+        proc: &mut Process,
         recurse: bool,
     ) -> Result<Option<Action<E>>, Error> {
         if recurse {
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            let process = &mut *proc;
 
             let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
             let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
@@ -1300,9 +1382,7 @@ impl<E: Effect> Executor<E> {
             Ok(None)
         } else {
             let (function_value, argument) = {
-                let process = self
-                    .get_process_mut(pid)
-                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                let process = &mut *proc;
                 let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
                 let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
                 (function_value, argument)
@@ -1314,9 +1394,7 @@ impl<E: Effect> Executor<E> {
                     self.get_function(function_index)
                         .ok_or(Error::FunctionUndefined(function_index))?;
 
-                    let process = self
-                        .get_process_mut(pid)
-                        .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                    let process = &mut *proc;
 
                     let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
                     let locals_base = frame.locals_base;
@@ -1326,7 +1404,7 @@ impl<E: Effect> Executor<E> {
 
                     // Extend with captures for new function
                     let captures_count = captures.len();
-                    process.locals.extend(captures);
+                    process.locals.extend(captures.iter().cloned());
 
                     process.stack.push(argument);
                     *process.frames.last_mut().unwrap() =
@@ -1342,7 +1420,7 @@ impl<E: Effect> Executor<E> {
 
     fn handle_function(
         &mut self,
-        pid: ProcessId,
+        proc: &mut Process,
         function_index: usize,
     ) -> Result<Option<Action<E>>, Error> {
         let func = self
@@ -1350,9 +1428,7 @@ impl<E: Effect> Executor<E> {
             .ok_or(Error::FunctionUndefined(function_index))?;
         let capture_count = func.captures;
 
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        let process = &mut *proc;
 
         // Pop capture values from stack (in reverse order, then reverse to restore)
         let mut captures = Vec::with_capacity(capture_count);
@@ -1361,7 +1437,7 @@ impl<E: Effect> Executor<E> {
         }
         captures.reverse();
 
-        let function_value = Value::Function(function_index, captures);
+        let function_value = Value::Function(function_index, Arc::new(captures));
         process.stack.push(function_value);
 
         if let Some(frame) = process.frames.last_mut() {
@@ -1370,10 +1446,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_reset(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_reset(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         let frame = process.frames.last_mut().ok_or(Error::FrameUnderflow)?;
         let target = frame.locals_base + index;
@@ -1385,14 +1459,12 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_builtin(&mut self, pid: ProcessId, index: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_builtin(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
         // Verify builtin exists
         if index >= self.builtins.len() {
             return Err(Error::BuiltinUndefined(index));
         }
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        let process = &mut *proc;
 
         // Push builtin by index
         process.stack.push(Value::Builtin(index));
@@ -1403,10 +1475,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_equal(&mut self, pid: ProcessId, count: usize) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_equal(&mut self, proc: &mut Process, count: usize) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         let values = {
             if count > process.stack.len() {
@@ -1430,9 +1500,7 @@ impl<E: Effect> Executor<E> {
             Value::nil()
         };
 
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        let process = &mut *proc;
 
         process.stack.push(result);
 
@@ -1442,10 +1510,8 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_not(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+    fn handle_not(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+        let process = &mut *proc;
 
         let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
 
@@ -1503,7 +1569,7 @@ impl<E: Effect> Executor<E> {
         Ok(Some(Action::Spawn {
             caller: pid,
             function_index,
-            captures,
+            captures: (*captures).clone(),
             argument,
         }))
     }
@@ -1662,7 +1728,7 @@ impl<E: Effect> Executor<E> {
 
         // Extract sources: if it's a tuple, use its elements; otherwise use the value itself
         let sources: Vec<Value> = match value {
-            Value::Tuple(_, elements) => elements,
+            Value::Tuple(_, elements) => (*elements).clone(),
             single => vec![single],
         };
 
@@ -2015,20 +2081,25 @@ impl<E: Effect> Executor<E> {
         message: Value,
         source: &Value,
     ) -> Result<(), Error> {
-        let process = self
-            .get_process_mut(pid)
+        // Take the process out so it can be passed to handle_call as a local (handle_call now
+        // borrows the process directly rather than looking it up in the map).
+        let mut proc = self
+            .processes
+            .remove(&pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
-        if let Some(state) = &mut process.select_state {
+        if let Some(state) = &mut proc.select_state {
             state.receiving = Some((receive_idx, message.clone()));
             state.cursors[receive_idx] = msg_idx;
         }
 
-        process.stack.push(message);
-        process.stack.push(source.clone());
+        proc.stack.push(message);
+        proc.stack.push(source.clone());
 
         // Call the function - when it returns, handle_select will be called again
-        self.handle_call(pid)?;
+        let result = self.handle_call(&mut proc, pid);
+        self.processes.insert(pid, proc);
+        result?;
         Ok(())
     }
 
@@ -2227,12 +2298,12 @@ fn collect_heap_indices(value: &Value, indices: &mut HashSet<usize>) {
             indices.insert(*idx);
         }
         Value::Tuple(_, elements) => {
-            for elem in elements {
+            for elem in elements.iter() {
                 collect_heap_indices(elem, indices);
             }
         }
         Value::Function(_, captures) => {
-            for capture in captures {
+            for capture in captures.iter() {
                 collect_heap_indices(capture, indices);
             }
         }
@@ -2259,14 +2330,14 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .iter()
                 .map(|elem| remap_heap_indices(elem, index_map))
                 .collect();
-            Ok(Value::Tuple(*type_id, remapped_elements?))
+            Ok(Value::tuple(*type_id, remapped_elements?))
         }
         Value::Function(func_idx, captures) => {
             let remapped_captures: Result<Vec<_>, _> = captures
                 .iter()
                 .map(|capture| remap_heap_indices(capture, index_map))
                 .collect();
-            Ok(Value::Function(*func_idx, remapped_captures?))
+            Ok(Value::Function(*func_idx, Arc::new(remapped_captures?)))
         }
         Value::Integer(i) => Ok(Value::Integer(*i)),
         Value::Builtin(name) => Ok(Value::Builtin(*name)),

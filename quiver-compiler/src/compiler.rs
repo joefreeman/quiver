@@ -1974,12 +1974,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Execute the module to get the result value
         let (module_value, executor) =
-            quiver_core::execute_bytecode_sync(bytecode, self.builtins, false).map_err(|e| {
-                Error::ModuleExecution {
+            // Modules are executed at compile time only to produce their value; they don't
+            // receive messages, so skip the (expensive) parameter-compatibility tables.
+            quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false).map_err(
+                |e| Error::ModuleExecution {
                     module: module.join("/"),
                     error: e,
-                }
-            })?;
+                },
+            )?;
 
         // Extract binary data from the executor
         let mut binary_data = HashMap::new();
@@ -2044,7 +2046,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             },
             Value::Tuple(tuple_id, fields) => {
                 let mut instructions = Vec::new();
-                for field in fields {
+                for field in fields.iter() {
                     let (field_instructions, _) =
                         self.value_to_instructions_from_cache(field, binary_data)?;
                     instructions.extend(field_instructions);
@@ -2066,7 +2068,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let mut instructions = Vec::new();
 
                 // Push capture values to stack (will be popped by Function instruction)
-                for capture_value in captures {
+                for capture_value in captures.iter() {
                     let (capture_instructions, _) =
                         self.value_to_instructions_from_cache(capture_value, binary_data)?;
                     instructions.extend(capture_instructions);

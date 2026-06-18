@@ -17,6 +17,21 @@ pub fn execute_bytecode_sync<E: Effect>(
     builtins: &crate::builtins::BuiltinRegistry<E>,
     profile: bool,
 ) -> Result<(Value, Executor<E>), Error> {
+    execute_bytecode_sync_with(bytecode, builtins, profile, true)
+}
+
+/// As [`execute_bytecode_sync`], but `param_compat` controls whether parameter-compatibility
+/// tables (used only for mailbox message filtering during select/receive) are computed.
+///
+/// Computing them is O(functions × types) and is the dominant cost of compiling modules,
+/// which are executed at compile time purely to produce a value and do not receive messages.
+/// Skipping it leaves the tables empty, which `check_message_compatible` treats permissively.
+pub fn execute_bytecode_sync_with<E: Effect>(
+    bytecode: Bytecode,
+    builtins: &crate::builtins::BuiltinRegistry<E>,
+    profile: bool,
+    param_compat: bool,
+) -> Result<(Value, Executor<E>), Error> {
     let entry = bytecode
         .entry
         .ok_or_else(|| Error::InvalidArgument("Bytecode has no entry point".to_string()))?;
@@ -39,8 +54,11 @@ pub fn execute_bytecode_sync<E: Effect>(
     };
 
     let type_compatibility = compute_type_compatibility(&input);
-    let (function_param_compatibility, builtin_param_compatibility) =
-        compute_param_compatibility(&input);
+    let (function_param_compatibility, builtin_param_compatibility) = if param_compat {
+        compute_param_compatibility(&input)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let program_update = ProgramUpdate {
         constants: bytecode.constants,

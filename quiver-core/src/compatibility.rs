@@ -1,6 +1,6 @@
 use crate::bytecode::{ConcreteType, Function, Instruction};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup, is_compatible};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// TypeLookup implementation for compatibility computation
 pub struct TypeLookupImpl<'a> {
@@ -62,6 +62,7 @@ fn extract_function_type_info(
 /// Returns a Vec where index is type_id and value is the set of compatible concrete types.
 pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<ConcreteType>> {
     let lookup = TypeLookupImpl::new(input.types, input.tuples);
+    let index = TypeIndex::build(input, &lookup);
 
     // Collect all pattern type IDs (types used in IsType instructions)
     let mut pattern_type_ids = HashSet::new();
@@ -83,7 +84,8 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
             continue; // Skip invalid IDs
         }
 
-        compatible_with[pattern_id] = compute_compatible_concrete_types(pattern_id, input, &lookup);
+        compatible_with[pattern_id] =
+            compute_compatible_concrete_types(pattern_id, input, &lookup, &index);
     }
 
     compatible_with
@@ -96,6 +98,15 @@ pub fn compute_param_compatibility(
     input: &CompatibilityInput,
 ) -> (Vec<HashSet<ConcreteType>>, Vec<HashSet<ConcreteType>>) {
     let lookup = TypeLookupImpl::new(input.types, input.tuples);
+    let index = TypeIndex::build(input, &lookup);
+
+    // Many functions share a parameter type, so memoise the result by parameter type id.
+    let mut memo: HashMap<usize, HashSet<ConcreteType>> = HashMap::new();
+    let mut compatible_for = |param: usize| -> HashSet<ConcreteType> {
+        memo.entry(param)
+            .or_insert_with(|| compute_compatible_concrete_types(param, input, &lookup, &index))
+            .clone()
+    };
 
     // Compute function parameter compatibility by extracting type info from each function
     let function_params: Vec<HashSet<ConcreteType>> = input
@@ -103,7 +114,7 @@ pub fn compute_param_compatibility(
         .iter()
         .map(|func| {
             let (parameter, _, _, _) = extract_function_type_info(func, input.types);
-            compute_compatible_concrete_types(parameter, input, &lookup)
+            compatible_for(parameter)
         })
         .collect();
 
@@ -111,12 +122,85 @@ pub fn compute_param_compatibility(
     let builtin_params: Vec<HashSet<ConcreteType>> = input
         .builtins
         .iter()
-        .map(|builtin_info| {
-            compute_compatible_concrete_types(builtin_info.param_type, input, &lookup)
-        })
+        .map(|builtin_info| compatible_for(builtin_info.param_type))
         .collect();
 
     (function_params, builtin_params)
+}
+
+/// Precomputed lookups from concrete-type shapes to their type id, so that
+/// `compute_compatible_concrete_types` avoids re-scanning the whole type table on every call.
+struct TypeIndex {
+    integer: Option<usize>,
+    binary: Option<usize>,
+    reference: Option<usize>,
+    /// tuple_id -> type id of `Type::Tuple(tuple_id)`
+    tuple_to_type: Vec<Option<usize>>,
+    /// (parameter, result) -> type id of a never-receiving `Type::Callable` (for builtins)
+    callable_to_type: HashMap<(usize, usize), usize>,
+    /// (send, receive) -> type id of `Type::Process`
+    process_to_type: HashMap<(Option<usize>, Option<usize>), usize>,
+    /// resource name -> type id of `Type::Resource`
+    resource_to_type: HashMap<String, usize>,
+}
+
+impl TypeIndex {
+    fn build(input: &CompatibilityInput, lookup: &TypeLookupImpl) -> Self {
+        let mut index = TypeIndex {
+            integer: None,
+            binary: None,
+            reference: None,
+            tuple_to_type: vec![None; input.tuples.len()],
+            callable_to_type: HashMap::new(),
+            process_to_type: HashMap::new(),
+            resource_to_type: HashMap::new(),
+        };
+        // Single pass over the type table, keeping the first occurrence of each shape
+        // (matching the previous `.position()` behaviour).
+        for (type_id, ty) in input.types.iter().enumerate() {
+            match ty {
+                Type::Integer => {
+                    index.integer.get_or_insert(type_id);
+                }
+                Type::Binary => {
+                    index.binary.get_or_insert(type_id);
+                }
+                Type::Reference => {
+                    index.reference.get_or_insert(type_id);
+                }
+                Type::Tuple(tuple_id) => {
+                    if let Some(slot) = index.tuple_to_type.get_mut(*tuple_id)
+                        && slot.is_none()
+                    {
+                        *slot = Some(type_id);
+                    }
+                }
+                Type::Callable {
+                    parameter,
+                    result,
+                    receive,
+                } => {
+                    if lookup.lookup_type(*receive).map(|t| t.is_never()) == Some(true) {
+                        index
+                            .callable_to_type
+                            .entry((*parameter, *result))
+                            .or_insert(type_id);
+                    }
+                }
+                Type::Process { send, receive } => {
+                    index
+                        .process_to_type
+                        .entry((*send, *receive))
+                        .or_insert(type_id);
+                }
+                Type::Resource(name) => {
+                    index.resource_to_type.entry(name.clone()).or_insert(type_id);
+                }
+                _ => {}
+            }
+        }
+        index
+    }
 }
 
 /// Compute which ConcreteTypes are compatible with a given pattern type ID.
@@ -124,6 +208,7 @@ fn compute_compatible_concrete_types(
     pattern_id: usize,
     input: &CompatibilityInput,
     lookup: &TypeLookupImpl,
+    index: &TypeIndex,
 ) -> HashSet<ConcreteType> {
     let mut compat_set = HashSet::new();
 
@@ -131,8 +216,8 @@ fn compute_compatible_concrete_types(
     // For Integer and Binary, we check by constructing their type IDs on-the-fly
     // and using is_compatible
 
-    // Check Integer - find or assume Integer type ID
-    if let Some(int_id) = input.types.iter().position(|t| matches!(t, Type::Integer)) {
+    // Check Integer
+    if let Some(int_id) = index.integer {
         if is_compatible(int_id, pattern_id, lookup) {
             compat_set.insert(ConcreteType::Integer);
         }
@@ -144,7 +229,7 @@ fn compute_compatible_concrete_types(
     }
 
     // Check Binary
-    if let Some(bin_id) = input.types.iter().position(|t| matches!(t, Type::Binary)) {
+    if let Some(bin_id) = index.binary {
         if is_compatible(bin_id, pattern_id, lookup) {
             compat_set.insert(ConcreteType::Binary);
         }
@@ -155,11 +240,7 @@ fn compute_compatible_concrete_types(
     }
 
     // Check Reference
-    if let Some(ref_id) = input
-        .types
-        .iter()
-        .position(|t| matches!(t, Type::Reference))
-    {
+    if let Some(ref_id) = index.reference {
         if is_compatible(ref_id, pattern_id, lookup) {
             compat_set.insert(ConcreteType::Reference);
         }
@@ -169,12 +250,8 @@ fn compute_compatible_concrete_types(
         compat_set.insert(ConcreteType::Reference);
     }
 
-    // Check all Tuples - find or construct type IDs for each tuple
-    for tuple_id in 0..input.tuples.len() {
-        let found_type_id = input
-            .types
-            .iter()
-            .position(|t| matches!(t, Type::Tuple(id) if *id == tuple_id));
+    // Check all Tuples
+    for (tuple_id, &found_type_id) in index.tuple_to_type.iter().enumerate() {
         if let Some(type_id) = found_type_id
             && is_compatible(type_id, pattern_id, lookup)
         {
@@ -190,32 +267,21 @@ fn compute_compatible_concrete_types(
         }
     }
 
-    // Check all Builtins - construct callable type for each
+    // Check all Builtins - look up their (param, result) callable type
     for (builtin_id, builtin_info) in input.builtins.iter().enumerate() {
-        // Find or create a callable type for this builtin
-        // Look for an existing callable type with matching param/result
-        let builtin_callable = input.types.iter().position(|t| {
-            matches!(t, Type::Callable { parameter, result, receive }
-                if *parameter == builtin_info.param_type
-                && *result == builtin_info.result_type
-                && lookup.lookup_type(*receive).map(|t| t.is_never()).unwrap_or(false))
-        });
-        if let Some(callable_id) = builtin_callable
+        if let Some(&callable_id) = index
+            .callable_to_type
+            .get(&(builtin_info.param_type, builtin_info.result_type))
             && is_compatible(callable_id, pattern_id, lookup)
         {
             compat_set.insert(ConcreteType::Builtin(builtin_id));
         }
     }
 
-    // Check all Processes - derive process type from function's callable type
+    // Check all Processes - derive process type from function's send/receive
     for (func_id, func) in input.functions.iter().enumerate() {
         let (_, _, process_send, process_receive) = extract_function_type_info(func, input.types);
-        // Look for process type matching this function's send/receive
-        let process_type = input.types.iter().position(|t| {
-            matches!(t, Type::Process { send, receive }
-                if *send == process_send && *receive == process_receive)
-        });
-        if let Some(process_id) = process_type
+        if let Some(&process_id) = index.process_to_type.get(&(process_send, process_receive))
             && is_compatible(process_id, pattern_id, lookup)
         {
             compat_set.insert(ConcreteType::Process(func_id));
@@ -224,10 +290,7 @@ fn compute_compatible_concrete_types(
 
     // Check all Resources
     for (resource_id, resource_name) in input.resource_names.iter().enumerate() {
-        if let Some(type_id) = input
-            .types
-            .iter()
-            .position(|t| matches!(t, Type::Resource(name) if name == resource_name))
+        if let Some(&type_id) = index.resource_to_type.get(resource_name)
             && is_compatible(type_id, pattern_id, lookup)
         {
             compat_set.insert(ConcreteType::Resource(resource_id));

@@ -885,12 +885,12 @@ impl<E: Effect> Environment<E> {
                 self.resource_ownership.insert(*resource_id, new_owner);
             }
             Value::Tuple(_, fields) => {
-                for field in fields {
+                for field in fields.iter() {
                     self.transfer_resource_ownership(field, new_owner);
                 }
             }
             Value::Function(_, captures) => {
-                for capture in captures {
+                for capture in captures.iter() {
                     self.transfer_resource_ownership(capture, new_owner);
                 }
             }

@@ -72,11 +72,11 @@ impl Value {
             }
             Value::Tuple { type_id, values } => quiver_core::value::Value::Tuple(
                 *type_id,
-                values.iter().map(|v| v.to_core_recursive(heap)).collect(),
+                std::sync::Arc::new(values.iter().map(|v| v.to_core_recursive(heap)).collect()),
             ),
             Value::Function { index, captures } => quiver_core::value::Value::Function(
                 *index,
-                captures.iter().map(|v| v.to_core_recursive(heap)).collect(),
+                std::sync::Arc::new(captures.iter().map(|v| v.to_core_recursive(heap)).collect()),
             ),
             Value::Builtin { name: _ } => {
                 // Web Value uses name, but core Value uses builtin_id
@@ -187,14 +187,14 @@ impl Value {
                     .into_iter()
                     .map(|v| v.to_core_value(executor))
                     .collect();
-                Ok(quiver_core::value::Value::Tuple(type_id, core_values?))
+                Ok(quiver_core::value::Value::Tuple(type_id, std::sync::Arc::new(core_values?)))
             }
             Value::Function { index, captures } => {
                 let core_captures: std::result::Result<Vec<_>, _> = captures
                     .into_iter()
                     .map(|v| v.to_core_value(executor))
                     .collect();
-                Ok(quiver_core::value::Value::Function(index, core_captures?))
+                Ok(quiver_core::value::Value::Function(index, std::sync::Arc::new(core_captures?)))
             }
             Value::Builtin { name: _ } => {
                 // Web Value stores name, but core Value needs builtin_id

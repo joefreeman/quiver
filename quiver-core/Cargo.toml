@@ -7,3 +7,4 @@ edition.workspace = true
 serde.workspace = true
 base64 = "0.22.1"
 hex = "0.4.3"
+rustc-hash = "2"

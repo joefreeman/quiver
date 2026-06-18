@@ -281,7 +281,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     Instruction::Process(pid, fid) => {
                         Instruction::Process(*pid, *function_remap.get(fid).unwrap())
                     }
-                    other => other.clone(),
+                    other => *other,
                 })
                 .collect();
             Function {

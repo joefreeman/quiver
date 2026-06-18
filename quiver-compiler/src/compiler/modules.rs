@@ -92,12 +92,12 @@ pub fn extract_binary_data<E: Effect>(
             // Constant binaries reference Program.constants which persists - no extraction needed
         }
         Value::Tuple(_, fields) => {
-            for field in fields {
+            for field in fields.iter() {
                 extract_binary_data(field, executor, binary_data);
             }
         }
         Value::Function(_, captures) => {
-            for capture in captures {
+            for capture in captures.iter() {
                 extract_binary_data(capture, executor, binary_data);
             }
         }
