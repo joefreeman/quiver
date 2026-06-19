@@ -3,16 +3,16 @@ byte_bit = #int {
 },
 
 [
-  new: __binary_new__,
-  length: __binary_length__,
-  concat: __binary_concat__,
-  append: __binary_append__,
-  and: __binary_and__,
-  or: __binary_or__,
-  xor: __binary_xor__,
-  not: __binary_not__,
-  shift: __binary_shift__,
-  slice: __binary_slice__,
+  new: &__binary_new__,
+  length: &__binary_length__,
+  concat: &__binary_concat__,
+  append: &__binary_append__,
+  and: &__binary_and__,
+  or: &__binary_or__,
+  xor: &__binary_xor__,
+  not: &__binary_not__,
+  shift: &__binary_shift__,
+  slice: &__binary_slice__,
 
   get_byte: #[bin, int] {
     __binary_get__[..., 0, 8]

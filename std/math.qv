@@ -1,7 +1,7 @@
 [
-  add: __add__,
-  sub: __subtract__,
-  mul: __multiply__,
+  add: &__add__,
+  sub: &__subtract__,
+  mul: &__multiply__,
 
   div: #[int, int] {
     | =[a, 0] => []
@@ -29,7 +29,7 @@
     __compare__ ~> { =0 | =1 }
   },
 
-  abs: __abs__,
+  abs: &__abs__,
 
   sqrt: #int {
     | __compare__[~, 0] ~> =-1 => []

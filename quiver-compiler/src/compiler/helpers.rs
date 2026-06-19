@@ -11,51 +11,6 @@ pub fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
-/// Check if a tuple contains ripple operations (~) in any of its field values
-/// Only checks if fields would consume an outer piped value, not ripples in nested chains
-pub fn tuple_contains_ripple(fields: &[ast::TupleField]) -> bool {
-    fields.iter().any(|f| match &f.value {
-        ast::FieldValue::Chain(chain) => chain_starts_with_ripple(chain),
-        ast::FieldValue::Spread(_) => false,
-    })
-}
-
-/// Check if a chain starts with (or immediately contains) a ripple operation
-/// This determines if the chain would consume an outer piped value.
-/// Returns false if the chain starts with a self-contained expression (literal, identifier, etc.)
-/// as any ripples in that case would consume the expression's value, not the outer piped value.
-fn chain_starts_with_ripple(chain: &ast::Chain) -> bool {
-    // Only check the first term - if it starts with a value-producing expression,
-    // any later ripples are part of a nested chain
-    if let Some(first_term) = chain.terms.first() {
-        match first_term {
-            // Direct ripple - consumes outer piped value
-            term if term.is_bare_ripple() => true,
-
-            // Tuples/blocks might contain ripple that consumes outer value
-            ast::Term::Tuple(tuple) => tuple_contains_ripple(&tuple.fields),
-            ast::Term::Block(block) => block_contains_ripple(block),
-
-            // Anything else (literal, identifier, function, etc.) is self-contained
-            // Any ripples after this consume THIS value, not the outer piped value
-            _ => false,
-        }
-    } else {
-        false
-    }
-}
-
-/// Check if a block contains ripple operations that would consume an outer piped value
-pub fn block_contains_ripple(block: &ast::Block) -> bool {
-    block.branches.iter().any(|branch| {
-        branch.condition.chains.iter().any(chain_starts_with_ripple)
-            || branch
-                .consequence
-                .as_ref()
-                .is_some_and(|expr| expr.chains.iter().any(chain_starts_with_ripple))
-    })
-}
-
 /// Check if tuple fields contain spread operations (...)
 pub fn tuple_contains_spread(fields: &[ast::TupleField]) -> bool {
     fields

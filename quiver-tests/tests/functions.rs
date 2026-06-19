@@ -53,7 +53,7 @@ fn test_higher_order_function() {
             r#"
             apply = #[#int -> int, int] { =[f, x] => x ~> f },
             double = #int { =x => [x, 2] ~> __multiply__ },
-            [double, 5] ~> apply
+            [&double, 5] ~> apply
             "#,
         )
         .expect("10");

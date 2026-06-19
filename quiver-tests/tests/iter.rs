@@ -9,7 +9,7 @@ fn test_map() {
             inc = #int { %math.add[~, 1] },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.map[~, inc]
+            ~> %iter.map[~, &inc]
             ~> %list.collect
             "#,
         )
@@ -24,7 +24,7 @@ fn test_filter() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.filter[~, even?]
+            ~> %iter.filter[~, &even?]
             ~> %list.collect
             "#,
         )
@@ -95,7 +95,7 @@ fn test_flat_map() {
             f = #int { Cons[~, Cons[~, Nil]] ~> %list.iter },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.flat_map[~, f]
+            ~> %iter.flat_map[~, &f]
             ~> %list.collect
             "#,
         )
@@ -109,7 +109,7 @@ fn test_chain() {
             r#"
             xs = Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter,
             ys = Cons[4, Cons[5, Nil]] ~> %list.iter,
-            [xs, ys] ~> %iter.chain ~> %list.collect
+            [&xs, &ys] ~> %iter.chain ~> %list.collect
             "#,
         )
         .expect("Cons[1, Cons[2, Cons[3, Cons[4, Cons[5, Nil]]]]]");
@@ -122,7 +122,7 @@ fn test_zip() {
             r#"
             xs = Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter,
             ys = Cons[4, Cons[5, Nil]] ~> %list.iter,
-            [xs, ys] ~> %iter.zip ~> %list.collect
+            [&xs, &ys] ~> %iter.zip ~> %list.collect
             "#,
         )
         .expect("Cons[[1, 4], Cons[[2, 5], Nil]]");
@@ -178,7 +178,7 @@ fn test_fold() {
             r#"
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.fold[~, 0, %math.add]
+            ~> %iter.fold[~, 0, &%math.add]
             "#,
         )
         .expect("6");
@@ -205,7 +205,7 @@ fn test_any() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.any?[~, even?]
+            ~> %iter.any?[~, &even?]
             "#,
         )
         .expect("Ok");
@@ -216,7 +216,7 @@ fn test_any() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Cons[1, Cons[3, Nil]]
             ~> %list.iter
-            ~> %iter.any?[~, even?]
+            ~> %iter.any?[~, &even?]
             "#,
         )
         .expect("[]");
@@ -227,7 +227,7 @@ fn test_any() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Nil
             ~> %list.iter
-            ~> %iter.any?[~, even?]
+            ~> %iter.any?[~, &even?]
             "#,
         )
         .expect("[]");
@@ -241,7 +241,7 @@ fn test_all() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Cons[2, Cons[4, Cons[6, Nil]]]
             ~> %list.iter
-            ~> %iter.all?[~, even?]
+            ~> %iter.all?[~, &even?]
             "#,
         )
         .expect("Ok");
@@ -252,7 +252,7 @@ fn test_all() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Cons[1, Cons[3, Nil]]
             ~> %list.iter
-            ~> %iter.all?[~, even?]
+            ~> %iter.all?[~, &even?]
             "#,
         )
         .expect("[]");
@@ -263,7 +263,7 @@ fn test_all() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Nil
             ~> %list.iter
-            ~> %iter.all?[~, even?]
+            ~> %iter.all?[~, &even?]
             "#,
         )
         .expect("Ok");
@@ -323,7 +323,7 @@ fn test_find_index() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.find_index[~, even?]
+            ~> %iter.find_index[~, &even?]
             "#,
         )
         .expect("1");
@@ -334,7 +334,7 @@ fn test_find_index() {
             even? = #int { %math.mod[~, 2] ~> =0 },
             Cons[1, Nil]
             ~> %list.iter
-            ~> %iter.find_index[~, even?]
+            ~> %iter.find_index[~, &even?]
             "#,
         )
         .expect("[]");

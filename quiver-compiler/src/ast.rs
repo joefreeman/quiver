@@ -65,6 +65,8 @@ pub enum Term {
     Process(usize),
     /// Reference operator (`&`). None creates a new unique ref, Some references a value.
     Reference(Option<Access>),
+    /// Reference to a builtin without calling it (`&__add__`).
+    BuiltinReference(Builtin),
 }
 
 impl Term {

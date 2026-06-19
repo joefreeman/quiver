@@ -103,7 +103,7 @@ iter' = #[#^ -> iterator<int>, bin, int, int] {
         ~> %math.mul[~, 8]
         ~> __binary_get__[data, byte_pos, 0, ~],
 
-      [char, self[self, data, char_end, data_len]]
+      [char, self[&self, data, char_end, data_len]]
     }
   }
 },
@@ -122,7 +122,7 @@ collect' = #[iterator<int>, bin] {
 
       acc
       ~> %binary.append[~, char_int, byte_count]
-      ~> ^[next, ~]
+      ~> ^[&next, ~]
     }
   }
 },
@@ -196,7 +196,7 @@ collect' = #[iterator<int>, bin] {
     =Str[data],
     data
     ~> %binary.length
-    ~> iter'[iter', data, 0, ~]
+    ~> iter'[&iter', data, 0, ~]
     ~> %iter.count
   },
 
@@ -204,7 +204,7 @@ collect' = #[iterator<int>, bin] {
     =[Str[data], start, end],
     data
     ~> %binary.length
-    ~> iter'[iter', data, 0, ~]
+    ~> iter'[&iter', data, 0, ~]
     ~> %iter.drop[~, start]
     ~> %iter.take[~, %math.sub[end, start]]
     ~> collect'[~, '']
@@ -233,7 +233,7 @@ collect' = #[iterator<int>, bin] {
     =Str[data],
     data
     ~> %binary.length
-    ~> iter'[iter', data, 0, ~]
+    ~> iter'[&iter', data, 0, ~]
   },
 
   collect: #iterator<int> {

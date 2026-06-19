@@ -14,7 +14,7 @@ fn test_nested_member_access_as_operation() {
         .evaluate(
             r#"
             inc = #int { [~, 1] ~> __add__ },
-            x = [0, [f: inc]],
+            x = [0, [f: &inc]],
             4 ~> x.1.f
             "#,
         )

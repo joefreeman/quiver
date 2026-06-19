@@ -521,21 +521,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         for (fields_compiled, field) in fields.iter().enumerate() {
             let (field_type, field_prov) = match &field.value {
                 ast::FieldValue::Chain(chain) => {
-                    // Pass ripple_context to chains, incrementing offset for each field compiled
-                    // Set owns_value=false since we're passing it through, not owning it
-                    let ripple_context_value;
-                    let ripple_context_param = if let Some(ctx) = ripple_context {
-                        ripple_context_value = RippleContext {
-                            value_type_id: ctx.value_type_id,
-                            stack_offset: ctx.stack_offset + fields_compiled,
-                            owns_value: false,
-                            provenance: ctx.provenance.clone(),
-                        };
-                        Some(&ripple_context_value)
-                    } else {
-                        None
-                    };
-                    self.compile_chain_with_provenance(chain.clone(), None, ripple_context_param)?
+                    // Each field chain receives a copy of the enclosing (piped) value as its
+                    // input, so a leading callable field is called with it (and `&` is needed
+                    // to pass a callable by value). The original value remains lower on the
+                    // stack for nested `~` references and is cleaned up below if owned.
+                    let input = ripple_context.map(|ctx| {
+                        // Duplicate the piped value to the top of the stack as the input.
+                        self.codegen
+                            .add_instruction(Instruction::Pick(ctx.stack_offset + fields_compiled));
+                        (ctx.value_type_id, ctx.provenance.clone())
+                    });
+                    // The input value carries the piped value (and its provenance); nested
+                    // tuples re-derive their own ripple context from it, so we pass no parent
+                    // ripple_context here (which would otherwise have a stale stack offset).
+                    self.compile_chain_with_input(chain.clone(), None, None, input, None, false)?
                 }
                 ast::FieldValue::Spread(_) => {
                     unreachable!("Spread should be handled by compile_tuple_with_spread")
@@ -1638,7 +1637,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 chain.clone(),
                 on_no_match,
                 None,
-                if i == 0 { last_type } else { None },
+                if i == 0 {
+                    last_type.map(|t| (t, Provenance::Unknown))
+                } else {
+                    None
+                },
                 narrowing.as_deref_mut(),
                 true, // implicit_continuation: block-level chains load parameter
             )?;
@@ -1747,7 +1750,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         chain: ast::Chain,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
-        input_type: Option<usize>,
+        input: Option<(usize, Provenance)>,
         mut narrowing: Option<&mut Narrowing>,
         implicit_continuation: bool,
     ) -> Result<(usize, Provenance), Error> {
@@ -1755,9 +1758,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // - If input_type is provided, use it (value already on stack)
         // - If implicit_continuation is true, load the parameter from scope
         // - Otherwise, no initial value (for tuple field chains)
-        let (mut current_type, mut current_prov) = if let Some(input) = input_type {
-            // Input provided (e.g., from a consequence or previous term in expression)
-            (Some(input), Provenance::Unknown)
+        let (mut current_type, mut current_prov) = if let Some((input_type, input_prov)) = input {
+            // Input provided (e.g., from a tuple field, consequence, or previous expression term)
+            (Some(input_type), input_prov)
         } else if implicit_continuation {
             // Load the parameter from scope (implicit continuation)
             let (parameter_type, param_local) = scopes::get_parameter(&self.scopes)?;
@@ -2358,30 +2361,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return Ok(None);
         };
 
-        // Check if argument uses the piped value (via ripple or spread)
-        let uses_piped_value =
-            helpers::tuple_contains_ripple(fields) || helpers::tuple_contains_spread(fields);
-
-        // If argument doesn't use the piped value, drop it
-        if value_type.is_some() && !uses_piped_value {
-            self.codegen.add_instruction(Instruction::Pop);
-        }
-
-        // Convert value_type to ripple_context if present AND argument uses it
+        // Always flow the piped value into the argument tuple's fields (each field gets a
+        // copy as input; callable fields are called with it, non-callables drop it). The
+        // original is owned and cleaned up by compile_tuple.
         let ripple_context_value;
         let ripple_ctx = if let Some(vt) = value_type {
-            if uses_piped_value {
-                ripple_context_value = RippleContext {
-                    value_type_id: *vt,
-                    stack_offset: 0,
-                    owns_value: true,
-                    provenance: value_provenance,
-                };
-                Some(&ripple_context_value)
-            } else {
-                // Value was popped, use parent ripple context if any
-                ripple_context
-            }
+            ripple_context_value = RippleContext {
+                value_type_id: *vt,
+                stack_offset: 0,
+                owns_value: true,
+                provenance: value_provenance,
+            };
+            Some(&ripple_context_value)
         } else {
             ripple_context
         };
@@ -2881,30 +2872,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Tuple(tuple) => {
-                // Check if tuple uses the piped value
-                let uses_piped_value = helpers::tuple_contains_ripple(&tuple.fields)
-                    || helpers::tuple_contains_spread(&tuple.fields);
-
-                // If tuple doesn't use the piped value, drop it
-                if value_type.is_some() && !uses_piped_value {
-                    self.codegen.add_instruction(Instruction::Pop);
-                }
-
-                // Convert value_type to ripple_context if present AND tuple uses it
+                // Always flow the piped value into the tuple's fields: each field receives a
+                // copy as its input, so a callable field is called with it (and `&` is needed
+                // to pass a callable by value), while non-callable fields drop it. The original
+                // is owned and cleaned up by compile_tuple.
                 let ripple_context_value;
                 let ripple_context_param = if let Some(vt) = value_type.as_ref() {
-                    if uses_piped_value {
-                        ripple_context_value = RippleContext {
-                            value_type_id: *vt,
-                            stack_offset: 0,
-                            owns_value: true,
-                            provenance: value_provenance,
-                        };
-                        Some(&ripple_context_value)
-                    } else {
-                        // Value was popped, use parent ripple context if any
-                        ripple_context
-                    }
+                    ripple_context_value = RippleContext {
+                        value_type_id: *vt,
+                        stack_offset: 0,
+                        owns_value: true,
+                        provenance: value_provenance,
+                    };
+                    Some(&ripple_context_value)
                 } else {
                     ripple_context
                 };
@@ -3144,6 +3124,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         "Reference requires an identifier (e.g., &f)".to_string(),
                     )),
                 }
+            }
+            ast::Term::BuiltinReference(builtin) => {
+                // &__builtin__ - the builtin function value, without applying it.
+                if value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+                let builtin_type = self.compile_builtin(&builtin.name)?;
+                Ok((builtin_type, Provenance::Unknown))
             }
             ast::Term::Reference(None) => {
                 // Standalone & - create a new unique ref

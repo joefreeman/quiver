@@ -5,7 +5,7 @@ use std::collections::HashMap;
 #[test]
 fn test_module_import() {
     let mut modules = HashMap::new();
-    modules.insert(vec!["mymath".to_string()], "[add: __add__]".to_string());
+    modules.insert(vec!["mymath".to_string()], "[add: &__add__]".to_string());
 
     quiver()
         .with_modules(modules)
@@ -18,7 +18,7 @@ fn test_destructured_import() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["mymath".to_string()],
-        r#"[add: __add__, sub: __subtract__]"#.to_string(),
+        r#"[add: &__add__, sub: &__subtract__]"#.to_string(),
     );
 
     quiver()
@@ -35,7 +35,7 @@ fn test_destructured_import() {
 #[test]
 fn test_star_import() {
     let mut modules = HashMap::new();
-    modules.insert(vec!["mymath".to_string()], "[add: __add__]".to_string());
+    modules.insert(vec!["mymath".to_string()], "[add: &__add__]".to_string());
 
     quiver()
         .with_modules(modules)

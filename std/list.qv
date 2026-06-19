@@ -13,7 +13,7 @@ iter' = #<t>[#^ -> iterator<t>, list<t>] {
   #{
     xs ~> {
       | =Nil => []
-      | =Cons[head, tail] => self[self, tail] ~> [head, ~]
+      | =Cons[head, tail] => self[&self, tail] ~> [head, ~]
     }
   }
 },
@@ -22,7 +22,7 @@ collect' = #<t>[iterator<t>, list<t>] {
   =[it, acc],
   it[] ~> {
     | / ~> =Ok => acc
-    | =[value, next] => value ~> Cons[~, acc] ~> ^[next, ~]
+    | =[value, next] => value ~> Cons[~, acc] ~> ^[&next, ~]
   }
 },
 
@@ -54,7 +54,7 @@ collect' = #<t>[iterator<t>, list<t>] {
   },
 
   iter: #<t>list<t> {
-    iter'[iter', ~]
+    iter'[&iter', ~]
   },
 
   collect: #<t>iterator<t> {

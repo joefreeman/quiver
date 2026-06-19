@@ -95,6 +95,7 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Term::Builtin(_) => {}
+            ast::Term::BuiltinReference(_) => {}
             ast::Term::TailCall(tail_call) => {
                 if let Some(name) = &tail_call.identifier {
                     self.visit_identifier(name, tail_call.accessors.clone());

@@ -1432,6 +1432,8 @@ fn reference_term(input: Span) -> IResult<Span, Term> {
                     argument: None,
                 }))
             }),
+            // &__builtin__ - reference a builtin without calling it
+            map(builtin, Term::BuiltinReference),
             // &identifier or &module.func
             map(access, |a| Term::Reference(Some(a))),
             // Standalone & - create a new unique ref

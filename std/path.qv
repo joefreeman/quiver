@@ -9,8 +9,8 @@ join' = #[#^ -> (path | []), path, path] {
     | =[_, Relative[0]] => p1
     | =[Root, Relative[_]] => []
     | =[Relative[m], Relative[n]] => %math.add[m, n] ~> Relative[~]
-    | =[Path[_, p], Relative[n]] => self[self, p, Relative[%math.sub[n, 1]]]
-    | =[_, Path[s, parent]] => self[self, p1, parent] ~> { / => [] | Path[s, ~] }
+    | =[Path[_, p], Relative[n]] => self[&self, p, Relative[%math.sub[n, 1]]]
+    | =[_, Path[s, parent]] => self[&self, p1, parent] ~> { / => [] | Path[s, ~] }
   }
 },
 
@@ -90,6 +90,6 @@ parse' = #[list<str>, path] {
   },
 
   join: #[path, path] {
-    join'[join', ...]
+    join'[&join', ...]
   }
 ]
