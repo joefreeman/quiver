@@ -2,7 +2,7 @@ use crate::ast::*;
 use nom::{
     IResult, Slice,
     branch::alt,
-    bytes::complete::{tag, take_while, take_while1},
+    bytes::complete::{tag, take_while},
     character::complete::{char, digit1, multispace0, multispace1, satisfy, space1},
     combinator::{map, map_res, not, opt, peek, recognize, success, value as nom_value, verify},
     multi::{many0, separated_list0, separated_list1},
@@ -311,10 +311,16 @@ fn identifier(input: Span) -> IResult<Span, String> {
             take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
             opt(char('?')),
             opt(char('!')),
-            take_while(|c: char| c == '\''),
         ))),
         |s: Span| s.fragment().to_string(),
     )(input)
+}
+
+/// A type name: a leading `'` followed by an identifier (e.g. `'int`, `'point`).
+/// The apostrophe distinguishes types from variables and field names; the returned
+/// string is the bare name without the prefix.
+fn type_name(input: Span) -> IResult<Span, String> {
+    preceded(char('\''), identifier)(input)
 }
 
 fn tuple_name(input: Span) -> IResult<Span, String> {
@@ -333,52 +339,27 @@ fn integer_literal(input: Span) -> IResult<Span, Literal> {
     map(
         pair(
             opt(char('-')),
-            alt((
-                // Hexadecimal: 0x...
-                map_res(
-                    preceded(tag("0x"), take_while1(|c: char| c.is_ascii_hexdigit())),
-                    |s: Span| {
-                        i64::from_str_radix(s.fragment(), 16).map_err(|_| {
-                            Error::new(
-                                ErrorKind::IntegerMalformed(format!("0x{}", s.fragment())),
-                                Some(SourceSpan::from_span(s)),
-                            )
-                        })
-                    },
-                ),
-                // Binary: 0b...
-                map_res(
-                    preceded(tag("0b"), take_while1(|c: char| c == '0' || c == '1')),
-                    |s: Span| {
-                        i64::from_str_radix(s.fragment(), 2).map_err(|_| {
-                            Error::new(
-                                ErrorKind::IntegerMalformed(format!("0b{}", s.fragment())),
-                                Some(SourceSpan::from_span(s)),
-                            )
-                        })
-                    },
-                ),
-                // Decimal
-                map_res(digit1, |s: Span| {
-                    s.fragment().parse::<i64>().map_err(|_| {
-                        Error::new(
-                            ErrorKind::IntegerMalformed(s.fragment().to_string()),
-                            Some(SourceSpan::from_span(s)),
-                        )
-                    })
-                }),
-            )),
+            // Decimal only. Hexadecimal byte sequences are binary literals (`0x...`).
+            map_res(digit1, |s: Span| {
+                s.fragment().parse::<i64>().map_err(|_| {
+                    Error::new(
+                        ErrorKind::IntegerMalformed(s.fragment().to_string()),
+                        Some(SourceSpan::from_span(s)),
+                    )
+                })
+            }),
         ),
         |(sign, value)| Literal::Integer(if sign.is_some() { -value } else { value }),
     )(input)
 }
 
 fn binary_literal(input: Span) -> IResult<Span, Literal> {
-    // Match opening quote, content (any chars except quote), and closing quote
-    let (remaining, (_, content, _)) =
-        tuple((char('\''), take_while(|c: char| c != '\''), char('\'')))(input)?;
+    // Hexadecimal bytes: `0x` followed by an even number of hex digits. `0x` alone is
+    // the empty binary.
+    let (remaining, content) =
+        preceded(tag("0x"), take_while(|c: char| c.is_ascii_hexdigit()))(input)?;
 
-    // Decode the hex string - this will fail if there are invalid hex digits
+    // Decode the hex string - this fails on an odd number of digits.
     match hex::decode(content.fragment()) {
         Ok(bytes) => Ok((remaining, Literal::Binary(bytes))),
         Err(_) => Err(nom::Err::Failure(nom::error::Error::new(
@@ -480,7 +461,8 @@ fn parse_string_content(span: Span) -> Result<String, Error> {
 }
 
 fn literal(input: Span) -> IResult<Span, Literal> {
-    alt((integer_literal, binary_literal))(input)
+    // Binary first: `0x...` would otherwise be read as the integer `0`.
+    alt((binary_literal, integer_literal))(input)
 }
 
 // Pattern parsers for terms
@@ -491,8 +473,15 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
     // We use a limited pattern parser here to avoid left recursion
     fn nested_pattern(input: Span) -> IResult<Span, Match> {
         alt((
-            // Reference pattern with & prefix
-            map(preceded(char('&'), base_type), Match::Reference),
+            // Variable pin with & prefix
+            map(preceded(char('&'), identifier), |name| {
+                Match::Reference(Type::Identifier {
+                    name,
+                    arguments: vec![],
+                })
+            }),
+            // Type reference: 'int, 'list<'t>
+            map(type_identifier, Match::Type),
             // Literals
             map(literal, Match::Literal),
             // Star and placeholder
@@ -551,14 +540,6 @@ fn partial_pattern_inner(input: Span) -> IResult<Span, PartialPattern> {
 
 // Type parsers
 
-fn primitive_type(input: Span) -> IResult<Span, Type> {
-    alt((
-        nom_value(Type::Primitive(PrimitiveType::Int), tag("int")),
-        nom_value(Type::Primitive(PrimitiveType::Bin), tag("bin")),
-        nom_value(Type::Primitive(PrimitiveType::Ref), tag("ref")),
-    ))(input)
-}
-
 fn resource_type_name(input: Span) -> IResult<Span, String> {
     map(
         recognize(pair(
@@ -575,12 +556,12 @@ fn resource_type(input: Span) -> IResult<Span, Type> {
 
 fn field_type(input: Span) -> IResult<Span, FieldType> {
     alt((
-        // Spread with optional identifier and optional type arguments: ... or ...identifier or ...identifier<type, type>
+        // Spread with optional type name and optional type arguments: ... or ...'alias or ...'alias<type, type>
         map(
             preceded(
                 tag("..."),
                 opt(pair(
-                    identifier,
+                    type_name,
                     opt(delimited(
                         char('<'),
                         separated_list1(tuple((ws0, char(','), ws0)), type_definition),
@@ -679,16 +660,16 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                     is_partial: false,
                 },
             ),
-            // identifier[...] - inherit name from type alias and auto-spread
+            // 'alias[...] - inherit name from type alias and auto-spread
             verify(
                 map(
                     tuple((
-                        identifier,
+                        type_name,
                         delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
                     )),
                     |(id, mut fields)| {
                         // Transform unspecified spread (...) into identifier spread (...identifier)
-                        // This allows event[..., timestamp: int] to mean "spread event and add timestamp"
+                        // This allows 'event[..., timestamp: 'int] to mean "spread event and add timestamp"
                         for field in &mut fields {
                             if let FieldType::Spread {
                                 identifier: spread_id,
@@ -738,7 +719,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
 }
 
 fn type_parameter(input: Span) -> IResult<Span, Type> {
-    map(delimited(char('<'), identifier, char('>')), |name| {
+    map(delimited(char('<'), type_name, char('>')), |name| {
         Type::Identifier {
             name,
             arguments: vec![],
@@ -749,16 +730,17 @@ fn type_parameter(input: Span) -> IResult<Span, Type> {
 fn type_identifier(input: Span) -> IResult<Span, Type> {
     map(
         pair(
-            identifier,
+            type_name,
             opt(delimited(
                 char('<'),
                 separated_list1(tuple((ws0, char(','), ws0)), type_definition),
                 char('>'),
             )),
         ),
-        |(name, arguments)| Type::Identifier {
-            name,
-            arguments: arguments.unwrap_or_default(),
+        |(name, arguments)| match arguments {
+            // No arguments: `'int`/`'bin`/`'ref` resolve to primitives, anything else to an alias.
+            None => identifier_to_type(name),
+            Some(arguments) => Type::Identifier { name, arguments },
         },
     )(input)
 }
@@ -834,7 +816,6 @@ fn function_input_type(input: Span) -> IResult<Span, Type> {
         partial_type, // Must come before grouping parentheses
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
-        primitive_type,
         resource_type,
         type_cycle,
         process_type,
@@ -847,7 +828,6 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
         partial_type, // Must come before grouping parentheses
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
-        primitive_type,
         resource_type,
         type_cycle,
         process_type,
@@ -858,12 +838,11 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
 fn base_type(input: Span) -> IResult<Span, Type> {
     alt((
         tuple_type,
-        partial_type, // Must come before grouping parentheses to have priority
-        primitive_type,
+        partial_type,  // Must come before grouping parentheses to have priority
         resource_type, // Must come before type_identifier to match \Resource
         type_cycle,
         process_type,
-        type_parameter, // Must come before type_identifier to match <t> before trying identifier
+        type_parameter, // Must come before type_identifier to match <'t> before trying identifier
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         type_identifier,
     ))(input)
@@ -935,15 +914,7 @@ fn make_source_chain(term: Term) -> Chain {
     }
 }
 
-// Helper to check if an identifier looks like a type (primitive or capitalized)
-fn is_type_identifier(ident: &str) -> bool {
-    ident == "int"
-        || ident == "bin"
-        || ident == "ref"
-        || ident.chars().next().is_some_and(|c| c.is_uppercase())
-}
-
-// Helper to convert an identifier to a type
+// Helper to convert a type name to a type (primitives or an alias reference)
 fn identifier_to_type(ident: String) -> Type {
     match ident.as_str() {
         "int" => Type::Primitive(PrimitiveType::Int),
@@ -979,8 +950,9 @@ fn make_receive(param_type: Type, body: Option<Block>) -> Term {
 // - !                - Bare select (postfix form, empty sources)
 // - !(type) { ... }  - Receive function with explicit type
 // - !(type)          - Identity receive with explicit type
-// - !ident { ... }   - Receive function with identifier type
-// - !ident           - Identity receive (if type-like) or single source (if variable)
+// - !'type { ... }   - Receive function with named type
+// - !'type           - Identity receive for a type
+// - !var             - Single source (variable/process)
 // - !#f              - Single source (function)
 // - !@p              - Single source (spawn)
 // - !1000            - Single source (timeout literal)
@@ -997,7 +969,7 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 ),
                 |sources| Term::Select(Some(sources)),
             ),
-            // (type) with optional body
+            // (type) with optional body - parenthesized receive type
             map(
                 pair(
                     delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
@@ -1005,24 +977,13 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 ),
                 |(param_type, body)| make_receive(param_type, body),
             ),
-            // ident with optional body - must check for body first due to parsing order
+            // 'type with optional filter body: !'int, !'int { ... }
             map(
-                pair(identifier, preceded(opt(ws1), block)),
-                |(ident, body)| make_receive(identifier_to_type(ident), Some(body)),
+                pair(type_identifier, opt(preceded(opt(ws1), block))),
+                |(param_type, body)| make_receive(param_type, body),
             ),
-            // access - could be type identifier or variable
-            map(access, |acc| {
-                // Bare type identifier → identity receive
-                if acc.accessors.is_empty()
-                    && acc.argument.is_none()
-                    && let Some(AccessSource::Identifier(ref ident)) = acc.source
-                    && is_type_identifier(ident)
-                {
-                    return make_receive(identifier_to_type(ident.clone()), None);
-                }
-                // Variable or complex access → single source
-                single_source(Term::Access(acc))
-            }),
+            // access - variable or process → single source
+            map(access, |acc| single_source(Term::Access(acc))),
             // #function
             map(function, |f| single_source(Term::Function(f))),
             // @N process reference (must come before spawn_term to match @1 before @f)
@@ -1143,7 +1104,7 @@ fn function(input: Span) -> IResult<Span, Function> {
             tuple((
                 opt(delimited(
                     char('<'),
-                    separated_list1(tuple((ws0, char(','), ws0)), identifier),
+                    separated_list1(tuple((ws0, char(','), ws0)), type_name),
                     char('>'),
                 )),
                 opt(preceded(not(peek(char('{'))), function_input_type)),
@@ -1231,20 +1192,16 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 body: Some(body),
             })))
         }),
-        // @identifier { ... } - Spawn with identifier type (sugar for @#identifier { ... })
+        // @(type) { ... } - Spawn with parenthesized type (sugar for @#(type) { ... })
         map(
-            tuple((preceded(char('@'), identifier), preceded(opt(ws1), block))),
-            |(ident, body)| {
-                // Check if identifier is a primitive type
-                let param_type = match ident.as_str() {
-                    "int" => Type::Primitive(PrimitiveType::Int),
-                    "bin" => Type::Primitive(PrimitiveType::Bin),
-                    "ref" => Type::Primitive(PrimitiveType::Ref),
-                    _ => Type::Identifier {
-                        name: ident,
-                        arguments: vec![],
-                    },
-                };
+            tuple((
+                preceded(
+                    char('@'),
+                    delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+                ),
+                preceded(opt(ws1), block),
+            )),
+            |(param_type, body)| {
                 Term::Spawn(Box::new(Term::Function(Function {
                     type_parameters: vec![],
                     parameter_type: Some(param_type),
@@ -1253,7 +1210,22 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 })))
             },
         ),
-        // @[...] - Spawn with tuple type (sugar for @#[...] { ... })
+        // @'type { ... } - Spawn with named type (sugar for @#'type { ... })
+        map(
+            tuple((
+                preceded(char('@'), type_identifier),
+                preceded(opt(ws1), block),
+            )),
+            |(param_type, body)| {
+                Term::Spawn(Box::new(Term::Function(Function {
+                    type_parameters: vec![],
+                    parameter_type: Some(param_type),
+                    return_type: None,
+                    body: Some(body),
+                })))
+            },
+        ),
+        // @[...] { ... } - Spawn with tuple type (sugar for @#[...] { ... })
         map(
             tuple((preceded(char('@'), tuple_type), preceded(opt(ws1), block))),
             |(tuple_ty, body)| {
@@ -1333,35 +1305,27 @@ fn match_string(input: Span) -> IResult<Span, Match> {
     )(input)
 }
 
-// Parse an inline type expression: either (type-expr) or identifier<type-args>
-// This is used for pin patterns with explicit types
+// Parse an inline type expression in a pattern: a parenthesized type expression,
+// a type name (`'int`, `'list<'t>`), or a partial type (`(mode: W)`, `A(x: 'int)`).
 fn inline_type_expression(input: Span) -> IResult<Span, Type> {
     alt((
-        // Parenthesized type expression: (int | bin), (list<int>), etc.
+        // Parenthesized type expression: ('int | 'bin), ('list<'int>), etc.
         delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
-        // Type identifier with required type arguments: list<int>, tree<int, bin>
-        map(
-            pair(
-                identifier,
-                delimited(
-                    char('<'),
-                    separated_list1(tuple((ws0, char(','), ws0)), type_definition),
-                    char('>'),
-                ),
-            ),
-            |(name, arguments)| Type::Identifier { name, arguments },
-        ),
-        // Partial types: A(x: int), (x: int), ()
+        // Type name, optionally with arguments: 'int, 'list<'int>, 'tree<'int, 'bin>
+        type_identifier,
+        // Partial type whose fields constrain by type: (mode: W), A(x: 'int)
         partial_type,
     ))(input)
 }
 
 fn match_pattern(input: Span) -> IResult<Span, Match> {
     alt((
-        // Reference pattern with & prefix: &<type-expression>
-        // The & precedes a type expression (not a pattern), used to check against existing value/type
-        map(preceded(char('&'), base_type), |type_def| {
-            Match::Reference(type_def)
+        // Variable pin with & prefix: &name checks against an existing variable's value.
+        map(preceded(char('&'), identifier), |name| {
+            Match::Reference(Type::Identifier {
+                name,
+                arguments: vec![],
+            })
         }),
         // Try string literals first (before tuples and literals)
         match_string,
@@ -1369,8 +1333,8 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         map(match_tuple, Match::Tuple),
         // Try partial patterns before inline types (partial patterns use parentheses too)
         map(partial_pattern_inner, Match::Partial),
-        // Inline type without & prefix: (type-expression) or list<int>
-        // Must come after partial patterns to avoid ambiguity with (identifier)
+        // Type reference: 'int, 'list<'t>, ('int | 'bin). Types need no & since they
+        // are never bound. Must come after partial patterns to avoid ambiguity with (...).
         map(inline_type_expression, Match::Type),
         // Then try literals
         map(literal, Match::Literal),
@@ -1555,13 +1519,13 @@ fn expression(input: Span) -> IResult<Span, Expression> {
 fn type_alias(input: Span) -> IResult<Span, Statement> {
     map(
         tuple((
-            identifier,
+            type_name,
             opt(delimited(
                 char('<'),
-                separated_list1(tuple((ws0, char(','), ws0)), identifier),
+                separated_list1(tuple((ws0, char(','), ws0)), type_name),
                 char('>'),
             )),
-            preceded(tuple((ws0, tag(":"), ws0)), type_definition),
+            preceded(tuple((ws0, char('='), ws0)), type_definition),
         )),
         |(name, type_parameters, type_definition)| Statement::TypeAlias {
             name,
@@ -1573,12 +1537,12 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
 
 fn type_import_pattern(input: Span) -> IResult<Span, TypeImportPattern> {
     alt((
-        nom_value(TypeImportPattern::Star, char('*')),
+        nom_value(TypeImportPattern::Star, pair(char('\''), char('*'))),
         map(
             delimited(
                 pair(char('('), ws0),
                 terminated(
-                    separated_list1(tuple((ws0, char(','), ws1)), identifier),
+                    separated_list1(tuple((ws0, char(','), ws1)), type_name),
                     opt(pair(ws0, char(','))),
                 ),
                 pair(ws0, char(')')),
@@ -1592,7 +1556,7 @@ fn type_import(input: Span) -> IResult<Span, Statement> {
     map(
         tuple((
             type_import_pattern,
-            preceded(tuple((ws0, tag(":"), ws0)), import),
+            preceded(tuple((ws0, char('='), ws0)), import),
         )),
         |(pattern, module)| Statement::TypeImport { pattern, module },
     )(input)

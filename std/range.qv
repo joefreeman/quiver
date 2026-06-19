@@ -1,7 +1,7 @@
-range : Range[int, int | None, int];
-(iterator) : %iter;
+'range = Range['int, 'int | None, 'int];
+('iterator) = %iter;
 
-iter' = #[#^ -> iterator<int>, range] {
+iter_ = #[#^ -> 'iterator<'int>, 'range] {
   =[self, Range[value, stop, step]],
   #{
     {
@@ -19,23 +19,23 @@ iter' = #[#^ -> iterator<int>, range] {
 },
 
 [
-  to: #int {
+  to: #'int {
     Range[0, ~, 1]
   },
 
-  from: #int {
+  from: #'int {
     Range[~, None, 1]
   },
 
-  between: #[int, int] {
+  between: #['int, 'int] {
     Range[..., 1]
   },
 
-  new: #[int, int | None, int] {
+  new: #['int, 'int | None, 'int] {
     Range[...]
   },
 
-  iter: #Range[int, int | None, int] {
-    iter' [&iter', ~]
+  iter: #Range['int, 'int | None, 'int] {
+    iter_ [&iter_, ~]
   }
 ]

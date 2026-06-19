@@ -58,8 +58,8 @@ fn test_named_partial_pattern_with_union() {
     quiver()
         .evaluate(
             r#"
-            union : A[x: int, y: int] | B[x: int, z: int];
-            #union { =A(x) => x } ~> =f;
+            'union = A[x: 'int, y: 'int] | B[x: 'int, z: 'int];
+            #'union { =A(x) => x } ~> =f;
             A[x: 1, y: 2] ~> f ~> =a;
             B[x: 3, z: 4] ~> f ~> =b;
             [a, b]
@@ -161,7 +161,7 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            #[a: int, b: int] { =(a, b) => [a, b] } ~> =f;
+            #[a: 'int, b: 'int] { =(a, b) => [a, b] } ~> =f;
             [a: 1, b: 2] ~> f
             "#,
         )
@@ -170,8 +170,8 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            union : [a: int, b: int] | [x: int];
-            #union { =(a, b) => [a, b] } ~> =f;
+            'union = [a: 'int, b: 'int] | [x: 'int];
+            #'union { =(a, b) => [a, b] } ~> =f;
             [a: 1, b: 2] ~> f ~> =b1;
             [x: 3] ~> f ~> =b2;
             [b1, b2]
@@ -182,8 +182,8 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            union : [a: int, b: int] | [b: int, c: int];
-            #union { =(b) => b } ~> =f;
+            'union = [a: 'int, b: 'int] | [b: 'int, c: 'int];
+            #'union { =(b) => b } ~> =f;
             [a: 1, b: 2] ~> f ~> =b1;
             [b: 3, c: 4] ~> f ~> =b2;
             [b1, b2]
@@ -194,8 +194,8 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            union : [a: int, b: int] | [b: int, c: int];
-            #union { =(a, b) => [a, b] } ~> =f;
+            'union = [a: 'int, b: 'int] | [b: 'int, c: 'int];
+            #'union { =(a, b) => [a, b] } ~> =f;
             [a: 1, b: 2] ~> f ~> =b1;
             [b: 3, c: 4] ~> f ~> =b2;
             [b1, b2]
@@ -209,8 +209,8 @@ fn test_match_union_in_nested_tuple() {
     quiver()
         .evaluate(
             r#"
-            option : Some[int] | None;
-            #[option, int] {
+            'option = Some['int] | None;
+            #['option, 'int] {
               | =[None, z] => 0
               | =[Some[x], z] => [x, z] ~> __add__
             } ~> =f,
@@ -263,8 +263,8 @@ fn test_complex_union_pattern_matching() {
     quiver()
         .evaluate(
             r#"
-            result : Ok[int] | Err[int];
-            option : Some[result] | None;
+            'result = Ok['int] | Err['int];
+            'option = Some['result] | None;
 
             Some[Ok[42]] ~> {
               | =None => 0
@@ -287,8 +287,8 @@ fn test_partial_pattern_order_for_union() {
     quiver()
         .evaluate(
             r#"
-            union : A[x: int, y: int] | B[y: int, x: int]
-            #Wrapper[union] { =Wrapper[(x, y)] => [x, y] } ~> =f
+            'union = A[x: 'int, y: 'int] | B[y: 'int, x: 'int]
+            #Wrapper['union] { =Wrapper[(x, y)] => [x, y] } ~> =f
             Wrapper[B[y: 1, x: 2]] ~> f
             "#,
         )
@@ -300,8 +300,8 @@ fn test_star_pattern_order_for_union() {
     quiver()
         .evaluate(
             r#"
-            union : A[x: int, y: int] | B[y: int, x: int]
-            #union { =* => [x, y] } ~> =f
+            'union = A[x: 'int, y: 'int] | B[y: 'int, x: 'int]
+            #'union { =* => [x, y] } ~> =f
             B[y: 1, x: 2] ~> f
             "#,
         )

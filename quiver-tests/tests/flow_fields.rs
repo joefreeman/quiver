@@ -3,7 +3,7 @@
 mod common;
 use common::*;
 
-const INC: &str = "inc = #int { [~, 1] ~> __add__ },";
+const INC: &str = "inc = #'int { [~, 1] ~> __add__ },";
 
 #[test]
 fn callable_field_is_called_with_flow() {
@@ -66,7 +66,7 @@ fn higher_order_argument_needs_amp() {
     // Passing a function as an argument requires `&`; it is then applied inside.
     quiver()
         .evaluate(&format!(
-            "{INC} twice = #[#int -> int, int] {{ $.1 ~> $.0 ~> $.0 }}, twice [&inc, 5]"
+            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 ~> $.0 }}, twice [&inc, 5]"
         ))
         .expect("7");
 }
@@ -84,10 +84,10 @@ fn tuple_field_provenance_preserved() {
     // The `~` field must preserve provenance so field access still narrows.
     quiver()
         .evaluate(
-            "make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            "make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
              x = 0 ~> make_ab,
              t = x ~> [~, 1],
-             t.0 ~> =&A[a: int], x.a",
+             t.0 ~> =A[a: 'int], x.a",
         )
         .expect("1");
 }

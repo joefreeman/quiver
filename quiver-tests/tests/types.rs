@@ -4,8 +4,8 @@ use common::*;
 #[test]
 fn test_simple_type_definition() {
     quiver()
-        .evaluate("circle : Circle[r: int]")
-        .expect_alias("circle", "Circle[r: int]");
+        .evaluate("'circle = Circle[r: 'int]")
+        .expect_alias("circle", "Circle[r: 'int]");
 }
 
 #[test]
@@ -13,12 +13,12 @@ fn test_union_type_definition() {
     quiver()
         .evaluate(
             r#"
-            shape :
-              | Circle[r: int]
-              | Rectangle[w: int, h: int]
+            'shape =
+              | Circle[r: 'int]
+              | Rectangle[w: 'int, h: 'int]
             "#,
         )
-        .expect_alias("shape", "Circle[r: int] | Rectangle[w: int, h: int]");
+        .expect_alias("shape", "Circle[r: 'int] | Rectangle[w: 'int, h: 'int]");
 }
 
 #[test]
@@ -26,11 +26,11 @@ fn test_function_with_type_pattern() {
     quiver()
         .evaluate(
             r#"
-            shape :
-              | Circle[r: int]
-              | Rectangle[w: int, h: int];
+            'shape =
+              | Circle[r: 'int]
+              | Rectangle[w: 'int, h: 'int];
 
-            area = #shape {
+            area = #'shape {
               | =Circle[r: r] => [r, r] ~> __multiply__
               | =Rectangle[w: w, h: h] => [w, h] ~> __multiply__
             },
@@ -43,7 +43,7 @@ fn test_function_with_type_pattern() {
         .expect("37")
         .expect_variable(
             "area",
-            "#(Circle[r: int] | Rectangle[w: int, h: int]) -> int",
+            "#(Circle[r: 'int] | Rectangle[w: 'int, h: 'int]) -> 'int",
         );
 }
 
@@ -53,15 +53,15 @@ fn test_exhaustive_union_matching() {
     quiver()
         .evaluate(
             r#"
-            f = #(A[int] | B[int]) {
-              | =&A[int] => 10
-              | =&B[int] => 20
+            f = #(A['int] | B['int]) {
+              | =A['int] => 10
+              | =B['int] => 20
             },
             A[5] ~> f
             "#,
         )
         .expect("10")
-        .expect_variable("f", "#(A[int] | B[int]) -> int");
+        .expect_variable("f", "#(A['int] | B['int]) -> 'int");
 }
 
 #[test]
@@ -70,15 +70,15 @@ fn test_non_exhaustive_union_matching() {
     quiver()
         .evaluate(
             r#"
-            f = #(A[int] | B[int] | C[int]) {
-              | =&A[int] => 10
-              | =&B[int] => 20
+            f = #(A['int] | B['int] | C['int]) {
+              | =A['int] => 10
+              | =B['int] => 20
             },
             C[99] ~> f
             "#,
         )
         .expect("[]")
-        .expect_variable("f", "#(A[int] | B[int] | C[int]) -> ([] | int)");
+        .expect_variable("f", "#(A['int] | B['int] | C['int]) -> ('int | [])");
 }
 
 #[test]
@@ -87,15 +87,15 @@ fn test_value_guard_with_full_coverage() {
     quiver()
         .evaluate(
             r#"
-            f = #A[int] {
+            f = #A['int] {
               | =A[10] => 100
-              | =&A[int] => 999
+              | =A['int] => 999
             },
             A[10] ~> f
             "#,
         )
         .expect("100")
-        .expect_variable("f", "#A[int] -> int");
+        .expect_variable("f", "#A['int] -> 'int");
 }
 
 #[test]
@@ -103,13 +103,13 @@ fn test_recursive_list_type() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
+            'list = Nil | Cons['int, ^];
             xs = Cons[1, Cons[2, Cons[3, Nil]]],
             [xs.1.0, xs.1.1.0] ~> __add__
             "#,
         )
         .expect("5")
-        .expect_variable("xs", "Cons[int, Cons[int, Cons[int, Nil]]]");
+        .expect_variable("xs", "Cons['int, Cons['int, Cons['int, Nil]]]");
 }
 
 #[test]
@@ -117,8 +117,8 @@ fn test_cycle_ref_with_pattern_matching() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
-            get_head = #list {
+            'list = Nil | Cons['int, ^];
+            get_head = #'list {
               | =Cons[h, _] => h
               | =Nil => 0
             },
@@ -126,7 +126,7 @@ fn test_cycle_ref_with_pattern_matching() {
             "#,
         )
         .expect("1")
-        .expect_variable("get_head", "#(Cons[int, μ1] | Nil) -> int");
+        .expect_variable("get_head", "#(Cons['int, μ1] | Nil) -> 'int");
 }
 
 #[test]
@@ -134,8 +134,8 @@ fn test_cycle_ref_nested_depth() {
     quiver()
         .evaluate(
             r#"
-            json : True | False | Array[(Nil | Cons[^0, ^1])];
-            f = #json { =Array[Cons[a, Cons[b, Nil]]] => [a, b] },
+            'json = True | False | Array[(Nil | Cons[^0, ^1])];
+            f = #'json { =Array[Cons[a, Cons[b, Nil]]] => [a, b] },
             Array[Cons[False, Cons[True, Nil]]] ~> f
             "#,
         )
@@ -146,7 +146,7 @@ fn test_cycle_ref_nested_depth() {
 fn test_cycle_ref_error_no_union() {
     // Should fail: cycle without enclosing union
     let result = std::panic::catch_unwind(|| {
-        quiver().evaluate("bad : Bad[^]").expect("should error");
+        quiver().evaluate("'bad = Bad[^]").expect("should error");
     });
     assert!(result.is_err(), "Expected error for cycle without union");
 }
@@ -156,7 +156,7 @@ fn test_cycle_ref_error_no_base_case() {
     // Should fail: union without base case
     let result = std::panic::catch_unwind(|| {
         quiver()
-            .evaluate("bad : A[^] | B[^]")
+            .evaluate("'bad = A[^] | B[^]")
             .expect("should error");
     });
     assert!(
@@ -170,7 +170,7 @@ fn test_cycle_ref_error_no_base_case_nested() {
     // Should fail: cycle nested in tuple field, but no base case in union
     let result = std::panic::catch_unwind(|| {
         quiver()
-            .evaluate("bad : A[x: int, next: ^] | B[y: int, next: ^]")
+            .evaluate("'bad = A[x: 'int, next: ^] | B[y: 'int, next: ^]")
             .expect("should error");
     });
     assert!(
@@ -184,7 +184,7 @@ fn test_nested_union_pattern_matching_in_block() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
+            'list = Nil | Cons['int, ^];
 
             Cons[10, Cons[20, Cons[30, Nil]]] ~> {
               | =Cons[_, Cons[h, _]] => h
@@ -200,10 +200,10 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
+            'list = Nil | Cons['int, ^];
 
             // Test extracting second element with nested pattern
-            get_second = #list {
+            get_second = #'list {
               | =Cons[_, Cons[h, _]] => h
               | 999
             },
@@ -216,9 +216,9 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
+            'list = Nil | Cons['int, ^];
 
-            get_first_two = #list {
+            get_first_two = #'list {
               | =Cons[first, Cons[second, _]] => [first, second]
               | [0, 0]
             },
@@ -231,9 +231,9 @@ fn test_nested_union_pattern_matching_in_function() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
+            'list = Nil | Cons['int, ^];
 
-            get_third = #list {
+            get_third = #'list {
               | =Cons[_, Cons[_, Cons[h, _]]] => h
               | 999
             },
@@ -251,10 +251,10 @@ fn test_multiple_runtime_type_checks_with_nested_patterns() {
     quiver()
         .evaluate(
             r#"
-            tree : Leaf[int] | Node[^, ^];
+            'tree = Leaf['int] | Node[^, ^];
 
             // Function with multiple nested patterns requiring runtime checks
-            extract_left_leaf = #tree {
+            extract_left_leaf = #'tree {
               | =Node[Node[Leaf[x], _], _] => x
               | =Node[Leaf[x], _] => x
               | =Leaf[x] => x
@@ -279,8 +279,8 @@ fn test_recursive_type_as_function_parameter() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
-            get_head = #list {
+            'list = Nil | Cons['int, ^];
+            get_head = #'list {
               | =Cons[h, _] => h
               | =Nil => 0
             },
@@ -295,7 +295,7 @@ fn test_recursive_tree_type() {
     quiver()
         .evaluate(
             r#"
-            tree : Node[left: ^, right: ^] | Leaf[int];
+            'tree = Node[left: ^, right: ^] | Leaf['int];
             t = Node[
               left: Node[
                 left: Leaf[1],
@@ -324,8 +324,8 @@ fn test_recursive_type_with_cycle() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
-            prepend = #list { =x => Cons[10, x] },
+            'list = Nil | Cons['int, ^];
+            prepend = #'list { =x => Cons[10, x] },
             Cons[20, Cons[30, Nil]] ~> prepend ~> .0
             "#,
         )
@@ -342,12 +342,12 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[^];
+            't = Empty | Full[^];
 
             // This function matches on a tuple where the first element is a recursive type
             // The bug would occur when the pattern compiler tried to access field 0 of Empty
             // (which has no fields) when matching the pattern [Full[rest], n]
-            match_recursive = #[t, int] {
+            match_recursive = #['t, 'int] {
               | =[Empty, n] => n
               | =[Full[rest], n] => [n, 100] ~> __add__
             },
@@ -370,10 +370,10 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            tree : Leaf[int] | Node[^, ^];
+            'tree = Leaf['int] | Node[^, ^];
 
             // Function that matches on first element of tuple
-            match_first = #[tree, int] {
+            match_first = #['tree, 'int] {
               | =[Leaf[x], n] => [x, n] ~> __add__
               | =[Node[l, r], n] => n
             },
@@ -390,10 +390,10 @@ fn test_recursive_type_pattern_matching_bug() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
+            'list = Nil | Cons['int, ^];
 
             // Pattern matching that would trigger the bug
-            process_list = #[list, int] {
+            process_list = #['list, 'int] {
               | =[Nil, x] => x
               | =[Cons[head, tail], x] => [head, x] ~> __add__
             },
@@ -414,8 +414,8 @@ fn test_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[^];
-            f = #[t, int] {
+            't = Empty | Full[^];
+            f = #['t, 'int] {
               | =[Empty, _] => 100
               | =[Full[rest], n] => 200
             },
@@ -427,8 +427,8 @@ fn test_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[^];
-            f = #[t, int] {
+            't = Empty | Full[^];
+            f = #['t, 'int] {
               | =[Empty, _] => 100
               | =[Full[rest], n] => 200
             },
@@ -443,8 +443,8 @@ fn test_recursive_union_pattern() {
     quiver()
         .evaluate(
             r#"
-            t : Empty | Full[^];
-            f = #[t, int] {
+            't = Empty | Full[^];
+            f = #['t, 'int] {
               | =[Empty, _] => 100
               | =[Full[rest], n] => ^ [rest, 0]
             },
@@ -459,7 +459,7 @@ fn test_unnamed_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(x: int, y: int) { =(x, y) => [x, y] },
+            f = #(x: 'int, y: 'int) { =(x, y) => [x, y] },
             a = [x: 1, y: 2] ~> f,
             b = [x: 3, y: 4, z: 5] ~> f,
             c = Point[x: 6, y: 7] ~> f,
@@ -468,40 +468,40 @@ fn test_unnamed_partial_type() {
             "#,
         )
         .expect("[[1, 2], [3, 4], [6, 7], [8, 9]]")
-        .expect_variable("f", "#(x: int, y: int) -> [int, int]");
+        .expect_variable("f", "#(x: 'int, y: 'int) -> ['int, 'int]");
 
     quiver()
         .evaluate(
             r#"
-            f = #(x: int, y: int) { =(x, y) => [x, y] },
+            f = #(x: 'int, y: 'int) { =(x, y) => [x, y] },
             [x: 1, z: 3] ~> f
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with (x: int, y: int)".to_string(),
-            found: "[x: int, z: int]".to_string(),
+            expected: "function parameter compatible with (x: 'int, y: 'int)".to_string(),
+            found: "[x: 'int, z: 'int]".to_string(),
         });
 }
 
 #[test]
 fn test_named_partial_type() {
     quiver()
-        .evaluate("f = #Point(x: int) { .x }, Point[x: 1] ~> f")
+        .evaluate("f = #Point(x: 'int) { .x }, Point[x: 1] ~> f")
         .expect("1")
-        .expect_variable("f", "#Point(x: int) -> int");
+        .expect_variable("f", "#Point(x: 'int) -> 'int");
 
     quiver()
-        .evaluate("f = #Point(x: int) { .x }, [x: 1] ~> f")
+        .evaluate("f = #Point(x: 'int) { .x }, [x: 1] ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with Point(x: int)".to_string(),
-            found: "[x: int]".to_string(),
+            expected: "function parameter compatible with Point(x: 'int)".to_string(),
+            found: "[x: 'int]".to_string(),
         });
 
     quiver()
-        .evaluate("f = #Point(x: int) { .x }, Other[x: 1] ~> f")
+        .evaluate("f = #Point(x: 'int) { .x }, Other[x: 1] ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with Point(x: int)".to_string(),
-            found: "Other[x: int]".to_string(),
+            expected: "function parameter compatible with Point(x: 'int)".to_string(),
+            found: "Other[x: 'int]".to_string(),
         });
 }
 
@@ -527,13 +527,13 @@ fn test_nested_partial_type() {
     quiver()
         .evaluate(
             r#"
-            container : (value: (x: int, y: int));
-            f = #container { =c => [c.value.x, c.value.y] },
+            'container = (value: (x: 'int, y: 'int));
+            f = #'container { =c => [c.value.x, c.value.y] },
             f [value: [x: 1, y: 2, z: 3], extra: 42]
             "#,
         )
         .expect("[1, 2]")
-        .expect_alias("container", "(value: (x: int, y: int))");
+        .expect_alias("container", "(value: (x: 'int, y: 'int))");
 }
 
 #[test]
@@ -541,7 +541,7 @@ fn test_union_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(A(x: int) | B(x: int)) { .x },
+            f = #(A(x: 'int) | B(x: 'int)) { .x },
             a = A[x: 10, y: 20] ~> f,
             b = B[x: 42, z: 99] ~> f,
             [a, b]
@@ -552,32 +552,32 @@ fn test_union_partial_type() {
     quiver()
         .evaluate(
             r#"
-            f = #(A(x: int) | B(x: int)) { .x },
+            f = #(A(x: 'int) | B(x: 'int)) { .x },
             C[x: 10] ~> f
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with A(x: int) | B(x: int)".to_string(),
-            found: "C[x: int]".to_string(),
+            expected: "function parameter compatible with A(x: 'int) | B(x: 'int)".to_string(),
+            found: "C[x: 'int]".to_string(),
         });
 
     quiver()
         .evaluate(
             r#"
-            f = #(A(x: int) | B(x: int)) { .x },
+            f = #(A(x: 'int) | B(x: 'int)) { .x },
             B[y: 10] ~> f
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with A(x: int) | B(x: int)".to_string(),
-            found: "B[y: int]".to_string(),
+            expected: "function parameter compatible with A(x: 'int) | B(x: 'int)".to_string(),
+            found: "B[y: 'int]".to_string(),
         });
 }
 
 #[test]
 fn test_invalid_partial_type() {
     quiver()
-        .evaluate("bad : (int, y: int)")
+        .evaluate("'bad = ('int, y: 'int)")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "All fields in a partial type must be named".to_string(),
         ));
@@ -588,11 +588,11 @@ fn test_type_spread_basic() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int];
-            extended : Extended[...base, y: int]
+            'base = Base[x: 'int];
+            'extended = Extended[...'base, y: 'int]
             "#,
         )
-        .expect_alias("extended", "Extended[x: int, y: int]");
+        .expect_alias("extended", "Extended[x: 'int, y: 'int]");
 }
 
 #[test]
@@ -600,11 +600,11 @@ fn test_type_spread_field_override() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int, y: int];
-            modified : Modified[...base, y: bin]
+            'base = Base[x: 'int, y: 'int];
+            'modified = Modified[...'base, y: 'bin]
             "#,
         )
-        .expect_alias("modified", "Modified[x: int, y: bin]");
+        .expect_alias("modified", "Modified[x: 'int, y: 'bin]");
 }
 
 #[test]
@@ -612,13 +612,13 @@ fn test_type_spread_union_distribution() {
     quiver()
         .evaluate(
             r#"
-            shape : Circle[r: int] | Square[s: int];
-            colored : Colored[...shape, color: bin]
+            'shape = Circle[r: 'int] | Square[s: 'int];
+            'colored = Colored[...'shape, color: 'bin]
             "#,
         )
         .expect_alias(
             "colored",
-            "Colored[r: int, color: bin] | Colored[s: int, color: bin]",
+            "Colored[r: 'int, color: 'bin] | Colored[s: 'int, color: 'bin]",
         );
 }
 
@@ -627,11 +627,11 @@ fn test_type_spread_unnamed() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int];
-            extended : [...base, y: int]
+            'base = Base[x: 'int];
+            'extended = [...'base, y: 'int]
             "#,
         )
-        .expect_alias("extended", "[x: int, y: int]");
+        .expect_alias("extended", "[x: 'int, y: 'int]");
 }
 
 #[test]
@@ -639,13 +639,13 @@ fn test_type_spread_name_modes() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int];
-            unnamed : [...base, y: int];
-            renamed : Renamed[...base, y: int]
+            'base = Base[x: 'int];
+            'unnamed = [...'base, y: 'int];
+            'renamed = Renamed[...'base, y: 'int]
             "#,
         )
-        .expect_alias("unnamed", "[x: int, y: int]")
-        .expect_alias("renamed", "Renamed[x: int, y: int]");
+        .expect_alias("unnamed", "[x: 'int, y: 'int]")
+        .expect_alias("renamed", "Renamed[x: 'int, y: 'int]");
 }
 
 #[test]
@@ -653,11 +653,11 @@ fn test_type_spread_multiple_fields() {
     quiver()
         .evaluate(
             r#"
-            point2d : Point2D[x: int, y: int];
-            point3d : Point3D[...point2d, z: int, color: bin]
+            'point2d = Point2D[x: 'int, y: 'int];
+            'point3d = Point3D[...'point2d, z: 'int, color: 'bin]
             "#,
         )
-        .expect_alias("point3d", "Point3D[x: int, y: int, z: int, color: bin]");
+        .expect_alias("point3d", "Point3D[x: 'int, y: 'int, z: 'int, color: 'bin]");
 }
 
 #[test]
@@ -665,13 +665,13 @@ fn test_type_spread_union_with_override() {
     quiver()
         .evaluate(
             r#"
-            base : A[x: int, y: int] | B[x: int, z: int];
-            modified : Modified[...base, y: bin]
+            'base = A[x: 'int, y: 'int] | B[x: 'int, z: 'int];
+            'modified = Modified[...'base, y: 'bin]
             "#,
         )
         .expect_alias(
             "modified",
-            "Modified[x: int, y: bin] | Modified[x: int, z: int, y: bin]",
+            "Modified[x: 'int, y: 'bin] | Modified[x: 'int, z: 'int, y: 'bin]",
         );
 }
 
@@ -680,11 +680,11 @@ fn test_type_spread_empty_base() {
     quiver()
         .evaluate(
             r#"
-            empty : Empty[];
-            extended : Extended[...empty, x: int]
+            'empty = Empty[];
+            'extended = Extended[...'empty, x: 'int]
             "#,
         )
-        .expect_alias("extended", "Extended[x: int]");
+        .expect_alias("extended", "Extended[x: 'int]");
 }
 
 #[test]
@@ -692,11 +692,11 @@ fn test_type_spread_identifier_preserves_name() {
     quiver()
         .evaluate(
             r#"
-            base : Point[x: int];
-            extended : base[...base, y: int]
+            'base = Point[x: 'int];
+            'extended = 'base[...'base, y: 'int]
             "#,
         )
-        .expect_alias("extended", "Point[x: int, y: int]");
+        .expect_alias("extended", "Point[x: 'int, y: 'int]");
 }
 
 #[test]
@@ -704,11 +704,11 @@ fn test_type_spread_in_generic_definition() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int, y: int];
-            extended<t> : Extended[...base, z: t]
+            'base = Base[x: 'int, y: 'int];
+            'extended<'t> = Extended[...'base, z: 't]
             "#,
         )
-        .expect_alias("extended", "Extended[x: int, y: int, z: t]");
+        .expect_alias("extended", "Extended[x: 'int, y: 'int, z: 't]");
 }
 
 #[test]
@@ -716,11 +716,11 @@ fn test_type_spread_with_generic_fields() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int];
-            extended<t, u> : Extended[...base, y: t, z: u]
+            'base = Base[x: 'int];
+            'extended<'t, 'u> = Extended[...'base, y: 't, z: 'u]
             "#,
         )
-        .expect_alias("extended", "Extended[x: int, y: t, z: u]");
+        .expect_alias("extended", "Extended[x: 'int, y: 't, z: 'u]");
 }
 
 #[test]
@@ -728,13 +728,13 @@ fn test_type_spread_in_generic_union() {
     quiver()
         .evaluate(
             r#"
-            shape : Circle[r: int] | Square[s: int];
-            colored<t> : Colored[...shape, color: t]
+            'shape = Circle[r: 'int] | Square[s: 'int];
+            'colored<'t> = Colored[...'shape, color: 't]
             "#,
         )
         .expect_alias(
             "colored",
-            "Colored[r: int, color: t] | Colored[s: int, color: t]",
+            "Colored[r: 'int, color: 't] | Colored[s: 'int, color: 't]",
         );
 }
 
@@ -743,11 +743,11 @@ fn test_type_spread_with_parameterized_type() {
     quiver()
         .evaluate(
             r#"
-            point<t> : Point[x: t, y: t];
-            point3d<t> : Point3D[...point<t>, z: t]
+            'point<'t> = Point[x: 't, y: 't];
+            'point3d<'t> = Point3D[...'point<'t>, z: 't]
             "#,
         )
-        .expect_alias("point3d", "Point3D[x: t, y: t, z: t]");
+        .expect_alias("point3d", "Point3D[x: 't, y: 't, z: 't]");
 }
 
 #[test]
@@ -755,11 +755,11 @@ fn test_type_spread_with_mixed_parameters() {
     quiver()
         .evaluate(
             r#"
-            base<t> : Base[value: t];
-            extended<t, u> : Extended[...base<t>, extra: u]
+            'base<'t> = Base[value: 't];
+            'extended<'t, 'u> = Extended[...'base<'t>, extra: 'u]
             "#,
         )
-        .expect_alias("extended", "Extended[value: t, extra: u]");
+        .expect_alias("extended", "Extended[value: 't, extra: 'u]");
 }
 
 #[test]
@@ -767,13 +767,13 @@ fn test_type_spread_parameterized_union() {
     quiver()
         .evaluate(
             r#"
-            result<t, e> : Ok[value: t] | Err[error: e];
-            tagged<t, e> : Tagged[...result<t, e>, tag: bin]
+            'result<'t, 'e> = Ok[value: 't] | Err[error: 'e];
+            'tagged<'t, 'e> = Tagged[...'result<'t, 'e>, tag: 'bin]
             "#,
         )
         .expect_alias(
             "tagged",
-            "Tagged[error: e, tag: bin] | Tagged[value: t, tag: bin]",
+            "Tagged[error: 'e, tag: 'bin] | Tagged[value: 't, tag: 'bin]",
         );
 }
 
@@ -782,10 +782,10 @@ fn test_expect_alias_simple() {
     quiver()
         .evaluate(
             r#"
-            point : Point[x: int, y: int]
+            'point = Point[x: 'int, y: 'int]
             "#,
         )
-        .expect_alias("point", "Point[x: int, y: int]");
+        .expect_alias("point", "Point[x: 'int, y: 'int]");
 }
 
 #[test]
@@ -793,10 +793,10 @@ fn test_expect_alias_with_parameters() {
     quiver()
         .evaluate(
             r#"
-            point<t> : Point[x: t, y: t]
+            'point<'t> = Point[x: 't, y: 't]
             "#,
         )
-        .expect_alias("point", "Point[x: t, y: t]");
+        .expect_alias("point", "Point[x: 't, y: 't]");
 }
 
 #[test]
@@ -804,10 +804,10 @@ fn test_expect_alias_union() {
     quiver()
         .evaluate(
             r#"
-            shape : Circle[r: int] | Square[s: int]
+            'shape = Circle[r: 'int] | Square[s: 'int]
             "#,
         )
-        .expect_alias("shape", "Circle[r: int] | Square[s: int]");
+        .expect_alias("shape", "Circle[r: 'int] | Square[s: 'int]");
 }
 
 #[test]
@@ -815,11 +815,11 @@ fn test_expect_alias_with_spread() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int];
-            extended : Extended[...base, y: int]
+            'base = Base[x: 'int];
+            'extended = Extended[...'base, y: 'int]
             "#,
         )
-        .expect_alias("extended", "Extended[x: int, y: int]");
+        .expect_alias("extended", "Extended[x: 'int, y: 'int]");
 }
 
 #[test]
@@ -827,11 +827,11 @@ fn test_expect_alias_parameterized_with_spread() {
     quiver()
         .evaluate(
             r#"
-            base<t> : Base[x: t];
-            extended<t> : Extended[...base<t>, y: t]
+            'base<'t> = Base[x: 't];
+            'extended<'t> = Extended[...'base<'t>, y: 't]
             "#,
         )
-        .expect_alias("extended", "Extended[x: t, y: t]");
+        .expect_alias("extended", "Extended[x: 't, y: 't]");
 }
 
 #[test]
@@ -839,11 +839,11 @@ fn test_spread_partial_type_basic() {
     quiver()
         .evaluate(
             r#"
-            entity : (id: int);
-            user : User[...entity, name: bin]
+            'entity = (id: 'int);
+            'user = User[...'entity, name: 'bin]
             "#,
         )
-        .expect_alias("user", "User[id: int, name: bin]");
+        .expect_alias("user", "User[id: 'int, name: 'bin]");
 }
 
 #[test]
@@ -851,14 +851,14 @@ fn test_spread_multiple_partials() {
     quiver()
         .evaluate(
             r#"
-            entity : (id: int);
-            metadata : (updated_at: int, created_at: int);
-            user : User[...entity, name: bin, ...metadata]
+            'entity = (id: 'int);
+            'metadata = (updated_at: 'int, created_at: 'int);
+            'user = User[...'entity, name: 'bin, ...'metadata]
             "#,
         )
         .expect_alias(
             "user",
-            "User[id: int, name: bin, updated_at: int, created_at: int]",
+            "User[id: 'int, name: 'bin, updated_at: 'int, created_at: 'int]",
         );
 }
 
@@ -867,11 +867,11 @@ fn test_spread_partial_with_override() {
     quiver()
         .evaluate(
             r#"
-            base : (x: int, y: int);
-            extended : Extended[...base, y: bin, z: int]
+            'base = (x: 'int, y: 'int);
+            'extended = Extended[...'base, y: 'bin, z: 'int]
             "#,
         )
-        .expect_alias("extended", "Extended[x: int, y: bin, z: int]");
+        .expect_alias("extended", "Extended[x: 'int, y: 'bin, z: 'int]");
 }
 
 #[test]
@@ -879,12 +879,12 @@ fn test_spread_partial_and_tuple() {
     quiver()
         .evaluate(
             r#"
-            partial : (x: int);
-            tuple : Tuple[y: int];
-            combined : Combined[...partial, ...tuple, z: int]
+            'partial = (x: 'int);
+            'tuple = Tuple[y: 'int];
+            'combined = Combined[...'partial, ...'tuple, z: 'int]
             "#,
         )
-        .expect_alias("combined", "Combined[x: int, y: int, z: int]");
+        .expect_alias("combined", "Combined[x: 'int, y: 'int, z: 'int]");
 }
 
 #[test]
@@ -892,11 +892,11 @@ fn test_identifier_spread_syntax_basic() {
     quiver()
         .evaluate(
             r#"
-            base : Base[x: int];
-            extended : base[..., y: int]
+            'base = Base[x: 'int];
+            'extended = 'base[..., y: 'int]
             "#,
         )
-        .expect_alias("extended", "Base[x: int, y: int]");
+        .expect_alias("extended", "Base[x: 'int, y: 'int]");
 }
 
 #[test]
@@ -904,13 +904,13 @@ fn test_identifier_spread_syntax_union() {
     quiver()
         .evaluate(
             r#"
-            event : Created[id: int] | Updated | Deleted;
-            logged : event[..., timestamp: int]
+            'event = Created[id: 'int] | Updated | Deleted;
+            'logged = 'event[..., timestamp: 'int]
             "#,
         )
         .expect_alias(
             "logged",
-            "Created[id: int, timestamp: int] | Deleted[timestamp: int] | Updated[timestamp: int]",
+            "Created[id: 'int, timestamp: 'int] | Deleted[timestamp: 'int] | Updated[timestamp: 'int]",
         );
 }
 
@@ -919,29 +919,29 @@ fn test_identifier_spread_syntax_partial() {
     quiver()
         .evaluate(
             r#"
-            entity : (id: int);
-            timestamped : entity[..., created_at: int]
+            'entity = (id: 'int);
+            'timestamped = 'entity[..., created_at: 'int]
             "#,
         )
-        .expect_alias("timestamped", "[id: int, created_at: int]");
+        .expect_alias("timestamped", "[id: 'int, created_at: 'int]");
 }
 
 #[test]
 fn test_primitive_type_alias_int() {
-    quiver().evaluate("int : Int[x: int]").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeUnresolved(
+    quiver()
+        .evaluate("'int = Int[x: 'int]")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "Cannot redefine primitive type 'int'".to_string(),
-        ),
-    );
+        ));
 }
 
 #[test]
 fn test_primitive_type_alias_bin() {
-    quiver().evaluate("bin : Bin[x: int]").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeUnresolved(
+    quiver()
+        .evaluate("'bin = Bin[x: 'int]")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "Cannot redefine primitive type 'bin'".to_string(),
-        ),
-    );
+        ));
 }
 
 #[test]
@@ -955,7 +955,7 @@ fn test_reserved_name_int_as_variable() {
 
 #[test]
 fn test_reserved_name_bin_as_variable() {
-    quiver().evaluate("#{ '0a' ~> =bin }").expect_compile_error(
+    quiver().evaluate("#{ 0x0a ~> =bin }").expect_compile_error(
         quiver_compiler::compiler::Error::TypeUnresolved(
             "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
         ),
@@ -974,7 +974,7 @@ fn test_reserved_name_int_in_destructuring() {
 #[test]
 fn test_reserved_name_bin_in_destructuring() {
     quiver()
-        .evaluate("#{ ['0a', '0b'] ~> =[bin, y] }")
+        .evaluate("#{ [0x0a, 0x0b] ~> =[bin, y] }")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
         ));
@@ -999,7 +999,7 @@ fn test_reserved_names_allowed_as_field_names() {
 #[test]
 fn test_reserved_names_allowed_in_type_definitions() {
     quiver()
-        .evaluate("data : Data[int: int, bin: int]; Data[int: 42, bin: 99]")
+        .evaluate("'data = Data[int: 'int, bin: 'int]; Data[int: 42, bin: 99]")
         .expect("Data[int: 42, bin: 99]");
 }
 
@@ -1008,8 +1008,8 @@ fn test_pin_with_type_alias_primitive() {
     quiver()
         .evaluate(
             r#"
-            number_or_bytes : int | bin;
-            42 ~> =&number_or_bytes
+            'number_or_bytes = 'int | 'bin;
+            42 ~> ='number_or_bytes
             "#,
         )
         .expect("42");
@@ -1017,11 +1017,11 @@ fn test_pin_with_type_alias_primitive() {
     quiver()
         .evaluate(
             r#"
-            number_or_bytes : int | bin;
-            '0a' ~> =&number_or_bytes
+            'number_or_bytes = 'int | 'bin;
+            0x0a ~> ='number_or_bytes
             "#,
         )
-        .expect("'0a'");
+        .expect("0x0a");
 }
 
 #[test]
@@ -1029,8 +1029,8 @@ fn test_pin_with_type_alias_union() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
-            Nil ~> =&list
+            'list = Nil | Cons['int, ^];
+            Nil ~> ='list
             "#,
         )
         .expect("Nil");
@@ -1038,8 +1038,8 @@ fn test_pin_with_type_alias_union() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
-            Cons[1, Cons[2, Nil]] ~> =&list
+            'list = Nil | Cons['int, ^];
+            Cons[1, Cons[2, Nil]] ~> ='list
             "#,
         )
         .expect("Cons[1, Cons[2, Nil]]");
@@ -1050,8 +1050,8 @@ fn test_pin_with_type_alias_mismatch() {
     quiver()
         .evaluate(
             r#"
-            number : int;
-            '0a' ~> =&number
+            'number = 'int;
+            0x0a ~> ='number
             "#,
         )
         .expect("[]");
@@ -1059,8 +1059,8 @@ fn test_pin_with_type_alias_mismatch() {
     quiver()
         .evaluate(
             r#"
-            point : Point[x: int, y: int];
-            42 ~> =&point
+            'point = Point[x: 'int, y: 'int];
+            42 ~> ='point
             "#,
         )
         .expect("[]");
@@ -1071,8 +1071,8 @@ fn test_pin_with_type_alias_in_pattern() {
     quiver()
         .evaluate(
             r#"
-            shape : Circle[r: int] | Square[s: int];
-            Circle[r: 5] ~> =&shape
+            'shape = Circle[r: 'int] | Square[s: 'int];
+            Circle[r: 5] ~> ='shape
             "#,
         )
         .expect("Circle[r: 5]");
@@ -1083,8 +1083,8 @@ fn test_pin_with_type_alias_nested() {
     quiver()
         .evaluate(
             r#"
-            inner : int | bin;
-            Wrapper[value: 42] ~> =Wrapper[value: &inner]
+            'inner = 'int | 'bin;
+            Wrapper[value: 42] ~> =Wrapper[value: 'inner]
             "#,
         )
         .expect("Wrapper[value: 42]");
@@ -1095,7 +1095,7 @@ fn test_pin_with_inline_type_primitive() {
     quiver()
         .evaluate(
             r#"
-            42 ~> =&(int | bin)
+            42 ~> =('int | 'bin)
             "#,
         )
         .expect("42");
@@ -1103,10 +1103,10 @@ fn test_pin_with_inline_type_primitive() {
     quiver()
         .evaluate(
             r#"
-            '0a' ~> =&(int | bin)
+            0x0a ~> =('int | 'bin)
             "#,
         )
-        .expect("'0a'");
+        .expect("0x0a");
 }
 
 #[test]
@@ -1114,7 +1114,7 @@ fn test_pin_with_inline_type_mismatch() {
     quiver()
         .evaluate(
             r#"
-            A ~> =&(int | bin)
+            A ~> =('int | 'bin)
             "#,
         )
         .expect("[]");
@@ -1125,7 +1125,7 @@ fn test_pin_with_inline_type_nested() {
     quiver()
         .evaluate(
             r#"
-            A[value: 42] ~> =A[value: &(int | bin)]
+            A[value: 42] ~> =A[value: ('int | 'bin)]
             "#,
         )
         .expect("A[value: 42]");
@@ -1136,7 +1136,7 @@ fn test_pin_with_inline_type_complex() {
     quiver()
         .evaluate(
             r#"
-            Rectangle[w: 5, h: 10] ~> =&(Rectangle[w: int, h: int] | Circle[r: int])
+            Rectangle[w: 5, h: 10] ~> =(Rectangle[w: 'int, h: 'int] | Circle[r: 'int])
             "#,
         )
         .expect("Rectangle[w: 5, h: 10]");
@@ -1148,7 +1148,7 @@ fn test_inline_type_without_ampersand() {
     quiver()
         .evaluate(
             r#"
-            42 ~> =(int | bin)
+            42 ~> =('int | 'bin)
             "#,
         )
         .expect("42");
@@ -1159,8 +1159,8 @@ fn test_generic_type_explicit_instantiation() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            Cons[42, Nil] ~> =&list<int>
+            'list<'t> = Nil | Cons['t, ^];
+            Cons[42, Nil] ~> ='list<'int>
             "#,
         )
         .expect("Cons[42, Nil]");
@@ -1171,8 +1171,8 @@ fn test_generic_type_explicit_instantiation_mismatch() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            Cons['aa', Nil] ~> =&list<int>
+            'list<'t> = Nil | Cons['t, ^];
+            Cons[0xaa, Nil] ~> ='list<'int>
             "#,
         )
         .expect("[]");
@@ -1183,8 +1183,8 @@ fn test_generic_type_explicit_instantiation_in_pattern() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            Cons[42, Cons[99, Nil]] ~> =Cons[x, &list<int>]
+            'list<'t> = Nil | Cons['t, ^];
+            Cons[42, Cons[99, Nil]] ~> =Cons[x, 'list<'int>]
             "#,
         )
         .expect("Cons[42, Cons[99, Nil]]");
@@ -1195,8 +1195,8 @@ fn test_generic_type_without_instantiation_error() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            Cons[42, Nil] ~> =&list
+            'list<'t> = Nil | Cons['t, ^];
+            Cons[42, Nil] ~> ='list
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
@@ -1209,8 +1209,8 @@ fn test_generic_type_short_syntax() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            Cons[42, Nil] ~> =&list<int>
+            'list<'t> = Nil | Cons['t, ^];
+            Cons[42, Nil] ~> ='list<'int>
             "#,
         )
         .expect("Cons[42, Nil]");
@@ -1221,8 +1221,8 @@ fn test_generic_type_short_syntax_mismatch() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            Cons['aa', Nil] ~> =&list<int>
+            'list<'t> = Nil | Cons['t, ^];
+            Cons[0xaa, Nil] ~> ='list<'int>
             "#,
         )
         .expect("[]");
@@ -1230,39 +1230,39 @@ fn test_generic_type_short_syntax_mismatch() {
 
 #[test]
 fn test_named_partial_type_without_parens() {
-    // Named partial type without extra parentheses: =&A(x: int)
+    // Named partial type without extra parentheses: =A(x: 'int)
     quiver()
-        .evaluate("A[x: 1, y: 2] ~> =&A(x: int)")
+        .evaluate("A[x: 1, y: 2] ~> =A(x: 'int)")
         .expect("A[x: 1, y: 2]");
 
     // Type mismatch should fail
     quiver()
-        .evaluate("A[x: 'ff', y: 2] ~> =&A(x: int)")
+        .evaluate("A[x: 0xff, y: 2] ~> =A(x: 'int)")
         .expect("[]");
 
     // Missing field should fail
     quiver()
-        .evaluate("A[y: 2, z: 3] ~> =&A(x: int)")
+        .evaluate("A[y: 2, z: 3] ~> =A(x: 'int)")
         .expect("[]");
 }
 
 #[test]
 fn test_unnamed_partial_type_without_parens() {
-    // Unnamed partial type without extra parentheses: =&(x: int)
-    quiver().evaluate("A[x: 1] ~> =&(x: int)").expect("A[x: 1]");
+    // Unnamed partial type without extra parentheses: =(x: 'int)
+    quiver().evaluate("A[x: 1] ~> =(x: 'int)").expect("A[x: 1]");
 
     quiver()
-        .evaluate("[x: 1, y: 2] ~> =&(x: int)")
+        .evaluate("[x: 1, y: 2] ~> =(x: 'int)")
         .expect("[x: 1, y: 2]");
 
     // Type mismatch should fail
-    quiver().evaluate("A[x: 'ff'] ~> =&(x: int)").expect("[]");
+    quiver().evaluate("A[x: 0xff] ~> =(x: 'int)").expect("[]");
 }
 
 #[test]
 fn test_empty_partial_type_without_parens() {
-    // Empty partial type matches any tuple: =&()
-    quiver().evaluate("A[1] ~> =&()").expect("A[1]");
-    quiver().evaluate("[1, 2, 3] ~> =&()").expect("[1, 2, 3]");
-    quiver().evaluate("42 ~> =&()").expect("[]");
+    // Empty partial type matches any tuple: =()
+    quiver().evaluate("A[1] ~> =()").expect("A[1]");
+    quiver().evaluate("[1, 2, 3] ~> =()").expect("[1, 2, 3]");
+    quiver().evaluate("42 ~> =()").expect("[]");
 }

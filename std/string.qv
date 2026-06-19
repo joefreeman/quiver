@@ -1,20 +1,20 @@
-str : Str[bin];
-(list) : %list;
-(iterator) : %iter;
+'str = Str['bin];
+('list) = %list;
+('iterator) = %iter;
 
-is_continuation' = #[bin, int] {
+is_continuation_ = #['bin, 'int] {
   =[data, byte_pos],
   data
   ~> %binary.get_byte [~, byte_pos]
-  ~> %integer.and [~, 0xC0]
-  ~> =0x80
+  ~> %integer.and [~, 192]
+  ~> =128
 },
 
-skip_continuation' = #[bin, int, int] {
+skip_continuation_ = #['bin, 'int, 'int] {
   =[data, byte_pos, data_len],
   {
   | byte_pos ~> %math.ge [~, data_len] => byte_pos
-  | is_continuation' [data, byte_pos] =>
+  | is_continuation_ [data, byte_pos] =>
     byte_pos
     ~> %math.add [~, 1]
     ~> ^ [data, ~, data_len]
@@ -22,7 +22,7 @@ skip_continuation' = #[bin, int, int] {
   }
 },
 
-find_index = #[bin, bin, int, int] {
+find_index = #['bin, 'bin, 'int, 'int] {
   =[haystack, needle, offset, end],
 
   %math.le [offset, end],
@@ -42,12 +42,12 @@ find_index = #[bin, bin, int, int] {
 },
 
 // Convert byte position to character index by counting non-continuation bytes from start
-byte_pos_to_char_idx' = #[bin, int, int, int] {
+byte_pos_to_char_idx_ = #['bin, 'int, 'int, 'int] {
   =[data, current_pos, target_pos, char_idx],
 
   {
   | %math.ge [current_pos, target_pos] => char_idx
-  | is_continuation' [data, current_pos] =>
+  | is_continuation_ [data, current_pos] =>
     current_pos
     ~> %math.add [~, 1]
     ~> ^ [data, ~, target_pos, char_idx]
@@ -61,7 +61,7 @@ byte_pos_to_char_idx' = #[bin, int, int, int] {
   }
 },
 
-split' = #[bin, bin, int, list<str>] {
+split_ = #['bin, 'bin, 'int, 'list<'str>] {
   =[haystack, delim, start, acc],
 
   haystack_len = haystack ~> %binary.length,
@@ -84,10 +84,10 @@ split' = #[bin, bin, int, list<str>] {
   }
 },
 
-iter' = #[#^ -> iterator<int>, bin, int, int] {
+iter_ = #[#^ -> 'iterator<'int>, 'bin, 'int, 'int] {
   =[self, data, byte_pos, data_len],
 
-  byte_pos = skip_continuation' [data, byte_pos, data_len],
+  byte_pos = skip_continuation_ [data, byte_pos, data_len],
 
   #{
     | %math.ge [byte_pos, data_len] => []
@@ -95,7 +95,7 @@ iter' = #[#^ -> iterator<int>, bin, int, int] {
       char_end =
         byte_pos
         ~> %math.add [~, 1]
-        ~> skip_continuation' [data, ~, data_len],
+        ~> skip_continuation_ [data, ~, data_len],
 
       char =
         char_end
@@ -108,15 +108,15 @@ iter' = #[#^ -> iterator<int>, bin, int, int] {
   }
 },
 
-collect' = #[iterator<int>, bin] {
+collect_ = #['iterator<'int>, 'bin] {
   =[it, acc],
   it [] ~> {
     | / ~> =Ok => Str[acc]
     | =[char_int, next] => {
       byte_count = char_int ~> {
-        | %math.le [~, 0x7F] => 1
-        | %math.le [~, 0xDFBF] => 2
-        | %math.le [~, 0xEFBFBF] => 3
+        | %math.le [~, 127] => 1
+        | %math.le [~, 57279] => 2
+        | %math.le [~, 15712191] => 3
         | 4
       },
 
@@ -128,20 +128,20 @@ collect' = #[iterator<int>, bin] {
 },
 
 [
-  bytes: #str {
+  bytes: #'str {
     =Str[b], b
   },
 
-  empty?: #str {
+  empty?: #'str {
     .0 ~> %binary.length ~> =0, Ok
   },
 
-  concat: #[str, str] {
+  concat: #['str, 'str] {
     =[Str[a], Str[b]],
     %binary.concat [a, b] ~> Str[~]
   },
 
-  starts_with?: #[str, str] {
+  starts_with?: #['str, 'str] {
     =[Str[target], Str[prefix]],
 
     prefix_len = prefix ~> %binary.length,
@@ -156,7 +156,7 @@ collect' = #[iterator<int>, bin] {
     Ok
   },
 
-  ends_with?: #[str, str] {
+  ends_with?: #['str, 'str] {
     =[Str[target], Str[suffix]],
 
     suffix_len = suffix ~> %binary.length,
@@ -172,7 +172,7 @@ collect' = #[iterator<int>, bin] {
     Ok
   },
 
-  contains?: #[str, str] {
+  contains?: #['str, 'str] {
     =[Str[haystack], Str[needle]],
 
     needle_len = needle ~> %binary.length,
@@ -187,30 +187,30 @@ collect' = #[iterator<int>, bin] {
     }
   },
 
-  split: #[str, str] {
+  split: #['str, 'str] {
     =[Str[haystack], Str[delim]],
-    split' [haystack, delim, 0, %list.new []]
+    split_ [haystack, delim, 0, %list.new []]
   },
 
-  length: #str {
+  length: #'str {
     =Str[data],
     data
     ~> %binary.length
-    ~> iter' [&iter', data, 0, ~]
+    ~> iter_ [&iter_, data, 0, ~]
     ~> %iter.count
   },
 
-  slice: #[str, int, int] {
+  slice: #['str, 'int, 'int] {
     =[Str[data], start, end],
     data
     ~> %binary.length
-    ~> iter' [&iter', data, 0, ~]
+    ~> iter_ [&iter_, data, 0, ~]
     ~> %iter.drop [~, start]
     ~> %iter.take [~, %math.sub [end, start]]
-    ~> collect' [~, '']
+    ~> collect_ [~, 0x]
   },
 
-  index_of: #[str, str] {
+  index_of: #['str, 'str] {
     =[Str[haystack], Str[needle]],
 
     needle_len = needle ~> %binary.length,
@@ -224,28 +224,28 @@ collect' = #[iterator<int>, bin] {
         ~> %math.sub [~, needle_len]
         ~> find_index [haystack, needle, 0, ~]
         ~> =byte_pos,
-        byte_pos_to_char_idx' [haystack, 0, byte_pos, 0]
+        byte_pos_to_char_idx_ [haystack, 0, byte_pos, 0]
       }
     }
   },
 
-  iter: #str {
+  iter: #'str {
     =Str[data],
     data
     ~> %binary.length
-    ~> iter' [&iter', data, 0, ~]
+    ~> iter_ [&iter_, data, 0, ~]
   },
 
-  collect: #iterator<int> {
-    collect' [~, '']
+  collect: #'iterator<'int> {
+    collect_ [~, 0x]
   },
 
-  join: #[iterator<str>, str] {
+  join: #['iterator<'str>, 'str] {
     =[it, Str[sep]],
     &it
-    ~> %iter.map [~, #str { .0 }]
+    ~> %iter.map [~, #'str { .0 }]
     ~> %iter.intersperse [~, sep]
-    ~> %iter.fold [~, '', &%binary.concat]
+    ~> %iter.fold [~, 0x, &%binary.concat]
     ~> Str[~]
   }
 ]

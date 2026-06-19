@@ -1,8 +1,8 @@
-(str) : %string;
-(list) : %list;
-path : Root | Relative[int] | Path[str, ^];
+('str) = %string;
+('list) = %list;
+'path = Root | Relative['int] | Path['str, ^];
 
-join' = #[#^ -> (path | []), path, path] {
+join_ = #[#^ -> ('path | []), 'path, 'path] {
   =[self, p1, p2],
   [p1, p2] ~> {
     | =[_, Root] => []
@@ -14,7 +14,7 @@ join' = #[#^ -> (path | []), path, path] {
   }
 },
 
-to_string' = #[path, str] {
+to_string_ = #['path, 'str] {
   | =[Root, acc] => {
     | acc ~> %string.empty? => "/"
     | %string.concat ["/", acc]
@@ -39,7 +39,7 @@ to_string' = #[path, str] {
   }
 },
 
-parse' = #[list<str>, path] {
+parse_ = #['list<'str>, 'path] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => head ~> {
     | %string.empty? => ^ [tail, acc]
@@ -57,39 +57,39 @@ parse' = #[list<str>, path] {
 },
 
 [
-  parse: #str {
+  parse: #'str {
     %string.split [~, "/"] ~> {
       | =Nil => Relative[0]
-      | =Cons[first, rest], first ~> %string.empty? => parse' [rest, Root]
-      | parse' [~, Relative[0]]
+      | =Cons[first, rest], first ~> %string.empty? => parse_ [rest, Root]
+      | parse_ [~, Relative[0]]
     }
   },
 
-  basename: #path {
+  basename: #'path {
     =Path[s, _] => s
   },
 
-  parent: #path {
+  parent: #'path {
     | =Path[_, p] => p
     | =Root => Root
     | =Relative[n] => %math.add [n, 1] ~> Relative[~]
   },
 
-  to_string: #path {
-    to_string' [~, ""]
+  to_string: #'path {
+    to_string_ [~, ""]
   },
 
-  absolute?: #path {
+  absolute?: #'path {
     | =Root => Ok
     | =Path[_, p] => p ~> ^
   },
 
-  relative?: #path {
+  relative?: #'path {
     | =Relative[_] => Ok
     | =Path[_, p] => p ~> ^
   },
 
-  join: #[path, path] {
-    join' [&join', ...]
+  join: #['path, 'path] {
+    join_ [&join_, ...]
   }
 ]

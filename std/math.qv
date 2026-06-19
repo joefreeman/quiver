@@ -3,35 +3,35 @@
   sub: &__subtract__,
   mul: &__multiply__,
 
-  div: #[int, int] {
+  div: #['int, 'int] {
     | =[a, 0] => []
     | __divide__
   },
 
-  mod: #[int, int] {
+  mod: #['int, 'int] {
     | =[a, 0] => []
     | __modulo__
   },
 
-  lt: #[int, int] {
+  lt: #['int, 'int] {
     __compare__ ~> =-1
   },
 
-  le: #[int, int] {
+  le: #['int, 'int] {
     __compare__ ~> { =-1 | =0 }
   },
 
-  gt: #[int, int] {
+  gt: #['int, 'int] {
     __compare__ ~> { =1 }
   },
 
-  ge: #[int, int] {
+  ge: #['int, 'int] {
     __compare__ ~> { =0 | =1 }
   },
 
   abs: &__abs__,
 
-  sqrt: #int {
+  sqrt: #'int {
     | __compare__ [~, 0] ~> =-1 => []
     | __sqrt__
   }

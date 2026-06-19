@@ -1,7 +1,7 @@
-ip : IPv4[bin] | IPv6[bin];
-(iterator) : %iter;
+'ip = IPv4['bin] | IPv6['bin];
+('iterator) = %iter;
 
-resolve' = #[#^ -> iterator<ip>, \DnsResolver] {
+resolve_ = #[#^ -> 'iterator<'ip>, \DnsResolver] {
   =[self, resolver],
   #{
     __dns_next__ [resolver] ~> {
@@ -23,10 +23,10 @@ resolve' = #[#^ -> iterator<ip>, \DnsResolver] {
 },
 
 [
-  resolve: #Str[bin] {
+  resolve: #Str['bin] {
     .0
     ~> __dns_resolve__ [~]
-    ~> [&resolve', ~]
-    ~> resolve'
+    ~> [&resolve_, ~]
+    ~> resolve_
   }
 ]

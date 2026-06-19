@@ -56,7 +56,7 @@ fn test_consequence_ripple_is_block_parameter_not_condition_result() {
     quiver()
         .evaluate(
             r#"
-            ok? = #int { =0 => Ok },
+            ok? = #'int { =0 => Ok },
             0 ~> { | ok? => ~ | 999 }
             "#,
         )
@@ -69,7 +69,7 @@ fn test_consequence_ripple_in_tuple() {
     quiver()
         .evaluate(
             r#"
-            ok? = #int { =0 => Ok },
+            ok? = #'int { =0 => Ok },
             0 ~> { | ok? => [~, 1] | [~, 2] }
             "#,
         )
@@ -82,7 +82,7 @@ fn test_consequence_ripple_fallback_branch() {
     quiver()
         .evaluate(
             r#"
-            ok? = #int { =0 => Ok },
+            ok? = #'int { =0 => Ok },
             5 ~> { | ok? => [~, 1] | [~, 2] }
             "#,
         )

@@ -14,7 +14,7 @@ fn test_nil_function() {
 #[test]
 fn test_function_with_parameter() {
     quiver()
-        .evaluate("inc = #int { =x => [x, 1] ~> __add__ }, 3 ~> inc")
+        .evaluate("inc = #'int { =x => [x, 1] ~> __add__ }, 3 ~> inc")
         .expect("4");
 }
 
@@ -30,7 +30,7 @@ fn test_function_with_tuple_parameter() {
     quiver()
         .evaluate(
             r#"
-            f = #Point[x: int, y: int] {
+            f = #Point[x: 'int, y: 'int] {
               =Point[x: x, y: y] => [x, y] ~> __add__
             },
             Point[x: 1, y: 2] ~> f
@@ -42,8 +42,8 @@ fn test_function_with_tuple_parameter() {
 #[test]
 fn test_function_with_enumerated_type_parameter() {
     quiver()
-        .evaluate("f = #(int | bin) { =x => x }, '0a1b2c' ~> f")
-        .expect("'0a1b2c'");
+        .evaluate("f = #('int | 'bin) { =x => x }, 0x0a1b2c ~> f")
+        .expect("0x0a1b2c");
 }
 
 #[test]
@@ -51,8 +51,8 @@ fn test_higher_order_function() {
     quiver()
         .evaluate(
             r#"
-            apply = #[#int -> int, int] { =[f, x] => x ~> f },
-            double = #int { =x => [x, 2] ~> __multiply__ },
+            apply = #[#'int -> 'int, 'int] { =[f, x] => x ~> f },
+            double = #'int { =x => [x, 2] ~> __multiply__ },
             [&double, 5] ~> apply
             "#,
         )
@@ -64,8 +64,8 @@ fn test_nested_function_return() {
     quiver()
         .evaluate(
             r#"
-            f = #int {
-              =x => #int { =y => [x, y] ~> __add__ }
+            f = #'int {
+              =x => #'int { =y => [x, y] ~> __add__ }
             },
             3 ~> f ~> =g,
             5 ~> g
@@ -79,7 +79,7 @@ fn test_closure_captures_member_accesses() {
     quiver()
         .evaluate(
             r#"
-            double_plus_one = #int {
+            double_plus_one = #'int {
               =x => [[x, 2] ~> %math.mul, 1] ~> %math.add
             },
             5 ~> double_plus_one
@@ -107,7 +107,7 @@ fn test_nested_function_captures() {
         .evaluate(
             r#"
             f = #{
-              inc = #int { [~, 1] ~> %math.add },
+              inc = #'int { [~, 1] ~> %math.add },
               42 ~> inc
             },
             [] ~> f
@@ -143,7 +143,7 @@ fn test_function_call_with_spread() {
     quiver()
         .evaluate(
             r#"
-            f = #[int, int, int] {
+            f = #['int, 'int, 'int] {
               $.0
               ~> %math.add [~, $.1]
               ~> %math.add [~, $.2]
@@ -169,8 +169,8 @@ fn test_ripple_field_access() {
 fn test_function_result_covariance() {
     quiver().evaluate(
         r#"
-        f = #(#bin -> (Ok | [])) { ~ },
-        g = #bin { [] },
+        f = #(#'bin -> (Ok | [])) { ~ },
+        g = #'bin { [] },
         g ~> f
         "#,
     );
@@ -180,8 +180,8 @@ fn test_function_result_covariance() {
 fn test_function_parameter_contravariance() {
     quiver().evaluate(
         r#"
-        f = #(#[] -> bin) { ~ },
-        g = #(Ok | []) { '00' },
+        f = #(#[] -> 'bin) { ~ },
+        g = #(Ok | []) { 0x00 },
         g ~> f
         "#,
     );
@@ -191,33 +191,33 @@ fn test_function_parameter_contravariance() {
 fn test_apply_value_to_inline_function() {
     // Inline functions are not auto-called; bind first, then call
     quiver()
-        .evaluate("f = #int { [~, 2] ~> __add__ }, 5 ~> f")
+        .evaluate("f = #'int { [~, 2] ~> __add__ }, 5 ~> f")
         .expect("7");
 }
 
 #[test]
 fn test_identity_function_int() {
-    quiver().evaluate("f = #int, 42 ~> f").expect("42");
+    quiver().evaluate("f = #'int, 42 ~> f").expect("42");
 }
 
 #[test]
 fn test_identity_function_bin() {
     quiver()
-        .evaluate("f = #bin, '0a1b2c' ~> f")
-        .expect("'0a1b2c'");
+        .evaluate("f = #'bin, 0x0a1b2c ~> f")
+        .expect("0x0a1b2c");
 }
 
 #[test]
 fn test_identity_function_tuple() {
     quiver()
-        .evaluate("f = #Point[x: int, y: int], Point[x: 1, y: 2] ~> f")
+        .evaluate("f = #Point[x: 'int, y: 'int], Point[x: 1, y: 2] ~> f")
         .expect("Point[x: 1, y: 2]");
 }
 
 #[test]
 fn test_identity_function_inline() {
     // Inline functions are not auto-called; bind first, then call
-    quiver().evaluate("f = #int, 42 ~> f").expect("42");
+    quiver().evaluate("f = #'int, 42 ~> f").expect("42");
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn test_identity_function_with_type_parameter() {
     quiver()
         .evaluate(
             r#"
-            id = #<t>t,
+            id = #<'t>'t,
             42 ~> id
             "#,
         )
@@ -234,20 +234,20 @@ fn test_identity_function_with_type_parameter() {
 
 #[test]
 fn test_dollar_parameter_reference() {
-    quiver().evaluate("f = #int { $ }, 5 ~> f").expect("5");
+    quiver().evaluate("f = #'int { $ }, 5 ~> f").expect("5");
 }
 
 #[test]
 fn test_dollar_with_tuple_field_access() {
     quiver()
-        .evaluate("f = #[int, int] { [$.0, $.1] ~> __add__ }, [10, 20] ~> f")
+        .evaluate("f = #['int, 'int] { [$.0, $.1] ~> __add__ }, [10, 20] ~> f")
         .expect("30");
 }
 
 #[test]
 fn test_dollar_in_nested_block() {
     quiver()
-        .evaluate("f = #int { 100 ~> { __add__ [~, $] } }, 7 ~> f")
+        .evaluate("f = #'int { 100 ~> { __add__ [~, $] } }, 7 ~> f")
         .expect("107");
 }
 
@@ -256,7 +256,7 @@ fn test_dollar_with_named_tuple_field() {
     quiver()
         .evaluate(
             r#"
-            f = #Point[x: int, y: int] { [$.x, $.y] ~> __add__ },
+            f = #Point[x: 'int, y: 'int] { [$.x, $.y] ~> __add__ },
             Point[x: 10, y: 20] ~> f
             "#,
         )
@@ -266,17 +266,17 @@ fn test_dollar_with_named_tuple_field() {
 #[test]
 fn test_function_with_return_type() {
     quiver()
-        .evaluate("f = #int -> int { __add__ [~, 1] }, 5 ~> f")
+        .evaluate("f = #'int -> 'int { __add__ [~, 1] }, 5 ~> f")
         .expect("6");
 }
 
 #[test]
 fn test_function_return_type_mismatch() {
     quiver()
-        .evaluate("f = #int -> bin { __add__ [~, 1] }, 5 ~> f")
+        .evaluate("f = #'int -> 'bin { __add__ [~, 1] }, 5 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "bin".to_string(),
-            found: "int".to_string(),
+            expected: "'bin".to_string(),
+            found: "'int".to_string(),
         });
 }
 
@@ -285,7 +285,7 @@ fn test_function_with_tuple_return_type() {
     quiver()
         .evaluate(
             r#"
-            f = #[int, int] -> int { [$.0, $.1] ~> __add__ },
+            f = #['int, 'int] -> 'int { [$.0, $.1] ~> __add__ },
             [3, 4] ~> f
             "#,
         )
@@ -297,28 +297,28 @@ fn test_function_tuple_return_type_mismatch() {
     quiver()
         .evaluate(
             r#"
-            f = #[int, int] -> bin { [$.0, $.1] ~> __add__ },
+            f = #['int, 'int] -> 'bin { [$.0, $.1] ~> __add__ },
             [3, 4] ~> f
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "bin".to_string(),
-            found: "int".to_string(),
+            expected: "'bin".to_string(),
+            found: "'int".to_string(),
         });
 }
 
 #[test]
 fn test_identity_function_with_return_type() {
-    quiver().evaluate("f = #int -> int, 42 ~> f").expect("42");
+    quiver().evaluate("f = #'int -> 'int, 42 ~> f").expect("42");
 }
 
 #[test]
 fn test_identity_function_return_type_mismatch() {
     quiver()
-        .evaluate("f = #int -> bin, 42 ~> f")
+        .evaluate("f = #'int -> 'bin, 42 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "bin".to_string(),
-            found: "int".to_string(),
+            expected: "'bin".to_string(),
+            found: "'int".to_string(),
         });
 }
 
@@ -327,7 +327,7 @@ fn test_function_with_generic_return_type() {
     quiver()
         .evaluate(
             r#"
-            id = #<t>t -> t { ~ },
+            id = #<'t>'t -> 't { ~ },
             42 ~> id
             "#,
         )
@@ -339,7 +339,7 @@ fn test_function_with_generic_return_type_string() {
     quiver()
         .evaluate(
             r#"
-            id = #<t>t -> t { ~ },
+            id = #<'t>'t -> 't { ~ },
             "hello" ~> id
             "#,
         )
@@ -351,8 +351,8 @@ fn test_function_with_complex_return_type() {
     quiver()
         .evaluate(
             r#"
-            double = #int -> int { __multiply__ [~, 2] },
-            square = #int -> int { __multiply__ [~, ~] },
+            double = #'int -> 'int { __multiply__ [~, 2] },
+            square = #'int -> 'int { __multiply__ [~, ~] },
             5 ~> double ~> square
             "#,
         )
@@ -364,7 +364,7 @@ fn test_function_with_named_tuple_return_type() {
     quiver()
         .evaluate(
             r#"
-            f = #int -> Point[x: int, y: int] {
+            f = #'int -> Point[x: 'int, y: 'int] {
                 =n => Point[x: n, y: [n, n] ~> __multiply__]
             },
             3 ~> f
@@ -378,13 +378,13 @@ fn test_function_named_tuple_return_type_mismatch() {
     quiver()
         .evaluate(
             r#"
-            f = #int -> Point[x: int, y: int] { ~ },
+            f = #'int -> Point[x: 'int, y: 'int] { ~ },
             3 ~> f
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "Point[x: int, y: int]".to_string(),
-            found: "int".to_string(),
+            expected: "Point[x: 'int, y: 'int]".to_string(),
+            found: "'int".to_string(),
         });
 }
 
@@ -393,9 +393,9 @@ fn test_generic_function_return_type_mismatch() {
     // Generic function with type parameter t but return type bin
     // Body returns t, which doesn't match bin
     quiver()
-        .evaluate("f = #<t>t -> bin { ~ }, 5 ~> f")
+        .evaluate("f = #<'t>'t -> 'bin { ~ }, 5 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "bin".to_string(),
-            found: "t".to_string(),
+            expected: "'bin".to_string(),
+            found: "'t".to_string(),
         });
 }

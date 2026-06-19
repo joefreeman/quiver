@@ -3,8 +3,8 @@
 mod common;
 use common::*;
 
-const ADD: &str = "add = #[int, int] { __add__ },";
-const INC: &str = "inc = #int { %math.add [~, 1] },";
+const ADD: &str = "add = #['int, 'int] { __add__ },";
+const INC: &str = "inc = #'int { %math.add [~, 1] },";
 
 #[test]
 fn spaced_bracket_call() {
@@ -23,7 +23,7 @@ fn bare_argument_call() {
 #[test]
 fn adjacent_call_is_a_parse_error() {
     quiver()
-        .evaluate("add = #[int, int] { __add__ }, add[3, 4]")
+        .evaluate("add = #['int, 'int] { __add__ }, add[3, 4]")
         .expect_parse_failure();
 }
 
@@ -49,7 +49,7 @@ fn spread_stays_adjacent() {
 #[test]
 fn field_access_call_is_spaced() {
     quiver()
-        .evaluate("m = [add: #[int, int] { __add__ }], m.add [3, 4]")
+        .evaluate("m = [add: #['int, 'int] { __add__ }], m.add [3, 4]")
         .expect("7");
 }
 
@@ -57,7 +57,7 @@ fn field_access_call_is_spaced() {
 fn tail_call_is_spaced() {
     quiver()
         .evaluate(
-            "count_down = #int {
+            "count_down = #'int {
                | =0 => Done
                | %math.sub [~, 1] ~> ^
              },
@@ -70,7 +70,7 @@ fn tail_call_is_spaced() {
 fn bare_amp_passes_function() {
     quiver()
         .evaluate(&format!(
-            "{INC} apply = #[#int -> int, int] {{ $.1 ~> $.0 }}, apply [&inc, 5]"
+            "{INC} apply = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 }}, apply [&inc, 5]"
         ))
         .expect("6");
 }
@@ -80,7 +80,7 @@ fn multi_argument_application_is_a_parse_error() {
     // Application takes a single argument; `f 1 2` is rejected rather than being
     // silently treated as `(f 1)` followed by a stray statement `2`.
     quiver()
-        .evaluate("f = #int { $ }, f 1 2")
+        .evaluate("f = #'int { $ }, f 1 2")
         .expect_parse_failure();
 }
 

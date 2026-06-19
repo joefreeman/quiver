@@ -1,15 +1,15 @@
 // Define a recursive list type
-list<t> : Nil | Cons[t, ^];
+'list<'t> = Nil | Cons['t, ^];
 
 // Compute the sum of a list using tail recursion
-sum' = #[list<int>, int] {
+sum_ = #['list<'int>, 'int] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => {
     %math.add [head, acc] ~> ^ [tail, ~]
   }
 },
 
-sum = #list<int> { sum' [~, 0] },
+sum = #'list<'int> { sum_ [~, 0] },
 
 #{
   // Build and sum a list

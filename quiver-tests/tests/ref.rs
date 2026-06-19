@@ -4,7 +4,7 @@ use common::*;
 #[test]
 fn test_ref_creation() {
     // Each & creates a unique ref
-    quiver().evaluate("& ~> =r, r").expect_type("ref");
+    quiver().evaluate("& ~> =r, r").expect_type("'ref");
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn test_ref_in_tuple() {
     // Refs can be stored in tuples
     quiver()
         .evaluate("r = &, [tag: r, data: 42] ~> .tag")
-        .expect_type("ref");
+        .expect_type("'ref");
 }
 
 #[test]
@@ -55,17 +55,17 @@ fn test_ref_pattern_matching_mismatch() {
 fn test_ref_type_annotation() {
     // ref type can be used in function signatures
     quiver()
-        .evaluate("f = #ref { $ }, & ~> f")
-        .expect_type("ref");
+        .evaluate("f = #'ref { $ }, & ~> f")
+        .expect_type("'ref");
 }
 
 #[test]
 fn test_ref_in_union_type() {
     // ref can be part of union types
     quiver()
-        .evaluate("f = #(int | ref) { | =&int => 1 | 2 }, & ~> f")
+        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }, & ~> f")
         .expect("2");
     quiver()
-        .evaluate("f = #(int | ref) { | =&int => 1 | 2 }, 42 ~> f")
+        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }, 42 ~> f")
         .expect("1");
 }

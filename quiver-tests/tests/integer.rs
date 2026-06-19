@@ -10,7 +10,7 @@ fn test_and() {
         .evaluate("[170, 204] ~> %integer.and")
         .expect("136");
     quiver()
-        .evaluate("[0xff, 0xf0] ~> %integer.and")
+        .evaluate("[255, 240] ~> %integer.and")
         .expect("240");
 }
 
@@ -94,7 +94,7 @@ fn test_extract_hash_bits() {
     quiver()
         .evaluate(
             r#"
-            hash = 0x12345678,
+            hash = 305419896,
             [hash, 31] ~> %integer.and
             "#,
         )
@@ -103,7 +103,7 @@ fn test_extract_hash_bits() {
     quiver()
         .evaluate(
             r#"
-            hash = 0x12345678,
+            hash = 305419896,
             depth = 1,
             shift = [depth, 5] ~> __multiply__,
             shifted = [hash, [0, shift] ~> __subtract__] ~> %integer.shift,
@@ -118,8 +118,8 @@ fn test_chained_operations() {
     quiver()
         .evaluate(
             r#"
-            a = [0xff, 0xf0] ~> %integer.and,
-            b = [a, 0x0f] ~> %integer.or,
+            a = [255, 240] ~> %integer.and,
+            b = [a, 15] ~> %integer.or,
             c = b ~> %integer.not,
             [c, 8] ~> %integer.shift
             "#,

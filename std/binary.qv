@@ -1,4 +1,4 @@
-byte_bit = #int {
+byte_bit = #'int {
   [__divide__ [$, 8], __modulo__ [$, 8]]
 },
 
@@ -13,20 +13,21 @@ byte_bit = #int {
   not: &__binary_not__,
   shift: &__binary_shift__,
   slice: &__binary_slice__,
+  index: &__binary_index__,
 
-  get_byte: #[bin, int] {
+  get_byte: #['bin, 'int] {
     __binary_get__[..., 0, 8]
   },
 
-  get_bit: #[bin, int] {
+  get_bit: #['bin, 'int] {
     $.1 ~> byte_bit ~> __binary_get__ [$.0, ..., 1]
   },
 
-  set_byte: #[bin, int, int] {
+  set_byte: #['bin, 'int, 'int] {
     __binary_set__ [$.0, $.1, 0, $.2, 8]
   },
 
-  set_bit: #[bin, int, int] {
+  set_bit: #['bin, 'int, 'int] {
     $.1 ~> byte_bit ~> __binary_set__ [$.0, ..., $.2, 1]
   }
 ]

@@ -8,8 +8,8 @@ Quiver is a statically-typed functional programming language with structural typ
 
 All values in Quiver are immutable. The language supports:
 
-- **Integers**: `42`, `-17`, `0xff`, `0b1010`
-- **Binaries**: `'0a1b2c'` (hexadecimal bytes)
+- **Integers**: `42`, `-17` (decimal)
+- **Binaries**: `0x0a1b2c` (hexadecimal bytes; an even number of hex digits, so `0x` alone is the empty binary)
 - **Tuples**: Collections of values with optional names and field labels
 
 ### Postfix flow
@@ -25,9 +25,9 @@ Quiver uses postfix notation where data flows left-to-right through transformati
 Pattern matching allows destructuring values and branching based on their structure. Matches can test literal values, extract components, and control program flow.
 
 ```
-response : Success[bin] | Error[code: int];
+'response = Success['bin] | Error[code: 'int]
 
-handle_response = #response {
+handle_response = #'response {
   | =Success[content] => content
   | =Error[code: 404] => default_page
   | error_page
@@ -36,23 +36,25 @@ handle_response = #response {
 
 ## Types
 
+Type names are written with a leading `'` (apostrophe): the built-in `'int`, `'bin`, `'ref`, and any type alias such as `'point`. This distinguishes types from variables and field names, which share the same lowercase identifier syntax. Named tuple types (such as `Point`) are already distinguished by their leading uppercase letter, so they take no prefix.
+
 ### Basic types
 
-- `int` - Integer values
-- `bin` - Binary data (bytes)
-- `ref` - Unique opaque identifiers
+- `'int` - Integer values
+- `'bin` - Binary data (bytes)
+- `'ref` - Unique opaque identifiers
 
 ### Tuple types
 
 Tuples are the primary composite type. They can optionally have a name, and have zero or more fields. Tuple names start with an uppercase letter. Each field has a type, and may be named (as per identifiers; see below).
 
 ```
-[]                       // Empty tuple ('nil')
-Blue                     // Named, empty tuple
-[int, int]               // Unnamed tuple with unnamed fields
-[x: int, y: int]         // Named fields
-Point[x: int, y: int]    // Named tuple
-A[b: B[c: C[bin]]]       // Nested tuples
+[]                          // Empty tuple ('nil')
+Blue                        // Named, empty tuple
+['int, 'int]                // Unnamed tuple with unnamed fields
+[x: 'int, y: 'int]          // Named fields
+Point[x: 'int, y: 'int]     // Named tuple
+A[b: B[c: C['bin]]]         // Nested tuples
 ```
 
 ### Partial types
@@ -60,18 +62,20 @@ A[b: B[c: C[bin]]]       // Nested tuples
 Partial types define structural constraints on tuples without specifying all fields. They use parentheses instead of brackets and require all fields to be named:
 
 ```
-(x: int, y: int)         // Unnamed partial - matches any tuple with 'x' and 'y' integer fields
-Point(x: int)            // Named partial - matches tuples named 'Point' with an 'x' integer field
+(x: 'int, y: 'int)       // Unnamed partial - matches any tuple with 'x' and 'y' integer fields
+Point(x: 'int)           // Named partial - matches tuples named 'Point' with an 'x' integer field
 ()                       // Empty unnamed partial - matches any tuple
 Point()                  // Empty named partial - matches any tuple named 'Point'
 ```
 
 ### Type aliases
 
+Type aliases are defined with `=`, the same operator used for value bindings — the `'` prefix on the name marks the statement as a type definition:
+
 ```
-point : Point[x: int, y: int];
-adder : #int -> int;
-writer : (write: (#bin -> Ok));
+'point = Point[x: 'int, y: 'int]
+'adder = #'int -> 'int
+'writer = (write: (#'bin -> Ok))
 ```
 
 ### Parameterised types
@@ -79,14 +83,14 @@ writer : (write: (#bin -> Ok));
 Type aliases and functions can be parameterised with type parameters using angle brackets:
 
 ```
-pair<a, b> : Pair[first: a, second: b];
+'pair<'a, 'b> = Pair[first: 'a, second: 'b]
 ```
 
 Functions can also declare type parameters:
 
 ```
-id = #<t>t { $ }
-map = #<t, u>[list<t>, #t -> u] { ... }
+id = #<'t>'t { $ }
+map = #<'t, 'u>['list<'t>, #'t -> 'u] { ... }
 ```
 
 Type parameters are inferred from usage. When a function with type parameters is called with different argument types, the type variables are unified (i.e., widened) to find the most general type that satisfies all constraints.
@@ -94,10 +98,10 @@ Type parameters are inferred from usage. When a function with type parameters is
 ### Union types
 
 ```
-bool : True | False;
-shape :
-  | Circle[radius: int]
-  | Rectangle[width: int, height: int];
+'bool = True | False
+'shape =
+  | Circle[radius: 'int]
+  | Rectangle[width: 'int, height: 'int]
 ```
 
 ### Recursive types
@@ -105,14 +109,14 @@ shape :
 Use `^` to refer back to the root of the types, or `^1`/`^2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
 
 ```
-list<t> : Nil | Cons[t, ^];
-tree<t> : Leaf[t] | Node[^, ^];
-json :
+'list<'t> = Nil | Cons['t, ^]
+'tree<'t> = Leaf['t] | Node[^, ^]
+'json =
   | Null
-  | bool
-  | int
-  | Str[bin]
-  | Array[(Nil | Cons[^, ^1])];
+  | 'bool
+  | 'int
+  | Str['bin]
+  | Array[(Nil | Cons[^, ^1])]
 ```
 
 ### Type spreads
@@ -121,25 +125,25 @@ Type aliases can be extended using the spread operator `...` to compose new type
 
 ```
 // Compose types from reusable pieces
-entity : [id: int, created_at: int];
-updateable : (updated_at: int);
-post : Post[...entity, title: Str[bin], ...updateable];  // Post[id: int, created_at: int, title: Str[bin], updated_at: int]
+'entity = [id: 'int, created_at: 'int]
+'updateable = (updated_at: 'int)
+'post = Post[...'entity, title: Str['bin], ...'updateable]  // Post[id: 'int, created_at: 'int, title: Str['bin], updated_at: 'int]
 
 // Field override - later fields override earlier ones
-v1 : User[id: int, name: Str[bin]];
-v2 : v1[..., id: bin];  // User[id: bin, name: Str[bin]]
+'v1 = User[id: 'int, name: Str['bin]]
+'v2 = 'v1[..., id: 'bin]  // User[id: 'bin, name: Str['bin]]
 ```
 
 When spreading a union type, the spread is distributed across all variants:
 
 ```
-event : Created[id: int] | Updated | Deleted;
-logged : event[..., timestamp: int] // Created[id: int, timestamp: int] | Updated[timestamp: int] | Deleted[timestamp: int];
+'event = Created[id: 'int] | Updated | Deleted
+'logged = 'event[..., timestamp: 'int] // Created[id: 'int, timestamp: 'int] | Updated[timestamp: 'int] | Deleted[timestamp: 'int]
 ```
 
 ### Strings
 
-The compiler converts UTF-8 strings, defined with `"..."` into binaries, wrapped in a `Str` tuple (`Str['...']`).
+The compiler converts UTF-8 strings, defined with `"..."` into binaries, wrapped in a `Str` tuple (`Str[0x...]`).
 
 ## Expressions
 
@@ -163,7 +167,7 @@ chain, and into the arguments of a call. Each field/argument receives its own co
 callable there is called with it (and a non-callable value simply replaces it):
 
 ```
-inc = #int { math.add [~, 1] },
+inc = #'int { math.add [~, 1] },
 5 ~> [inc, 100]          // [6, 100] - inc is called with 5
 5 ~> [&inc, 100]         // [<function>, 100] - & passes inc by value
 ```
@@ -214,14 +218,13 @@ A[x: 1] ~> B[...]        // B[x: 1] - replaces name
 
 ## Identifiers
 
-Identifiers (for variables and tuple field names) start with a lowercase letter, followed by alphanumeric characters or underscores. Optional suffixes: `?`, `!`, `'` (in order).
+Identifiers (for variables and tuple field names) start with a lowercase letter, followed by alphanumeric characters or underscores. Optional suffixes: `?`, `!` (in order).
 
 ```
 x, a1, first_name
 is_empty?      // ? for predicates
 validate!      // ! for emphasis
-helper'        // ' for variants
-is_valid?!'    // Combined
+is_valid?!     // Combined
 ```
 
 ## Pattern matching
@@ -265,7 +268,7 @@ role ~> ="admin"                 // String matching
 
 ### References
 
-Use `&` to check against existing variables or types, instead of binding:
+Use `&` to check against an existing variable, instead of binding:
 
 ```
 y = 2
@@ -275,13 +278,17 @@ y = 2
 Point[x, &y] = Point[1, 2]       // Binds x, checks y is 2
 Point[1, 2] ~> =Point[x, &y]     // x bound, y pinned
 A[x, B[&y, C[z]]]                // Mixed; x and z bound; y pinned
-
-42 ~> =&int                       // 42
-A[2] ~> =A[&y]                   // A[2]
-P[x: 1, y: 2] ~> =(x: &int)      // P[x: 1, y: 2]
 ```
 
-Identifiers in patterns bind by default. Use `&` to reference an existing variable or type instead of binding.
+Type references need no `&`: because types are never bound, a type name (carrying its `'` prefix) is always a reference:
+
+```
+42 ~> ='int                       // 42
+A[2] ~> =A[&y]                   // A[2]
+P[x: 1, y: 2] ~> =(x: 'int)      // P[x: 1, y: 2]
+```
+
+Identifiers in patterns bind by default. Use `&` to reference an existing variable instead of binding; type references (`'int`, `'point`, …) are always references and need no `&`.
 
 ## Blocks
 
@@ -369,7 +376,7 @@ x   // 42
 
 ## Functions
 
-Functions always have a single parameter and a result. The parameter is explicitly typed, and the result type is inferred. Optionally, the return type can be specified (e.g., `#int -> bin { ... }`), and will be validated at compile time.
+Functions always have a single parameter and a result. The parameter is explicitly typed, and the result type is inferred. Optionally, the return type can be specified (e.g., `#'int -> 'bin { ... }`), and will be validated at compile time.
 
 Functions are defined with `#... { ... }` syntax, where the first `...` is the type definition of the parameter, and the second `...` is the function body (a 'block'; see above).
 
@@ -377,29 +384,29 @@ Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
 The function parameter can be accessed using `$` (e.g., `$.x`, `$.0`). Unlike `~>`, which refers to a block's parameter, `$` always refers to the enclosing function's parameter.
 
-Identity functions (that simply return their input unchanged) can be defined without a body: `#int` is equivalent to `#int { $ }`.
+Identity functions (that simply return their input unchanged) can be defined without a body: `#'int` is equivalent to `#'int { $ }`.
 
 ```
 // Single parameter function
-double = #int { math.mul [~, 2] }
+double = #'int { math.mul [~, 2] }
 
 // Pattern matching on union types
-area = #shape {
+area = #'shape {
   | =Circle[radius: r] => math.mul [r, r]
   | =Rectangle[width: w, height: h] => math.mul [w, h]
 }
 
 // Using a tuple for multiple values
-swap = #[int, int] { =[a, b] => [b, a] }
+swap = #['int, 'int] { =[a, b] => [b, a] }
 
 // Shorthand for nil parameter
 #{ 42 }
 
 // Identity function
-f = #int
+f = #'int
 
 // Parameter reference with $
-sum = #[int, int] { [$.0, $.1] ~> math.add }
+sum = #['int, 'int] { [$.0, $.1] ~> math.add }
 ```
 
 ### Function application
@@ -445,7 +452,7 @@ When used with field access (`.field [...]`), ripples are not allowed in the arg
 Use `^` for tail-recursive calls:
 
 ```
-f = #[int, int] {
+f = #['int, 'int] {
   | =[1, y] => y
   | =[x, y] => [
     [~, 1] ~> math.sub,
@@ -457,15 +464,15 @@ f = #[int, int] {
 Named tail calls to other functions:
 
 ```
-f = #[int, int] { math.mul },
-fact = #int { [~, 1] ~> ^f }
+f = #['int, 'int] { math.mul },
+fact = #'int { [~, 1] ~> ^f }
 ```
 
 Tail calls also take an argument, using the same space-separated syntax:
 
 ```
-g = #[int, int] { math.mul },
-f = #int { math.add [~, 1] ~> ^g [~, 2] },
+g = #['int, 'int] { math.mul },
+f = #'int { math.add [~, 1] ~> ^g [~, 2] },
 10 ~> f   // 22
 ```
 
@@ -485,19 +492,19 @@ processor = @process
 Processes can be initialised with an argument, and a shorthand can be used to define the function:
 
 ```
-counter = @int { ... }
+counter = @'int { ... }
 ```
 
 ### Receiving messages
 
-The select operator, `!`, can be used to receive messages by applying it to a function - for example, applying it to an identity function: `!#int`, which can be shortened to `!int`.
+The select operator, `!`, can be used to receive messages by applying it to a function - for example, applying it to an identity function: `!#'int`, which can be shortened to `!'int`.
 
 The function's parameter type defines the message type to be received. And this in turn will define the receive type of the process spawned with the surrounding function:
 
 ```
 // Spawn a process with an int receive type
 p1 = @{
-  !int ~> {
+  !'int ~> {
     | =0 => "done"
     | ^ []
   }
@@ -552,8 +559,8 @@ p1 ~> ![~, 1000]
 
 Shorthand forms:
 - `!p` is sugar for `![p]`
-- `!int` is sugar for `![#int]` (identity receive for type)
-- `!int { ... }` is sugar for `![#int { ... }]` (filtered receive)
+- `!'int` is sugar for `![#'int]` (identity receive for type)
+- `!'int { ... }` is sugar for `![#'int { ... }]` (filtered receive)
 - `![]` is a no-op (returns nil immediately)
 
 ### Referring to processes
@@ -562,7 +569,7 @@ When spawning, a process identifier is returned. The current process can refer t
 - `.` to send a message to self: `42 ~> .`
 - `&.` to get a reference to self without sending: `&. ~> =self_pid`
 
-To specify a type that refers to a process, use `@type`. For example, `@int` is a process that receives integers.
+To specify a type that refers to a process, use `@` followed by a type. For example, `@'int` is a process that receives integers.
 
 ### Resource ownership
 
@@ -598,11 +605,11 @@ math = %math                   // Import standard library module
 
 ### Type imports
 
-Import types from modules using patterns:
+Type imports use the same `=` form, with the `'` prefix marking them as type-level:
 
 ```
-(circle, rectangle) : %shapes;   // Import specific types
-* : %geometry;                   // Import all types
+('circle, 'rectangle) = %shapes   // Import specific types
+'* = %geometry                    // Import all types
 ```
 
 ## Standard library
@@ -638,7 +645,7 @@ add [x, y] ~> mul [~, 2] ~> sub [~, 1]
 ### Working with tuples
 
 ```
-point : Point[x: int, y: int];
+'point = Point[x: 'int, y: 'int]
 
 // Define points
 p0 = Point[x: 2, y: 3],
@@ -646,7 +653,7 @@ p1 = Point[...p0, x: 5],
 p2 = Point[...p1, y: 4],
 
 // Function to add points
-add_points = #[point, point] {
+add_points = #['point, 'point] {
   Point[
     x: %math.add [$.0.x, $.1.x],
     y: %math.add [$.0.y, $.1.y],
@@ -659,10 +666,10 @@ add_points [p1, p2]   // Point[x: 10, y: 7]
 ### Pattern matching
 
 ```
-list<t> : Nil | Cons[t, ^];
+'list<'t> = Nil | Cons['t, ^]
 
 // Determine whether a list contains an item
-contains? = #<t>[list<t>, t] {
+contains? = #<'t>['list<'t>, 't] {
   | =[Nil, _] => []
   | =[Cons[value, _], value] => Ok
   | =[Cons[_, tail], value] => ^ [tail, value]
@@ -677,7 +684,7 @@ contains? [xs, 4]    // []
 
 ```
 // Clamp value to range [0, 100]
-clamp = #int {
+clamp = #'int {
   | %math.gt [~, 100] => 100
   | %math.lt [~, 0] => 0
   | $
@@ -692,12 +699,12 @@ clamp = #int {
 
 ```
 // shapes.qv
-shape :
-  | Circle[radius: int]
-  | Rectangle[width: int, height: int];
+'shape =
+  | Circle[radius: 'int]
+  | Rectangle[width: 'int, height: 'int]
 
 [
-  bounding_box: #shape {
+  bounding_box: #'shape {
     | =Circle[radius: r] => {
       x = %math.mul [r, 2],
       Rectangle[width: x, height: x]
@@ -707,7 +714,7 @@ shape :
     }
   },
 
-  is_square?: #shape {
+  is_square?: #'shape {
     =Rectangle[width: x, height: x]
   }
 ]
@@ -748,7 +755,7 @@ next_year = person.age ~> %math.add [~, 1],
 ```
 // Spawn process that receives strings
 pid = @{
-  !Str[bin] ~> {
+  !Str['bin] ~> {
     | ="" => []              // Stop on empty string
     | =s => {
       s ~> __println__,      // (not implemented!)

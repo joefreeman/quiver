@@ -202,9 +202,9 @@ fn test_resource_ownership_transfers_on_send() {
         .with_io()
         .evaluate(&format!(
             r#"
-            reader : Read[\File];
+            'reader = Read[\File];
             r = @{{
-                !#reader ~> {{ =Read[f] => __file_read__ [f, 0, 5] ~> Str[~] }}
+                !#'reader ~> {{ =Read[f] => __file_read__ [f, 0, 5] ~> Str[~] }}
             }},
             file = __file_open__ ["{}" ~> .0, 0, 0],
             Read[file] ~> r,
@@ -232,9 +232,9 @@ fn test_resource_ownership_enforced_after_transfer() {
         .with_io()
         .evaluate(&format!(
             r#"
-            holder : Hold[\File];
+            'holder = Hold[\File];
             h = @{{
-                !#holder ~> {{ =Hold[_] => ^ }}
+                !#'holder ~> {{ =Hold[_] => ^ }}
             }},
             file = __file_open__ ["{}" ~> .0, 0, 0],
             Hold[file] ~> h,
@@ -263,9 +263,9 @@ fn test_resource_cleanup_on_owner_completion() {
         .with_io()
         .evaluate(&format!(
             r#"
-            reader : Read[\File];
+            'reader = Read[\File];
             r = @{{
-                !#reader ~> {{ =Read[f] => __file_read__ [f, 0, 5] ~> Str[~] }}
+                !#'reader ~> {{ =Read[f] => __file_read__ [f, 0, 5] ~> Str[~] }}
             }},
             file = __file_open__ ["{}" ~> .0, 0, 0],
             Read[file] ~> r,
@@ -464,7 +464,7 @@ fn test_std_file_lines_spanning_chunks() {
             file = %file,
             r = "{}" ~> %path.parse ~> file.open [~],
             lengths = file.lines r
-              ~> %iter.map [~, #Str[bin] {{ .0 ~> %binary.length }}]
+              ~> %iter.map [~, #Str['bin] {{ .0 ~> %binary.length }}]
               ~> %list.collect,
             file.close r,
             lengths

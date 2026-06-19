@@ -1,21 +1,21 @@
-(path) : %path;
-(iterator) : %iter;
+('path) = %path;
+('iterator) = %iter;
 
 // A file is backed by a process that owns the underlying file descriptor. Clients hold the
 // process and interact with it by sending commands; each request carries the client's own
 // process (to reply to) and a unique ref (to correlate the reply).
-command :
-  | Read[int, int, @Reply[ref, bin], ref]
-  | Write[int, bin, @Reply[ref, int], ref]
+'command =
+  | Read['int, 'int, @Reply['ref, 'bin], 'ref]
+  | Write['int, 'bin, @Reply['ref, 'int], 'ref]
   | Close;
 
-file : File[@command];
+'file = File[@'command];
 
 // The file process loop. The descriptor is held as the parameter (rather than reopened) and
 // threaded through each tail call, so the file is opened exactly once.
 serve = #\File {
   =fd,
-  !#command ~> {
+  !#'command ~> {
     | =Read[offset, length, reply, id] => {
       [fd, offset, length] ~> __file_read__ ~> Reply[id, ~] ~> reply,
       fd ~> ^
@@ -29,15 +29,15 @@ serve = #\File {
 },
 
 // Send a read request to a file process and wait for the correlated reply.
-do_read = #[file, int, int] {
+do_read = #['file, 'int, 'int] {
   =[f, offset, length],
   id = &,
   Read[offset, length, &., id] ~> f.0,
-  !#Reply[ref, bin] { =Reply[&id, _], Ok } ~> { =Reply[_, data] => data }
+  !#Reply['ref, 'bin] { =Reply[&id, _], Ok } ~> { =Reply[_, data] => data }
 },
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
-read_all' = #[file, int, bin] {
+read_all_ = #['file, 'int, 'bin] {
   =[f, offset, acc],
   chunk = do_read [f, offset, 65536],
   chunk ~> %binary.length ~> {
@@ -51,11 +51,11 @@ read_all' = #[file, int, bin] {
 // next newline (advancing the cursor rather than recopying the buffer), reading further 64KB
 // chunks only when the remaining buffer holds no complete line. The buffer is compacted (the
 // consumed prefix dropped) once per chunk read, keeping the whole pass linear.
-lines' = #[#^ -> iterator<Str[bin]>, file, int, bin, int] {
+lines_ = #[#^ -> 'iterator<Str['bin]>, 'file, 'int, 'bin, 'int] {
   =[self, f, offset, buf, pos],
   #{
     len = buf ~> %binary.length,
-    %binary.index [buf, 0x0A, pos] ~> {
+    %binary.index [buf, 10, pos] ~> {
       | =index => {
         line = %binary.slice [buf, pos, index],
         [Str[line], self [&self, f, offset, buf, %math.add [index, 1]]]
@@ -68,7 +68,7 @@ lines' = #[#^ -> iterator<Str[bin]>, file, int, bin, int] {
           | =0 => {
             // EOF: emit the final unterminated line if there is one, otherwise stop.
             | leftover ~> %binary.length ~> =0 => []
-            | [Str[leftover], self [&self, f, offset, '', 0]]
+            | [Str[leftover], self [&self, f, offset, 0x, 0]]
           }
           | =n => {
             it = n
@@ -84,7 +84,7 @@ lines' = #[#^ -> iterator<Str[bin]>, file, int, bin, int] {
 
 [
   // Open a file. Defaults to read-only; pass `mode: W` to create/truncate for writing.
-  open: #([path] | [path, mode: R | W]) {
+  open: #(['path] | ['path, mode: R | W]) {
     flags = { =(mode: W) => 577 | 0 },
     name = $.0 ~> %path.to_string ~> .0,
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
@@ -92,24 +92,24 @@ lines' = #[#^ -> iterator<Str[bin]>, file, int, bin, int] {
   },
 
   // Read `length` bytes starting at `offset`.
-  read: #[file, int, int] { do_read },
+  read: #['file, 'int, 'int] { do_read },
 
   // Read the entire file from the start, returning all its bytes.
-  read_all: #file { read_all' [~, 0, ''] },
+  read_all: #'file { read_all_ [~, 0, 0x] },
 
   // Iterate over the lines of the file (newline-separated, without the trailing newline).
-  lines: #file { lines' [&lines', ~, 0, '', 0] },
+  lines: #'file { lines_ [&lines_, ~, 0, 0x, 0] },
 
   // Write `data` starting at `offset`, returning the number of bytes written.
-  write: #[file, int, bin] {
+  write: #['file, 'int, 'bin] {
     =[f, offset, data],
     id = &,
     Write[offset, data, &., id] ~> f.0,
-    !#Reply[ref, int] { =Reply[&id, _], Ok } ~> { =Reply[_, written] => written }
+    !#Reply['ref, 'int] { =Reply[&id, _], Ok } ~> { =Reply[_, written] => written }
   },
 
   // Close the file, releasing the descriptor and stopping its process.
-  close: #file {
+  close: #'file {
     Close ~> $.0,
     Ok
   }

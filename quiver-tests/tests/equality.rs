@@ -16,19 +16,19 @@ fn test_unequal_integers() {
 fn test_binary_equality_content() {
     // Test that binaries with same content are equal even if different references
     quiver()
-        .evaluate("['68656c6c6f', '68656c6c6f'] ~> ==")
-        .expect("'68656c6c6f'");
-    quiver().evaluate("['abcd', 'abcd'] ~> ==").expect("'abcd'");
+        .evaluate("[0x68656c6c6f, 0x68656c6c6f] ~> ==")
+        .expect("0x68656c6c6f");
+    quiver().evaluate("[0xabcd, 0xabcd] ~> ==").expect("0xabcd");
 }
 
 #[test]
 fn test_binary_inequality_content() {
     // Test that binaries with different content are not equal
     quiver()
-        .evaluate("['68656c6c6f', '776f726c64'] ~> ==")
+        .evaluate("[0x68656c6c6f, 0x776f726c64] ~> ==")
         .expect("[]");
     quiver()
-        .evaluate("['61626364', '65666768'] ~> ==")
+        .evaluate("[0x61626364, 0x65666768] ~> ==")
         .expect("[]");
 }
 

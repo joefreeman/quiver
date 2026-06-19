@@ -51,9 +51,9 @@ pub fn format_type(lookup: &impl TypeLookup, type_def: &Type) -> String {
 
 fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> String {
     match type_def {
-        Type::Integer => "int".to_string(),
-        Type::Binary => "bin".to_string(),
-        Type::Reference => "ref".to_string(),
+        Type::Integer => "'int".to_string(),
+        Type::Binary => "'bin".to_string(),
+        Type::Reference => "'ref".to_string(),
         Type::Process { send, receive } => {
             let formatted = match (send, receive) {
                 (Some(send_id), Some(receive_id)) => {
@@ -139,7 +139,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             }
         }
         Type::Resource(name) => format!("\\{}", name),
-        Type::Variable(name) => name.to_string(),
+        Type::Variable(name) => format!("'{}", name),
     }
 }
 
@@ -210,13 +210,19 @@ pub fn format_tuple_info(lookup: &impl TypeLookup, tuple_info: &TupleTypeInfo) -
 }
 
 /// Format a binary value showing its actual content
+/// Number of leading bytes shown before a long binary is truncated.
+const BINARY_DISPLAY_BYTES: usize = 8;
+
 fn format_binary(bytes: &[u8]) -> String {
-    if bytes.len() <= 64 {
-        // Show binaries up to 64 bytes in full
-        format!("'{}'", hex::encode(bytes))
+    if bytes.len() <= BINARY_DISPLAY_BYTES {
+        format!("0x{}", hex::encode(bytes))
     } else {
-        // Show truncated for long binaries
-        format!("'{}…'", hex::encode(&bytes[..64]))
+        // Show a prefix and the total length for long binaries.
+        format!(
+            "0x{}… ({} bytes)",
+            hex::encode(&bytes[..BINARY_DISPLAY_BYTES]),
+            bytes.len()
+        )
     }
 }
 

@@ -130,14 +130,14 @@ fn test_partial_type_import() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
-        "ok : Ok[int]; err : Err[int]; []".to_string(),
+        "'ok = Ok['int]; 'err = Err['int]; []".to_string(),
     );
     quiver()
         .with_modules(modules)
         .evaluate(
             r#"
-            (ok, err) : %types;
-            double = #ok { =Ok[x] => [x, 2] ~> __multiply__ },
+            ('ok, 'err) = %types;
+            double = #'ok { =Ok[x] => [x, 2] ~> __multiply__ },
             Ok[21] ~> double
             "#,
         )
@@ -149,14 +149,14 @@ fn test_star_type_import() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
-        "result : Ok[int] | Err[int]; []".to_string(),
+        "'result = Ok['int] | Err['int]; []".to_string(),
     );
     quiver()
         .with_modules(modules)
         .evaluate(
             r#"
-            * : %types;
-            unwrap = #result { =Ok[x] => x | =Err[x] => 0 },
+            '* = %types;
+            unwrap = #'result { =Ok[x] => x | =Err[x] => 0 },
             Ok[42] ~> unwrap
             "#,
         )
@@ -168,10 +168,10 @@ fn test_import_generic() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
-        "list<t> : Nil | Cons[t, ^];".to_string(),
+        "'list<'t> = Nil | Cons['t, ^];".to_string(),
     );
     quiver()
         .with_modules(modules)
-        .evaluate(r#"(list) : %types"#)
-        .expect_alias("list", "Cons[t, μ1] | Nil");
+        .evaluate(r#"('list) = %types"#)
+        .expect_alias("list", "Cons['t, μ1] | Nil");
 }

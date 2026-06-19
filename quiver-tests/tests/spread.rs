@@ -81,8 +81,8 @@ fn test_spread_union_single_spread() {
     quiver()
         .evaluate(
             r#"
-            t : [x: int] | [y: int];
-            f = #[v: t] { =[v: v] => [z: 0, ...v] },
+            't = [x: 'int] | [y: 'int];
+            f = #[v: 't] { =[v: v] => [z: 0, ...v] },
             f [v: [x: 1]]
             "#,
         )
@@ -94,9 +94,9 @@ fn test_spread_union_cartesian_product() {
     quiver()
         .evaluate(
             r#"
-            ta : [x: int] | [y: int];
-            tb : [z: int] | [w: int];
-            f = #[a: ta, b: tb] { =[a: a, b: b] => [...a, ...b] },
+            'ta = [x: 'int] | [y: 'int];
+            'tb = [z: 'int] | [w: 'int];
+            f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
             f [a: [x: 1], b: [z: 2]]
             "#,
         )
@@ -108,9 +108,9 @@ fn test_spread_union_multiple_spreads() {
     quiver()
         .evaluate(
             r#"
-            ta : [x: int];
-            tb : [z: int] | [w: int];
-            f = #[a: ta, b: tb] { =[a: a, b: b] => [...a, ...b] },
+            'ta = [x: 'int];
+            'tb = [z: 'int] | [w: 'int];
+            f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
             f [a: [x: 1], b: [w: 2]]
             "#,
         )
@@ -122,9 +122,9 @@ fn test_spread_same_fields_different_sources() {
     quiver()
         .evaluate(
             r#"
-            ta : [x: int];
-            tb : [x: int, y: int] | [y: int];
-            f = #[a: ta, b: tb] { =[a: a, b: b] => [...a, ...b] },
+            'ta = [x: 'int];
+            'tb = [x: 'int, y: 'int] | [y: 'int];
+            f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
             [f [a: [x: 1], b: [x: 2, y: 3]], f [a: [x: 4], b: [y: 5]]]
             "#,
         )
@@ -155,8 +155,8 @@ fn test_identifier_spread_unnamed_tuple() {
 #[test]
 fn test_identifier_spread_multiple_fields() {
     quiver()
-        .evaluate("p = Point[x: 10, y: 20], p[..., z: 30, color: 'ff']")
-        .expect("Point[x: 10, y: 20, z: 30, color: 'ff']");
+        .evaluate("p = Point[x: 10, y: 20], p[..., z: 30, color: 0xff]")
+        .expect("Point[x: 10, y: 20, z: 30, color: 0xff]");
 }
 
 #[test]
@@ -183,8 +183,8 @@ fn test_ripple_spread_unnamed_tuple() {
 #[test]
 fn test_ripple_spread_multiple_fields() {
     quiver()
-        .evaluate("Point[x: 10, y: 20] ~> ~[..., z: 30, color: 'ff']")
-        .expect("Point[x: 10, y: 20, z: 30, color: 'ff']");
+        .evaluate("Point[x: 10, y: 20] ~> ~[..., z: 30, color: 0xff]")
+        .expect("Point[x: 10, y: 20, z: 30, color: 0xff]");
 }
 
 #[test]

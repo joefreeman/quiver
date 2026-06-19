@@ -11,9 +11,9 @@ fn test_basic_variable_narrowing_in_chain() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
-            x ~> =&A[a: int], x.a
+            x ~> =A[a: 'int], x.a
             "#,
         )
         .expect("1");
@@ -25,9 +25,9 @@ fn test_field_narrowing_propagates_to_parent() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: 0x00, c: 3] },
             y = 0 ~> make_ab,
-            y.a ~> =&int, y.b
+            y.a ~> ='int, y.b
             "#,
         )
         .expect("2");
@@ -39,9 +39,9 @@ fn test_parameter_provenance_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
-            x ~> { =&A[a: int] => x.a }
+            x ~> { =A[a: 'int] => x.a }
             "#,
         )
         .expect("1");
@@ -53,10 +53,10 @@ fn test_type_intersection_from_multiple_checks() {
     quiver()
         .evaluate(
             r#"
-            t : A | B | C;
-            u : B | C | D;
+            't = A | B | C;
+            'u = B | C | D;
             x = B,
-            x ~> =&t ~> =&u, x
+            x ~> ='t ~> ='u, x
             "#,
         )
         .expect_type("B");
@@ -68,9 +68,9 @@ fn test_inner_scope_inherits_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
-            x ~> =&A[a: int], { x.a }
+            x ~> =A[a: 'int], { x.a }
             "#,
         )
         .expect("1");
@@ -83,7 +83,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
     quiver()
         .evaluate(
             r#"
-            match0 = #int { =0 },
+            match0 = #'int { =0 },
             a = 0 ~> match0,
             { a => %math.add [a, 1] | 200 }
             "#,
@@ -94,7 +94,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
     quiver()
         .evaluate(
             r#"
-            match0 = #int { =0 },
+            match0 = #'int { =0 },
             b = 1 ~> match0,
             { b => %math.add [b, 1] | 200 }
             "#,
@@ -109,7 +109,7 @@ fn test_truthiness_narrowing_with_binding() {
     quiver()
         .evaluate(
             r#"
-            match0 = #int { =0 },
+            match0 = #'int { =0 },
             a = 0 ~> match0,
             { a ~> =x => %math.add [x, 1] | 200 }
             "#,
@@ -120,7 +120,7 @@ fn test_truthiness_narrowing_with_binding() {
     quiver()
         .evaluate(
             r#"
-            match0 = #int { =0 },
+            match0 = #'int { =0 },
             b = 1 ~> match0,
             { b ~> =x => %math.add [x, 1] | 200 }
             "#,
@@ -135,7 +135,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
     quiver()
         .evaluate(
             r#"
-            f = #int { =0 },
+            f = #'int { =0 },
             { 0 ~> f ~> =x => %math.add [x, 1] | 200 }
             "#,
         )
@@ -145,7 +145,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
     quiver()
         .evaluate(
             r#"
-            f = #int { =0 },
+            f = #'int { =0 },
             { 1 ~> f ~> =x => %math.add [x, 1] | 200 }
             "#,
         )
@@ -159,7 +159,7 @@ fn test_inter_chain_narrowing() {
     quiver()
         .evaluate(
             r#"
-            match0 = #int { =0 },
+            match0 = #'int { =0 },
             a = 0 ~> match0,
             { a ~> =x, %math.add [x, 1] }
             "#,
@@ -170,7 +170,7 @@ fn test_inter_chain_narrowing() {
     quiver()
         .evaluate(
             r#"
-            f = #int { =0 },
+            f = #'int { =0 },
             { 0 ~> f ~> =x, %math.add [x, 1] }
             "#,
         )
@@ -188,9 +188,9 @@ fn test_basic_complement_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: 0x00, c: 3] },
             y = 0 ~> make_ab,
-            { y.a ~> =&int => y.b | y.c }
+            { y.a ~> ='int => y.b | y.c }
             "#,
         )
         .expect("2");
@@ -199,9 +199,9 @@ fn test_basic_complement_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1, b: 2] | B[a: '00', c: 3] },
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: 0x00, c: 3] },
             y = 1 ~> make_ab,
-            { y.a ~> =&int => y.b | y.c }
+            { y.a ~> ='int => y.b | y.c }
             "#,
         )
         .expect("3");
@@ -213,9 +213,9 @@ fn test_complement_from_condition_failure() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 1 ~> make_ab,
-            { x ~> =&A[a: int] => 0 | x.b }
+            { x ~> =A[a: 'int] => 0 | x.b }
             "#,
         )
         .expect("2");
@@ -228,10 +228,10 @@ fn test_multiple_type_checks_same_provenance_complement() {
     quiver()
         .evaluate(
             r#"
-            t : A | B | C;
-            u : B | C;
+            't = A | B | C;
+            'u = B | C;
             x = A,
-            { x ~> =&t ~> =&u => 1 | x }
+            { x ~> ='t ~> ='u => 1 | x }
             "#,
         )
         .expect_type("A");
@@ -245,7 +245,7 @@ fn test_complement_propagates_across_multiple_branches() {
         .evaluate(
             r#"
             value = 5,
-            to_option = #int { =0 => None | ~ },
+            to_option = #'int { =0 => None | ~ },
             stop = 10 ~> to_option,
             { stop ~> =None | %math.lt [value, stop] | %math.gt [value, stop] }
             "#,
@@ -257,7 +257,7 @@ fn test_complement_propagates_across_multiple_branches() {
         .evaluate(
             r#"
             value = 5,
-            to_option = #int { =0 => None | ~ },
+            to_option = #'int { =0 => None | ~ },
             stop = 0 ~> to_option,
             { stop ~> =None => 999 | %math.lt [value, stop] | %math.gt [value, stop] }
             "#,
@@ -271,10 +271,10 @@ fn test_non_type_failable_disables_complement() {
     quiver()
         .evaluate(
             r#"
-            some_func = #(A[a: int]) -> A[a: int] { $ },
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            some_func = #(A[a: 'int]) -> A[a: 'int] { $ },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
-            { x ~> =&A[a: int] ~> some_func => 1 | x.a }
+            { x ~> =A[a: 'int] ~> some_func => 1 | x.a }
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
@@ -289,11 +289,11 @@ fn test_multiple_provenances_disables_complement() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
-            make_cd = #int { =0 => C[c: 3] | D[d: 4] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
+            make_cd = #'int { =0 => C[c: 3] | D[d: 4] },
             x = 0 ~> make_ab,
             y = 0 ~> make_cd,
-            { x ~> =&A[a: int], y ~> =&C[c: int] => 1 | x.b }
+            { x ~> =A[a: 'int], y ~> =C[c: 'int] => 1 | x.b }
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
@@ -308,7 +308,7 @@ fn test_literal_match_disables_complement() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[val: 1, a: 10] | B[val: 2, b: 20] },
+            make_ab = #'int { =0 => A[val: 1, a: 10] | B[val: 2, b: 20] },
             x = 0 ~> make_ab,
             { x.val ~> =1 => 2 | x.b }
             "#,
@@ -329,9 +329,9 @@ fn test_shadowing_does_not_affect_outer_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
-            x ~> =&A[a: int],
+            x ~> =A[a: 'int],
             {
                 x = B[b: 99],
                 x.b
@@ -348,9 +348,9 @@ fn test_complement_with_three_branches() {
     quiver()
         .evaluate(
             r#"
-            make_abc = #int { =0 => A[a: 1] | =1 => B[b: 2] | C[c: 3] },
+            make_abc = #'int { =0 => A[a: 1] | =1 => B[b: 2] | C[c: 3] },
             x = 0 ~> make_abc,
-            { x ~> =&A[a: int] => 10 | x ~> =&B[b: int] => 20 | x.c }
+            { x ~> =A[a: 'int] => 10 | x ~> =B[b: 'int] => 20 | x.c }
             "#,
         )
         .expect("10");
@@ -362,9 +362,9 @@ fn test_complement_union_with_common_field() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[val: 1, a: 10] | B[val: '00', b: 20] },
+            make_ab = #'int { =0 => A[val: 1, a: 10] | B[val: 0x00, b: 20] },
             x = 0 ~> make_ab,
-            { x.val ~> =&int => x.a | x.b }
+            { x.val ~> ='int => x.a | x.b }
             "#,
         )
         .expect("10");
@@ -380,7 +380,7 @@ fn test_field_access_on_union_without_narrowing_fails() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
             x.a
             "#,
@@ -397,9 +397,9 @@ fn test_field_access_on_wrong_branch_fails() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
-            x ~> =&A[a: int], x.b
+            x ~> =A[a: 'int], x.b
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
@@ -415,8 +415,8 @@ fn test_fallback_branch_does_not_require_nil() {
     quiver()
         .evaluate(
             r#"
-            f = #(A[int] | B[int]) -> int {
-              | =&A[int] => 1
+            f = #(A['int] | B['int]) -> 'int {
+              | =A['int] => 1
               | 2
             },
             A[1] ~> f
@@ -435,11 +435,11 @@ fn test_tuple_field_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
             y = C[c: 3],
             t = [x, y],
-            t.0 ~> =&A[a: int], x.a
+            t.0 ~> =A[a: 'int], x.a
             "#,
         )
         .expect("1");
@@ -451,10 +451,10 @@ fn test_tuple_ripple_preserves_provenance() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
             t = x ~> [~, 1],
-            t.0 ~> =&A[a: int], x.a
+            t.0 ~> =A[a: 'int], x.a
             "#,
         )
         .expect("1");
@@ -466,11 +466,11 @@ fn test_nested_tuple_field_access() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
             inner = [x],
             outer = [inner],
-            outer.0.0 ~> =&A[a: int], x.a
+            outer.0.0 ~> =A[a: 'int], x.a
             "#,
         )
         .expect("1");
@@ -482,10 +482,10 @@ fn test_named_tuple_field_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #int { =0 => A[a: 1] | B[b: 2] },
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
             t = [first: x, second: 0],
-            t.first ~> =&A[a: int], x.a
+            t.first ~> =A[a: 'int], x.a
             "#,
         )
         .expect("1");
@@ -502,8 +502,8 @@ fn test_tuple_pattern_complement_first_field() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            f = #<t>[list<t>, list<t>] -> list<t> {
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
               | =[Nil, ys] => ys
               | =[Cons[head, tail], ys] => ys
             },
@@ -519,8 +519,8 @@ fn test_tuple_pattern_complement_second_field() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            f = #<t>[int, list<t>] -> int {
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['int, 'list<'t>] -> 'int {
               | =[n, Nil] => n
               | =[n, Cons[_, _]] => n
             },
@@ -536,8 +536,8 @@ fn test_tuple_pattern_complement_three_variants() {
     quiver()
         .evaluate(
             r#"
-            tri<t> : A[t] | B[t] | C[t];
-            f = #<t>[tri<t>, int] -> int {
+            'tri<'t> = A['t] | B['t] | C['t];
+            f = #<'t>['tri<'t>, 'int] -> 'int {
               | =[A[_], n] => n
               | =[B[_], n] => n
               | =[C[_], n] => n
@@ -554,12 +554,12 @@ fn test_tuple_pattern_complement_exhaustive() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            reverse' = #<t>[list<t>, list<t>] -> list<t> {
+            'list<'t> = Nil | Cons['t, ^];
+            reverse_ = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
               | =[Nil, ys] => ys
               | =[Cons[head, tail], ys] => Cons[head, ys] ~> ^ [tail, ~]
             },
-            reverse' [Cons[1, Cons[2, Nil]], Nil]
+            reverse_ [Cons[1, Cons[2, Nil]], Nil]
         "#,
         )
         .expect("Cons[2, Cons[1, Nil]]");
@@ -573,15 +573,15 @@ fn test_tuple_pattern_multiple_constraining_fields_not_exhaustive() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            f = #<t>[list<t>, list<t>] {
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] {
               | =[Nil, Nil] => 0
               | =[Cons[_, _], Cons[_, _]] => 1
             },
             f [Nil, Nil]
         "#,
         )
-        .expect_type("[] | int");
+        .expect_type("'int | []");
 }
 
 #[test]
@@ -590,15 +590,15 @@ fn test_tuple_pattern_nested_pattern_not_complement() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            f = #<t>[list<list<t>>, int] {
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'list<'t>>, 'int] {
               | =[Nil, n] => n
               | =[Cons[Nil, _], n] => n
             },
             f [Nil, 42]
         "#,
         )
-        .expect_type("[] | int");
+        .expect_type("'int | []");
 }
 
 #[test]
@@ -608,8 +608,8 @@ fn test_tuple_pattern_complement_via_binding() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            f = #<t>[list<t>, list<t>] -> list<t> {
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
               =[xs, ys],
               [xs, ys] ~> {
                 | =[Nil, zs] => zs
@@ -629,8 +629,8 @@ fn test_tuple_pattern_complement_via_variable() {
     quiver()
         .evaluate(
             r#"
-            list<t> : Nil | Cons[t, ^];
-            f = #<t>[list<t>, list<t>] -> list<t> {
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
               =[xs, ys],
               t = [xs, ys],
               t ~> {

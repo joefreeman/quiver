@@ -125,54 +125,54 @@ fn test_pin_mixed_repeated_and_single() {
 
 #[test]
 fn test_pin_int_type() {
-    quiver().evaluate("42 ~> =&int").expect("42");
-    quiver().evaluate("'ff' ~> =&int").expect("[]");
+    quiver().evaluate("42 ~> ='int").expect("42");
+    quiver().evaluate("0xff ~> ='int").expect("[]");
 }
 
 #[test]
 fn test_pin_bin_type() {
-    quiver().evaluate("'abcd' ~> =&bin").expect("'abcd'");
-    quiver().evaluate("42 ~> =&bin").expect("[]");
+    quiver().evaluate("0xabcd ~> ='bin").expect("0xabcd");
+    quiver().evaluate("42 ~> ='bin").expect("[]");
 }
 
 #[test]
 fn test_type_narrowing_in_blocks() {
     // Test type narrowing for int
     quiver()
-        .evaluate("value = 42, value ~> { =&int => \"is_int\" | \"is_bin\" }")
+        .evaluate("value = 42, value ~> { ='int => \"is_int\" | \"is_bin\" }")
         .expect("\"is_int\"");
 
     // Test type narrowing for bin
     quiver()
-        .evaluate("value = 'abcd', value ~> { =&bin => \"is_bin\" | \"is_int\" }")
+        .evaluate("value = 0xabcd, value ~> { ='bin => \"is_bin\" | \"is_int\" }")
         .expect("\"is_bin\"");
 
     // Test type narrowing failure falls through
     quiver()
-        .evaluate("value = 42, value ~> { =&bin => \"is_bin\" | \"not_bin\" }")
+        .evaluate("value = 42, value ~> { ='bin => \"is_bin\" | \"not_bin\" }")
         .expect("\"not_bin\"");
 }
 
 #[test]
 fn test_type_narrowing_in_function() {
     quiver()
-        .evaluate("f = #(int | bin) { =&int }, 1 ~> f")
-        .expect_type("[] | int");
+        .evaluate("f = #('int | 'bin) { ='int }, 1 ~> f")
+        .expect_type("'int | []");
 }
 
 #[test]
 fn test_narrowing_multiple_matching_variants() {
     // Multiple variants match the pattern structurally
     quiver()
-        .evaluate("f = #(A[int] | A[bin] | B[int]) { =A[x] => x }, A[1] ~> f")
-        .expect_type("[] | bin | int");
+        .evaluate("f = #(A['int] | A['bin] | B['int]) { =A[x] => x }, A[1] ~> f")
+        .expect_type("'bin | 'int | []");
 }
 
 #[test]
 fn test_narrowing_no_matching_variants() {
     // No variants match - should return just []
     quiver()
-        .evaluate("f = #(A[int] | B[int]) { =C[x] }, A[1] ~> f")
+        .evaluate("f = #(A['int] | B['int]) { =C[x] }, A[1] ~> f")
         .expect_type("[]");
 }
 
@@ -180,32 +180,32 @@ fn test_narrowing_no_matching_variants() {
 fn test_narrowing_all_variants_match() {
     // All variants match structurally - exhaustive matching removes [] from result type
     quiver()
-        .evaluate("f = #(A[int] | A[bin]) { =A[x] => x }, A[1] ~> f")
-        .expect_type("bin | int");
+        .evaluate("f = #(A['int] | A['bin]) { =A[x] => x }, A[1] ~> f")
+        .expect_type("'bin | 'int");
 }
 
 #[test]
 fn test_narrowing_nested_field() {
     // Pattern narrows based on nested tuple types
     quiver()
-        .evaluate("f = #(X[A[int]] | X[B[int]]) { =&X[A[int]] }, X[A[1]] ~> f")
-        .expect_type("X[A[int]] | []");
+        .evaluate("f = #(X[A['int]] | X[B['int]]) { =X[A['int]] }, X[A[1]] ~> f")
+        .expect_type("X[A['int]] | []");
 }
 
 #[test]
 fn test_narrowing_with_wildcard() {
     // Wildcards match anything - only outer structure matters
     quiver()
-        .evaluate("f = #(A[int, bin] | B[int, bin]) { =A[_, _] }, A[1, 'ff'] ~> f")
-        .expect_type("A[int, bin] | []");
+        .evaluate("f = #(A['int, 'bin] | B['int, 'bin]) { =A[_, _] }, A[1, 0xff] ~> f")
+        .expect_type("A['int, 'bin] | []");
 }
 
 #[test]
 fn test_narrowing_with_literal() {
     // Literal pattern should narrow to only matching variant
     quiver()
-        .evaluate("f = #(A[int] | B[int]) { =A[1] }, A[1] ~> f")
-        .expect_type("A[int] | []");
+        .evaluate("f = #(A['int] | B['int]) { =A[1] }, A[1] ~> f")
+        .expect_type("A['int] | []");
 }
 
 #[test]
@@ -214,59 +214,59 @@ fn test_narrowing_repeated_identifiers() {
     quiver()
         .evaluate(
             r#"
-            f = #(A[int, int] | A[int, bin] | B[int, int]) {
+            f = #(A['int, 'int] | A['int, 'bin] | B['int, 'int]) {
               =A[x, x] => x
             },
             A[1, 1] ~> f
             "#,
         )
-        .expect_type("[] | int");
+        .expect_type("'int | []");
 }
 
 #[test]
 fn test_narrowing_partial_types() {
     // Should work with partial types
     quiver()
-        .evaluate("f = #(A[x: int] | B[x: int]) { =&A[x: int] }, A[x: 1] ~> f")
-        .expect_type("A[x: int] | []");
+        .evaluate("f = #(A[x: 'int] | B[x: 'int]) { =A[x: 'int] }, A[x: 1] ~> f")
+        .expect_type("A[x: 'int] | []");
 }
 
 #[test]
 fn test_narrowing_type_and_variable_pin() {
     // Combines structural narrowing with runtime variable check
     quiver()
-        .evaluate("y = 2, f = #(A[int] | B[int]) { =A[&y] }, A[2] ~> f")
-        .expect_type("A[int] | []");
+        .evaluate("y = 2, f = #(A['int] | B['int]) { =A[&y] }, A[2] ~> f")
+        .expect_type("A['int] | []");
 }
 
 #[test]
 fn test_narrowing_nested_union_in_field() {
     quiver()
-        .evaluate("f = #(A[int | bin] | B[int]) { =&A[(int | bin)] }, A[1] ~> f")
-        .expect_type("A[(bin | int)] | []");
+        .evaluate("f = #(A['int | 'bin] | B['int]) { =A[('int | 'bin)] }, A[1] ~> f")
+        .expect_type("A[('bin | 'int)] | []");
 }
 
 #[test]
 fn test_narrowing_with_branches() {
     quiver()
-        .evaluate("f = #(A | B | C) { =&(A | B) => =&A }, A ~> f")
+        .evaluate("f = #(A | B | C) { =(A | B) => =A }, A ~> f")
         .expect_type("A | []");
 
     quiver()
-        .evaluate("f = #(A | B | C) { =&(A | B) => =&A | X }, A ~> f")
+        .evaluate("f = #(A | B | C) { =(A | B) => =A | X }, A ~> f")
         .expect_type("A | X | []");
 
     quiver()
-        .evaluate("f = #(A | B | C) { =&(A | B) => 1 | X }, A ~> f")
-        .expect_type("X | int");
+        .evaluate("f = #(A | B | C) { =(A | B) => 1 | X }, A ~> f")
+        .expect_type("'int | X");
 }
 
 #[test]
 fn test_narrowing_star_pattern() {
     // Star matches everything - no narrowing, no failure possible
     quiver()
-        .evaluate("f = #(A[int] | B[int]) { =_ => 1 }, A[1] ~> f")
-        .expect_type("int");
+        .evaluate("f = #(A['int] | B['int]) { =_ => 1 }, A[1] ~> f")
+        .expect_type("'int");
 }
 
 #[test]
@@ -275,12 +275,12 @@ fn test_narrowing_with_type_alias() {
     quiver()
         .evaluate(
             r#"
-            a : A[int, int];
-            f = #(A[int, int] | B[int, int]) { =&a },
+            'a = A['int, 'int];
+            f = #(A['int, 'int] | B['int, 'int]) { ='a },
             A[1, 2] ~> f
             "#,
         )
-        .expect_type("A[int, int] | []");
+        .expect_type("A['int, 'int] | []");
 }
 
 #[test]
@@ -289,20 +289,20 @@ fn test_narrowing_generic_type() {
     quiver()
         .evaluate(
             r#"
-            box<t> : Box[t];
-            f = #(Box[A[int]] | Box[B[int]]) { =&box<A[int]> },
+            'box<'t> = Box['t];
+            f = #(Box[A['int]] | Box[B['int]]) { ='box<A['int]> },
             Box[A[1]] ~> f
             "#,
         )
-        .expect_type("Box[A[int]] | []");
+        .expect_type("Box[A['int]] | []");
 }
 
 #[test]
 fn test_narrowing_preserves_field_types() {
     // Narrowing should preserve the exact field types from matching variants
     quiver()
-        .evaluate("f = #(A[int] | B[int]) { =A[1] => 1 }, A[1] ~> f")
-        .expect_type("[] | int");
+        .evaluate("f = #(A['int] | B['int]) { =A[1] => 1 }, A[1] ~> f")
+        .expect_type("'int | []");
 }
 
 #[test]
@@ -311,13 +311,13 @@ fn test_narrowing_complex_nested_pattern() {
     quiver()
         .evaluate(
             r#"
-            f = #(X[Y[A[int]]] | X[Y[B[int]]] | X[Z[A[int]]]) {
-                =&X[Y[A[int]]]
+            f = #(X[Y[A['int]]] | X[Y[B['int]]] | X[Z[A['int]]]) {
+                =X[Y[A['int]]]
             },
             X[Y[A[1]]] ~> f
             "#,
         )
-        .expect_type("X[Y[A[int]]] | []");
+        .expect_type("X[Y[A['int]]] | []");
 }
 
 #[test]
@@ -326,7 +326,7 @@ fn test_narrowing_in_block_branches() {
     quiver()
         .evaluate(
             r#"
-            f = #(A[int] | B[int]) {
+            f = #(A['int] | B['int]) {
               | =A[x] => x
               | =B[x] => x
               | 0
@@ -335,31 +335,31 @@ fn test_narrowing_in_block_branches() {
             value ~> f
             "#,
         )
-        .expect_type("int");
+        .expect_type("'int");
 }
 
 #[test]
 fn test_narrowing_with_fallback_branch() {
     quiver()
-        .evaluate("f = #(int | bin) { =&bin | 'ff' }, &f")
-        .expect_type("#(bin | int) -> bin");
+        .evaluate("f = #('int | 'bin) { ='bin | 0xff }, &f")
+        .expect_type("#('bin | 'int) -> 'bin");
 
     quiver()
-        .evaluate("f = #(int | bin) { =&bin | 'ff' }, '0a' ~> f")
-        .expect("'0a'");
+        .evaluate("f = #('int | 'bin) { ='bin | 0xff }, 0x0a ~> f")
+        .expect("0x0a");
     quiver()
-        .evaluate("f = #(int | bin) { =&bin | 'ff' }, 42 ~> f")
-        .expect("'ff'");
+        .evaluate("f = #('int | 'bin) { ='bin | 0xff }, 42 ~> f")
+        .expect("0xff");
 }
 
 #[test]
 fn test_nil_condition_with_fallback() {
     quiver()
-        .evaluate("#(A[int] | B[int]) { =&C[int] }")
-        .expect_type("#(A[int] | B[int]) -> []");
+        .evaluate("#(A['int] | B['int]) { =C['int] }")
+        .expect_type("#(A['int] | B['int]) -> []");
     quiver()
-        .evaluate("#(A[int] | B[int]) { =&C[int] | 42 }")
-        .expect_type("#(A[int] | B[int]) -> int");
+        .evaluate("#(A['int] | B['int]) { =C['int] | 42 }")
+        .expect_type("#(A['int] | B['int]) -> 'int");
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn test_not_operator_type_narrowing() {
     // When ~> / succeeds (returns Ok), it proves input was nil
     // Subsequent branches receive narrowed type with nil subtracted
     quiver()
-        .evaluate("#(A | []) { / | =&A }")
+        .evaluate("#(A | []) { / | =A }")
         .expect_type("#(A | []) -> (A | Ok)");
 }
 
@@ -381,9 +381,9 @@ fn test_variable_pattern_matching_in_branches() {
     quiver()
         .evaluate(
             r#"
-            list : Nil | Cons[int, ^];
+            'list = Nil | Cons['int, ^];
 
-            f = #[list, list] -> list {
+            f = #['list, 'list] -> 'list {
               =[xs, ys],
               t = [xs, ys],
               {

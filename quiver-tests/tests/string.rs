@@ -5,11 +5,11 @@ use common::*;
 fn test_bytes() {
     quiver()
         .evaluate(r#""hello" ~> %string.bytes"#)
-        .expect("'68656c6c6f'");
-    quiver().evaluate(r#""" ~> %string.bytes"#).expect("''");
+        .expect("0x68656c6c6f");
+    quiver().evaluate(r#""" ~> %string.bytes"#).expect("0x");
     quiver()
         .evaluate(r#""🚀" ~> %string.bytes"#)
-        .expect("'f09f9a80'");
+        .expect("0xf09f9a80");
 }
 
 #[test]
