@@ -155,6 +155,51 @@ impl BinaryData {
         }
     }
 
+    /// Find the index of the first occurrence of `byte` at or after `offset`.
+    ///
+    /// Walks the rope structure directly without materializing it, so a search from an
+    /// advancing offset (e.g. scanning successive lines of a buffer) stays linear overall.
+    pub fn find_byte(&self, byte: u8, offset: usize) -> Option<usize> {
+        match self {
+            BinaryData::Owned(bytes) => {
+                if offset >= bytes.len() {
+                    return None;
+                }
+                bytes[offset..]
+                    .iter()
+                    .position(|&b| b == byte)
+                    .map(|p| p + offset)
+            }
+            BinaryData::Zeroed(len) => (byte == 0 && offset < *len).then_some(offset),
+            BinaryData::Slice {
+                parent,
+                offset: slice_offset,
+                length,
+            } => {
+                if offset >= *length {
+                    return None;
+                }
+                parent
+                    .find_byte(byte, slice_offset + offset)
+                    .map(|abs| abs - slice_offset)
+                    .filter(|&rel| rel < *length)
+            }
+            BinaryData::Concat { left, right, .. } => {
+                let left_len = left.len();
+                if offset < left_len {
+                    if let Some(index) = left.find_byte(byte, offset) {
+                        return Some(index);
+                    }
+                    right.find_byte(byte, 0).map(|index| index + left_len)
+                } else {
+                    right
+                        .find_byte(byte, offset - left_len)
+                        .map(|index| index + left_len)
+                }
+            }
+        }
+    }
+
     /// Get the depth of the tree structure (useful for compaction heuristics later)
     pub fn depth(&self) -> usize {
         match self {

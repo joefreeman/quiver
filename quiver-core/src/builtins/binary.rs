@@ -249,6 +249,47 @@ pub fn builtin_binary_xor<E: Effect>(
     }
 }
 
+/// binary_index([bin, byte, offset]) -> int | []
+/// Index of the first occurrence of `byte` (0..=255) at or after `offset`, or nil if absent.
+pub fn builtin_binary_index<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    match arg {
+        Value::Tuple(_, elements) if elements.len() == 3 => {
+            match (&elements[0], &elements[1], &elements[2]) {
+                (Value::Binary(binary), Value::Integer(byte), Value::Integer(offset)) => {
+                    if *byte < 0 || *byte > 255 {
+                        return Err(Error::InvalidArgument(
+                            "Byte must be in the range 0..=255".to_string(),
+                        ));
+                    }
+                    if *offset < 0 {
+                        return Err(Error::InvalidArgument(
+                            "Offset cannot be negative".to_string(),
+                        ));
+                    }
+                    let binary_data = executor.get_binary_data(binary)?;
+                    let result = binary_data.find_byte(*byte as u8, *offset as usize);
+                    Ok(BuiltinResult::Value(match result {
+                        Some(index) => Value::Integer(index as i64),
+                        None => Value::nil(),
+                    }))
+                }
+                _ => Err(Error::TypeMismatch {
+                    expected: "[binary, integer, integer]".to_string(),
+                    found: "invalid tuple contents".to_string(),
+                }),
+            }
+        }
+        _ => Err(Error::TypeMismatch {
+            expected: "[binary, integer, integer]".to_string(),
+            found: "not a 3-element tuple".to_string(),
+        }),
+    }
+}
+
 /// Bitwise NOT of a binary
 /// binary_not(bin) -> bin
 pub fn builtin_binary_not<E: Effect>(

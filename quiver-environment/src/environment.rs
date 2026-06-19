@@ -1248,19 +1248,21 @@ impl<E: Effect> Environment<E> {
         process_id: ProcessId,
         effect: E,
     ) -> Result<(), EnvironmentError> {
-        // Validate ownership for operations on existing resources
-        if let Some(resource_id) = effect.resource_id() {
-            // Check that the process owns this resource
-            if let Some(owner) = self.resource_ownership.get(&resource_id)
-                && *owner != process_id
-            {
-                return Err(EnvironmentError::Executor(
-                    quiver_core::error::Error::InvalidArgument(format!(
-                        "Process {} does not own resource {}",
-                        process_id, resource_id
-                    )),
-                ));
-            }
+        // Validate ownership for operations on existing resources. A violation is reported
+        // back to the requesting process as a runtime error (rather than propagated up the
+        // environment loop), so the process fails cleanly instead of hanging on a completion
+        // that never arrives.
+        if let Some(resource_id) = effect.resource_id()
+            && let Some(owner) = self.resource_ownership.get(&resource_id)
+            && *owner != process_id
+        {
+            return self.report_effect_error(
+                process_id,
+                format!(
+                    "Process {} does not own resource {}",
+                    process_id, resource_id
+                ),
+            );
         }
         // Resource-creating operations (those that return None from resource_id()) don't need ownership checks
 
@@ -1282,21 +1284,34 @@ impl<E: Effect> Environment<E> {
                 // Async operation submitted - backend will track it and return via process_completions()
             }
             Err(e) => {
-                // Operation failed - send error to worker
-                let worker_id = self
-                    .process_router
-                    .get(&process_id)
-                    .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
-                self.workers[*worker_id]
-                    .send(Command::EffectCompletion {
-                        process_id,
-                        result: Err(format!("{:?}", e)),
-                        heap: vec![],
-                    })
-                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+                // Operation failed - report the error back to the requesting process
+                self.report_effect_error(process_id, format!("{:?}", e))?;
             }
         }
 
+        Ok(())
+    }
+
+    /// Report an effect failure back to the requesting process as a runtime error.
+    ///
+    /// The process is suspended waiting for its effect to complete; delivering an error
+    /// completion lets it resume and fail, rather than hanging indefinitely.
+    fn report_effect_error(
+        &mut self,
+        process_id: ProcessId,
+        message: String,
+    ) -> Result<(), EnvironmentError> {
+        let worker_id = self
+            .process_router
+            .get(&process_id)
+            .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
+        self.workers[*worker_id]
+            .send(Command::EffectCompletion {
+                process_id,
+                result: Err(message),
+                heap: vec![],
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         Ok(())
     }
 

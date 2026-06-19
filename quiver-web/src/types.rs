@@ -187,14 +187,20 @@ impl Value {
                     .into_iter()
                     .map(|v| v.to_core_value(executor))
                     .collect();
-                Ok(quiver_core::value::Value::Tuple(type_id, std::sync::Arc::new(core_values?)))
+                Ok(quiver_core::value::Value::Tuple(
+                    type_id,
+                    std::sync::Arc::new(core_values?),
+                ))
             }
             Value::Function { index, captures } => {
                 let core_captures: std::result::Result<Vec<_>, _> = captures
                     .into_iter()
                     .map(|v| v.to_core_value(executor))
                     .collect();
-                Ok(quiver_core::value::Value::Function(index, std::sync::Arc::new(core_captures?)))
+                Ok(quiver_core::value::Value::Function(
+                    index,
+                    std::sync::Arc::new(core_captures?),
+                ))
             }
             Value::Builtin { name: _ } => {
                 // Web Value stores name, but core Value needs builtin_id

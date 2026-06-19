@@ -291,6 +291,9 @@ pub fn register_binary_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     // Slicing operations
     register_builtin!(registry, "binary_slice", binary::builtin_binary_slice, bin_int_int.clone() => TypeSpec::Binary);
 
+    // Byte search: index of a byte at or after an offset, or nil
+    register_builtin!(registry, "binary_index", binary::builtin_binary_index, bin_int_int.clone() => TypeSpec::Union(vec![TypeSpec::Integer, TypeSpec::Tuple(None, vec![])]));
+
     // Hashing operations
     register_builtin!(registry, "binary_hash32", binary::builtin_binary_hash32, TypeSpec::Binary => TypeSpec::Integer);
     register_builtin!(registry, "binary_hash64", binary::builtin_binary_hash64, TypeSpec::Binary => TypeSpec::Integer);

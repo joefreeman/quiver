@@ -564,6 +564,26 @@ When spawning, a process identifier is returned. The current process can refer t
 
 To specify a type that refers to a process, use `@type`. For example, `@int` is a process that receives integers.
 
+### Resource ownership
+
+Some built-in operations produce *resources* — opaque handles to external state such as open
+files or sockets. A resource handle has a type written `\Name` (e.g. `\File`), and is an
+ordinary value that can be bound, stored in tuples, and passed in messages.
+
+Every resource is **owned by exactly one process** — initially the process that created it.
+Ownership is enforced at runtime:
+
+- Only the owning process may operate on a resource. An operation attempted by any other
+  process fails with a runtime error.
+- Ownership **moves** when the handle is transferred to another process — by sending it in a
+  message, or by capturing it (or passing it as the spawn argument) when spawning. After a
+  transfer the original owner can no longer use the handle.
+- When a process terminates, any resources it still owns are **automatically closed**.
+
+Because a handle can only be used by its owner, sharing a resource between processes is done
+by keeping it in one owning process and sending that process messages requesting operations
+on it. This is the pattern the standard library's `file` module follows.
+
 ## Modules and imports
 
 Import modules using `%name` or `%namespace/name` syntax. Module names are resolved through a manifest.

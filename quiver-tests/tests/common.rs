@@ -106,7 +106,7 @@ impl Default for TestBuilder {
     fn default() -> Self {
         Self {
             modules: load_stdlib_modules!(
-                "math", "list", "binary", "integer", "string", "iter", "range", "path"
+                "math", "list", "binary", "integer", "string", "iter", "range", "path", "file"
             ),
             with_io: false,
         }
