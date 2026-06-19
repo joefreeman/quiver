@@ -626,7 +626,7 @@ fn test_receive_type_in_function_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 20 ~> @#int { %math.div[~, !#int] },
+            p = 20 ~> @#int { %math.div [~, !#int] },
             2 ~> p, !p
             "#,
         )
@@ -652,7 +652,7 @@ fn test_receive_type_in_builtin_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 10 ~> @#int { __add__[~, !#int] },
+            p = 10 ~> @#int { __add__ [~, !#int] },
             32 ~> p, !p
             "#,
         )
@@ -666,7 +666,7 @@ fn test_receive_type_in_tail_call_argument() {
         .evaluate(
             r#"
             f = #[int, int] { __add__ },
-            p = 10 ~> @#int { ^f[~, !#int] },
+            p = 10 ~> @#int { ^f [~, !#int] },
             32 ~> p, !p
             "#,
         )

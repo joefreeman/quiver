@@ -194,7 +194,10 @@ impl TypeIndex {
                         .or_insert(type_id);
                 }
                 Type::Resource(name) => {
-                    index.resource_to_type.entry(name.clone()).or_insert(type_id);
+                    index
+                        .resource_to_type
+                        .entry(name.clone())
+                        .or_insert(type_id);
                 }
                 _ => {}
             }

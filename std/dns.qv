@@ -4,9 +4,9 @@ ip : IPv4[bin] | IPv6[bin];
 resolve' = #[#^ -> iterator<ip>, \DnsResolver] {
   =[self, resolver],
   #{
-    __dns_next__[resolver] ~> {
+    __dns_next__ [resolver] ~> {
       | / => {
-        __dns_close__[resolver],
+        __dns_close__ [resolver],
         []
       }
       | =b ~> {
@@ -16,7 +16,7 @@ resolve' = #[#^ -> iterator<ip>, \DnsResolver] {
           | =4 => IPv4[b]
           | =16 => IPv6[b]
         }
-        ~> [~, self[&self, resolver]]
+        ~> [~, self [&self, resolver]]
       }
     }
   }
@@ -25,7 +25,7 @@ resolve' = #[#^ -> iterator<ip>, \DnsResolver] {
 [
   resolve: #Str[bin] {
     .0
-    ~> __dns_resolve__[~]
+    ~> __dns_resolve__ [~]
     ~> [&resolve', ~]
     ~> resolve'
   }

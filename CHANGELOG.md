@@ -7,6 +7,13 @@
 - Added initial support for I/O (sockets and files).
 - Re-added support for `$` to access the function parameter.
 - Added support for optionally specifying return type on functions (e.g., `#int -> bin { ... }`).
+- Added space-separated function application with a bare argument (e.g. `double 5`).
+
+### Changed
+
+- Function application now requires a space before the argument (`f [1, 2]`, `f x`); `f[1]` is now a syntax error.
+- A chain's value flows into constructed tuple fields and call arguments, so a callable there is called; use `&` to pass one by value (e.g. `map [xs, &double]`).
+- Statements must be separated by a newline or semicolon (so `f a b` is an error).
 
 ## [0.3.0] - 2025-10-31
 

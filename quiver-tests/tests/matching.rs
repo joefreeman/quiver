@@ -104,10 +104,10 @@ fn test_pin_without_variable_single_occurrence() {
 fn test_pin_from_outer_scope() {
     // Pin pattern should be able to reference variables from outer scopes
     quiver()
-        .evaluate("x = 5, f = #{ A[5] ~> =A[&x] }, f[]")
+        .evaluate("x = 5, f = #{ A[5] ~> =A[&x] }, f []")
         .expect("A[5]");
     quiver()
-        .evaluate("x = 5, f = #{ A[6] ~> =A[&x] }, f[]")
+        .evaluate("x = 5, f = #{ A[6] ~> =A[&x] }, f []")
         .expect("[]");
 }
 
@@ -376,7 +376,7 @@ fn test_variable_pattern_matching_in_branches() {
     // Regression test for variable-based branch matching bug.
     // When pattern matching on a variable (not ~>) in multi-branch blocks,
     // the second branch should work correctly after the first branch fails.
-    // Previously this caused VariableUndefined("local[7]") because the
+    // Previously this caused VariableUndefined("local [7]") because the
     // cleanup code assumed pattern bindings were stored when they weren't.
     quiver()
         .evaluate(
@@ -392,7 +392,7 @@ fn test_variable_pattern_matching_in_branches() {
               }
             },
 
-            [f[Nil, Cons[1, Nil]], f[Cons[1, Nil], Cons[2, Nil]]]
+            [f [Nil, Cons[1, Nil]], f [Cons[1, Nil], Cons[2, Nil]]]
             "#,
         )
         .expect("[Cons[1, Nil], Cons[2, Nil]]");

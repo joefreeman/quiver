@@ -280,7 +280,7 @@ fn test_iter_with_transformations() {
             r#"
             "hello"
             ~> %string.iter
-            ~> %iter.take[~, 3]
+            ~> %iter.take [~, 3]
             ~> %string.collect
             "#,
         )
@@ -291,7 +291,7 @@ fn test_iter_with_transformations() {
             r#"
             "hello"
             ~> %string.iter
-            ~> %iter.drop[~, 2]
+            ~> %iter.drop [~, 2]
             ~> %string.collect
             "#,
         )
@@ -305,16 +305,16 @@ fn test_join() {
             r#"
             Cons["one", Cons["two", Cons["three", Nil]]]
             ~> %list.iter
-            ~> %string.join[~, ", "]
+            ~> %string.join [~, ", "]
             "#,
         )
         .expect("\"one, two, three\"");
 
     quiver()
-        .evaluate(r#"Cons["only", Nil] ~> %list.iter ~> %string.join[~, ", "]"#)
+        .evaluate(r#"Cons["only", Nil] ~> %list.iter ~> %string.join [~, ", "]"#)
         .expect("\"only\"");
 
     quiver()
-        .evaluate(r#"Nil ~> %list.iter ~> %string.join[~, ", "]"#)
+        .evaluate(r#"Nil ~> %list.iter ~> %string.join [~, ", "]"#)
         .expect("\"\"");
 }

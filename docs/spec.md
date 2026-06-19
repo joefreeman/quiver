@@ -155,8 +155,18 @@ When a term receives a value:
 - **Variables** depend on their type: callable variables are called, others replace the value
 
 To explicitly control this behavior:
-- `f[]` calls `f` with nil, discarding any incoming value
+- `f []` calls `f` with nil, discarding any incoming value
 - `&f` references `f` without calling it
+
+The flowing value is also passed into the fields of a tuple that is constructed in the
+chain, and into the arguments of a call. Each field/argument receives its own copy, so a
+callable there is called with it (and a non-callable value simply replaces it):
+
+```
+inc = #int { math.add [~, 1] },
+5 ~> [inc, 100]          // [6, 100] - inc is called with 5
+5 ~> [&inc, 100]         // [<function>, 100] - & passes inc by value
+```
 
 ### Control flow
 
@@ -291,7 +301,7 @@ A block may contain multiple branches, separated by `|`. If a sequence evaluates
 
 ```
 // If item is valid, try to process it, otherwise show error
-item ~> { is_valid? ~> process | show_error[] }
+item ~> { is_valid? ~> process | show_error [] }
 
 // Try multiple sources with fallback
 value = id ~> {
@@ -316,7 +326,7 @@ value ~> {
 This allows 'guard'-style checks to be added to a condition:
 
 ```
-{ =Square[x] ~> math.gt[x, 10] => "large" | "small" }
+{ =Square[x] ~> math.gt [x, 10] => "large" | "small" }
 ```
 
 ## Field access
@@ -371,12 +381,12 @@ Identity functions (that simply return their input unchanged) can be defined wit
 
 ```
 // Single parameter function
-double = #int { math.mul[~, 2] }
+double = #int { math.mul [~, 2] }
 
 // Pattern matching on union types
 area = #shape {
-  | =Circle[radius: r] => math.mul[r, r]
-  | =Rectangle[width: w, height: h] => math.mul[w, h]
+  | =Circle[radius: r] => math.mul [r, r]
+  | =Rectangle[width: w, height: h] => math.mul [w, h]
 }
 
 // Using a tuple for multiple values
@@ -404,26 +414,31 @@ Functions are called when a value is applied to them in a chain:
 To call a function with nil, or to discard an incoming value, use explicit argument syntax:
 
 ```
-f[]                      // Call f with nil
-list.new[]               // Call list.new with nil
+f []                      // Call f with nil
+list.new []               // Call list.new with nil
 ```
 
-To reference a function without calling it, use `&`:
+To reference a function without calling it, use `&`. Because tuple fields and call
+arguments flow the surrounding value into themselves (see below), a callable used there
+is *called* unless prefixed with `&`:
 
 ```
 &double                  // Reference to double (not called)
-map[xs, &double]         // Pass double as an argument
+map [xs, &double]        // Pass double as an argument (without &, double would be called)
+[add: &__add__]          // A record of functions; & references a builtin without calling it
 ```
 
-Functions can also be called using shorthand syntax `f[...]` where `[...]` is an unnamed tuple:
+A function is applied to an argument by writing the argument after it, separated by a
+space — either a bracketed tuple or a single value:
 
 ```
-math.add[3, 4]                     // Equivalent to [3, 4] ~> math.add
-math.add[1, 2] ~> math.mul[~, 3]   // Chained calls
-math ~> .add[1, 2]                 // Field access with call
+math.add [3, 4]                      // Apply add to the tuple [3, 4]
+double 5                             // Apply double to the value 5
+math.add [1, 2] ~> math.mul [~, 3]   // Chained calls
+math ~> .add [1, 2]                  // Field access with call
 ```
 
-When used with field access (`.field[...]`), ripples are not allowed in the argument.
+When used with field access (`.field [...]`), ripples are not allowed in the argument.
 
 ### Tail recursion
 
@@ -446,11 +461,11 @@ f = #[int, int] { math.mul },
 fact = #int { [~, 1] ~> ^f }
 ```
 
-Tail calls also support the shorthand argument syntax:
+Tail calls also take an argument, using the same space-separated syntax:
 
 ```
 g = #[int, int] { math.mul },
-f = #int { math.add[~, 1] ~> ^g[~, 2] },
+f = #int { math.add [~, 1] ~> ^g [~, 2] },
 10 ~> f   // 22
 ```
 
@@ -484,7 +499,7 @@ The function's parameter type defines the message type to be received. And this 
 p1 = @{
   !int ~> {
     | =0 => "done"
-    | ^[]
+    | ^ []
   }
 }
 ```
@@ -597,7 +612,7 @@ doubled = [x, 2] ~> __multiply__      // Built-in multiplication
 
 // Create and manipulate values
 x = 10, y = 20,
-add[x, y] ~> mul[~, 2] ~> sub[~, 1]
+add [x, y] ~> mul [~, 2] ~> sub [~, 1]
 ```
 
 ### Working with tuples
@@ -613,12 +628,12 @@ p2 = Point[...p1, y: 4],
 // Function to add points
 add_points = #[point, point] {
   Point[
-    x: %math.add[$.0.x, $.1.x],
-    y: %math.add[$.0.y, $.1.y],
+    x: %math.add [$.0.x, $.1.x],
+    y: %math.add [$.0.y, $.1.y],
   ]
 },
 
-add_points[p1, p2]   // Point[x: 10, y: 7]
+add_points [p1, p2]   // Point[x: 10, y: 7]
 ```
 
 ### Pattern matching
@@ -630,12 +645,12 @@ list<t> : Nil | Cons[t, ^];
 contains? = #<t>[list<t>, t] {
   | =[Nil, _] => []
   | =[Cons[value, _], value] => Ok
-  | =[Cons[_, tail], value] => ^[tail, value]
+  | =[Cons[_, tail], value] => ^ [tail, value]
 },
 
 xs = Cons[1, Cons[2, Cons[3, Nil]]],
-contains?[xs, 3],   // Ok
-contains?[xs, 4]    // []
+contains? [xs, 3],   // Ok
+contains? [xs, 4]    // []
 ```
 
 ### Conditional logic
@@ -643,8 +658,8 @@ contains?[xs, 4]    // []
 ```
 // Clamp value to range [0, 100]
 clamp = #int {
-  | %math.gt[~, 100] => 100
-  | %math.lt[~, 0] => 0
+  | %math.gt [~, 100] => 100
+  | %math.lt [~, 0] => 0
   | $
 },
 
@@ -664,7 +679,7 @@ shape :
 [
   bounding_box: #shape {
     | =Circle[radius: r] => {
-      x = %math.mul[r, 2],
+      x = %math.mul [r, 2],
       Rectangle[width: x, height: x]
     }
     | =Rectangle[width: w, height: h] => {
@@ -705,7 +720,7 @@ person.name,                           // Extract name field
 person ~> .date_of_birth ~> .month,    // Chain field access
 
 // Built-in operations
-next_year = person.age ~> %math.add[~, 1],
+next_year = person.age ~> %math.add [~, 1],
 ```
 
 ### Concurrent processes
@@ -717,7 +732,7 @@ pid = @{
     | ="" => []              // Stop on empty string
     | =s => {
       s ~> __println__,      // (not implemented!)
-      ^[]                    // Receive another message
+      ^ []                    // Receive another message
     }
   }
 },

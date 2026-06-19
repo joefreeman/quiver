@@ -8,16 +8,16 @@ join' = #[#^ -> (path | []), path, path] {
     | =[_, Root] => []
     | =[_, Relative[0]] => p1
     | =[Root, Relative[_]] => []
-    | =[Relative[m], Relative[n]] => %math.add[m, n] ~> Relative[~]
-    | =[Path[_, p], Relative[n]] => self[&self, p, Relative[%math.sub[n, 1]]]
-    | =[_, Path[s, parent]] => self[&self, p1, parent] ~> { / => [] | Path[s, ~] }
+    | =[Relative[m], Relative[n]] => %math.add [m, n] ~> Relative[~]
+    | =[Path[_, p], Relative[n]] => self [&self, p, Relative[%math.sub [n, 1]]]
+    | =[_, Path[s, parent]] => self [&self, p1, parent] ~> { / => [] | Path[s, ~] }
   }
 },
 
 to_string' = #[path, str] {
   | =[Root, acc] => {
     | acc ~> %string.empty? => "/"
-    | %string.concat["/", acc]
+    | %string.concat ["/", acc]
   }
   | =[Relative[0], acc] => {
     | acc ~> %string.empty? => "."
@@ -26,42 +26,42 @@ to_string' = #[path, str] {
   | =[Relative[n], acc] => {
     prefix = {
       | acc ~> %string.empty? => ".."
-      | %string.concat["../", acc]
+      | %string.concat ["../", acc]
     },
-    %math.sub[n, 1] ~> Relative[~] ~> ^[~, prefix]
+    %math.sub [n, 1] ~> Relative[~] ~> ^ [~, prefix]
   }
   | =[Path[s, parent], acc] => {
     new_acc = {
       | acc ~> %string.empty? => s
-      | %string.concat[s, "/"] ~> %string.concat[~, acc]
+      | %string.concat [s, "/"] ~> %string.concat [~, acc]
     },
-    ^[parent, new_acc]
+    ^ [parent, new_acc]
   }
 },
 
 parse' = #[list<str>, path] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => head ~> {
-    | %string.empty? => ^[tail, acc]
-    | ="." => ^[tail, acc]
+    | %string.empty? => ^ [tail, acc]
+    | ="." => ^ [tail, acc]
     | =".." => {
       new_acc = acc ~> {
         | =Path[_, parent] => parent
-        | =Relative[n] => %math.add[n, 1] ~> Relative[~]
+        | =Relative[n] => %math.add [n, 1] ~> Relative[~]
         | =Root => Root
       },
-      ^[tail, new_acc]
+      ^ [tail, new_acc]
     }
-    | ^[tail, Path[~, acc]]
+    | ^ [tail, Path[~, acc]]
   }
 },
 
 [
   parse: #str {
-    %string.split[~, "/"] ~> {
+    %string.split [~, "/"] ~> {
       | =Nil => Relative[0]
-      | =Cons[first, rest], first ~> %string.empty? => parse'[rest, Root]
-      | parse'[~, Relative[0]]
+      | =Cons[first, rest], first ~> %string.empty? => parse' [rest, Root]
+      | parse' [~, Relative[0]]
     }
   },
 
@@ -72,11 +72,11 @@ parse' = #[list<str>, path] {
   parent: #path {
     | =Path[_, p] => p
     | =Root => Root
-    | =Relative[n] => %math.add[n, 1] ~> Relative[~]
+    | =Relative[n] => %math.add [n, 1] ~> Relative[~]
   },
 
   to_string: #path {
-    to_string'[~, ""]
+    to_string' [~, ""]
   },
 
   absolute?: #path {
@@ -90,6 +90,6 @@ parse' = #[list<str>, path] {
   },
 
   join: #[path, path] {
-    join'[&join', ...]
+    join' [&join', ...]
   }
 ]

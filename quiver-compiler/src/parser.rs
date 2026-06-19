@@ -3,7 +3,7 @@ use nom::{
     IResult, Slice,
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
-    character::complete::{char, digit1, multispace0, multispace1, satisfy},
+    character::complete::{char, digit1, multispace0, multispace1, satisfy, space1},
     combinator::{map, map_res, not, opt, peek, recognize, success, value as nom_value, verify},
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
@@ -245,6 +245,38 @@ fn ws0(input: Span) -> IResult<Span, ()> {
 
 fn ws1(input: Span) -> IResult<Span, ()> {
     nom_value((), multispace1)(input)
+}
+
+/// Horizontal whitespace (spaces/tabs only, no newline) - used as the gap in a
+/// function application like `f [1, 2]` or `f x`, so it doesn't swallow the
+/// newline that separates statements.
+fn hspace1(input: Span) -> IResult<Span, ()> {
+    nom_value((), space1)(input)
+}
+
+/// Parse a bracketed argument/field list: `[ ... ]`.
+fn bracket_args(input: Span) -> IResult<Span, Vec<TupleField>> {
+    delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']')))(input)
+}
+
+/// Parse the argument that follows a callable head (`f`, `.field`, `^g`, `__b__`).
+/// Two forms are accepted: an adjacent bracket that begins with a spread (`a[..., y]`,
+/// a tuple spread), and a space-separated bracket (`f [1, 2]`, function application).
+/// An adjacent non-spread bracket (`f[1]`) is rejected, leaving it to fail as a
+/// syntax error, so calls must be written with a space.
+fn call_argument(input: Span) -> IResult<Span, Vec<TupleField>> {
+    alt((
+        verify(bracket_args, |fields: &[TupleField]| {
+            matches!(
+                fields.first(),
+                Some(TupleField {
+                    value: FieldValue::Spread(_),
+                    ..
+                })
+            )
+        }),
+        preceded(hspace1, bracket_args),
+    ))(input)
 }
 
 fn comment(input: Span) -> IResult<Span, Span> {
@@ -883,10 +915,7 @@ fn access(input: Span) -> IResult<Span, Access> {
                         map(identifier, AccessPath::Field),
                     )),
                 )),
-                opt(preceded(
-                    peek(char('[')),
-                    delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-                )),
+                opt(call_argument),
             )),
             |(source, accessors, argument)| Access {
                 source,
@@ -1141,10 +1170,7 @@ fn tail_call(input: Span) -> IResult<Span, Term> {
             map(identifier, AccessPath::Field),
         )),
     ))(input)?;
-    let (input, argument) = opt(preceded(
-        peek(char('[')),
-        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-    ))(input)?;
+    let (input, argument) = opt(call_argument)(input)?;
     Ok((
         input,
         Term::TailCall(TailCall {
@@ -1175,10 +1201,7 @@ fn builtin(input: Span) -> IResult<Span, Builtin> {
     let (input, _) = tag("__")(input)?;
 
     // Parse optional argument [...] (same as access)
-    let (input, argument) = opt(preceded(
-        peek(char('[')),
-        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-    ))(input)?;
+    let (input, argument) = opt(call_argument)(input)?;
 
     Ok((
         input,
@@ -1242,8 +1265,8 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 })))
             },
         ),
-        // @<term> - Match @ followed by optional term (bare @ becomes @~)
-        map(preceded(char('@'), opt(term)), |opt_t| {
+        // @<primary> - Match @ followed by optional primary (bare @ becomes @~)
+        map(preceded(char('@'), opt(primary)), |opt_t| {
             Term::Spawn(Box::new(opt_t.unwrap_or(Term::Access(Access {
                 source: Some(AccessSource::Ripple),
                 accessors: vec![],
@@ -1442,7 +1465,7 @@ fn reference_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
-fn term(input: Span) -> IResult<Span, Term> {
+fn primary(input: Span) -> IResult<Span, Term> {
     alt((
         // String terms (before literals to handle quotes)
         string_term,
@@ -1470,6 +1493,25 @@ fn term(input: Span) -> IResult<Span, Term> {
         select_term,
         tail_call,
     ))(input)
+}
+
+/// A term is a primary optionally applied to a single argument by juxtaposition
+/// (`f 1`, `f x`, `f &g`). The gap is horizontal whitespace so it doesn't cross the
+/// newline that separates statements. Bracket calls (`f [1, 2]`) are handled within
+/// the primary itself, so only a non-bracket argument is consumed here.
+fn term(input: Span) -> IResult<Span, Term> {
+    let (input, head) = primary(input)?;
+    // The `~` of a `~>` chain separator begins a valid primary (a ripple), and `//` begins
+    // a comment whose first `/` would parse as a negation primary - guard against consuming
+    // either as an application argument.
+    let (input, arg) = opt(preceded(
+        pair(hspace1, not(peek(alt((tag("~>"), tag("//")))))),
+        primary,
+    ))(input)?;
+    match arg {
+        Some(arg) => Ok((input, Term::Apply(Box::new(head), Box::new(arg)))),
+        None => Ok((input, head)),
+    }
 }
 
 fn chain(input: Span) -> IResult<Span, Chain> {
@@ -1567,15 +1609,24 @@ fn statement(input: Span) -> IResult<Span, Statement> {
     )(input)
 }
 
+/// Separator between top-level statements: a newline or semicolon, surrounded by
+/// horizontal whitespace and line comments. Bare horizontal whitespace is deliberately
+/// not a separator, so a stray trailing token - e.g. the `b` in `f a b` - is a syntax
+/// error rather than a silent second statement.
+fn statement_separator(input: Span) -> IResult<Span, ()> {
+    nom_value(
+        (),
+        tuple((
+            many0(alt((nom_value((), space1), nom_value((), comment)))),
+            alt((char('\n'), char(';'))),
+            wsc,
+        )),
+    )(input)
+}
+
 fn statements(input: Span) -> IResult<Span, Vec<Statement>> {
     terminated(
-        separated_list0(
-            alt((
-                nom_value((), tuple((ws0, alt((char('\n'), char(';'))), ws0))),
-                nom_value((), ws1),
-            )),
-            statement,
-        ),
+        separated_list0(statement_separator, statement),
         opt(pair(ws0, char(';'))),
     )(input)
 }

@@ -67,6 +67,9 @@ pub enum Term {
     Reference(Option<Access>),
     /// Reference to a builtin without calling it (`&__add__`).
     BuiltinReference(Builtin),
+    /// Function application by juxtaposition (`f 1`, `f x`, `f &g`). The argument is
+    /// evaluated as a flow position and the callable head is invoked with it.
+    Apply(Box<Term>, Box<Term>),
 }
 
 impl Term {

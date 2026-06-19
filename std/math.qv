@@ -32,7 +32,7 @@
   abs: &__abs__,
 
   sqrt: #int {
-    | __compare__[~, 0] ~> =-1 => []
+    | __compare__ [~, 0] ~> =-1 => []
     | __sqrt__
   }
 ]

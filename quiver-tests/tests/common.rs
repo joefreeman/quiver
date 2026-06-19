@@ -279,6 +279,22 @@ impl TestResult {
         }
     }
 
+    /// Assert that the source fails to parse (any parse error), without pinning the
+    /// exact error value.
+    pub fn expect_parse_failure(self) {
+        match self.result {
+            Err(ReplError::Parser(_)) => {}
+            Ok(result) => panic!(
+                "Expected a parse error, but evaluation succeeded with: {:?} for source: {}",
+                result, self.source
+            ),
+            Err(e) => panic!(
+                "Expected a parse error, but got {:?} for source: {}",
+                e, self.source
+            ),
+        }
+    }
+
     pub fn expect_parse_error(self, expected: quiver_compiler::parser::Error) {
         match self.result {
             Ok(result) => {

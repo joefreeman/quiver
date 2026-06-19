@@ -35,7 +35,7 @@ fn test_tail_call_with_arguments() {
         .evaluate(
             r#"
             g = #[int, int] { %math.mul },
-            f = #int { %math.add[~, 1] ~> ^g[~ , 2] },
+            f = #int { %math.add [~, 1] ~> ^g [~ , 2] },
             1 ~> f
             "#,
         )
@@ -54,7 +54,7 @@ fn test_factorial() {
                 [x, y] ~> __multiply__
               ] ~> ^
             },
-            fact = #int { f[~, 1] },
+            fact = #int { f [~, 1] },
             5 ~> fact
             "#,
         )
@@ -63,6 +63,6 @@ fn test_factorial() {
 
 #[test]
 fn test_tail_call_with_nil_argument() {
-    quiver().evaluate("f = #{ ^[] }");
+    quiver().evaluate("f = #{ ^ [] }");
     quiver().evaluate("f = #{ ^ }");
 }

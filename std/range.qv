@@ -6,14 +6,14 @@ iter' = #[#^ -> iterator<int>, range] {
   #{
     {
       | stop ~> =None
-      | %math.gt[step, 0], %math.lt[value, stop]
-      | %math.lt[step, 0], %math.gt[value, stop]
+      | %math.gt [step, 0], %math.lt [value, stop]
+      | %math.lt [step, 0], %math.gt [value, stop]
       | step ~> =0
     },
     value
-    ~> %math.add[~, step]
+    ~> %math.add [~, step]
     ~> Range[~, stop, step]
-    ~> self[&self, ~]
+    ~> self [&self, ~]
     ~> [value, ~]
   }
 },
@@ -36,6 +36,6 @@ iter' = #[#^ -> iterator<int>, range] {
   },
 
   iter: #Range[int, int | None, int] {
-    iter'[&iter', ~]
+    iter' [&iter', ~]
   }
 ]

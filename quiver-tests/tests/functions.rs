@@ -118,24 +118,24 @@ fn test_nested_function_captures() {
 
 #[test]
 fn test_function_call_syntax() {
-    quiver().evaluate("%math.add[3, 4]").expect("7");
+    quiver().evaluate("%math.add [3, 4]").expect("7");
 }
 
 #[test]
 fn test_function_call_with_ripple() {
     quiver()
-        .evaluate("%math.add[1, 2] ~> %math.mul[~, 3]")
+        .evaluate("%math.add [1, 2] ~> %math.mul [~, 3]")
         .expect("9");
 }
 
 #[test]
 fn test_function_call_no_args() {
-    quiver().evaluate("f = #{ 42 }, f[]").expect("42");
+    quiver().evaluate("f = #{ 42 }, f []").expect("42");
 }
 
 #[test]
 fn test_function_call_field_access() {
-    quiver().evaluate("%math ~> .add[1, 2]").expect("3");
+    quiver().evaluate("%math ~> .add [1, 2]").expect("3");
 }
 
 #[test]
@@ -145,8 +145,8 @@ fn test_function_call_with_spread() {
             r#"
             f = #[int, int, int] {
               $.0
-              ~> %math.add[~, $.1]
-              ~> %math.add[~, $.2]
+              ~> %math.add [~, $.1]
+              ~> %math.add [~, $.2]
             },
             [1, 2] ~> f[..., 3]
             "#,
@@ -157,7 +157,7 @@ fn test_function_call_with_spread() {
 #[test]
 fn test_ripple_call_function() {
     // Use &%math.add to get function reference, then call via ripple
-    quiver().evaluate("&%math.add ~> ~[3, 4]").expect("7");
+    quiver().evaluate("&%math.add ~> ~ [3, 4]").expect("7");
 }
 
 #[test]
@@ -247,7 +247,7 @@ fn test_dollar_with_tuple_field_access() {
 #[test]
 fn test_dollar_in_nested_block() {
     quiver()
-        .evaluate("f = #int { 100 ~> { __add__[~, $] } }, 7 ~> f")
+        .evaluate("f = #int { 100 ~> { __add__ [~, $] } }, 7 ~> f")
         .expect("107");
 }
 
@@ -266,14 +266,14 @@ fn test_dollar_with_named_tuple_field() {
 #[test]
 fn test_function_with_return_type() {
     quiver()
-        .evaluate("f = #int -> int { __add__[~, 1] }, 5 ~> f")
+        .evaluate("f = #int -> int { __add__ [~, 1] }, 5 ~> f")
         .expect("6");
 }
 
 #[test]
 fn test_function_return_type_mismatch() {
     quiver()
-        .evaluate("f = #int -> bin { __add__[~, 1] }, 5 ~> f")
+        .evaluate("f = #int -> bin { __add__ [~, 1] }, 5 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "bin".to_string(),
             found: "int".to_string(),
@@ -351,8 +351,8 @@ fn test_function_with_complex_return_type() {
     quiver()
         .evaluate(
             r#"
-            double = #int -> int { __multiply__[~, 2] },
-            square = #int -> int { __multiply__[~, ~] },
+            double = #int -> int { __multiply__ [~, 2] },
+            square = #int -> int { __multiply__ [~, ~] },
             5 ~> double ~> square
             "#,
         )

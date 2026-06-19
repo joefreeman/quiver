@@ -5,8 +5,8 @@ use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
-use serde::{Deserialize, Serialize};
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
@@ -1064,7 +1064,11 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_load(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_load(
+        &mut self,
+        proc: &mut Process,
+        index: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         let process = &mut *proc;
 
         let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
@@ -1214,7 +1218,11 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    fn handle_jump(&mut self, proc: &mut Process, offset: isize) -> Result<Option<Action<E>>, Error> {
+    fn handle_jump(
+        &mut self,
+        proc: &mut Process,
+        offset: isize,
+    ) -> Result<Option<Action<E>>, Error> {
         if let Some(frame) = proc.frames.last_mut() {
             // Jump modifies counter directly
             // Add 1 to offset because in the old code, Jump got the centralized increment
@@ -1446,7 +1454,11 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_reset(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_reset(
+        &mut self,
+        proc: &mut Process,
+        index: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         let process = &mut *proc;
 
         let frame = process.frames.last_mut().ok_or(Error::FrameUnderflow)?;
@@ -1459,7 +1471,11 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_builtin(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_builtin(
+        &mut self,
+        proc: &mut Process,
+        index: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         // Verify builtin exists
         if index >= self.builtins.len() {
             return Err(Error::BuiltinUndefined(index));
@@ -1475,7 +1491,11 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_equal(&mut self, proc: &mut Process, count: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_equal(
+        &mut self,
+        proc: &mut Process,
+        count: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         let process = &mut *proc;
 
         let values = {

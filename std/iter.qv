@@ -3,22 +3,22 @@ iterator<t> : #[] -> ([t, ^] | []);
 map' = #<t, u>[#^ -> iterator<t>, iterator<t>, #t -> u] {
   =[self, it, f],
   #{
-    it[] ~> =[value, next],
-    value ~> f ~> [~, self[&self, &next, &f]]
+    it [] ~> =[value, next],
+    value ~> f ~> [~, self [&self, &next, &f]]
   }
 },
 
 filter' = #<t>[#^ -> iterator<t>, iterator<t>, #t -> (t | [])] {
   =[self, it, pred],
   #{
-    it[] ~> =[value, next],
+    it [] ~> =[value, next],
     {
       | value ~> pred => {
-        self[&self, &next, &pred] ~> [value, ~]
+        self [&self, &next, &pred] ~> [value, ~]
       }
       | {
-        it = self[&self, &next, &pred],
-        it[]
+        it = self [&self, &next, &pred],
+        it []
       }
     }
   }
@@ -29,10 +29,10 @@ take' = #<t>[#^ -> iterator<t>, iterator<t>, int] {
   #{
     | n ~> =0 => []
     | {
-      it[] ~> =[value, next],
+      it [] ~> =[value, next],
       n
-      ~> %math.sub[~, 1]
-      ~> self[&self, &next, ~]
+      ~> %math.sub [~, 1]
+      ~> self [&self, &next, ~]
       ~> [value, ~]
     }
   }
@@ -41,11 +41,11 @@ take' = #<t>[#^ -> iterator<t>, iterator<t>, int] {
 drop' = #<t>[#^ -> iterator<t>, iterator<t>, int] {
   =[self, it, n],
   #{
-    | n ~> =0 => it[]
+    | n ~> =0 => it []
     | {
-      it[] ~> =[_, next],
-      it = n ~> %math.sub[~, 1] ~> self[&self, &next, ~],
-      it[]
+      it [] ~> =[_, next],
+      it = n ~> %math.sub [~, 1] ~> self [&self, &next, ~],
+      it []
     }
   }
 },
@@ -53,20 +53,20 @@ drop' = #<t>[#^ -> iterator<t>, iterator<t>, int] {
 take_while' = #<t>[#^ -> iterator<t>, iterator<t>, #t -> (t | [])] {
   =[self, it, pred],
   #{
-    it[] ~> =[value, next],
+    it [] ~> =[value, next],
     value ~> pred,
-    self[&self, &next, &pred] ~> [value, ~]
+    self [&self, &next, &pred] ~> [value, ~]
   }
 },
 
 drop_while' = #<t>[#^ -> iterator<t>, iterator<t>, #t -> (t | [])] {
   =[self, it, pred],
   #{
-    it[] ~> =[value, next],
+    it [] ~> =[value, next],
     {
       | value ~> pred => {
-        it = self[&self, &next, &pred],
-        it[]
+        it = self [&self, &next, &pred],
+        it []
       }
       | [value, &next]
     }
@@ -82,13 +82,13 @@ flat_map' = #<t, u>[
   =[self, source, f, current],
   #{
     | {
-      current[] ~> =[value, next],
-      [value, self[&self, &source, &f, &next]]
+      current [] ~> =[value, next],
+      [value, self [&self, &source, &f, &next]]
     }
     | {
-      source[] ~> =[value, next],
-      it = value ~> f ~> self[&self, &next, &f, ~],
-      it[]
+      source [] ~> =[value, next],
+      it = value ~> f ~> self [&self, &next, &f, ~],
+      it []
     }
   }
 },
@@ -96,9 +96,9 @@ flat_map' = #<t, u>[
 chain' = #<t>[#^ -> iterator<t>, iterator<t>, iterator<t>] {
   =[self, first, second],
   #{
-    first[] ~> {
-      | =[value, next] => [value, self[&self, &next, &second]]
-      | / ~> =Ok => second[]
+    first [] ~> {
+      | =[value, next] => [value, self [&self, &next, &second]]
+      | / ~> =Ok => second []
     }
   }
 },
@@ -106,19 +106,19 @@ chain' = #<t>[#^ -> iterator<t>, iterator<t>, iterator<t>] {
 zip' = #<t, u>[#^ -> iterator<[t, u]>, iterator<t>, iterator<u>] {
   =[self, it1, it2],
   #{
-    it1[] ~> =[v1, next1],
-    it2[] ~> =[v2, next2],
-    [[v1, v2], self[&self, &next1, &next2]]
+    it1 [] ~> =[v1, next1],
+    it2 [] ~> =[v2, next2],
+    [[v1, v2], self [&self, &next1, &next2]]
   }
 },
 
 enumerate' = #<t>[#^ -> iterator<[int, t]>, iterator<t>, int] {
   =[self, it, index],
   #{
-    it[] ~> =[value, next],
+    it [] ~> =[value, next],
     index
-    ~> %math.add[~, 1]
-    ~> self[&self, &next, ~]
+    ~> %math.add [~, 1]
+    ~> self [&self, &next, ~]
     ~> [[index, value], ~]
   }
 },
@@ -126,13 +126,13 @@ enumerate' = #<t>[#^ -> iterator<[int, t]>, iterator<t>, int] {
 cycle' = #<t>[#^ -> iterator<t>, iterator<t>, iterator<t>] {
   =[self, original, current],
   #{
-    current[] ~> {
+    current [] ~> {
       | =[value, next] => {
-        [value, self[&self, &original, &next]]
+        [value, self [&self, &original, &next]]
       }
       | {
-        it = self[&self, &original, &original],
-        it[],
+        it = self [&self, &original, &original],
+        it [],
       }
     }
   }
@@ -140,14 +140,14 @@ cycle' = #<t>[#^ -> iterator<t>, iterator<t>, iterator<t>] {
 
 repeat' = #<t>[#^ -> iterator<t>, t] {
   =[self, value],
-  #{ [value, self[&self, value]] }
+  #{ [value, self [&self, value]] }
 },
 
 fold' = #<t, acc>[iterator<t>, acc, #[acc, t] -> acc] {
   =[it, acc, f],
-  it[] ~> {
+  it [] ~> {
     | =[value, next] => {
-      [acc, value] ~> f ~> ^[&next, ~, &f]
+      [acc, value] ~> f ~> ^ [&next, ~, &f]
     }
     | acc
   }
@@ -155,13 +155,13 @@ fold' = #<t, acc>[iterator<t>, acc, #[acc, t] -> acc] {
 
 find_index' = #<t>[iterator<t>, #t -> (t | []), int] {
   =[it, pred, index],
-  it[] ~> =[value, next],
+  it [] ~> =[value, next],
   {
     | value ~> pred => index
     | {
       index
-      ~> %math.add[~, 1]
-      ~> ^[&next, &pred, ~]
+      ~> %math.add [~, 1]
+      ~> ^ [&next, &pred, ~]
     }
   }
 },
@@ -169,8 +169,8 @@ find_index' = #<t>[iterator<t>, #t -> (t | []), int] {
 intersperse' = #<t>[#^ -> iterator<t>, iterator<t>, t] {
   =[self, it, sep],
   #{
-    it[] ~> =[value, next],
-    [sep, #{ [value, self[&self, &next, sep]] }]
+    it [] ~> =[value, next],
+    [sep, #{ [value, self [&self, &next, sep]] }]
   }
 },
 
@@ -229,10 +229,10 @@ intersperse' = #<t>[#^ -> iterator<t>, iterator<t>, t] {
 
   find: #<t>[iterator<t>, #t -> (t | [])] {
     =[it, pred],
-    it[] ~> =[value, next],
+    it [] ~> =[value, next],
     {
       | value ~> pred => value
-      | ^[&next, &pred]
+      | ^ [&next, &pred]
     }
   },
 
@@ -242,42 +242,42 @@ intersperse' = #<t>[#^ -> iterator<t>, iterator<t>, t] {
 
   any?: #<t>[iterator<t>, #t -> (t | [])] {
     =[it, pred],
-    it[] ~> =[value, next],
+    it [] ~> =[value, next],
     {
       | value ~> pred => Ok
-      | ^[&next, &pred]
+      | ^ [&next, &pred]
     }
   },
 
   all?: #<t>[iterator<t>, #t -> (t | [])] {
     =[it, pred],
-    it[] ~> {
+    it [] ~> {
       | / ~> =Ok => Ok
-      | =[value, next], value ~> pred => ^[&next, &pred]
+      | =[value, next], value ~> pred => ^ [&next, &pred]
       | []
     }
   },
 
   count: #<t>iterator<t> {
-    fold'[~, 0, #[int, int] { %math.add[$.0, 1] }]
+    fold' [~, 0, #[int, int] { %math.add [$.0, 1] }]
   },
 
   nth: #<t>[iterator<t>, int] {
     | =[it, 0] => {
-      it[] ~> =[value, _],
+      it [] ~> =[value, _],
       value
     }
     | =[it, n] => {
-      it[] ~> =[_, next],
-      n ~> %math.sub[~, 1] ~> ^[&next, ~]
+      it [] ~> =[_, next],
+      n ~> %math.sub [~, 1] ~> ^ [&next, ~]
     }
   },
 
   intersperse: #<t>[iterator<t>, t] {
     =[it, sep],
     #{
-      it[] ~> =[first, rest],
-      [first, intersperse'[&intersperse', &rest, sep]]
+      it [] ~> =[first, rest],
+      [first, intersperse' [&intersperse', &rest, sep]]
     }
   }
 ]

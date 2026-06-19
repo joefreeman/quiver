@@ -81,40 +81,40 @@ where
         .name(format!("quiver-worker-{worker_id}"))
         .stack_size(WORKER_STACK_SIZE)
         .spawn(move || {
-        let cmd_receiver = NativeCommandReceiver { receiver: cmd_rx };
+            let cmd_receiver = NativeCommandReceiver { receiver: cmd_rx };
 
-        // Clone the sender so we can use it for error reporting
-        let error_sender = evt_tx.clone();
-        let evt_sender = NativeEventSender { sender: evt_tx };
+            // Clone the sender so we can use it for error reporting
+            let error_sender = evt_tx.clone();
+            let evt_sender = NativeEventSender { sender: evt_tx };
 
-        let mut worker = Worker::<NativeEffect, _, _>::new(
-            cmd_receiver,
-            evt_sender,
-            builtins,
-            profile,
-            worker_id,
-        );
+            let mut worker = Worker::<NativeEffect, _, _>::new(
+                cmd_receiver,
+                evt_sender,
+                builtins,
+                profile,
+                worker_id,
+            );
 
-        // Run the worker loop
-        loop {
-            // Get current time from the provided function
-            let current_time_ms = time_fn();
+            // Run the worker loop
+            loop {
+                // Get current time from the provided function
+                let current_time_ms = time_fn();
 
-            match worker.step(current_time_ms) {
-                Ok(true) => {
-                    // Work was done, continue immediately
-                }
-                Ok(false) => {
-                    // No work - sleep to save CPU
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(e) => {
-                    // Send error event to environment
-                    let _ = error_sender.send(Event::WorkerError { error: e });
-                    break;
+                match worker.step(current_time_ms) {
+                    Ok(true) => {
+                        // Work was done, continue immediately
+                    }
+                    Ok(false) => {
+                        // No work - sleep to save CPU
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => {
+                        // Send error event to environment
+                        let _ = error_sender.send(Event::WorkerError { error: e });
+                        break;
+                    }
                 }
             }
-        }
         })
         .expect("failed to spawn worker thread");
 

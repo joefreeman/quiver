@@ -4,7 +4,7 @@ list<t> : Nil | Cons[t, ^];
 reverse' = #<t>[list<t>, list<t>] {
   | =[Nil, xs] => xs
   | =[Cons[head, tail], xs] => {
-    Cons[head, xs] ~> ^[tail, ~]
+    Cons[head, xs] ~> ^ [tail, ~]
   }
 },
 
@@ -13,16 +13,16 @@ iter' = #<t>[#^ -> iterator<t>, list<t>] {
   #{
     xs ~> {
       | =Nil => []
-      | =Cons[head, tail] => self[&self, tail] ~> [head, ~]
+      | =Cons[head, tail] => self [&self, tail] ~> [head, ~]
     }
   }
 },
 
 collect' = #<t>[iterator<t>, list<t>] {
   =[it, acc],
-  it[] ~> {
+  it [] ~> {
     | / ~> =Ok => acc
-    | =[value, next] => value ~> Cons[~, acc] ~> ^[&next, ~]
+    | =[value, next] => value ~> Cons[~, acc] ~> ^ [&next, ~]
   }
 },
 
@@ -46,18 +46,18 @@ collect' = #<t>[iterator<t>, list<t>] {
   },
 
   append: #<t>[list<t>, t] {
-    reverse'[$.0, Nil] ~> reverse'[Cons[$.1, ~], Nil]
+    reverse' [$.0, Nil] ~> reverse' [Cons[$.1, ~], Nil]
   },
 
   reverse: #<t>list<t> {
-    reverse'[~, Nil]
+    reverse' [~, Nil]
   },
 
   iter: #<t>list<t> {
-    iter'[&iter', ~]
+    iter' [&iter', ~]
   },
 
   collect: #<t>iterator<t> {
-    collect'[~, Nil] ~> reverse'[~, Nil]
+    collect' [~, Nil] ~> reverse' [~, Nil]
   }
 ]

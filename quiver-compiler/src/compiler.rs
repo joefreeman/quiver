@@ -3133,6 +3133,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let builtin_type = self.compile_builtin(&builtin.name)?;
                 Ok((builtin_type, Provenance::Unknown))
             }
+            ast::Term::Apply(head, arg) => {
+                // `f x` - compile the argument as a flow position (it receives the piped
+                // value, so a callable argument is invoked with it; use `&` to pass one by
+                // value), then feed its result into the head, which invokes the callable.
+                let (arg_type, arg_prov) = self.compile_term(
+                    *arg,
+                    value_type,
+                    value_provenance,
+                    on_no_match,
+                    ripple_context,
+                    None,
+                )?;
+                self.compile_term(
+                    *head,
+                    Some(arg_type),
+                    arg_prov,
+                    on_no_match,
+                    None,
+                    narrowing,
+                )
+            }
             ast::Term::Reference(None) => {
                 // Standalone & - create a new unique ref
                 // Drop incoming value if present

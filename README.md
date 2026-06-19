@@ -16,11 +16,11 @@ list<t> : Nil | Cons[t, ^];
 sum' = #[list<int>, int] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => {
-     %math.add[head, acc] ~> ^[tail, ~]
+     %math.add [head, acc] ~> ^ [tail, ~]
   }
 },
 
-sum = #list<int> { sum'[~, 0] },
+sum = #list<int> { sum' [~, 0] },
 
 // Build and sum a list
 Cons[1, Cons[2, Cons[3, Nil]]] ~> sum  // 6
