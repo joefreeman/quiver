@@ -52,3 +52,32 @@ jobs:
 
       - name: Show generated package.json
         run: cat quiver-web/pkg/package.json
+
+  tree-sitter:
+    name: Tree-sitter grammar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: cd tree-sitter && npm install
+
+      - name: Verify the committed parser matches grammar.js
+        run: |
+          cd tree-sitter
+          npx tree-sitter generate
+          git diff --exit-code src/ || {
+            echo "::error::src/ is out of date. Run 'tree-sitter generate' in tree-sitter/ and commit the result."
+            exit 1
+          }
+
+      - name: Run corpus tests
+        run: cd tree-sitter && npx tree-sitter test
+
+      - name: Parse all Quiver source files (grammar/parser sync guard)
+        run: tree-sitter/scripts/check-corpus.sh

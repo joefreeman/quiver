@@ -1,0 +1,139 @@
+==================
+chain with pipes
+==================
+
+5 ~> double ~> increment
+
+---
+
+(source_file
+  (expression
+    (chain
+      (integer)
+      (access
+        source: (identifier))
+      (access
+        source: (identifier)))))
+
+==================
+named tuple and fields
+==================
+
+Point[x: 1, y: 2]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (tuple
+        name: (tuple_name)
+        (named_field
+          name: (identifier)
+          (chain
+            (integer)))
+        (named_field
+          name: (identifier)
+          (chain
+            (integer)))))))
+
+==================
+string with escape
+==================
+
+"hi\n"
+
+---
+
+(source_file
+  (expression
+    (chain
+      (string
+        (escape_sequence)))))
+
+==================
+binary and integer
+==================
+
+[0x0a1b, -17]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (tuple
+        (chain
+          (binary))
+        (chain
+          (integer))))))
+
+==================
+spread
+==================
+
+a[..., y: 3]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (identifier))
+        argument: (tuple
+          (spread)
+          (named_field
+            name: (identifier)
+            (chain
+              (integer))))))))
+
+==================
+ripple
+==================
+
+5 ~> [~, 1]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (integer)
+      (tuple
+        (chain
+          (access
+            source: (ripple)))
+        (chain
+          (integer))))))
+
+==================
+builtin and access
+==================
+
+math.add [1, 2] ~> __multiply__ [~, 3]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (identifier)
+          field: (identifier))
+        argument: (tuple
+          (chain
+            (integer))
+          (chain
+            (integer))))
+      (application
+        function: (builtin)
+        argument: (tuple
+          (chain
+            (access
+              source: (ripple)))
+          (chain
+            (integer)))))))
+

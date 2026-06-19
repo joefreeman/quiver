@@ -1,0 +1,90 @@
+==================
+destructuring binding
+==================
+
+Point[x, y] = Point[10, 20]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (tuple
+          name: (tuple_name)
+          (chain
+            (access
+              source: (identifier)))
+          (chain
+            (access
+              source: (identifier))))
+        argument: (bind_match
+          (pattern_tuple
+            name: (tuple_name)
+            (integer)
+            (integer)))))))
+
+==================
+partial binding
+==================
+
+(add, mul) = %math
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (pattern_partial
+        name: (identifier)
+        name: (identifier))
+      (access
+        source: (import
+          (identifier))))))
+
+==================
+star binding
+==================
+
+* = Config[host: "localhost"]
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (star)
+      (tuple
+        name: (tuple_name)
+        (named_field
+          name: (identifier)
+          (chain
+            (string)))))))
+
+==================
+pinned match
+==================
+
+Point[x, &y] = Point[1, 2]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (tuple
+          name: (tuple_name)
+          (chain
+            (access
+              source: (identifier)))
+          (chain
+            (reference
+              (access
+                source: (identifier)))))
+        argument: (bind_match
+          (pattern_tuple
+            name: (tuple_name)
+            (integer)
+            (integer)))))))
+

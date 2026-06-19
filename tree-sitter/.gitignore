@@ -1,0 +1,14 @@
+node_modules/
+*.log
+
+# Build artifacts from the node/c bindings. The generated parser in src/ IS committed
+# so editors and CI can build without re-running `tree-sitter generate`.
+build/
+*.o
+*.so
+*.dylib
+*.wasm
+
+# Rust binding build artifacts. Cargo.lock is omitted (this is a library crate).
+/target/
+Cargo.lock

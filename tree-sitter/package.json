@@ -1,0 +1,32 @@
+{
+  "name": "tree-sitter-quiver",
+  "version": "0.1.0",
+  "description": "Quiver grammar for tree-sitter",
+  "license": "MIT",
+  "keywords": [
+    "tree-sitter",
+    "quiver"
+  ],
+  "files": [
+    "grammar.js",
+    "queries/*",
+    "src/**"
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.24.0"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.quiver",
+      "file-types": [
+        "qv"
+      ],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

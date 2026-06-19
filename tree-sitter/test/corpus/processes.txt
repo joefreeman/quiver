@@ -1,0 +1,112 @@
+==================
+spawn and receive
+==================
+
+p = @{ !'int ~> { | =0 => "done" | ^ [] } }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (spawn
+        (block
+          (branch
+            condition: (expression
+              (chain
+                (select
+                  (receive_type
+                    (type_identifier
+                      name: (type_name))))
+                (block
+                  (branch
+                    condition: (expression
+                      (chain
+                        (bind_match
+                          (integer))))
+                    consequence: (expression
+                      (chain
+                        (string))))
+                  (branch
+                    condition: (expression
+                      (chain
+                        (application
+                          function: (tail_call)
+                          argument: (tuple))))))))))))))
+
+==================
+spawn typed and await
+==================
+
+p = [42, 100] ~> @['int, 'int] { $ }, !p
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (identifier))
+        argument: (bind_match
+          (pattern_tuple
+            (integer)
+            (integer))))
+      (spawn
+        parameter: (tuple_type
+          (type_identifier
+            name: (type_name))
+          (type_identifier
+            name: (type_name)))
+        (block
+          (branch
+            condition: (expression
+              (chain
+                (access
+                  source: (parameter))))))))
+    (chain
+      (select
+        (access
+          source: (identifier))))))
+
+==================
+select with timeout
+==================
+
+p1 ~> ![~, 1000]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (select
+        sources: (chain
+          (access
+            source: (ripple)))
+        sources: (chain
+          (integer))))))
+
+==================
+send and self
+==================
+
+42 ~> pid, &. ~> =self_pid
+
+---
+
+(source_file
+  (expression
+    (chain
+      (integer)
+      (access
+        source: (identifier)))
+    (chain
+      (reference
+        (self))
+      (bind_match
+        (identifier)))))
+

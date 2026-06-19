@@ -1,0 +1,81 @@
+==================
+type alias union
+==================
+
+'shape = Circle[radius: 'int] | Rectangle[width: 'int, height: 'int]
+
+---
+
+(source_file
+  (type_alias
+    name: (type_name)
+    definition: (union_type
+      (tuple_type
+        name: (tuple_name)
+        name: (identifier)
+        (type_identifier
+          name: (type_name)))
+      (tuple_type
+        name: (tuple_name)
+        name: (identifier)
+        (type_identifier
+          name: (type_name))
+        name: (identifier)
+        (type_identifier
+          name: (type_name))))))
+
+==================
+recursive type
+==================
+
+'list<'t> = Nil | Cons['t, ^]
+
+---
+
+(source_file
+  (type_alias
+    name: (type_name)
+    (type_parameters
+      (type_name))
+    definition: (union_type
+      (tuple_type
+        name: (tuple_name))
+      (tuple_type
+        name: (tuple_name)
+        (type_identifier
+          name: (type_name))
+        (cycle_type)))))
+
+==================
+type import
+==================
+
+('circle, 'rectangle) = %shapes
+
+---
+
+(source_file
+  (type_import
+    pattern: (type_import_pattern
+      (type_name)
+      (type_name))
+    module: (import
+      (identifier))))
+
+==================
+function type alias
+==================
+
+'adder = #'int -> 'int
+
+---
+
+(source_file
+  (type_alias
+    name: (type_name)
+    definition: (function_type
+      input: (type_identifier
+        name: (type_name))
+      output: (type_identifier
+        name: (type_name)))))
+

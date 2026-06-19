@@ -1,0 +1,32 @@
+{
+  "grammars": [
+    {
+      "name": "quiver",
+      "camelcase": "Quiver",
+      "scope": "source.quiver",
+      "file-types": [
+        "qv"
+      ],
+      "highlights": [
+        "queries/highlights.scm"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Quiver grammar for tree-sitter",
+    "links": {
+      "repository": "https://github.com/quiver-lang/quiver"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": false,
+    "node": true,
+    "python": false,
+    "rust": true,
+    "swift": false,
+    "zig": false
+  }
+}

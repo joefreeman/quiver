@@ -1,0 +1,105 @@
+==================
+function with pattern match
+==================
+
+area = #'shape { | =Circle[radius: r] => math.mul [r, r] | =Rectangle[width: w, height: h] => math.mul [w, h] }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (type_identifier
+          name: (type_name))
+        (block
+          (branch
+            condition: (expression
+              (chain
+                (bind_match
+                  (pattern_tuple
+                    name: (tuple_name)
+                    name: (identifier)
+                    (identifier)))))
+            consequence: (expression
+              (chain
+                (application
+                  function: (access
+                    source: (identifier)
+                    field: (identifier))
+                  argument: (tuple
+                    (chain
+                      (access
+                        source: (identifier)))
+                    (chain
+                      (access
+                        source: (identifier))))))))
+          (branch
+            condition: (expression
+              (chain
+                (bind_match
+                  (pattern_tuple
+                    name: (tuple_name)
+                    name: (identifier)
+                    (identifier)
+                    name: (identifier)
+                    (identifier)))))
+            consequence: (expression
+              (chain
+                (application
+                  function: (access
+                    source: (identifier)
+                    field: (identifier))
+                  argument: (tuple
+                    (chain
+                      (access
+                        source: (identifier)))
+                    (chain
+                      (access
+                        source: (identifier)))))))))))))
+
+==================
+identity shorthand
+==================
+
+f = #'int
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (type_identifier
+          name: (type_name))))))
+
+==================
+tail call
+==================
+
+fact = #'int { [~, 1] ~> ^f }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (type_identifier
+          name: (type_name))
+        (block
+          (branch
+            condition: (expression
+              (chain
+                (tuple
+                  (chain
+                    (access
+                      source: (ripple)))
+                  (chain
+                    (integer)))
+                (tail_call
+                  function: (identifier))))))))))
+

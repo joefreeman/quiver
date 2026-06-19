@@ -1,0 +1,6 @@
+# The parser is generated from grammar.js by `tree-sitter generate`. Mark it generated so
+# GitHub collapses it in diffs and excludes it from language statistics.
+src/parser.c linguist-generated
+src/grammar.json linguist-generated
+src/node-types.json linguist-generated
+src/tree_sitter/* linguist-generated
