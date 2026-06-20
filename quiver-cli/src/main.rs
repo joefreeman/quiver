@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use quiver_compiler::compiler::ModuleCache;
-use quiver_compiler::{Compiler, FileSystemModuleLoader, parse};
+use quiver_compiler::{Compiler, ModuleResolver, PackageResolver, parse};
 use quiver_core::bytecode;
 use quiver_core::format;
 use quiver_core::program::Program;
@@ -124,9 +124,18 @@ fn handle_parse_error(err: quiver_compiler::parser::Error, source: &str, source_
 /// Compile source code and extract the entry function, returning a Program and entry index.
 /// This handles the common pattern of compiling instructions, executing them to get a function value,
 /// and handling captures by injecting them into the program.
+/// Build a resolver for an entry program: discover the project from the file's location, or —
+/// for inline `--eval`/stdin with no path — the default (stdlib-only) package.
+fn entry_resolver(input_path: Option<&str>) -> PackageResolver {
+    match input_path {
+        Some(path) => PackageResolver::for_entry_file(std::path::Path::new(path)),
+        None => PackageResolver::inline(),
+    }
+}
+
 fn compile_and_extract_entry(
     source: &str,
-    module_loader: &dyn quiver_compiler::ModuleLoader,
+    resolver: &dyn ModuleResolver,
     builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
 ) -> Result<(Program, usize), Box<dyn std::error::Error>> {
     let ast = match parse(source) {
@@ -140,7 +149,7 @@ fn compile_and_extract_entry(
         ast,
         &HashMap::new(),
         &mut module_cache,
-        module_loader,
+        resolver,
         &mut program,
         quiver_core::types::NIL, // parameter_type_id - use pre-registered nil type
         &HashMap::new(),
@@ -198,23 +207,23 @@ fn compile_command(
     output: Option<String>,
     eval: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (source, source_id) = if let Some(code) = eval {
-        (code, "eval".to_string())
+    let (source, source_id, resolver_path) = if let Some(code) = eval {
+        (code, "eval".to_string(), None)
     } else if let Some(path) = input.clone() {
-        (fs::read_to_string(&path)?, path)
+        (fs::read_to_string(&path)?, path.clone(), Some(path))
     } else {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
-        (buffer, "stdin".to_string())
+        (buffer, "stdin".to_string(), None)
     };
 
     // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
-    let module_loader = FileSystemModuleLoader::new();
+    let resolver = entry_resolver(resolver_path.as_deref());
 
     // Compile and extract entry function
     // Note: compile_command allows programs that don't evaluate to a function
-    let (program, entry) = match compile_and_extract_entry(&source, &module_loader, &builtins) {
+    let (program, entry) = match compile_and_extract_entry(&source, &resolver, &builtins) {
         Ok((program, entry)) => (program, Some(entry)),
         Err(_) => {
             // If it doesn't evaluate to a function, compile without an entry point
@@ -228,7 +237,7 @@ fn compile_command(
                 ast,
                 &HashMap::new(),
                 &mut module_cache,
-                &module_loader,
+                &resolver,
                 &mut program,
                 quiver_core::types::NIL, // parameter_type_id
                 &HashMap::new(),
@@ -262,12 +271,12 @@ fn run_command(
     profile: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(code) = eval {
-        compile_execute(&code, quiet, profile)?;
+        compile_execute(&code, None, quiet, profile)?;
     } else if let Some(path) = input {
         let content = fs::read_to_string(&path)?;
 
         if path.ends_with(".qv") {
-            compile_execute(&content, quiet, profile)?;
+            compile_execute(&content, Some(&path), quiet, profile)?;
         } else if path.ends_with(".qx") {
             execute_bytecode(&content, quiet, profile)?;
         } else {
@@ -284,10 +293,10 @@ fn run_command(
         if buffer.trim_start().starts_with('{') {
             match serde_json::from_str::<bytecode::Bytecode>(&buffer) {
                 Ok(_) => execute_bytecode(&buffer, quiet, profile)?,
-                Err(_) => compile_execute(&buffer, quiet, profile)?,
+                Err(_) => compile_execute(&buffer, None, quiet, profile)?,
             }
         } else {
-            compile_execute(&buffer, quiet, profile)?;
+            compile_execute(&buffer, None, quiet, profile)?;
         }
     }
 
@@ -296,15 +305,16 @@ fn run_command(
 
 fn compile_execute(
     source: &str,
+    input_path: Option<&str>,
     quiet: bool,
     profile: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
-    let module_loader = FileSystemModuleLoader::new();
+    let resolver = entry_resolver(input_path);
 
     // Compile and extract entry function (this will error if not a function)
-    let (program, entry) = compile_and_extract_entry(source, &module_loader, &builtins)?;
+    let (program, entry) = compile_and_extract_entry(source, &resolver, &builtins)?;
 
     // Convert to bytecode
     let bytecode = program.to_bytecode_optimized(entry);

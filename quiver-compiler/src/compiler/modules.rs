@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::{ast, modules::ModuleLoader, parser};
+use crate::{
+    ast, parser,
+    resolver::{ModuleId, ModuleResolver, PackageId},
+};
 use quiver_core::effects::Effect;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
@@ -19,11 +22,11 @@ pub struct CachedModule {
 
 #[derive(Clone)]
 pub struct ModuleCache {
-    pub ast_cache: HashMap<Vec<String>, ast::Program>,
-    pub import_stack: Vec<Vec<String>>,
+    pub ast_cache: HashMap<ModuleId, ast::Program>,
+    pub import_stack: Vec<ModuleId>,
     /// Cache for module values with their types and extracted binary data.
     /// With capture-by-value, function indices can be reused, making this cache valid.
-    pub value_cache: HashMap<Vec<String>, CachedModule>,
+    pub value_cache: HashMap<ModuleId, CachedModule>,
 }
 
 impl Default for ModuleCache {
@@ -42,32 +45,30 @@ impl ModuleCache {
     }
 
     /// Get cached module value
-    pub fn get_cached_module(&self, module: &[String]) -> Option<&CachedModule> {
-        self.value_cache.get(module)
+    pub fn get_cached_module(&self, id: &ModuleId) -> Option<&CachedModule> {
+        self.value_cache.get(id)
     }
 
     /// Cache a module value with its type and extracted binary data
-    pub fn cache_module(&mut self, module: Vec<String>, cached: CachedModule) {
-        self.value_cache.insert(module, cached);
+    pub fn cache_module(&mut self, id: ModuleId, cached: CachedModule) {
+        self.value_cache.insert(id, cached);
     }
 
     pub fn load_and_cache_ast(
         &mut self,
-        module: &[String],
-        module_loader: &dyn ModuleLoader,
+        id: &ModuleId,
+        source: &str,
     ) -> Result<ast::Program, Error> {
-        if let Some(cached_ast) = self.ast_cache.get(module).cloned() {
+        if let Some(cached_ast) = self.ast_cache.get(id).cloned() {
             return Ok(cached_ast);
         }
 
-        let content = module_loader.load(module).map_err(Error::ModuleLoad)?;
-
-        let parsed = parser::parse(&content).map_err(|e| Error::ModuleParse {
-            module: module.join("/"),
+        let parsed = parser::parse(source).map_err(|e| Error::ModuleParse {
+            module: id.display(),
             error: Box::new(e),
         })?;
 
-        self.ast_cache.insert(module.to_vec(), parsed.clone());
+        self.ast_cache.insert(id.clone(), parsed.clone());
 
         Ok(parsed)
     }
@@ -109,15 +110,20 @@ pub fn extract_binary_data<E: Effect>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn compile_type_import(
     pattern: ast::TypeImportPattern,
     module: &[String],
+    from_package: &PackageId,
     module_cache: &mut ModuleCache,
-    module_loader: &dyn ModuleLoader,
+    resolver: &dyn ModuleResolver,
     scopes_mut: &mut [Scope],
     program: &mut Program,
 ) -> Result<(), Error> {
-    let parsed = module_cache.load_and_cache_ast(module, module_loader)?;
+    let resolved = resolver
+        .resolve(from_package, module)
+        .map_err(Error::ModuleLoad)?;
+    let parsed = module_cache.load_and_cache_ast(&resolved.id, &resolved.source)?;
 
     // Build a module-local scope with all type definitions from the module
     // This allows us to resolve types using the module's context
@@ -130,12 +136,14 @@ pub fn compile_type_import(
                 pattern: import_pattern,
                 module: import_module,
             } => {
-                // Recursively import types into the module scope
+                // Recursively import types into the module scope, resolving the nested import
+                // against the imported module's own package (hermetic resolution).
                 compile_type_import(
                     import_pattern.clone(),
                     import_module,
+                    &resolved.package,
                     module_cache,
-                    module_loader,
+                    resolver,
                     &mut module_scope,
                     program,
                 )?;

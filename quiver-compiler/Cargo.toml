@@ -9,3 +9,5 @@ nom = "7.1"
 nom_locate = "4.2"
 serde.workspace = true
 hex = "0.4.3"
+toml = "0.8"
+include_dir = "0.7"

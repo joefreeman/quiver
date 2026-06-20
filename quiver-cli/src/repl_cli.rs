@@ -1,6 +1,6 @@
 use colored::Colorize;
 use quiver_cli::spawn_worker;
-use quiver_compiler::FileSystemModuleLoader;
+use quiver_compiler::{ModuleResolver, PackageResolver, find_project_root};
 use quiver_core::value::Value;
 use quiver_environment::{Environment, Repl, ReplError, RequestResult, WorkerHandle};
 use quiver_io::NativeEffect;
@@ -26,6 +26,20 @@ pub struct ReplCli {
     repl: Option<Repl<NativeEffect>>,
     stepping_thread: Option<JoinHandle<()>>,
     shutdown_signal: Arc<AtomicBool>,
+}
+
+/// Build the resolver for a REPL session: project-aware when launched inside a project (the
+/// nearest `quiver.toml` from the current directory), otherwise the standard library only.
+fn repl_resolver() -> Box<dyn ModuleResolver> {
+    match std::env::current_dir() {
+        Ok(dir) => Box::new(PackageResolver::for_dir(&dir)),
+        Err(_) => Box::new(PackageResolver::inline()),
+    }
+}
+
+/// The project root for the current directory, if the REPL was launched inside a project.
+fn current_project_root() -> Option<std::path::PathBuf> {
+    find_project_root(&std::env::current_dir().ok()?)
 }
 
 impl ReplCli {
@@ -95,12 +109,28 @@ impl ReplCli {
         })
     }
 
+    fn reload_modules(&mut self) {
+        let Some(repl) = self.repl.as_mut() else {
+            return;
+        };
+        repl.reload_modules(repl_resolver());
+        match current_project_root() {
+            Some(root) => println!(
+                "{}",
+                format!("Reloaded modules (project: {})", root.display()).bright_black()
+            ),
+            None => println!(
+                "{}",
+                "Reloaded modules (standard library only)".bright_black()
+            ),
+        }
+    }
+
     fn reset_repl(&mut self) -> Result<(), ReplError> {
         let repl = {
             let mut env = self.environment.lock().unwrap();
-            let module_loader = Box::new(FileSystemModuleLoader::new());
             let builtins = crate::build_builtin_registry();
-            Repl::new(&mut env, module_loader, builtins)?
+            Repl::new(&mut env, repl_resolver(), builtins)?
         };
 
         if std::io::stdin().is_terminal() {
@@ -109,6 +139,10 @@ impl ReplCli {
                 env!("CARGO_PKG_VERSION"),
                 repl.process_id()
             );
+            match current_project_root() {
+                Some(root) => println!("{}", format!("Project: {}", root.display()).bright_black()),
+                None => println!("{}", "No project (standard library only)".bright_black()),
+            }
             println!("Type \\? for help or \\q to exit");
             println!();
         }
@@ -192,6 +226,10 @@ impl ReplCli {
                 println!("{}", "  \\? - Show this help message".bright_black());
                 println!("{}", "  \\q - Exit the REPL".bright_black());
                 println!("{}", "  \\! - Reset the REPL".bright_black());
+                println!(
+                    "{}",
+                    "  \\r - Reload project modules (keeps variables)".bright_black()
+                );
                 println!("{}", "  \\v - List variables".bright_black());
                 println!("{}", "  \\p - List processes".bright_black());
                 println!("{}", "  \\p X - Inspect process with ID X".bright_black());
@@ -211,6 +249,10 @@ impl ReplCli {
                     eprintln!("Fatal: Failed to restart REPL: {}", e);
                     return false;
                 }
+            }
+
+            ["r"] => {
+                self.reload_modules();
             }
 
             ["v"] => {

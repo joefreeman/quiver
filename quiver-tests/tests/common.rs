@@ -1,5 +1,5 @@
 use quiver::spawn_worker;
-use quiver_compiler::modules::InMemoryModuleLoader;
+use quiver_compiler::PackageResolver;
 use quiver_core::value::Value;
 use quiver_environment::{Environment, Repl, ReplError, WorkerHandle};
 use quiver_io::NativeEffect;
@@ -82,19 +82,6 @@ fn evaluate(
     }
 }
 
-macro_rules! load_stdlib_modules {
-    ($($name:literal),* $(,)?) => {{
-        let mut modules = HashMap::new();
-        $(
-            modules.insert(
-                vec![$name.to_string()],
-                include_str!(concat!("../../std/", $name, ".qv")).to_string()
-            );
-        )*
-        modules
-    }};
-}
-
 #[allow(dead_code)]
 pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
@@ -104,10 +91,10 @@ pub struct TestBuilder {
 #[allow(dead_code)]
 impl Default for TestBuilder {
     fn default() -> Self {
+        // The standard library is a built-in package (embedded in quiver-compiler), so tests
+        // start with no in-memory modules — only those a test adds via `with_modules`.
         Self {
-            modules: load_stdlib_modules!(
-                "math", "list", "binary", "integer", "string", "iter", "range", "path", "file"
-            ),
+            modules: HashMap::new(),
             with_io: false,
         }
     }
@@ -119,11 +106,7 @@ impl TestBuilder {
         Self::default()
     }
 
-    pub fn with_modules(mut self, mut modules: HashMap<Vec<String>, String>) -> Self {
-        // Merge additional modules with standard library modules
-        for (key, value) in self.modules {
-            modules.entry(key).or_insert(value);
-        }
+    pub fn with_modules(mut self, modules: HashMap<Vec<String>, String>) -> Self {
         self.modules = modules;
         self
     }
@@ -182,9 +165,8 @@ impl TestBuilder {
         if let Some(backend) = effect_backend {
             environment.set_effect_backend(backend);
         }
-        let module_loader = Box::new(InMemoryModuleLoader::new(self.modules));
-        let repl =
-            Repl::new(&mut environment, module_loader, builtins).expect("Failed to create REPL");
+        let resolver = Box::new(PackageResolver::memory(self.modules));
+        let repl = Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
 
         evaluate(environment, repl, virtual_time_ms, source)
     }

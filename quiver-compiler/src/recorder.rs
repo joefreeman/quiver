@@ -11,6 +11,7 @@
 
 use crate::parser::SourceSpan;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// What kind of symbol a reference resolves to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,10 @@ pub enum SymbolKind {
 pub struct SemanticInfo {
     pub type_id: usize,
     pub definition: Option<SourceSpan>,
+    /// For imports, the file the module resolves to — its definition lives in another document,
+    /// so go-to-definition jumps there rather than to a span in the current file. `None` for
+    /// local symbols and for imports with no openable origin (the embedded standard library).
+    pub definition_module: Option<PathBuf>,
     pub kind: SymbolKind,
     pub label: Option<String>,
 }
@@ -67,6 +72,7 @@ impl Recorder {
             SemanticInfo {
                 type_id,
                 definition,
+                definition_module: None,
                 kind,
                 label,
             },
@@ -87,7 +93,30 @@ impl Recorder {
             SemanticInfo {
                 type_id,
                 definition: None,
+                definition_module: None,
                 kind,
+                label,
+            },
+        ));
+    }
+
+    /// Record a reference to an imported module (or one of its members). `definition_module` is
+    /// the file the import resolves to, for cross-file go-to-definition (`None` when the origin
+    /// is not openable, e.g. the embedded standard library).
+    pub fn record_import(
+        &mut self,
+        span: SourceSpan,
+        type_id: usize,
+        label: Option<String>,
+        definition_module: Option<PathBuf>,
+    ) {
+        self.entries.push((
+            span,
+            SemanticInfo {
+                type_id,
+                definition: None,
+                definition_module,
+                kind: SymbolKind::Import,
                 label,
             },
         ));

@@ -24,9 +24,9 @@ pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, un
 
 use crate::{
     ast,
-    modules::{ModuleError, ModuleLoader},
     parser::SourceSpan,
     recorder::{Recorder, SymbolKind},
+    resolver::{ModuleError, ModuleOrigin, ModuleResolver, PackageId},
 };
 
 use quiver_core::{
@@ -268,7 +268,11 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Caller-owned; the caller keeps it after the compile (success or failure) to read the
     // type registry the semantic recorder's type-ids point into.
     program: &'a mut Program,
-    module_loader: &'a dyn ModuleLoader,
+    resolver: &'a dyn ModuleResolver,
+    /// The package whose `modules` rules resolve the imports currently being compiled. Swapped
+    /// when descending into an imported module, so each module resolves hermetically against
+    /// its own package (see `import_and_cache_module`).
+    current_package: PackageId,
     builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
 
     process_types: &'a HashMap<usize, (usize, usize)>,
@@ -347,7 +351,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         ast_program: ast::Program,
         existing_bindings: &HashMap<String, Binding>,
         module_cache: &'a mut ModuleCache,
-        module_loader: &'a dyn ModuleLoader,
+        resolver: &'a dyn ModuleResolver,
         program: &'a mut Program,
         parameter_type_id: usize,
         process_types: &'a HashMap<usize, (usize, usize)>,
@@ -355,6 +359,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         recorder: Option<&'a mut Recorder>,
     ) -> Result<Compiled, LocatedError> {
         let never_id = program.never();
+        let current_package = resolver.entry_package();
 
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
@@ -362,7 +367,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             scopes: vec![],
             local_count: 0,
             program,
-            module_loader,
+            resolver,
+            current_package,
             builtins,
             process_types,
             current_receive_type_id: never_id,
@@ -499,6 +505,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     ) {
         if let (Some(recorder), Some(span)) = (self.recorder.as_deref_mut(), span) {
             recorder.record_typed(span, type_id, kind, label);
+        }
+    }
+
+    /// Record an import reference at `span`, carrying the module's origin file (when openable)
+    /// so the language server can offer cross-file go-to-definition.
+    fn record_import(
+        &mut self,
+        span: Option<SourceSpan>,
+        type_id: usize,
+        label: Option<String>,
+        origin: ModuleOrigin,
+    ) {
+        if let (Some(recorder), Some(span)) = (self.recorder.as_deref_mut(), span) {
+            let definition_module = match origin {
+                ModuleOrigin::Path(path) => Some(path),
+                ModuleOrigin::Virtual => None,
+            };
+            recorder.record_import(span, type_id, label, definition_module);
         }
     }
 
@@ -640,8 +664,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         compile_type_import(
             pattern,
             module,
+            &self.current_package,
             self.module_cache,
-            self.module_loader,
+            self.resolver,
             &mut self.scopes,
             self.program,
         )
@@ -2063,30 +2088,39 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Resolve an import with optional accessor chain, returning the cached module,
-    /// resolved value, and type. Does not emit any instructions.
+    /// Resolve an import with optional accessor chain, returning the cached module, resolved
+    /// value, type, and the module's origin (for go-to-definition). Emits no instructions.
     fn resolve_import(
         &mut self,
         module: &[String],
         accessors: &[ast::AccessPath],
-    ) -> Result<(modules::CachedModule, Value, usize), Error> {
+    ) -> Result<(modules::CachedModule, Value, usize, ModuleOrigin), Error> {
         let module_name = module.join("/");
 
+        // Resolve the import against the package currently being compiled, yielding a canonical
+        // id (used for caching and cycle detection) and the package its own imports resolve in.
+        let resolved = self
+            .resolver
+            .resolve(&self.current_package, module)
+            .map_err(Error::ModuleLoad)?;
+        let id = resolved.id.clone();
+        let origin = resolved.origin.clone();
+
         // Check for circular imports
-        if self.module_cache.import_stack.contains(&module.to_vec()) {
+        if self.module_cache.import_stack.contains(&id) {
             return Err(Error::FeatureUnsupported(
                 "Circular import detected".to_string(),
             ));
         }
 
         // Get or compute cached module value
-        let cached = if let Some(cached) = self.module_cache.get_cached_module(module) {
+        let cached = if let Some(cached) = self.module_cache.get_cached_module(&id) {
             cached.clone()
         } else {
-            self.module_cache.import_stack.push(module.to_vec());
-            let cached = self.import_and_cache_module(module)?;
+            self.module_cache.import_stack.push(id.clone());
+            let cached = self.import_and_cache_module(&resolved);
             self.module_cache.import_stack.pop();
-            cached
+            cached?
         };
 
         // Resolve accessor chain on the cached value
@@ -2094,7 +2128,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let (resolved_value, resolved_type) =
             self.resolve_accessors(&cached.value, &module_type_id, accessors, &module_name)?;
 
-        Ok((cached, resolved_value, resolved_type))
+        Ok((cached, resolved_value, resolved_type, origin))
     }
 
     /// Compile an import with optional accessor chain.
@@ -2104,8 +2138,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         module: &[String],
         accessors: &[ast::AccessPath],
-    ) -> Result<usize, Error> {
-        let (cached, resolved_value, resolved_type) = self.resolve_import(module, accessors)?;
+    ) -> Result<(usize, ModuleOrigin), Error> {
+        let (cached, resolved_value, resolved_type, origin) =
+            self.resolve_import(module, accessors)?;
 
         // Emit instructions for just the resolved value
         let (instructions, _) =
@@ -2115,23 +2150,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.add_instruction(instruction);
         }
 
-        Ok(resolved_type)
+        Ok((resolved_type, origin))
     }
 
-    /// Import a module, execute it, and cache the result.
+    /// Import a module, execute it, and cache the result. The module is compiled in *its own*
+    /// package context, so its imports resolve hermetically against its package's manifest.
     fn import_and_cache_module(
         &mut self,
-        module: &[String],
+        resolved: &crate::resolver::ResolvedModule,
     ) -> Result<modules::CachedModule, Error> {
+        let module_name = resolved.id.display();
+
         // Parse the module
         let parsed = self
             .module_cache
-            .load_and_cache_ast(module, self.module_loader)?;
+            .load_and_cache_ast(&resolved.id, &resolved.source)?;
 
         // Save current compiler state
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_local_count = self.local_count;
+        // Resolve this module's own imports against its package, not the importer's.
+        let saved_package = std::mem::replace(&mut self.current_package, resolved.package.clone());
         // Suppress semantic recording while compiling an imported module: its spans are
         // offsets into the module's own source, which would otherwise collide with the
         // document being indexed. (A module that fails to compile aborts the whole
@@ -2191,6 +2231,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
         self.recorder = saved_recorder;
+        self.current_package = saved_package;
 
         // Register the callable type for this module wrapper function
         // (modules take no arguments and return the module value)
@@ -2217,7 +2258,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // receive messages, so skip the (expensive) parameter-compatibility tables.
             quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false).map_err(
                 |e| Error::ModuleExecution {
-                    module: module.join("/"),
+                    module: module_name.clone(),
                     error: Box::new(e),
                 },
             )?;
@@ -2234,7 +2275,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Cache the module
         self.module_cache
-            .cache_module(module.to_vec(), cached.clone());
+            .cache_module(resolved.id.clone(), cached.clone());
 
         Ok(cached)
     }
@@ -2968,19 +3009,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
 
                 // Resolve import type first (no code emission yet) to check if callable
-                let (cached, resolved_value, accessed_type) =
+                let (cached, resolved_value, accessed_type, origin) =
                     self.resolve_import(&module, &access.accessors)?;
 
                 // Record the resolved import (or member) signature at its span, so hover
-                // shows e.g. `%math.add: #['int, 'int] -> 'int`. Uses `accessed_type` (the
+                // shows e.g. `%math.add: #['int, 'int] -> 'int`, with the origin file so
+                // go-to-definition can jump into the module. Uses `accessed_type` (the
                 // member's own type), not the result of applying any argument.
                 let label = accessors_label(&module_name, &access.accessors);
-                self.record_typed(
-                    access.span.get(),
-                    accessed_type,
-                    SymbolKind::Import,
-                    Some(label),
-                );
+                self.record_import(access.span.get(), accessed_type, Some(label), origin);
 
                 let is_callable = matches!(
                     self.program.lookup_type(accessed_type),
@@ -3419,8 +3456,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Some(ast::AccessSource::Import(ref module)) => {
                         let label =
                             accessors_label(&format!("%{}", module.join("/")), &access.accessors);
-                        let ty = self.compile_import(module, &access.accessors)?;
-                        self.record_typed(ref_span, ty, SymbolKind::Import, Some(label));
+                        let (ty, origin) = self.compile_import(module, &access.accessors)?;
+                        self.record_import(ref_span, ty, Some(label), origin);
                         Ok((ty, Provenance::Unknown))
                     }
                     Some(ast::AccessSource::Self_) => {

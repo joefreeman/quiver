@@ -1,7 +1,6 @@
 use crate::types::*;
 use crate::web_transport::WebWorkerHandle;
-use include_dir::{Dir, include_dir};
-use quiver_compiler::modules::InMemoryModuleLoader;
+use quiver_compiler::PackageResolver;
 use quiver_environment::{RequestResult, WorkerHandle};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -107,33 +106,9 @@ export class Repl {
 }
 "#;
 
-// Embed standard library directory at compile time
-static STD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../std");
-
-/// Create a module loader with the standard library pre-loaded
-fn create_std_module_loader() -> Box<InMemoryModuleLoader> {
-    let mut modules = HashMap::new();
-
-    // Automatically load all .qv files from the std directory
-    for file in STD_DIR.files() {
-        if let Some(path) = file.path().to_str()
-            && path.ends_with(".qv")
-        {
-            // Extract module name (filename without .qv extension)
-            let module_name = path
-                .trim_end_matches(".qv")
-                .split('/')
-                .next_back()
-                .unwrap_or(path);
-
-            // Read file contents as UTF-8 string
-            if let Some(contents) = file.contents_utf8() {
-                modules.insert(vec![module_name.to_string()], contents.to_string());
-            }
-        }
-    }
-
-    Box::new(InMemoryModuleLoader::new(modules))
+/// Create a resolver with the built-in standard library (embedded in `quiver-compiler`).
+fn create_std_resolver() -> Box<PackageResolver> {
+    Box::new(PackageResolver::inline())
 }
 
 /// Callback wrapper to store JS callbacks
@@ -590,14 +565,13 @@ impl Repl {
             environment.get_shared_state();
 
         // Create REPL
-        let module_loader = create_std_module_loader();
+        let resolver = create_std_resolver();
         // For WASM, use core modules only (no network builtins)
         let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
             &quiver_core::builtins::core_modules(),
         );
-        let repl =
-            quiver_environment::Repl::new(&mut *env_rc.borrow_mut(), module_loader, builtins)
-                .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
+        let repl = quiver_environment::Repl::new(&mut *env_rc.borrow_mut(), resolver, builtins)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
 
         Ok(Self {
             environment: env_rc,

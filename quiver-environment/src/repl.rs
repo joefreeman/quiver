@@ -1,9 +1,9 @@
 use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
+use quiver_compiler::ModuleResolver;
 use quiver_compiler::compiler::{
     Binding, ModuleCache, Scope, ScopeKind, resolve_type_alias_for_display,
 };
-use quiver_compiler::modules::ModuleLoader;
 use quiver_core::bytecode::Function;
 use quiver_core::effects::Effect;
 use quiver_core::process::ProcessId;
@@ -36,14 +36,14 @@ pub struct Repl<E: Effect> {
     bindings: HashMap<String, Binding>, // variables and type aliases persisted across sessions
     module_cache: ModuleCache, // persistent module cache across evaluations
     last_result_type: Type, // Type of the last evaluated result, for continuations
-    module_loader: Box<dyn ModuleLoader>,
+    resolver: Box<dyn ModuleResolver>,
     builtins: quiver_core::builtins::BuiltinRegistry<E>,
 }
 
 impl<E: Effect> Repl<E> {
     pub fn new(
         env: &mut Environment<E>,
-        module_loader: Box<dyn ModuleLoader>,
+        resolver: Box<dyn ModuleResolver>,
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
     ) -> Result<Self, ReplError> {
         // Create a sleeping process ready for resume
@@ -55,7 +55,7 @@ impl<E: Effect> Repl<E> {
             bindings: HashMap::new(),
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
-            module_loader,
+            resolver,
             builtins,
         })
     }
@@ -63,6 +63,15 @@ impl<E: Effect> Repl<E> {
     /// Get the REPL process ID
     pub fn process_id(&self) -> ProcessId {
         self.repl_process_id.expect("REPL process not initialized")
+    }
+
+    /// Swap in a fresh resolver and drop all cached modules, so subsequent evaluations re-read
+    /// (and recompile) project modules from disk — picking up edits and `quiver.toml` changes.
+    /// Accumulated variables and program state are kept; bindings that already captured values
+    /// from a previous version of a module retain those values.
+    pub fn reload_modules(&mut self, resolver: Box<dyn ModuleResolver>) {
+        self.resolver = resolver;
+        self.module_cache = ModuleCache::new();
     }
 
     /// Compile and evaluate an expression
@@ -100,7 +109,7 @@ impl<E: Effect> Repl<E> {
             parsed,
             &self.bindings,
             &mut module_cache,
-            self.module_loader.as_ref(),
+            self.resolver.as_ref(),
             &mut program,
             last_result_type_id, // parameter_type - use previous result type for continuations
             &process_type_ids,
