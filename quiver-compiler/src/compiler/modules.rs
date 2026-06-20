@@ -64,7 +64,7 @@ impl ModuleCache {
 
         let parsed = parser::parse(&content).map_err(|e| Error::ModuleParse {
             module: module.join("/"),
-            error: e,
+            error: Box::new(e),
         })?;
 
         self.ast_cache.insert(module.to_vec(), parsed.clone());
@@ -144,6 +144,7 @@ pub fn compile_type_import(
                 name,
                 type_parameters,
                 type_definition,
+                ..
             } => {
                 // Create Type::Variable bindings for type parameters
                 let mut bindings = HashMap::new();

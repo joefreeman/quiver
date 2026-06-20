@@ -81,8 +81,11 @@ impl<E: Effect> Repl<E> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
-        // Clone the program for compilation (on success we'll replace self.program)
+        // Clone the program and module cache for compilation; the compiler mutates these in
+        // place, and we commit them back to `self` only on success (so a failed line can't
+        // pollute REPL state).
         let mut program = self.program.clone();
+        let mut module_cache = self.module_cache.clone();
 
         // Convert process types from Type to type IDs for the compiler
         let process_type_ids: HashMap<usize, (usize, usize)> = process_types
@@ -96,21 +99,20 @@ impl<E: Effect> Repl<E> {
         let result = Compiler::compile(
             parsed,
             &self.bindings,
-            self.module_cache.clone(),
+            &mut module_cache,
             self.module_loader.as_ref(),
-            program,
+            &mut program,
             last_result_type_id, // parameter_type - use previous result type for continuations
             &process_type_ids,
             &self.builtins,
+            None, // the REPL doesn't build a semantic index
         )
-        .map_err(ReplError::Compiler)?;
+        .map_err(|e| ReplError::Compiler(e.error))?;
 
         let instructions = result.instructions;
         let result_type_id = result.result_type;
         let receive_type_id = result.receive_type;
         let bindings = result.bindings;
-        let module_cache = result.module_cache;
-        let mut program = result.program;
 
         // Convert result_type_id to Type for storage
         let result_type = program

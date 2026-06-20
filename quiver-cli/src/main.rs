@@ -134,21 +134,23 @@ fn compile_and_extract_entry(
         Err(e) => handle_parse_error(e, source, "input"),
     };
 
+    let mut program = Program::new();
+    let mut module_cache = ModuleCache::new();
     let compilation_result = Compiler::compile(
         ast,
         &HashMap::new(),
-        ModuleCache::new(),
+        &mut module_cache,
         module_loader,
-        Program::new(),
+        &mut program,
         quiver_core::types::NIL, // parameter_type_id - use pre-registered nil type
         &HashMap::new(),
         builtins,
+        None, // no semantic recorder for the CLI
     )
-    .map_err(|e| format!("Compile error: {:?}", e))?;
+    .map_err(|e| format!("Compile error: {:?}", e.error))?;
 
     let instructions = compilation_result.instructions;
     let receive_type = compilation_result.receive_type;
-    let mut program = compilation_result.program;
 
     // Register the callable type for this wrapper function
     // Use the receive type extracted from the program (allows top-level code to receive messages)
@@ -220,18 +222,21 @@ fn compile_command(
                 Ok(ast) => ast,
                 Err(e) => handle_parse_error(e, &source, &source_id),
             };
-            let result = Compiler::compile(
+            let mut program = Program::new();
+            let mut module_cache = ModuleCache::new();
+            Compiler::compile(
                 ast,
                 &HashMap::new(),
-                ModuleCache::new(),
+                &mut module_cache,
                 &module_loader,
-                Program::new(),
+                &mut program,
                 quiver_core::types::NIL, // parameter_type_id
                 &HashMap::new(),
                 &builtins,
+                None, // no semantic recorder for the CLI
             )
-            .map_err(|e| format!("Compile error: {:?}", e))?;
-            (result.program, None)
+            .map_err(|e| format!("Compile error: {:?}", e.error))?;
+            (program, None)
         }
     };
 

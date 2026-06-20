@@ -402,7 +402,7 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     let (compiled_values, stack_size) = compile_field_values(compiler, &fields, ripple_context)?;
 
     // Step 2: Resolve final field layout (handling union spreads)
-    let variants = build_field_variants(&fields, &compiled_values, &compiler.program)?;
+    let variants = build_field_variants(&fields, &compiled_values, compiler.program)?;
 
     // Step 3: Generate bytecode based on number of variants
     let result_type_id = if variants.len() == 1 {
@@ -444,8 +444,7 @@ fn emit_single_variant_tuple<E: quiver_core::effects::Effect>(
     stack_size: usize,
     tuple_name: Option<String>,
 ) -> Result<usize, Error> {
-    let field_sources =
-        build_field_sources_for_variant(variant, compiled_values, &compiler.program);
+    let field_sources = build_field_sources_for_variant(variant, compiled_values, compiler.program);
     emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
     // Register the tuple type (fields already have type IDs)
@@ -476,7 +475,7 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
     for (variant_idx, variant) in variants.iter().enumerate() {
         let is_last = variant_idx == variants.len() - 1;
         let field_sources =
-            build_field_sources_for_variant(variant, compiled_values, &compiler.program);
+            build_field_sources_for_variant(variant, compiled_values, compiler.program);
 
         if !is_last {
             // Check if spreads match this variant's types
@@ -544,5 +543,5 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
     emit_stack_cleanup_code(compiler, stack_size);
 
     // Build union type from all variants
-    Ok(union_type_ids(&mut compiler.program, variant_type_ids))
+    Ok(union_type_ids(compiler.program, variant_type_ids))
 }

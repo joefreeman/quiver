@@ -363,13 +363,13 @@ fn classify_field_pattern(
     program: &Program,
 ) -> FieldPatternKind {
     match pattern {
-        ast::Match::Identifier(_) | ast::Match::Placeholder => FieldPatternKind::AlwaysBinds,
+        ast::Match::Identifier(_, _) | ast::Match::Placeholder => FieldPatternKind::AlwaysBinds,
 
         ast::Match::Tuple(tuple) => {
             let is_flat = tuple.fields.iter().all(|f| {
                 matches!(
                     f.pattern,
-                    ast::Match::Identifier(_) | ast::Match::Placeholder
+                    ast::Match::Identifier(_, _) | ast::Match::Placeholder
                 )
             });
 

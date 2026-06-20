@@ -187,7 +187,7 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             // These don't contain nested patterns or references
-            ast::Match::Identifier(_)
+            ast::Match::Identifier(_, _)
             | ast::Match::Literal(_)
             | ast::Match::Star
             | ast::Match::Placeholder

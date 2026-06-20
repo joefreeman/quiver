@@ -298,7 +298,7 @@ fn analyze_match_pattern(
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     match pattern {
-        ast::Match::Identifier(name) => {
+        ast::Match::Identifier(name, _) => {
             analyze_identifier_pattern(name.clone(), value_type_id, path, identifiers)
         }
         ast::Match::Literal(literal) => {

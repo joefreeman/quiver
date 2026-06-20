@@ -239,6 +239,32 @@ pub fn parse(source: &str) -> Result<Program, Error> {
 
 // Utility parsers
 
+/// The [`SourceSpan`] covering the input consumed between `start` and `end` (where `end` is
+/// the remaining input after a parser ran).
+fn span_between(start: Span, end: Span) -> SourceSpan {
+    SourceSpan {
+        offset: start.location_offset(),
+        line: start.location_line() as usize,
+        column: start.get_column(),
+        length: start.fragment().len() - end.fragment().len(),
+    }
+}
+
+/// Wrap a parser so it also yields the [`SourceSpan`] of the input it consumed. Used to
+/// stamp source positions onto the AST nodes the language server needs to address (variable
+/// references, builtins, binding patterns). The captured span runs from the start of the
+/// input to wherever the inner parser stopped.
+fn spanned<'a, O, P>(mut parser: P) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, (SourceSpan, O)>
+where
+    P: FnMut(Span<'a>) -> IResult<Span<'a>, O>,
+{
+    move |input: Span<'a>| {
+        let start = input;
+        let (rest, out) = parser(input)?;
+        Ok((rest, (span_between(start, rest), out)))
+    }
+}
+
 fn ws0(input: Span) -> IResult<Span, ()> {
     nom_value((), multispace0)(input)
 }
@@ -386,6 +412,7 @@ fn string_term(input: Span) -> IResult<Span, Term> {
                     name: None,
                     value: FieldValue::Chain(Chain {
                         match_pattern: None,
+                        bind_span: Spanned::default(),
                         terms: vec![Term::Literal(Literal::Binary(bytes))],
                     }),
                 }],
@@ -488,7 +515,9 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
             map(char('*'), |_| Match::Star),
             map(char('_'), |_| Match::Placeholder),
             // Identifier
-            map(identifier, Match::Identifier),
+            map(spanned(identifier), |(span, name)| {
+                Match::Identifier(name, Spanned(Some(span)))
+            }),
         ))(input)
     }
 
@@ -877,39 +906,54 @@ fn type_definition(input: Span) -> IResult<Span, Type> {
 
 // Parse access patterns: identifier, $, ~, %import, with optional .field accessors and [args]
 fn access(input: Span) -> IResult<Span, Access> {
-    verify(
-        map(
-            tuple((
-                opt(alt((
-                    map(char('$'), |_| AccessSource::Parameter),
-                    map(char('~'), |_| AccessSource::Ripple),
-                    // Import: %module or %module/submodule
-                    map(import, AccessSource::Import),
-                    map(identifier, AccessSource::Identifier),
-                ))),
-                many0(preceded(
-                    char('.'),
-                    alt((
-                        map(digit1, |s: Span| AccessPath::Index(s.parse().unwrap())),
-                        map(identifier, AccessPath::Field),
-                    )),
-                )),
-                opt(call_argument),
+    let start = input;
+    let (after_ref, (source, accessors)) = tuple((
+        opt(alt((
+            map(char('$'), |_| AccessSource::Parameter),
+            map(char('~'), |_| AccessSource::Ripple),
+            // Import: %module or %module/submodule
+            map(import, AccessSource::Import),
+            map(identifier, AccessSource::Identifier),
+        ))),
+        many0(preceded(
+            char('.'),
+            alt((
+                map(digit1, |s: Span| AccessPath::Index(s.parse().unwrap())),
+                map(identifier, AccessPath::Field),
             )),
-            |(source, accessors, argument)| Access {
-                source,
-                accessors,
-                argument,
-            },
-        ),
-        |ma| ma.source.is_some() || !ma.accessors.is_empty(),
-    )(input)
+        )),
+    ))(input)?;
+
+    // The span covers just the reference (`%math.add`, `foo`, `$.x`), not a trailing call
+    // argument, so hover and go-to-definition land precisely on the referenced symbol.
+    let ref_span = span_between(start, after_ref);
+
+    let (rest, argument) = opt(call_argument)(after_ref)?;
+
+    // An access must have a source or at least one accessor.
+    if source.is_none() && accessors.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((
+        rest,
+        Access {
+            source,
+            accessors,
+            argument,
+            span: Spanned(Some(ref_span)),
+        },
+    ))
 }
 
 // Helper to wrap a term in a single-element source chain
 fn make_source_chain(term: Term) -> Chain {
     Chain {
         match_pattern: None,
+        bind_span: Spanned::default(),
         terms: vec![term],
     }
 }
@@ -1122,6 +1166,7 @@ fn function(input: Span) -> IResult<Span, Function> {
 }
 
 fn tail_call(input: Span) -> IResult<Span, Term> {
+    let start = input;
     let (input, _) = char('^')(input)?;
     let (input, ident) = opt(identifier)(input)?;
     let (input, accessors) = many0(preceded(
@@ -1138,11 +1183,13 @@ fn tail_call(input: Span) -> IResult<Span, Term> {
             identifier: ident,
             accessors,
             argument,
+            span: Spanned(Some(span_between(start, input))),
         }),
     ))
 }
 
 fn builtin(input: Span) -> IResult<Span, Builtin> {
+    let start = input;
     // Parse opening __
     let (input, _) = tag("__")(input)?;
 
@@ -1161,6 +1208,10 @@ fn builtin(input: Span) -> IResult<Span, Builtin> {
     // Parse closing __
     let (input, _) = tag("__")(input)?;
 
+    // The span covers just the `__name__` reference (not the argument), so hover and
+    // undefined-builtin diagnostics land precisely on the builtin.
+    let name_span = span_between(start, input);
+
     // Parse optional argument [...] (same as access)
     let (input, argument) = opt(call_argument)(input)?;
 
@@ -1169,6 +1220,7 @@ fn builtin(input: Span) -> IResult<Span, Builtin> {
         Builtin {
             name: trimmed.to_string(),
             argument,
+            span: Spanned(Some(name_span)),
         },
     ))
 }
@@ -1243,6 +1295,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 source: Some(AccessSource::Ripple),
                 accessors: vec![],
                 argument: None,
+                span: Spanned::default(),
             }))))
         }),
     ))(input)
@@ -1342,7 +1395,9 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         map(char('*'), |_| Match::Star),
         map(char('_'), |_| Match::Placeholder),
         // Identifier must come last (since it's more general)
-        map(identifier, Match::Identifier),
+        map(spanned(identifier), |(span, name)| {
+            Match::Identifier(name, Spanned(Some(span)))
+        }),
     ))(input)
 }
 
@@ -1417,6 +1472,7 @@ fn reference_term(input: Span) -> IResult<Span, Term> {
                     source: Some(AccessSource::Self_),
                     accessors: vec![],
                     argument: None,
+                    span: Spanned::default(),
                 }))
             }),
             // &__builtin__ - reference a builtin without calling it
@@ -1483,17 +1539,19 @@ fn chain(input: Span) -> IResult<Span, Chain> {
         // Match pattern: pattern = chain_inner
         map(
             pair(
-                terminated(match_pattern, tuple((ws1, char('='), ws1))),
+                terminated(spanned(match_pattern), tuple((ws1, char('='), ws1))),
                 chain_inner,
             ),
-            |(match_pattern, terms)| Chain {
+            |((bind_span, match_pattern), terms)| Chain {
                 match_pattern: Some(match_pattern),
+                bind_span: Spanned(Some(bind_span)),
                 terms,
             },
         ),
         // Plain chain
         map(chain_inner, |terms| Chain {
             match_pattern: None,
+            bind_span: Spanned::default(),
             terms,
         }),
     ))(input)
@@ -1519,7 +1577,7 @@ fn expression(input: Span) -> IResult<Span, Expression> {
 fn type_alias(input: Span) -> IResult<Span, Statement> {
     map(
         tuple((
-            type_name,
+            spanned(type_name),
             opt(delimited(
                 char('<'),
                 separated_list1(tuple((ws0, char(','), ws0)), type_name),
@@ -1527,8 +1585,9 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
             )),
             preceded(tuple((ws0, char('='), ws0)), type_definition),
         )),
-        |(name, type_parameters, type_definition)| Statement::TypeAlias {
+        |((name_span, name), type_parameters, type_definition)| Statement::TypeAlias {
             name,
+            name_span: Spanned(Some(name_span)),
             type_parameters: type_parameters.unwrap_or_default(),
             type_definition,
         },
@@ -1663,6 +1722,50 @@ mod tests {
         let source = "#{ [1, 2] ~> __add__ }";
         let result = parse(source);
         assert!(result.is_ok());
+    }
+
+    /// The slice of `source` covered by a span.
+    fn slice(source: &str, span: SourceSpan) -> &str {
+        &source[span.offset..span.offset + span.length]
+    }
+
+    #[test]
+    fn parse_populates_access_spans() {
+        let source = "point ~> double";
+        let program = parse(source).unwrap();
+        let Statement::Expression(expr) = &program.statements[0] else {
+            panic!("expected expression statement");
+        };
+        let terms = &expr.chains[0].terms;
+        let Term::Access(a0) = &terms[0] else {
+            panic!("expected access term");
+        };
+        assert_eq!(slice(source, a0.span.get().unwrap()), "point");
+        let Term::Access(a1) = &terms[1] else {
+            panic!("expected access term");
+        };
+        assert_eq!(slice(source, a1.span.get().unwrap()), "double");
+    }
+
+    #[test]
+    fn parse_populates_binding_span() {
+        let source = "total = 5";
+        let program = parse(source).unwrap();
+        let Statement::Expression(expr) = &program.statements[0] else {
+            panic!("expected expression statement");
+        };
+        let span = expr.chains[0].bind_span.get().unwrap();
+        assert_eq!(slice(source, span), "total");
+    }
+
+    #[test]
+    fn parse_populates_type_alias_name_span() {
+        let source = "'point = Point[x: 'int, y: 'int]";
+        let program = parse(source).unwrap();
+        let Statement::TypeAlias { name_span, .. } = &program.statements[0] else {
+            panic!("expected type alias statement");
+        };
+        assert_eq!(slice(source, name_span.get().unwrap()), "'point");
     }
 
     #[test]

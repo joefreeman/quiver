@@ -1,3 +1,28 @@
+use crate::parser::SourceSpan;
+
+/// An optional source span attached to an AST node.
+///
+/// Its `PartialEq`/`Eq` are intentionally always-true: attaching spans must not change the
+/// structural equality of ASTs, so the parser's `assert_eq!`-style tests keep passing
+/// regardless of source position. Spans are populated by [`crate::parse`] and consumed by
+/// the language server.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Spanned(pub Option<SourceSpan>);
+
+impl Spanned {
+    pub fn get(self) -> Option<SourceSpan> {
+        self.0
+    }
+}
+
+impl PartialEq for Spanned {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Spanned {}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Statement>,
@@ -7,6 +32,8 @@ pub struct Program {
 pub enum Statement {
     TypeAlias {
         name: String,
+        /// Span of the alias name (`'point` in `'point = ...`), for symbols/go-to-definition.
+        name_span: Spanned,
         type_parameters: Vec<String>,
         type_definition: Type,
     },
@@ -42,6 +69,9 @@ pub struct Expression {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
     pub match_pattern: Option<Match>,
+    /// Span of the binding pattern (the `x` in `x = ...`), for go-to-definition and symbols.
+    /// `None` when the chain has no binding.
+    pub bind_span: Spanned,
     pub terms: Vec<Term>,
 }
 
@@ -73,6 +103,18 @@ pub enum Term {
 }
 
 impl Term {
+    /// The source span of this term, when it is an addressable node (a reference,
+    /// builtin, or tail call). Used by the compiler to locate errors and by the language
+    /// server for hover/go-to-definition.
+    pub fn span(&self) -> Option<SourceSpan> {
+        match self {
+            Term::Access(access) => access.span.get(),
+            Term::Builtin(builtin) => builtin.span.get(),
+            Term::TailCall(tail_call) => tail_call.span.get(),
+            _ => None,
+        }
+    }
+
     /// Returns true if this is a bare ripple placeholder (`~`)
     pub fn is_bare_ripple(&self) -> bool {
         matches!(
@@ -81,6 +123,7 @@ impl Term {
                 source: Some(AccessSource::Ripple),
                 accessors,
                 argument: None,
+                ..
             }) if accessors.is_empty()
         )
     }
@@ -139,6 +182,8 @@ pub struct Access {
     pub source: Option<AccessSource>,
     pub accessors: Vec<AccessPath>,
     pub argument: Option<Vec<TupleField>>,
+    /// Span of the access (reference), for hover and go-to-definition.
+    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -151,6 +196,8 @@ pub enum AccessPath {
 pub struct Builtin {
     pub name: String,
     pub argument: Option<Vec<TupleField>>,
+    /// Span of the builtin reference, for hover.
+    pub span: Spanned,
 }
 
 /// Partial pattern field: (field_name, optional_nested_pattern)
@@ -168,11 +215,15 @@ pub struct TailCall {
     pub identifier: Option<String>,
     pub accessors: Vec<AccessPath>,
     pub argument: Option<Vec<TupleField>>,
+    /// Span of the tail call, for hover.
+    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Match {
-    Identifier(String),
+    /// A binding identifier (`x` in `[x, y] = ...` or `~> =x`). The span covers the
+    /// identifier itself, for go-to-definition and hover on pattern bindings.
+    Identifier(String, Spanned),
     Literal(Literal),
     Tuple(MatchTuple),
     Partial(PartialPattern),
