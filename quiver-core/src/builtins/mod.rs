@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 pub mod binary;
 pub mod integer;
+pub mod io;
 pub mod math;
 
 /// Result of a builtin function execution
@@ -156,6 +157,22 @@ impl<E: Effect> BuiltinRegistry<E> {
         result: TypeSpec,
     ) {
         self.functions.insert(name, (impl_fn, param, result));
+    }
+
+    /// Attach (replace) the implementation of an already-registered builtin, keeping its
+    /// signature. This is how an executing host backs a builtin whose *signature* is part of the
+    /// universal contract but whose *implementation* it provides — e.g. the IO builtins, whose
+    /// signatures are registered everywhere (via [`core_modules`]) but whose runtime differs per
+    /// host (native io-uring, a web backend, or none in a type-checker).
+    pub fn attach_implementation(&mut self, name: &str, impl_fn: BuiltinFn<E>) {
+        match self.functions.get_mut(name) {
+            Some((existing, _, _)) => *existing = impl_fn,
+            None => debug_assert!(
+                false,
+                "attaching an implementation for unregistered builtin `{name}`; its signature \
+                 must be registered first (see core_modules)"
+            ),
+        }
     }
 
     /// Merge another registry into this one
@@ -319,11 +336,15 @@ pub fn register_integer_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "integer_popcount", integer::builtin_integer_popcount, TypeSpec::Integer => TypeSpec::Integer);
 }
 
-/// Get all core builtin modules
+/// Get all core builtin modules. This establishes the full builtin *contract* every host shares:
+/// the pure builtins (math/binary/integer) with their universal implementations, and the IO
+/// builtins' signatures (with placeholder implementations that executing hosts replace via
+/// [`BuiltinRegistry::attach_implementation`]).
 pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![
         register_math_builtins,
         register_binary_builtins,
         register_integer_builtins,
+        io::register_io_signatures,
     ]
 }

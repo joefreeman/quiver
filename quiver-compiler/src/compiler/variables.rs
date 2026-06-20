@@ -114,12 +114,12 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::Equality => {}
             ast::Term::Not => {}
-            ast::Term::Spawn(term) => {
+            ast::Term::Spawn(term, _) => {
                 self.visit_term(term);
             }
             ast::Term::Self_ => {}
             ast::Term::Process(_) => {}
-            ast::Term::Select(sources) => {
+            ast::Term::Select(sources, _) => {
                 // Visit all source chains (if explicit sources provided)
                 if let Some(sources) = sources {
                     for source in sources {
@@ -180,8 +180,8 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Match::Partial(partial) => {
                 // Visit nested patterns in partial pattern fields
-                for (_, nested_pattern) in &partial.fields {
-                    if let Some(nested_pattern) = nested_pattern {
+                for field in &partial.fields {
+                    if let Some(nested_pattern) = &field.pattern {
                         self.visit_match(nested_pattern);
                     }
                 }

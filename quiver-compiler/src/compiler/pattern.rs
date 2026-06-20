@@ -715,7 +715,7 @@ fn analyze_partial_pattern(
     let field_names: Vec<String> = partial_pattern
         .fields
         .iter()
-        .map(|(name, _)| name.clone())
+        .map(|f| f.name.clone())
         .collect();
 
     // Find types that have all required fields (and optionally matching type name)
@@ -779,7 +779,9 @@ fn analyze_partial_pattern(
         };
 
         let mut bindings = Vec::new();
-        for (i, (field_name, nested_pattern)) in partial_pattern.fields.iter().enumerate() {
+        for (i, partial_field) in partial_pattern.fields.iter().enumerate() {
+            let field_name = &partial_field.name;
+            let nested_pattern = &partial_field.pattern;
             let idx = field_indices[i];
             let field_type_id = fields[idx].1;
             let mut field_path = path.clone();

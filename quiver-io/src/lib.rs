@@ -4,6 +4,6 @@ pub mod native_backend;
 pub mod network;
 
 pub use effects::NativeEffect;
-pub use file::register_file_builtins;
+pub use file::attach_file_builtins;
 pub use native_backend::NativeEffectBackend;
-pub use network::register_network_builtins;
+pub use network::attach_network_builtins;

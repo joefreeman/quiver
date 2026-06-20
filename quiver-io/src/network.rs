@@ -1,5 +1,5 @@
 use crate::effects::NativeEffect;
-use quiver_core::builtins::{BuiltinResult, TypeSpec};
+use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult};
 use quiver_core::error::Error;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId};
@@ -531,106 +531,23 @@ pub fn builtin_tcp_listener_close(
 }
 
 /// Register network builtins (TCP operations)
-pub fn register_network_builtins(
-    registry: &mut quiver_core::builtins::BuiltinRegistry<NativeEffect>,
-) {
-    // dns_resolve accepts binary (UTF-8 hostname)
-    let hostname_tuple = TypeSpec::Tuple(None, vec![(None, TypeSpec::Binary)]);
-
-    // tcp_connect accepts raw IP binary (4 bytes IPv4, 16 bytes IPv6)
-    let ip_port_tuple = TypeSpec::Tuple(
-        None,
-        vec![(None, TypeSpec::Binary), (None, TypeSpec::Integer)],
-    );
-    let int_int_tuple = TypeSpec::Tuple(
-        None,
-        vec![(None, TypeSpec::Integer), (None, TypeSpec::Integer)],
-    );
-
-    // Resource types (opaque identifiers)
-    let dns_resolver_resource = TypeSpec::Resource("DnsResolver".to_string());
-    let tcp_socket_resource = TypeSpec::Resource("TcpSocket".to_string());
-    let tcp_listener_resource = TypeSpec::Resource("TcpListener".to_string());
-    let bin_type = TypeSpec::Binary;
-    let int_type = TypeSpec::Integer;
-    let ok_type = TypeSpec::Tuple(Some("Ok"), vec![]);
-    let nil_type = TypeSpec::Tuple(None, vec![]);
-
-    // DNS resolution (iterator-based)
-    registry.register(
-        "dns_resolve".to_string(),
-        builtin_dns_resolve,
-        hostname_tuple.clone(),
-        dns_resolver_resource.clone(),
-    );
-    registry.register(
-        "dns_next".to_string(),
-        builtin_dns_next,
-        TypeSpec::Tuple(None, vec![(None, dns_resolver_resource.clone())]),
-        TypeSpec::Union(vec![bin_type.clone(), nil_type.clone()]),
-    );
-    registry.register(
-        "dns_close".to_string(),
-        builtin_dns_close,
-        TypeSpec::Tuple(None, vec![(None, dns_resolver_resource)]),
-        ok_type.clone(),
-    );
-
-    // Connection and listener creation
-    registry.register(
-        "tcp_connect".to_string(),
-        builtin_tcp_connect,
-        ip_port_tuple,
-        tcp_socket_resource.clone(),
-    );
-    registry.register(
-        "tcp_listen".to_string(),
-        builtin_tcp_listen,
-        int_int_tuple,
-        tcp_listener_resource.clone(),
-    );
-
-    // Socket operations
-    // tcp_socket_read([socket, length]) -> bin
-    registry.register(
-        "tcp_socket_read".to_string(),
-        builtin_tcp_socket_read,
-        TypeSpec::Tuple(
-            None,
-            vec![
-                (None, tcp_socket_resource.clone()),
-                (None, int_type.clone()),
-            ],
-        ),
-        bin_type.clone(),
-    );
-    registry.register(
-        "tcp_socket_write".to_string(),
-        builtin_tcp_socket_write,
-        TypeSpec::Tuple(
-            None,
-            vec![(None, tcp_socket_resource.clone()), (None, bin_type)],
-        ),
-        int_type,
-    );
-    registry.register(
-        "tcp_socket_close".to_string(),
-        builtin_tcp_socket_close,
-        TypeSpec::Tuple(None, vec![(None, tcp_socket_resource.clone())]),
-        ok_type.clone(),
-    );
-
-    // Listener operations
-    registry.register(
-        "tcp_listener_accept".to_string(),
-        builtin_tcp_listener_accept,
-        TypeSpec::Tuple(None, vec![(None, tcp_listener_resource.clone())]),
-        tcp_socket_resource,
-    );
-    registry.register(
-        "tcp_listener_close".to_string(),
-        builtin_tcp_listener_close,
-        TypeSpec::Tuple(None, vec![(None, tcp_listener_resource)]),
-        ok_type,
-    );
+/// Attach the native (io-uring/socket2) implementations of the network builtins. Their signatures
+/// are part of the universal contract (registered everywhere via `core_modules`); this backs them
+/// with a real runtime for an executing host.
+pub fn attach_network_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
+    let implementations: [(&str, BuiltinFn<NativeEffect>); 10] = [
+        ("dns_resolve", builtin_dns_resolve),
+        ("dns_next", builtin_dns_next),
+        ("dns_close", builtin_dns_close),
+        ("tcp_connect", builtin_tcp_connect),
+        ("tcp_listen", builtin_tcp_listen),
+        ("tcp_socket_read", builtin_tcp_socket_read),
+        ("tcp_socket_write", builtin_tcp_socket_write),
+        ("tcp_socket_close", builtin_tcp_socket_close),
+        ("tcp_listener_accept", builtin_tcp_listener_accept),
+        ("tcp_listener_close", builtin_tcp_listener_close),
+    ];
+    for (name, impl_fn) in implementations {
+        registry.attach_implementation(name, impl_fn);
+    }
 }

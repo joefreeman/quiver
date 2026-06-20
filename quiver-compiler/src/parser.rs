@@ -410,12 +410,14 @@ fn string_term(input: Span) -> IResult<Span, Term> {
                 name: Some("Str".to_string()),
                 fields: vec![TupleField {
                     name: None,
+                    name_span: Spanned::default(),
                     value: FieldValue::Chain(Chain {
                         match_pattern: None,
                         bind_span: Spanned::default(),
                         terms: vec![Term::Literal(Literal::Binary(bytes))],
                     }),
                 }],
+                span: Spanned::default(),
             })
         },
     )(input)
@@ -524,11 +526,19 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
     alt((
         // Field with nested pattern: name: pattern
         map(
-            tuple((identifier, ws0, char(':'), ws0, nested_pattern)),
-            |(name, _, _, _, pattern)| (name, Some(pattern)),
+            tuple((spanned(identifier), ws0, char(':'), ws0, nested_pattern)),
+            |((span, name), _, _, _, pattern)| PartialPatternField {
+                name,
+                name_span: Spanned(Some(span)),
+                pattern: Some(pattern),
+            },
         ),
         // Simple field name binding
-        map(identifier, |name| (name, None)),
+        map(spanned(identifier), |(span, name)| PartialPatternField {
+            name,
+            name_span: Spanned(Some(span)),
+            pattern: None,
+        }),
     ))(input)
 }
 
@@ -907,22 +917,30 @@ fn type_definition(input: Span) -> IResult<Span, Type> {
 // Parse access patterns: identifier, $, ~, %import, with optional .field accessors and [args]
 fn access(input: Span) -> IResult<Span, Access> {
     let start = input;
-    let (after_ref, (source, accessors)) = tuple((
-        opt(alt((
-            map(char('$'), |_| AccessSource::Parameter),
-            map(char('~'), |_| AccessSource::Ripple),
-            // Import: %module or %module/submodule
-            map(import, AccessSource::Import),
-            map(identifier, AccessSource::Identifier),
-        ))),
-        many0(preceded(
-            char('.'),
-            alt((
-                map(digit1, |s: Span| AccessPath::Index(s.parse().unwrap())),
-                map(identifier, AccessPath::Field),
-            )),
-        )),
-    ))(input)?;
+    let (after_source, source) = opt(alt((
+        map(char('$'), |_| AccessSource::Parameter),
+        map(char('~'), |_| AccessSource::Ripple),
+        // Import: %module or %module/submodule
+        map(import, AccessSource::Import),
+        map(identifier, AccessSource::Identifier),
+    )))(input)?;
+    // The base span covers just the `%util` / `$` / variable, before any accessors.
+    let base_span = span_between(start, after_source);
+
+    // Each accessor carries its own span (`.triple` → the `triple`), so the language server can
+    // hover/navigate components separately.
+    let (after_ref, accessors_with_spans) = many0(preceded(char('.'), |i| {
+        let acc_start = i;
+        let (rest, accessor) = alt((
+            map(digit1, |s: Span| AccessPath::Index(s.parse().unwrap())),
+            map(identifier, AccessPath::Field),
+        ))(i)?;
+        Ok((
+            rest,
+            (accessor, Spanned(Some(span_between(acc_start, rest)))),
+        ))
+    }))(after_source)?;
+    let (accessors, accessor_spans): (Vec<_>, Vec<_>) = accessors_with_spans.into_iter().unzip();
 
     // The span covers just the reference (`%math.add`, `foo`, `$.x`), not a trailing call
     // argument, so hover and go-to-definition land precisely on the referenced symbol.
@@ -943,7 +961,9 @@ fn access(input: Span) -> IResult<Span, Access> {
         Access {
             source,
             accessors,
+            accessor_spans,
             argument,
+            base_span: Spanned(Some(base_span)),
             span: Spanned(Some(ref_span)),
         },
     ))
@@ -973,7 +993,7 @@ fn identifier_to_type(ident: String) -> Type {
 
 // Wrap a term as a single-source select: ![term]
 fn single_source(term: Term) -> Term {
-    Term::Select(Some(vec![make_source_chain(term)]))
+    Term::Select(Some(vec![make_source_chain(term)]), Spanned::default())
 }
 
 // Create a receive function from a type and optional body
@@ -983,6 +1003,7 @@ fn make_receive(param_type: Type, body: Option<Block>) -> Term {
         parameter_type: Some(param_type),
         return_type: None,
         body,
+        span: Spanned::default(),
     };
     single_source(Term::Function(func))
 }
@@ -1001,7 +1022,8 @@ fn make_receive(param_type: Type, body: Option<Block>) -> Term {
 // - !@p              - Single source (spawn)
 // - !1000            - Single source (timeout literal)
 fn select_term(input: Span) -> IResult<Span, Term> {
-    preceded(
+    let start = input;
+    let (rest, term) = preceded(
         char('!'),
         alt((
             // [...] - Tuple of source chains (explicit sources)
@@ -1011,7 +1033,7 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                     separated_list0(tuple((wsc, char(','), wsc)), chain),
                     pair(wsc, char(']')),
                 ),
-                |sources| Term::Select(Some(sources)),
+                |sources| Term::Select(Some(sources), Spanned::default()),
             ),
             // (type) with optional body - parenthesized receive type
             map(
@@ -1037,9 +1059,15 @@ fn select_term(input: Span) -> IResult<Span, Term> {
             // literal (timeout)
             map(literal, |l| single_source(Term::Literal(l))),
             // nothing - bare ! for postfix form (uses chained value)
-            success(Term::Select(None)),
+            success(Term::Select(None, Spanned::default())),
         )),
-    )(input)
+    )(input)?;
+    // Attach the `!` span to whatever select form was produced, for hover.
+    let term = match term {
+        Term::Select(sources, _) => Term::Select(sources, Spanned(Some(span_between(start, rest)))),
+        other => other,
+    };
+    Ok((rest, term))
 }
 
 fn import(input: Span) -> IResult<Span, Vec<String>> {
@@ -1050,25 +1078,29 @@ fn tuple_field(input: Span) -> IResult<Span, TupleField> {
     alt((
         // Named field with chain: name: chain
         map(
-            separated_pair(identifier, tuple((char(':'), ws1)), chain),
-            |(name, chain_value)| TupleField {
+            separated_pair(spanned(identifier), tuple((char(':'), ws1)), chain),
+            |((span, name), chain_value)| TupleField {
                 name: Some(name),
+                name_span: Spanned(Some(span)),
                 value: FieldValue::Chain(chain_value),
             },
         ),
         // Spread with identifier: ...identifier
         map(preceded(tag("..."), identifier), |id| TupleField {
             name: None,
+            name_span: Spanned::default(),
             value: FieldValue::Spread(Some(id)),
         }),
         // Spread chained value: ...
         map(tag("..."), |_| TupleField {
             name: None,
+            name_span: Spanned::default(),
             value: FieldValue::Spread(None),
         }),
         // Unnamed chain: chain
         map(chain, |chain_value| TupleField {
             name: None,
+            name_span: Spanned::default(),
             value: FieldValue::Chain(chain_value),
         }),
     ))(input)
@@ -1082,7 +1114,8 @@ fn tuple_field_list(input: Span) -> IResult<Span, Vec<TupleField>> {
 }
 
 fn tuple_term(input: Span) -> IResult<Span, Tuple> {
-    alt((
+    let start = input;
+    let (rest, mut tuple_value) = alt((
         // TupleName[...] - uppercase named tuple with fields
         map(
             tuple((
@@ -1092,12 +1125,17 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
             |(name, fields)| Tuple {
                 name: Some(name),
                 fields,
+                span: Spanned::default(),
             },
         ),
         // [...] - unnamed tuple with fields
         map(
             delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
-            |fields| Tuple { name: None, fields },
+            |fields| Tuple {
+                name: None,
+                fields,
+                span: Spanned::default(),
+            },
         ),
         // TupleName - bare tuple name without fields
         // Only parse if not followed by '(' (which would indicate a partial pattern)
@@ -1109,9 +1147,12 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
             |(name, _)| Tuple {
                 name: Some(name),
                 fields: vec![],
+                span: Spanned::default(),
             },
         ),
-    ))(input)
+    ))(input)?;
+    tuple_value.span = Spanned(Some(span_between(start, rest)));
+    Ok((rest, tuple_value))
 }
 
 fn branch(input: Span) -> IResult<Span, Branch> {
@@ -1142,7 +1183,8 @@ fn block(input: Span) -> IResult<Span, Block> {
 }
 
 fn function(input: Span) -> IResult<Span, Function> {
-    map(
+    let start = input;
+    let (rest, mut func) = map(
         preceded(
             char('#'),
             tuple((
@@ -1161,8 +1203,11 @@ fn function(input: Span) -> IResult<Span, Function> {
             parameter_type,
             return_type,
             body,
+            span: Spanned::default(),
         },
-    )(input)
+    )(input)?;
+    func.span = Spanned(Some(span_between(start, rest)));
+    Ok((rest, func))
 }
 
 fn tail_call(input: Span) -> IResult<Span, Term> {
@@ -1234,15 +1279,20 @@ fn not_term(input: Span) -> IResult<Span, Term> {
 }
 
 fn spawn_term(input: Span) -> IResult<Span, Term> {
-    alt((
+    let start = input;
+    let (rest, term) = alt((
         // @{ ... } - Spawn parameterless function (sugar for @#{ ... })
         map(preceded(pair(char('@'), opt(ws1)), block), |body| {
-            Term::Spawn(Box::new(Term::Function(Function {
-                type_parameters: vec![],
-                parameter_type: None,
-                return_type: None,
-                body: Some(body),
-            })))
+            Term::Spawn(
+                Box::new(Term::Function(Function {
+                    type_parameters: vec![],
+                    parameter_type: None,
+                    return_type: None,
+                    body: Some(body),
+                    span: Spanned::default(),
+                })),
+                Spanned::default(),
+            )
         }),
         // @(type) { ... } - Spawn with parenthesized type (sugar for @#(type) { ... })
         map(
@@ -1254,12 +1304,16 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 preceded(opt(ws1), block),
             )),
             |(param_type, body)| {
-                Term::Spawn(Box::new(Term::Function(Function {
-                    type_parameters: vec![],
-                    parameter_type: Some(param_type),
-                    return_type: None,
-                    body: Some(body),
-                })))
+                Term::Spawn(
+                    Box::new(Term::Function(Function {
+                        type_parameters: vec![],
+                        parameter_type: Some(param_type),
+                        return_type: None,
+                        body: Some(body),
+                        span: Spanned::default(),
+                    })),
+                    Spanned::default(),
+                )
             },
         ),
         // @'type { ... } - Spawn with named type (sugar for @#'type { ... })
@@ -1269,36 +1323,55 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 preceded(opt(ws1), block),
             )),
             |(param_type, body)| {
-                Term::Spawn(Box::new(Term::Function(Function {
-                    type_parameters: vec![],
-                    parameter_type: Some(param_type),
-                    return_type: None,
-                    body: Some(body),
-                })))
+                Term::Spawn(
+                    Box::new(Term::Function(Function {
+                        type_parameters: vec![],
+                        parameter_type: Some(param_type),
+                        return_type: None,
+                        body: Some(body),
+                        span: Spanned::default(),
+                    })),
+                    Spanned::default(),
+                )
             },
         ),
         // @[...] { ... } - Spawn with tuple type (sugar for @#[...] { ... })
         map(
             tuple((preceded(char('@'), tuple_type), preceded(opt(ws1), block))),
             |(tuple_ty, body)| {
-                Term::Spawn(Box::new(Term::Function(Function {
-                    type_parameters: vec![],
-                    parameter_type: Some(tuple_ty),
-                    return_type: None,
-                    body: Some(body),
-                })))
+                Term::Spawn(
+                    Box::new(Term::Function(Function {
+                        type_parameters: vec![],
+                        parameter_type: Some(tuple_ty),
+                        return_type: None,
+                        body: Some(body),
+                        span: Spanned::default(),
+                    })),
+                    Spanned::default(),
+                )
             },
         ),
         // @<primary> - Match @ followed by optional primary (bare @ becomes @~)
         map(preceded(char('@'), opt(primary)), |opt_t| {
-            Term::Spawn(Box::new(opt_t.unwrap_or(Term::Access(Access {
-                source: Some(AccessSource::Ripple),
-                accessors: vec![],
-                argument: None,
-                span: Spanned::default(),
-            }))))
+            Term::Spawn(
+                Box::new(opt_t.unwrap_or(Term::Access(Access {
+                    source: Some(AccessSource::Ripple),
+                    accessors: vec![],
+                    accessor_spans: vec![],
+                    argument: None,
+                    base_span: Spanned::default(),
+                    span: Spanned::default(),
+                }))),
+                Spanned::default(),
+            )
         }),
-    ))(input)
+    ))(input)?;
+    // Attach the `@` span to the spawn, for hover (shows the process type).
+    let term = match term {
+        Term::Spawn(inner, _) => Term::Spawn(inner, Spanned(Some(span_between(start, rest)))),
+        other => other,
+    };
+    Ok((rest, term))
 }
 
 fn self_term(input: Span) -> IResult<Span, Term> {
@@ -1471,7 +1544,9 @@ fn reference_term(input: Span) -> IResult<Span, Term> {
                 Term::Reference(Some(Access {
                     source: Some(AccessSource::Self_),
                     accessors: vec![],
+                    accessor_spans: vec![],
                     argument: None,
+                    base_span: Spanned::default(),
                     span: Spanned::default(),
                 }))
             }),

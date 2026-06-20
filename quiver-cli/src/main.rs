@@ -23,8 +23,9 @@ pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver
         &quiver_core::builtins::core_modules(),
     );
     // Add I/O builtins from quiver-io
-    quiver_io::register_network_builtins(&mut registry);
-    quiver_io::register_file_builtins(&mut registry);
+    // Signatures came from `core_modules`; attach the native implementations.
+    quiver_io::attach_network_builtins(&mut registry);
+    quiver_io::attach_file_builtins(&mut registry);
     registry
 }
 

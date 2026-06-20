@@ -294,9 +294,8 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
 
 /// Collect the name and source span of every binding identifier in a pattern, recursing
 /// through tuple and partial sub-patterns. Used by the language server to index pattern
-/// bindings (destructuring, mid-chain `=x`, block branches) for hover/go-to-definition.
-/// Bare partial fields (`(x, y)`) bind by field name, which carries no span, so they are
-/// not indexed.
+/// bindings (destructuring, mid-chain `=x`, block branches, and bare partial fields like
+/// `(double)`) for hover/go-to-definition.
 /// Build a hover label from a base symbol and an accessor chain, e.g. `foo` + `[.bar]` →
 /// `foo.bar`, `$` + `[.0]` → `$.0`, `%math` + `[.add]` → `%math.add`.
 fn accessors_label(base: &str, accessors: &[ast::AccessPath]) -> String {
@@ -329,9 +328,16 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
             }
         }
         ast::Match::Partial(partial) => {
-            for (_, nested) in &partial.fields {
-                if let Some(nested) = nested {
-                    collect_binding_spans(nested, out);
+            for field in &partial.fields {
+                match &field.pattern {
+                    // `(x: pattern)` — the binding lives in the nested pattern; `x` only selects.
+                    Some(nested) => collect_binding_spans(nested, out),
+                    // `(x)` — binds the field by name; index it for go-to-definition.
+                    None => {
+                        if let Some(span) = field.name_span.get() {
+                            out.push((field.name.clone(), span));
+                        }
+                    }
                 }
             }
         }
@@ -509,20 +515,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Record an import reference at `span`, carrying the module's origin file (when openable)
-    /// so the language server can offer cross-file go-to-definition.
+    /// so the language server can offer cross-file go-to-definition, and the accessed `member`
+    /// (`%util.double` → `"double"`) so it can find references to an imported symbol.
     fn record_import(
         &mut self,
         span: Option<SourceSpan>,
         type_id: usize,
         label: Option<String>,
         origin: ModuleOrigin,
+        accessors: &[ast::AccessPath],
     ) {
         if let (Some(recorder), Some(span)) = (self.recorder.as_deref_mut(), span) {
             let definition_module = match origin {
                 ModuleOrigin::Path(path) => Some(path),
                 ModuleOrigin::Virtual => None,
             };
-            recorder.record_import(span, type_id, label, definition_module);
+            let member = match accessors.first() {
+                Some(ast::AccessPath::Field(name)) => Some(name.clone()),
+                _ => None,
+            };
+            recorder.record_import(span, type_id, label, definition_module, member);
         }
     }
 
@@ -784,6 +796,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     unreachable!("Spread should be handled by compile_tuple_with_spread")
                 }
             };
+            // Record the field label's type for hover (named source fields only) — e.g. a
+            // module's `[ double: #..., triple: #... ]` exposes each member's signature.
+            if let (Some(name), Some(span)) = (&field.name, field.name_span.get()) {
+                self.record_typed(
+                    Some(span),
+                    field_type,
+                    SymbolKind::Field,
+                    Some(name.clone()),
+                );
+            }
+
             field_types.push((field.name.clone(), field_type));
             field_provenances.push(field_prov);
         }
@@ -904,7 +927,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         receive_types: &mut Vec<usize>,
     ) -> Result<Option<usize>, Error> {
         match term {
-            ast::Term::Select(sources) => {
+            ast::Term::Select(sources, _) => {
                 // Extract receive types from all sources
                 let mut select_sources = Vec::new();
 
@@ -2035,7 +2058,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 && matches!(
                     terms.get(i + 1),
                     Some(ast::Term::Block(_))
-                        | Some(ast::Term::Select(_))
+                        | Some(ast::Term::Select(_, _))
                         | Some(ast::Term::Match(_))
                 );
 
@@ -2074,6 +2097,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // and hover are recorded inside `compile_match`, which sees every binding site
         // (top-level `name = ...`, destructuring, mid-chain `=x`, and block branches).
         if let Some(pattern) = chain.match_pattern {
+            // Index destructured imports (`(double) = %util`) as references to the module's
+            // members, before the pattern's own bindings are recorded.
+            if let [term] = terms.as_slice() {
+                self.record_destructured_import(term, &pattern);
+            }
             let ty = self.compile_match(
                 pattern,
                 result_type,
@@ -2085,6 +2113,41 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Ok((ty, current_prov))
         } else {
             Ok((result_type, current_prov))
+        }
+    }
+
+    /// Record a destructured import (`(double) = %util`) as references to the module's members,
+    /// so find-references on a member includes its destructure sites. Only the partial form
+    /// `(a, b) = %module` (the import idiom) is recognized; the right-hand side must be a bare
+    /// module import.
+    fn record_destructured_import(&mut self, term: &ast::Term, pattern: &ast::Match) {
+        if self.recorder.is_none() {
+            return;
+        }
+        let ast::Term::Access(access) = term else {
+            return;
+        };
+        let Some(ast::AccessSource::Import(module)) = &access.source else {
+            return;
+        };
+        if !access.accessors.is_empty() || access.argument.is_some() {
+            return;
+        }
+        let ast::Match::Partial(partial) = pattern else {
+            return;
+        };
+        let Ok(resolved) = self.resolver.resolve(&self.current_package, module) else {
+            return;
+        };
+        let ModuleOrigin::Path(module_path) = resolved.origin else {
+            return;
+        };
+        for field in &partial.fields {
+            if let (Some(span), Some(recorder)) =
+                (field.name_span.get(), self.recorder.as_deref_mut())
+            {
+                recorder.record_import_member_ref(span, module_path.clone(), field.name.clone());
+            }
         }
     }
 
@@ -2652,8 +2715,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(Some(ty))
     }
 
-    /// Compile access expression: .x, $.x, foo.x, etc. Records the resolved type (and the
-    /// referenced symbol) for the LSP, then delegates to the implementation.
+    /// Compile access expression: .x, $.x, foo.x, etc. Records each component (the base symbol
+    /// and each accessor) for the LSP, then delegates to the implementation.
     fn compile_access(
         &mut self,
         access: ast::Access,
@@ -2661,36 +2724,95 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
     ) -> Result<(usize, Provenance), Error> {
-        let access_span = access.span.get();
-        // Capture what's needed to record the reference before `access` is moved into the
-        // inner compiler. The label includes the accessor path so hover on `$.0` or
-        // `foo.bar` shows the whole path, not just the base symbol.
-        let ref_name = match &access.source {
-            Some(ast::AccessSource::Identifier(name)) => Some(name.clone()),
-            _ => None,
-        };
-        let is_parameter = matches!(&access.source, Some(ast::AccessSource::Parameter));
-        let label = match &access.source {
-            Some(ast::AccessSource::Identifier(name)) => {
-                Some(accessors_label(name, &access.accessors))
-            }
-            Some(ast::AccessSource::Parameter) => Some(accessors_label("$", &access.accessors)),
-            _ => None,
-        };
+        // Capture the components before `access` is moved into the inner compiler.
+        let source = access.source.clone();
+        let accessors = access.accessors.clone();
+        let base_span = access.base_span.get();
+        let accessor_spans: Vec<Option<SourceSpan>> =
+            access.accessor_spans.iter().map(|s| s.get()).collect();
 
         let result =
             self.compile_access_inner(access, value_type, value_provenance, ripple_context);
 
-        if let Ok((type_id, _)) = &result
-            && let Some(label) = label
-        {
-            if let Some(name) = &ref_name {
-                self.record_reference(access_span, name, label, *type_id);
-            } else if is_parameter {
-                self.record_typed(access_span, *type_id, SymbolKind::Parameter, Some(label));
+        // Record each component on its own span (`%util` vs `triple`, `foo` vs `bar`, `$` vs `0`)
+        // so hover/go-to-definition resolve precisely. This is the sole recorder for accesses.
+        if let Ok((ty, _)) = &result {
+            self.record_access_components(&source, &accessors, base_span, &accessor_spans);
+            // Bare ripple `~`: hover shows the flowing value's type (the access result).
+            if accessors.is_empty() && matches!(source, Some(ast::AccessSource::Ripple)) {
+                self.record_typed(base_span, *ty, SymbolKind::Expression, None);
             }
         }
         result
+    }
+
+    /// Record a hover/navigation entry for each component of an access chain: the base symbol
+    /// (its own type, with go-to-definition) and each accessor (the type after it).
+    fn record_access_components(
+        &mut self,
+        source: &Option<ast::AccessSource>,
+        accessors: &[ast::AccessPath],
+        base_span: Option<SourceSpan>,
+        accessor_spans: &[Option<SourceSpan>],
+    ) {
+        if self.recorder.is_none() {
+            return;
+        }
+
+        // Record the base, and capture its type for resolving accessor types below.
+        let mut import_origin = None;
+        let (base_type, base_name) = match source {
+            Some(ast::AccessSource::Identifier(name)) => {
+                let Some((ty, _)) = scopes::lookup_variable(&self.scopes, name, &[]) else {
+                    return;
+                };
+                self.record_reference(base_span, name, name.clone(), ty);
+                (ty, name.clone())
+            }
+            Some(ast::AccessSource::Parameter) => {
+                let Ok((ty, _)) = scopes::get_function_parameter(&self.scopes) else {
+                    return;
+                };
+                self.record_typed(base_span, ty, SymbolKind::Parameter, Some("$".to_string()));
+                (ty, "$".to_string())
+            }
+            Some(ast::AccessSource::Import(module)) => {
+                let Ok((_, _, ty, origin)) = self.resolve_import(module, &[]) else {
+                    return;
+                };
+                let label = format!("%{}", module.join("/"));
+                // Base = the module itself: hover its type, go-to-def to its file, refs module-level.
+                self.record_import(base_span, ty, Some(label.clone()), origin.clone(), &[]);
+                import_origin = Some(origin);
+                (ty, label)
+            }
+            _ => return,
+        };
+
+        // Each accessor: the type after applying it, hovered on its own span.
+        for (i, accessor) in accessors.iter().enumerate() {
+            let Some(span) = accessor_spans.get(i).copied().flatten() else {
+                continue;
+            };
+            let Ok(ty) = type_queries::resolve_accessor_type(
+                self.program,
+                base_type,
+                &accessors[..=i],
+                &base_name,
+            ) else {
+                continue;
+            };
+            let label = match accessor {
+                ast::AccessPath::Field(name) => name.clone(),
+                ast::AccessPath::Index(index) => index.to_string(),
+            };
+            // The first accessor of an import is the module member: keep its go-to-def/refs.
+            if let (Some(origin), 0) = (&import_origin, i) {
+                self.record_import(Some(span), ty, Some(label), origin.clone(), accessors);
+            } else {
+                self.record_typed(Some(span), ty, SymbolKind::Field, Some(label));
+            }
+        }
     }
 
     fn compile_access_inner(
@@ -3008,16 +3130,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     &module_name,
                 )?;
 
-                // Resolve import type first (no code emission yet) to check if callable
-                let (cached, resolved_value, accessed_type, origin) =
+                // Resolve import type first (no code emission yet) to check if callable. The
+                // hover/go-to-definition entries are recorded per component by the caller
+                // (`record_access_components`), so nothing is recorded here.
+                let (cached, resolved_value, accessed_type, _origin) =
                     self.resolve_import(&module, &access.accessors)?;
-
-                // Record the resolved import (or member) signature at its span, so hover
-                // shows e.g. `%math.add: #['int, 'int] -> 'int`, with the origin file so
-                // go-to-definition can jump into the module. Uses `accessed_type` (the
-                // member's own type), not the result of applying any argument.
-                let label = accessors_label(&module_name, &access.accessors);
-                self.record_import(access.span.get(), accessed_type, Some(label), origin);
 
                 let is_callable = matches!(
                     self.program.lookup_type(accessed_type),
@@ -3194,6 +3311,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Tuple(tuple) => {
+                let tuple_span = tuple.span.get();
                 // Always flow the piped value into the tuple's fields: each field receives a
                 // copy as its input, so a callable field is called with it (and `&` is needed
                 // to pass a callable by value), while non-callable fields drop it. The original
@@ -3213,6 +3331,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 let (ty, tuple_prov) =
                     self.compile_tuple(tuple.name, tuple.fields, ripple_context_param)?;
+                // Hover on the tuple (its `[` / name) shows the constructed composite type.
+                self.record_typed(tuple_span, ty, SymbolKind::Expression, None);
                 // Return tuple provenance for field access tracking
                 Ok((ty, tuple_prov))
             }
@@ -3249,7 +3369,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
 
+                let span = func.span.get();
                 let function_type = self.compile_function(func)?;
+                // Hover on `#` shows the inferred function type.
+                self.record_typed(span, function_type, SymbolKind::Expression, None);
                 Ok((function_type, Provenance::Unknown))
             }
             ast::Term::Access(access) => {
@@ -3368,12 +3491,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Match result preserves provenance of matched value
                 Ok((ty, value_provenance))
             }
-            ast::Term::Spawn(term) => {
+            ast::Term::Spawn(term, span) => {
                 let ty = self.compile_spawn(*term, value_type)?;
+                // Hover on `@` shows the spawned process's type.
+                self.record_typed(span.get(), ty, SymbolKind::Expression, None);
                 Ok((ty, Provenance::Unknown))
             }
-            ast::Term::Select(select) => {
+            ast::Term::Select(select, span) => {
                 let ty = self.compile_select(select, value_type)?;
+                // Hover on `!` shows the received/awaited result type.
+                self.record_typed(span.get(), ty, SymbolKind::Expression, None);
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Self_ => {
@@ -3457,7 +3584,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         let label =
                             accessors_label(&format!("%{}", module.join("/")), &access.accessors);
                         let (ty, origin) = self.compile_import(module, &access.accessors)?;
-                        self.record_import(ref_span, ty, Some(label), origin);
+                        self.record_import(ref_span, ty, Some(label), origin, &access.accessors);
                         Ok((ty, Provenance::Unknown))
                     }
                     Some(ast::AccessSource::Self_) => {

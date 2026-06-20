@@ -127,8 +127,8 @@ impl TestBuilder {
 
         // Add I/O builtins if I/O is enabled
         if self.with_io {
-            quiver_io::register_network_builtins(&mut builtins);
-            quiver_io::register_file_builtins(&mut builtins);
+            quiver_io::attach_network_builtins(&mut builtins);
+            quiver_io::attach_file_builtins(&mut builtins);
         }
 
         // Create workers with virtual time function

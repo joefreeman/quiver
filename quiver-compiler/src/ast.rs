@@ -87,11 +87,12 @@ pub enum Term {
     TailCall(TailCall),
     Equality,
     Not,
-    Spawn(Box<Term>),
+    Spawn(Box<Term>, Spanned),
     Self_,
     /// Select operation. None means bare `!` (postfix form using chained value).
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
-    Select(Option<Vec<Chain>>),
+    /// The `Spanned` is the `!`, for hover (shows the received/awaited result type).
+    Select(Option<Vec<Chain>>, Spanned),
     Process(usize),
     /// Reference operator (`&`). None creates a new unique ref, Some references a value.
     Reference(Option<Access>),
@@ -140,6 +141,8 @@ pub struct Tuple {
     /// Tuple name: None for unnamed, Some for named (e.g., "Point")
     pub name: Option<String>,
     pub fields: Vec<TupleField>,
+    /// Span of the tuple literal, for hover (shows the constructed composite type).
+    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +155,9 @@ pub enum FieldValue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleField {
     pub name: Option<String>,
+    /// Span of the field label (the `triple` in `triple: ...`), for go-to-definition onto a
+    /// module's exported members. Absent for unnamed fields and spreads.
+    pub name_span: Spanned,
     pub value: FieldValue,
 }
 
@@ -161,6 +167,8 @@ pub struct Function {
     pub parameter_type: Option<Type>,
     pub return_type: Option<Type>,
     pub body: Option<Block>,
+    /// Span of the `#`, for hover (shows the inferred function type).
+    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -181,8 +189,15 @@ pub enum AccessSource {
 pub struct Access {
     pub source: Option<AccessSource>,
     pub accessors: Vec<AccessPath>,
+    /// Source span of each accessor (the `triple` in `.triple`), parallel to `accessors`, so
+    /// the language server can hover/navigate each component of a chain separately. Kept beside
+    /// `accessors` rather than inside `AccessPath`, whose identity is the field, not its position.
+    pub accessor_spans: Vec<Spanned>,
     pub argument: Option<Vec<TupleField>>,
-    /// Span of the access (reference), for hover and go-to-definition.
+    /// Span of the base (the `%util` / `$` / variable part, before any accessors).
+    pub base_span: Spanned,
+    /// Span of the whole access reference (`%util.triple`, `$.x`), for the fallback hover and
+    /// for locating the symbol as a whole.
     pub span: Spanned,
 }
 
@@ -200,9 +215,16 @@ pub struct Builtin {
     pub span: Spanned,
 }
 
-/// Partial pattern field: (field_name, optional_nested_pattern)
-/// None = bind field by name, Some = match field against nested pattern
-pub type PartialPatternField = (String, Option<Match>);
+/// Partial pattern field. `pattern` is `None` to bind the field by name (`(x)`), or `Some` to
+/// match it against a nested pattern (`(x: pattern)`) — in which case `name` selects the field
+/// and the binding lives in `pattern`. `name_span` covers the field name, for go-to-definition
+/// on a bare binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartialPatternField {
+    pub name: String,
+    pub name_span: Spanned,
+    pub pattern: Option<Match>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartialPattern {
