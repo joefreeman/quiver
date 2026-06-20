@@ -442,10 +442,9 @@ space — either a bracketed tuple or a single value:
 math.add [3, 4]                      // Apply add to the tuple [3, 4]
 double 5                             // Apply double to the value 5
 math.add [1, 2] ~> math.mul [~, 3]   // Chained calls
-math ~> .add [1, 2]                  // Field access with call
+&math.add ~> ~ [1, 2]                // The flowing value is a function; apply it to [1, 2]
+math ~> ~.add [1, 2]                 // Read `.add` off the flowing value, then apply
 ```
-
-When used with field access (`.field [...]`), ripples are not allowed in the argument.
 
 ### Tail recursion
 

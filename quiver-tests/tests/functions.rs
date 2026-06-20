@@ -134,8 +134,12 @@ fn test_function_call_no_args() {
 }
 
 #[test]
-fn test_function_call_field_access() {
-    quiver().evaluate("%math ~> .add [1, 2]").expect("3");
+fn calling_a_field_access_directly_is_unsupported() {
+    // `.field [args]` is intentionally dropped — `%math ~> .add [1, 2]` reads confusingly.
+    // Bind the function first, or use a tail call.
+    quiver()
+        .evaluate("%math ~> .add [1, 2]")
+        .expect_parse_failure();
 }
 
 #[test]
@@ -148,16 +152,22 @@ fn test_function_call_with_spread() {
               ~> %math.add [~, $.1]
               ~> %math.add [~, $.2]
             },
-            [1, 2] ~> f[..., 3]
+            [1, 2] ~> f [..., 3]
             "#,
         )
         .expect("6");
 }
 
 #[test]
-fn test_ripple_call_function() {
-    // Use &%math.add to get function reference, then call via ripple
+fn calling_via_a_bare_ripple() {
+    // `~ [args]` applies the flowing value (a function) to the argument.
     quiver().evaluate("&%math.add ~> ~ [3, 4]").expect("7");
+}
+
+#[test]
+fn calling_via_a_ripple_field_access() {
+    // `~.field [args]` reads a field off the flowing value and applies the argument to it.
+    quiver().evaluate("%math ~> ~.add [1, 2]").expect("3");
 }
 
 #[test]

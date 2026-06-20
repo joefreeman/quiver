@@ -755,13 +755,44 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Resolve the name a name-inheriting spread (`~[...]`, `a[...]`) takes from its first
+    /// spread's source: the variable's tuple type for `...a`, or the flowing value's for `...`.
+    fn inherited_spread_name(
+        &self,
+        fields: &[ast::TupleField],
+        ripple_context: Option<&RippleContext>,
+    ) -> Option<String> {
+        let source = fields.iter().find_map(|f| match &f.value {
+            ast::FieldValue::Spread(s) => Some(s),
+            _ => None,
+        })?;
+        let source_type = match source {
+            Some(var) => scopes::lookup_variable(&self.scopes, var, &[]).map(|(ty, _)| ty)?,
+            None => ripple_context?.value_type_id,
+        };
+        match self.program.lookup_type(source_type) {
+            Some(Type::Tuple(tuple_id)) => self
+                .program
+                .lookup_tuple(*tuple_id)
+                .and_then(|t| t.name.clone()),
+            _ => None,
+        }
+    }
+
     fn compile_tuple(
         &mut self,
-        tuple_name: Option<String>,
+        name: ast::TupleName,
         fields: Vec<ast::TupleField>,
         ripple_context: Option<&RippleContext>,
     ) -> Result<(usize, Provenance), Error> {
         helpers::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
+
+        // `~[..., y]` / `a[..., y]` inherit the result name from their first spread's source.
+        let tuple_name = match name {
+            ast::TupleName::Anonymous => None,
+            ast::TupleName::Named(name) => Some(name),
+            ast::TupleName::Inherit => self.inherited_spread_name(&fields, ripple_context),
+        };
 
         // Check if this tuple contains spreads
         let contains_spread = helpers::tuple_contains_spread(&fields);
@@ -968,16 +999,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Select doesn't produce a chainable type for receive extraction
                 Ok(None)
             }
+            ast::Term::Apply(_access, arg) => {
+                // The argument may contain a select defining a receive type (`f [!#'int]`).
+                self.collect_receive_types_from_term(arg, chained_type, receive_types)?;
+                Ok(None)
+            }
             ast::Term::Access(access) => {
-                // Check argument for receive types (e.g., math.div[~, !#int])
-                if let Some(arg_fields) = &access.argument {
-                    for field in arg_fields {
-                        if let ast::FieldValue::Chain(chain) = &field.value {
-                            self.collect_receive_types_from_chain(chain, receive_types)?;
-                        }
-                    }
-                }
-
                 // Try to resolve the access to get its type
                 if let Some(ast::AccessSource::Identifier(identifier)) = &access.source {
                     let var_type =
@@ -1012,28 +1039,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 for field in &tuple.fields {
                     if let ast::FieldValue::Chain(chain) = &field.value {
                         self.collect_receive_types_from_chain(chain, receive_types)?;
-                    }
-                }
-                Ok(None)
-            }
-            ast::Term::Builtin(builtin) => {
-                // Check argument tuple for receive types (e.g., __add__[!#int, 5])
-                if let Some(arg_fields) = &builtin.argument {
-                    for field in arg_fields {
-                        if let ast::FieldValue::Chain(chain) = &field.value {
-                            self.collect_receive_types_from_chain(chain, receive_types)?;
-                        }
-                    }
-                }
-                Ok(None)
-            }
-            ast::Term::TailCall(tail_call) => {
-                // Check argument tuple for receive types (e.g., &f[!#int, 5])
-                if let Some(arg_fields) = &tail_call.argument {
-                    for field in arg_fields {
-                        if let ast::FieldValue::Chain(chain) = &field.value {
-                            self.collect_receive_types_from_chain(chain, receive_types)?;
-                        }
                     }
                 }
                 Ok(None)
@@ -1078,11 +1083,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 ast::Term::Access(access) => {
                     // Variable reference - look up its type
-                    // Skip function calls (only handle bare references)
-                    if access.argument.is_some() {
-                        continue;
-                    }
-
                     let Some(ast::AccessSource::Identifier(identifier)) = &access.source else {
                         continue;
                     };
@@ -2130,7 +2130,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let Some(ast::AccessSource::Import(module)) = &access.source else {
             return;
         };
-        if !access.accessors.is_empty() || access.argument.is_some() {
+        if !access.accessors.is_empty() {
             return;
         }
         let ast::Match::Partial(partial) = pattern else {
@@ -2681,40 +2681,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }))
     }
 
-    /// Compile an argument tuple, handling ripple context conversion
-    /// Returns None if no argument provided
-    fn compile_argument(
-        &mut self,
-        argument: Option<&Vec<ast::TupleField>>,
-        value_type: Option<&usize>,
-        value_provenance: Provenance,
-        ripple_context: Option<&RippleContext>,
-        _context_name: &str,
-    ) -> Result<Option<usize>, Error> {
-        let Some(fields) = argument else {
-            return Ok(None);
-        };
-
-        // Always flow the piped value into the argument tuple's fields (each field gets a
-        // copy as input; callable fields are called with it, non-callables drop it). The
-        // original is owned and cleaned up by compile_tuple.
-        let ripple_context_value;
-        let ripple_ctx = if let Some(vt) = value_type {
-            ripple_context_value = RippleContext {
-                value_type_id: *vt,
-                stack_offset: 0,
-                owns_value: true,
-                provenance: value_provenance,
-            };
-            Some(&ripple_context_value)
-        } else {
-            ripple_context
-        };
-
-        let (ty, _prov) = self.compile_tuple(None, fields.clone(), ripple_ctx)?;
-        Ok(Some(ty))
-    }
-
     /// Compile access expression: .x, $.x, foo.x, etc. Records each component (the base symbol
     /// and each accessor) for the LSP, then delegates to the implementation.
     fn compile_access(
@@ -2731,17 +2697,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let accessor_spans: Vec<Option<SourceSpan>> =
             access.accessor_spans.iter().map(|s| s.get()).collect();
 
+        // The flowing value a `~` / bare `.field` access reads from — the chained value, or the
+        // enclosing tuple's ripple context when there's no direct chain.
+        let flowing_value = value_type.or_else(|| ripple_context.map(|c| c.value_type_id));
+
         let result =
             self.compile_access_inner(access, value_type, value_provenance, ripple_context);
 
         // Record each component on its own span (`%util` vs `triple`, `foo` vs `bar`, `$` vs `0`)
         // so hover/go-to-definition resolve precisely. This is the sole recorder for accesses.
-        if let Ok((ty, _)) = &result {
-            self.record_access_components(&source, &accessors, base_span, &accessor_spans);
-            // Bare ripple `~`: hover shows the flowing value's type (the access result).
-            if accessors.is_empty() && matches!(source, Some(ast::AccessSource::Ripple)) {
-                self.record_typed(base_span, *ty, SymbolKind::Expression, None);
-            }
+        if result.is_ok() {
+            self.record_access_components(
+                &source,
+                &accessors,
+                base_span,
+                &accessor_spans,
+                flowing_value,
+            );
         }
         result
     }
@@ -2754,6 +2726,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         accessors: &[ast::AccessPath],
         base_span: Option<SourceSpan>,
         accessor_spans: &[Option<SourceSpan>],
+        flowing_value: Option<usize>,
     ) {
         if self.recorder.is_none() {
             return;
@@ -2786,6 +2759,54 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 import_origin = Some(origin);
                 (ty, label)
             }
+            Some(ast::AccessSource::Builtin(name)) => {
+                // The builtin's signature, hovered on its `__name__`.
+                let Some((param, result)) = self.builtins.resolve_signature(name, self.program)
+                else {
+                    return;
+                };
+                let parameter = self.program.register_type(param);
+                let result = self.program.register_type(result);
+                let receive = self.program.never();
+                let ty = self.program.register_type(Type::Callable {
+                    parameter,
+                    result,
+                    receive,
+                });
+                self.record_typed(
+                    base_span,
+                    ty,
+                    SymbolKind::Builtin,
+                    Some(format!("__{}__", name)),
+                );
+                (ty, name.clone())
+            }
+            Some(ast::AccessSource::TailCall(Some(name))) => {
+                // `^f` tail-calls the function `f`: hover its type and navigate to its definition.
+                let Some((ty, _)) = scopes::lookup_variable(&self.scopes, name, &[]) else {
+                    return;
+                };
+                self.record_reference(base_span, name, name.clone(), ty);
+                (ty, name.clone())
+            }
+            Some(ast::AccessSource::Ripple) => {
+                // `~` / `~.field` read off the flowing value; the `~` hovers as its type, and the
+                // accessors are resolved against it below.
+                let Some(ty) = flowing_value else {
+                    return;
+                };
+                self.record_typed(base_span, ty, SymbolKind::Expression, None);
+                (ty, "~".to_string())
+            }
+            None => {
+                // A bare field access (`.field`) reads off the flowing value. There is no base
+                // token to hover (it starts with `.`); resolve the accessors against it below.
+                let Some(ty) = flowing_value else {
+                    return;
+                };
+                (ty, "value".to_string())
+            }
+            // Self tail call (`^`) and self (`.`) have nothing to navigate to.
             _ => return,
         };
 
@@ -2822,38 +2843,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
     ) -> Result<(usize, Provenance), Error> {
+        // An access produces a value (a variable, parameter, import member, builtin, or a field
+        // of the flowing value). When that value is callable and a flowing value is present
+        // (chained, or supplied as the argument of an enclosing `Term::Apply`), it is invoked
+        // with it. The flowing value arrives as `value_type` and sits on the stack.
         match access.source {
             None => {
-                // Field/positional access (.x, .0) requires a value
+                // Field/positional access (.x, .0) reads off the flowing value.
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported(
                         "Field/positional access requires a value".to_string(),
                     )
                 })?;
-
-                // Track field provenance as we access fields
                 let (accessed_type, accessed_prov) =
                     self.compile_accessor(val_type, access.accessors, "value", value_provenance)?;
-
-                if let Some(arg_fields) = &access.argument {
-                    // Compile argument - no ripples allowed for bare accessor
-                    let (arg_type, _) = self.compile_tuple(None, arg_fields.clone(), None)?;
-                    self.codegen.add_instruction(Instruction::Rotate(2));
-                    // Function call result has unknown provenance
-                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
-                    Ok((ty, Provenance::Unknown))
-                } else {
-                    Ok((accessed_type, accessed_prov))
-                }
+                Ok((accessed_type, accessed_prov))
             }
             Some(ast::AccessSource::Parameter) => {
-                // $ accesses the function parameter
+                // $ accesses the function parameter.
                 let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
 
-                // Check if there's an explicit argument
-                let has_argument = access.argument.is_some();
-
-                // Peek at the accessed type to determine if callable (without emitting code)
+                // Peek at the accessed type to determine if callable (without emitting code).
                 let peeked_type = type_queries::resolve_accessor_type(
                     self.program,
                     param_type,
@@ -2867,117 +2877,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     )
                 });
 
-                // If not callable and no explicit argument, drop incoming value first
-                if !is_callable && !has_argument && value_type.is_some() {
+                // Non-callable accessed with a flowing value: drop the value before loading.
+                if !is_callable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
-
-                // Now load and compile
                 self.codegen.add_instruction(Instruction::Load(param_local));
-
-                // Parameter access has Parameter provenance
                 let (accessed_type, accessed_prov) = self.compile_accessor(
                     param_type,
                     access.accessors,
                     "$",
                     Provenance::Parameter,
                 )?;
-                let arg_type = self.compile_argument(
-                    access.argument.as_ref(),
-                    value_type.as_ref(),
-                    value_provenance.clone(),
-                    ripple_context,
-                    "$",
-                )?;
 
-                if let Some(arg_type) = arg_type {
-                    // Explicit argument → call
-                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
-                    Ok((ty, Provenance::Unknown))
-                } else if let (true, Some(val_type)) = (is_callable, value_type) {
-                    // Callable with implicit input → call
+                if let (true, Some(val_type)) = (is_callable, value_type) {
                     let ty = self.apply_value_to_type(accessed_type, val_type)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
-                    // Non-callable → already popped incoming value, just return reference
                     Ok((accessed_type, accessed_prov))
                 }
             }
             Some(ast::AccessSource::Identifier(name)) => {
-                // Check if this is a tuple variable being spread (a[..., y] syntax)
-                let has_spread = access
-                    .argument
-                    .as_ref()
-                    .is_some_and(|args| helpers::tuple_contains_spread(args));
-
-                if has_spread
-                    && access.accessors.is_empty()
-                    && let Some((var_type_id, _var_index)) =
-                        scopes::lookup_variable(&self.scopes, &name, &[])
-                    && let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(var_type_id)
-                {
-                    let tuple_id = *tuple_id;
-                    // This is tuple spread: a[..., y] where a is a tuple
-                    // Get the tuple name for inheritance
-                    let tuple_name = self
-                        .program
-                        .lookup_tuple(tuple_id)
-                        .and_then(|t| t.name.clone());
-
-                    // Transform bare spreads (...) into named spreads (...a)
-                    // so they load from the prefix variable
-                    let mut arg_fields = access.argument.unwrap();
-                    for field in &mut arg_fields {
-                        if matches!(&field.value, ast::FieldValue::Spread(None)) {
-                            field.value = ast::FieldValue::Spread(Some(name.clone()));
-                        }
-                    }
-
-                    // Determine ripple context for field values:
-                    // - If there's a chained value, ripples (~) should resolve to it
-                    // - Otherwise use outer ripple_context if available
-                    let chained_ripple_ctx;
-                    let effective_ripple_ctx = if let Some(val_type) = value_type {
-                        // Value is chained directly to this spread - create context for it
-                        chained_ripple_ctx = RippleContext {
-                            value_type_id: val_type,
-                            stack_offset: 0,
-                            owns_value: true,
-                            provenance: value_provenance.clone(),
-                        };
-                        Some(&chained_ripple_ctx)
-                    } else {
-                        ripple_context
-                    };
-
-                    // Compile tuple with spread
-                    let (ty, _) = spread::compile_tuple_with_spread(
-                        self,
-                        tuple_name,
-                        arg_fields,
-                        effective_ripple_ctx,
-                    )?;
-                    // Spread result has unknown provenance
-                    return Ok((ty, Provenance::Unknown));
-                }
-
-                // Normal function call path
-                // Compile argument first so ripples can access the piped value
-                let arg_type = self.compile_argument(
-                    access.argument.as_ref(),
-                    value_type.as_ref(),
-                    value_provenance.clone(),
-                    ripple_context,
-                    &name,
-                )?;
-
-                // For non-callable lookups, we need to know before loading whether to pop
-                // the incoming value. Peek at the type first.
-                // First try the full path as a variable (for captures), then resolve through type system.
+                // Peek at the accessed type to decide whether to call or pop the flowing value.
+                // Try the full path as a variable first (for captures), then resolve via types.
                 let peeked_type = scopes::lookup_variable(&self.scopes, &name, &access.accessors)
                     .map(|(ty, _)| ty)
                     .or_else(|| {
-                        // Full path not found - resolve base variable + accessors through type system
                         let (base_type, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
                         type_queries::resolve_accessor_type(
                             self.program,
@@ -2987,8 +2911,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         )
                         .ok()
                     });
-
-                // Check if the final accessed type will be callable
                 let is_callable = peeked_type.is_some_and(|ty| {
                     matches!(
                         self.program.lookup_type(ty),
@@ -2996,143 +2918,52 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     )
                 });
 
-                // If not callable and no explicit argument, drop incoming value first
-                if !is_callable && arg_type.is_none() && value_type.is_some() {
+                // Non-callable accessed with a flowing value: drop the value before loading.
+                if !is_callable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
-
-                // compile_member_access loads the variable and handles accessors
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
 
-                if let Some(arg_type) = arg_type {
-                    // Explicit argument → always try to call
-                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
-                    Ok((ty, Provenance::Unknown))
-                } else if let (true, Some(val_type)) = (is_callable, value_type) {
-                    // Callable with implicit input → call
+                if let (true, Some(val_type)) = (is_callable, value_type) {
                     let ty = self.apply_value_to_type(accessed_type, val_type)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
-                    // Non-callable → already popped incoming value, just return reference
                     Ok((accessed_type, accessed_prov))
                 }
             }
             Some(ast::AccessSource::Ripple) => {
-                // Bare ~ - ripple placeholder that evaluates to the chained value
-                if access.accessors.is_empty() && access.argument.is_none() {
-                    // Prefer value_type (directly chained) over ripple_context (inherited from parent)
+                if access.accessors.is_empty() {
+                    // Bare ~ - the flowing value itself.
                     if let Some(val_type) = value_type {
-                        // Value was directly chained to this ripple - use it
-                        // The value is already on the stack, no need to Pick
-                        return Ok((val_type, value_provenance));
+                        // Already on the stack as the chained value.
+                        Ok((val_type, value_provenance))
                     } else if let Some(ctx) = ripple_context {
-                        // Inherit ripple context from parent tuple
+                        // Inherit the ripple context from the enclosing tuple.
                         self.codegen
                             .add_instruction(Instruction::Pick(ctx.stack_offset));
-                        return Ok((ctx.value_type_id, ctx.provenance.clone()));
+                        Ok((ctx.value_type_id, ctx.provenance.clone()))
                     } else {
-                        return Err(Error::FeatureUnsupported(
+                        Err(Error::FeatureUnsupported(
                             "Ripple placeholder (~) can only be used when a value is being chained"
                                 .to_string(),
-                        ));
+                        ))
                     }
-                }
-
-                // ~[args] or ~.field[args] - use piped value as source
-                let piped_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported(
-                        "Ripple access (~[...]) requires a piped value".to_string(),
-                    )
-                })?;
-
-                let has_spread = access
-                    .argument
-                    .as_ref()
-                    .is_some_and(|args| helpers::tuple_contains_spread(args));
-
-                if access.accessors.is_empty() && has_spread {
-                    // ~[..., y] - tuple spread from piped value (must be tuple)
-                    if let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(piped_type) {
-                        let tuple_id = *tuple_id;
-                        // Get tuple name for inheritance
-                        let tuple_name = self
-                            .program
-                            .lookup_tuple(tuple_id)
-                            .and_then(|t| t.name.clone());
-
-                        // Piped value is already on stack, create ripple context
-                        let ripple_ctx = RippleContext {
-                            value_type_id: piped_type,
-                            stack_offset: 0,
-                            owns_value: true,
-                            provenance: value_provenance.clone(),
-                        };
-
-                        let arg_fields = access.argument.unwrap();
-                        let (ty, _) = spread::compile_tuple_with_spread(
-                            self,
-                            tuple_name,
-                            arg_fields,
-                            Some(&ripple_ctx),
-                        )?;
-                        return Ok((ty, Provenance::Unknown));
-                    } else {
-                        return Err(Error::TypeMismatch {
-                            expected: "tuple".to_string(),
-                            found: quiver_core::format::format_type_by_id(
-                                &*self.program,
-                                piped_type,
-                            ),
-                        });
-                    }
-                }
-
-                if access.accessors.is_empty() {
-                    // ~[args] without spread - call piped value (must be callable)
-                    // argument must be Some here since bare ~ was handled above
-                    let arg_fields = access.argument.unwrap();
-
-                    // Compile argument tuple (no ripple context needed, piped value IS the function)
-                    let (arg_type, _) = self.compile_tuple(None, arg_fields, None)?;
-
-                    // Rotate so piped value (function) is on top
-                    self.codegen.add_instruction(Instruction::Rotate(2));
-
-                    let ty = self.apply_value_to_type(piped_type, arg_type)?;
-                    Ok((ty, Provenance::Unknown))
                 } else {
-                    // ~.field or ~.field[args] - access field on piped value
+                    // ~.field - access a field on the flowing value.
+                    let piped_type = value_type.ok_or_else(|| {
+                        Error::FeatureUnsupported(
+                            "Ripple access (~.field) requires a piped value".to_string(),
+                        )
+                    })?;
                     let (accessed_type, accessed_prov) =
                         self.compile_accessor(piped_type, access.accessors, "~", value_provenance)?;
-
-                    if let Some(arg_fields) = access.argument {
-                        // ~.field[args] - apply args to accessed value
-                        let (arg_type, _) = self.compile_tuple(None, arg_fields, None)?;
-                        self.codegen.add_instruction(Instruction::Rotate(2));
-                        let ty = self.apply_value_to_type(accessed_type, arg_type)?;
-                        Ok((ty, Provenance::Unknown))
-                    } else {
-                        Ok((accessed_type, accessed_prov))
-                    }
+                    Ok((accessed_type, accessed_prov))
                 }
             }
             Some(ast::AccessSource::Import(module)) => {
-                // %module or %module/submodule with optional .field accessors and [args]
-                let module_name = format!("%{}", module.join("/"));
-
-                // Compile argument first so ripples can access the piped value
-                let arg_type = self.compile_argument(
-                    access.argument.as_ref(),
-                    value_type.as_ref(),
-                    value_provenance.clone(),
-                    ripple_context,
-                    &module_name,
-                )?;
-
-                // Resolve import type first (no code emission yet) to check if callable. The
-                // hover/go-to-definition entries are recorded per component by the caller
-                // (`record_access_components`), so nothing is recorded here.
+                // Resolve the import type first (no code emission yet) to check if callable. Hover
+                // / go-to-definition entries are recorded per component by `record_access_components`.
                 let (cached, resolved_value, accessed_type, _origin) =
                     self.resolve_import(&module, &access.accessors)?;
 
@@ -3141,30 +2972,51 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Some(Type::Callable { .. }) | Some(Type::Process { .. })
                 );
 
-                // If not callable and no explicit argument, drop incoming value BEFORE loading
-                if !is_callable && arg_type.is_none() && value_type.is_some() {
+                // Non-callable accessed with a flowing value: drop the value before loading.
+                if !is_callable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
-
-                // Now emit instructions for the resolved import value
                 let (instructions, _) =
                     self.value_to_instructions_from_cache(&resolved_value, &cached.binary_data)?;
                 for instruction in instructions {
                     self.codegen.add_instruction(instruction);
                 }
 
-                if let Some(arg_type) = arg_type {
-                    // Explicit argument → always try to call
-                    let ty = self.apply_value_to_type(accessed_type, arg_type)?;
-                    Ok((ty, Provenance::Unknown))
-                } else if let (true, Some(val_type)) = (is_callable, value_type) {
-                    // Callable with implicit input → call
+                if let (true, Some(val_type)) = (is_callable, value_type) {
                     let ty = self.apply_value_to_type(accessed_type, val_type)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
-                    // Non-callable → already popped incoming value, just return reference
                     Ok((accessed_type, Provenance::Unknown))
                 }
+            }
+            Some(ast::AccessSource::Builtin(name)) => {
+                // A builtin (`__add__`): a globally-resolved callable. Its signature is recorded
+                // as the access base by `record_access_components`.
+                if let Some(span) = access.base_span.get() {
+                    self.current_span = Some(span);
+                }
+                let builtin_type = self.compile_builtin(&name)?;
+                // A builtin has no fields, so accessors (`__x__.field`) fail here as a non-tuple.
+                let (callable_type, _) = self.compile_accessor(
+                    builtin_type,
+                    access.accessors,
+                    "__builtin__",
+                    Provenance::Unknown,
+                )?;
+
+                if let Some(val_type) = value_type {
+                    let ty = self.apply_value_to_type(callable_type, val_type)?;
+                    Ok((ty, Provenance::Unknown))
+                } else {
+                    Ok((callable_type, Provenance::Unknown))
+                }
+            }
+            Some(ast::AccessSource::TailCall(identifier)) => {
+                // `^` / `^f` / `^f.field` - a tail call (TCO). The flowing value (chained, or the
+                // argument of an enclosing `Apply`) is the call argument, already on the stack.
+                let ty =
+                    self.compile_tail_call(identifier.as_deref(), &access.accessors, value_type)?;
+                Ok((ty, Provenance::Unknown))
             }
             Some(ast::AccessSource::Self_) => {
                 // Self_ should only appear in Term::Reference, not Term::Access
@@ -3376,84 +3228,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((function_type, Provenance::Unknown))
             }
             ast::Term::Access(access) => {
+                // A builtin call can fail for non-type reasons, so disable complement narrowing
+                // (matching the tail-call path and the former Term::Builtin arm).
+                if matches!(
+                    access.source,
+                    Some(ast::AccessSource::Builtin(_)) | Some(ast::AccessSource::TailCall(_))
+                ) && let Some(n) = narrowing.as_deref_mut()
+                {
+                    n.disable();
+                }
                 self.compile_access(access, value_type, value_provenance.clone(), ripple_context)
-            }
-            ast::Term::Builtin(builtin) => {
-                // Compile argument first so ripples can access the piped value
-                let arg_type = self.compile_argument(
-                    builtin.argument.as_ref(),
-                    value_type.as_ref(),
-                    value_provenance,
-                    ripple_context,
-                    "__builtin__",
-                )?;
-
-                // Compiling the argument moved `current_span` onto the argument's sub-terms
-                // (e.g. a ripple). Restore the builtin's own span so an undefined-builtin
-                // error is located on the builtin, not the last argument term.
-                if let Some(span) = builtin.span.get() {
-                    self.current_span = Some(span);
-                }
-                let builtin_type = self.compile_builtin(&builtin.name)?;
-
-                // Record the builtin's signature (the callable type, not the applied result)
-                // at its name span, so hover shows e.g. `__add__: #['int, 'int] -> 'int`.
-                self.record_typed(
-                    builtin.span.get(),
-                    builtin_type,
-                    SymbolKind::Builtin,
-                    Some(format!("__{}__", builtin.name)),
-                );
-
-                // Builtin calls can fail for non-type reasons, disable complement narrowing
-                if let Some(n) = narrowing.as_deref_mut() {
-                    n.disable();
-                }
-
-                let result_type = if let Some(arg_type) = arg_type {
-                    self.apply_value_to_type(builtin_type, arg_type)?
-                } else if let Some(val_type) = value_type {
-                    self.apply_value_to_type(builtin_type, val_type)?
-                } else {
-                    builtin_type
-                };
-                // Builtin results have unknown provenance
-                Ok((result_type, Provenance::Unknown))
-            }
-            ast::Term::TailCall(tail_call) => {
-                // Tail calls can fail for non-type reasons, disable complement narrowing
-                if let Some(n) = narrowing.as_deref_mut() {
-                    n.disable();
-                }
-
-                // Compile argument if present (may contain ripples using value_type)
-                // TailCall doesn't check for ignored values - argument or piped value is used
-                let arg_type = if let Some(arg_fields) = &tail_call.argument {
-                    let ripple_context_value;
-                    let ripple_ctx = if let Some(vt) = value_type.as_ref() {
-                        ripple_context_value = RippleContext {
-                            value_type_id: *vt,
-                            stack_offset: 0,
-                            owns_value: true,
-                            provenance: value_provenance.clone(),
-                        };
-                        Some(&ripple_context_value)
-                    } else {
-                        ripple_context
-                    };
-                    let (ty, _) = self.compile_tuple(None, arg_fields.clone(), ripple_ctx)?;
-                    Some(ty)
-                } else {
-                    value_type
-                };
-
-                let ty = self.compile_tail_call(
-                    tail_call.identifier.as_deref(),
-                    &tail_call.accessors,
-                    arg_type,
-                )?;
-                // Tail call results have unknown provenance
-                Ok((ty, Provenance::Unknown))
             }
             ast::Term::Equality => {
                 let val_type = value_type.ok_or_else(|| {
@@ -3596,32 +3380,48 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         });
                         Ok((self_type, Provenance::Unknown))
                     }
+                    Some(ast::AccessSource::Builtin(ref name)) => {
+                        // &__builtin__ - the builtin function value, without applying it.
+                        let builtin_type = self.compile_builtin(name)?;
+                        self.record_typed(
+                            ref_span,
+                            builtin_type,
+                            SymbolKind::Builtin,
+                            Some(format!("__{}__", name)),
+                        );
+                        Ok((builtin_type, Provenance::Unknown))
+                    }
                     Some(ast::AccessSource::Ripple) => Err(Error::FeatureUnsupported(
                         "Cannot reference ripple (~) - use it directly".to_string(),
+                    )),
+                    Some(ast::AccessSource::TailCall(_)) => Err(Error::FeatureUnsupported(
+                        "Cannot reference a tail call (^) - reference the function instead"
+                            .to_string(),
                     )),
                     None => Err(Error::FeatureUnsupported(
                         "Reference requires an identifier (e.g., &f)".to_string(),
                     )),
                 }
             }
-            ast::Term::BuiltinReference(builtin) => {
-                // &__builtin__ - the builtin function value, without applying it.
-                if value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::Pop);
-                }
-                let builtin_type = self.compile_builtin(&builtin.name)?;
-                self.record_typed(
-                    builtin.span.get(),
-                    builtin_type,
-                    SymbolKind::Builtin,
-                    Some(format!("__{}__", builtin.name)),
-                );
-                Ok((builtin_type, Provenance::Unknown))
+            ast::Term::Apply(access, arg)
+                if matches!(access.source, Some(ast::AccessSource::Ripple)) =>
+            {
+                // Ripple head (`~ [args]`, `~.field [args]`): the head consumes the flowing value
+                // (`~` *is* it; `~.field` reads the field off it), producing a callable, and the
+                // argument is applied to that result. The argument therefore does not receive the
+                // flowing value.
+                let (callable_type, _) =
+                    self.compile_access(access, value_type, value_provenance, ripple_context)?;
+                let (arg_type, _) =
+                    self.compile_term(*arg, None, Provenance::Unknown, on_no_match, None, None)?;
+                // The callable is below the argument on the stack; swap so the call sees it on top.
+                self.codegen.add_instruction(Instruction::Rotate(2));
+                let ty = self.apply_value_to_type(callable_type, arg_type)?;
+                Ok((ty, Provenance::Unknown))
             }
-            ast::Term::Apply(head, arg) => {
-                // `f x` - compile the argument as a flow position (it receives the piped
-                // value, so a callable argument is invoked with it; use `&` to pass one by
-                // value), then feed its result into the head, which invokes the callable.
+            ast::Term::Apply(access, arg) => {
+                // Looked-up head: the flowing value flows into the argument (so `f [~, 1]` works),
+                // and the head is then invoked with the argument's result.
                 let (arg_type, arg_prov) = self.compile_term(
                     *arg,
                     value_type,
@@ -3630,14 +3430,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     ripple_context,
                     None,
                 )?;
-                self.compile_term(
-                    *head,
-                    Some(arg_type),
-                    arg_prov,
-                    on_no_match,
-                    None,
-                    narrowing,
-                )
+                // A builtin/tail call can fail for non-type reasons, so disable complement narrowing.
+                if matches!(
+                    access.source,
+                    Some(ast::AccessSource::Builtin(_)) | Some(ast::AccessSource::TailCall(_))
+                ) && let Some(n) = narrowing
+                {
+                    n.disable();
+                }
+                self.compile_access(access, Some(arg_type), arg_prov, None)
             }
             ast::Term::Reference(None) => {
                 // Standalone & - create a new unique ref

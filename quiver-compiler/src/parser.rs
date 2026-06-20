@@ -250,6 +250,18 @@ fn span_between(start: Span, end: Span) -> SourceSpan {
     }
 }
 
+/// A span of `length` bytes starting at `input` — for stamping an opening token (`#`, `@`, `!`,
+/// a tuple's `[` or name) rather than the whole construct, so hover/go-to-definition land on the
+/// token and not on everything inside it.
+fn token_span(input: Span, length: usize) -> SourceSpan {
+    SourceSpan {
+        offset: input.location_offset(),
+        line: input.location_line() as usize,
+        column: input.get_column(),
+        length,
+    }
+}
+
 /// Wrap a parser so it also yields the [`SourceSpan`] of the input it consumed. Used to
 /// stamp source positions onto the AST nodes the language server needs to address (variable
 /// references, builtins, binding patterns). The captured span runs from the start of the
@@ -281,18 +293,23 @@ fn hspace1(input: Span) -> IResult<Span, ()> {
 }
 
 /// Parse a bracketed argument/field list: `[ ... ]`.
-fn bracket_args(input: Span) -> IResult<Span, Vec<TupleField>> {
-    delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']')))(input)
+/// Parse `[ ... ]` arguments, also yielding the span of the opening `[` (for hover on the
+/// argument tuple).
+fn bracket_args(input: Span) -> IResult<Span, (SourceSpan, Vec<TupleField>)> {
+    let start = input;
+    let (rest, fields) =
+        delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']')))(input)?;
+    Ok((rest, (token_span(start, 1), fields)))
 }
 
-/// Parse the argument that follows a callable head (`f`, `.field`, `^g`, `__b__`).
-/// Two forms are accepted: an adjacent bracket that begins with a spread (`a[..., y]`,
-/// a tuple spread), and a space-separated bracket (`f [1, 2]`, function application).
-/// An adjacent non-spread bracket (`f[1]`) is rejected, leaving it to fail as a
-/// syntax error, so calls must be written with a space.
-fn call_argument(input: Span) -> IResult<Span, Vec<TupleField>> {
-    alt((
-        verify(bracket_args, |fields: &[TupleField]| {
+/// An adjacent `[...]` immediately after an access head, allowed only when it begins with a
+/// spread (`a[..., y]`, `~[..., y]`) — a tuple spread-update, not a call. A call uses a space
+/// (`f [1, 2]`) and is parsed as a juxtaposition application (`Term::Apply`); an adjacent
+/// non-spread bracket (`f[1]`) is rejected, so it fails as a syntax error.
+fn adjacent_spread_args(input: Span) -> IResult<Span, (SourceSpan, Vec<TupleField>)> {
+    verify(
+        bracket_args,
+        |(_, fields): &(SourceSpan, Vec<TupleField>)| {
             matches!(
                 fields.first(),
                 Some(TupleField {
@@ -300,9 +317,8 @@ fn call_argument(input: Span) -> IResult<Span, Vec<TupleField>> {
                     ..
                 })
             )
-        }),
-        preceded(hspace1, bracket_args),
-    ))(input)
+        },
+    )(input)
 }
 
 fn comment(input: Span) -> IResult<Span, Span> {
@@ -407,7 +423,7 @@ fn string_term(input: Span) -> IResult<Span, Term> {
             let bytes = s.into_bytes();
             // Create a Str tuple with the binary as its single field
             Term::Tuple(Tuple {
-                name: Some("Str".to_string()),
+                name: TupleName::Named("Str".to_string()),
                 fields: vec![TupleField {
                     name: None,
                     name_span: Spanned::default(),
@@ -922,6 +938,8 @@ fn access(input: Span) -> IResult<Span, Access> {
         map(char('~'), |_| AccessSource::Ripple),
         // Import: %module or %module/submodule
         map(import, AccessSource::Import),
+        // Builtin: __name__ (before identifier; the `__` lexical form is unambiguous)
+        map(builtin_name, AccessSource::Builtin),
         map(identifier, AccessSource::Identifier),
     )))(input)?;
     // The base span covers just the `%util` / `$` / variable, before any accessors.
@@ -946,8 +964,6 @@ fn access(input: Span) -> IResult<Span, Access> {
     // argument, so hover and go-to-definition land precisely on the referenced symbol.
     let ref_span = span_between(start, after_ref);
 
-    let (rest, argument) = opt(call_argument)(after_ref)?;
-
     // An access must have a source or at least one accessor.
     if source.is_none() && accessors.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -957,15 +973,39 @@ fn access(input: Span) -> IResult<Span, Access> {
     }
 
     Ok((
-        rest,
+        after_ref,
         Access {
             source,
             accessors,
             accessor_spans,
-            argument,
             base_span: Spanned(Some(base_span)),
             span: Spanned(Some(ref_span)),
         },
+    ))
+}
+
+/// Parse a name-preserving tuple spread-update: `~[..., y]` (spread the chained value) or
+/// `a[..., y]` (spread the variable `a`), each inheriting the source's tuple name. Produces a
+/// `Term::Tuple` — the spread-update that `Access` used to carry as an argument now lives here.
+fn spread_update(input: Span) -> IResult<Span, Term> {
+    let (input, source) = alt((map(char('~'), |_| None::<String>), map(identifier, Some)))(input)?;
+    let (input, (bracket_span, mut fields)) = adjacent_spread_args(input)?;
+    // For `a[...]`, the bare spread `...` spreads `a`; rewrite it so the compiler loads from `a`.
+    // A `~` appearing in a *field value* is a chained-value ripple and is left untouched.
+    if let Some(name) = &source {
+        for field in &mut fields {
+            if matches!(field.value, FieldValue::Spread(None)) {
+                field.value = FieldValue::Spread(Some(name.clone()));
+            }
+        }
+    }
+    Ok((
+        input,
+        Term::Tuple(Tuple {
+            name: TupleName::Inherit,
+            fields,
+            span: Spanned(Some(bracket_span)),
+        }),
     ))
 }
 
@@ -1064,7 +1104,8 @@ fn select_term(input: Span) -> IResult<Span, Term> {
     )(input)?;
     // Attach the `!` span to whatever select form was produced, for hover.
     let term = match term {
-        Term::Select(sources, _) => Term::Select(sources, Spanned(Some(span_between(start, rest)))),
+        // Stamp just the `!`, not the raced sources / awaited expression.
+        Term::Select(sources, _) => Term::Select(sources, Spanned(Some(token_span(start, 1)))),
         other => other,
     };
     Ok((rest, term))
@@ -1123,7 +1164,7 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
                 delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
             )),
             |(name, fields)| Tuple {
-                name: Some(name),
+                name: TupleName::Named(name),
                 fields,
                 span: Spanned::default(),
             },
@@ -1132,7 +1173,7 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
         map(
             delimited(pair(char('['), wsc), tuple_field_list, pair(wsc, char(']'))),
             |fields| Tuple {
-                name: None,
+                name: TupleName::Anonymous,
                 fields,
                 span: Spanned::default(),
             },
@@ -1145,13 +1186,19 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
                 peek(not(pair(ws0, char('(')))), // Ensure not followed by '('
             )),
             |(name, _)| Tuple {
-                name: Some(name),
+                name: TupleName::Named(name),
                 fields: vec![],
                 span: Spanned::default(),
             },
         ),
     ))(input)?;
-    tuple_value.span = Spanned(Some(span_between(start, rest)));
+    // Stamp the tuple's head — its name, or the opening `[` — not the whole literal, so hover
+    // inside the tuple shows the fields, and only the head shows the composite type.
+    let head_len = match &tuple_value.name {
+        TupleName::Named(name) => name.len(),
+        TupleName::Anonymous | TupleName::Inherit => 1,
+    };
+    tuple_value.span = Spanned(Some(token_span(start, head_len)));
     Ok((rest, tuple_value))
 }
 
@@ -1206,35 +1253,47 @@ fn function(input: Span) -> IResult<Span, Function> {
             span: Spanned::default(),
         },
     )(input)?;
-    func.span = Spanned(Some(span_between(start, rest)));
+    // Stamp just the `#`, so hover/go-to-definition land on it, not the whole function body.
+    func.span = Spanned(Some(token_span(start, 1)));
     Ok((rest, func))
 }
 
 fn tail_call(input: Span) -> IResult<Span, Term> {
     let start = input;
     let (input, _) = char('^')(input)?;
-    let (input, ident) = opt(identifier)(input)?;
-    let (input, accessors) = many0(preceded(
-        char('.'),
-        alt((
+    let (after_ident, ident) = opt(identifier)(input)?;
+    // The base span covers the `^` / `^name`, before any accessors.
+    let base_span = span_between(start, after_ident);
+    let (after_ref, accessors_with_spans) = many0(preceded(char('.'), |i| {
+        let acc_start = i;
+        let (rest, accessor) = alt((
             map(digit1, |s: Span| AccessPath::Index(s.parse().unwrap())),
             map(identifier, AccessPath::Field),
-        )),
-    ))(input)?;
-    let (input, argument) = opt(call_argument)(input)?;
+        ))(i)?;
+        Ok((
+            rest,
+            (accessor, Spanned(Some(span_between(acc_start, rest)))),
+        ))
+    }))(after_ident)?;
+    let (accessors, accessor_spans): (Vec<_>, Vec<_>) = accessors_with_spans.into_iter().unzip();
+    // A tail call is an access whose source is the tail target; a space-separated argument is a
+    // juxtaposition application (`^g [~, 2]`), handled by `term`.
     Ok((
-        input,
-        Term::TailCall(TailCall {
-            identifier: ident,
+        after_ref,
+        Term::Access(Access {
+            source: Some(AccessSource::TailCall(ident)),
             accessors,
-            argument,
-            span: Spanned(Some(span_between(start, input))),
+            accessor_spans,
+            base_span: Spanned(Some(base_span)),
+            span: Spanned(Some(span_between(start, after_ref))),
         }),
     ))
 }
 
-fn builtin(input: Span) -> IResult<Span, Builtin> {
-    let start = input;
+/// Parse a builtin name `__name__`, returning the inner name. A builtin is an [`AccessSource`],
+/// so it flows through the same call/reference machinery as identifiers and imports — the access
+/// parser captures its span (the `__name__`) and any `[...]` argument.
+fn builtin_name(input: Span) -> IResult<Span, String> {
     // Parse opening __
     let (input, _) = tag("__")(input)?;
 
@@ -1253,21 +1312,7 @@ fn builtin(input: Span) -> IResult<Span, Builtin> {
     // Parse closing __
     let (input, _) = tag("__")(input)?;
 
-    // The span covers just the `__name__` reference (not the argument), so hover and
-    // undefined-builtin diagnostics land precisely on the builtin.
-    let name_span = span_between(start, input);
-
-    // Parse optional argument [...] (same as access)
-    let (input, argument) = opt(call_argument)(input)?;
-
-    Ok((
-        input,
-        Builtin {
-            name: trimmed.to_string(),
-            argument,
-            span: Spanned(Some(name_span)),
-        },
-    ))
+    Ok((input, trimmed.to_string()))
 }
 
 fn equality(input: Span) -> IResult<Span, Term> {
@@ -1358,7 +1403,6 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                     source: Some(AccessSource::Ripple),
                     accessors: vec![],
                     accessor_spans: vec![],
-                    argument: None,
                     base_span: Spanned::default(),
                     span: Spanned::default(),
                 }))),
@@ -1368,7 +1412,8 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
     ))(input)?;
     // Attach the `@` span to the spawn, for hover (shows the process type).
     let term = match term {
-        Term::Spawn(inner, _) => Term::Spawn(inner, Spanned(Some(span_between(start, rest)))),
+        // Stamp just the `@`, not the spawned function body.
+        Term::Spawn(inner, _) => Term::Spawn(inner, Spanned(Some(token_span(start, 1)))),
         other => other,
     };
     Ok((rest, term))
@@ -1545,14 +1590,11 @@ fn reference_term(input: Span) -> IResult<Span, Term> {
                     source: Some(AccessSource::Self_),
                     accessors: vec![],
                     accessor_spans: vec![],
-                    argument: None,
                     base_span: Spanned::default(),
                     span: Spanned::default(),
                 }))
             }),
-            // &__builtin__ - reference a builtin without calling it
-            map(builtin, Term::BuiltinReference),
-            // &identifier or &module.func
+            // &identifier, &module.func, or &__builtin__ (a builtin is an access source)
             map(access, |a| Term::Reference(Some(a))),
             // Standalone & - create a new unique ref
             success(Term::Reference(None)),
@@ -1576,11 +1618,12 @@ fn primary(input: Span) -> IResult<Span, Term> {
         map(tuple_term, Term::Tuple),
         map(function, Term::Function),
         map(block, Term::Block),
-        // Builtins
-        map(builtin, Term::Builtin),
         // Reference (must come before access to parse &f before f)
         reference_term,
-        // Access (includes field/positional access, bare identifiers with optional argument, and imports)
+        // Name-preserving spread-update (`~[..., y]`, `a[..., y]`) — before access, which would
+        // otherwise consume the `~`/identifier as a bare reference.
+        spread_update,
+        // Access (field/positional access, bare identifiers, and imports)
         map(access, Term::Access),
         // Operations
         equality,
@@ -1596,6 +1639,18 @@ fn primary(input: Span) -> IResult<Span, Term> {
 /// the primary itself, so only a non-bracket argument is consumed here.
 fn term(input: Span) -> IResult<Span, Term> {
     let (input, head) = primary(input)?;
+    // Application by juxtaposition only targets a looked-up callable head — an `Access` whose
+    // source is a variable, `$`, import member, builtin, tail call, or a ripple (`~ [args]`,
+    // `~.f [args]` — the ripple head consumes the flowing value and the argument applies to it).
+    // A *bare* field access (`.f`) is the one head that can't be applied — bind it first, or
+    // write `~.f`. A literal/tuple/function-literal head isn't applicable either (`#{…} 5` is a
+    // syntax error).
+    let Term::Access(access) = head else {
+        return Ok((input, head));
+    };
+    if access.source.is_none() {
+        return Ok((input, Term::Access(access)));
+    }
     // The `~` of a `~>` chain separator begins a valid primary (a ripple), and `//` begins
     // a comment whose first `/` would parse as a negation primary - guard against consuming
     // either as an application argument.
@@ -1604,8 +1659,8 @@ fn term(input: Span) -> IResult<Span, Term> {
         primary,
     ))(input)?;
     match arg {
-        Some(arg) => Ok((input, Term::Apply(Box::new(head), Box::new(arg)))),
-        None => Ok((input, head)),
+        Some(arg) => Ok((input, Term::Apply(access, Box::new(arg)))),
+        None => Ok((input, Term::Access(access))),
     }
 }
 

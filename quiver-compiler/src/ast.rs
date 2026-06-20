@@ -83,8 +83,6 @@ pub enum Term {
     Block(Block),
     Function(Function),
     Access(Access),
-    Builtin(Builtin),
-    TailCall(TailCall),
     Equality,
     Not,
     Spawn(Box<Term>, Spanned),
@@ -94,13 +92,14 @@ pub enum Term {
     /// The `Spanned` is the `!`, for hover (shows the received/awaited result type).
     Select(Option<Vec<Chain>>, Spanned),
     Process(usize),
-    /// Reference operator (`&`). None creates a new unique ref, Some references a value.
+    /// Reference operator (`&`). None creates a new unique ref, Some references a value
+    /// (a variable, import member, or builtin — `&x`, `&m.f`, `&__add__`).
     Reference(Option<Access>),
-    /// Reference to a builtin without calling it (`&__add__`).
-    BuiltinReference(Builtin),
-    /// Function application by juxtaposition (`f 1`, `f x`, `f &g`). The argument is
-    /// evaluated as a flow position and the callable head is invoked with it.
-    Apply(Box<Term>, Box<Term>),
+    /// Function application: a looked-up callable head (an [`Access`] whose source is a variable,
+    /// `$`, import member, or builtin) applied to an argument. `f 5`, `f [1, 2]`, `__add__ [3,4]`.
+    /// The flowing value goes into the argument (evaluated as a flow position); the head is then
+    /// invoked with it. Bare-accessor (`.f`) and ripple (`~`) heads are not applicable this way.
+    Apply(Access, Box<Term>),
 }
 
 impl Term {
@@ -110,8 +109,6 @@ impl Term {
     pub fn span(&self) -> Option<SourceSpan> {
         match self {
             Term::Access(access) => access.span.get(),
-            Term::Builtin(builtin) => builtin.span.get(),
-            Term::TailCall(tail_call) => tail_call.span.get(),
             _ => None,
         }
     }
@@ -123,7 +120,6 @@ impl Term {
             Term::Access(Access {
                 source: Some(AccessSource::Ripple),
                 accessors,
-                argument: None,
                 ..
             }) if accessors.is_empty()
         )
@@ -136,10 +132,21 @@ pub enum Literal {
     Binary(Vec<u8>),
 }
 
+/// How a tuple literal's name is determined.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TupleName {
+    /// Unnamed: `[...]`
+    Anonymous,
+    /// Named: `Point[...]`
+    Named(String),
+    /// Inherited from the first spread's source (`~[..., y]`, `a[..., y]`). The compiler resolves
+    /// it from that source's tuple type.
+    Inherit,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tuple {
-    /// Tuple name: None for unnamed, Some for named (e.g., "Point")
-    pub name: Option<String>,
+    pub name: TupleName,
     pub fields: Vec<TupleField>,
     /// Span of the tuple literal, for hover (shows the constructed composite type).
     pub span: Spanned,
@@ -183,6 +190,12 @@ pub enum AccessSource {
     Import(Vec<String>),
     /// Self reference `.` - the current process
     Self_,
+    /// Builtin like `__add__` — a globally-resolved callable, looked up in the builtin
+    /// registry rather than the lexical scope.
+    Builtin(String),
+    /// Tail call (`^`, `^f`, `^f.field`): `None` recurses into the current function, `Some(name)`
+    /// tail-calls `name`. Compiled with the tail-call instruction (TCO), not a normal call.
+    TailCall(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,7 +206,6 @@ pub struct Access {
     /// the language server can hover/navigate each component of a chain separately. Kept beside
     /// `accessors` rather than inside `AccessPath`, whose identity is the field, not its position.
     pub accessor_spans: Vec<Spanned>,
-    pub argument: Option<Vec<TupleField>>,
     /// Span of the base (the `%util` / `$` / variable part, before any accessors).
     pub base_span: Spanned,
     /// Span of the whole access reference (`%util.triple`, `$.x`), for the fallback hover and
@@ -205,14 +217,6 @@ pub struct Access {
 pub enum AccessPath {
     Field(String),
     Index(usize),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Builtin {
-    pub name: String,
-    pub argument: Option<Vec<TupleField>>,
-    /// Span of the builtin reference, for hover.
-    pub span: Spanned,
 }
 
 /// Partial pattern field. `pattern` is `None` to bind the field by name (`(x)`), or `Some` to
@@ -230,15 +234,6 @@ pub struct PartialPatternField {
 pub struct PartialPattern {
     pub name: Option<String>,
     pub fields: Vec<PartialPatternField>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TailCall {
-    pub identifier: Option<String>,
-    pub accessors: Vec<AccessPath>,
-    pub argument: Option<Vec<TupleField>>,
-    /// Span of the tail call, for hover.
-    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq)]

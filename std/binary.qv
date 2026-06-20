@@ -16,7 +16,7 @@ byte_bit = #'int {
   index: &__binary_index__,
 
   get_byte: #['bin, 'int] {
-    __binary_get__[..., 0, 8]
+    __binary_get__ [..., 0, 8]
   },
 
   get_bit: #['bin, 'int] {

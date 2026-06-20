@@ -62,10 +62,14 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::Literal(_) => {}
             ast::Term::Tuple(tuple) => {
                 for field in &tuple.fields {
-                    if let ast::FieldValue::Chain(chain) = &field.value {
-                        self.visit_chain(chain);
+                    match &field.value {
+                        ast::FieldValue::Chain(chain) => self.visit_chain(chain),
+                        // A named spread (`...a`, including the `a` of an `a[..., y]` spread-
+                        // update) references the variable `a`, so a closure must capture it.
+                        ast::FieldValue::Spread(Some(name)) => self.visit_identifier(name, vec![]),
+                        // A bare spread (`...`) is the chained value, not a variable.
+                        ast::FieldValue::Spread(None) => {}
                     }
-                    // Ripple doesn't introduce variables
                 }
             }
             ast::Term::Match(pattern) => {
@@ -82,35 +86,14 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Term::Access(access) => {
-                if let Some(ast::AccessSource::Identifier(name)) = &access.source {
-                    self.visit_identifier(name, access.accessors.clone());
-                }
-                // $ doesn't capture variables, so skip AccessSource::Parameter
-                if let Some(argument) = &access.argument {
-                    for field in argument {
-                        if let ast::FieldValue::Chain(chain) = &field.value {
-                            self.visit_chain(chain);
-                        }
-                    }
-                }
+                // A variable reference or a named tail call (`^f`) captures its identifier; `$`,
+                // imports, builtins, and ripples don't.
+                self.visit_access_capture(access);
             }
-            ast::Term::Builtin(_) => {}
-            ast::Term::BuiltinReference(_) => {}
-            ast::Term::Apply(head, arg) => {
-                self.visit_term(head);
+            ast::Term::Apply(access, arg) => {
+                // The head is an access (the callable); capture as for a bare access.
+                self.visit_access_capture(access);
                 self.visit_term(arg);
-            }
-            ast::Term::TailCall(tail_call) => {
-                if let Some(name) = &tail_call.identifier {
-                    self.visit_identifier(name, tail_call.accessors.clone());
-                }
-                if let Some(argument) = &tail_call.argument {
-                    for field in argument {
-                        if let ast::FieldValue::Chain(chain) = &field.value {
-                            self.visit_chain(chain);
-                        }
-                    }
-                }
             }
             ast::Term::Equality => {}
             ast::Term::Not => {}
@@ -129,20 +112,21 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::Reference(Some(access)) => {
                 // Reference to a value - same variable capture as Access
-                if let Some(ast::AccessSource::Identifier(name)) = &access.source {
-                    self.visit_identifier(name, access.accessors.clone());
-                }
-                if let Some(argument) = &access.argument {
-                    for field in argument {
-                        if let ast::FieldValue::Chain(chain) = &field.value {
-                            self.visit_chain(chain);
-                        }
-                    }
-                }
+                self.visit_access_capture(access);
             }
             ast::Term::Reference(None) => {
                 // Ref creation doesn't capture any variables
             }
+        }
+    }
+
+    /// Capture the variable an access refers to: a plain identifier (`f`, `f.x`) or a named tail
+    /// call (`^f`). `$`, imports, builtins, ripples, and self tail calls (`^`) capture nothing.
+    fn visit_access_capture(&mut self, access: &ast::Access) {
+        if let Some(ast::AccessSource::Identifier(name) | ast::AccessSource::TailCall(Some(name))) =
+            &access.source
+        {
+            self.visit_identifier(name, access.accessors.clone());
         }
     }
 
