@@ -43,36 +43,34 @@ read_all_ = #[', 'int, 'bin] {
   }
 },
 
-// A streaming line iterator. State is the file, the next read offset, a buffer of bytes read
-// but not yet emitted, and a cursor `pos` into that buffer. Each step scans from `pos` to the
-// next newline (advancing the cursor rather than recopying the buffer), reading further 64KB
-// chunks only when the remaining buffer holds no complete line. The buffer is compacted (the
-// consumed prefix dropped) once per chunk read, keeping the whole pass linear.
-lines_ = #[#^ -> '%iter<Str['bin]>, ', 'int, 'bin, 'int] {
-  =[self, f, offset, buf, pos],
-  #{
-    len = buf ~> %bin.length,
-    %bin.index [buf, 10, pos] ~> {
-      | =index => {
-        line = %bin.slice [buf, pos, index],
-        [Str[line], self [&self, f, offset, buf, %math.add [index, 1]]]
-      }
-      | {
-        // No newline in the remaining buffer: keep the unconsumed tail and read more.
-        leftover = %bin.slice [buf, pos, len],
-        chunk = do_read [f, offset, 65536],
-        chunk ~> %bin.length ~> {
-          | =0 => {
-            // EOF: emit the final unterminated line if there is one, otherwise stop.
-            | leftover ~> %bin.length ~> =0 => []
-            | [Str[leftover], self [&self, f, offset, 0x, 0]]
-          }
-          | =n => {
-            n
-            ~> %math.add [offset, ~]
-            ~> self [&self, f, ~, %bin.concat [leftover, chunk], 0]
-            ~> ^~
-          }
+// One step of the line iterator. The state is the file, the next read offset, a buffer of
+// bytes read but not yet emitted, and a cursor `pos` into that buffer. Each step scans from
+// `pos` to the next newline (advancing the cursor rather than recopying the buffer), reading
+// further 64KB chunks only when the remaining buffer holds no complete line. When a chunk is
+// read without completing a line it loops (via `^`) rather than emitting, so the buffer is
+// compacted once per chunk read, keeping the whole pass linear.
+lines_step_ = #[', 'int, 'bin, 'int] {
+  =[f, offset, buf, pos],
+  len = buf ~> %bin.length,
+  %bin.index [buf, 10, pos] ~> {
+    | =index => {
+      line = %bin.slice [buf, pos, index],
+      [Str[line], [f, offset, buf, %math.add [index, 1]]]
+    }
+    | {
+      // No newline in the remaining buffer: keep the unconsumed tail and read more.
+      leftover = %bin.slice [buf, pos, len],
+      chunk = do_read [f, offset, 65536],
+      chunk ~> %bin.length ~> {
+        | =0 => {
+          // EOF: emit the final unterminated line if there is one, otherwise stop.
+          | leftover ~> %bin.length ~> =0 => []
+          | [Str[leftover], [f, offset, 0x, 0]]
+        }
+        | =n => {
+          n
+          ~> %math.add [offset, ~]
+          ~> ^ [f, ~, %bin.concat [leftover, chunk], 0]
         }
       }
     }
@@ -95,7 +93,7 @@ lines_ = #[#^ -> '%iter<Str['bin]>, ', 'int, 'bin, 'int] {
   read_all: #' { read_all_ [~, 0, 0x] },
 
   // Iterate over the lines of the file (newline-separated, without the trailing newline).
-  lines: #' { lines_ [&lines_, ~, 0, 0x, 0] },
+  lines: #' { %iter.unfold [[~, 0, 0x, 0], &lines_step_] },
 
   // Write `data` starting at `offset`, returning the number of bytes written.
   write: #[', 'int, 'bin] {

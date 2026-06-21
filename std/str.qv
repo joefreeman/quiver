@@ -59,73 +59,46 @@ byte_pos_to_char_idx_ = #['bin, 'int, 'int, 'int] {
   }
 },
 
-split_ = #[#^ -> '%iter<'>, 'bin, 'bin, 'int] {
-  =[self, haystack, delim, start],
+// Iterator over the Unicode codepoints (as ints) of a binary. The state is the
+// byte position; each step skips any continuation bytes, then decodes the char.
+chars_ = #'bin {
+  =data,
+  data_len = data ~> %bin.length,
+  %iter.unfold [0, #'int {
+    =byte_pos,
+    byte_pos = skip_continuation_ [data, byte_pos, data_len],
+    {
+      | %math.ge [byte_pos, data_len] => []
+      | {
+        char_end =
+          byte_pos
+          ~> %math.add [~, 1]
+          ~> skip_continuation_ [data, ~, data_len],
 
-  haystack_len = haystack ~> %bin.length,
-  delim_len = delim ~> %bin.length,
-  end = %math.sub [haystack_len, delim_len],
+        char =
+          char_end
+          ~> %math.sub [~, byte_pos]
+          ~> %math.mul [~, 8]
+          ~> __binary_get__ [data, byte_pos, 0, ~],
 
-  #{
-    | start ~> %math.gt [~, haystack_len] => []
-
-    | find_index [haystack, delim, start, end] ~> =index => {
-      match_end = %math.add [index, delim_len],
-      segment = haystack ~> %bin.slice [~, start, index] ~> Str[~],
-      [segment, self [&self, haystack, delim, match_end]]
+        [char, char_end]
+      }
     }
-
-    | {
-      // No further delimiter: emit the trailing segment, then advance start
-      // past the end so the next call yields nil.
-      segment = haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~],
-      next_start = %math.add [haystack_len, 1],
-      [segment, self [&self, haystack, delim, next_start]]
-    }
-  }
+  }]
 },
 
-iter_ = #[#^ -> '%iter<'int>, 'bin, 'int, 'int] {
-  =[self, data, byte_pos, data_len],
-
-  byte_pos = skip_continuation_ [data, byte_pos, data_len],
-
-  #{
-    | %math.ge [byte_pos, data_len] => []
-    | {
-      char_end =
-        byte_pos
-        ~> %math.add [~, 1]
-        ~> skip_continuation_ [data, ~, data_len],
-
-      char =
-        char_end
-        ~> %math.sub [~, byte_pos]
-        ~> %math.mul [~, 8]
-        ~> __binary_get__ [data, byte_pos, 0, ~],
-
-      [char, self [&self, data, char_end, data_len]]
-    }
-  }
-},
-
-collect_ = #['%iter<'int>, 'bin] {
-  =[it, acc],
-  it [] ~> {
-    | / ~> =Ok => Str[acc]
-    | =[char_int, next] => {
-      byte_count = char_int ~> {
-        | %math.le [~, 127] => 1
-        | %math.le [~, 57279] => 2
-        | %math.le [~, 15712191] => 3
-        | 4
-      },
-
-      acc
-      ~> %bin.append [~, char_int, byte_count]
-      ~> ^ [&next, ~]
-    }
-  }
+// Reassemble a Str from an iterator of codepoints, encoding each as UTF-8.
+from_chars_ = #'%iter<'int> {
+  %iter.fold [~, 0x, #['bin, 'int] {
+    =[acc, char_int],
+    byte_count = char_int ~> {
+      | %math.le [~, 127] => 1
+      | %math.le [~, 57279] => 2
+      | %math.le [~, 15712191] => 3
+      | 4
+    },
+    acc ~> %bin.append [~, char_int, byte_count]
+  }] ~> Str[~]
 },
 
 [
@@ -190,25 +163,32 @@ collect_ = #['%iter<'int>, 'bin] {
 
   split: #[', '] {
     =[Str[haystack], Str[delim]],
-    split_ [&split_, haystack, delim, 0]
+    haystack_len = haystack ~> %bin.length,
+    delim_len = delim ~> %bin.length,
+    end = %math.sub [haystack_len, delim_len],
+    %iter.unfold [0, #'int {
+      =start,
+      {
+        | start ~> %math.gt [~, haystack_len] => []
+        | find_index [haystack, delim, start, end] ~> =index =>
+          [haystack ~> %bin.slice [~, start, index] ~> Str[~], %math.add [index, delim_len]]
+        | [haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~], %math.add [haystack_len, 1]]
+      }
+    }]
   },
 
   length: #' {
     =Str[data],
-    data
-    ~> %bin.length
-    ~> iter_ [&iter_, data, 0, ~]
-    ~> %iter.count
+    data ~> chars_ ~> %iter.count
   },
 
   slice: #[', 'int, 'int] {
     =[Str[data], start, end],
     data
-    ~> %bin.length
-    ~> iter_ [&iter_, data, 0, ~]
+    ~> chars_
     ~> %iter.drop [~, start]
     ~> %iter.take [~, %math.sub [end, start]]
-    ~> collect_ [~, 0x]
+    ~> from_chars_
   },
 
   index_of: #[', '] {
@@ -232,18 +212,16 @@ collect_ = #['%iter<'int>, 'bin] {
 
   iter: #' {
     =Str[data],
-    data
-    ~> %bin.length
-    ~> iter_ [&iter_, data, 0, ~]
+    data ~> chars_
   },
 
   collect: #'%iter<'int> {
-    collect_ [~, 0x]
+    from_chars_
   },
 
   join: #['%iter<'>, '] {
     =[it, Str[sep]],
-    &it
+    it
     ~> %iter.map [~, #' { .0 }]
     ~> %iter.intersperse [~, sep]
     ~> %iter.fold [~, 0x, &%bin.concat]

@@ -7,24 +7,6 @@ reverse_ = #<'t>['<'t>, '<'t>] {
   }
 },
 
-iter_ = #<'t>[#^ -> '%iter<'t>, '<'t>] {
-  =[self, xs],
-  #{
-    xs ~> {
-      | =Nil => []
-      | =Cons[head, tail] => self [&self, tail] ~> [head, ~]
-    }
-  }
-},
-
-collect_ = #<'t>['%iter<'t>, '<'t>] {
-  =[it, acc],
-  it [] ~> {
-    | / ~> =Ok => acc
-    | =[value, next] => value ~> Cons[~, acc] ~> ^ [&next, ~]
-  }
-},
-
 [
   new: #{ Nil },
 
@@ -53,10 +35,13 @@ collect_ = #<'t>['%iter<'t>, '<'t>] {
   },
 
   iter: #<'t>'<'t> {
-    iter_ [&iter_, ~]
+    %iter.unfold [~, #<'t>'<'t> {
+      | =Cons[head, tail] => [head, tail]
+      | =Nil => []
+    }]
   },
 
   collect: #<'t>'%iter<'t> {
-    collect_ [~, Nil] ~> reverse_ [~, Nil]
+    %iter.fold [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> reverse_ [~, Nil]
   }
 ]

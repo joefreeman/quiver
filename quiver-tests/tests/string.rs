@@ -133,6 +133,19 @@ fn test_split() {
 }
 
 #[test]
+fn test_split_returns_iterator() {
+    // The result is a lazy iterator: bound to a variable it is a value (wrapped in
+    // Iter[...]), so it flows through a chain without being called - no `&` needed.
+    quiver()
+        .evaluate(r#"parts = %str.split ["1,2,3", ","], parts ~> %str.join [~, " + "]"#)
+        .expect("\"1 + 2 + 3\"");
+    // Laziness: the first field can be taken without materialising the rest.
+    quiver()
+        .evaluate(r#"["a,b,c", ","] ~> %str.split ~> %iter.nth [~, 0]"#)
+        .expect("\"a\"");
+}
+
+#[test]
 fn test_length() {
     // ASCII strings
     quiver().evaluate(r#""hello" ~> %str.length"#).expect("5");

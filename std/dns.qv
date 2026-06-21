@@ -1,31 +1,27 @@
 'ip = IPv4['bin] | IPv6['bin];
 
-resolve_ = #[#^ -> '%iter<'ip>, \DnsResolver] {
-  =[self, resolver],
-  #{
-    __dns_next__ [resolver] ~> {
-      | / => {
-        __dns_close__ [resolver],
-        []
-      }
-      | =b ~> {
-        b
-        ~> __binary_length__
-        ~> {
-          | =4 => IPv4[b]
-          | =16 => IPv6[b]
-        }
-        ~> [~, self [&self, resolver]]
-      }
-    }
-  }
-},
-
 [
   resolve: #Str['bin] {
     .0
     ~> __dns_resolve__ [~]
-    ~> [&resolve_, ~]
-    ~> resolve_
+    ~> =resolver,
+    %iter.unfold [resolver, #\DnsResolver {
+      =r,
+      __dns_next__ [r] ~> {
+        | / => {
+          __dns_close__ [r],
+          []
+        }
+        | =b ~> {
+          b
+          ~> __binary_length__
+          ~> {
+            | =4 => IPv4[b]
+            | =16 => IPv6[b]
+          }
+          ~> [~, r]
+        }
+      }
+    }]
   }
 ]
