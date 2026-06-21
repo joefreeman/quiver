@@ -126,7 +126,7 @@ fn test_multi_level_import_with_captures() {
 }
 
 #[test]
-fn test_partial_type_import() {
+fn test_named_module_type_alias() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
@@ -136,7 +136,7 @@ fn test_partial_type_import() {
         .with_modules(modules)
         .evaluate(
             r#"
-            ('ok, 'err) = %types;
+            'ok = '%types.ok;
             double = #'ok { =Ok[x] => [x, 2] ~> __multiply__ },
             Ok[21] ~> double
             "#,
@@ -145,7 +145,8 @@ fn test_partial_type_import() {
 }
 
 #[test]
-fn test_star_type_import() {
+fn test_named_module_type_inline() {
+    // A module type used inline in a function signature, without a local alias.
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
@@ -155,8 +156,7 @@ fn test_star_type_import() {
         .with_modules(modules)
         .evaluate(
             r#"
-            '* = %types;
-            unwrap = #'result { =Ok[x] => x | =Err[x] => 0 },
+            unwrap = #'%types.result { =Ok[x] => x | =Err[x] => 0 },
             Ok[42] ~> unwrap
             "#,
         )
@@ -164,7 +164,26 @@ fn test_star_type_import() {
 }
 
 #[test]
-fn test_import_generic() {
+fn test_default_module_type() {
+    // The module's nameless default type, referenced as `'%mod`.
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["result".to_string()],
+        "' = Ok['int] | Err['int]; []".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate(
+            r#"
+            unwrap = #'%result { =Ok[x] => x | =Err[x] => 0 },
+            Ok[42] ~> unwrap
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_generic_module_type() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
@@ -172,6 +191,73 @@ fn test_import_generic() {
     );
     quiver()
         .with_modules(modules)
-        .evaluate(r#"('list) = %types"#)
+        .evaluate(r#"'list<'t> = '%types.list<'t>"#)
         .expect_alias("list", "Cons['t, μ1] | Nil");
+}
+
+#[test]
+fn test_generic_default_module_type_applied() {
+    // A generic default type instantiated with a concrete argument.
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["list".to_string()],
+        "'<'t> = Nil | Cons['t, ^];".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate(r#"'ints = '%list<'int>"#)
+        .expect_alias("ints", "Cons['int, μ1] | Nil");
+}
+
+#[test]
+fn test_module_type_missing() {
+    let mut modules = HashMap::new();
+    modules.insert(vec!["types".to_string()], "'ok = Ok['int]; []".to_string());
+    quiver()
+        .with_modules(modules)
+        .evaluate(r#"'nope = '%types.missing"#)
+        .expect_compile_error(quiver_compiler::compiler::Error::ModuleTypeMissing {
+            type_name: "missing".to_string(),
+            module: "types".to_string(),
+        });
+}
+
+#[test]
+fn test_default_aliasing_named_in_same_module() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["range".to_string()],
+        "'range = Range['int, 'int]; ' = 'range; []".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate(r#"'r = '%range"#)
+        .expect_alias("r", "Range['int, 'int]");
+}
+
+#[test]
+fn test_self_default_type_reference() {
+    // Within a module, a bare `'` refers to the module's own default type.
+    quiver()
+        .evaluate(
+            r#"
+            ' = Ok['int] | Err['int]
+            unwrap = #' { =Ok[x] => x | =Err[_] => 0 }
+            Ok[42] ~> unwrap
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_self_default_type_parameterised() {
+    quiver()
+        .evaluate(
+            r#"
+            '<'t> = Nil | Cons['t, ^]
+            len? = #'<'int> { =Nil => 0 | =Cons[_, _] => 1 }
+            Cons[7, Nil] ~> len?
+            "#,
+        )
+        .expect("1");
 }

@@ -20,15 +20,15 @@ const REPS: usize = 5;
 // op name -> closure building Quiver source for a given string literal body and char count
 fn ops() -> Vec<(&'static str, fn(&str, usize) -> String)> {
     vec![
-        ("length", |s, _n| format!(r#""{s}" ~> %string.length"#)),
+        ("length", |s, _n| format!(r#""{s}" ~> %str.length"#)),
         ("iter_count", |s, _n| {
-            format!(r#""{s}" ~> %string.iter ~> %iter.count"#)
+            format!(r#""{s}" ~> %str.iter ~> %iter.count"#)
         }),
         ("iter_collect", |s, _n| {
-            format!(r#""{s}" ~> %string.iter ~> %string.collect"#)
+            format!(r#""{s}" ~> %str.iter ~> %str.collect"#)
         }),
         ("slice_all", |s, n| {
-            format!(r#"["{s}", 0, {n}] ~> %string.slice"#)
+            format!(r#"["{s}", 0, {n}] ~> %str.slice"#)
         }),
     ]
 }
@@ -37,7 +37,7 @@ fn ops() -> Vec<(&'static str, fn(&str, usize) -> String)> {
 #[ignore]
 fn bench_unicode() {
     // Warm: first evaluate compiles the std graph once.
-    let mut tr = quiver().evaluate(r#""warm" ~> %string.length"#);
+    let mut tr = quiver().evaluate(r#""warm" ~> %str.length"#);
 
     println!(
         "\n{:<14} {:<8} {:>12} {:>12} {:>10}",

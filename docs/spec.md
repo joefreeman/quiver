@@ -78,6 +78,13 @@ Type aliases are defined with `=`, the same operator used for value bindings —
 'writer = (write: (#'bin -> Ok))
 ```
 
+A type definition with the name omitted — a bare `'` — declares a module's default type, reached from other modules as `'%mod` (see [Module types](#module-types)). A module has at most one:
+
+```quiver
+' = Str['bin]                  // this module's default type
+'<'t> = Nil | Cons['t, ^]      // a parameterised default type
+```
+
 ### Parameterised types
 
 Type aliases and functions can be parameterised with type parameters using angle brackets:
@@ -622,14 +629,36 @@ math = %math                   // Import standard library module
 * = %math                      // Import all named exports
 ```
 
-### Type imports
+### Module types
 
-Type imports use the same `=` form, with the `'` prefix marking them as type-level:
+A module's types are reached with a type-level form combining the `'` type prefix and the `%` module sigil:
+
+- `'%mod` — the module's **default type** (its nameless definition; see [Type aliases](#type-aliases))
+- `'%mod.name` — a **named type** from the module
+
+These are ordinary type expressions, usable wherever a type can appear and taking type arguments as usual:
 
 ```quiver
-('circle, 'rectangle) = %shapes   // Import specific types
-'* = %geometry                    // Import all types
+count = #'%list<'int> { ... }        // the list module's default type, applied
+area = #'%shapes.circle { ... }      // a named type from the shapes module
 ```
+
+Inside the module that defines a type, its own default is written as a bare `'` (or `'<args>` when parameterised):
+
+```quiver
+// list.qv
+'<'t> = Nil | Cons['t, ^]            // the list module's default type
+head = #<'t>'<'t> { ... }            // `'<'t>` is this module's own default
+```
+
+A local name for a module type is just an ordinary type alias:
+
+```quiver
+'circle = '%shapes.circle           // a local name for a named module type
+'pair<'t> = '%shapes.pair<'t>       // re-expose a parameterised type, keeping its parameter
+```
+
+A parameterised module type needs its type arguments (`'%shapes.pair<'int>`); to re-export it generically, thread the parameter through as above.
 
 ## Standard library
 

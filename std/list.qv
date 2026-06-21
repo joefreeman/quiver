@@ -1,14 +1,13 @@
-'list<'t> = Nil | Cons['t, ^];
-('iterator) = %iter;
+'<'t> = Nil | Cons['t, ^];
 
-reverse_ = #<'t>['list<'t>, 'list<'t>] {
+reverse_ = #<'t>['<'t>, '<'t>] {
   | =[Nil, xs] => xs
   | =[Cons[head, tail], xs] => {
     Cons[head, xs] ~> ^ [tail, ~]
   }
 },
 
-iter_ = #<'t>[#^ -> 'iterator<'t>, 'list<'t>] {
+iter_ = #<'t>[#^ -> '%iter<'t>, '<'t>] {
   =[self, xs],
   #{
     xs ~> {
@@ -18,7 +17,7 @@ iter_ = #<'t>[#^ -> 'iterator<'t>, 'list<'t>] {
   }
 },
 
-collect_ = #<'t>['iterator<'t>, 'list<'t>] {
+collect_ = #<'t>['%iter<'t>, '<'t>] {
   =[it, acc],
   it [] ~> {
     | / ~> =Ok => acc
@@ -29,35 +28,35 @@ collect_ = #<'t>['iterator<'t>, 'list<'t>] {
 [
   new: #{ Nil },
 
-  head: #<'t>'list<'t> {
+  head: #<'t>'<'t> {
     =Cons[head, _] => head
   },
 
-  tail: #<'t>'list<'t> {
+  tail: #<'t>'<'t> {
     =Cons[_, tail] => tail
   },
 
-  empty?: #<'t>'list<'t> {
+  empty?: #<'t>'<'t> {
     =Nil => Ok
   },
 
-  prepend: #<'t>['list<'t>, 't] {
+  prepend: #<'t>['<'t>, 't] {
     Cons[$.1, $.0]
   },
 
-  append: #<'t>['list<'t>, 't] {
+  append: #<'t>['<'t>, 't] {
     reverse_ [$.0, Nil] ~> reverse_ [Cons[$.1, ~], Nil]
   },
 
-  reverse: #<'t>'list<'t> {
+  reverse: #<'t>'<'t> {
     reverse_ [~, Nil]
   },
 
-  iter: #<'t>'list<'t> {
+  iter: #<'t>'<'t> {
     iter_ [&iter_, ~]
   },
 
-  collect: #<'t>'iterator<'t> {
+  collect: #<'t>'%iter<'t> {
     collect_ [~, Nil] ~> reverse_ [~, Nil]
   }
 ]

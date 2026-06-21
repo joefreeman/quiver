@@ -47,20 +47,122 @@ recursive type
         (cycle_type)))))
 
 ==================
-type import
+named module type alias
 ==================
 
-('circle, 'rectangle) = %shapes
+'circle = '%shapes.circle
 
 ---
 
 (source_file
-  (type_import
-    pattern: (type_import_pattern
-      (type_name)
+  (type_alias
+    name: (type_name)
+    definition: (module_type
+      module: (import
+        (identifier))
+      member: (identifier))))
+
+==================
+default module type alias
+==================
+
+'shape = '%shapes
+
+---
+
+(source_file
+  (type_alias
+    name: (type_name)
+    definition: (module_type
+      module: (import
+        (identifier)))))
+
+==================
+module type with arguments
+==================
+
+'ints = '%list.list<'int>
+
+---
+
+(source_file
+  (type_alias
+    name: (type_name)
+    definition: (module_type
+      module: (import
+        (identifier))
+      member: (identifier)
+      (type_arguments
+        (type_identifier
+          name: (type_name))))))
+
+==================
+default type marker
+==================
+
+' = Str['bin]
+
+---
+
+(source_file
+  (type_alias
+    name: (default_type_name)
+    definition: (tuple_type
+      name: (tuple_name)
+      (type_identifier
+        name: (type_name)))))
+
+==================
+parameterised default type marker
+==================
+
+'<'t> = Nil | Cons['t, ^]
+
+---
+
+(source_file
+  (type_alias
+    name: (default_type_name)
+    (type_parameters
       (type_name))
-    module: (import
-      (identifier))))
+    definition: (union_type
+      (tuple_type
+        name: (tuple_name))
+      (tuple_type
+        name: (tuple_name)
+        (type_identifier
+          name: (type_name))
+        (cycle_type)))))
+
+==================
+self default type reference
+==================
+
+f = #'<'int> { 0 }
+g = #' { 0 }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (self_default_type
+          (type_arguments
+            (type_identifier
+              name: (type_name))))
+        (block
+          (branch
+            condition: (expression (chain (integer))))))))
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (self_default_type)
+        (block
+          (branch
+            condition: (expression (chain (integer)))))))))
 
 ==================
 function type alias

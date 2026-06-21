@@ -31,23 +31,15 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     TypeAlias {
-        name: String,
+        /// The alias name (`point` in `'point = ...`), or `None` for the module's
+        /// nameless default-type marker (`' = ...` / `'<'t> = ...`).
+        name: Option<String>,
         /// Span of the alias name (`'point` in `'point = ...`), for symbols/go-to-definition.
         name_span: Spanned,
         type_parameters: Vec<String>,
         type_definition: Type,
     },
-    TypeImport {
-        pattern: TypeImportPattern,
-        module: Vec<String>,
-    },
     Expression(Expression),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypeImportPattern {
-    Star,
-    Partial(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,10 +268,26 @@ pub enum Type {
     Tuple(TupleType),
     Function(FunctionType),
     Union(UnionType),
-    Identifier { name: String, arguments: Vec<Type> },
+    Identifier {
+        name: String,
+        arguments: Vec<Type>,
+    },
     Cycle(Option<usize>),
     Process(ProcessType),
     Resource(String),
+    /// A type reached through a module's type namespace: `'%mod` (the module's default
+    /// type, `member: None`) or `'%mod.name` (a named type). `arguments` are type
+    /// arguments applied to the referenced (parameterised) type, e.g. `'%list<'int>`.
+    ModuleType {
+        module: Vec<String>,
+        member: Option<String>,
+        arguments: Vec<Type>,
+    },
+    /// The enclosing module's own default type, written as a bare `'` (or `'<args>` to apply
+    /// type arguments). The type-level counterpart of how other modules reach it as `'%mod`.
+    SelfDefault {
+        arguments: Vec<Type>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

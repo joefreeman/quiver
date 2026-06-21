@@ -1,6 +1,6 @@
-'iterator<'t> = #[] -> (['t, ^] | []);
+'<'t> = #[] -> (['t, ^] | []);
 
-map_ = #<'t, 'u>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> 'u] {
+map_ = #<'t, 'u>[#^ -> '<'t>, '<'t>, #'t -> 'u] {
   =[self, it, f],
   #{
     it [] ~> =[value, next],
@@ -8,7 +8,7 @@ map_ = #<'t, 'u>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> 'u] {
   }
 },
 
-filter_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
+filter_ = #<'t>[#^ -> '<'t>, '<'t>, #'t -> ('t | [])] {
   =[self, it, pred],
   #{
     it [] ~> =[value, next],
@@ -21,7 +21,7 @@ filter_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
   }
 },
 
-take_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'int] {
+take_ = #<'t>[#^ -> '<'t>, '<'t>, 'int] {
   =[self, it, n],
   #{
     | n ~> =0 => []
@@ -35,7 +35,7 @@ take_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'int] {
   }
 },
 
-drop_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'int] {
+drop_ = #<'t>[#^ -> '<'t>, '<'t>, 'int] {
   =[self, it, n],
   #{
     | n ~> =0 => it []
@@ -46,7 +46,7 @@ drop_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'int] {
   }
 },
 
-take_while_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
+take_while_ = #<'t>[#^ -> '<'t>, '<'t>, #'t -> ('t | [])] {
   =[self, it, pred],
   #{
     it [] ~> =[value, next],
@@ -55,7 +55,7 @@ take_while_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
   }
 },
 
-drop_while_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
+drop_while_ = #<'t>[#^ -> '<'t>, '<'t>, #'t -> ('t | [])] {
   =[self, it, pred],
   #{
     it [] ~> =[value, next],
@@ -67,10 +67,10 @@ drop_while_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
 },
 
 flat_map_ = #<'t, 'u>[
-  #^ -> 'iterator<'u>,
-  'iterator<'t>,
-  #'t -> 'iterator<'u>,
-  'iterator<'u>
+  #^ -> '<'u>,
+  '<'t>,
+  #'t -> '<'u>,
+  '<'u>
 ] {
   =[self, source, f, current],
   #{
@@ -85,7 +85,7 @@ flat_map_ = #<'t, 'u>[
   }
 },
 
-chain_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'iterator<'t>] {
+chain_ = #<'t>[#^ -> '<'t>, '<'t>, '<'t>] {
   =[self, first, second],
   #{
     first [] ~> {
@@ -95,7 +95,7 @@ chain_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'iterator<'t>] {
   }
 },
 
-zip_ = #<'t, 'u>[#^ -> 'iterator<['t, 'u]>, 'iterator<'t>, 'iterator<'u>] {
+zip_ = #<'t, 'u>[#^ -> '<['t, 'u]>, '<'t>, '<'u>] {
   =[self, it1, it2],
   #{
     it1 [] ~> =[v1, next1],
@@ -104,7 +104,7 @@ zip_ = #<'t, 'u>[#^ -> 'iterator<['t, 'u]>, 'iterator<'t>, 'iterator<'u>] {
   }
 },
 
-enumerate_ = #<'t>[#^ -> 'iterator<['int, 't]>, 'iterator<'t>, 'int] {
+enumerate_ = #<'t>[#^ -> '<['int, 't]>, '<'t>, 'int] {
   =[self, it, index],
   #{
     it [] ~> =[value, next],
@@ -115,7 +115,7 @@ enumerate_ = #<'t>[#^ -> 'iterator<['int, 't]>, 'iterator<'t>, 'int] {
   }
 },
 
-cycle_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'iterator<'t>] {
+cycle_ = #<'t>[#^ -> '<'t>, '<'t>, '<'t>] {
   =[self, original, current],
   #{
     current [] ~> {
@@ -127,12 +127,12 @@ cycle_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'iterator<'t>] {
   }
 },
 
-repeat_ = #<'t>[#^ -> 'iterator<'t>, 't] {
+repeat_ = #<'t>[#^ -> '<'t>, 't] {
   =[self, value],
   #{ [value, self [&self, value]] }
 },
 
-fold_ = #<'t, 'acc>['iterator<'t>, 'acc, #['acc, 't] -> 'acc] {
+fold_ = #<'t, 'acc>['<'t>, 'acc, #['acc, 't] -> 'acc] {
   =[it, acc, f],
   it [] ~> {
     | =[value, next] => {
@@ -142,7 +142,7 @@ fold_ = #<'t, 'acc>['iterator<'t>, 'acc, #['acc, 't] -> 'acc] {
   }
 },
 
-find_index_ = #<'t>['iterator<'t>, #'t -> ('t | []), 'int] {
+find_index_ = #<'t>['<'t>, #'t -> ('t | []), 'int] {
   =[it, pred, index],
   it [] ~> =[value, next],
   {
@@ -155,7 +155,7 @@ find_index_ = #<'t>['iterator<'t>, #'t -> ('t | []), 'int] {
   }
 },
 
-intersperse_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 't] {
+intersperse_ = #<'t>[#^ -> '<'t>, '<'t>, 't] {
   =[self, it, sep],
   #{
     it [] ~> =[value, next],
@@ -164,47 +164,47 @@ intersperse_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 't] {
 },
 
 [
-  map: #<'t, 'u>['iterator<'t>, #'t -> 'u] {
+  map: #<'t, 'u>['<'t>, #'t -> 'u] {
     [&map_, ...] ~> map_
   },
 
-  filter: #<'t>['iterator<'t>, #'t -> ('t | [])] {
+  filter: #<'t>['<'t>, #'t -> ('t | [])] {
     [&filter_, ...] ~> filter_
   },
 
-  take: #<'t>['iterator<'t>, 'int] {
+  take: #<'t>['<'t>, 'int] {
     [&take_, ...] ~> take_
   },
 
-  drop: #<'t>['iterator<'t>, 'int] {
+  drop: #<'t>['<'t>, 'int] {
     [&drop_, ...] ~> drop_
   },
 
-  take_while: #<'t>['iterator<'t>, #'t -> ('t | [])] {
+  take_while: #<'t>['<'t>, #'t -> ('t | [])] {
     [&take_while_, ...] ~> take_while_
   },
 
-  drop_while: #<'t>['iterator<'t>, #'t -> ('t | [])] {
+  drop_while: #<'t>['<'t>, #'t -> ('t | [])] {
     [&drop_while_, ...] ~> drop_while_
   },
 
-  flat_map: #<'t, 'u>['iterator<'t>, #'t -> 'iterator<'u>] {
+  flat_map: #<'t, 'u>['<'t>, #'t -> '<'u>] {
     [&flat_map_, ..., #{ [] }] ~> flat_map_
   },
 
-  chain: #<'t>['iterator<'t>, 'iterator<'t>] {
+  chain: #<'t>['<'t>, '<'t>] {
     [&chain_, ...] ~> chain_
   },
 
-  zip: #<'t, 'u>['iterator<'t>, 'iterator<'u>] {
+  zip: #<'t, 'u>['<'t>, '<'u>] {
     [&zip_, ...] ~> zip_
   },
 
-  enumerate: #<'t>'iterator<'t> {
+  enumerate: #<'t>'<'t> {
     [&enumerate_, ~, 0] ~> enumerate_
   },
 
-  cycle: #<'t>'iterator<'t> {
+  cycle: #<'t>'<'t> {
     [&cycle_, ~, ~] ~> cycle_
   },
 
@@ -212,11 +212,11 @@ intersperse_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 't] {
     [&repeat_, ~] ~> repeat_
   },
 
-  fold: #<'t, 'acc>['iterator<'t>, 'acc, #['acc, 't] -> 'acc] {
+  fold: #<'t, 'acc>['<'t>, 'acc, #['acc, 't] -> 'acc] {
     fold_
   },
 
-  find: #<'t>['iterator<'t>, #'t -> ('t | [])] {
+  find: #<'t>['<'t>, #'t -> ('t | [])] {
     =[it, pred],
     it [] ~> =[value, next],
     {
@@ -225,11 +225,11 @@ intersperse_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 't] {
     }
   },
 
-  find_index: #<'t>['iterator<'t>, #'t -> ('t | [])] {
+  find_index: #<'t>['<'t>, #'t -> ('t | [])] {
     [..., 0] ~> find_index_
   },
 
-  any?: #<'t>['iterator<'t>, #'t -> ('t | [])] {
+  any?: #<'t>['<'t>, #'t -> ('t | [])] {
     =[it, pred],
     it [] ~> =[value, next],
     {
@@ -238,7 +238,7 @@ intersperse_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 't] {
     }
   },
 
-  all?: #<'t>['iterator<'t>, #'t -> ('t | [])] {
+  all?: #<'t>['<'t>, #'t -> ('t | [])] {
     =[it, pred],
     it [] ~> {
       | / ~> =Ok => Ok
@@ -247,11 +247,11 @@ intersperse_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 't] {
     }
   },
 
-  count: #<'t>'iterator<'t> {
+  count: #<'t>'<'t> {
     fold_ [~, 0, #['int, 'int] { %math.add [$.0, 1] }]
   },
 
-  nth: #<'t>['iterator<'t>, 'int] {
+  nth: #<'t>['<'t>, 'int] {
     | =[it, 0] => {
       it [] ~> =[value, _],
       value
@@ -262,7 +262,7 @@ intersperse_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 't] {
     }
   },
 
-  intersperse: #<'t>['iterator<'t>, 't] {
+  intersperse: #<'t>['<'t>, 't] {
     =[it, sep],
     #{
       it [] ~> =[first, rest],

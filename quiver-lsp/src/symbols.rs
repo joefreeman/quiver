@@ -68,9 +68,12 @@ pub fn document_symbols(program: &Program, text: &str, index: &LineIndex) -> Vec
             } => {
                 if let Some(span) = name_span.get() {
                     // The parser strips the leading `'`; restore it so the outline matches
-                    // the source (`'point`).
-                    let name = format!("'{name}");
-                    symbols.push(symbol(name, SymbolKind::CLASS, span, text, index));
+                    // the source (`'point`). A nameless default-type marker shows as `'`.
+                    let label = match name {
+                        Some(name) => format!("'{name}"),
+                        None => "'".to_string(),
+                    };
+                    symbols.push(symbol(label, SymbolKind::CLASS, span, text, index));
                 }
             }
             Statement::Expression(expression) => {
@@ -88,7 +91,6 @@ pub fn document_symbols(program: &Program, text: &str, index: &LineIndex) -> Vec
                     }
                 }
             }
-            Statement::TypeImport { .. } => {}
         }
     }
     symbols

@@ -383,7 +383,7 @@ fn test_std_file_read_all() {
             r = file.open [p],
             all = file.read_all r,
             file.close r,
-            all ~> %binary.length
+            all ~> %bin.length
         "#,
             path_str
         ))
@@ -464,7 +464,7 @@ fn test_std_file_lines_spanning_chunks() {
             file = %file,
             r = "{}" ~> %path.parse ~> file.open [~],
             lengths = file.lines r
-              ~> %iter.map [~, #Str['bin] {{ .0 ~> %binary.length }}]
+              ~> %iter.map [~, #Str['bin] {{ .0 ~> %bin.length }}]
               ~> %list.collect,
             file.close r,
             lengths

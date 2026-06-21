@@ -125,6 +125,7 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
 
 /// Analyze pattern without generating code
 pub fn analyze_pattern(
+    env: &mut super::typing::TypeEnv,
     program: &mut Program,
     pattern: &ast::Match,
     value_type_id: usize,
@@ -133,6 +134,7 @@ pub fn analyze_pattern(
 ) -> Result<PatternAnalysisResult, Error> {
     let mut identifiers = HashMap::new();
     let (binding_sets, narrowed_type_id) = analyze_match_pattern(
+        env,
         program,
         pattern,
         value_type_id,
@@ -288,7 +290,9 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn analyze_match_pattern(
+    env: &mut super::typing::TypeEnv,
     program: &mut Program,
     pattern: &ast::Match,
     value_type_id: usize,
@@ -305,6 +309,7 @@ fn analyze_match_pattern(
             analyze_literal_pattern(literal.clone(), path, value_type_id, program)
         }
         ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
+            env,
             program,
             tuple,
             value_type_id,
@@ -314,6 +319,7 @@ fn analyze_match_pattern(
             value_provenance,
         ),
         ast::Match::Partial(partial) => analyze_partial_pattern(
+            env,
             program,
             partial,
             value_type_id,
@@ -363,7 +369,7 @@ fn analyze_match_pattern(
 
             // It's a type reference - resolve the ast::Type to a type ID
             let resolved_type_id =
-                super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
+                super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
 
             // Narrow the type by filtering compatible variants
             let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
@@ -392,7 +398,7 @@ fn analyze_match_pattern(
             // Inline type expression without & prefix
             // Resolve the ast::Type to a type ID
             let resolved_type_id =
-                super::typing::resolve_ast_type(scopes, ast_type.clone(), program)?;
+                super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
 
             // Narrow the type by filtering compatible variants
             let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
@@ -421,7 +427,9 @@ fn analyze_match_pattern(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn analyze_match_tuple_pattern(
+    env: &mut super::typing::TypeEnv,
     program: &mut Program,
     tuple: &ast::MatchTuple,
     value_type_id: usize,
@@ -511,6 +519,7 @@ fn analyze_match_tuple_pattern(
             // Recursively analyze the field pattern
             let field_provenance = value_provenance.field(*actual_idx);
             let (field_binding_sets, _field_narrowed_type_id) = analyze_match_pattern(
+                env,
                 program,
                 &field.pattern,
                 field_type_id,
@@ -700,7 +709,9 @@ fn analyze_identifier_pattern(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_partial_pattern(
+    env: &mut super::typing::TypeEnv,
     program: &mut Program,
     partial_pattern: &ast::PartialPattern,
     value_type_id: usize,
@@ -791,6 +802,7 @@ fn analyze_partial_pattern(
             if let Some(nested_pattern) = nested_pattern {
                 let field_provenance = value_provenance.field(idx);
                 let (nested_binding_sets, _) = analyze_match_pattern(
+                    env,
                     program,
                     nested_pattern,
                     field_type_id,

@@ -19,6 +19,12 @@
 (resource_type) @type
 (tuple_name) @constructor
 (cycle_type) @type.builtin
+; The bare `'` of a module's nameless default-type marker (`' = ...`).
+(default_type_name) @type
+; A bare `'` referring to the module's own default type, in a type position.
+(self_default_type) @type
+; The `.name` of a module type reference (`'%mod.name`); the `%mod` part is a module.
+(module_type member: (identifier) @type)
 
 ; ------------------------------------------------------------------ functions
 
@@ -60,7 +66,6 @@
   "^"
   "#"
   "..."
-  "*"
 ] @operator
 
 (equality) @operator

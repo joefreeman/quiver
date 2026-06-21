@@ -27,6 +27,11 @@ pub struct ModuleCache {
     /// Cache for module values with their types and extracted binary data.
     /// With capture-by-value, function indices can be reused, making this cache valid.
     pub value_cache: HashMap<ModuleId, CachedModule>,
+    /// Cache of resolved type namespaces (default + named types) per module. The type IDs
+    /// are valid for the lifetime of the `Program` being compiled.
+    pub type_namespace_cache: HashMap<ModuleId, ModuleTypeNamespace>,
+    /// Modules whose type namespaces are currently being built, for cyclic-reference detection.
+    pub type_namespace_stack: Vec<ModuleId>,
 }
 
 impl Default for ModuleCache {
@@ -41,6 +46,8 @@ impl ModuleCache {
             ast_cache: HashMap::new(),
             import_stack: Vec::new(),
             value_cache: HashMap::new(),
+            type_namespace_cache: HashMap::new(),
+            type_namespace_stack: Vec::new(),
         }
     }
 
@@ -110,117 +117,118 @@ pub fn extract_binary_data<E: Effect>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn compile_type_import(
-    pattern: ast::TypeImportPattern,
+/// A module's type namespace: its nameless default type (`' = ...`), if any, plus its
+/// named type aliases, each resolved to a `TypeAliasDef`. Referenced from other modules
+/// as `'%mod` (default) and `'%mod.name` (named).
+#[derive(Clone)]
+pub struct ModuleTypeNamespace {
+    pub default: Option<TypeAliasDef>,
+    pub named: HashMap<String, TypeAliasDef>,
+}
+
+/// Build (or fetch from cache) the type namespace of a module. Type definitions in the
+/// module are resolved against the module's own package (hermetic resolution); references
+/// to further modules (`'%other`) inside them resolve recursively. Cyclic references are
+/// rejected.
+pub fn module_type_namespace(
     module: &[String],
-    from_package: &PackageId,
-    module_cache: &mut ModuleCache,
     resolver: &dyn ModuleResolver,
-    scopes_mut: &mut [Scope],
+    module_cache: &mut ModuleCache,
+    from_package: &PackageId,
     program: &mut Program,
-) -> Result<(), Error> {
+) -> Result<ModuleTypeNamespace, Error> {
     let resolved = resolver
         .resolve(from_package, module)
         .map_err(Error::ModuleLoad)?;
-    let parsed = module_cache.load_and_cache_ast(&resolved.id, &resolved.source)?;
+    let id = resolved.id.clone();
 
-    // Build a module-local scope with all type definitions from the module
-    // This allows us to resolve types using the module's context
+    if let Some(namespace) = module_cache.type_namespace_cache.get(&id) {
+        return Ok(namespace.clone());
+    }
+    if module_cache.type_namespace_stack.contains(&id) {
+        return Err(Error::ModuleTypeCycle(module.join("/")));
+    }
+
+    let parsed = module_cache.load_and_cache_ast(&id, &resolved.source)?;
+
+    module_cache.type_namespace_stack.push(id.clone());
+    let result = build_type_namespace(&parsed, &resolved.package, resolver, module_cache, program);
+    module_cache.type_namespace_stack.pop();
+    let namespace = result?;
+
+    module_cache
+        .type_namespace_cache
+        .insert(id, namespace.clone());
+    Ok(namespace)
+}
+
+/// Resolve every type alias declared in a module into a `ModuleTypeNamespace`. Aliases are
+/// resolved in order so that later definitions can reference earlier ones.
+fn build_type_namespace(
+    parsed: &ast::Program,
+    package: &PackageId,
+    resolver: &dyn ModuleResolver,
+    module_cache: &mut ModuleCache,
+    program: &mut Program,
+) -> Result<ModuleTypeNamespace, Error> {
+    // A module-local scope holding the aliases resolved so far, so they can reference
+    // each other during resolution.
     let mut module_scope = vec![Scope::new(HashMap::new(), None, ScopeKind::Root)];
+    let mut default: Option<TypeAliasDef> = None;
+    let mut named: HashMap<String, TypeAliasDef> = HashMap::new();
 
-    // Process all type-related statements in order
     for statement in &parsed.statements {
-        match statement {
-            ast::Statement::TypeImport {
-                pattern: import_pattern,
-                module: import_module,
-            } => {
-                // Recursively import types into the module scope, resolving the nested import
-                // against the imported module's own package (hermetic resolution).
-                compile_type_import(
-                    import_pattern.clone(),
-                    import_module,
-                    &resolved.package,
-                    module_cache,
-                    resolver,
-                    &mut module_scope,
-                    program,
-                )?;
+        let ast::Statement::TypeAlias {
+            name,
+            type_parameters,
+            type_definition,
+            ..
+        } = statement
+        else {
+            continue;
+        };
+
+        // Create Type::Variable bindings for type parameters
+        let mut bindings = HashMap::new();
+        for param in type_parameters {
+            let var_type_id = program.register_type(Type::Variable(param.clone()));
+            bindings.insert(param.clone(), var_type_id);
+        }
+
+        // Resolve the type definition using the module scope built so far
+        let mut env = typing::TypeEnv {
+            resolver,
+            module_cache: &mut *module_cache,
+            package,
+        };
+        let type_id = typing::resolve_ast_type_with_bindings(
+            &mut env,
+            &module_scope,
+            type_definition.clone(),
+            program,
+            &bindings,
+        )?;
+
+        let def = TypeAliasDef {
+            parameters: type_parameters.clone(),
+            type_id,
+        };
+        match name {
+            Some(name) => {
+                named.insert(name.clone(), def.clone());
+                scopes::define_type_alias(&mut module_scope, name.clone(), def);
             }
-            ast::Statement::TypeAlias {
-                name,
-                type_parameters,
-                type_definition,
-                ..
-            } => {
-                // Create Type::Variable bindings for type parameters
-                let mut bindings = HashMap::new();
-                for param in type_parameters {
-                    let var_type_id = program.register_type(Type::Variable(param.clone()));
-                    bindings.insert(param.clone(), var_type_id);
-                }
-
-                // Resolve the type definition using the module scope built so far
-                let type_id = typing::resolve_ast_type_with_bindings(
-                    &module_scope,
-                    type_definition.clone(),
-                    program,
-                    &bindings,
-                )?;
-
-                // Store the resolved type in module scope
+            None => {
+                // Bind under the reserved key too, so a bare `'` later in the module resolves.
+                default = Some(def.clone());
                 scopes::define_type_alias(
                     &mut module_scope,
-                    name.to_string(),
-                    TypeAliasDef {
-                        parameters: type_parameters.clone(),
-                        type_id,
-                    },
+                    typing::SELF_DEFAULT_KEY.to_string(),
+                    def,
                 );
             }
-            _ => {}
         }
     }
 
-    // Helper to copy a resolved type alias from module scope to caller's scope
-    let mut copy_type_alias = |name: &str| -> Result<(), Error> {
-        let type_alias = scopes::lookup_type_alias(&module_scope, name)
-            .ok_or_else(|| Error::TypeAliasMissing(name.to_string()))?;
-        scopes::define_type_alias(scopes_mut, name.to_string(), type_alias);
-        Ok(())
-    };
-
-    match &pattern {
-        ast::TypeImportPattern::Star => {
-            for stmt in &parsed.statements {
-                if let ast::Statement::TypeAlias { name, .. } = stmt {
-                    copy_type_alias(name)?;
-                }
-            }
-        }
-        ast::TypeImportPattern::Partial(requested_names) => {
-            let found_alias_names: Vec<_> = parsed
-                .statements
-                .iter()
-                .filter_map(|stmt| match stmt {
-                    ast::Statement::TypeAlias { name, .. } => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect();
-
-            for requested_name in requested_names {
-                if found_alias_names.contains(&requested_name.as_str()) {
-                    copy_type_alias(requested_name)?;
-                } else {
-                    return Err(Error::ModuleTypeMissing {
-                        type_name: requested_name.clone(),
-                        module: module.join("/"),
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(())
+    Ok(ModuleTypeNamespace { default, named })
 }

@@ -104,27 +104,19 @@ module.exports = grammar({
 
     _statement: $ => choice(
       $.type_alias,
-      $.type_import,
       $.expression,
     ),
 
+    // A named alias (`'point = ...`) or the module's nameless default-type marker
+    // (`' = ...` / `'<'t> = ...`), where the name is a bare `'`.
     type_alias: $ => seq(
-      field('name', $.type_name),
+      field('name', choice($.type_name, $.default_type_name)),
       optional($.type_parameters),
       optional($._nl), '=', optional($._nl),
       field('definition', $._type),
     ),
 
-    type_import: $ => seq(
-      field('pattern', $.type_import_pattern),
-      optional($._nl), '=', optional($._nl),
-      field('module', $.import),
-    ),
-
-    type_import_pattern: $ => choice(
-      seq("'", '*'),
-      bracketed($, '(', $.type_name, ')'),
-    ),
+    default_type_name: _ => "'",
 
     type_parameters: $ => immBracketed($, '<', $.type_name, '>'),
 
@@ -391,6 +383,8 @@ module.exports = grammar({
       $.resource_type,
       $.cycle_type,
       $.process_type,
+      $.module_type,
+      $.self_default_type,
       $.type_identifier,
       $._paren_type,
     ),
@@ -401,6 +395,21 @@ module.exports = grammar({
       field('name', $.type_name),
       optional($.type_arguments),
     ),
+
+    // A type reached through a module's type namespace: `'%mod` (default type) or
+    // `'%mod.name` (named type), with optional type arguments (`'%list<'int>`).
+    // Higher precedence than `self_default_type` so that after a leading `'`, a following
+    // `%` continues into a module type rather than reducing the bare `'`.
+    module_type: $ => prec(1, seq(
+      "'",
+      field('module', $.import),
+      optional(seq(token.immediate('.'), field('member', $.identifier))),
+      optional($.type_arguments),
+    )),
+
+    // The enclosing module's own default type: a bare `'`, optionally applied to type
+    // arguments (`'<'int>`).
+    self_default_type: $ => seq("'", optional($.type_arguments)),
 
     type_arguments: $ => immBracketed($, '<', $._type, '>'),
 

@@ -1,12 +1,24 @@
 use std::collections::HashMap;
 
 use crate::ast;
+use crate::resolver::{ModuleResolver, PackageId};
 use quiver_core::{
     program::Program,
     types::{Type, TypeLookup},
 };
 
+use super::modules::{self, ModuleCache};
 use super::{Error, Scope, scopes};
+
+/// Capabilities for resolving `'%mod` / `'%mod.name` module-type references: the package
+/// to resolve module paths against, plus the resolver and module cache used to load and
+/// build the target module's type namespace. Threaded through type resolution because a
+/// module type can appear anywhere a type can.
+pub struct TypeEnv<'a> {
+    pub resolver: &'a dyn ModuleResolver,
+    pub module_cache: &'a mut ModuleCache,
+    pub package: &'a PackageId,
+}
 
 #[derive(Debug, Clone)]
 pub enum TupleAccessor {
@@ -48,8 +60,14 @@ pub struct TypeAliasDef {
     pub type_id: usize,
 }
 
+/// Scope key under which a module's nameless default type (`' = ...`) is stored, so that a
+/// bare `'` (`ast::Type::SelfDefault`) can resolve to it. A lone `'` is never a valid user
+/// type-alias name, so this key cannot collide with one.
+pub const SELF_DEFAULT_KEY: &str = "'";
+
 fn instantiate_generic_type(
     recursion_depth: &mut usize,
+    env: &mut TypeEnv,
     scopes_ref: &[Scope],
     name: &str,
     arguments: Vec<ast::Type>,
@@ -60,10 +78,45 @@ fn instantiate_generic_type(
     let type_def = scopes::lookup_type_alias(scopes_ref, name)
         .ok_or_else(|| Error::TypeAliasMissing(name.to_string()))?;
 
+    instantiate_alias_def(
+        recursion_depth,
+        env,
+        scopes_ref,
+        name,
+        &type_def,
+        arguments,
+        program,
+        type_bindings,
+    )
+}
+
+/// Instantiate a (possibly parameterised) type alias definition with the given type
+/// arguments, substituting its `Type::Variable` placeholders. Shared between named alias
+/// references and module-type references.
+#[allow(clippy::too_many_arguments)]
+fn instantiate_alias_def(
+    recursion_depth: &mut usize,
+    env: &mut TypeEnv,
+    scopes_ref: &[Scope],
+    name: &str,
+    type_def: &TypeAliasDef,
+    arguments: Vec<ast::Type>,
+    program: &mut Program,
+    type_bindings: &HashMap<String, usize>,
+) -> Result<usize, Error> {
     // Resolve all type arguments
     let resolved_args: Vec<usize> = arguments
         .into_iter()
-        .map(|arg| resolve_ast_type_impl(recursion_depth, scopes_ref, arg, program, type_bindings))
+        .map(|arg| {
+            resolve_ast_type_impl(
+                recursion_depth,
+                env,
+                scopes_ref,
+                arg,
+                program,
+                type_bindings,
+            )
+        })
         .collect::<Result<_, _>>()?;
 
     // Validate argument count
@@ -96,6 +149,8 @@ fn ast_contains_cycle(typ: &ast::Type) -> bool {
             ast::FieldType::Spread { .. } => false,
         }),
         ast::Type::Identifier { arguments, .. } => arguments.iter().any(ast_contains_cycle),
+        ast::Type::ModuleType { arguments, .. } => arguments.iter().any(ast_contains_cycle),
+        ast::Type::SelfDefault { arguments } => arguments.iter().any(ast_contains_cycle),
         // Function and process types are boundaries - cycles inside them don't count
         // as structural recursion
         ast::Type::Function(_) | ast::Type::Process(_) => false,
@@ -115,6 +170,7 @@ fn validate_union_has_base_case(variants: &[ast::Type]) -> Result<(), Error> {
 }
 
 pub fn resolve_ast_type(
+    env: &mut TypeEnv,
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
@@ -123,6 +179,7 @@ pub fn resolve_ast_type(
     let mut recursion_depth = 0;
     resolve_ast_type_impl(
         &mut recursion_depth,
+        env,
         scopes_ref,
         ast_type,
         program,
@@ -134,6 +191,7 @@ pub fn resolve_ast_type(
 /// Used when importing types from modules where type parameters should be
 /// resolved as Type::Variable.
 pub fn resolve_ast_type_with_bindings(
+    env: &mut TypeEnv,
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
@@ -142,6 +200,7 @@ pub fn resolve_ast_type_with_bindings(
     let mut recursion_depth = 0;
     resolve_ast_type_impl(
         &mut recursion_depth,
+        env,
         scopes_ref,
         ast_type,
         program,
@@ -152,6 +211,7 @@ pub fn resolve_ast_type_with_bindings(
 /// Resolve a function parameter type with explicitly declared type parameters.
 /// Type parameters are resolved to Type::Variable, while undefined types cause errors.
 pub fn resolve_function_parameter_type(
+    env: &mut TypeEnv,
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     type_parameters: &[String],
@@ -169,6 +229,7 @@ pub fn resolve_function_parameter_type(
     let mut recursion_depth = 1;
     resolve_ast_type_impl(
         &mut recursion_depth,
+        env,
         scopes_ref,
         ast_type,
         program,
@@ -242,6 +303,7 @@ type NamedFieldVariants = Vec<(Option<String>, FieldSet)>; // (tuple_name, field
 /// Returns a vector of (name, field_set) pairs - multiple pairs if spreading creates union variants
 fn resolve_tuple_fields_with_spread(
     recursion_depth: &mut usize,
+    env: &mut TypeEnv,
     scopes_ref: &[Scope],
     fields: &[ast::FieldType],
     program: &mut Program,
@@ -258,6 +320,7 @@ fn resolve_tuple_fields_with_spread(
                 // Resolve the field type
                 let field_type_id = resolve_ast_type_impl(
                     recursion_depth,
+                    env,
                     scopes_ref,
                     type_def.clone(),
                     program,
@@ -309,6 +372,7 @@ fn resolve_tuple_fields_with_spread(
                 for (param, arg) in type_alias.parameters.iter().zip(type_arguments.iter()) {
                     let arg_type_id = resolve_ast_type_impl(
                         recursion_depth,
+                        env,
                         scopes_ref,
                         arg.clone(),
                         program,
@@ -403,6 +467,7 @@ fn extract_tuples_from_type_with_names(
 
 fn resolve_ast_type_impl(
     recursion_depth: &mut usize,
+    env: &mut TypeEnv,
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     program: &mut Program,
@@ -425,6 +490,7 @@ fn resolve_ast_type_impl(
                 // Handle spreads - may create multiple variants
                 let field_variants = resolve_tuple_fields_with_spread(
                     recursion_depth,
+                    env,
                     scopes_ref,
                     &tuple.fields,
                     program,
@@ -493,6 +559,7 @@ fn resolve_ast_type_impl(
                     ast::FieldType::Field { name, type_def } => {
                         let field_type_id = resolve_ast_type_impl(
                             recursion_depth,
+                            env,
                             scopes_ref,
                             type_def,
                             program,
@@ -541,6 +608,7 @@ fn resolve_ast_type_impl(
 
             let input_type_id = resolve_ast_type_impl(
                 recursion_depth,
+                env,
                 scopes_ref,
                 *function.input,
                 program,
@@ -548,6 +616,7 @@ fn resolve_ast_type_impl(
             )?;
             let output_type_id = resolve_ast_type_impl(
                 recursion_depth,
+                env,
                 scopes_ref,
                 *function.output,
                 program,
@@ -580,6 +649,7 @@ fn resolve_ast_type_impl(
             for member_type in union.types {
                 let member_type_id = resolve_ast_type_impl(
                     recursion_depth,
+                    env,
                     scopes_ref,
                     member_type,
                     program,
@@ -630,6 +700,7 @@ fn resolve_ast_type_impl(
                 .map(|receive_type| {
                     resolve_ast_type_impl(
                         recursion_depth,
+                        env,
                         scopes_ref,
                         *receive_type,
                         program,
@@ -642,6 +713,7 @@ fn resolve_ast_type_impl(
                 .map(|return_type| {
                     resolve_ast_type_impl(
                         recursion_depth,
+                        env,
                         scopes_ref,
                         *return_type,
                         program,
@@ -666,6 +738,7 @@ fn resolve_ast_type_impl(
             // Instantiate the type (works for both bare identifiers and parameterized types)
             instantiate_generic_type(
                 recursion_depth,
+                env,
                 scopes_ref,
                 &name,
                 arguments,
@@ -673,6 +746,76 @@ fn resolve_ast_type_impl(
                 type_bindings,
             )
         }
+        ast::Type::ModuleType {
+            module,
+            member,
+            arguments,
+        } => {
+            // Build the target module's type namespace and select the default type
+            // (`'%mod`) or a named one (`'%mod.name`).
+            let namespace = modules::module_type_namespace(
+                &module,
+                env.resolver,
+                env.module_cache,
+                env.package,
+                program,
+            )?;
+            let display = display_module_type(&module, member.as_deref());
+            let type_def =
+                match &member {
+                    None => namespace.default.ok_or_else(|| Error::ModuleTypeMissing {
+                        type_name: display.clone(),
+                        module: module.join("/"),
+                    })?,
+                    Some(name) => namespace.named.get(name).cloned().ok_or_else(|| {
+                        Error::ModuleTypeMissing {
+                            type_name: name.clone(),
+                            module: module.join("/"),
+                        }
+                    })?,
+                };
+
+            instantiate_alias_def(
+                recursion_depth,
+                env,
+                scopes_ref,
+                &display,
+                &type_def,
+                arguments,
+                program,
+                type_bindings,
+            )
+        }
+        ast::Type::SelfDefault { arguments } => {
+            // Bare `'`: the enclosing module's own default type, stored in scope under the
+            // reserved key when its `' = ...` marker was compiled.
+            let type_def =
+                scopes::lookup_type_alias(scopes_ref, SELF_DEFAULT_KEY).ok_or_else(|| {
+                    Error::TypeUnresolved(
+                        "`'` refers to the module's default type, but this module defines none"
+                            .to_string(),
+                    )
+                })?;
+            instantiate_alias_def(
+                recursion_depth,
+                env,
+                scopes_ref,
+                "'",
+                &type_def,
+                arguments,
+                program,
+                type_bindings,
+            )
+        }
+    }
+}
+
+/// Human-readable form of a module type reference, e.g. `'%math/vec` or `'%shapes.circle`.
+fn display_module_type(module: &[String], member: Option<&str>) -> String {
+    let path = module.join("/");
+    match member {
+        Some(name) => format!("'%{path}.{name}"),
+        None => format!("'%{path}"),
     }
 }
 

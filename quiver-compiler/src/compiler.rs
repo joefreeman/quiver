@@ -17,7 +17,7 @@ mod typing;
 mod variables;
 
 pub use codegen::InstructionBuilder;
-pub use modules::{ModuleCache, compile_type_import};
+pub use modules::ModuleCache;
 pub use provenance::{Narrowings, Provenance};
 pub use scopes::{Binding, Parameter, Scope, ScopeKind};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_type_ids};
@@ -110,6 +110,7 @@ pub enum Error {
         type_name: String,
         module: String,
     },
+    ModuleTypeCycle(String),
 
     // Language feature errors
     FeatureUnsupported(String),
@@ -181,6 +182,12 @@ impl std::fmt::Display for Error {
             }
             Error::ModuleTypeMissing { type_name, module } => {
                 write!(f, "Type '{type_name}' not found in module '{module}'")
+            }
+            Error::ModuleTypeCycle(module) => {
+                write!(
+                    f,
+                    "Cyclic module type reference involving module '{module}'"
+                )
             }
             Error::FeatureUnsupported(what) => write!(f, "Unsupported: {what}"),
             Error::DestructuringOnNonTuple(ty) => {
@@ -553,11 +560,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 type_definition,
                 ..
             } => {
-                self.compile_type_alias(&name, type_parameters, type_definition)?;
-                Ok(self.program.register_type(Type::nil()))
-            }
-            ast::Statement::TypeImport { pattern, module } => {
-                self.compile_type_import(pattern, &module)?;
+                self.compile_type_alias(name.as_deref(), type_parameters, type_definition)?;
                 Ok(self.program.register_type(Type::nil()))
             }
             ast::Statement::Expression(expression) => {
@@ -567,14 +570,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Compile a type alias. `name` is `None` for the module's nameless default-type
+    /// marker (`' = ...`), which is resolved for validation but not bound locally — it is
+    /// only reachable from other modules as `'%mod`.
     fn compile_type_alias(
         &mut self,
-        name: &str,
+        name: Option<&str>,
         type_parameters: Vec<String>,
         type_definition: ast::Type,
     ) -> Result<(), Error> {
         // Prevent shadowing primitive types
-        if helpers::is_reserved_name(name) {
+        if let Some(name) = name
+            && helpers::is_reserved_name(name)
+        {
             return Err(Error::TypeUnresolved(format!(
                 "Cannot redefine primitive type '{}'",
                 name
@@ -592,17 +600,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         // Resolve the type definition immediately
+        let mut env = typing::TypeEnv {
+            resolver: self.resolver,
+            module_cache: &mut *self.module_cache,
+            package: &self.current_package,
+        };
         let type_id = typing::resolve_ast_type_with_bindings(
+            &mut env,
             &self.scopes,
             type_definition,
             self.program,
             &bindings,
         )?;
 
-        // Store the resolved type alias
+        // Store the resolved alias. The nameless default marker is bound under the reserved
+        // self-default key, so a bare `'` elsewhere in the module resolves to it.
+        let key = match name {
+            Some(name) => name.to_string(),
+            None => typing::SELF_DEFAULT_KEY.to_string(),
+        };
         scopes::define_type_alias(
             &mut self.scopes,
-            name.to_string(),
+            key,
             TypeAliasDef {
                 parameters: type_parameters,
                 type_id,
@@ -658,7 +677,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 Ok(())
             }
-            ast::Type::Identifier { arguments, .. } => {
+            ast::Type::Identifier { arguments, .. }
+            | ast::Type::ModuleType { arguments, .. }
+            | ast::Type::SelfDefault { arguments } => {
                 for arg in arguments {
                     Self::validate_type_ast(arg)?;
                 }
@@ -666,22 +687,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             ast::Type::Primitive(_) | ast::Type::Cycle(_) | ast::Type::Resource(_) => Ok(()),
         }
-    }
-
-    fn compile_type_import(
-        &mut self,
-        pattern: ast::TypeImportPattern,
-        module: &[String],
-    ) -> Result<(), Error> {
-        compile_type_import(
-            pattern,
-            module,
-            &self.current_package,
-            self.module_cache,
-            self.resolver,
-            &mut self.scopes,
-            self.program,
-        )
     }
 
     // Helper methods for type operations on type IDs
@@ -1073,7 +1078,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 ast::Term::Function(func) => {
                     // Inline function definition - extract parameter type
                     if let Some(param_type) = &func.parameter_type {
+                        let mut env = typing::TypeEnv {
+                            resolver: self.resolver,
+                            module_cache: &mut *self.module_cache,
+                            package: &self.current_package,
+                        };
                         let resolved_type = typing::resolve_ast_type(
+                            &mut env,
                             &self.scopes,
                             param_type.clone(),
                             self.program,
@@ -1147,12 +1158,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Resolve parameter type with declared type parameters
         let parameter_type = match &function.parameter_type {
-            Some(t) => typing::resolve_function_parameter_type(
-                &self.scopes,
-                t.clone(),
-                &function.type_parameters,
-                self.program,
-            )?,
+            Some(t) => {
+                let mut env = typing::TypeEnv {
+                    resolver: self.resolver,
+                    module_cache: &mut *self.module_cache,
+                    package: &self.current_package,
+                };
+                typing::resolve_function_parameter_type(
+                    &mut env,
+                    &self.scopes,
+                    t.clone(),
+                    &function.type_parameters,
+                    self.program,
+                )?
+            }
             None => self.program.register_type(Type::nil()),
         };
 
@@ -1257,8 +1276,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     type_def,
                 } = field
                 {
-                    let field_type =
-                        typing::resolve_ast_type(&self.scopes, type_def.clone(), self.program)?;
+                    let mut env = typing::TypeEnv {
+                        resolver: self.resolver,
+                        module_cache: &mut *self.module_cache,
+                        package: &self.current_package,
+                    };
+                    let field_type = typing::resolve_ast_type(
+                        &mut env,
+                        &self.scopes,
+                        type_def.clone(),
+                        self.program,
+                    )?;
                     parameter_fields.insert(field_name.clone(), (field_index, field_type));
                 }
             }
@@ -1284,7 +1312,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Validate return type if specified
         if let Some(return_type_ast) = &function.return_type {
+            let mut env = typing::TypeEnv {
+                resolver: self.resolver,
+                module_cache: &mut *self.module_cache,
+                package: &self.current_package,
+            };
             let expected_return_type = typing::resolve_function_parameter_type(
+                &mut env,
                 &self.scopes,
                 return_type_ast.clone(),
                 &function.type_parameters,
@@ -1381,7 +1415,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.patch_jump_to_here(start_jump_addr);
 
         // Analyze pattern to get bindings without generating code yet
+        let mut env = typing::TypeEnv {
+            resolver: self.resolver,
+            module_cache: &mut *self.module_cache,
+            package: &self.current_package,
+        };
         let (bindings, binding_sets, result_type) = pattern::analyze_pattern(
+            &mut env,
             self.program,
             &pattern,
             value_type,

@@ -1,7 +1,6 @@
-'range = Range['int, 'int | None, 'int];
-('iterator) = %iter;
+' = Range['int, 'int | None, 'int];
 
-iter_ = #[#^ -> 'iterator<'int>, 'range] {
+iter_ = #[#^ -> '%iter<'int>, '] {
   =[self, Range[value, stop, step]],
   #{
     {

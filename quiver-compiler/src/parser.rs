@@ -808,6 +808,49 @@ fn type_parameter(input: Span) -> IResult<Span, Type> {
     })(input)
 }
 
+/// The enclosing module's own default type: a bare `'`, optionally applied to type
+/// arguments (`'<'int>`). Tried after `type_identifier`/`module_type`, so `'int` and `'%mod`
+/// take precedence; only a `'` not followed by an identifier or `%` reaches here.
+fn self_default_type(input: Span) -> IResult<Span, Type> {
+    map(
+        preceded(
+            char('\''),
+            opt(delimited(
+                char('<'),
+                separated_list1(tuple((ws0, char(','), ws0)), type_definition),
+                char('>'),
+            )),
+        ),
+        |arguments| Type::SelfDefault {
+            arguments: arguments.unwrap_or_default(),
+        },
+    )(input)
+}
+
+/// A type reached through a module's type namespace: `'%mod` (default type) or
+/// `'%mod.name` (named type), with optional type arguments (`'%list<'int>`).
+fn module_type(input: Span) -> IResult<Span, Type> {
+    map(
+        preceded(
+            char('\''),
+            tuple((
+                import,
+                opt(preceded(char('.'), identifier)),
+                opt(delimited(
+                    char('<'),
+                    separated_list1(tuple((ws0, char(','), ws0)), type_definition),
+                    char('>'),
+                )),
+            )),
+        ),
+        |(module, member, arguments)| Type::ModuleType {
+            module,
+            member,
+            arguments: arguments.unwrap_or_default(),
+        },
+    )(input)
+}
+
 fn type_identifier(input: Span) -> IResult<Span, Type> {
     map(
         pair(
@@ -900,7 +943,9 @@ fn function_input_type(input: Span) -> IResult<Span, Type> {
         resource_type,
         type_cycle,
         process_type,
+        module_type, // Must come before type_identifier to match '% before trying identifier
         type_identifier,
+        self_default_type, // Bare `'`; after type_identifier/module_type so `'int`/`'%mod` win
     ))(input)
 }
 
@@ -912,7 +957,9 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
         resource_type,
         type_cycle,
         process_type,
+        module_type, // Must come before type_identifier to match '% before trying identifier
         type_identifier,
+        self_default_type, // Bare `'`; after type_identifier/module_type so `'int`/`'%mod` win
     ))(input)
 }
 
@@ -924,8 +971,10 @@ fn base_type(input: Span) -> IResult<Span, Type> {
         type_cycle,
         process_type,
         type_parameter, // Must come before type_identifier to match <'t> before trying identifier
+        module_type,    // Must come before type_identifier to match '% before trying identifier
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         type_identifier,
+        self_default_type, // Bare `'`; after type_identifier/module_type so `'int`/`'%mod` win
     ))(input)
 }
 
@@ -1737,7 +1786,9 @@ fn expression(input: Span) -> IResult<Span, Expression> {
 fn type_alias(input: Span) -> IResult<Span, Statement> {
     map(
         tuple((
-            spanned(type_name),
+            // `'name` for a named alias, or a bare `'` for the module's nameless
+            // default-type marker (`' = ...` / `'<'t> = ...`).
+            spanned(preceded(char('\''), opt(identifier))),
             opt(delimited(
                 char('<'),
                 separated_list1(tuple((ws0, char(','), ws0)), type_name),
@@ -1754,42 +1805,12 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
     )(input)
 }
 
-fn type_import_pattern(input: Span) -> IResult<Span, TypeImportPattern> {
-    alt((
-        nom_value(TypeImportPattern::Star, pair(char('\''), char('*'))),
-        map(
-            delimited(
-                pair(char('('), ws0),
-                terminated(
-                    separated_list1(tuple((ws0, char(','), ws1)), type_name),
-                    opt(pair(ws0, char(','))),
-                ),
-                pair(ws0, char(')')),
-            ),
-            TypeImportPattern::Partial,
-        ),
-    ))(input)
-}
-
-fn type_import(input: Span) -> IResult<Span, Statement> {
-    map(
-        tuple((
-            type_import_pattern,
-            preceded(tuple((ws0, char('='), ws0)), import),
-        )),
-        |(pattern, module)| Statement::TypeImport { pattern, module },
-    )(input)
-}
-
 fn statement_expression(input: Span) -> IResult<Span, Statement> {
     map(expression, Statement::Expression)(input)
 }
 
 fn statement(input: Span) -> IResult<Span, Statement> {
-    preceded(
-        ws_with_comments,
-        alt((type_import, type_alias, statement_expression)),
-    )(input)
+    preceded(ws_with_comments, alt((type_alias, statement_expression)))(input)
 }
 
 /// Separator between top-level statements: a newline or semicolon, surrounded by

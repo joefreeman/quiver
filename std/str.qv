@@ -1,12 +1,10 @@
-'str = Str['bin];
-('list) = %list;
-('iterator) = %iter;
+' = Str['bin];
 
 is_continuation_ = #['bin, 'int] {
   =[data, byte_pos],
   data
-  ~> %binary.get_byte [~, byte_pos]
-  ~> %integer.and [~, 192]
+  ~> %bin.get_byte [~, byte_pos]
+  ~> %int.and [~, 192]
   ~> =128
 },
 
@@ -29,9 +27,9 @@ find_index = #['bin, 'bin, 'int, 'int] {
 
   {
     | needle
-      ~> %binary.length
+      ~> %bin.length
       ~> %math.add [offset, ~]
-      ~> %binary.slice [haystack, offset, ~]
+      ~> %bin.slice [haystack, offset, ~]
       ~> =&needle
       => offset
 
@@ -61,11 +59,11 @@ byte_pos_to_char_idx_ = #['bin, 'int, 'int, 'int] {
   }
 },
 
-split_ = #['bin, 'bin, 'int, 'list<'str>] {
+split_ = #['bin, 'bin, 'int, '%list<'>] {
   =[haystack, delim, start, acc],
 
-  haystack_len = haystack ~> %binary.length,
-  delim_len = delim ~> %binary.length,
+  haystack_len = haystack ~> %bin.length,
+  delim_len = delim ~> %bin.length,
   end = %math.sub [haystack_len, delim_len],
 
   {
@@ -73,18 +71,18 @@ split_ = #['bin, 'bin, 'int, 'list<'str>] {
       match_end = %math.add [index, delim_len],
 
       haystack
-      ~> %binary.slice [~, start, index]
+      ~> %bin.slice [~, start, index]
       ~> %list.prepend [acc, Str[~]]
       ~> ^ [haystack, delim, match_end, ~]
 
     | haystack
-      ~> %binary.slice [~, start, haystack_len]
+      ~> %bin.slice [~, start, haystack_len]
       ~> %list.prepend [acc, Str[~]]
       ~> %list.reverse
   }
 },
 
-iter_ = #[#^ -> 'iterator<'int>, 'bin, 'int, 'int] {
+iter_ = #[#^ -> '%iter<'int>, 'bin, 'int, 'int] {
   =[self, data, byte_pos, data_len],
 
   byte_pos = skip_continuation_ [data, byte_pos, data_len],
@@ -108,7 +106,7 @@ iter_ = #[#^ -> 'iterator<'int>, 'bin, 'int, 'int] {
   }
 },
 
-collect_ = #['iterator<'int>, 'bin] {
+collect_ = #['%iter<'int>, 'bin] {
   =[it, acc],
   it [] ~> {
     | / ~> =Ok => Str[acc]
@@ -121,62 +119,62 @@ collect_ = #['iterator<'int>, 'bin] {
       },
 
       acc
-      ~> %binary.append [~, char_int, byte_count]
+      ~> %bin.append [~, char_int, byte_count]
       ~> ^ [&next, ~]
     }
   }
 },
 
 [
-  bytes: #'str {
+  bytes: #' {
     =Str[b], b
   },
 
-  empty?: #'str {
-    .0 ~> %binary.length ~> =0, Ok
+  empty?: #' {
+    .0 ~> %bin.length ~> =0, Ok
   },
 
-  concat: #['str, 'str] {
+  concat: #[', '] {
     =[Str[a], Str[b]],
-    %binary.concat [a, b] ~> Str[~]
+    %bin.concat [a, b] ~> Str[~]
   },
 
-  starts_with?: #['str, 'str] {
+  starts_with?: #[', '] {
     =[Str[target], Str[prefix]],
 
-    prefix_len = prefix ~> %binary.length,
-    target_len = target ~> %binary.length,
+    prefix_len = prefix ~> %bin.length,
+    target_len = target ~> %bin.length,
 
     %math.le [prefix_len, target_len],
 
     target
-    ~> %binary.slice [~, 0, prefix_len]
+    ~> %bin.slice [~, 0, prefix_len]
     ~> =&prefix,
 
     Ok
   },
 
-  ends_with?: #['str, 'str] {
+  ends_with?: #[', '] {
     =[Str[target], Str[suffix]],
 
-    suffix_len = suffix ~> %binary.length,
-    target_len = target ~> %binary.length,
+    suffix_len = suffix ~> %bin.length,
+    target_len = target ~> %bin.length,
 
     %math.le [suffix_len, target_len],
 
     target_len
     ~> %math.sub [~, suffix_len]
-    ~> %binary.slice [target, ~, target_len]
+    ~> %bin.slice [target, ~, target_len]
     ~> =&suffix,
 
     Ok
   },
 
-  contains?: #['str, 'str] {
+  contains?: #[', '] {
     =[Str[haystack], Str[needle]],
 
-    needle_len = needle ~> %binary.length,
-    haystack_len = haystack ~> %binary.length,
+    needle_len = needle ~> %bin.length,
+    haystack_len = haystack ~> %bin.length,
 
     {
       | needle_len ~> =0 => Ok
@@ -187,34 +185,34 @@ collect_ = #['iterator<'int>, 'bin] {
     }
   },
 
-  split: #['str, 'str] {
+  split: #[', '] {
     =[Str[haystack], Str[delim]],
     split_ [haystack, delim, 0, %list.new []]
   },
 
-  length: #'str {
+  length: #' {
     =Str[data],
     data
-    ~> %binary.length
+    ~> %bin.length
     ~> iter_ [&iter_, data, 0, ~]
     ~> %iter.count
   },
 
-  slice: #['str, 'int, 'int] {
+  slice: #[', 'int, 'int] {
     =[Str[data], start, end],
     data
-    ~> %binary.length
+    ~> %bin.length
     ~> iter_ [&iter_, data, 0, ~]
     ~> %iter.drop [~, start]
     ~> %iter.take [~, %math.sub [end, start]]
     ~> collect_ [~, 0x]
   },
 
-  index_of: #['str, 'str] {
+  index_of: #[', '] {
     =[Str[haystack], Str[needle]],
 
-    needle_len = needle ~> %binary.length,
-    haystack_len = haystack ~> %binary.length,
+    needle_len = needle ~> %bin.length,
+    haystack_len = haystack ~> %bin.length,
 
     {
       | needle_len ~> =0 => 0  // Empty string is at index 0
@@ -229,23 +227,23 @@ collect_ = #['iterator<'int>, 'bin] {
     }
   },
 
-  iter: #'str {
+  iter: #' {
     =Str[data],
     data
-    ~> %binary.length
+    ~> %bin.length
     ~> iter_ [&iter_, data, 0, ~]
   },
 
-  collect: #'iterator<'int> {
+  collect: #'%iter<'int> {
     collect_ [~, 0x]
   },
 
-  join: #['iterator<'str>, 'str] {
+  join: #['%iter<'>, '] {
     =[it, Str[sep]],
     &it
-    ~> %iter.map [~, #'str { .0 }]
+    ~> %iter.map [~, #' { .0 }]
     ~> %iter.intersperse [~, sep]
-    ~> %iter.fold [~, 0x, &%binary.concat]
+    ~> %iter.fold [~, 0x, &%bin.concat]
     ~> Str[~]
   }
 ]
