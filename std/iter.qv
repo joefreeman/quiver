@@ -16,10 +16,7 @@ filter_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
       | value ~> pred => {
         self [&self, &next, &pred] ~> [value, ~]
       }
-      | {
-        it = self [&self, &next, &pred],
-        it []
-      }
+      | self [&self, &next, &pred] ~> ^~
     }
   }
 },
@@ -44,8 +41,7 @@ drop_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'int] {
     | n ~> =0 => it []
     | {
       it [] ~> =[_, next],
-      it = n ~> %math.sub [~, 1] ~> self [&self, &next, ~],
-      it []
+      n ~> %math.sub [~, 1] ~> self [&self, &next, ~] ~> ^~
     }
   }
 },
@@ -64,10 +60,7 @@ drop_while_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, #'t -> ('t | [])] {
   #{
     it [] ~> =[value, next],
     {
-      | value ~> pred => {
-        it = self [&self, &next, &pred],
-        it []
-      }
+      | value ~> pred => self [&self, &next, &pred] ~> ^~
       | [value, &next]
     }
   }
@@ -87,8 +80,7 @@ flat_map_ = #<'t, 'u>[
     }
     | {
       source [] ~> =[value, next],
-      it = value ~> f ~> self [&self, &next, &f, ~],
-      it []
+      value ~> f ~> self [&self, &next, &f, ~] ~> ^~
     }
   }
 },
@@ -130,10 +122,7 @@ cycle_ = #<'t>[#^ -> 'iterator<'t>, 'iterator<'t>, 'iterator<'t>] {
       | =[value, next] => {
         [value, self [&self, &original, &next]]
       }
-      | {
-        it = self [&self, &original, &original],
-        it [],
-      }
+      | self [&self, &original, &original] ~> ^~
     }
   }
 },

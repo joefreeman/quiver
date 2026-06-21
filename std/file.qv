@@ -71,10 +71,10 @@ lines_ = #[#^ -> 'iterator<Str['bin]>, 'file, 'int, 'bin, 'int] {
             | [Str[leftover], self [&self, f, offset, 0x, 0]]
           }
           | =n => {
-            it = n
+            n
             ~> %math.add [offset, ~]
-            ~> self [&self, f, ~, %binary.concat [leftover, chunk], 0],
-            it []
+            ~> self [&self, f, ~, %binary.concat [leftover, chunk], 0]
+            ~> ^~
           }
         }
       }

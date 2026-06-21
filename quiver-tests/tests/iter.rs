@@ -316,6 +316,24 @@ fn test_nth() {
 }
 
 #[test]
+fn test_filter_long_skip_run_is_tail_recursive() {
+    // Keeping only one late element forces ~50k consecutive skips through `filter_`'s advance
+    // loop. That loop tail-calls the next iterator via `^~`, so it runs in constant stack; without
+    // tail-call optimization this would overflow.
+    quiver()
+        .evaluate(
+            r#"
+            50000
+            ~> %range.to
+            ~> %range.iter
+            ~> %iter.filter [~, #'int { =49999 }]
+            ~> %iter.nth [~, 0]
+            "#,
+        )
+        .expect("49999");
+}
+
+#[test]
 fn test_find_index() {
     quiver()
         .evaluate(
