@@ -494,6 +494,15 @@ Processes can be initialised with an argument, and a shorthand can be used to de
 counter = @'int { ... }
 ```
 
+The init argument can be supplied either by the chained value (`x ~> @f`) or by juxtaposition, exactly like a function call. These are equivalent:
+
+```quiver
+p = 42 ~> @counter   // init argument from the chained value
+p = @counter 42      // init argument by juxtaposition
+```
+
+As with a call argument, the chained value flows into a juxtaposed argument (`10 ~> @adder [~, 5]` spawns `adder` with `[10, 5]`). When the function is the chained value itself, use the ripple form `@~`, supplying the argument by juxtaposition: `&f ~> @~ 42`.
+
 ### Receiving messages
 
 The select operator, `!`, can be used to receive messages by applying it to a function - for example, applying it to an identity function: `!#'int`, which can be shortened to `!'int`.
@@ -539,7 +548,8 @@ If a process has failed with a runtime error, that error will be propagated to t
 
 As well as being used for receiving messages and awaiting the result of a single process, the select operator can specify multiple sources at once to 'race' them. And also for specifying timeouts.
 
-The canonical form is `![sources]`, which takes a tuple of sources. Sources can be:
+The general form is `! [sources]`, which takes a tuple of sources. **A space is required** between `!` and the tuple (mirroring function application, `f [...]`); this distinguishes the general form from the single-source shorthands below. Sources can be:
+
 - Processes (to await their result)
 - Functions (for receiving messages)
 - Integers (timeouts in milliseconds)
@@ -547,20 +557,21 @@ The canonical form is `![sources]`, which takes a tuple of sources. Sources can 
 For example, given two processes, `p1` and `p2`, the following select will wait for whichever finishes first (prioritising `p1` if both are already finished), or time out after 5 seconds:
 
 ```quiver
-![p1, p2, 5000]
+! [p1, p2, 5000]
 ```
 
 A select operator can be used in a chain by including the ripple operator (`~`) to refer to the chained value. For example, to wait for a process, but timeout after one second:
 
 ```quiver
-p1 ~> ![~, 1000]
+p1 ~> ! [~, 1000]
 ```
 
-Shorthand forms:
-- `!p` is sugar for `![p]`
-- `!'int` is sugar for `![#'int]` (identity receive for type)
-- `!'int { ... }` is sugar for `![#'int { ... }]` (filtered receive)
-- `![]` is a no-op (returns nil immediately)
+Shorthand forms (tight, no space — each selects on a *single* source):
+
+- `!p` is sugar for `! [p]`
+- `!'int` is sugar for `! [#'int]` (identity receive for type)
+- `!'int { ... }` is sugar for `! [#'int { ... }]` (filtered receive)
+- `! []` is a no-op (returns nil immediately)
 
 ### Referring to processes
 

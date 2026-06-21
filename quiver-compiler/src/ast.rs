@@ -85,7 +85,12 @@ pub enum Term {
     Access(Access),
     Equality,
     Not,
-    Spawn(Box<Term>, Spanned),
+    /// Spawn a process from a function (`@f`, `@~`, `@{ … }`). The optional second field is a
+    /// juxtaposed init argument (`@f x`); `None` means the argument comes from the chained value
+    /// (`x ~> @f`) or is nil. The argument follows the same flow rules as a call argument: for a
+    /// named/literal function the chained value flows into it; for a ripple function (`@~`) the
+    /// chained value *is* the function, so the argument is evaluated without it.
+    Spawn(Box<Term>, Option<Box<Term>>, Spanned),
     Self_,
     /// Select operation. None means bare `!` (postfix form using chained value).
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).

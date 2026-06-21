@@ -1076,8 +1076,12 @@ fn make_receive(param_type: Type, body: Option<Block>) -> Term {
 
 // Parse select operator - all forms desugar to Vec<Chain>
 //
+// The general form takes a *tuple* of sources and requires a space after `!` (`! [...]`),
+// mirroring function application (`f [...]`). The tight forms (no space) are shorthand for
+// selecting on a single source.
+//
 // Syntax forms:
-// - ![...]           - Tuple of source chains (canonical form)
+// - ! [...]          - Tuple of source chains (general form; space required)
 // - !                - Bare select (postfix form, empty sources)
 // - !(type) { ... }  - Receive function with explicit type
 // - !(type)          - Identity receive with explicit type
@@ -1092,10 +1096,11 @@ fn select_term(input: Span) -> IResult<Span, Term> {
     let (rest, term) = preceded(
         char('!'),
         alt((
-            // [...] - Tuple of source chains (explicit sources)
+            // ` [...]` - Tuple of source chains (general form). The leading space distinguishes it
+            // from the tight single-source shorthands, so `! f` is not a single-source form.
             map(
                 delimited(
-                    pair(char('['), wsc),
+                    tuple((hspace1, char('['), wsc)),
                     separated_list0(tuple((wsc, char(','), wsc)), chain),
                     pair(wsc, char(']')),
                 ),
@@ -1349,21 +1354,28 @@ fn not_term(input: Span) -> IResult<Span, Term> {
     nom_value(Term::Not, char('/'))(input)
 }
 
+// Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
+// argument is filled in later by `term()` if one is juxtaposed (`@'int { … } 5`).
+fn spawn_of_function(parameter_type: Option<Type>, body: Block) -> Term {
+    Term::Spawn(
+        Box::new(Term::Function(Function {
+            type_parameters: vec![],
+            parameter_type,
+            return_type: None,
+            body: Some(body),
+            span: Spanned::default(),
+        })),
+        None,
+        Spanned::default(),
+    )
+}
+
 fn spawn_term(input: Span) -> IResult<Span, Term> {
     let start = input;
     let (rest, term) = alt((
         // @{ ... } - Spawn parameterless function (sugar for @#{ ... })
         map(preceded(pair(char('@'), opt(ws1)), block), |body| {
-            Term::Spawn(
-                Box::new(Term::Function(Function {
-                    type_parameters: vec![],
-                    parameter_type: None,
-                    return_type: None,
-                    body: Some(body),
-                    span: Spanned::default(),
-                })),
-                Spanned::default(),
-            )
+            spawn_of_function(None, body)
         }),
         // @(type) { ... } - Spawn with parenthesized type (sugar for @#(type) { ... })
         map(
@@ -1374,18 +1386,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 ),
                 preceded(opt(ws1), block),
             )),
-            |(param_type, body)| {
-                Term::Spawn(
-                    Box::new(Term::Function(Function {
-                        type_parameters: vec![],
-                        parameter_type: Some(param_type),
-                        return_type: None,
-                        body: Some(body),
-                        span: Spanned::default(),
-                    })),
-                    Spanned::default(),
-                )
-            },
+            |(param_type, body)| spawn_of_function(Some(param_type), body),
         ),
         // @'type { ... } - Spawn with named type (sugar for @#'type { ... })
         map(
@@ -1393,34 +1394,12 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 preceded(char('@'), type_identifier),
                 preceded(opt(ws1), block),
             )),
-            |(param_type, body)| {
-                Term::Spawn(
-                    Box::new(Term::Function(Function {
-                        type_parameters: vec![],
-                        parameter_type: Some(param_type),
-                        return_type: None,
-                        body: Some(body),
-                        span: Spanned::default(),
-                    })),
-                    Spanned::default(),
-                )
-            },
+            |(param_type, body)| spawn_of_function(Some(param_type), body),
         ),
         // @[...] { ... } - Spawn with tuple type (sugar for @#[...] { ... })
         map(
             tuple((preceded(char('@'), tuple_type), preceded(opt(ws1), block))),
-            |(tuple_ty, body)| {
-                Term::Spawn(
-                    Box::new(Term::Function(Function {
-                        type_parameters: vec![],
-                        parameter_type: Some(tuple_ty),
-                        return_type: None,
-                        body: Some(body),
-                        span: Spanned::default(),
-                    })),
-                    Spanned::default(),
-                )
-            },
+            |(tuple_ty, body)| spawn_of_function(Some(tuple_ty), body),
         ),
         // @<primary> - Match @ followed by optional primary (bare @ becomes @~)
         map(preceded(char('@'), opt(primary)), |opt_t| {
@@ -1432,6 +1411,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                     base_span: Spanned::default(),
                     span: Spanned::default(),
                 }))),
+                None,
                 Spanned::default(),
             )
         }),
@@ -1439,7 +1419,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
     // Attach the `@` span to the spawn, for hover (shows the process type).
     let term = match term {
         // Stamp just the `@`, not the spawned function body.
-        Term::Spawn(inner, _) => Term::Spawn(inner, Spanned(Some(token_span(start, 1)))),
+        Term::Spawn(inner, arg, _) => Term::Spawn(inner, arg, Spanned(Some(token_span(start, 1)))),
         other => other,
     };
     Ok((rest, term))
@@ -1665,17 +1645,20 @@ fn primary(input: Span) -> IResult<Span, Term> {
 /// the primary itself, so only a non-bracket argument is consumed here.
 fn term(input: Span) -> IResult<Span, Term> {
     let (input, head) = primary(input)?;
-    // Application by juxtaposition only targets a looked-up callable head — an `Access` whose
-    // source is a variable, `$`, import member, builtin, tail call, or a ripple (`~ [args]`,
-    // `~.f [args]` — the ripple head consumes the flowing value and the argument applies to it).
-    // A *bare* field access (`.f`) is the one head that can't be applied — bind it first, or
+    // Application by juxtaposition targets an applicable head: a looked-up callable `Access` (a
+    // variable, `$`, import member, builtin, tail call, or a ripple — `~ [args]`, `~.f [args]`,
+    // where the ripple head consumes the flowing value and the argument applies to it), or a
+    // spawn (`@f x` supplies the spawned function's init argument, mirroring `x ~> @f`).
+    // A *bare* field access (`.f`) is the one access that can't be applied — bind it first, or
     // write `~.f`. A literal/tuple/function-literal head isn't applicable either (`#{…} 5` is a
     // syntax error).
-    let Term::Access(access) = head else {
-        return Ok((input, head));
+    let applicable = match &head {
+        Term::Access(access) => access.source.is_some(),
+        Term::Spawn(..) => true,
+        _ => false,
     };
-    if access.source.is_none() {
-        return Ok((input, Term::Access(access)));
+    if !applicable {
+        return Ok((input, head));
     }
     // The `~` of a `~>` chain separator begins a valid primary (a ripple), and `//` begins
     // a comment whose first `/` would parse as a negation primary - guard against consuming
@@ -1684,10 +1667,15 @@ fn term(input: Span) -> IResult<Span, Term> {
         pair(hspace1, not(peek(alt((tag("~>"), tag("//")))))),
         primary,
     ))(input)?;
-    match arg {
-        Some(arg) => Ok((input, Term::Apply(access, Box::new(arg)))),
-        None => Ok((input, Term::Access(access))),
-    }
+    let Some(arg) = arg else {
+        return Ok((input, head));
+    };
+    let term = match head {
+        Term::Access(access) => Term::Apply(access, Box::new(arg)),
+        Term::Spawn(function, _, span) => Term::Spawn(function, Some(Box::new(arg)), span),
+        _ => unreachable!("only applicable heads reach here"),
+    };
+    Ok((input, term))
 }
 
 fn chain(input: Span) -> IResult<Span, Chain> {

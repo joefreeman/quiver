@@ -97,8 +97,11 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::Equality => {}
             ast::Term::Not => {}
-            ast::Term::Spawn(term, _) => {
-                self.visit_term(term);
+            ast::Term::Spawn(function, argument, _) => {
+                self.visit_term(function);
+                if let Some(argument) = argument {
+                    self.visit_term(argument);
+                }
             }
             ast::Term::Self_ => {}
             ast::Term::Process(_) => {}

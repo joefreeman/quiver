@@ -47,6 +47,38 @@ fn test_spawn_with_argument() {
 }
 
 #[test]
+fn test_spawn_juxtaposed_argument() {
+    // `@f x` supplies the spawned function's init argument by juxtaposition.
+    quiver()
+        .evaluate("f = #'int { $ }, p = @f 42, !p")
+        .expect("42");
+}
+
+#[test]
+fn test_spawn_juxtaposed_argument_equals_piped() {
+    // `@f x` is equivalent to `x ~> @f`.
+    quiver()
+        .evaluate("f = #'int { $ }, p = 42 ~> @f, !p")
+        .expect("42");
+}
+
+#[test]
+fn test_spawn_juxtaposed_argument_flows_chained_value() {
+    // The chained value flows into the juxtaposed argument (via `~`), like a call argument.
+    quiver()
+        .evaluate("f = #['int, 'int] { __add__ }, p = 10 ~> @f [~, 5], !p")
+        .expect("15");
+}
+
+#[test]
+fn test_spawn_ripple_with_juxtaposed_argument() {
+    // `@~ x`: the chained value is the function to spawn; `x` is its init argument.
+    quiver()
+        .evaluate("f = #'int { $ }, p = &f ~> @~ 42, !p")
+        .expect("42");
+}
+
+#[test]
 fn test_spawn_with_argument_type_mismatch() {
     quiver()
         .evaluate("0x00 ~> @#'int { $ }")
@@ -149,7 +181,7 @@ fn test_receive_filter_returns_original_message() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int { =x => Ok }] ~> =result => result },
+            p = @#{ ! [#'int { =x => Ok }] ~> =result => result },
             42 ~> p,
             !p
             "#,
@@ -266,7 +298,7 @@ fn test_select_multiple_processes_first_ready() {
             slow = #{ !#'int },
             p1 = @fast,
             p2 = @slow,
-            ![p1, p2]
+            ! [p1, p2]
             "#,
         )
         .expect("42");
@@ -282,7 +314,7 @@ fn test_select_priority_left_to_right() {
             p1 = @f1,
             p2 = @f2,
             !p1, !p2,
-            ![p1, p2]
+            ! [p1, p2]
             "#,
         )
         .expect("42");
@@ -305,7 +337,7 @@ fn test_select_multiple_receive_patterns() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int, #'bin] },
+            p = @#{ ! [#'int, #'bin] },
             42 ~> p, !p
             "#,
         )
@@ -321,7 +353,7 @@ fn test_select_receive_pattern_priority() {
                 &. ~> =self_pid,
                 42 ~> self_pid,
                 0x00 ~> self_pid,
-                ![#'int, #'bin]
+                ! [#'int, #'bin]
             },
             !@f
             "#,
@@ -353,7 +385,7 @@ fn test_timeout_fires() {
         .evaluate(
             r#"
             slow = #{ !#'int },
-            ![@slow, 1000]
+            ! [@slow, 1000]
             "#,
         )
         .expect("[]");
@@ -365,7 +397,7 @@ fn test_timeout_process_completes_first() {
         .evaluate(
             r#"
             fast = #{ 42 },
-            ![@fast, 1000]
+            ! [@fast, 1000]
             "#,
         )
         .expect("42");
@@ -377,7 +409,7 @@ fn test_timeout_zero() {
         .evaluate(
             r#"
             slow = #{ !#'int },
-            ![@slow, 0]
+            ! [@slow, 0]
             "#,
         )
         .expect("[]");
@@ -385,18 +417,18 @@ fn test_timeout_zero() {
 
 #[test]
 fn test_empty_select_returns_nil() {
-    quiver().evaluate("![]").expect("[]");
+    quiver().evaluate("! []").expect("[]");
 }
 
 #[test]
 fn test_timeout_only() {
-    quiver().evaluate("![100]").expect("[]");
+    quiver().evaluate("! [100]").expect("[]");
 }
 
 #[test]
 fn test_multiple_timeouts_uses_minimum() {
     quiver()
-        .evaluate("![2000, 100, 500]")
+        .evaluate("! [2000, 100, 500]")
         .expect("[]")
         .expect_duration(100, 500);
 }
@@ -409,7 +441,7 @@ fn test_mixed_process_and_receive() {
             make_receiver = #{
                 fast = @#{ 99 },
                 !fast,
-                ![#'int, fast]
+                ! [#'int, fast]
             },
             receiver = @make_receiver,
             42 ~> receiver, !receiver
@@ -425,7 +457,7 @@ fn test_mixed_all_three_types_receive_wins() {
             r#"
             receiver = @#{
                 slow = @#{ !#'bin },
-                ![#'int, slow, 1000]
+                ! [#'int, slow, 1000]
             },
             42 ~> receiver, !receiver
             "#,
@@ -440,7 +472,7 @@ fn test_mixed_all_three_types_process_wins() {
             r#"
             !@#{
                 fast = @#{ 99 },
-                ![#'int, fast, 1000]
+                ! [#'int, fast, 1000]
             }
             "#,
         )
@@ -454,7 +486,7 @@ fn test_mixed_all_three_types_timeout_wins() {
             r#"
             !@#{
                 slow = @#{ !#'bin },
-                ![#'int, slow, 500]
+                ! [#'int, slow, 500]
             }
             "#,
         )
@@ -467,7 +499,7 @@ fn test_select_with_ripple() {
         .evaluate(
             r#"
             fast = #{ 42 },
-            @fast ~> ![~, 1000]
+            @fast ~> ! [~, 1000]
             "#,
         )
         .expect("42");
@@ -479,7 +511,7 @@ fn test_select_ripple_timeout_wins() {
         .evaluate(
             r#"
             slow = #{ !#'int },
-            @slow ~> ![~, 100]
+            @slow ~> ! [~, 100]
             "#,
         )
         .expect("[]");
@@ -491,7 +523,7 @@ fn test_select_nested_chain_outer_used() {
         .evaluate(
             r#"
             fast = #{ 42 },
-            @fast ~> ![~, 3 ~> ~]
+            @fast ~> ! [~, 3 ~> ~]
             "#,
         )
         .expect("42");
@@ -510,7 +542,7 @@ fn test_receive_type_from_variable() {
         .evaluate(
             r#"
             receiver_func = #'int,
-            p = @#{ ![receiver_func] ~> [~, 100] ~> __add__ },
+            p = @#{ ! [receiver_func] ~> [~, 100] ~> __add__ },
             42 ~> p, !p
             "#,
         )
@@ -533,7 +565,7 @@ fn test_receive_type_from_module_builtin() {
 #[test]
 fn test_postfix_select_with_function() {
     // Postfix form with a single function source
-    // This is equivalent to ![receiver]
+    // This is equivalent to ! [receiver]
     quiver()
         .evaluate(
             r#"
@@ -547,16 +579,16 @@ fn test_postfix_select_with_function() {
 
 #[test]
 fn test_postfix_select_with_timeout() {
-    quiver().evaluate("!@#{ ![1] }").expect("[]");
+    quiver().evaluate("!@#{ ! [1] }").expect("[]");
 }
 
 #[test]
 fn test_postfix_select_equivalence_timeout() {
-    // Test that ![1] works for timeout
+    // Test that ! [1] works for timeout
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![1] };
+            p = @#{ ! [1] };
             !p
             "#,
         )
@@ -568,10 +600,10 @@ fn test_nested_select() {
     quiver()
         .evaluate(
             r#"
-            inner = #{ ![#'int, 500] },
+            inner = #{ ! [#'int, 500] },
             p = @inner,
             42 ~> p,
-            ![p, 1000]
+            ! [p, 1000]
             "#,
         )
         .expect("42");
@@ -584,7 +616,7 @@ fn test_continuation_after_timeout() {
             r#"
             !@#{
                 slow = @#{ !#'int },
-                result = ![slow, 100] ~> /,
+                result = ! [slow, 100] ~> /,
                 [result, 42]
             }
             "#,
@@ -597,7 +629,7 @@ fn test_process_spawns_and_receives_reply() {
     quiver()
         .evaluate(
             r#"
-            child = #{ ![#(@'int) { =parent => { 42 ~> parent, Ok } }] },
+            child = #{ ! [#(@'int) { =parent => { 42 ~> parent, Ok } }] },
             parent = #{ c = @child, &. ~> c, !#'int },
             @parent
             "#,
@@ -763,7 +795,7 @@ fn test_sugar_mixed_with_comma_separation() {
             make_receiver = #{
                 fast = @#{ 99 },
                 !fast,
-                ![#'int, fast]
+                ! [#'int, fast]
             },
             receiver = @make_receiver,
             42 ~> receiver, !receiver
@@ -775,7 +807,7 @@ fn test_sugar_mixed_with_comma_separation() {
 #[test]
 fn test_sugar_tuple_type() {
     // Test !#[int, int] for identity receive on tuple type
-    // Note: ![...] is now sources syntax, so we need explicit #
+    // Note: ! [...] is now sources syntax, so we need explicit #
     quiver()
         .evaluate(
             r#"

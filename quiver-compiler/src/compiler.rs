@@ -2576,40 +2576,64 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(source_types)
     }
 
-    /// Compile spawn operation: @f, f ~> @, or arg ~> @f
-    fn compile_spawn(&mut self, term: ast::Term, arg_type: Option<usize>) -> Result<usize, Error> {
-        // Case 1: f ~> @ (function is the piped value, spawn with nil)
-        if term.is_bare_ripple() {
-            let fn_type = arg_type.ok_or_else(|| {
+    /// Compile spawn operation. The init argument may be supplied three ways: by juxtaposition
+    /// (`@f x`, `argument` is `Some`), by the chained value (`x ~> @f`, carried in `value_type`),
+    /// or not at all (`@f`, `@{ … }`). For a ripple function (`@~`) the chained value *is* the
+    /// function being spawned, so a juxtaposed argument is evaluated without it.
+    fn compile_spawn(
+        &mut self,
+        function: ast::Term,
+        argument: Option<ast::Term>,
+        value_type: Option<usize>,
+    ) -> Result<usize, Error> {
+        // `@~` / `@~ x`: the chained value is the function to spawn (already on the stack).
+        if function.is_bare_ripple() {
+            let fn_type = value_type.ok_or_else(|| {
                 Error::FeatureUnsupported("Ripple spawn requires piped value".to_string())
             })?;
-            return self.emit_nil_param_spawn(fn_type);
+            let Some(argument) = argument else {
+                return self.emit_nil_param_spawn(fn_type);
+            };
+            // The argument does not receive the chained value (which is the function), so compile
+            // it without one. Stack: [function] -> [function, argument] -> [argument, function].
+            let (arg_type, _) =
+                self.compile_term(argument, None, Provenance::Unknown, None, None, None)?;
+            self.codegen.add_instruction(Instruction::Rotate(2));
+            return self.emit_arg_spawn(fn_type, arg_type);
         }
 
-        // For nil-parameter spawn sugar (@{ ... }), the inline function definition
-        // ignores the incoming value - it's not passed as an argument.
-        // But for typed spawn sugar (@int { ... }), the incoming value IS the argument.
+        // `@f x`: the chained value flows into the juxtaposed argument (so `@f [~, 1]` works),
+        // exactly like a call argument. Compile the argument first (consuming the chained value),
+        // then the function on top. Stack: [argument] -> [argument, function].
+        if let Some(argument) = argument {
+            let (arg_type, arg_prov) =
+                self.compile_term(argument, value_type, Provenance::Unknown, None, None, None)?;
+            let _ = arg_prov;
+            let (fn_type, _) =
+                self.compile_term(function, None, Provenance::Unknown, None, None, None)?;
+            return self.emit_arg_spawn(fn_type, arg_type);
+        }
+
+        // No juxtaposed argument: the chained value (if any) is the init argument. For nil-parameter
+        // spawn sugar (`@{ … }`) the inline function ignores it; a typed sugar (`@'int { … }`) or a
+        // named function (`@f`) takes it.
         let is_nil_param_inline =
-            matches!(&term, ast::Term::Function(f) if f.parameter_type.is_none());
+            matches!(&function, ast::Term::Function(f) if f.parameter_type.is_none());
         let effective_arg_type = if is_nil_param_inline {
-            // Pop the incoming value if present (nil-parameter spawn ignores it)
-            if arg_type.is_some() {
+            if value_type.is_some() {
                 self.codegen.add_instruction(Instruction::Pop);
             }
             None
         } else {
-            arg_type
+            value_type
         };
 
-        // Compile the function term
         let (fn_type, _prov) =
-            self.compile_term(term, None, Provenance::Unknown, None, None, None)?;
+            self.compile_term(function, None, Provenance::Unknown, None, None, None)?;
 
         if let Some(arg_type) = effective_arg_type {
-            // Case 2: arg ~> @f (spawn with argument)
             self.emit_arg_spawn(fn_type, arg_type)
         } else {
-            // Case 3: @f (spawn with nil) or @{ ... } (spawn sugar)
             self.emit_nil_param_spawn(fn_type)
         }
     }
@@ -3275,8 +3299,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Match result preserves provenance of matched value
                 Ok((ty, value_provenance))
             }
-            ast::Term::Spawn(term, span) => {
-                let ty = self.compile_spawn(*term, value_type)?;
+            ast::Term::Spawn(function, argument, span) => {
+                let ty = self.compile_spawn(*function, argument.map(|a| *a), value_type)?;
                 // Hover on `@` shows the spawned process's type.
                 self.record_typed(span.get(), ty, SymbolKind::Expression, None);
                 Ok((ty, Provenance::Unknown))
