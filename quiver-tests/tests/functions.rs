@@ -255,6 +255,27 @@ fn test_dollar_with_tuple_field_access() {
 }
 
 #[test]
+fn test_dollar_dotless_index_shorthand() {
+    quiver()
+        .evaluate("f = #['int, 'int] { [$0, $1] ~> __add__ }, [10, 20] ~> f")
+        .expect("30");
+}
+
+#[test]
+fn test_dollar_dotless_field_shorthand() {
+    quiver()
+        .evaluate("f = #Point[x: 'int, y: 'int] { [$x, $y] ~> __add__ }, Point[x: 10, y: 20] ~> f")
+        .expect("30");
+}
+
+#[test]
+fn test_dollar_dotless_shorthand_then_dotted() {
+    quiver()
+        .evaluate("f = #[p: [x: 'int]] { $p.x }, [p: [x: 7]] ~> f")
+        .expect("7");
+}
+
+#[test]
 fn test_dollar_in_nested_block() {
     quiver()
         .evaluate("f = #'int { 100 ~> { __add__ [~, $] } }, 7 ~> f")

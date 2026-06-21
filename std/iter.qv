@@ -248,7 +248,7 @@ intersperse_ = #<'t>[#^ -> '<'t>, '<'t>, 't] {
   },
 
   count: #<'t>'<'t> {
-    fold_ [~, 0, #['int, 'int] { %math.add [$.0, 1] }]
+    fold_ [~, 0, #['int, 'int] { %math.add [$0, 1] }]
   },
 
   nth: #<'t>['<'t>, 'int] {

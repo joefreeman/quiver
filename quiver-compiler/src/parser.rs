@@ -1005,6 +1005,17 @@ fn type_definition(input: Span) -> IResult<Span, Type> {
 
 // Term parsers
 
+// Parse a single accessor — a positional `0` index or a `foo` field — together with its span.
+// Used both for `.`-prefixed accessors and for the dot-less `$foo` / `$0` parameter shorthand.
+fn accessor(input: Span) -> IResult<Span, (AccessPath, Spanned)> {
+    let start = input;
+    let (rest, path) = alt((
+        map(digit1, |s: Span| AccessPath::Index(s.parse().unwrap())),
+        map(identifier, AccessPath::Field),
+    ))(input)?;
+    Ok((rest, (path, Spanned(Some(span_between(start, rest))))))
+}
+
 // Parse access patterns: identifier, $, ~, %import, with optional .field accessors and [args]
 fn access(input: Span) -> IResult<Span, Access> {
     let start = input;
@@ -1020,20 +1031,19 @@ fn access(input: Span) -> IResult<Span, Access> {
     // The base span covers just the `%util` / `$` / variable, before any accessors.
     let base_span = span_between(start, after_source);
 
+    // `$foo` / `$0` are sugar for `$.foo` / `$.0`: when the parameter is the source, a single
+    // accessor may follow immediately, with no dot. Restricted to the parameter source — `~`,
+    // imports and identifiers keep requiring the dot (e.g. `foo` is a variable, not `f.oo`).
+    let (after_source, leading) = if matches!(source, Some(AccessSource::Parameter)) {
+        opt(accessor)(after_source)?
+    } else {
+        (after_source, None)
+    };
+
     // Each accessor carries its own span (`.triple` → the `triple`), so the language server can
     // hover/navigate components separately.
-    let (after_ref, accessors_with_spans) = many0(preceded(char('.'), |i| {
-        let acc_start = i;
-        let (rest, accessor) = alt((
-            map(digit1, |s: Span| AccessPath::Index(s.parse().unwrap())),
-            map(identifier, AccessPath::Field),
-        ))(i)?;
-        Ok((
-            rest,
-            (accessor, Spanned(Some(span_between(acc_start, rest)))),
-        ))
-    }))(after_source)?;
-    let (accessors, accessor_spans): (Vec<_>, Vec<_>) = accessors_with_spans.into_iter().unzip();
+    let (after_ref, dotted) = many0(preceded(char('.'), accessor))(after_source)?;
+    let (accessors, accessor_spans): (Vec<_>, Vec<_>) = leading.into_iter().chain(dotted).unzip();
 
     // The span covers just the reference (`%math.add`, `foo`, `$.x`), not a trailing call
     // argument, so hover and go-to-definition land precisely on the referenced symbol.

@@ -20,14 +20,14 @@ byte_bit = #'int {
   },
 
   get_bit: #['bin, 'int] {
-    $.1 ~> byte_bit ~> __binary_get__ [$.0, ..., 1]
+    $1 ~> byte_bit ~> __binary_get__ [$0, ..., 1]
   },
 
   set_byte: #['bin, 'int, 'int] {
-    __binary_set__ [$.0, $.1, 0, $.2, 8]
+    __binary_set__ [$0, $1, 0, $2, 8]
   },
 
   set_bit: #['bin, 'int, 'int] {
-    $.1 ~> byte_bit ~> __binary_set__ [$.0, ..., $.2, 1]
+    $1 ~> byte_bit ~> __binary_set__ [$0, ..., $2, 1]
   }
 ]

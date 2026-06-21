@@ -83,7 +83,7 @@ lines_ = #[#^ -> '%iter<Str['bin]>, ', 'int, 'bin, 'int] {
   // Open a file. Defaults to read-only; pass `mode: W` to create/truncate for writing.
   open: #(['%path] | ['%path, mode: R | W]) {
     flags = { =(mode: W) => 577 | 0 },
-    name = $.0 ~> %path.to_string ~> .0,
+    name = $0 ~> %path.to_string ~> .0,
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
     File[[name, flags, 420] ~> __file_open__ ~> @serve]
   },
@@ -107,7 +107,7 @@ lines_ = #[#^ -> '%iter<Str['bin]>, ', 'int, 'bin, 'int] {
 
   // Close the file, releasing the descriptor and stopping its process.
   close: #' {
-    Close ~> $.0,
+    Close ~> $0,
     Ok
   }
 ]

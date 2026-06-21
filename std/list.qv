@@ -41,11 +41,11 @@ collect_ = #<'t>['%iter<'t>, '<'t>] {
   },
 
   prepend: #<'t>['<'t>, 't] {
-    Cons[$.1, $.0]
+    Cons[$1, $0]
   },
 
   append: #<'t>['<'t>, 't] {
-    reverse_ [$.0, Nil] ~> reverse_ [Cons[$.1, ~], Nil]
+    reverse_ [$0, Nil] ~> reverse_ [Cons[$1, ~], Nil]
   },
 
   reverse: #<'t>'<'t> {

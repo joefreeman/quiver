@@ -391,6 +391,8 @@ Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
 
 The function parameter can be accessed using `$` (e.g., `$.x`, `$.0`). Unlike `~>`, which refers to a block's parameter, `$` always refers to the enclosing function's parameter.
 
+A single field or index may follow `$` directly, with no dot: `$x` and `$0` are sugar for `$.x` and `$.0`.
+
 Identity functions (that simply return their input unchanged) can be defined without a body: `#'int` is equivalent to `#'int { $ }`.
 
 ```quiver
