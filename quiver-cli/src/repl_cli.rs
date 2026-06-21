@@ -451,12 +451,8 @@ impl ReplCli {
             .map_err(ReplError::Environment)?
         {
             RequestResult::Result(Ok((value, heap)), _) => {
-                // Compact locals after successful evaluation (optimization)
-                self.repl
-                    .as_mut()
-                    .unwrap()
-                    .compact(&mut *self.environment.lock().unwrap());
-
+                // Locals are re-aligned by `Repl::evaluate` itself (it compacts before each
+                // line), so the host no longer needs to compact here.
                 Ok(Some(EvaluationResult { value, heap }))
             }
             RequestResult::Result(Err(e), _) => Err(ReplError::Runtime(e)),

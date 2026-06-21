@@ -90,6 +90,15 @@ impl<E: Effect> Repl<E> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
+        // Re-align the persistent process's locals with the binding indices before compiling.
+        // Each evaluated line stores its parameter (the previous result) and any temporaries into
+        // the process's locals, which are never otherwise reclaimed — so without this the physical
+        // local positions drift away from the compiler-assigned binding indices, and variable
+        // lookups read stale slots. Compaction keeps only the bound variables (re-indexed
+        // contiguously) so every line begins from an aligned state. This is correctness-critical,
+        // not an optimisation, so the REPL performs it itself rather than relying on the host.
+        self.compact(env);
+
         // Clone the program and module cache for compilation; the compiler mutates these in
         // place, and we commit them back to `self` only on success (so a failed line can't
         // pollute REPL state).
