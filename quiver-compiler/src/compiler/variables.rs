@@ -10,11 +10,11 @@ pub struct Capture {
 /// Collect free variables (captures) from a function body.
 /// Returns captures in deterministic order (order of first occurrence in AST traversal).
 pub fn collect_free_variables(
-    block: Option<&ast::Block>,
+    body: Option<&ast::Expression>,
     function_parameters: &HashSet<String>,
     defined_variables: &dyn Fn(&str, &[ast::AccessPath]) -> bool,
 ) -> Vec<Capture> {
-    let Some(block) = block else {
+    let Some(body) = body else {
         // Identity function has no captures
         return Vec::new();
     };
@@ -24,7 +24,7 @@ pub fn collect_free_variables(
         defined_variables,
         captures: Vec::new(),
     };
-    collector.visit_block(block);
+    collector.visit_expression(body);
     collector.captures
 }
 
@@ -36,17 +36,17 @@ struct FreeVariableCollector<'a> {
 }
 
 impl<'a> FreeVariableCollector<'a> {
-    fn visit_block(&mut self, expression: &ast::Block) {
+    fn visit_expression(&mut self, expression: &ast::Expression) {
         for branch in &expression.branches {
-            self.visit_expression(&branch.condition);
+            self.visit_sequence(&branch.condition);
             if let Some(ref consequence) = branch.consequence {
-                self.visit_expression(consequence);
+                self.visit_sequence(consequence);
             }
         }
     }
 
-    fn visit_expression(&mut self, expression: &ast::Expression) {
-        for chain in &expression.chains {
+    fn visit_sequence(&mut self, sequence: &ast::Sequence) {
+        for chain in &sequence.chains {
             self.visit_chain(chain);
         }
     }
@@ -78,11 +78,11 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_match(pattern);
             }
             ast::Term::Block(block) => {
-                self.visit_block(block);
+                self.visit_expression(block);
             }
             ast::Term::Function(func) => {
                 if let Some(body) = &func.body {
-                    self.visit_block(body);
+                    self.visit_expression(body);
                 }
             }
             ast::Term::Access(access) => {

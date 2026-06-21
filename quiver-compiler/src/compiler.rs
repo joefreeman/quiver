@@ -563,8 +563,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.compile_type_alias(name.as_deref(), type_parameters, type_definition)?;
                 Ok(self.program.register_type(Type::nil()))
             }
-            ast::Statement::Expression(expression) => {
-                let (result_type, _) = self.compile_expression(expression, None)?;
+            ast::Statement::Expression(sequence) => {
+                // A statement is a branchless sequence compiled in the current scope, so its
+                // bindings persist to later statements.
+                let (result_type, _) = self.compile_sequence(sequence, None, None, None)?;
                 Ok(result_type)
             }
         }
@@ -893,10 +895,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.program.register_type(Type::Union(unique_types))
     }
 
-    fn extract_receive_type(&mut self, block: Option<&ast::Block>) -> Result<usize, Error> {
+    fn extract_receive_type(&mut self, body: Option<&ast::Expression>) -> Result<usize, Error> {
         let mut receive_types = Vec::new();
-        if let Some(block) = block {
-            self.collect_receive_types(block, &mut receive_types)?;
+        if let Some(body) = body {
+            self.collect_receive_types(body, &mut receive_types)?;
         }
 
         Ok(self.unify_receive_types(receive_types))
@@ -908,8 +910,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     ) -> Result<usize, Error> {
         let mut receive_types = Vec::new();
         for statement in statements {
-            if let ast::Statement::Expression(expression) = statement {
-                self.collect_receive_types_from_expression(expression, &mut receive_types)?;
+            if let ast::Statement::Expression(sequence) = statement {
+                self.collect_receive_types_from_sequence(sequence, &mut receive_types)?;
             }
         }
 
@@ -918,24 +920,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     fn collect_receive_types(
         &mut self,
-        block: &ast::Block,
+        expression: &ast::Expression,
         receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
-        for branch in &block.branches {
-            self.collect_receive_types_from_expression(&branch.condition, receive_types)?;
+        for branch in &expression.branches {
+            self.collect_receive_types_from_sequence(&branch.condition, receive_types)?;
             if let Some(consequence) = &branch.consequence {
-                self.collect_receive_types_from_expression(consequence, receive_types)?;
+                self.collect_receive_types_from_sequence(consequence, receive_types)?;
             }
         }
         Ok(())
     }
 
-    fn collect_receive_types_from_expression(
+    fn collect_receive_types_from_sequence(
         &mut self,
-        expression: &ast::Expression,
+        sequence: &ast::Sequence,
         receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
-        for chain in &expression.chains {
+        for chain in &sequence.chains {
             self.collect_receive_types_from_chain(chain, receive_types)?;
         }
         Ok(())
@@ -1294,7 +1296,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let body_type = match function.body {
             Some(body) => {
                 // Function parameters have Provenance::Parameter since they come from callers
-                self.compile_block(
+                self.compile_scoped_expression(
                     body,
                     parameter_type,
                     Provenance::Parameter,
@@ -1600,9 +1602,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(final_type)
     }
 
-    fn compile_block(
+    /// Compile an expression in its own scope: store the incoming value as the scope parameter,
+    /// then evaluate each `|` branch (re-loading the parameter) until one yields non-nil. Used for
+    /// braced blocks, function bodies, and multi-branch statement expressions.
+    fn compile_scoped_expression(
         &mut self,
-        block: ast::Block,
+        expression: ast::Expression,
         parameter_type: usize,
         parameter_provenance: Provenance,
         on_no_match: Option<usize>,
@@ -1641,8 +1646,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Assume not exhaustive until proven otherwise by complement narrowing.
         let mut is_exhaustive = false;
 
-        for (i, branch) in block.branches.iter().enumerate() {
-            let is_last_branch = i == block.branches.len() - 1;
+        for (i, branch) in expression.branches.iter().enumerate() {
+            let is_last_branch = i == expression.branches.len() - 1;
 
             branch_starts.push(self.codegen.instructions.len());
 
@@ -1684,7 +1689,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             // Compile the condition expression - it can use ~> to access the parameter
             // We need both the type and provenance for forward narrowing
-            let (condition_type, condition_prov) = self.compile_expression_with_input(
+            let (condition_type, condition_prov) = self.compile_sequence(
                 branch.condition.clone(),
                 on_no_match,
                 None,
@@ -1760,7 +1765,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // (not the condition's result). Every chain implicitly starts with the
                 // surrounding block's parameter. Pass None for input_type so the consequence
                 // loads the parameter via implicit_continuation.
-                let (consequence_type, _) = self.compile_expression_with_input(
+                let (consequence_type, _) = self.compile_sequence(
                     consequence.clone(),
                     None,
                     None, // No input - consequence loads parameter via implicit_continuation
@@ -1920,18 +1925,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(typing::union_type_ids(self.program, branch_types))
     }
 
-    fn compile_expression(
+    /// Compile a sequence of `,`-separated chains, short-circuiting to nil if any yields nil.
+    fn compile_sequence(
         &mut self,
-        expression: ast::Expression,
-        on_no_match: Option<usize>,
-    ) -> Result<(usize, Provenance), Error> {
-        self.compile_expression_with_input(expression, on_no_match, None, None)
-    }
-
-    /// Compile an expression and return both the result type and provenance.
-    fn compile_expression_with_input(
-        &mut self,
-        expression: ast::Expression,
+        sequence: ast::Sequence,
         on_no_match: Option<usize>,
         input_type: Option<usize>,
         mut narrowing: Option<&mut Narrowing>,
@@ -1941,7 +1938,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut last_prov = Provenance::Unknown;
         let mut end_jumps = Vec::new();
 
-        for (i, chain) in expression.chains.iter().enumerate() {
+        for (i, chain) in sequence.chains.iter().enumerate() {
             // Track bindings before this chain for inter-chain narrowing
             let bindings_before_chain: std::collections::HashSet<String> = self
                 .scopes
@@ -2011,7 +2008,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 break;
             }
 
-            if i < expression.chains.len() - 1 {
+            if i < sequence.chains.len() - 1 {
                 let end_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
                 end_jumps.push(end_jump);
 
@@ -2034,7 +2031,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         let result_type = last_type.ok_or_else(|| Error::InternalError {
-            message: "Expression compiled with no chains".to_string(),
+            message: "Sequence compiled with no chains".to_string(),
         })?;
         Ok((result_type, last_prov))
     }
@@ -3262,7 +3259,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Blocks without a value need NIL on stack
                     self.codegen.add_instruction(Instruction::Tuple(NIL));
                 }
-                let ty = self.compile_block(
+                let ty = self.compile_scoped_expression(
                     block,
                     block_parameter,
                     block_provenance,

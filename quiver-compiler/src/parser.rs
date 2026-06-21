@@ -1133,7 +1133,7 @@ fn single_source(term: Term) -> Term {
 }
 
 // Create a receive function from a type and optional body
-fn make_receive(param_type: Type, body: Option<Block>) -> Term {
+fn make_receive(param_type: Type, body: Option<Expression>) -> Term {
     let func = Function {
         type_parameters: vec![],
         parameter_type: Some(param_type),
@@ -1306,8 +1306,8 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
 fn branch(input: Span) -> IResult<Span, Branch> {
     map(
         pair(
-            expression,
-            opt(preceded(tuple((wsc, tag("=>"), wsc)), expression)),
+            sequence,
+            opt(preceded(tuple((wsc, tag("=>"), wsc)), sequence)),
         ),
         |(condition, consequence)| Branch {
             condition,
@@ -1316,18 +1316,21 @@ fn branch(input: Span) -> IResult<Span, Branch> {
     )(input)
 }
 
-fn block(input: Span) -> IResult<Span, Block> {
+/// An expression: `|`-separated branches (with an optional leading `|`). This is the shared
+/// grammar for statement bodies, function bodies, and block contents.
+fn expression(input: Span) -> IResult<Span, Expression> {
     map(
-        delimited(
-            pair(char('{'), wsc),
-            preceded(
-                opt(pair(char('|'), wsc)),
-                separated_list1(tuple((wsc, char('|'), wsc)), branch),
-            ),
-            pair(wsc, char('}')),
+        preceded(
+            opt(pair(char('|'), wsc)),
+            separated_list1(tuple((wsc, char('|'), wsc)), branch),
         ),
-        |branches| Block { branches },
+        |branches| Expression { branches },
     )(input)
+}
+
+/// A block `{ … }`: a braced expression that introduces a new scope.
+fn block(input: Span) -> IResult<Span, Expression> {
+    delimited(pair(char('{'), wsc), expression, pair(wsc, char('}')))(input)
 }
 
 fn function(input: Span) -> IResult<Span, Function> {
@@ -1442,7 +1445,7 @@ fn not_term(input: Span) -> IResult<Span, Term> {
 
 // Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
 // argument is filled in later by `term()` if one is juxtaposed (`@'int { … } 5`).
-fn spawn_of_function(parameter_type: Option<Type>, body: Block) -> Term {
+fn spawn_of_function(parameter_type: Option<Type>, body: Expression) -> Term {
     Term::Spawn(
         Box::new(Term::Function(Function {
             type_parameters: vec![],
@@ -1793,13 +1796,13 @@ fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {
     separated_list1(tuple((ws1, tag("~>"), ws1)), term)(input)
 }
 
-fn expression(input: Span) -> IResult<Span, Expression> {
+fn sequence(input: Span) -> IResult<Span, Sequence> {
     map(
         terminated(
             separated_list1(tuple((ws0, char(','), wsc)), chain),
             opt(pair(ws0, char(','))),
         ),
-        |chains| Expression { chains },
+        |chains| Sequence { chains },
     )(input)
 }
 
@@ -1828,7 +1831,8 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
 }
 
 fn statement_expression(input: Span) -> IResult<Span, Statement> {
-    map(expression, Statement::Expression)(input)
+    // A statement is a single sequence: branches (`|`/`=>`) require a block.
+    map(sequence, Statement::Expression)(input)
 }
 
 fn statement(input: Span) -> IResult<Span, Statement> {

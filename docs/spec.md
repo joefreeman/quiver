@@ -184,11 +184,11 @@ inc = #'int { math.add [~, 1] },
 Chains in a sequence are executed one at a time, unless a chain evaluates to nil (`[]`), in which case the expression short-circuits, and evaluates to nil.
 
 ```quiver
-[], 5     // single expression, evaluates to []
-[]; 5     // multiple expressions, evaluates to 5
+[], 5     // one statement, evaluates to []
+[]; 5     // two statements, evaluates to 5
 ```
 
-See 'blocks' below for further details about control flow.
+See [Blocks](#blocks) below for further control flow (branches and matching).
 
 ### Ripple operator
 
@@ -300,11 +300,15 @@ Identifiers in patterns bind by default. Use `&` to reference an existing variab
 
 ## Blocks
 
-Blocks are specified in the form `{ ... }`. They provide variable scoping, control flow, pattern matching, and can improve readability.
+A block is a braced expression, `{ … }`. It introduces a scope, and it is where branches (`|`) and condition-consequence matching (`=>`) live — these don't appear at the statement level. Like any chain, each branch starts from the block's parameter, so a value piped into a block is shared across all its branches:
+
+```quiver
+B[42] ~> { =A[a] => 1 | =B[b] => 2 }   // 2 - both branches test B[42]
+```
 
 ### Variable scoping
 
-Blocks create new scopes. Variables assigned within a block shadow outer variables but don't affect them.
+Blocks create new scopes. Variables assigned within a block shadow outer variables but don't affect them; a branch's bindings are likewise local to the block.
 
 ```quiver
 x = 42, { x = 5 }, x  // 42
@@ -312,7 +316,7 @@ x = 42, { x = 5 }, x  // 42
 
 ### Branches
 
-A block may contain multiple branches, separated by `|`. If a sequence evaluates to nil (`[]`), execution jumps to the next branch, or, if there are no more branches, to the end of the block. (This enables concise logic similar to `&&` and `||` operators or ternary expressions in other languages.)
+A block may contain multiple branches, separated by `|`. If a branch's sequence evaluates to nil (`[]`), execution jumps to the next branch, or, if there are no more branches, the block evaluates to nil. (This enables concise logic similar to `&&` and `||` operators or ternary expressions in other languages.)
 
 ```quiver
 // If item is valid, try to process it, otherwise show error
@@ -326,9 +330,9 @@ value = id ~> {
 }
 ```
 
-### Pattern matching
+### Condition-consequence
 
-Branches in a block can use 'condition-consequence' syntax - `{ ... => ... | ... }`. If the 'condition' expression (on the left of the `=>`) doesn't evaluate to nil (`[]`), then the 'consequence' expression will be executed, and then execution will jump to the end of the block, taking the value of the consequence. If the condition does evaluate to nil, execution will jump to the next branch within the block, if any; otherwise the block will evaluate to nil. The significance is that if a consequence fails (i.e., evaluateas to nil), execution jumps to the end of the block rather than to the next branch.
+A branch can use 'condition-consequence' syntax - `... => ... | ...`. If the 'condition' sequence (on the left of the `=>`) doesn't evaluate to nil (`[]`), then the 'consequence' sequence will be executed, and then execution will jump to the end of the block, taking the value of the consequence. If the condition does evaluate to nil, execution will jump to the next branch, if any; otherwise the block will evaluate to nil. The significance is that if a consequence fails (i.e., evaluates to nil), execution jumps to the end rather than to the next branch.
 
 ```quiver
 value ~> {

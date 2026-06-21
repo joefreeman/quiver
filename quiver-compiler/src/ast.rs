@@ -39,22 +39,29 @@ pub enum Statement {
         type_parameters: Vec<String>,
         type_definition: Type,
     },
-    Expression(Expression),
+    /// A value-producing statement: a single branchless [`Sequence`]. Branches (`|`) and `=>`
+    /// require a block, so they cannot appear at the statement level.
+    Expression(Sequence),
 }
 
+/// An expression: one or more `|`-separated [`Branch`]es. A branchless expression is just a
+/// single branch with no consequence. This is the grammar shared by statement bodies, function
+/// bodies, and block contents; a [`Term::Block`] is simply a braced expression that adds a scope.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Block {
+pub struct Expression {
     pub branches: Vec<Branch>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Branch {
-    pub condition: Expression,
-    pub consequence: Option<Expression>,
+    pub condition: Sequence,
+    pub consequence: Option<Sequence>,
 }
 
+/// A sequence of `,`-separated [`Chain`]s (the body of a [`Branch`]). Chains run left to right
+/// and the sequence short-circuits to nil if any chain evaluates to nil.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Expression {
+pub struct Sequence {
     pub chains: Vec<Chain>,
 }
 
@@ -72,7 +79,8 @@ pub enum Term {
     Literal(Literal),
     Tuple(Tuple),
     Match(Match),
-    Block(Block),
+    /// A braced expression `{ … }`: a new scope whose branches each start from the flowing value.
+    Block(Expression),
     Function(Function),
     Access(Access),
     Equality,
@@ -170,7 +178,7 @@ pub struct Function {
     pub type_parameters: Vec<String>,
     pub parameter_type: Option<Type>,
     pub return_type: Option<Type>,
-    pub body: Option<Block>,
+    pub body: Option<Expression>,
     /// Span of the `#`, for hover (shows the inferred function type).
     pub span: Spanned,
 }

@@ -88,3 +88,27 @@ fn test_consequence_ripple_fallback_branch() {
         )
         .expect("[5, 2]");
 }
+
+// Branches (`|` and `=>`) belong to a block. A statement is a single branchless sequence, so a
+// bare `|` at the statement level is a parse error - the branches must be wrapped in braces.
+
+#[test]
+fn test_toplevel_branch_requires_block() {
+    quiver().evaluate("1 | 2").expect_parse_failure();
+}
+
+#[test]
+fn test_toplevel_consequence_requires_block() {
+    quiver().evaluate("1 => 2").expect_parse_failure();
+}
+
+#[test]
+fn test_toplevel_branch_in_block() {
+    quiver().evaluate("{ 1 | 2 }").expect("1");
+}
+
+#[test]
+fn test_toplevel_sequence_bindings_persist() {
+    // A statement is a branchless sequence sharing the enclosing scope, so its bindings persist.
+    quiver().evaluate("x = 5, y = 10; [x, y]").expect("[5, 10]");
+}
