@@ -63,9 +63,7 @@ fn test_tail() {
 
 #[test]
 fn test_is_empty() {
-    quiver()
-        .evaluate("%list.new ~> %list.empty?")
-        .expect("Ok");
+    quiver().evaluate("%list.new ~> %list.empty?").expect("Ok");
 
     quiver()
         .evaluate("%list.new ~> %list.prepend [~, 10] ~> %list.empty?")

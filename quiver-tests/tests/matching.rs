@@ -364,10 +364,10 @@ fn test_nil_condition_with_fallback() {
 
 #[test]
 fn test_not_operator_type_narrowing() {
-    // When ~> / succeeds (returns Ok), it proves input was nil
+    // When ~> <> succeeds (returns Ok), it proves input was nil
     // Subsequent branches receive narrowed type with nil subtracted
     quiver()
-        .evaluate("#(A | []) { / | =A }")
+        .evaluate("#(A | []) { <> | =A }")
         .expect_type("#(A | []) -> (A | Ok)");
 }
 

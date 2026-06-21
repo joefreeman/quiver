@@ -1440,7 +1440,7 @@ fn equality(input: Span) -> IResult<Span, Term> {
 }
 
 fn not_term(input: Span) -> IResult<Span, Term> {
-    nom_value(Term::Not, char('/'))(input)
+    nom_value(Term::Not, tag("<>"))(input)
 }
 
 // Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
@@ -1750,13 +1750,9 @@ fn term(input: Span) -> IResult<Span, Term> {
     if !applicable {
         return Ok((input, head));
     }
-    // The `~` of a `~>` chain separator begins a valid primary (a ripple), and `//` begins
-    // a comment whose first `/` would parse as a negation primary - guard against consuming
-    // either as an application argument.
-    let (input, arg) = opt(preceded(
-        pair(hspace1, not(peek(alt((tag("~>"), tag("//")))))),
-        primary,
-    ))(input)?;
+    // The `~` of a `~>` chain separator begins a valid primary (a ripple), so guard against
+    // consuming it as an application argument.
+    let (input, arg) = opt(preceded(pair(hspace1, not(peek(tag("~>")))), primary))(input)?;
     let Some(arg) = arg else {
         return Ok((input, head));
     };

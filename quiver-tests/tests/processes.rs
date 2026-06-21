@@ -616,7 +616,7 @@ fn test_continuation_after_timeout() {
             r#"
             !@#{
                 slow = @#{ !#'int },
-                result = ! [slow, 100] ~> /,
+                result = ! [slow, 100] ~> <>,
                 [result, 42]
             }
             "#,

@@ -108,7 +108,7 @@ chain_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
   #{
     first ~> {
       | =[value, next] => [value, self [&self, &next, &second]]
-      | / ~> =Ok => second
+      | <> ~> =Ok => second
     }
   }
 },
@@ -194,7 +194,7 @@ any_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
 all_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
   =[it, pred],
   it ~> {
-    | / ~> =Ok => Ok
+    | <> ~> =Ok => Ok
     | =[value, next], value ~> pred => ^ [&next, &pred]
     | []
   }

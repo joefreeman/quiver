@@ -66,7 +66,7 @@ fn test_take_while() {
             r#"
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.take_while [~, #'int { =3 ~> / }]
+            ~> %iter.take_while [~, #'int { =3 ~> <> }]
             ~> %list.collect
             "#,
         )
@@ -80,7 +80,7 @@ fn test_drop_while() {
             r#"
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.drop_while [~, #'int { =2 ~> / }]
+            ~> %iter.drop_while [~, #'int { =2 ~> <> }]
             ~> %list.collect
             "#,
         )

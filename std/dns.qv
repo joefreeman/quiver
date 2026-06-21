@@ -8,7 +8,7 @@
     %iter.unfold [resolver, #\DnsResolver {
       =r,
       __dns_next__ [r] ~> {
-        | / => {
+        | <> => {
           __dns_close__ [r],
           []
         }
