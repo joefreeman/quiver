@@ -1,0 +1,17 @@
+[package]
+name = "quiver-lsp"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "quiver-lsp"
+path = "src/main.rs"
+
+[dependencies]
+quiver-core = { path = "../quiver-core" }
+quiver-compiler = { path = "../quiver-compiler" }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+dashmap = "6"
+serde.workspace = true
+serde_json.workspace = true

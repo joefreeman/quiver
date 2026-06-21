@@ -1,5 +1,5 @@
 [workspace]
-members = ["quiver-core", "quiver-compiler", "quiver-environment", "quiver-io", "quiver-cli", "quiver-web", "quiver-tests"]
+members = ["quiver-core", "quiver-compiler", "quiver-environment", "quiver-io", "quiver-cli", "quiver-web", "quiver-tests", "quiver-lsp"]
 # The tree-sitter grammar lives in its own (Node/C) toolchain and is not a Cargo crate.
 exclude = ["tree-sitter"]
 resolver = "2"

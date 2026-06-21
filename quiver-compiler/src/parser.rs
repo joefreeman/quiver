@@ -98,6 +98,32 @@ impl std::fmt::Display for ErrorKind {
     }
 }
 
+impl ErrorKind {
+    /// An actionable suggestion for fixing this error, when one applies. Shared by every
+    /// front-end that renders parse errors (the CLI's ariadne reports and the language
+    /// server's LSP diagnostics) so the guidance stays consistent in one place.
+    pub fn help(&self) -> Option<String> {
+        let text = match self {
+            ErrorKind::UnterminatedTuple => "Add a closing ']' to complete the tuple",
+            ErrorKind::UnterminatedString => "Add a closing '\"' to complete the string",
+            ErrorKind::UnterminatedBlock => "Add a closing '}' to complete the block",
+            ErrorKind::MissingClosingBrace => "Add '}' to close the block",
+            ErrorKind::MissingClosingBracket => "Add ']' to close the tuple",
+            ErrorKind::MissingClosingParen => "Add ')' to close the parenthesized expression",
+            ErrorKind::ExpectedPipe => "Chains use '~>' to pipe values, e.g. '[1, 2] ~> __add__'",
+            ErrorKind::InvalidFunctionBody => "A function body should be a valid expression",
+            ErrorKind::HexMalformed(_) => {
+                "Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F"
+            }
+            ErrorKind::StringEscapeInvalid(_) => {
+                "Valid escape sequences are: \\n \\r \\t \\\\ \\\""
+            }
+            _ => return None,
+        };
+        Some(text.to_string())
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(span) = self.span {

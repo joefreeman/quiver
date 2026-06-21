@@ -27,7 +27,7 @@ pub fn to_report<'a>(
     }
 
     // Add help text if available
-    if let Some(help) = help_text(&error.kind) {
+    if let Some(help) = error.kind.help() {
         report = report.with_help(help);
     }
 
@@ -68,42 +68,5 @@ fn hint(kind: &ErrorKind) -> String {
         }
 
         ErrorKind::ParseError(_) => "parse error occurred here".to_string(),
-    }
-}
-
-/// Get optional help text with suggestions for fixing the error
-fn help_text(kind: &ErrorKind) -> Option<String> {
-    match kind {
-        ErrorKind::UnterminatedTuple => Some("Add a closing ']' to complete the tuple".to_string()),
-        ErrorKind::UnterminatedString => {
-            Some("Add a closing '\"' to complete the string".to_string())
-        }
-        ErrorKind::UnterminatedBlock => Some("Add a closing '}' to complete the block".to_string()),
-        ErrorKind::MissingClosingBrace => Some("Add '}' to close the block".to_string()),
-        ErrorKind::MissingClosingBracket => Some("Add ']' to close the tuple".to_string()),
-        ErrorKind::MissingClosingParen => {
-            Some("Add ')' to close the parenthesized expression".to_string())
-        }
-
-        ErrorKind::ExpectedPipe => {
-            Some("Chains use '~>' to pipe values, e.g., '[1, 2] ~> __add__'".to_string())
-        }
-        ErrorKind::InvalidFunctionBody => {
-            Some("Function body should be a valid expression".to_string())
-        }
-
-        ErrorKind::HexMalformed(_) => {
-            Some("Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F".to_string())
-        }
-
-        ErrorKind::StringEscapeInvalid(esc) => {
-            if esc.starts_with('\\') && esc.len() == 2 {
-                Some("Valid escape sequences are: \\n \\r \\t \\\\ \\\"".to_string())
-            } else {
-                Some("Use valid escape sequences: \\n (newline), \\r (return), \\t (tab), \\\\ (backslash), \\\" (quote)".to_string())
-            }
-        }
-
-        _ => None,
     }
 }
