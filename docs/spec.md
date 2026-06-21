@@ -161,12 +161,13 @@ Programs are made up of multiple statements separated by new lines or semicolons
 A chain is a `~>`-separated sequence of terms. Every chain implicitly starts with the surrounding block's parameter value. This value flows through the chain, being transformed by each term.
 
 When a term receives a value:
-- **Callable terms** (functions, processes) are called with the value
+- **Callable terms** (functions, processes) are called with the value — unless the callable is **nilary** (its parameter is nil), in which case it ignores the flowing value and is called with nil, like a literal
 - **Literals and tuples** replace the value (discarding it)
 - **Variables** depend on their type: callable variables are called, others replace the value
 
+So a nilary `f` needs no explicit argument: `f` and `5 ~> f` both call it with nil. An *explicit* argument is still type-checked, so `f [5]` (handing a value to something that takes nothing) is an error.
+
 To explicitly control this behavior:
-- `f []` calls `f` with nil, discarding any incoming value
 - `&f` references `f` without calling it
 
 The flowing value is also passed into the fields of a tuple that is constructed in the
@@ -432,11 +433,11 @@ Functions are called when a value is applied to them in a chain:
 [3, 4] ~> math.add       // Apply add to tuple [3, 4]
 ```
 
-To call a function with nil, or to discard an incoming value, use explicit argument syntax:
+A nilary function (one taking nil) is called with nil automatically, ignoring any flowing value:
 
 ```quiver
-f []                      // Call f with nil
-list.new []               // Call list.new with nil
+list.new                  // create a new list (any flowing value is ignored)
+5 ~> list.new             // the 5 is ignored; list.new is called with nil
 ```
 
 To reference a function without calling it, use `&`. Because tuple fields and call

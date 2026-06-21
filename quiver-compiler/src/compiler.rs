@@ -2651,13 +2651,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return self.emit_arg_spawn(fn_type, arg_type);
         }
 
-        // No juxtaposed argument: the chained value (if any) is the init argument, type-checked
-        // against the parameter exactly like a call argument. With no chained value, spawn with nil.
+        // No juxtaposed argument: the chained value (if any) is the init argument. A nilary
+        // process function ignores this implicit flow and is spawned with nil — the value is
+        // discarded, like a call (an explicit juxtaposed argument, handled above, stays checked).
         let (fn_type, _prov) =
             self.compile_term(function, None, Provenance::Unknown, None, None, None)?;
 
+        let param_is_nil = matches!(
+            self.program.lookup_type(fn_type),
+            Some(Type::Callable { parameter, .. }) if self.is_nil(*parameter)
+        );
+
         if let Some(arg_type) = value_type {
-            self.emit_arg_spawn(fn_type, arg_type)
+            if param_is_nil {
+                // Discard the chained value (Stack: [value, function] -> [function]), spawn with nil.
+                self.codegen.add_instruction(Instruction::Rotate(2));
+                self.codegen.add_instruction(Instruction::Pop);
+                self.emit_nil_param_spawn(fn_type)
+            } else {
+                self.emit_arg_spawn(fn_type, arg_type)
+            }
         } else {
             self.emit_nil_param_spawn(fn_type)
         }
@@ -2738,6 +2751,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: Option<usize>,
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
+        implicit_flow: bool,
     ) -> Result<(usize, Provenance), Error> {
         // Capture the components before `access` is moved into the inner compiler.
         let source = access.source.clone();
@@ -2750,8 +2764,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // enclosing tuple's ripple context when there's no direct chain.
         let flowing_value = value_type.or_else(|| ripple_context.map(|c| c.value_type_id));
 
-        let result =
-            self.compile_access_inner(access, value_type, value_provenance, ripple_context);
+        let result = self.compile_access_inner(
+            access,
+            value_type,
+            value_provenance,
+            ripple_context,
+            implicit_flow,
+        );
 
         // Record each component on its own span (`%util` vs `triple`, `foo` vs `bar`, `$` vs `0`)
         // so hover/go-to-definition resolve precisely. This is the sole recorder for accesses.
@@ -2891,6 +2910,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: Option<usize>,
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
+        implicit_flow: bool,
     ) -> Result<(usize, Provenance), Error> {
         // An access produces a value (a variable, parameter, import member, builtin, or a field
         // of the flowing value). When that value is callable and a flowing value is present
@@ -2939,7 +2959,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
 
                 if let (true, Some(val_type)) = (is_callable, value_type) {
-                    let ty = self.apply_value_to_type(accessed_type, val_type)?;
+                    let ty = self.apply_value_to_type(accessed_type, val_type, implicit_flow)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -2975,7 +2995,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.compile_member_access(&name, access.accessors)?;
 
                 if let (true, Some(val_type)) = (is_callable, value_type) {
-                    let ty = self.apply_value_to_type(accessed_type, val_type)?;
+                    let ty = self.apply_value_to_type(accessed_type, val_type, implicit_flow)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -3032,7 +3052,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
 
                 if let (true, Some(val_type)) = (is_callable, value_type) {
-                    let ty = self.apply_value_to_type(accessed_type, val_type)?;
+                    let ty = self.apply_value_to_type(accessed_type, val_type, implicit_flow)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, Provenance::Unknown))
@@ -3054,7 +3074,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
 
                 if let Some(val_type) = value_type {
-                    let ty = self.apply_value_to_type(callable_type, val_type)?;
+                    let ty = self.apply_value_to_type(callable_type, val_type, implicit_flow)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((callable_type, Provenance::Unknown))
@@ -3292,7 +3312,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 {
                     n.disable();
                 }
-                self.compile_access(access, value_type, value_provenance.clone(), ripple_context)
+                // A bare access in a chain receives the implicit chain flow.
+                self.compile_access(
+                    access,
+                    value_type,
+                    value_provenance.clone(),
+                    ripple_context,
+                    true,
+                )
             }
             ast::Term::Equality => {
                 let val_type = value_type.ok_or_else(|| {
@@ -3353,7 +3380,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Apply value if present (for message sends like `10 ~> .`)
                 let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(self_type, val_type)?
+                    self.apply_value_to_type(self_type, val_type, false)?
                 } else {
                     self_type
                 };
@@ -3375,7 +3402,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Apply value if present (for message sends like `10 ~> @1`)
                 let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(process_type, val_type)?
+                    self.apply_value_to_type(process_type, val_type, false)?
                 } else {
                     process_type
                 };
@@ -3476,13 +3503,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // (`~` *is* it; `~.field` reads the field off it), producing a callable, and the
                 // argument is applied to that result. The argument therefore does not receive the
                 // flowing value.
-                let (callable_type, _) =
-                    self.compile_access(access, value_type, value_provenance, ripple_context)?;
+                let (callable_type, _) = self.compile_access(
+                    access,
+                    value_type,
+                    value_provenance,
+                    ripple_context,
+                    true,
+                )?;
                 let (arg_type, _) =
                     self.compile_term(*arg, None, Provenance::Unknown, on_no_match, None, None)?;
                 // The callable is below the argument on the stack; swap so the call sees it on top.
                 self.codegen.add_instruction(Instruction::Rotate(2));
-                let ty = self.apply_value_to_type(callable_type, arg_type)?;
+                // An explicit argument (`f [5]`) is type-checked, not an implicit flow.
+                let ty = self.apply_value_to_type(callable_type, arg_type, false)?;
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Apply(access, arg) => {
@@ -3504,7 +3537,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 {
                     n.disable();
                 }
-                self.compile_access(access, Some(arg_type), arg_prov, None)
+                // The head is invoked with the explicit argument, not an implicit flow, so a nilary
+                // head rejects it rather than ignoring it.
+                self.compile_access(access, Some(arg_type), arg_prov, None, false)
             }
             ast::Term::Reference(None) => {
                 // Standalone & - create a new unique ref
@@ -3661,6 +3696,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         target_type_id: usize,
         value_type: usize,
+        implicit_flow: bool,
     ) -> Result<usize, Error> {
         let target_type =
             self.program
@@ -3680,6 +3716,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let result_id = *result;
             let receive_id = *receive;
 
+            // A nilary callable ignores an implicitly-flowing value: it is called with nil and the
+            // value is discarded, like a literal. An explicit argument (`implicit_flow == false`,
+            // e.g. `f [5]`) is still type-checked, so handing a value to a nilary callable errors.
+            let ignore_value = implicit_flow && self.is_nil(param_id);
+            let arg_type = if ignore_value {
+                self.program.register_type(Type::nil())
+            } else {
+                value_type
+            };
+
             // Check if function has type variables - if so, perform unification
             let has_vars_param = typing::contains_variables(param_id, &*self.program);
             let has_vars_result = typing::contains_variables(result_id, &*self.program);
@@ -3688,13 +3734,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Perform unification to bind type variables
                 let mut bindings = HashMap::new();
 
-                typing::unify(&mut bindings, param_id, value_type, self.program)?;
+                typing::unify(&mut bindings, param_id, arg_type, self.program)?;
 
                 // Substitute bindings in the result type
                 typing::substitute(result_id, &bindings, self.program)
             } else {
                 // No type variables - just check compatibility
-                if !quiver_core::types::is_compatible(value_type, param_id, &*self.program) {
+                if !quiver_core::types::is_compatible(arg_type, param_id, &*self.program) {
                     return Err(Error::TypeMismatch {
                         expected: format!(
                             "function parameter compatible with {}",
@@ -3731,6 +3777,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     ]);
                 }
                 // If compatible, no change needed - current type already includes called type
+            }
+
+            // A nilary callable ignoring a non-nil flow: replace the value on the stack with nil
+            // before calling. Stack: [value, callable] -> [callable] -> [nil, callable].
+            if ignore_value && !self.is_nil(value_type) {
+                self.codegen.add_instruction(Instruction::Rotate(2));
+                self.codegen.add_instruction(Instruction::Pop);
+                self.codegen.add_instruction(Instruction::Tuple(NIL));
+                self.codegen.add_instruction(Instruction::Rotate(2));
             }
 
             // Execute the call

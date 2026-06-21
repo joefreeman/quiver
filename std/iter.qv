@@ -20,7 +20,7 @@ unfold_ = #<'s, 't>[#^ -> 'thunk<'t>, 's, #'s -> (['t, 's] | [])] {
 map_ = #<'t, 'u>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> 'u] {
   =[self, it, f],
   #{
-    it [] ~> =[value, next],
+    it ~> =[value, next],
     value ~> f ~> [~, self [&self, &next, &f]]
   }
 },
@@ -28,7 +28,7 @@ map_ = #<'t, 'u>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> 'u] {
 filter_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
   =[self, it, pred],
   #{
-    it [] ~> =[value, next],
+    it ~> =[value, next],
     {
       | value ~> pred => {
         self [&self, &next, &pred] ~> [value, ~]
@@ -43,7 +43,7 @@ take_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
   #{
     | n ~> =0 => []
     | {
-      it [] ~> =[value, next],
+      it ~> =[value, next],
       n
       ~> %math.sub [~, 1]
       ~> self [&self, &next, ~]
@@ -55,9 +55,9 @@ take_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
 drop_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
   =[self, it, n],
   #{
-    | n ~> =0 => it []
+    | n ~> =0 => it
     | {
-      it [] ~> =[_, next],
+      it ~> =[_, next],
       n ~> %math.sub [~, 1] ~> self [&self, &next, ~] ~> ^~
     }
   }
@@ -66,7 +66,7 @@ drop_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
 take_while_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
   =[self, it, pred],
   #{
-    it [] ~> =[value, next],
+    it ~> =[value, next],
     value ~> pred,
     self [&self, &next, &pred] ~> [value, ~]
   }
@@ -75,7 +75,7 @@ take_while_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
 drop_while_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
   =[self, it, pred],
   #{
-    it [] ~> =[value, next],
+    it ~> =[value, next],
     {
       | value ~> pred => self [&self, &next, &pred] ~> ^~
       | [value, &next]
@@ -92,11 +92,11 @@ flat_map_ = #<'t, 'u>[
   =[self, source, f, current],
   #{
     | {
-      current [] ~> =[value, next],
+      current ~> =[value, next],
       [value, self [&self, &source, &f, &next]]
     }
     | {
-      source [] ~> =[value, next],
+      source ~> =[value, next],
       value ~> f ~> =Iter[fc],
       self [&self, &next, &f, &fc] ~> ^~
     }
@@ -106,9 +106,9 @@ flat_map_ = #<'t, 'u>[
 chain_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
   =[self, first, second],
   #{
-    first [] ~> {
+    first ~> {
       | =[value, next] => [value, self [&self, &next, &second]]
-      | / ~> =Ok => second []
+      | / ~> =Ok => second
     }
   }
 },
@@ -116,8 +116,8 @@ chain_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
 zip_ = #<'t, 'u>[#^ -> 'thunk<['t, 'u]>, 'thunk<'t>, 'thunk<'u>] {
   =[self, it1, it2],
   #{
-    it1 [] ~> =[v1, next1],
-    it2 [] ~> =[v2, next2],
+    it1 ~> =[v1, next1],
+    it2 ~> =[v2, next2],
     [[v1, v2], self [&self, &next1, &next2]]
   }
 },
@@ -125,7 +125,7 @@ zip_ = #<'t, 'u>[#^ -> 'thunk<['t, 'u]>, 'thunk<'t>, 'thunk<'u>] {
 enumerate_ = #<'t>[#^ -> 'thunk<['int, 't]>, 'thunk<'t>, 'int] {
   =[self, it, index],
   #{
-    it [] ~> =[value, next],
+    it ~> =[value, next],
     index
     ~> %math.add [~, 1]
     ~> self [&self, &next, ~]
@@ -136,7 +136,7 @@ enumerate_ = #<'t>[#^ -> 'thunk<['int, 't]>, 'thunk<'t>, 'int] {
 cycle_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
   =[self, original, current],
   #{
-    current [] ~> {
+    current ~> {
       | =[value, next] => {
         [value, self [&self, &original, &next]]
       }
@@ -152,7 +152,7 @@ repeat_ = #<'t>[#^ -> 'thunk<'t>, 't] {
 
 fold_ = #<'t, 'acc>['thunk<'t>, 'acc, #['acc, 't] -> 'acc] {
   =[it, acc, f],
-  it [] ~> {
+  it ~> {
     | =[value, next] => {
       [acc, value] ~> f ~> ^ [&next, ~, &f]
     }
@@ -162,7 +162,7 @@ fold_ = #<'t, 'acc>['thunk<'t>, 'acc, #['acc, 't] -> 'acc] {
 
 find_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
   =[it, pred],
-  it [] ~> =[value, next],
+  it ~> =[value, next],
   {
     | value ~> pred => value
     | ^ [&next, &pred]
@@ -171,7 +171,7 @@ find_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
 
 find_index_ = #<'t>['thunk<'t>, #'t -> ('t | []), 'int] {
   =[it, pred, index],
-  it [] ~> =[value, next],
+  it ~> =[value, next],
   {
     | value ~> pred => index
     | {
@@ -184,7 +184,7 @@ find_index_ = #<'t>['thunk<'t>, #'t -> ('t | []), 'int] {
 
 any_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
   =[it, pred],
-  it [] ~> =[value, next],
+  it ~> =[value, next],
   {
     | value ~> pred => Ok
     | ^ [&next, &pred]
@@ -193,7 +193,7 @@ any_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
 
 all_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
   =[it, pred],
-  it [] ~> {
+  it ~> {
     | / ~> =Ok => Ok
     | =[value, next], value ~> pred => ^ [&next, &pred]
     | []
@@ -202,11 +202,11 @@ all_ = #<'t>['thunk<'t>, #'t -> ('t | [])] {
 
 nth_ = #<'t>['thunk<'t>, 'int] {
   | =[it, 0] => {
-    it [] ~> =[value, _],
+    it ~> =[value, _],
     value
   }
   | =[it, n] => {
-    it [] ~> =[_, next],
+    it ~> =[_, next],
     n ~> %math.sub [~, 1] ~> ^ [&next, ~]
   }
 },
@@ -214,7 +214,7 @@ nth_ = #<'t>['thunk<'t>, 'int] {
 intersperse_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 't] {
   =[self, it, sep],
   #{
-    it [] ~> =[value, next],
+    it ~> =[value, next],
     [sep, #{ [value, self [&self, &next, sep]] }]
   }
 },
@@ -322,7 +322,7 @@ intersperse_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 't] {
   intersperse: #<'t>['<'t>, 't] {
     =[Iter[r], sep],
     #{
-      r [] ~> =[first, rest],
+      r ~> =[first, rest],
       [first, intersperse_ [&intersperse_, &rest, sep]]
     } ~> Iter[~]
   }

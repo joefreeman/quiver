@@ -430,3 +430,35 @@ fn test_generic_function_return_type_mismatch() {
             found: "'t".to_string(),
         });
 }
+
+// A nilary function (parameter `[]`) ignores an implicitly-flowing value: it is called with nil
+// and the value is discarded, like a literal. An explicit argument is still type-checked.
+
+#[test]
+fn test_nilary_call_ignores_chained_value() {
+    quiver().evaluate("make = #{ 99 }, 5 ~> make").expect("99");
+}
+
+#[test]
+fn test_nilary_call_ignores_block_parameter() {
+    // `make` is the leading term of the body, offered the int parameter, which it ignores.
+    quiver()
+        .evaluate("make = #{ 99 }, use = #'int { make }, 5 ~> use")
+        .expect("99");
+}
+
+#[test]
+fn test_nilary_call_explicit_nil_argument() {
+    quiver().evaluate("make = #{ 99 }, make []").expect("99");
+}
+
+#[test]
+fn test_nilary_call_rejects_explicit_argument() {
+    // An explicit argument is not an implicit flow, so handing a value to a nilary function errors.
+    quiver()
+        .evaluate("make = #{ 99 }, make [5]")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with []".to_string(),
+            found: "['int]".to_string(),
+        });
+}

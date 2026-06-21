@@ -203,7 +203,7 @@ fn test_receive_function_cannot_spawn() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !#'int { @#{ 42 } [], Ok } },
+            p = @#{ !#'int { @#{ 42 }, Ok } },
             10 ~> p,
             !p
             "#,
@@ -826,4 +826,22 @@ fn test_process_reference_after_completion() {
         .expect("Ok")
         .then_evaluate("!@1")
         .expect("42");
+}
+
+// A nilary process function ignores an implicitly-flowing init value (like a nilary call), but an
+// explicit juxtaposed argument is still type-checked.
+
+#[test]
+fn test_nilary_spawn_ignores_chained_value() {
+    quiver().evaluate("p = 5 ~> @{ 99 }, !p").expect("99");
+}
+
+#[test]
+fn test_nilary_spawn_rejects_juxtaposed_argument() {
+    quiver().evaluate("p = @{ 99 } 5, !p").expect_compile_error(
+        quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "[]".to_string(),
+            found: "'int".to_string(),
+        },
+    );
 }

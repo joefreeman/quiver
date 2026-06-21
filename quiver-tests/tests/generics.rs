@@ -107,7 +107,7 @@ fn test_heterogeneous_list_via_widening() {
     quiver()
         .evaluate(
             r#"
-            %list.new []
+            %list.new
               ~> %list.append [~, 5]
               ~> %list.append [~, "a"],
             "#,
