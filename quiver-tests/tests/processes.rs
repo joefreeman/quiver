@@ -203,7 +203,7 @@ fn test_receive_function_cannot_spawn() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !#'int { @#{ 42 }, Ok } },
+            p = @#{ !#'int { @#{ 42 } [], Ok } },
             10 ~> p,
             !p
             "#,

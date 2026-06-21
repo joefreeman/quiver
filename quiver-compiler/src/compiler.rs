@@ -2654,24 +2654,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return self.emit_arg_spawn(fn_type, arg_type);
         }
 
-        // No juxtaposed argument: the chained value (if any) is the init argument. For nil-parameter
-        // spawn sugar (`@{ … }`) the inline function ignores it; a typed sugar (`@'int { … }`) or a
-        // named function (`@f`) takes it.
-        let is_nil_param_inline =
-            matches!(&function, ast::Term::Function(f) if f.parameter_type.is_none());
-        let effective_arg_type = if is_nil_param_inline {
-            if value_type.is_some() {
-                self.codegen.add_instruction(Instruction::Pop);
-            }
-            None
-        } else {
-            value_type
-        };
-
+        // No juxtaposed argument: the chained value (if any) is the init argument, type-checked
+        // against the parameter exactly like a call argument. With no chained value, spawn with nil.
         let (fn_type, _prov) =
             self.compile_term(function, None, Provenance::Unknown, None, None, None)?;
 
-        if let Some(arg_type) = effective_arg_type {
+        if let Some(arg_type) = value_type {
             self.emit_arg_spawn(fn_type, arg_type)
         } else {
             self.emit_nil_param_spawn(fn_type)
