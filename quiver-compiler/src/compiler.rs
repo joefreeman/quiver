@@ -3042,6 +3042,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.compile_tail_call(identifier.as_deref(), &access.accessors, value_type)?;
                 Ok((ty, Provenance::Unknown))
             }
+            Some(ast::AccessSource::TailCallRipple) => {
+                // Bare `^~` - tail-call the flowing value (the function) with no argument. `^~ x`
+                // (with an argument) is handled as a `Term::Apply` in `compile_term`.
+                let ty = self.compile_ripple_tail_call(None, value_type)?;
+                Ok((ty, Provenance::Unknown))
+            }
             Some(ast::AccessSource::Self_) => {
                 // Self_ should only appear in Term::Reference, not Term::Access
                 Err(Error::InternalError {
@@ -3418,14 +3424,25 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Some(ast::AccessSource::Ripple) => Err(Error::FeatureUnsupported(
                         "Cannot reference ripple (~) - use it directly".to_string(),
                     )),
-                    Some(ast::AccessSource::TailCall(_)) => Err(Error::FeatureUnsupported(
-                        "Cannot reference a tail call (^) - reference the function instead"
-                            .to_string(),
-                    )),
+                    Some(ast::AccessSource::TailCall(_) | ast::AccessSource::TailCallRipple) => {
+                        Err(Error::FeatureUnsupported(
+                            "Cannot reference a tail call (^) - reference the function instead"
+                                .to_string(),
+                        ))
+                    }
                     None => Err(Error::FeatureUnsupported(
                         "Reference requires an identifier (e.g., &f)".to_string(),
                     )),
                 }
+            }
+            ast::Term::Apply(_access, arg)
+                if matches!(_access.source, Some(ast::AccessSource::TailCallRipple)) =>
+            {
+                // `^~ x`: tail-call the flowing value (the function) with `x`. Like the ripple head
+                // below, `^~` consumes the flowing value, so the argument is evaluated without it.
+                // The flowing function is already on the stack from the chain.
+                let ty = self.compile_ripple_tail_call(Some(*arg), value_type)?;
+                Ok((ty, Provenance::Unknown))
             }
             ast::Term::Apply(access, arg)
                 if matches!(access.source, Some(ast::AccessSource::Ripple)) =>
@@ -3804,6 +3821,53 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }),
             }
         }
+    }
+
+    /// Compile a ripple tail call (`^~`, `^~ x`): tail-call the flowing value, which must be a
+    /// function and is already on the stack. The argument comes by juxtaposition (`^~ x`), or is
+    /// nil for the bare form; either way it does not receive the flowing value (which is the
+    /// function being called).
+    fn compile_ripple_tail_call(
+        &mut self,
+        argument: Option<ast::Term>,
+        value_type: Option<usize>,
+    ) -> Result<usize, Error> {
+        let fn_type = value_type.ok_or_else(|| {
+            Error::FeatureUnsupported("`^~` tail call requires a piped function".to_string())
+        })?;
+        let Some(Type::Callable {
+            parameter, result, ..
+        }) = self.program.lookup_type(fn_type)
+        else {
+            return Err(Error::TypeMismatch {
+                expected: "function".to_string(),
+                found: quiver_core::format::format_type_by_id(&*self.program, fn_type),
+            });
+        };
+        let (parameter, result) = (*parameter, *result);
+
+        match argument {
+            Some(arg) => {
+                self.compile_term(arg, None, Provenance::Unknown, None, None, None)?;
+            }
+            None => {
+                // No argument: the function must take nil.
+                let nil_type_id = self.program.register_type(Type::nil());
+                if parameter != nil_type_id {
+                    return Err(Error::FeatureUnsupported(
+                        "`^~` tail call requires an argument".to_string(),
+                    ));
+                }
+                let nil_tuple_id = self.program.register_tuple(None, vec![]);
+                self.codegen
+                    .add_instruction(Instruction::Tuple(nil_tuple_id));
+            }
+        }
+
+        // Stack: [function, argument] -> [argument, function], as the tail call expects.
+        self.codegen.add_instruction(Instruction::Rotate(2));
+        self.codegen.add_instruction(Instruction::TailCall(false));
+        Ok(result)
     }
 
     fn compile_builtin(&mut self, name: &str) -> Result<usize, Error> {

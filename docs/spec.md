@@ -475,6 +475,15 @@ f = #'int { math.add [~, 1] ~> ^g [~, 2] },
 10 ~> f   // 22
 ```
 
+The flowing value itself can be the tail-call target, using the ripple form `^~`. Since the
+flowing value is then the function, the argument is supplied by juxtaposition:
+
+```quiver
+g = #'int { [~, 2] ~> math.mul },
+f = #'int { &g ~> ^~ $ },   // tail-call g (the flowing value) with f's parameter
+5 ~> f                      // 10
+```
+
 ## Processes
 
 Quiver supports lightweight concurrent processes inspired by Erlang. Processes communicate through typed message passing.

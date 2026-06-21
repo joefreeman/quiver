@@ -1292,6 +1292,22 @@ fn function(input: Span) -> IResult<Span, Function> {
 fn tail_call(input: Span) -> IResult<Span, Term> {
     let start = input;
     let (input, _) = char('^')(input)?;
+    // `^~` - tail-call the flowing value. Guard the `~` against the `~>` chain separator, so a
+    // bare `^` followed by `~> …` still parses as a self tail call.
+    let (after_tilde, tilde) = opt(terminated(char('~'), not(char('>'))))(input)?;
+    if tilde.is_some() {
+        let span = span_between(start, after_tilde);
+        return Ok((
+            after_tilde,
+            Term::Access(Access {
+                source: Some(AccessSource::TailCallRipple),
+                accessors: vec![],
+                accessor_spans: vec![],
+                base_span: Spanned(Some(span)),
+                span: Spanned(Some(span)),
+            }),
+        ));
+    }
     let (after_ident, ident) = opt(identifier)(input)?;
     // The base span covers the `^` / `^name`, before any accessors.
     let base_span = span_between(start, after_ident);

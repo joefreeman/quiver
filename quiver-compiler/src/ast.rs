@@ -201,6 +201,9 @@ pub enum AccessSource {
     /// Tail call (`^`, `^f`, `^f.field`): `None` recurses into the current function, `Some(name)`
     /// tail-calls `name`. Compiled with the tail-call instruction (TCO), not a normal call.
     TailCall(Option<String>),
+    /// Ripple tail call (`^~`): tail-calls the flowing value (which must be a function). The init
+    /// argument is supplied by juxtaposition (`^~ x`), since the flowing value is the function.
+    TailCallRipple,
 }
 
 #[derive(Debug, Clone, PartialEq)]
