@@ -9,6 +9,9 @@ use nom::{
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
 };
 use nom_locate::LocatedSpan;
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_traits::Zero;
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
@@ -409,7 +412,7 @@ fn integer_literal(input: Span) -> IResult<Span, Literal> {
             opt(char('-')),
             // Decimal only. Hexadecimal byte sequences are binary literals (`0x...`).
             map_res(digit1, |s: Span| {
-                s.fragment().parse::<i64>().map_err(|_| {
+                s.fragment().parse::<BigInt>().map_err(|_| {
                     Error::new(
                         ErrorKind::IntegerMalformed(s.fragment().to_string()),
                         Some(SourceSpan::from_span(s)),
@@ -465,32 +468,19 @@ fn string_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
-/// Greatest common divisor of two i64s (non-negative), used to reduce rational
-/// literals to canonical form at parse time.
-fn gcd_i64(a: i64, b: i64) -> i64 {
-    let mut a = a.unsigned_abs();
-    let mut b = b.unsigned_abs();
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a as i64
-}
-
 /// Reduce a numerator/denominator pair to lowest terms. The denominator is assumed
 /// positive (decimal and fraction literals are built that way).
-fn reduce_rational(numer: i64, denom: i64) -> (i64, i64) {
-    let g = gcd_i64(numer, denom);
-    if g == 0 {
+fn reduce_rational(numer: BigInt, denom: BigInt) -> (BigInt, BigInt) {
+    let g = numer.gcd(&denom);
+    if g.is_zero() {
         (numer, denom)
     } else {
-        (numer / g, denom / g)
+        (numer / &g, denom / &g)
     }
 }
 
 /// A single integer field of a desugared `Rational` tuple.
-fn rational_field(value: i64) -> TupleField {
+fn rational_field(value: BigInt) -> TupleField {
     TupleField {
         name: None,
         name_span: Spanned::default(),
@@ -504,7 +494,7 @@ fn rational_field(value: i64) -> TupleField {
 
 /// Build the `Rational[numer, denom]` tuple term that a numeric literal desugars to,
 /// reduced to canonical form (mirrors how `"…"` desugars to `Str[…]`).
-fn rational_term(numer: i64, denom: i64) -> Term {
+fn rational_term(numer: BigInt, denom: BigInt) -> Term {
     let (n, d) = reduce_rational(numer, denom);
     Term::Tuple(Tuple {
         name: TupleName::Named("Rational".to_string()),
@@ -514,7 +504,7 @@ fn rational_term(numer: i64, denom: i64) -> Term {
 }
 
 /// The `Rational[numer, denom]` pattern that a numeric literal pattern desugars to.
-fn rational_match(numer: i64, denom: i64) -> Match {
+fn rational_match(numer: BigInt, denom: BigInt) -> Match {
     let (n, d) = reduce_rational(numer, denom);
     Match::Tuple(MatchTuple {
         name: Some("Rational".to_string()),
@@ -533,12 +523,12 @@ fn rational_match(numer: i64, denom: i64) -> Match {
 
 /// Parse a decimal literal (`1.5`, `-0.25`) into a reduced numerator/denominator pair.
 /// The fractional part fixes the denominator as a power of ten.
-fn decimal_parts(input: Span) -> IResult<Span, (i64, i64)> {
+fn decimal_parts(input: Span) -> IResult<Span, (BigInt, BigInt)> {
     map_res(
         tuple((opt(char('-')), digit1, char('.'), digit1)),
         |(sign, int_part, _dot, frac_part): (Option<char>, Span, char, Span)| {
             let combined = format!("{}{}", int_part.fragment(), frac_part.fragment());
-            let magnitude = combined.parse::<i64>().map_err(|_| {
+            let magnitude = combined.parse::<BigInt>().map_err(|_| {
                 Error::new(
                     ErrorKind::IntegerMalformed(combined.clone()),
                     Some(SourceSpan::from_span(int_part)),
@@ -549,27 +539,20 @@ fn decimal_parts(input: Span) -> IResult<Span, (i64, i64)> {
             } else {
                 magnitude
             };
-            let denom = 10i64
-                .checked_pow(frac_part.fragment().len() as u32)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::IntegerMalformed(frac_part.fragment().to_string()),
-                        Some(SourceSpan::from_span(frac_part)),
-                    )
-                })?;
-            Ok::<(i64, i64), Error>((numer, denom))
+            let denom = BigInt::from(10).pow(frac_part.fragment().len() as u32);
+            Ok::<(BigInt, BigInt), Error>((numer, denom))
         },
     )(input)
 }
 
 /// Parse a fraction literal (`1/3`, `-2/4`) into a reduced numerator/denominator pair.
 /// A zero denominator is rejected.
-fn fraction_parts(input: Span) -> IResult<Span, (i64, i64)> {
+fn fraction_parts(input: Span) -> IResult<Span, (BigInt, BigInt)> {
     map_res(
         tuple((opt(char('-')), digit1, char('/'), digit1)),
         |(sign, num_part, _slash, den_part): (Option<char>, Span, char, Span)| {
             let parse = |s: &Span| {
-                s.fragment().parse::<i64>().map_err(|_| {
+                s.fragment().parse::<BigInt>().map_err(|_| {
                     Error::new(
                         ErrorKind::IntegerMalformed(s.fragment().to_string()),
                         Some(SourceSpan::from_span(*s)),
@@ -583,7 +566,7 @@ fn fraction_parts(input: Span) -> IResult<Span, (i64, i64)> {
                 magnitude
             };
             let denom = parse(&den_part)?;
-            if denom == 0 {
+            if denom.is_zero() {
                 return Err(Error::new(
                     ErrorKind::IntegerMalformed(
                         "rational literal with zero denominator".to_string(),
@@ -591,7 +574,7 @@ fn fraction_parts(input: Span) -> IResult<Span, (i64, i64)> {
                     Some(SourceSpan::from_span(den_part)),
                 ));
             }
-            Ok::<(i64, i64), Error>((numer, denom))
+            Ok::<(BigInt, BigInt), Error>((numer, denom))
         },
     )(input)
 }
@@ -2142,17 +2125,12 @@ mod tests {
     }
 
     #[test]
-    fn test_span_malformed_integer() {
-        // Note: Currently malformed integers produce UnexpectedEndOfInput errors
-        // because nom converts our custom errors. This could be improved in future.
+    fn test_large_integer_literal_parses() {
+        // Integers are arbitrary-precision: a literal far beyond i64 range parses
+        // successfully rather than overflowing.
         let source = "#{ 99999999999999999999 }";
         let result = parse(source);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Verify we still capture span information even if error kind is generic
-        assert!(err.span.is_some());
-        let span = err.span.unwrap();
-        assert_eq!(span.line, 1);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2218,14 +2196,11 @@ mod tests {
     }
 
     #[test]
-    fn test_span_process_ref_malformed() {
-        // Note: Custom errors are converted by nom
+    fn test_process_ref_large_integer_parses() {
+        // A large integer spawn argument parses (arbitrary-precision integers no
+        // longer overflow at parse time).
         let source = "#{ @99999999999999999999 }";
         let result = parse(source);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.span.is_some());
-        let span = err.span.unwrap();
-        assert_eq!(span.line, 1);
+        assert!(result.is_ok());
     }
 }

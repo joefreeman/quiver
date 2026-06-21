@@ -5,6 +5,10 @@ use crate::error::Error;
 use crate::executor::Executor;
 use crate::process::ProcessId;
 use crate::value::Value;
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_traits::{Signed, ToPrimitive, Zero};
+use std::cmp::Ordering;
 
 /// Builtin function: math:abs
 /// Returns the absolute value of an integer
@@ -22,6 +26,12 @@ pub fn builtin_math_abs<E: Effect>(
     }
 }
 
+/// Convert a `BigInt` to `f64` for the lossy trigonometric builtins, falling back to
+/// infinity when the magnitude is too large to represent.
+fn to_f64_lossy(n: &BigInt) -> f64 {
+    n.to_f64().unwrap_or(f64::INFINITY)
+}
+
 /// Builtin function: math:sqrt
 /// Returns the square root of an integer (truncated to integer)
 pub fn builtin_math_sqrt<E: Effect>(
@@ -31,13 +41,12 @@ pub fn builtin_math_sqrt<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     match arg {
         Value::Integer(n) => {
-            if *n < 0 {
+            if n.is_negative() {
                 Err(Error::InvalidArgument(
                     "Cannot take square root of negative number".to_string(),
                 ))
             } else {
-                let result = (*n as f64).sqrt() as i64;
-                Ok(BuiltinResult::Value(Value::Integer(result)))
+                Ok(BuiltinResult::Value(Value::Integer(n.sqrt())))
             }
         }
         _other => Err(Error::TypeMismatch {
@@ -56,8 +65,8 @@ pub fn builtin_math_sin<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     match arg {
         Value::Integer(n) => {
-            let result = (*n as f64).sin() as i64;
-            Ok(BuiltinResult::Value(Value::Integer(result)))
+            let result = to_f64_lossy(n).sin() as i64;
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(result))))
         }
         _other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
@@ -75,8 +84,8 @@ pub fn builtin_math_cos<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     match arg {
         Value::Integer(n) => {
-            let result = (*n as f64).cos() as i64;
-            Ok(BuiltinResult::Value(Value::Integer(result)))
+            let result = to_f64_lossy(n).cos() as i64;
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(result))))
         }
         _other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
@@ -86,7 +95,7 @@ pub fn builtin_math_cos<E: Effect>(
 }
 
 /// Helper function to extract exactly two integers from a tuple
-fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
+fn extract_two_integers(arg: &Value) -> Result<(BigInt, BigInt), Error> {
     match arg {
         Value::Tuple(_, fields) => {
             if fields.len() != 2 {
@@ -97,7 +106,7 @@ fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
             }
 
             let first = match &fields[0] {
-                Value::Integer(n) => *n,
+                Value::Integer(n) => n.clone(),
                 _other => {
                     return Err(Error::TypeMismatch {
                         expected: "integer".to_string(),
@@ -107,7 +116,7 @@ fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
             };
 
             let second = match &fields[1] {
-                Value::Integer(n) => *n,
+                Value::Integer(n) => n.clone(),
                 _other => {
                     return Err(Error::TypeMismatch {
                         expected: "integer".to_string(),
@@ -145,14 +154,7 @@ pub fn builtin_gcd<E: Effect>(
     _program: &mut Executor<E>,
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    let mut a = a.unsigned_abs();
-    let mut b = b.unsigned_abs();
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    Ok(BuiltinResult::Value(Value::Integer(a as i64)))
+    Ok(BuiltinResult::Value(Value::Integer(a.gcd(&b))))
 }
 
 /// Builtin function: __subtract__
@@ -185,7 +187,7 @@ pub fn builtin_divide<E: Effect>(
     _program: &mut Executor<E>,
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    if b == 0 {
+    if b.is_zero() {
         return Err(Error::InvalidArgument("Division by zero".to_string()));
     }
     Ok(BuiltinResult::Value(Value::Integer(a / b)))
@@ -199,7 +201,7 @@ pub fn builtin_modulo<E: Effect>(
     _program: &mut Executor<E>,
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    if b == 0 {
+    if b.is_zero() {
         return Err(Error::InvalidArgument("Modulo by zero".to_string()));
     }
     Ok(BuiltinResult::Value(Value::Integer(a % b)))
@@ -214,13 +216,11 @@ pub fn builtin_compare<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
 
-    let result = if a < b {
-        -1
-    } else if a > b {
-        1
-    } else {
-        0
+    let result = match a.cmp(&b) {
+        Ordering::Less => -1,
+        Ordering::Greater => 1,
+        Ordering::Equal => 0,
     };
 
-    Ok(BuiltinResult::Value(Value::Integer(result)))
+    Ok(BuiltinResult::Value(Value::Integer(BigInt::from(result))))
 }

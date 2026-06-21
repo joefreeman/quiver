@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 serde.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+num-integer.workspace = true
 base64 = "0.22.1"
 hex = "0.4.3"
 rustc-hash = "2"

@@ -5,7 +5,36 @@ use crate::process::{Action, ProcessId};
 use crate::program::Program;
 use crate::types::Type;
 use crate::value::Value;
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use std::collections::HashMap;
+
+/// Convert a `BigInt` to `i64`, erroring if it doesn't fit. Used by the bounded
+/// (bitwise/binary) builtins, whose semantics operate on machine integers.
+pub fn bigint_to_i64(n: &BigInt) -> Result<i64, Error> {
+    n.to_i64().ok_or_else(|| {
+        Error::InvalidArgument(format!("Integer {n} does not fit in a 64-bit value"))
+    })
+}
+
+/// Convert a `BigInt` to `usize`, erroring if it's negative or too large.
+pub fn bigint_to_usize(n: &BigInt) -> Result<usize, Error> {
+    n.to_usize().ok_or_else(|| {
+        Error::InvalidArgument(format!("Integer {n} does not fit in an unsigned index"))
+    })
+}
+
+/// Convert a `BigInt` to `u8`, erroring if it's out of the `0..=255` byte range.
+pub fn bigint_to_u8(n: &BigInt) -> Result<u8, Error> {
+    n.to_u8()
+        .ok_or_else(|| Error::InvalidArgument(format!("Integer {n} is not a byte (0..=255)")))
+}
+
+/// Build a `BigInt` from an `i64`. Lets downstream crates construct integer values
+/// without depending on `num-bigint` directly.
+pub fn bigint_from_i64(n: i64) -> BigInt {
+    BigInt::from(n)
+}
 
 pub mod binary;
 pub mod integer;

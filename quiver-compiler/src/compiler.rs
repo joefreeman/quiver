@@ -2391,7 +2391,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Value::Integer(int_value) => {
                 let index = self
                     .program
-                    .register_constant(Constant::Integer(*int_value));
+                    .register_constant(Constant::Integer(int_value.clone()));
                 Ok((
                     vec![Instruction::Constant(index)],
                     self.program.register_type(Type::Integer),

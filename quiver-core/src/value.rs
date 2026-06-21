@@ -1,5 +1,6 @@
 use crate::process::ProcessId;
 use crate::types::{NIL, OK};
+use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ pub enum Binary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
-    Integer(i64),
+    Integer(BigInt),
     Binary(Binary),
     Reference(u64), // Unique ref: (worker_id << 48) | counter
     // Tuple/Function payloads are reference-counted so cloning a value is O(1) (refcount bump)

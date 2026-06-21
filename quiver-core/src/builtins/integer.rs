@@ -1,12 +1,17 @@
 //! Integer builtin function implementations
-use crate::builtins::BuiltinResult;
+//!
+//! These bitwise operations operate on 64-bit machine integers: each `BigInt` operand
+//! is narrowed to `i64` (erroring if out of range) before the existing logic runs, and
+//! the result is widened back to a `BigInt`.
+use crate::builtins::{BuiltinResult, bigint_to_i64};
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::process::ProcessId;
 use crate::value::Value;
+use num_bigint::BigInt;
 
-/// Helper function to extract exactly two integers from a tuple
+/// Helper function to extract exactly two i64 integers from a tuple
 fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
     match arg {
         Value::Tuple(_, fields) => {
@@ -18,7 +23,7 @@ fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
             }
 
             let first = match &fields[0] {
-                Value::Integer(n) => *n,
+                Value::Integer(n) => bigint_to_i64(n)?,
                 _other => {
                     return Err(Error::TypeMismatch {
                         expected: "integer".to_string(),
@@ -28,7 +33,7 @@ fn extract_two_integers(arg: &Value) -> Result<(i64, i64), Error> {
             };
 
             let second = match &fields[1] {
-                Value::Integer(n) => *n,
+                Value::Integer(n) => bigint_to_i64(n)?,
                 _other => {
                     return Err(Error::TypeMismatch {
                         expected: "integer".to_string(),
@@ -54,7 +59,7 @@ pub fn builtin_integer_and<E: Effect>(
     _executor: &mut Executor<E>,
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    Ok(BuiltinResult::Value(Value::Integer(a & b)))
+    Ok(BuiltinResult::Value(Value::Integer(BigInt::from(a & b))))
 }
 
 /// Bitwise OR of two integers
@@ -65,7 +70,7 @@ pub fn builtin_integer_or<E: Effect>(
     _executor: &mut Executor<E>,
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    Ok(BuiltinResult::Value(Value::Integer(a | b)))
+    Ok(BuiltinResult::Value(Value::Integer(BigInt::from(a | b))))
 }
 
 /// Bitwise XOR of two integers
@@ -76,7 +81,7 @@ pub fn builtin_integer_xor<E: Effect>(
     _executor: &mut Executor<E>,
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b) = extract_two_integers(arg)?;
-    Ok(BuiltinResult::Value(Value::Integer(a ^ b)))
+    Ok(BuiltinResult::Value(Value::Integer(BigInt::from(a ^ b))))
 }
 
 /// Bitwise NOT of an integer
@@ -87,7 +92,10 @@ pub fn builtin_integer_not<E: Effect>(
     _executor: &mut Executor<E>,
 ) -> Result<BuiltinResult<E>, Error> {
     match arg {
-        Value::Integer(n) => Ok(BuiltinResult::Value(Value::Integer(!n))),
+        Value::Integer(n) => {
+            let n = bigint_to_i64(n)?;
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(!n))))
+        }
         other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
             found: other.type_name().to_string(),
@@ -106,7 +114,7 @@ pub fn builtin_integer_shift<E: Effect>(
     let (value, shift_amount) = extract_two_integers(arg)?;
 
     if shift_amount == 0 {
-        return Ok(BuiltinResult::Value(Value::Integer(value)));
+        return Ok(BuiltinResult::Value(Value::Integer(BigInt::from(value))));
     }
 
     // Rust's shift operators panic if shift amount is >= bit width
@@ -117,14 +125,12 @@ pub fn builtin_integer_shift<E: Effect>(
         // Shifting by 64+ bits
         if shift_amount > 0 {
             // Left shift by 64+ always gives 0
-            return Ok(BuiltinResult::Value(Value::Integer(0)));
+            return Ok(BuiltinResult::Value(Value::Integer(BigInt::from(0))));
         } else {
             // Right shift by 64+ gives 0 or -1 depending on sign
-            return Ok(BuiltinResult::Value(Value::Integer(if value >= 0 {
-                0
-            } else {
-                -1
-            })));
+            return Ok(BuiltinResult::Value(Value::Integer(BigInt::from(
+                if value >= 0 { 0 } else { -1 },
+            ))));
         }
     }
 
@@ -136,7 +142,7 @@ pub fn builtin_integer_shift<E: Effect>(
         value >> shift_amount_abs
     };
 
-    Ok(BuiltinResult::Value(Value::Integer(result)))
+    Ok(BuiltinResult::Value(Value::Integer(BigInt::from(result))))
 }
 
 /// Count number of set bits (population count) in an integer
@@ -149,8 +155,8 @@ pub fn builtin_integer_popcount<E: Effect>(
     match arg {
         Value::Integer(n) => {
             // Use u64's count_ones for positive values, handle negative via two's complement
-            let count = (*n as u64).count_ones() as i64;
-            Ok(BuiltinResult::Value(Value::Integer(count)))
+            let count = (bigint_to_i64(n)? as u64).count_ones() as i64;
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(count))))
         }
         other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),

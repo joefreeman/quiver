@@ -1,5 +1,5 @@
 use crate::effects::NativeEffect;
-use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult};
+use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult, bigint_to_i64};
 use quiver_core::error::Error;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId};
@@ -176,12 +176,13 @@ pub fn builtin_tcp_connect(
     };
 
     // Get port
-    let Value::Integer(port) = fields[1] else {
+    let Value::Integer(port) = &fields[1] else {
         return Err(Error::TypeMismatch {
             expected: "integer".to_string(),
             found: fields[1].type_name().to_string(),
         });
     };
+    let port = bigint_to_i64(port)?;
 
     if !(0..=65535).contains(&port) {
         return Err(Error::InvalidArgument(format!(
@@ -253,20 +254,22 @@ pub fn builtin_tcp_listen(
     };
 
     // Get port
-    let Value::Integer(port) = fields[0] else {
+    let Value::Integer(port) = &fields[0] else {
         return Err(Error::TypeMismatch {
             expected: "integer".to_string(),
             found: fields[0].type_name().to_string(),
         });
     };
+    let port = bigint_to_i64(port)?;
 
     // Get backlog
-    let Value::Integer(backlog) = fields[1] else {
+    let Value::Integer(backlog) = &fields[1] else {
         return Err(Error::TypeMismatch {
             expected: "integer".to_string(),
             found: fields[1].type_name().to_string(),
         });
     };
+    let backlog = bigint_to_i64(backlog)? as i32;
 
     if !(0..=65535).contains(&port) {
         return Err(Error::InvalidArgument(format!(
@@ -280,7 +283,7 @@ pub fn builtin_tcp_listen(
         process_id,
         effect: NativeEffect::TcpListen {
             port: port as u16,
-            backlog: backlog as i32,
+            backlog,
         },
     }))
 }
@@ -317,12 +320,13 @@ pub fn builtin_tcp_socket_read(
         }
     };
 
-    let Value::Integer(length) = fields[1] else {
+    let Value::Integer(length) = &fields[1] else {
         return Err(Error::TypeMismatch {
             expected: "integer".to_string(),
             found: fields[1].type_name().to_string(),
         });
     };
+    let length = bigint_to_i64(length)?;
 
     if length <= 0 {
         return Err(Error::InvalidArgument(format!(

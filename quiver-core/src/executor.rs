@@ -5,6 +5,7 @@ use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Value};
+use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -991,7 +992,7 @@ impl<E: Effect> Executor<E> {
         // Resolve integers directly; binaries go through the constant cache. Determine which
         // up front so the constants borrow ends before the (mutable) cache call.
         let integer = match self.get_constant(index) {
-            Some(Constant::Integer(integer)) => Some(*integer),
+            Some(Constant::Integer(integer)) => Some(integer.clone()),
             Some(Constant::Binary(_)) => None,
             None => return Err(Error::ConstantUndefined(index)),
         };
@@ -1850,8 +1851,10 @@ impl<E: Effect> Executor<E> {
         for (src_idx, source) in select_state.sources.iter().enumerate() {
             match source {
                 Value::Integer(timeout_ms) => {
+                    // A timeout beyond i64 range is effectively unbounded.
+                    let timeout_ms = timeout_ms.to_i64().unwrap_or(i64::MAX);
                     if let Some(value) =
-                        self.handle_select_timeout(*timeout_ms, start_time, current_time_ms)?
+                        self.handle_select_timeout(timeout_ms, start_time, current_time_ms)?
                     {
                         return self.complete_select(pid, value);
                     }
@@ -2189,7 +2192,7 @@ impl<E: Effect> Executor<E> {
                     let elapsed = current_time_ms.saturating_sub(start_time);
                     return select_state.sources.iter().any(|source| {
                         if let Value::Integer(timeout_ms) = source {
-                            elapsed >= (*timeout_ms).max(0) as u64
+                            elapsed >= timeout_ms.to_i64().unwrap_or(i64::MAX).max(0) as u64
                         } else {
                             false
                         }
@@ -2359,7 +2362,7 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .collect();
             Ok(Value::Function(*func_idx, Arc::new(remapped_captures?)))
         }
-        Value::Integer(i) => Ok(Value::Integer(*i)),
+        Value::Integer(i) => Ok(Value::Integer(i.clone())),
         Value::Builtin(name) => Ok(Value::Builtin(*name)),
         Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
         Value::Resource(id, type_name) => Ok(Value::Resource(*id, *type_name)),

@@ -1,10 +1,11 @@
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup};
+use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Constant {
     #[serde(rename = "int")]
-    Integer(i64),
+    Integer(BigInt),
     #[serde(rename = "bin")]
     Binary(Vec<u8>),
 }

@@ -222,7 +222,7 @@ pub fn generate_pattern_code(
                     generate_value_access(codegen, &requirement.path);
                     match literal {
                         ast::Literal::Integer(val) => {
-                            let idx = program.register_constant(Constant::Integer(*val));
+                            let idx = program.register_constant(Constant::Integer(val.clone()));
                             codegen.add_instruction(Instruction::Constant(idx));
                         }
                         ast::Literal::Binary(bytes) => {

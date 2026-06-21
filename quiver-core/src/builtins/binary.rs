@@ -1,11 +1,12 @@
 //! Binary builtin function implementations
 use crate::binary::BinaryData;
-use crate::builtins::BuiltinResult;
+use crate::builtins::{BuiltinResult, bigint_to_i64, bigint_to_u8, bigint_to_usize};
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::process::ProcessId;
 use crate::value::Value;
+use num_bigint::BigInt;
 use std::rc::Rc;
 
 /// Create a new zero-filled binary of the specified size
@@ -17,13 +18,13 @@ pub fn builtin_binary_new<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     match arg {
         Value::Integer(size) => {
-            if *size < 0 {
+            if size.sign() == num_bigint::Sign::Minus {
                 return Err(Error::InvalidArgument(
                     "Size cannot be negative".to_string(),
                 ));
             }
 
-            let size = *size as usize;
+            let size = bigint_to_usize(size)?;
             if size > crate::value::MAX_BINARY_SIZE {
                 return Err(Error::InvalidArgument(format!(
                     "Size {} exceeds maximum {}",
@@ -53,9 +54,9 @@ pub fn builtin_binary_length<E: Effect>(
     match arg {
         Value::Binary(binary) => {
             let binary_data = executor.get_binary_data(binary)?;
-            Ok(BuiltinResult::Value(Value::Integer(
-                binary_data.len() as i64
-            )))
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(
+                binary_data.len(),
+            ))))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -260,20 +261,19 @@ pub fn builtin_binary_index<E: Effect>(
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), Value::Integer(byte), Value::Integer(offset)) => {
-                    if *byte < 0 || *byte > 255 {
-                        return Err(Error::InvalidArgument(
-                            "Byte must be in the range 0..=255".to_string(),
-                        ));
-                    }
-                    if *offset < 0 {
+                    let byte = bigint_to_u8(byte).map_err(|_| {
+                        Error::InvalidArgument("Byte must be in the range 0..=255".to_string())
+                    })?;
+                    if offset.sign() == num_bigint::Sign::Minus {
                         return Err(Error::InvalidArgument(
                             "Offset cannot be negative".to_string(),
                         ));
                     }
+                    let offset = bigint_to_usize(offset)?;
                     let binary_data = executor.get_binary_data(binary)?;
-                    let result = binary_data.find_byte(*byte as u8, *offset as usize);
+                    let result = binary_data.find_byte(byte, offset);
                     Ok(BuiltinResult::Value(match result {
-                        Some(index) => Value::Integer(index as i64),
+                        Some(index) => Value::Integer(BigInt::from(index)),
                         None => Value::nil(),
                     }))
                 }
@@ -328,7 +328,8 @@ pub fn builtin_binary_shift<E: Effect>(
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary), Value::Integer(shift_amount)) => {
-                    if *shift_amount == 0 {
+                    let shift_amount = bigint_to_i64(shift_amount)?;
+                    if shift_amount == 0 {
                         // No shift needed
                         return Ok(BuiltinResult::Value(Value::Binary(*binary)));
                     }
@@ -336,7 +337,7 @@ pub fn builtin_binary_shift<E: Effect>(
                     let binary_data = executor.get_binary_data(binary)?;
                     let bytes = binary_data.to_vec();
 
-                    let shift_left = *shift_amount > 0;
+                    let shift_left = shift_amount > 0;
                     let shift_bits = shift_amount.unsigned_abs() as u32;
 
                     if shift_bits >= (bytes.len() as u32 * 8) {
@@ -425,7 +426,7 @@ pub fn builtin_binary_popcount<E: Effect>(
                 .map(|byte| byte.count_ones() as u64)
                 .sum();
 
-            Ok(BuiltinResult::Value(Value::Integer(count as i64)))
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(count))))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -455,25 +456,29 @@ pub fn builtin_binary_get<E: Effect>(
                 ) => {
                     let binary_data = executor.get_binary_data(binary)?;
 
-                    if *byte_offset < 0 {
+                    let byte_offset = bigint_to_i64(byte_offset)?;
+                    let bit_offset = bigint_to_i64(bit_offset)?;
+                    let num_bits = bigint_to_i64(num_bits)?;
+
+                    if byte_offset < 0 {
                         return Err(Error::InvalidArgument(
                             "Byte offset cannot be negative".to_string(),
                         ));
                     }
 
-                    if *bit_offset < 0 || *bit_offset > 7 {
+                    if !(0..=7).contains(&bit_offset) {
                         return Err(Error::InvalidArgument("Bit offset must be 0-7".to_string()));
                     }
 
-                    if *num_bits < 1 || *num_bits > 64 {
+                    if !(1..=64).contains(&num_bits) {
                         return Err(Error::InvalidArgument(
                             "Number of bits must be between 1 and 64".to_string(),
                         ));
                     }
 
-                    let byte_offset = *byte_offset as usize;
-                    let bit_offset = *bit_offset as usize;
-                    let num_bits = *num_bits as usize;
+                    let byte_offset = byte_offset as usize;
+                    let bit_offset = bit_offset as usize;
+                    let num_bits = num_bits as usize;
 
                     // Calculate which bytes we need to read
                     let total_bit_start = byte_offset * 8 + bit_offset;
@@ -510,7 +515,7 @@ pub fn builtin_binary_get<E: Effect>(
                     };
                     value &= mask;
 
-                    Ok(BuiltinResult::Value(Value::Integer(value as i64)))
+                    Ok(BuiltinResult::Value(Value::Integer(BigInt::from(value))))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer, integer]".to_string(),
@@ -553,25 +558,29 @@ pub fn builtin_binary_set<E: Effect>(
                 ) => {
                     let binary_data = executor.get_binary_data(binary)?;
 
-                    if *byte_offset < 0 {
+                    let byte_offset = bigint_to_i64(byte_offset)?;
+                    let bit_offset = bigint_to_i64(bit_offset)?;
+                    let num_bits = bigint_to_i64(num_bits)?;
+
+                    if byte_offset < 0 {
                         return Err(Error::InvalidArgument(
                             "Byte offset cannot be negative".to_string(),
                         ));
                     }
 
-                    if *bit_offset < 0 || *bit_offset > 7 {
+                    if !(0..=7).contains(&bit_offset) {
                         return Err(Error::InvalidArgument("Bit offset must be 0-7".to_string()));
                     }
 
-                    if *num_bits < 1 || *num_bits > 64 {
+                    if !(1..=64).contains(&num_bits) {
                         return Err(Error::InvalidArgument(
                             "Number of bits must be between 1 and 64".to_string(),
                         ));
                     }
 
-                    let byte_offset = *byte_offset as usize;
-                    let bit_offset = *bit_offset as usize;
-                    let num_bits = *num_bits as usize;
+                    let byte_offset = byte_offset as usize;
+                    let bit_offset = bit_offset as usize;
+                    let num_bits = num_bits as usize;
                     let len = binary_data.len();
 
                     // Calculate which bytes we need to modify
@@ -593,14 +602,15 @@ pub fn builtin_binary_set<E: Effect>(
                         (1u64 << num_bits) - 1
                     };
 
-                    if *value < 0 || (*value as u64) > max_value {
+                    let value_i64 = bigint_to_i64(value)?;
+                    if value_i64 < 0 || (value_i64 as u64) > max_value {
                         return Err(Error::InvalidArgument(format!(
                             "Value {} does not fit in {} bits",
                             value, num_bits
                         )));
                     }
 
-                    let value_u64 = *value as u64;
+                    let value_u64 = value_i64 as u64;
 
                     // Read the bytes we need to modify
                     let bytes_to_modify = last_byte_needed - byte_offset;
@@ -705,14 +715,16 @@ pub fn builtin_binary_slice<E: Effect>(
                 (Value::Binary(binary), Value::Integer(start), Value::Integer(end)) => {
                     let binary_data = executor.get_binary_data(binary)?;
 
-                    if *start < 0 || *end < 0 {
+                    if start.sign() == num_bigint::Sign::Minus
+                        || end.sign() == num_bigint::Sign::Minus
+                    {
                         return Err(Error::InvalidArgument(
                             "Indices cannot be negative".to_string(),
                         ));
                     }
 
-                    let start = *start as usize;
-                    let end = *end as usize;
+                    let start = bigint_to_usize(start)?;
+                    let end = bigint_to_usize(end)?;
                     let len = binary_data.len();
 
                     if start > len || end > len {
@@ -767,7 +779,7 @@ pub fn builtin_binary_hash32<E: Effect>(
                 (hash ^ (byte as u32)).wrapping_mul(16777619)
             });
 
-            Ok(BuiltinResult::Value(Value::Integer(hash as i64)))
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(hash))))
         }
         _ => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -794,8 +806,11 @@ pub fn builtin_binary_hash64<E: Effect>(
                     (hash ^ (byte as u64)).wrapping_mul(1099511628211)
                 });
 
-            // Note: This may not fit in i64 but we cast it anyway
-            Ok(BuiltinResult::Value(Value::Integer(hash as i64)))
+            // Note: This may not fit in i64 but we cast it anyway, preserving the
+            // historical wrapping behaviour of the 64-bit hash.
+            Ok(BuiltinResult::Value(Value::Integer(BigInt::from(
+                hash as i64,
+            ))))
         }
         _ => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -815,20 +830,21 @@ pub fn builtin_binary_append<E: Effect>(
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), Value::Integer(value), Value::Integer(num_bytes)) => {
-                    if *num_bytes < 1 || *num_bytes > 8 {
+                    let num_bytes = bigint_to_i64(num_bytes)?;
+                    if !(1..=8).contains(&num_bytes) {
                         return Err(Error::InvalidArgument(
                             "Number of bytes must be between 1 and 8".to_string(),
                         ));
                     }
 
-                    if *value < 0 {
+                    if value.sign() == num_bigint::Sign::Minus {
                         return Err(Error::InvalidArgument(
                             "Value cannot be negative".to_string(),
                         ));
                     }
 
-                    let num_bytes = *num_bytes as usize;
-                    let value = *value as u64;
+                    let num_bytes = num_bytes as usize;
+                    let value = bigint_to_i64(value)? as u64;
 
                     // Check if value fits in the specified number of bytes
                     let max_value = if num_bytes == 8 {

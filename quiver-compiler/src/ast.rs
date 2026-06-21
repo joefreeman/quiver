@@ -133,7 +133,7 @@ impl Term {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
-    Integer(i64),
+    Integer(num_bigint::BigInt),
     Binary(Vec<u8>),
 }
 

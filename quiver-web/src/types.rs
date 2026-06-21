@@ -1,4 +1,5 @@
 use crate::effects::WebEffect;
+use quiver_core::builtins::{bigint_from_i64, bigint_to_i64};
 use quiver_core::bytecode::Constant;
 use quiver_core::executor::Executor;
 use quiver_core::program::Program;
@@ -62,7 +63,7 @@ impl Value {
 
     fn to_core_recursive(&self, heap: &mut Vec<Vec<u8>>) -> quiver_core::value::Value {
         match self {
-            Value::Integer { value } => quiver_core::value::Value::Integer(*value),
+            Value::Integer { value } => quiver_core::value::Value::Integer(bigint_from_i64(*value)),
             Value::Binary { hex } => {
                 // Decode hex and add to heap
                 let bytes = hex::decode(hex).unwrap_or_default();
@@ -108,7 +109,9 @@ impl Value {
         program: &Program,
     ) -> Self {
         match value {
-            quiver_core::value::Value::Integer(i) => Value::Integer { value: *i },
+            quiver_core::value::Value::Integer(i) => Value::Integer {
+                value: bigint_to_i64(i).unwrap_or(0),
+            },
             quiver_core::value::Value::Binary(binary) => {
                 // Resolve binary reference to actual bytes
                 let bytes = match binary {
@@ -173,7 +176,9 @@ impl Value {
         executor: &mut Executor<WebEffect>,
     ) -> std::result::Result<quiver_core::value::Value, String> {
         match self {
-            Value::Integer { value } => Ok(quiver_core::value::Value::Integer(value)),
+            Value::Integer { value } => {
+                Ok(quiver_core::value::Value::Integer(bigint_from_i64(value)))
+            }
             Value::Binary { hex } => {
                 // Decode hex string and allocate to executor heap
                 let bytes = hex::decode(&hex).map_err(|e| format!("Invalid hex: {}", e))?;

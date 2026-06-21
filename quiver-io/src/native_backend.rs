@@ -808,7 +808,7 @@ impl NativeEffectBackend {
 
         // Return bytes actually written (may be less than requested)
         let bytes_written = result_code as i64;
-        Ok((Value::Integer(bytes_written), vec![]))
+        Ok((Value::Integer(bytes_written.into()), vec![]))
     }
 
     fn handle_flush_completion(&self, result_code: i32) -> EffectResult {
