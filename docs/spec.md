@@ -258,6 +258,7 @@ Point[x, y] = Point[10, 20]              // Bind both fields
 (x, y) = Point[x: 10, y: 20, z: 30]      // Partial pattern (for named fields)
 Point(x, y) = Point[x: 1, y: 2, z: 3]    // Named partial pattern
 * = Config[host: "localhost", port: 80]  // Star (all named fields)
+Config* = Config[host: "x", port: 80]    // Named star (all named fields, matches the name)
 [x, _] = Point[10, 20]                   // Placeholder (ignore value)
 ```
 

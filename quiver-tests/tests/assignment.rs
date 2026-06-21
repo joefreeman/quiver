@@ -94,6 +94,38 @@ fn test_star_assignment() {
 }
 
 #[test]
+fn test_named_star_assignment() {
+    // A named star binds all named fields, like `*`, but also requires the tuple name.
+    quiver()
+        .evaluate("Config[a: 1, b: 2] ~> =Config*, [a, b] ~> __add__")
+        .expect("3");
+
+    quiver()
+        .evaluate("Config* = Config[a: 1, b: 2]; [a, b] ~> __add__")
+        .expect("3");
+}
+
+#[test]
+fn test_named_star_rejects_mismatched_name() {
+    quiver()
+        .evaluate("Config[a: 1, b: 2] ~> =Other*")
+        .expect("[]");
+}
+
+#[test]
+fn test_named_star_discriminates_union() {
+    quiver()
+        .evaluate(
+            r#"
+            'union = Config[a: 'int, b: 'int] | Other[x: 'int]
+            #'union { =Config* => [a, b] | None } ~> =f
+            [Config[a: 1, b: 2] ~> f, Other[x: 9] ~> f]
+            "#,
+        )
+        .expect("[[1, 2], None]");
+}
+
+#[test]
 fn test_ignore_placeholder() {
     quiver().evaluate("[1, 2] ~> =[a, _], a").expect("1");
     quiver().evaluate("[1, 2] ~> =_").expect("[1, 2]");

@@ -328,7 +328,9 @@ fn analyze_match_pattern(
             scopes,
             value_provenance,
         ),
-        ast::Match::Star => analyze_star_pattern(program, value_type_id, path, identifiers),
+        ast::Match::Star(name) => {
+            analyze_star_pattern(program, name.as_ref(), value_type_id, path, identifiers)
+        }
         ast::Match::Placeholder => Ok((
             vec![BindingSet {
                 requirements: vec![],
@@ -881,15 +883,31 @@ fn analyze_partial_pattern(
 
 fn analyze_star_pattern(
     program: &mut Program,
+    name: Option<&String>,
     value_type_id: usize,
     path: AccessPath,
     identifiers: &mut HashMap<String, Identifier>,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     // Collect all field sources (tuples and partials)
-    let field_sources = extract_field_sources(program, value_type_id);
+    let all_sources = extract_field_sources(program, value_type_id);
 
-    // Create a binding set for each field source
+    // When a name is given, keep only the variants carrying that tuple name (`Config*`).
+    let field_sources: Vec<FieldSource> = match name {
+        None => all_sources.clone(),
+        Some(expected) => all_sources
+            .iter()
+            .filter(|source| field_source_name(program, source).as_ref() == Some(expected))
+            .cloned()
+            .collect(),
+    };
+
+    // If the value could be one of several variants at runtime, a type check is needed to
+    // discriminate the matching variant (and, for a named star, to enforce the name).
+    let needs_type_check = all_sources.len() > 1;
+
+    // Create a binding set for each matching field source
     let mut binding_sets = vec![];
+    let mut narrowed_type_ids: Vec<usize> = vec![];
     for source in &field_sources {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         let mut variant_identifiers_scope =
@@ -906,12 +924,10 @@ fn analyze_star_pattern(
                     })?
                     .fields
                     .clone();
-                let tuple_type_id = if field_sources.len() > 1 {
-                    Some(program.register_type(Type::Tuple(*tuple_id)))
-                } else {
-                    None
-                };
-                (tuple_fields, tuple_type_id)
+                let tuple_type_id = program.register_type(Type::Tuple(*tuple_id));
+                narrowed_type_ids.push(tuple_type_id);
+                let type_check = needs_type_check.then_some(tuple_type_id);
+                (tuple_fields, type_check)
             }
             FieldSource::Partial { fields, .. } => {
                 // Partial fields are all named, convert to (Option<String>, usize) format
@@ -920,6 +936,7 @@ fn analyze_star_pattern(
                     .map(|(name, type_id)| (Some(name.clone()), *type_id))
                     .collect();
                 // No type check needed for partials since they're type constraints
+                narrowed_type_ids.push(value_type_id);
                 (converted, None)
             }
         };
@@ -975,8 +992,24 @@ fn analyze_star_pattern(
         });
     }
 
-    // Star pattern matches all variants, so narrowed type is the full input type
-    Ok((binding_sets, value_type_id))
+    // An unnamed star matches every variant, so the type is unchanged. A named star narrows
+    // to the matching variants (or never, if none carry the name).
+    let narrowed_type_id = match name {
+        None => value_type_id,
+        Some(_) if narrowed_type_ids.is_empty() => program.never(),
+        Some(_) => union_type_ids(program, narrowed_type_ids),
+    };
+    Ok((binding_sets, narrowed_type_id))
+}
+
+/// The tuple name carried by a field source, if any.
+fn field_source_name(program: &Program, source: &FieldSource) -> Option<String> {
+    match source {
+        FieldSource::Tuple(tuple_id) => {
+            program.lookup_tuple(*tuple_id).and_then(|t| t.name.clone())
+        }
+        FieldSource::Partial { name, .. } => name.clone(),
+    }
 }
 
 /// Represents a match against either a concrete tuple or a partial type

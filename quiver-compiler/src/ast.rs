@@ -244,7 +244,9 @@ pub enum Match {
     Literal(Literal),
     Tuple(MatchTuple),
     Partial(PartialPattern),
-    Star,
+    /// Bind all named fields (`*`). An optional tuple name (`Config*`) additionally
+    /// requires the value to be named, mirroring a named partial pattern.
+    Star(Option<String>),
     Placeholder,
     Reference(Type),
     Type(Type),

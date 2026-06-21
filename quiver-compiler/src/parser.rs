@@ -538,6 +538,17 @@ fn literal(input: Span) -> IResult<Span, Literal> {
 
 // Pattern parsers for terms
 
+/// Parse a star pattern, which binds all named fields: bare `*`, or `Name*` which
+/// additionally requires the matched value to carry that tuple name.
+fn star_pattern(input: Span) -> IResult<Span, Match> {
+    alt((
+        map(terminated(tuple_name, char('*')), |name| {
+            Match::Star(Some(name))
+        }),
+        map(char('*'), |_| Match::Star(None)),
+    ))(input)
+}
+
 /// Parse a single partial pattern field: either `name` or `name: pattern`
 fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
     // Forward reference for nested patterns within partial pattern fields
@@ -555,8 +566,8 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
             map(type_identifier, Match::Type),
             // Literals
             map(literal, Match::Literal),
-            // Star and placeholder
-            map(char('*'), |_| Match::Star),
+            // Star (optionally named) and placeholder
+            star_pattern,
             map(char('_'), |_| Match::Placeholder),
             // Identifier
             map(spanned(identifier), |(span, name)| {
@@ -1581,6 +1592,9 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         }),
         // Try string literals first (before tuples and literals)
         match_string,
+        // Star (optionally named): `*` or `Name*`. Before match_tuple so `Name*` isn't
+        // first consumed as a bare named tuple, leaving the `*` dangling.
+        star_pattern,
         // Try match tuple (handles both [..] and Name[..])
         map(match_tuple, Match::Tuple),
         // Try partial patterns before inline types (partial patterns use parentheses too)
@@ -1590,8 +1604,6 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         map(inline_type_expression, Match::Type),
         // Then try literals
         map(literal, Match::Literal),
-        // Star and placeholder
-        map(char('*'), |_| Match::Star),
         map(char('_'), |_| Match::Placeholder),
         // Identifier must come last (since it's more general)
         map(spanned(identifier), |(span, name)| {
