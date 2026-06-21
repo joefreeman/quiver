@@ -1,0 +1,71 @@
+// Exact rational arithmetic. The compiler desugars decimal (`1.5`) and fraction
+// (`1/3`) literals into reduced `Rational[numerator, denominator]` tuples, so the
+// numbers people write are exact by construction. This module is the arithmetic
+// surface over those values.
+' = Rational['int, 'int];
+
+// Reduce [numerator, denominator] to canonical form: denominator positive, gcd 1.
+// The denominator is assumed non-zero.
+reduce_ = #['int, 'int] {
+  =[n, d],
+  {
+    | %math.lt [d, 0] => [%math.mul [n, -1], %math.mul [d, -1]] ~> ^
+    | {
+      // `g` is gcd(n, d); with a non-zero denominator it is never zero, so the
+      // raw `__divide__` (typed `'int`, no nil case) keeps the rational's fields
+      // exactly `'int`. The safe `%math.div` would infect them with `| []`.
+      g = [n, d] ~> __gcd__,
+      Rational[__divide__ [n, g], __divide__ [d, g]]
+    }
+  }
+},
+
+[
+  // Lift an integer to a rational.
+  from_int: #'int { Rational[~, 1] },
+
+  numer: #' { =Rational[n, _] => n },
+  denom: #' { =Rational[_, d] => d },
+
+  // a/b + c/d = (ad + cb) / bd
+  add: #[', '] {
+    =[Rational[a, b], Rational[c, d]],
+    reduce_ [%math.add [%math.mul [a, d], %math.mul [c, b]], %math.mul [b, d]]
+  },
+
+  // a/b - c/d = (ad - cb) / bd
+  sub: #[', '] {
+    =[Rational[a, b], Rational[c, d]],
+    reduce_ [%math.sub [%math.mul [a, d], %math.mul [c, b]], %math.mul [b, d]]
+  },
+
+  // a/b * c/d = ac / bd
+  mul: #[', '] {
+    =[Rational[a, b], Rational[c, d]],
+    reduce_ [%math.mul [a, c], %math.mul [b, d]]
+  },
+
+  // a/b / c/d = ad / bc; division by zero fails to nil.
+  div: #[', '] {
+    | =[_, Rational[0, _]] => []
+    | =[Rational[a, b], Rational[c, d]] => reduce_ [%math.mul [a, d], %math.mul [b, c]]
+  },
+
+  neg: #' { =Rational[a, b] => Rational[%math.mul [a, -1], b] },
+
+  // Cross-multiplied comparisons (denominators are positive by invariant).
+  eq?: #[', '] {
+    =[Rational[a, b], Rational[c, d]],
+    [%math.mul [a, d], %math.mul [c, b]] ~> ==, Ok
+  },
+
+  lt?: #[', '] {
+    =[Rational[a, b], Rational[c, d]],
+    %math.lt [%math.mul [a, d], %math.mul [c, b]], Ok
+  },
+
+  le?: #[', '] {
+    =[Rational[a, b], Rational[c, d]],
+    %math.le [%math.mul [a, d], %math.mul [c, b]], Ok
+  }
+]

@@ -465,6 +465,153 @@ fn string_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
+/// Greatest common divisor of two i64s (non-negative), used to reduce rational
+/// literals to canonical form at parse time.
+fn gcd_i64(a: i64, b: i64) -> i64 {
+    let mut a = a.unsigned_abs();
+    let mut b = b.unsigned_abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a as i64
+}
+
+/// Reduce a numerator/denominator pair to lowest terms. The denominator is assumed
+/// positive (decimal and fraction literals are built that way).
+fn reduce_rational(numer: i64, denom: i64) -> (i64, i64) {
+    let g = gcd_i64(numer, denom);
+    if g == 0 {
+        (numer, denom)
+    } else {
+        (numer / g, denom / g)
+    }
+}
+
+/// A single integer field of a desugared `Rational` tuple.
+fn rational_field(value: i64) -> TupleField {
+    TupleField {
+        name: None,
+        name_span: Spanned::default(),
+        value: FieldValue::Chain(Chain {
+            match_pattern: None,
+            bind_span: Spanned::default(),
+            terms: vec![Term::Literal(Literal::Integer(value))],
+        }),
+    }
+}
+
+/// Build the `Rational[numer, denom]` tuple term that a numeric literal desugars to,
+/// reduced to canonical form (mirrors how `"…"` desugars to `Str[…]`).
+fn rational_term(numer: i64, denom: i64) -> Term {
+    let (n, d) = reduce_rational(numer, denom);
+    Term::Tuple(Tuple {
+        name: TupleName::Named("Rational".to_string()),
+        fields: vec![rational_field(n), rational_field(d)],
+        span: Spanned::default(),
+    })
+}
+
+/// The `Rational[numer, denom]` pattern that a numeric literal pattern desugars to.
+fn rational_match(numer: i64, denom: i64) -> Match {
+    let (n, d) = reduce_rational(numer, denom);
+    Match::Tuple(MatchTuple {
+        name: Some("Rational".to_string()),
+        fields: vec![
+            MatchField {
+                name: None,
+                pattern: Match::Literal(Literal::Integer(n)),
+            },
+            MatchField {
+                name: None,
+                pattern: Match::Literal(Literal::Integer(d)),
+            },
+        ],
+    })
+}
+
+/// Parse a decimal literal (`1.5`, `-0.25`) into a reduced numerator/denominator pair.
+/// The fractional part fixes the denominator as a power of ten.
+fn decimal_parts(input: Span) -> IResult<Span, (i64, i64)> {
+    map_res(
+        tuple((opt(char('-')), digit1, char('.'), digit1)),
+        |(sign, int_part, _dot, frac_part): (Option<char>, Span, char, Span)| {
+            let combined = format!("{}{}", int_part.fragment(), frac_part.fragment());
+            let magnitude = combined.parse::<i64>().map_err(|_| {
+                Error::new(
+                    ErrorKind::IntegerMalformed(combined.clone()),
+                    Some(SourceSpan::from_span(int_part)),
+                )
+            })?;
+            let numer = if sign.is_some() {
+                -magnitude
+            } else {
+                magnitude
+            };
+            let denom = 10i64
+                .checked_pow(frac_part.fragment().len() as u32)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::IntegerMalformed(frac_part.fragment().to_string()),
+                        Some(SourceSpan::from_span(frac_part)),
+                    )
+                })?;
+            Ok::<(i64, i64), Error>((numer, denom))
+        },
+    )(input)
+}
+
+/// Parse a fraction literal (`1/3`, `-2/4`) into a reduced numerator/denominator pair.
+/// A zero denominator is rejected.
+fn fraction_parts(input: Span) -> IResult<Span, (i64, i64)> {
+    map_res(
+        tuple((opt(char('-')), digit1, char('/'), digit1)),
+        |(sign, num_part, _slash, den_part): (Option<char>, Span, char, Span)| {
+            let parse = |s: &Span| {
+                s.fragment().parse::<i64>().map_err(|_| {
+                    Error::new(
+                        ErrorKind::IntegerMalformed(s.fragment().to_string()),
+                        Some(SourceSpan::from_span(*s)),
+                    )
+                })
+            };
+            let magnitude = parse(&num_part)?;
+            let numer = if sign.is_some() {
+                -magnitude
+            } else {
+                magnitude
+            };
+            let denom = parse(&den_part)?;
+            if denom == 0 {
+                return Err(Error::new(
+                    ErrorKind::IntegerMalformed(
+                        "rational literal with zero denominator".to_string(),
+                    ),
+                    Some(SourceSpan::from_span(den_part)),
+                ));
+            }
+            Ok::<(i64, i64), Error>((numer, denom))
+        },
+    )(input)
+}
+
+fn decimal_term(input: Span) -> IResult<Span, Term> {
+    map(decimal_parts, |(n, d)| rational_term(n, d))(input)
+}
+
+fn fraction_term(input: Span) -> IResult<Span, Term> {
+    map(fraction_parts, |(n, d)| rational_term(n, d))(input)
+}
+
+fn match_decimal(input: Span) -> IResult<Span, Match> {
+    map(decimal_parts, |(n, d)| rational_match(n, d))(input)
+}
+
+fn match_fraction(input: Span) -> IResult<Span, Match> {
+    map(fraction_parts, |(n, d)| rational_match(n, d))(input)
+}
+
 fn parse_string_content(span: Span) -> Result<String, Error> {
     let s = span.fragment();
     let mut result = String::new();
@@ -1605,6 +1752,10 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         // Type reference: 'int, 'list<'t>, ('int | 'bin). Types need no & since they
         // are never bound. Must come after partial patterns to avoid ambiguity with (...).
         map(inline_type_expression, Match::Type),
+        // Numeric literal patterns: decimal (`=1.5`) and fraction (`=1/3`), before bare
+        // literals so the leading digits aren't consumed as a plain integer.
+        match_decimal,
+        match_fraction,
         // Then try literals
         map(literal, Match::Literal),
         map(char('_'), |_| Match::Placeholder),
@@ -1708,6 +1859,11 @@ fn primary(input: Span) -> IResult<Span, Term> {
         self_term,
         // Bind match (must be before literals and identifiers)
         bind_match,
+        // Numeric literals: decimal (`1.5`) and fraction (`1/3`) desugar to reduced
+        // `Rational` tuples. Before bare integer/binary literals, which would otherwise
+        // consume the leading digits and leave `.5` / `/3` dangling.
+        decimal_term,
+        fraction_term,
         // Literals
         map(literal, Term::Literal),
         // Complex terms

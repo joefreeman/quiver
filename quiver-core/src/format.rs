@@ -299,6 +299,14 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                     return s;
                 }
 
+                // Check for Rational type and format as an `X/Y` literal (the form the
+                // compiler desugars into a `Rational` tuple).
+                if tuple_info.name.as_deref() == Some("Rational")
+                    && let [Value::Integer(numer), Value::Integer(denom)] = elements.as_slice()
+                {
+                    return format!("{}/{}", numer, denom);
+                }
+
                 let name = tuple_info.name.as_deref();
                 let field_strs: Vec<String> = elements
                     .iter()

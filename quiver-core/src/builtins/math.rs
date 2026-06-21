@@ -136,6 +136,25 @@ pub fn builtin_add<E: Effect>(
     Ok(BuiltinResult::Value(Value::Integer(a + b)))
 }
 
+/// Builtin function: __gcd__
+/// Returns the greatest common divisor of two integers (always non-negative).
+/// Used by the `num` module to reduce rationals to canonical form.
+pub fn builtin_gcd<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _program: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    let (a, b) = extract_two_integers(arg)?;
+    let mut a = a.unsigned_abs();
+    let mut b = b.unsigned_abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    Ok(BuiltinResult::Value(Value::Integer(a as i64)))
+}
+
 /// Builtin function: __subtract__
 /// Subtracts two integers from a tuple
 pub fn builtin_subtract<E: Effect>(

@@ -240,6 +240,7 @@ pub fn register_math_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "multiply", math::builtin_multiply, int_int.clone() => TypeSpec::Integer);
     register_builtin!(registry, "divide", math::builtin_divide, int_int.clone() => TypeSpec::Integer);
     register_builtin!(registry, "modulo", math::builtin_modulo, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "gcd", math::builtin_gcd, int_int.clone() => TypeSpec::Integer);
 
     // Comparison operations - operate on [int, int] tuples
     register_builtin!(registry, "compare", math::builtin_compare, int_int => TypeSpec::Integer);
