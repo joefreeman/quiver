@@ -56,7 +56,7 @@ parse_ = #['%list<'%str>, '] {
 
 [
   parse: #'%str {
-    %str.split [~, "/"] ~> {
+    %str.split [~, "/"] ~> %list.collect ~> {
       | =Nil => Relative[0]
       | =Cons[first, rest], first ~> %str.empty? => parse_ [rest, Root]
       | parse_ [~, Relative[0]]

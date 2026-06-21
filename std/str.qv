@@ -59,26 +59,29 @@ byte_pos_to_char_idx_ = #['bin, 'int, 'int, 'int] {
   }
 },
 
-split_ = #['bin, 'bin, 'int, '%list<'>] {
-  =[haystack, delim, start, acc],
+split_ = #[#^ -> '%iter<'>, 'bin, 'bin, 'int] {
+  =[self, haystack, delim, start],
 
   haystack_len = haystack ~> %bin.length,
   delim_len = delim ~> %bin.length,
   end = %math.sub [haystack_len, delim_len],
 
-  {
-    | find_index [haystack, delim, start, end] ~> =index =>
+  #{
+    | start ~> %math.gt [~, haystack_len] => []
+
+    | find_index [haystack, delim, start, end] ~> =index => {
       match_end = %math.add [index, delim_len],
+      segment = haystack ~> %bin.slice [~, start, index] ~> Str[~],
+      [segment, self [&self, haystack, delim, match_end]]
+    }
 
-      haystack
-      ~> %bin.slice [~, start, index]
-      ~> %list.prepend [acc, Str[~]]
-      ~> ^ [haystack, delim, match_end, ~]
-
-    | haystack
-      ~> %bin.slice [~, start, haystack_len]
-      ~> %list.prepend [acc, Str[~]]
-      ~> %list.reverse
+    | {
+      // No further delimiter: emit the trailing segment, then advance start
+      // past the end so the next call yields nil.
+      segment = haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~],
+      next_start = %math.add [haystack_len, 1],
+      [segment, self [&self, haystack, delim, next_start]]
+    }
   }
 },
 
@@ -187,7 +190,7 @@ collect_ = #['%iter<'int>, 'bin] {
 
   split: #[', '] {
     =[Str[haystack], Str[delim]],
-    split_ [haystack, delim, 0, %list.new []]
+    split_ [&split_, haystack, delim, 0]
   },
 
   length: #' {

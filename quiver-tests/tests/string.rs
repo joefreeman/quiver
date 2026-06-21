@@ -116,19 +116,19 @@ fn test_contains() {
 #[test]
 fn test_split() {
     quiver()
-        .evaluate(r#"["hello,world,test", ","] ~> %str.split"#)
+        .evaluate(r#"["hello,world,test", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"hello\", Cons[\"world\", Cons[\"test\", Nil]]]");
     quiver()
-        .evaluate(r#"["hello", ","] ~> %str.split"#)
+        .evaluate(r#"["hello", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"hello\", Nil]");
     quiver()
-        .evaluate(r#"["a::b::c", "::"] ~> %str.split"#)
+        .evaluate(r#"["a::b::c", "::"] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"a\", Cons[\"b\", Cons[\"c\", Nil]]]");
     quiver()
-        .evaluate(r#"["", ","] ~> %str.split"#)
+        .evaluate(r#"["", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"\", Nil]");
     quiver()
-        .evaluate(r#"[",hello,", ","] ~> %str.split"#)
+        .evaluate(r#"[",hello,", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"\", Cons[\"hello\", Cons[\"\", Nil]]]");
 }
 
