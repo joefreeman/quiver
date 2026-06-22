@@ -484,7 +484,7 @@ fn print_bytecode_profile_report(
             } else {
                 0.0
             };
-            let avg_ns = if *count > 0 { *time / *count } else { 0 };
+            let avg_ns = time.checked_div(*count).unwrap_or(0);
             eprintln!(
                 "  {:?}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
                 instr_type,
@@ -516,7 +516,7 @@ fn print_bytecode_profile_report(
             } else {
                 0.0
             };
-            let avg_ns = if *count > 0 { *time / *count } else { 0 };
+            let avg_ns = time.checked_div(*count).unwrap_or(0);
             eprintln!(
                 "  {}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
                 builtin_name,

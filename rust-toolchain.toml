@@ -1,0 +1,9 @@
+# Single source of truth for the Rust toolchain. Honoured natively by rustup/cargo, by
+# CI (via actions-rust-lang/setup-rust-toolchain), and locally by mise when the
+# `idiomatic_version_file_enable_tools = ["rust"]` setting is enabled. Bump `channel`
+# here to upgrade the toolchain everywhere at once.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
