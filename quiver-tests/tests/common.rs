@@ -82,22 +82,13 @@ fn evaluate(
     }
 }
 
+// The standard library is a built-in package (embedded in quiver-compiler), so tests start
+// with no in-memory modules — only those a test adds via `with_modules`.
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
     with_io: bool,
-}
-
-#[allow(dead_code)]
-impl Default for TestBuilder {
-    fn default() -> Self {
-        // The standard library is a built-in package (embedded in quiver-compiler), so tests
-        // start with no in-memory modules — only those a test adds via `with_modules`.
-        Self {
-            modules: HashMap::new(),
-            with_io: false,
-        }
-    }
 }
 
 #[allow(dead_code)]

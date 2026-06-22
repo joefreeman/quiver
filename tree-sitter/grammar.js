@@ -198,8 +198,8 @@ module.exports = grammar({
     _accessor: $ => seq('.', field('field', choice($.identifier, $.index))),
     index: _ => /\d+/,
 
-    // `%math`, `%math/trig`. The `/` path separator is immediate so it is not confused
-    // with the `/` (not) operator.
+    // `%math`, `%math/trig`. The `/` path separator is immediate so a later `mod / x`
+    // (with surrounding spaces) is not mistaken for part of the module path.
     import: $ => seq('%', $.identifier, repeat(seq(token.immediate('/'), $.identifier))),
 
     // ------------------------------------------------------------------- operations
@@ -207,7 +207,7 @@ module.exports = grammar({
     builtin: _ => token(/__[a-z][a-zA-Z0-9_]*__/),
 
     equality: _ => '==',
-    not: _ => '/',
+    not: _ => '<>',
 
     // `^`, `^f`, `^math.mul` tail calls. An argument, if any, is applied by juxtaposition.
     tail_call: $ => prec.right(seq(

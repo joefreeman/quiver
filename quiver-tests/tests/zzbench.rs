@@ -75,8 +75,8 @@ fn best_eval_secs(src: &str, reps: usize) -> f64 {
 #[ignore]
 fn bench_workloads() {
     println!(
-        "\n{:<20} {:>10} {:>10} {:>12}   {}",
-        "workload", "work(ms)", "big(ms)", "per-unit(ns)", "targets"
+        "\n{:<20} {:>10} {:>10} {:>12}   targets",
+        "workload", "work(ms)", "big(ms)", "per-unit(ns)"
     );
     println!("{}", "-".repeat(78));
 

@@ -17,8 +17,11 @@ const PROFILES: &[(&str, &str)] = &[
 const SIZE: usize = 2000;
 const REPS: usize = 5;
 
-// op name -> closure building Quiver source for a given string literal body and char count
-fn ops() -> Vec<(&'static str, fn(&str, usize) -> String)> {
+// closure building Quiver source for a given string literal body and char count
+type OpFn = fn(&str, usize) -> String;
+
+// op name -> source-building closure
+fn ops() -> Vec<(&'static str, OpFn)> {
     vec![
         ("length", |s, _n| format!(r#""{s}" ~> %str.length"#)),
         ("iter_count", |s, _n| {

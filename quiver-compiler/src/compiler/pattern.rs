@@ -290,7 +290,6 @@ fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn analyze_match_pattern(
     env: &mut super::typing::TypeEnv,
     program: &mut Program,
@@ -428,7 +427,6 @@ fn analyze_match_pattern(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn analyze_match_tuple_pattern(
     env: &mut super::typing::TypeEnv,

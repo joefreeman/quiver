@@ -728,7 +728,7 @@
     },
     "not": {
       "type": "STRING",
-      "value": "/"
+      "value": "<>"
     },
     "tail_call": {
       "type": "PREC_RIGHT",
