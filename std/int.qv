@@ -1,4 +1,25 @@
+// Integer-only operations. Arithmetic with a rational analogue lives in `%num`; this module
+// is the home for operations defined only over the integers: integer (truncating) quotient
+// and modulo, integer square root, and the bitwise primitives.
 [
+  // Integer quotient, truncating toward zero. Division by zero fails to nil.
+  div: #['int, 'int] {
+    | =[a, 0] => []
+    | __divide__
+  },
+
+  // Integer modulo. A zero divisor fails to nil.
+  mod: #['int, 'int] {
+    | =[a, 0] => []
+    | __modulo__
+  },
+
+  // Integer square root (floor). Negative input fails to nil.
+  sqrt: #'int {
+    | __compare__ [~, 0] ~> =-1 => []
+    | __sqrt__
+  },
+
   and: &__integer_and__,
   or: &__integer_or__,
   xor: &__integer_xor__,

@@ -493,7 +493,9 @@ fn rational_field(value: BigInt) -> TupleField {
 }
 
 /// Build the `Rational[numer, denom]` tuple term that a numeric literal desugars to,
-/// reduced to canonical form (mirrors how `"…"` desugars to `Str[…]`).
+/// reduced to canonical form (mirrors how `"…"` desugars to `Str[…]`). The result is
+/// always a `Rational` — an integer-valued literal like `2.0` or `4/2` becomes
+/// `Rational[2, 1]`, distinct from the integer `2`.
 fn rational_term(numer: BigInt, denom: BigInt) -> Term {
     let (n, d) = reduce_rational(numer, denom);
     Term::Tuple(Tuple {
@@ -503,7 +505,8 @@ fn rational_term(numer: BigInt, denom: BigInt) -> Term {
     })
 }
 
-/// The `Rational[numer, denom]` pattern that a numeric literal pattern desugars to.
+/// The `Rational[numer, denom]` pattern that a numeric literal pattern desugars to,
+/// reduced to canonical form (always a `Rational`, mirroring `rational_term`).
 fn rational_match(numer: BigInt, denom: BigInt) -> Match {
     let (n, d) = reduce_rational(numer, denom);
     Match::Tuple(MatchTuple {
@@ -1186,7 +1189,7 @@ fn access(input: Span) -> IResult<Span, Access> {
     let (after_ref, dotted) = many0(preceded(char('.'), accessor))(after_source)?;
     let (accessors, accessor_spans): (Vec<_>, Vec<_>) = leading.into_iter().chain(dotted).unzip();
 
-    // The span covers just the reference (`%math.add`, `foo`, `$.x`), not a trailing call
+    // The span covers just the reference (`%num.add`, `foo`, `$.x`), not a trailing call
     // argument, so hover and go-to-definition land precisely on the referenced symbol.
     let ref_span = span_between(start, after_ref);
 
@@ -1319,8 +1322,11 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 pair(type_identifier, opt(preceded(opt(ws1), block))),
                 |(param_type, body)| make_receive(param_type, body),
             ),
-            // access - variable or process → single source
-            map(access, |acc| single_source(Term::Access(acc))),
+            // access (variable / module member) → reference it as a single source. Select
+            // sources are a tuple of values, so a callable source must be referenced rather
+            // than called: the tight form `!f` desugars to `! [&f]` (the `&` is part of the
+            // sugar). A process variable references harmlessly (`&p` is just `p`).
+            map(access, |acc| single_source(Term::Reference(Some(acc)))),
             // #function
             map(function, |f| single_source(Term::Function(f))),
             // @N process reference (must come before spawn_term to match @1 before @f)

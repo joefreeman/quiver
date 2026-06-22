@@ -810,7 +810,7 @@ fn resolve_ast_type_impl(
     }
 }
 
-/// Human-readable form of a module type reference, e.g. `'%math/vec` or `'%shapes.circle`.
+/// Human-readable form of a module type reference, e.g. `'%mathx/vec` or `'%shapes.circle`.
 fn display_module_type(module: &[String], member: Option<&str>) -> String {
     let path = module.join("/");
     match member {

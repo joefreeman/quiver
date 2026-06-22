@@ -4,7 +4,7 @@ mod common;
 use common::*;
 
 const ADD: &str = "add = #['int, 'int] { __add__ },";
-const INC: &str = "inc = #'int { %math.add [~, 1] },";
+const INC: &str = "inc = #'int { %num.add [~, 1] },";
 
 #[test]
 fn spaced_bracket_call() {
@@ -59,7 +59,7 @@ fn tail_call_is_spaced() {
         .evaluate(
             "count_down = #'int {
                | =0 => Done
-               | %math.sub [~, 1] ~> ^
+               | %num.sub [~, 1] ~> ^
              },
              3 ~> count_down",
         )

@@ -16,7 +16,7 @@ list<t> : Nil | Cons[t, ^];
 sum' = #[list<int>, int] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => {
-     %math.add [head, acc] ~> ^ [tail, ~]
+     %num.add [head, acc] ~> ^ [tail, ~]
   }
 },
 

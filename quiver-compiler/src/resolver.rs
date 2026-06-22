@@ -544,9 +544,9 @@ mod tests {
         );
 
         // The standard library still resolves, with no openable origin.
-        let math = resolver.resolve(&entry, &["math".to_string()]).unwrap();
-        assert_eq!(math.id.package, PackageId::Std);
-        assert_eq!(math.origin, ModuleOrigin::Virtual);
+        let num = resolver.resolve(&entry, &["num".to_string()]).unwrap();
+        assert_eq!(num.id.package, PackageId::Std);
+        assert_eq!(num.origin, ModuleOrigin::Virtual);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -191,7 +191,7 @@ pub enum AccessSource {
     Parameter,
     /// Ripple `~` - references the piped value
     Ripple,
-    /// Import like `%math` or `%math/trig`
+    /// Import like `%num` or `%mathx/vec`
     Import(Vec<String>),
     /// Self reference `.` - the current process
     Self_,

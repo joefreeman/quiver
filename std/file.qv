@@ -39,7 +39,7 @@ read_all_ = #[', 'int, 'bin] {
   chunk = do_read [f, offset, 65536],
   chunk ~> %bin.length ~> {
     | =0 => acc
-    | =n => [acc, chunk] ~> %bin.concat ~> ^ [f, %math.add [offset, n], ~]
+    | =n => [acc, chunk] ~> %bin.concat ~> ^ [f, %num.add [offset, n], ~]
   }
 },
 
@@ -55,7 +55,7 @@ lines_step_ = #[', 'int, 'bin, 'int] {
   %bin.index [buf, 10, pos] ~> {
     | =index => {
       line = %bin.slice [buf, pos, index],
-      [Str[line], [f, offset, buf, %math.add [index, 1]]]
+      [Str[line], [f, offset, buf, %num.add [index, 1]]]
     }
     | {
       // No newline in the remaining buffer: keep the unconsumed tail and read more.
@@ -69,7 +69,7 @@ lines_step_ = #[', 'int, 'bin, 'int] {
         }
         | =n => {
           n
-          ~> %math.add [offset, ~]
+          ~> %num.add [offset, ~]
           ~> ^ [f, ~, %bin.concat [leftover, chunk], 0]
         }
       }

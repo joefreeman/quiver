@@ -1,5 +1,5 @@
 use crate::effects::WebEffect;
-use quiver_core::builtins::{bigint_from_i64, bigint_to_i64};
+use quiver_core::builtins::{bigint_from_i64, bigint_from_str};
 use quiver_core::bytecode::Constant;
 use quiver_core::executor::Executor;
 use quiver_core::program::Program;
@@ -15,7 +15,9 @@ use tsify::Tsify;
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Value {
     Integer {
-        value: i64,
+        // Arbitrary-precision: encoded as a decimal string so values beyond JS's safe
+        // integer range (or i64) survive the bridge intact (`value: string` in TypeScript).
+        value: String,
     },
     Binary {
         // Hex-encoded binary data for JSON serialization
@@ -63,7 +65,11 @@ impl Value {
 
     fn to_core_recursive(&self, heap: &mut Vec<Vec<u8>>) -> quiver_core::value::Value {
         match self {
-            Value::Integer { value } => quiver_core::value::Value::Integer(bigint_from_i64(*value)),
+            Value::Integer { value } => quiver_core::value::Value::Integer(
+                // The string is produced by `from_core_value` (always a valid decimal); fall
+                // back to 0 only if a malformed value somehow reaches this formatting path.
+                bigint_from_str(value).unwrap_or_else(|_| bigint_from_i64(0)),
+            ),
             Value::Binary { hex } => {
                 // Decode hex and add to heap
                 let bytes = hex::decode(hex).unwrap_or_default();
@@ -110,7 +116,9 @@ impl Value {
     ) -> Self {
         match value {
             quiver_core::value::Value::Integer(i) => Value::Integer {
-                value: bigint_to_i64(i).unwrap_or(0),
+                // Decimal string keeps arbitrary-precision integers exact across the bridge,
+                // instead of the old `i64` field that coerced out-of-range values to 0.
+                value: i.to_string(),
             },
             quiver_core::value::Value::Binary(binary) => {
                 // Resolve binary reference to actual bytes
@@ -176,9 +184,9 @@ impl Value {
         executor: &mut Executor<WebEffect>,
     ) -> std::result::Result<quiver_core::value::Value, String> {
         match self {
-            Value::Integer { value } => {
-                Ok(quiver_core::value::Value::Integer(bigint_from_i64(value)))
-            }
+            Value::Integer { value } => Ok(quiver_core::value::Value::Integer(
+                bigint_from_str(&value).map_err(|e| format!("{:?}", e))?,
+            )),
             Value::Binary { hex } => {
                 // Decode hex string and allocate to executor heap
                 let bytes = hex::decode(&hex).map_err(|e| format!("Invalid hex: {}", e))?;
@@ -318,4 +326,31 @@ pub struct Process {
 pub struct EvaluationResult {
     pub value: Value,
     pub heap: Vec<Vec<u8>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_round_trips_beyond_i64() {
+        // i64::MAX * 1000 — far outside i64 range, which the old `i64` bridge coerced to 0.
+        let s = "9223372036854775807000";
+        let core = quiver_core::value::Value::Integer(bigint_from_str(s).unwrap());
+
+        // core -> web: preserved exactly as a decimal string (not 0).
+        let program = Program::new();
+        let web = Value::from_core_value(&core, &[], &program);
+        let Value::Integer { value } = &web else {
+            panic!("expected an Integer web value");
+        };
+        assert_eq!(value, s);
+
+        // web -> core: parses back to the same arbitrary-precision integer.
+        let mut heap: Vec<Vec<u8>> = Vec::new();
+        let quiver_core::value::Value::Integer(back) = web.to_core_recursive(&mut heap) else {
+            panic!("expected an Integer core value");
+        };
+        assert_eq!(back.to_string(), s);
+    }
 }

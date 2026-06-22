@@ -175,7 +175,7 @@ chain, and into the arguments of a call. Each field/argument receives its own co
 callable there is called with it (and a non-callable value simply replaces it):
 
 ```quiver
-inc = #'int { math.add [~, 1] },
+inc = #'int { num.add [~, 1] },
 5 ~> [inc, 100]          // [6, 100] - inc is called with 5
 5 ~> [&inc, 100]         // [<function>, 100] - & passes inc by value
 ```
@@ -338,7 +338,7 @@ A branch can use 'condition-consequence' syntax - `... => ... | ...`. If the 'co
 ```quiver
 value ~> {
   | =0 => "zero"
-  | [~, 0] ~> math.gt => "positive"
+  | [~, 0] ~> num.gt? => "positive"
   | "negative"
 }
 ```
@@ -346,7 +346,7 @@ value ~> {
 This allows 'guard'-style checks to be added to a condition:
 
 ```quiver
-{ =Square[x] ~> math.gt [x, 10] => "large" | "small" }
+{ =Square[x] ~> num.gt? [x, 10] => "large" | "small" }
 ```
 
 ## Field access
@@ -403,12 +403,12 @@ Identity functions (that simply return their input unchanged) can be defined wit
 
 ```quiver
 // Single parameter function
-double = #'int { math.mul [~, 2] }
+double = #'int { num.mul [~, 2] }
 
 // Pattern matching on union types
 area = #'shape {
-  | =Circle[radius: r] => math.mul [r, r]
-  | =Rectangle[width: w, height: h] => math.mul [w, h]
+  | =Circle[radius: r] => num.mul [r, r]
+  | =Rectangle[width: w, height: h] => num.mul [w, h]
 }
 
 // Using a tuple for multiple values
@@ -421,7 +421,7 @@ swap = #['int, 'int] { =[a, b] => [b, a] }
 f = #'int
 
 // Parameter reference with $
-sum = #['int, 'int] { [$.0, $.1] ~> math.add }
+sum = #['int, 'int] { [$.0, $.1] ~> num.add }
 ```
 
 ### Function application
@@ -430,7 +430,7 @@ Functions are called when a value is applied to them in a chain:
 
 ```quiver
 5 ~> double              // Apply double to 5
-[3, 4] ~> math.add       // Apply add to tuple [3, 4]
+[3, 4] ~> num.add       // Apply add to tuple [3, 4]
 ```
 
 A nilary function (one taking nil) is called with nil automatically, ignoring any flowing value:
@@ -454,11 +454,11 @@ A function is applied to an argument by writing the argument after it, separated
 space — either a bracketed tuple or a single value:
 
 ```quiver
-math.add [3, 4]                      // Apply add to the tuple [3, 4]
+num.add [3, 4]                      // Apply add to the tuple [3, 4]
 double 5                             // Apply double to the value 5
-math.add [1, 2] ~> math.mul [~, 3]   // Chained calls
-&math.add ~> ~ [1, 2]                // The flowing value is a function; apply it to [1, 2]
-math ~> ~.add [1, 2]                 // Read `.add` off the flowing value, then apply
+num.add [1, 2] ~> num.mul [~, 3]   // Chained calls
+&num.add ~> ~ [1, 2]                // The flowing value is a function; apply it to [1, 2]
+num ~> ~.add [1, 2]                 // Read `.add` off the flowing value, then apply
 ```
 
 ### Tail recursion
@@ -469,8 +469,8 @@ Use `^` for tail-recursive calls:
 f = #['int, 'int] {
   | =[1, y] => y
   | =[x, y] => [
-    [~, 1] ~> math.sub,
-    math.mul
+    [~, 1] ~> num.sub,
+    num.mul
   ] ~> ^
 }
 ```
@@ -478,15 +478,15 @@ f = #['int, 'int] {
 Named tail calls to other functions:
 
 ```quiver
-f = #['int, 'int] { math.mul },
+f = #['int, 'int] { num.mul },
 fact = #'int { [~, 1] ~> ^f }
 ```
 
 Tail calls also take an argument, using the same space-separated syntax:
 
 ```quiver
-g = #['int, 'int] { math.mul },
-f = #'int { math.add [~, 1] ~> ^g [~, 2] },
+g = #['int, 'int] { num.mul },
+f = #'int { num.add [~, 1] ~> ^g [~, 2] },
 10 ~> f   // 22
 ```
 
@@ -494,7 +494,7 @@ The flowing value itself can be the tail-call target, using the ripple form `^~`
 flowing value is then the function, the argument is supplied by juxtaposition:
 
 ```quiver
-g = #'int { [~, 2] ~> math.mul },
+g = #'int { [~, 2] ~> num.mul },
 f = #'int { &g ~> ^~ $ },   // tail-call g (the flowing value) with f's parameter
 5 ~> f                      // 10
 ```
@@ -545,7 +545,9 @@ p1 = @{
 
 #### Filtering messages
 
-The example above uses an identity function to specify the receive type. Alternatively a body can be specified to filter messages in the process's mailbox. When a body is specified, the function must return either nil (`[]`) or `Ok`. If the function evaluates to nil, the message will be skipped, but remain in the mailbox (to be received in future). If none of the messages in the mailbox match, the select will wait to receive a message that does match.
+The example above uses an identity function to specify the receive type. Alternatively a body can be specified to filter messages in the process's mailbox. A filter follows Quiver's usual truthiness convention: if it evaluates to nil (`[]`) the message is skipped (it remains in the mailbox, to be received in future); any non-nil result accepts the message. The filter's result is only a verdict — the select always yields the received message, never the filter's result. If none of the messages in the mailbox match, the select will wait to receive a message that does match.
+
+A receiver is either **body-less** or a **filter**, decided purely by whether it has a body — a builtin (which has no body) is body-less, exactly like an identity function, and so just names the message type; it is never applied to the message. Only a function *with* a body acts as a filter. So `!%int.and` receives an `['int, 'int]` message and returns that message unchanged, identically to `!#['int, 'int]`.
 
 It's important to avoid side effects in the receive function, since the block may be evaluated multiple times. Receive functions are not permitted to spawn processes, send messages or contain nested selects.
 
@@ -572,10 +574,10 @@ If a process has failed with a runtime error, that error will be propagated to t
 
 As well as being used for receiving messages and awaiting the result of a single process, the select operator can specify multiple sources at once to 'race' them. And also for specifying timeouts.
 
-The general form is `! [sources]`, which takes a tuple of sources. **A space is required** between `!` and the tuple (mirroring function application, `f [...]`); this distinguishes the general form from the single-source shorthands below. Sources can be:
+The general form is `! [sources]`, which takes a tuple of sources. **A space is required** between `!` and the tuple (mirroring function application, `f [...]`); this distinguishes the general form from the single-source shorthands below. The tuple is an ordinary value tuple, so a *function* source must be passed by reference with `&` (a bare callable would be called); processes and timeouts are plain values and need no `&`. Sources can be:
 
 - Processes (to await their result)
-- Functions (for receiving messages)
+- Functions, by reference (for receiving messages) — e.g. `&f`, `&%mod.recv`
 - Integers (timeouts in milliseconds)
 
 For example, given two processes, `p1` and `p2`, the following select will wait for whichever finishes first (prioritising `p1` if both are already finished), or time out after 5 seconds:
@@ -592,7 +594,7 @@ p1 ~> ! [~, 1000]
 
 Shorthand forms (tight, no space — each selects on a *single* source):
 
-- `!p` is sugar for `! [p]`
+- `!x` is sugar for `! [&x]`, for any variable or module member (`!p`, `!f`, `!%mod.recv`) — the `&` is part of the sugar, so it works inline with no binding. The `&` references the value rather than calling it: required for a function receiver, and a harmless no-op for a process (`&p` is just `p`), so the same form covers both awaiting a process and receiving on a function.
 - `!'int` is sugar for `! [#'int]` (identity receive for type)
 - `!'int { ... }` is sugar for `! [#'int { ... }]` (filtered receive)
 - `! []` is a no-op (returns nil immediately)
@@ -632,9 +634,9 @@ Import modules using `%name` or `%namespace/name` syntax. Module names are resol
 Modules are evaluated at compile time, and the result (e.g., the final tuple) is the value that's imported.
 
 ```quiver
-math = %math                   // Import standard library module
-(add, mul) = %math             // Import specific functions
-* = %math                      // Import all named exports
+num = %num                   // Import standard library module
+(add, mul) = %num             // Import specific functions
+* = %num                      // Import all named exports
 ```
 
 ### Module types
@@ -673,7 +675,8 @@ A parameterised module type needs its type arguments (`'%shapes.pair<'int>`); to
 The following standard library modules are available:
 
 - `io`
-- `math`
+- `num`
+- `int`
 - `list`
 
 ## Built-in functions
@@ -690,8 +693,8 @@ doubled = [x, 2] ~> __multiply__      // Built-in multiplication
 ### Basic usage
 
 ```quiver
-// Import math functions
-(add, mul, sub) = math,
+// Import num functions
+(add, mul, sub) = %num,
 
 // Create and manipulate values
 x = 10, y = 20,
@@ -711,8 +714,8 @@ p2 = Point[...p1, y: 4],
 // Function to add points
 add_points = #['point, 'point] {
   Point[
-    x: %math.add [$.0.x, $.1.x],
-    y: %math.add [$.0.y, $.1.y],
+    x: %num.add [$.0.x, $.1.x],
+    y: %num.add [$.0.y, $.1.y],
   ]
 },
 
@@ -741,8 +744,8 @@ contains? [xs, 4]    // []
 ```quiver
 // Clamp value to range [0, 100]
 clamp = #'int {
-  | %math.gt [~, 100] => 100
-  | %math.lt [~, 0] => 0
+  | %num.gt? [~, 100] => 100
+  | %num.lt? [~, 0] => 0
   | $
 },
 
@@ -762,7 +765,7 @@ clamp = #'int {
 [
   bounding_box: #'shape {
     | =Circle[radius: r] => {
-      x = %math.mul [r, 2],
+      x = %num.mul [r, 2],
       Rectangle[width: x, height: x]
     }
     | =Rectangle[width: w, height: h] => {
@@ -803,7 +806,7 @@ person.name,                           // Extract name field
 person ~> .date_of_birth ~> .month,    // Chain field access
 
 // Built-in operations
-next_year = person.age ~> %math.add [~, 1],
+next_year = person.age ~> %num.add [~, 1],
 ```
 
 ### Concurrent processes

@@ -88,16 +88,18 @@ pub struct BindingSet {
 /// Check if any binding set has requirements that prevent complement narrowing.
 ///
 /// Returns true if the pattern cannot use complement narrowing because:
-/// 1. It has value-based requirements (literals, variable pins, path equality) - these may fail
-///    for value-based reasons, not type-based reasons
-/// 2. It has type checks at non-root paths (nested structural patterns) - failure at an inner
-///    level doesn't mean we can narrow the outer type
-/// 3. It has partial type checks at the root - a partial pattern like `(x: A)` may fail because
-///    the field value doesn't match, not because the tuple type is wrong
+/// 1. It has value-based requirements (literals, variable pins, path equality) — their negation
+///    is not a type, so the structural complement cannot represent it.
+/// 2. It has a partial type check — a partial like `(x: A)` may fail because a field value
+///    doesn't match, not because the tuple type is wrong.
+///
+/// Concrete type checks at *any* depth are fine: `compute_complement` is structural over tuple
+/// fields, so a failed inner check soundly refines the outer type. (Constraints on *recursive*
+/// fields are a separate concern — the narrowed type can't capture them — and are handled by
+/// `narrowing::pattern_constrains_recursive_field` at the call site.)
 ///
 /// For example:
-/// - `=Node[x, y]` - safe, type check at root only
-/// - `=Node[Leaf[x], _]` - NOT safe, nested type check at path [0]
+/// - `=Node[x, y]`, `=Node[Leaf[x], _]` - safe, concrete type checks
 /// - `=5` - NOT safe, literal check
 /// - `=(x: A)` - NOT safe, partial type check (field value could fail)
 pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Program) -> bool {
@@ -108,14 +110,11 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
                 RuntimeCheck::Literal(_) | RuntimeCheck::Variable(_) | RuntimeCheck::Path(_) => {
                     true
                 }
-                // Type checks at non-root paths prevent complement narrowing
-                // because failure at an inner level doesn't mean we can narrow the outer type
+                // Concrete type checks — at any depth — are fine: `compute_complement` is
+                // structural over tuple fields (and sound on recursive types), so a failed inner
+                // check soundly refines the outer type. Partial checks remain an exception, as
+                // they constrain field compatibility rather than concrete identity.
                 RuntimeCheck::TypeId(type_id) => {
-                    if !req.path.is_empty() {
-                        return true;
-                    }
-                    // Partial type checks at root also prevent complement narrowing because
-                    // they check field compatibility, not concrete type identity
                     matches!(program.lookup_type(*type_id), Some(Type::Partial { .. }))
                 }
             }
@@ -452,19 +451,22 @@ fn analyze_match_tuple_pattern(
             IdentifierScope::new(identifiers, matching_types.len() > 1);
         let variant_identifiers = variant_identifiers_scope.get_mut();
 
-        // Get tuple info and extract field type IDs upfront to avoid borrow issues
-        let tuple_fields: Vec<usize> = {
+        // Tuple name and field defs upfront. `narrowed_fields` starts as the static defs and is
+        // refined per field as sub-patterns narrow them, so the reconstructed narrowed type
+        // carries field-level precision (e.g. `[True, True]`) instead of the opaque tuple — which
+        // is what lets `compute_complement` reason about field combinations.
+        let (tuple_name, mut narrowed_fields): (Option<String>, Vec<(Option<String>, usize)>) = {
             let tuple_info = program
                 .lookup_tuple(*tuple_id)
                 .ok_or(Error::TupleNotInRegistry {
                     tuple_id: *tuple_id,
                 })?;
-            tuple_info
-                .fields
-                .iter()
-                .map(|(_, type_id)| *type_id)
-                .collect()
+            (tuple_info.name.clone(), tuple_info.fields.clone())
         };
+        let tuple_fields: Vec<usize> = narrowed_fields
+            .iter()
+            .map(|(_, type_id)| *type_id)
+            .collect();
 
         // Start with a binding set for this type
         let mut base_requirements = vec![];
@@ -518,7 +520,7 @@ fn analyze_match_tuple_pattern(
 
             // Recursively analyze the field pattern
             let field_provenance = value_provenance.field(*actual_idx);
-            let (field_binding_sets, _field_narrowed_type_id) = analyze_match_pattern(
+            let (field_binding_sets, field_narrowed_type_id) = analyze_match_pattern(
                 env,
                 program,
                 &field.pattern,
@@ -533,6 +535,13 @@ fn analyze_match_tuple_pattern(
                 // This type variant can't match, skip it entirely
                 current_binding_sets.clear();
                 break;
+            }
+
+            // Record the field's narrowed type for the reconstructed tuple. Recursive `Cycle(1)`
+            // fields keep their original reference rather than the resolved value type, to avoid
+            // materializing an infinite type.
+            if !matches!(program.lookup_type(raw_field_type_id), Some(Type::Cycle(1))) {
+                narrowed_fields[*actual_idx].1 = field_narrowed_type_id;
             }
 
             // Combine field binding sets with current binding sets (cartesian product)
@@ -554,10 +563,11 @@ fn analyze_match_tuple_pattern(
             current_binding_sets = new_binding_sets;
         }
 
-        // Add all binding sets from this type to the result
-        // Only track this tuple as successful if it produced binding sets
+        // Track this tuple as successful if it produced binding sets, reconstructing it with the
+        // narrowed field types so the narrowed result carries field-level precision.
         if !current_binding_sets.is_empty() {
-            successful_tuple_ids.push(*tuple_id);
+            let narrowed_tuple_id = program.register_tuple(tuple_name, narrowed_fields);
+            successful_tuple_ids.push(program.register_type(Type::Tuple(narrowed_tuple_id)));
             binding_sets.extend(current_binding_sets);
         }
     }
@@ -571,15 +581,11 @@ fn analyze_match_tuple_pattern(
         });
     }
 
-    // Construct narrowed type only from tuples that successfully produced binding sets
+    // `successful_tuple_ids` already holds reconstructed `Type::Tuple` ids (narrowed per field).
     let narrowed_type_id = if successful_tuple_ids.is_empty() {
         program.never()
     } else {
-        let tuple_type_ids: Vec<usize> = successful_tuple_ids
-            .iter()
-            .map(|tuple_id| program.register_type(Type::Tuple(*tuple_id)))
-            .collect();
-        union_type_ids(program, tuple_type_ids)
+        union_type_ids(program, successful_tuple_ids)
     };
 
     Ok((binding_sets, narrowed_type_id))

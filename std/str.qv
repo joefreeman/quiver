@@ -11,10 +11,10 @@ is_continuation_ = #['bin, 'int] {
 skip_continuation_ = #['bin, 'int, 'int] {
   =[data, byte_pos, data_len],
   {
-  | byte_pos ~> %math.ge [~, data_len] => byte_pos
+  | byte_pos ~> %num.ge? [~, data_len] => byte_pos
   | is_continuation_ [data, byte_pos] =>
     byte_pos
-    ~> %math.add [~, 1]
+    ~> %num.add [~, 1]
     ~> ^ [data, ~, data_len]
   | byte_pos
   }
@@ -23,18 +23,18 @@ skip_continuation_ = #['bin, 'int, 'int] {
 find_index = #['bin, 'bin, 'int, 'int] {
   =[haystack, needle, offset, end],
 
-  %math.le [offset, end],
+  %num.le? [offset, end],
 
   {
     | needle
       ~> %bin.length
-      ~> %math.add [offset, ~]
+      ~> %num.add [offset, ~]
       ~> %bin.slice [haystack, offset, ~]
       ~> =&needle
       => offset
 
     | offset
-      ~> %math.add [~, 1]
+      ~> %num.add [~, 1]
       ~> ^ [haystack, needle, ~, end]
   }
 },
@@ -44,16 +44,16 @@ byte_pos_to_char_idx_ = #['bin, 'int, 'int, 'int] {
   =[data, current_pos, target_pos, char_idx],
 
   {
-  | %math.ge [current_pos, target_pos] => char_idx
+  | %num.ge? [current_pos, target_pos] => char_idx
   | is_continuation_ [data, current_pos] =>
     current_pos
-    ~> %math.add [~, 1]
+    ~> %num.add [~, 1]
     ~> ^ [data, ~, target_pos, char_idx]
   | {
     // Start of character - count it
-    new_char_idx = %math.add [char_idx, 1],
+    new_char_idx = %num.add [char_idx, 1],
     current_pos
-    ~> %math.add [~, 1]
+    ~> %num.add [~, 1]
     ~> ^ [data, ~, target_pos, new_char_idx]
   }
   }
@@ -68,17 +68,17 @@ chars_ = #'bin {
     =byte_pos,
     byte_pos = skip_continuation_ [data, byte_pos, data_len],
     {
-      | %math.ge [byte_pos, data_len] => []
+      | %num.ge? [byte_pos, data_len] => []
       | {
         char_end =
           byte_pos
-          ~> %math.add [~, 1]
+          ~> %num.add [~, 1]
           ~> skip_continuation_ [data, ~, data_len],
 
         char =
           char_end
-          ~> %math.sub [~, byte_pos]
-          ~> %math.mul [~, 8]
+          ~> %num.sub [~, byte_pos]
+          ~> %num.mul [~, 8]
           ~> __binary_get__ [data, byte_pos, 0, ~],
 
         [char, char_end]
@@ -92,9 +92,9 @@ from_chars_ = #'%iter<'int> {
   %iter.fold [~, 0x, #['bin, 'int] {
     =[acc, char_int],
     byte_count = char_int ~> {
-      | %math.le [~, 127] => 1
-      | %math.le [~, 57279] => 2
-      | %math.le [~, 15712191] => 3
+      | %num.le? [~, 127] => 1
+      | %num.le? [~, 57279] => 2
+      | %num.le? [~, 15712191] => 3
       | 4
     },
     acc ~> %bin.append [~, char_int, byte_count]
@@ -121,7 +121,7 @@ from_chars_ = #'%iter<'int> {
     prefix_len = prefix ~> %bin.length,
     target_len = target ~> %bin.length,
 
-    %math.le [prefix_len, target_len],
+    %num.le? [prefix_len, target_len],
 
     target
     ~> %bin.slice [~, 0, prefix_len]
@@ -136,10 +136,10 @@ from_chars_ = #'%iter<'int> {
     suffix_len = suffix ~> %bin.length,
     target_len = target ~> %bin.length,
 
-    %math.le [suffix_len, target_len],
+    %num.le? [suffix_len, target_len],
 
     target_len
-    ~> %math.sub [~, suffix_len]
+    ~> %num.sub [~, suffix_len]
     ~> %bin.slice [target, ~, target_len]
     ~> =&suffix,
 
@@ -154,9 +154,9 @@ from_chars_ = #'%iter<'int> {
 
     {
       | needle_len ~> =0 => Ok
-      | %math.gt [needle_len, haystack_len] => []
+      | %num.gt? [needle_len, haystack_len] => []
       | haystack_len
-        ~> %math.sub [~, needle_len]
+        ~> %num.sub [~, needle_len]
         ~> find_index [haystack, needle, 0, ~] => Ok
     }
   },
@@ -165,14 +165,14 @@ from_chars_ = #'%iter<'int> {
     =[Str[haystack], Str[delim]],
     haystack_len = haystack ~> %bin.length,
     delim_len = delim ~> %bin.length,
-    end = %math.sub [haystack_len, delim_len],
+    end = %num.sub [haystack_len, delim_len],
     %iter.unfold [0, #'int {
       =start,
       {
-        | start ~> %math.gt [~, haystack_len] => []
+        | start ~> %num.gt? [~, haystack_len] => []
         | find_index [haystack, delim, start, end] ~> =index =>
-          [haystack ~> %bin.slice [~, start, index] ~> Str[~], %math.add [index, delim_len]]
-        | [haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~], %math.add [haystack_len, 1]]
+          [haystack ~> %bin.slice [~, start, index] ~> Str[~], %num.add [index, delim_len]]
+        | [haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~], %num.add [haystack_len, 1]]
       }
     }]
   },
@@ -187,7 +187,7 @@ from_chars_ = #'%iter<'int> {
     data
     ~> chars_
     ~> %iter.drop [~, start]
-    ~> %iter.take [~, %math.sub [end, start]]
+    ~> %iter.take [~, %num.sub [end, start]]
     ~> from_chars_
   },
 
@@ -199,10 +199,10 @@ from_chars_ = #'%iter<'int> {
 
     {
       | needle_len ~> =0 => 0  // Empty string is at index 0
-      | %math.gt [needle_len, haystack_len] => []  // Needle longer than haystack
+      | %num.gt? [needle_len, haystack_len] => []  // Needle longer than haystack
       | {
         haystack_len
-        ~> %math.sub [~, needle_len]
+        ~> %num.sub [~, needle_len]
         ~> find_index [haystack, needle, 0, ~]
         ~> =byte_pos,
         byte_pos_to_char_idx_ [haystack, 0, byte_pos, 0]

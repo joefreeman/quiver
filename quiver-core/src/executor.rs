@@ -1984,15 +1984,11 @@ impl<E: Effect> Executor<E> {
             "Receive result should be present when receiving is set".to_string(),
         ))?;
 
-        // Check if result is nil or Ok
-        if !result.is_nil() && !result.is_ok() {
-            return Err(Error::InvalidArgument(
-                "Receive function must return [] or Ok".to_string(),
-            ));
-        }
-
-        if result.is_ok() {
-            // Ok result - remove message from mailbox and complete
+        // A filter accepts the message on any non-nil result and skips it on nil — matching
+        // Quiver's truthiness convention everywhere else (nil is the only "no"). The filter's
+        // result is only a verdict; the received message itself is what the select yields.
+        if !result.is_nil() {
+            // Accept - remove message from mailbox and complete
             let process = self
                 .get_process(pid)
                 .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -2049,19 +2045,23 @@ impl<E: Effect> Executor<E> {
                 // Found a compatible message
                 let message = message.clone();
 
-                // Check if this is an identity function (no body)
-                let is_identity = match source {
+                // A body-less receiver only specifies the message type; it is not a filter.
+                // That covers an identity function (no instructions) and any builtin (which
+                // has no Quiver body). Only a function *with* a body runs as a filter, so a
+                // builtin behaves exactly like the equivalent body-less function rather than
+                // being applied to the message.
+                let is_type_only = match source {
                     Value::Function(func_id, _) => self
                         .functions
                         .get(*func_id)
                         .map(|f| f.instructions.is_empty())
                         .unwrap_or(false),
-                    Value::Builtin(_) => false,
+                    Value::Builtin(_) => true,
                     _ => unreachable!(),
                 };
 
-                if is_identity {
-                    // Identity function - skip calling, just complete with message
+                if is_type_only {
+                    // Type-only receiver - skip calling, just complete with the message
                     let process = self
                         .get_process_mut(pid)
                         .ok_or(Error::InvalidArgument("Process not found".to_string()))?;

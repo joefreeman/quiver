@@ -37,7 +37,7 @@
 
 ; -------------------------------------------------------------------- imports
 
-; Colour the whole `%math` / `%math/trig` as a single module reference (the `%` sigil
+; Colour the whole `%num` / `%mathx/vec` as a single module reference (the `%` sigil
 ; included), mirroring how a type name carries its `'` in one `@type` token.
 (import) @module
 

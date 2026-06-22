@@ -5,7 +5,7 @@
 sum_ = #['list<'int>, 'int] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => {
-    %math.add [head, acc] ~> ^ [tail, ~]
+    %num.add [head, acc] ~> ^ [tail, ~]
   }
 },
 

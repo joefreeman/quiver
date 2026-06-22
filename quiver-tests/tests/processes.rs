@@ -161,7 +161,10 @@ fn test_receive_waits_until_match() {
 }
 
 #[test]
-fn test_receive_function_must_return_ok_or_nil() {
+fn test_receive_filter_accepts_on_any_non_nil() {
+    // A filter accepts a message on any non-nil result (matching Quiver's truthiness
+    // convention), not only on `Ok`. The select still yields the received message, never the
+    // filter's own result — here the filter returns 99 but the receive evaluates to 42.
     quiver()
         .evaluate(
             r#"
@@ -170,10 +173,7 @@ fn test_receive_function_must_return_ok_or_nil() {
             !p
             "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "receive function with body must return [] or Ok".to_string(),
-            found: "'int".to_string(),
-        });
+        .expect("42");
 }
 
 #[test]
@@ -542,7 +542,7 @@ fn test_receive_type_from_variable() {
         .evaluate(
             r#"
             receiver_func = #'int,
-            p = @#{ ! [receiver_func] ~> [~, 100] ~> __add__ },
+            p = @#{ ! [&receiver_func] ~> [~, 100] ~> __add__ },
             42 ~> p, !p
             "#,
         )
@@ -550,16 +550,25 @@ fn test_receive_type_from_variable() {
 }
 
 #[test]
-fn test_receive_type_from_module_builtin() {
+fn test_receive_type_from_module_member() {
+    // A module member used as a receiver supplies only the message type; it is body-less, so
+    // (like an identity function) it is NOT applied to the message — the message passes through
+    // unchanged. The module member is used inline, with no intermediate binding.
     quiver()
-        .evaluate(
-            r#"
-            math = %math,
-            p1 = @#{ !math.add },
-            [10, 32] ~> p1, !p1
-            "#,
-        )
-        .expect("42");
+        .evaluate("p = @#{ !%int.and }, [255, 240] ~> p, !p")
+        .expect("[255, 240]");
+}
+
+#[test]
+fn test_body_less_receiver_builtin_matches_identity_function() {
+    // A builtin and the equivalent body-less (identity) function behave identically as
+    // receivers: both name the message type and return the received message, neither applies.
+    quiver()
+        .evaluate("p = @#{ !%int.and }, [255, 240] ~> p, !p")
+        .expect("[255, 240]");
+    quiver()
+        .evaluate("p = @#{ !#['int, 'int] }, [255, 240] ~> p, !p")
+        .expect("[255, 240]");
 }
 
 #[test]
@@ -658,7 +667,7 @@ fn test_receive_type_in_function_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 20 ~> @#'int { %math.div [~, !#'int] },
+            p = 20 ~> @#'int { %int.div [~, !#'int] },
             2 ~> p, !p
             "#,
         )

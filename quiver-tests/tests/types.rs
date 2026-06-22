@@ -944,49 +944,35 @@ fn test_primitive_type_alias_bin() {
         ));
 }
 
+// The primitive type names are free as variable names — a type always carries its leading
+// apostrophe (`'int`), so a bare `int` is unambiguously a value.
 #[test]
-fn test_reserved_name_int_as_variable() {
-    quiver().evaluate("#{ 42 ~> =int }").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
-        ),
-    );
+fn test_int_allowed_as_variable() {
+    quiver().evaluate("42 ~> =int, int").expect("42");
 }
 
 #[test]
-fn test_reserved_name_bin_as_variable() {
-    quiver().evaluate("#{ 0x0a ~> =bin }").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
-        ),
-    );
+fn test_bin_allowed_as_variable() {
+    quiver().evaluate("0x0a ~> =bin, bin").expect("0x0a");
 }
 
 #[test]
-fn test_reserved_name_int_in_destructuring() {
+fn test_int_allowed_in_destructuring() {
+    quiver().evaluate("[1, 2] ~> =[int, y], int").expect("1");
+}
+
+#[test]
+fn test_bin_allowed_in_destructuring() {
     quiver()
-        .evaluate("#{ [1, 2] ~> =[int, y] }")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
-        ));
+        .evaluate("[0x0a, 0x0b] ~> =[bin, y], bin")
+        .expect("0x0a");
 }
 
 #[test]
-fn test_reserved_name_bin_in_destructuring() {
+fn test_int_allowed_in_nested_pattern() {
     quiver()
-        .evaluate("#{ [0x0a, 0x0b] ~> =[bin, y] }")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot use reserved primitive type 'bin' as a variable name".to_string(),
-        ));
-}
-
-#[test]
-fn test_reserved_name_int_in_nested_pattern() {
-    quiver()
-        .evaluate("#{ [1, [2, 3]] ~> =[x, [y, int]] }")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot use reserved primitive type 'int' as a variable name".to_string(),
-        ));
+        .evaluate("[1, [2, 3]] ~> =[x, [y, int]], int")
+        .expect("3");
 }
 
 #[test]

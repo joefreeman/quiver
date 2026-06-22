@@ -17,16 +17,19 @@
     Range[...]
   },
 
+  // A `Range` is entirely integer-valued, so this generator runs once per yielded element
+  // over the integer builtins directly (`__compare__`/`__add__`) rather than the polymorphic
+  // `%num` dispatch — the same internal fast path `%num` itself takes for integer operands.
   iter: #Range['int, 'int | None, 'int] {
     %iter.unfold [~, #' {
       =Range[value, stop, step],
       {
         | stop ~> =None
-        | %math.gt [step, 0], %math.lt [value, stop]
-        | %math.lt [step, 0], %math.gt [value, stop]
+        | __compare__ [step, 0] ~> =1, __compare__ [value, stop] ~> =-1
+        | __compare__ [step, 0] ~> =-1, __compare__ [value, stop] ~> =1
         | step ~> =0
       },
-      [value, Range[%math.add [value, step], stop, step]]
+      [value, Range[__add__ [value, step], stop, step]]
     }]
   }
 ]

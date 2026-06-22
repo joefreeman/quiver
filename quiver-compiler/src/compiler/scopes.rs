@@ -93,14 +93,6 @@ pub fn define_variable(
     var_type_id: usize,
     provenance: super::Provenance,
 ) -> Result<usize, Error> {
-    // Only check base name (not captured field paths like "foo.x")
-    if accessors.is_empty() && helpers::is_reserved_name(name) {
-        return Err(Error::TypeUnresolved(format!(
-            "Cannot use reserved primitive type '{}' as a variable name",
-            name
-        )));
-    }
-
     let full_name = helpers::make_capture_name(name, accessors);
     let index = *local_count;
     *local_count += 1;

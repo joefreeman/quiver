@@ -360,18 +360,16 @@ fn check_type_relation<T: TypeLookup>(
             result
         }
 
-        // Tuple vs Tuple: structural compatibility (only for ALL mode, ANY delegates)
+        // Tuple vs Tuple: structural in both modes. Two tuples are related iff they share a
+        // name and arity and every field pair is related under the same mode — for ALL that
+        // is field-wise assignability, for ANY (overlap) it is field-wise overlap (the tuples
+        // share a value iff every field can). Recursing rather than comparing ids lets ANY mode
+        // see that, e.g., `[Rational, 'n]` overlaps `[Rational, 'int]`.
         (Type::Tuple(id1), Type::Tuple(id2)) => {
             if id1 == id2 {
                 return true;
             }
 
-            // In ANY mode, different tuple IDs means no overlap
-            if mode == UnionMode::Any {
-                return false;
-            }
-
-            // In ALL mode, check structural compatibility
             let Some(info1) = lookup.lookup_tuple(*id1) else {
                 return false;
             };

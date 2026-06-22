@@ -1,7 +1,7 @@
 //! Module resolution for the language server.
 //!
 //! The Quiver standard library is bundled into `quiver-compiler` and exposed through the
-//! built-in `std` package, so `%math`, `%list`, etc. always resolve. A document that lives on
+//! built-in `std` package, so `%num`, `%list`, etc. always resolve. A document that lives on
 //! disk additionally gets its project's own modules: the resolver discovers the nearest
 //! `quiver.toml` and reads filesystem packages through the editor `overlay`, so imports resolve
 //! to unsaved buffer content rather than stale on-disk source.

@@ -8,14 +8,14 @@ use common::*;
 fn test_multiplication_exceeds_i64() {
     // i64::MAX squared is far beyond i64::MAX; the exact product is returned.
     quiver()
-        .evaluate("[9223372036854775807, 9223372036854775807] ~> %math.mul")
+        .evaluate("[9223372036854775807, 9223372036854775807] ~> %num.mul")
         .expect("85070591730234615847396907784232501249");
 }
 
 #[test]
 fn test_addition_exceeds_i64() {
     quiver()
-        .evaluate("[9223372036854775807, 9223372036854775807] ~> %math.add")
+        .evaluate("[9223372036854775807, 9223372036854775807] ~> %num.add")
         .expect("18446744073709551614");
 }
 

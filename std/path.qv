@@ -6,8 +6,8 @@ join_ = #[#^ -> (' | []), ', '] {
     | =[_, Root] => []
     | =[_, Relative[0]] => p1
     | =[Root, Relative[_]] => []
-    | =[Relative[m], Relative[n]] => %math.add [m, n] ~> Relative[~]
-    | =[Path[_, p], Relative[n]] => self [&self, p, Relative[%math.sub [n, 1]]]
+    | =[Relative[m], Relative[n]] => %num.add [m, n] ~> Relative[~]
+    | =[Path[_, p], Relative[n]] => self [&self, p, Relative[%num.sub [n, 1]]]
     | =[_, Path[s, parent]] => self [&self, p1, parent] ~> { <> => [] | Path[s, ~] }
   }
 },
@@ -26,7 +26,7 @@ to_string_ = #[', '%str] {
       | acc ~> %str.empty? => ".."
       | %str.concat ["../", acc]
     },
-    %math.sub [n, 1] ~> Relative[~] ~> ^ [~, prefix]
+    %num.sub [n, 1] ~> Relative[~] ~> ^ [~, prefix]
   }
   | =[Path[s, parent], acc] => {
     new_acc = {
@@ -45,7 +45,7 @@ parse_ = #['%list<'%str>, '] {
     | =".." => {
       new_acc = acc ~> {
         | =Path[_, parent] => parent
-        | =Relative[n] => %math.add [n, 1] ~> Relative[~]
+        | =Relative[n] => %num.add [n, 1] ~> Relative[~]
         | =Root => Root
       },
       ^ [tail, new_acc]
@@ -70,7 +70,7 @@ parse_ = #['%list<'%str>, '] {
   parent: #' {
     | =Path[_, p] => p
     | =Root => Root
-    | =Relative[n] => %math.add [n, 1] ~> Relative[~]
+    | =Relative[n] => %num.add [n, 1] ~> Relative[~]
   },
 
   to_string: #' {

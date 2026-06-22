@@ -156,8 +156,8 @@ mod tests {
 
     #[test]
     fn std_imports_resolve_via_the_bundled_loader() {
-        // Exercises the bundled std module loader (`%math` → std/math.qv).
-        let diags = diagnostics("[1, 2] ~> %math.add");
+        // Exercises the bundled std module loader (`%num` → std/num.qv).
+        let diags = diagnostics("[1, 2] ~> %num.add");
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
     }
 
@@ -421,13 +421,13 @@ mod tests {
     #[test]
     fn ampersand_reference_to_a_module_member_is_recorded() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "&%math.add";
+        let text = "&%num.add";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
-        let offset = text.find("%math.add").unwrap();
+        let offset = text.find("%num.add").unwrap();
         let info = semantics.at_offset(offset).expect("import ref recorded");
         assert_eq!(info.kind, SymbolKind::Import);
-        assert_eq!(info.label.as_deref(), Some("%math.add"));
+        assert_eq!(info.label.as_deref(), Some("%num.add"));
         // The standard library has no openable origin, so there is nothing to jump to.
         assert_eq!(info.definition_module, None);
     }
@@ -446,7 +446,7 @@ mod tests {
         )
         .unwrap();
         let util = src.join("util.qv");
-        std::fs::write(&util, "[ double: #'int { %math.mul [~, 2] } ]").unwrap();
+        std::fs::write(&util, "[ double: #'int { %num.mul [~, 2] } ]").unwrap();
 
         // Analyse a document in the project that imports the project module.
         let text = "&%util.double";
@@ -502,7 +502,7 @@ mod tests {
         let util = src.join("util.qv");
         std::fs::write(
             &util,
-            "[ double: #'int { %math.mul [~, 2] }, triple: #'int { %math.mul [~, 3] } ]",
+            "[ double: #'int { %num.mul [~, 2] }, triple: #'int { %num.mul [~, 3] } ]",
         )
         .unwrap();
 
@@ -547,7 +547,7 @@ mod tests {
         )
         .unwrap();
         let util = src.join("util.qv");
-        std::fs::write(&util, "[ double: #'int { %math.mul [~, 2] } ]").unwrap();
+        std::fs::write(&util, "[ double: #'int { %num.mul [~, 2] } ]").unwrap();
 
         // `double` is destructured (no `%util.double` access) and then used twice.
         let text = "(double) = %util,\n#{ [ double 1, double 2 ] }";
@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn hover_on_a_module_member_shows_its_signature_and_label() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "[1, 2] ~> %math.add";
+        let text = "[1, 2] ~> %num.add";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn import_span_excludes_the_argument() {
         // Hovering inside the call argument must not resolve to the import member.
-        let text = "%math.add [1, 2]";
+        let text = "%num.add [1, 2]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let arg_offset = text.rfind('1').unwrap();

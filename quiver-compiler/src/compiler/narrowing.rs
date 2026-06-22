@@ -137,10 +137,13 @@ pub fn apply_narrowing(
                 .unwrap_or(false);
 
             if is_single_tuple {
-                // Get current field type, considering existing narrowings
-                let current_field_type_id = get_field_narrowing(scopes, parent, *field_idx)
-                    .or_else(|| get_field_type(parent_type_id, *field_idx, program))
-                    .unwrap_or(never_id);
+                // Get current field type, considering existing narrowings. (Not an `or_else`
+                // closure: `get_field_type` now needs `&mut program`, which can't be captured
+                // alongside the `scopes` borrow.)
+                let current_field_type_id = match get_field_narrowing(scopes, parent, *field_idx) {
+                    Some(t) => t,
+                    None => get_field_type(parent_type_id, *field_idx, program).unwrap_or(never_id),
+                };
                 let intersected = intersect_types(current_field_type_id, narrowed_to_id, program);
                 set_field_narrowing(scopes, parent, *field_idx, intersected);
                 return;
@@ -237,20 +240,105 @@ pub fn get_type_for_provenance(
     }
 }
 
-/// Compute the intersection of two types (by type ID).
+/// Whether a type transitively contains a `Cycle` node (i.e. is recursive). Used to gate the
+/// structural narrowing operations, which would otherwise call `is_compatible`/`types_overlap`
+/// on a bare `Cycle` — those answer optimistically without the enclosing `type_stack`, which is
+/// unsound for subtraction. The `seen` set guards against malformed self-referential registries.
+fn contains_cycle(type_id: usize, program: &Program, seen: &mut Vec<usize>) -> bool {
+    if seen.contains(&type_id) {
+        return false;
+    }
+    seen.push(type_id);
+    let children: Vec<usize> = match program.lookup_type(type_id) {
+        Some(Type::Cycle(_)) => return true,
+        Some(Type::Union(ids)) => ids.clone(),
+        Some(Type::Tuple(tuple_id)) => match program.lookup_tuple(*tuple_id) {
+            Some(info) => info.fields.iter().map(|(_, t)| *t).collect(),
+            None => return false,
+        },
+        Some(Type::Partial { fields, .. }) => fields.iter().map(|(_, t)| *t).collect(),
+        _ => return false,
+    };
+    children
+        .iter()
+        .any(|&child| contains_cycle(child, program, seen))
+}
+
+/// Compute the intersection of two types (by type ID): the type whose values belong to both.
 ///
-/// Filters variants from `a` that could possibly match `b`.
-/// Uses `types_overlap` (ANY-variant semantics) because for pattern matching
-/// we need to know if a match is *possible*, not if it's *certain*.
+/// Distributes over unions and recurses into tuple fields, so a single tuple with union-typed
+/// fields is narrowed field-wise (`['n, 'n] ∩ [Rational, 'n]` is `[Rational, 'n]`). Recursive
+/// types (and shapes not modelled precisely) keep the left operand when the two could overlap —
+/// a wider intersection never excludes a valid value, so it is sound for narrowing.
 pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize {
     let a_variants = get_type_variants(a_id, program);
+    let b_variants = get_type_variants(b_id, program);
+    let never = program.never();
 
-    let intersected: Vec<usize> = a_variants
-        .into_iter()
-        .filter(|&variant_id| types_overlap(variant_id, b_id, program))
-        .collect();
+    let mut pieces = Vec::new();
+    for &av in &a_variants {
+        for &bv in &b_variants {
+            let piece = intersect_pair(av, bv, program);
+            if piece != never {
+                pieces.push(piece);
+            }
+        }
+    }
+    union_type_ids(program, pieces)
+}
 
-    union_type_ids(program, intersected)
+/// Intersect two single (non-union) types. Returns the never type when provably disjoint.
+fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
+    if a == b {
+        return a;
+    }
+
+    let never = program.never();
+    let (Some(ta), Some(tb)) = (
+        program.lookup_type(a).cloned(),
+        program.lookup_type(b).cloned(),
+    ) else {
+        return never;
+    };
+
+    match (&ta, &tb) {
+        // A type variable is opaque; keep the value's own type rather than discard genericity.
+        (Type::Variable(_), _) | (_, Type::Variable(_)) => a,
+        // A bare recursive reference can't be compared soundly without its enclosing context;
+        // keep `a` (sound, `a ∩ b ⊆ a`). This keeps recursive *fields* whole when recursing.
+        (Type::Cycle(_), _) | (_, Type::Cycle(_)) => a,
+        (Type::Integer, Type::Integer)
+        | (Type::Binary, Type::Binary)
+        | (Type::Reference, Type::Reference) => a,
+        (Type::Tuple(id1), Type::Tuple(id2)) => {
+            let (Some(i1), Some(i2)) = (
+                program.lookup_tuple(*id1).cloned(),
+                program.lookup_tuple(*id2).cloned(),
+            ) else {
+                return never;
+            };
+            if i1.name != i2.name || i1.fields.len() != i2.fields.len() {
+                return never;
+            }
+            let mut fields = Vec::with_capacity(i1.fields.len());
+            for ((name, f1), (_, f2)) in i1.fields.iter().zip(i2.fields.iter()) {
+                let fi = intersect_types(*f1, *f2, program);
+                if fi == program.never() {
+                    return never;
+                }
+                fields.push((name.clone(), fi));
+            }
+            let tuple_id = program.register_tuple(i1.name.clone(), fields);
+            program.register_type(Type::Tuple(tuple_id))
+        }
+        _ => {
+            if types_overlap(a, b, program) {
+                a
+            } else {
+                never
+            }
+        }
+    }
 }
 
 /// Filter parent type to variants where a specific field is compatible with a given type.
@@ -262,34 +350,111 @@ pub fn filter_variants_by_field(
 ) -> usize {
     let variants = get_type_variants(parent_type_id, program);
 
-    let filtered: Vec<usize> = variants
-        .into_iter()
-        .filter(|&variant_id| {
-            if let Some(field_type_id) = get_field_type(variant_id, field_idx, program) {
-                is_compatible(field_type_id, field_must_be_id, program)
-            } else {
-                false
-            }
-        })
-        .collect();
+    // A for-loop rather than `.filter`, since `get_field_type` now borrows `&mut program`.
+    let mut filtered = Vec::new();
+    for variant_id in variants {
+        if let Some(field_type_id) = get_field_type(variant_id, field_idx, program)
+            && is_compatible(field_type_id, field_must_be_id, program)
+        {
+            filtered.push(variant_id);
+        }
+    }
 
     union_type_ids(program, filtered)
 }
 
-/// Compute the complement type (variants NOT compatible with the narrowed type).
+/// Compute the complement type: the values of `original` that are NOT in `narrowed`.
+///
+/// Structural over tuples — `[A, B] ∖ [a, b]` is `[A∖a, B] | [A, B∖b]` — so a match splitting on
+/// a combination of fields can be proven exhaustive (the complement reduces to never) rather than
+/// left as the whole original. Distributes over unions on both sides. Recursive types fall back
+/// to keeping the original whole (sound: an over-large remainder only makes a block look *less*
+/// exhaustive, never more — and never narrows a later branch to exclude a valid value).
 pub fn compute_complement(original_id: usize, narrowed_id: usize, program: &mut Program) -> usize {
-    let variants = get_type_variants(original_id, program);
-
-    let complement: Vec<usize> = variants
-        .into_iter()
-        .filter(|&variant_id| !is_compatible(variant_id, narrowed_id, program))
-        .collect();
-
-    union_type_ids(program, complement)
+    let narrowed_variants = get_type_variants(narrowed_id, program);
+    let mut pieces = get_type_variants(original_id, program);
+    for nv in narrowed_variants {
+        let mut next = Vec::new();
+        for piece in pieces {
+            next.extend(subtract_one(piece, nv, program));
+        }
+        pieces = next;
+    }
+    union_type_ids(program, pieces)
 }
 
-/// Get the type ID of a field at a given index from a type.
-pub fn get_field_type(type_id: usize, field_idx: usize, program: &Program) -> Option<usize> {
+/// Subtract single type `b` from single type `a`, returning the variants whose union is `a ∖ b`.
+fn subtract_one(a: usize, b: usize, program: &mut Program) -> Vec<usize> {
+    if a == b {
+        return vec![];
+    }
+
+    let (Some(ta), Some(tb)) = (
+        program.lookup_type(a).cloned(),
+        program.lookup_type(b).cloned(),
+    ) else {
+        return vec![a];
+    };
+
+    // A bare recursive reference can't be subtracted soundly without its enclosing context;
+    // keep it whole (`a ∖ b ⊆ a`). This is what lets a `Node[^, ^]` survive a subtraction:
+    // when a recursive field reaches here, the field's difference is the field unchanged.
+    if matches!(ta, Type::Cycle(_)) || matches!(tb, Type::Cycle(_)) {
+        return vec![a];
+    }
+
+    // `is_compatible`/`types_overlap` are exact only for cycle-free types; on a tuple with
+    // recursive fields they traverse the `Cycle` optimistically (matching anything), which would
+    // unsoundly empty the difference. For cycle-bearing types, skip these shortcuts and rely on
+    // the structural tuple difference below, which keeps recursive fields whole.
+    let cyclic = contains_cycle(a, &*program, &mut Vec::new())
+        || contains_cycle(b, &*program, &mut Vec::new());
+    if !cyclic {
+        if is_compatible(a, b, program) {
+            return vec![];
+        }
+        if !types_overlap(a, b, program) {
+            return vec![a];
+        }
+    }
+
+    let never = program.never();
+    match (&ta, &tb) {
+        (Type::Tuple(id1), Type::Tuple(id2)) => {
+            let (Some(i1), Some(i2)) = (
+                program.lookup_tuple(*id1).cloned(),
+                program.lookup_tuple(*id2).cloned(),
+            ) else {
+                return vec![a];
+            };
+            if i1.name != i2.name || i1.fields.len() != i2.fields.len() {
+                return vec![a];
+            }
+            // `[A] ∖ [b]` = union over i of `[A₀, …, Aᵢ∖bᵢ, …, Aₙ]`.
+            let mut out = Vec::new();
+            for (i, ((_, f1), (_, f2))) in i1.fields.iter().zip(i2.fields.iter()).enumerate() {
+                let field_complement = compute_complement(*f1, *f2, program);
+                if field_complement == never {
+                    continue;
+                }
+                let mut fields = i1.fields.clone();
+                fields[i].1 = field_complement;
+                let tuple_id = program.register_tuple(i1.name.clone(), fields);
+                out.push(program.register_type(Type::Tuple(tuple_id)));
+            }
+            out
+        }
+        _ => vec![a],
+    }
+}
+
+/// Get the type ID of a field at a given index, unioned across every tuple/partial variant of
+/// `type_id` that has that field. Returns None if no variant has the field.
+///
+/// Takes `&mut Program` so a multi-variant field can be returned as a true union, rather than
+/// the first variant as an approximation — important when a narrowed value is a union of tuples
+/// (e.g. `Leaf['int] | Node[…]`), where collapsing to one variant is unsound.
+pub fn get_field_type(type_id: usize, field_idx: usize, program: &mut Program) -> Option<usize> {
     let variants = get_type_variants_readonly(type_id, program);
 
     let field_type_ids: Vec<usize> = variants
@@ -314,13 +479,46 @@ pub fn get_field_type(type_id: usize, field_idx: usize, program: &Program) -> Op
 
     if field_type_ids.is_empty() {
         None
-    } else if field_type_ids.len() == 1 {
-        Some(field_type_ids[0])
     } else {
-        // Multiple field types - would need to create union, but we don't have &mut Program
-        // Return the first one as approximation (this is a read-only context)
-        Some(field_type_ids[0])
+        Some(union_type_ids(program, field_type_ids))
     }
+}
+
+/// Whether `pattern` constrains a field whose type is recursive (transitively contains a
+/// `Cycle`) with a sub-pattern more specific than a plain binding/placeholder.
+///
+/// Such a constraint cannot be reflected soundly in the reconstructed narrowed type: recursive
+/// fields are kept whole (to avoid materializing an infinite type), so the narrowed type
+/// *over-approximates* what actually matched. Complement narrowing on an over-approximation
+/// subtracts more than matched — unsound — so it must be disabled for these patterns. (The
+/// sound recursive case, a single flat constraining field like `=[Cons[h, t], ys]`, is handled
+/// separately by `analyze_tuple_pattern_for_complement` and is unaffected.)
+pub fn pattern_constrains_recursive_field(
+    pattern: &ast::Match,
+    value_type: usize,
+    program: &mut Program,
+) -> bool {
+    let ast::Match::Tuple(tuple) = pattern else {
+        return false;
+    };
+    for (idx, field) in tuple.fields.iter().enumerate() {
+        let constraining = !matches!(
+            field.pattern,
+            ast::Match::Identifier(_, _) | ast::Match::Placeholder
+        );
+        if !constraining {
+            continue;
+        }
+        let Some(field_type) = get_field_type(value_type, idx, program) else {
+            continue;
+        };
+        if contains_cycle(field_type, &*program, &mut Vec::new())
+            || pattern_constrains_recursive_field(&field.pattern, field_type, program)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Get variant type IDs from a type (readonly version for use with &Program)
@@ -391,6 +589,18 @@ fn classify_field_pattern(
 
         _ => FieldPatternKind::Complex,
     }
+}
+
+/// If `pattern` names a concrete tuple type present in `field_type_id` (matching name and
+/// arity), return that tuple type's id registered as a `Type::Tuple`. Used to compute the
+/// positive narrowing a field sub-pattern imposes on a dispatch branch's guard type.
+pub fn matching_tuple_type(
+    pattern: &ast::MatchTuple,
+    field_type_id: usize,
+    program: &mut Program,
+) -> Option<usize> {
+    let tuple_id = find_matching_tuple_type(pattern, field_type_id, program)?;
+    Some(program.register_type(Type::Tuple(tuple_id)))
 }
 
 /// Find a matching tuple type for a pattern in the given type.

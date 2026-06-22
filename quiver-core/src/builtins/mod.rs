@@ -36,6 +36,14 @@ pub fn bigint_from_i64(n: i64) -> BigInt {
     BigInt::from(n)
 }
 
+/// Parse a decimal string into a `BigInt`. Used to carry arbitrary-precision integers
+/// across a boundary (e.g. the wasm/JS value bridge) as strings, so downstream crates
+/// need not depend on `num-bigint` directly. The pairing `i.to_string()` round-trips.
+pub fn bigint_from_str(s: &str) -> Result<BigInt, Error> {
+    s.parse::<BigInt>()
+        .map_err(|_| Error::InvalidArgument(format!("Invalid integer string: {s}")))
+}
+
 pub mod binary;
 pub mod integer;
 pub mod io;

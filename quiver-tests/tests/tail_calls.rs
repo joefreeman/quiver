@@ -34,8 +34,8 @@ fn test_tail_call_with_arguments() {
     quiver()
         .evaluate(
             r#"
-            g = #['int, 'int] { %math.mul },
-            f = #'int { %math.add [~, 1] ~> ^g [~ , 2] },
+            g = #['int, 'int] { %num.mul },
+            f = #'int { %num.add [~, 1] ~> ^g [~ , 2] },
             1 ~> f
             "#,
         )

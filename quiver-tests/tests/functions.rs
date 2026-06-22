@@ -80,7 +80,7 @@ fn test_closure_captures_member_accesses() {
         .evaluate(
             r#"
             double_plus_one = #'int {
-              =x => [[x, 2] ~> %math.mul, 1] ~> %math.add
+              =x => [[x, 2] ~> %num.mul, 1] ~> %num.add
             },
             5 ~> double_plus_one
             "#,
@@ -107,7 +107,7 @@ fn test_nested_function_captures() {
         .evaluate(
             r#"
             f = #{
-              inc = #'int { [~, 1] ~> %math.add },
+              inc = #'int { [~, 1] ~> %num.add },
               42 ~> inc
             },
             [] ~> f
@@ -118,13 +118,13 @@ fn test_nested_function_captures() {
 
 #[test]
 fn test_function_call_syntax() {
-    quiver().evaluate("%math.add [3, 4]").expect("7");
+    quiver().evaluate("%num.add [3, 4]").expect("7");
 }
 
 #[test]
 fn test_function_call_with_ripple() {
     quiver()
-        .evaluate("%math.add [1, 2] ~> %math.mul [~, 3]")
+        .evaluate("%num.add [1, 2] ~> %num.mul [~, 3]")
         .expect("9");
 }
 
@@ -135,10 +135,10 @@ fn test_function_call_no_args() {
 
 #[test]
 fn calling_a_field_access_directly_is_unsupported() {
-    // `.field [args]` is intentionally dropped — `%math ~> .add [1, 2]` reads confusingly.
+    // `.field [args]` is intentionally dropped — `%num ~> .add [1, 2]` reads confusingly.
     // Bind the function first, or use a tail call.
     quiver()
-        .evaluate("%math ~> .add [1, 2]")
+        .evaluate("%num ~> .add [1, 2]")
         .expect_parse_failure();
 }
 
@@ -149,8 +149,8 @@ fn test_function_call_with_spread() {
             r#"
             f = #['int, 'int, 'int] {
               $.0
-              ~> %math.add [~, $.1]
-              ~> %math.add [~, $.2]
+              ~> %num.add [~, $.1]
+              ~> %num.add [~, $.2]
             },
             [1, 2] ~> f [..., 3]
             "#,
@@ -161,13 +161,13 @@ fn test_function_call_with_spread() {
 #[test]
 fn calling_via_a_bare_ripple() {
     // `~ [args]` applies the flowing value (a function) to the argument.
-    quiver().evaluate("&%math.add ~> ~ [3, 4]").expect("7");
+    quiver().evaluate("&%num.add ~> ~ [3, 4]").expect("7");
 }
 
 #[test]
 fn calling_via_a_ripple_field_access() {
     // `~.field [args]` reads a field off the flowing value and applies the argument to it.
-    quiver().evaluate("%math ~> ~.add [1, 2]").expect("3");
+    quiver().evaluate("%num ~> ~.add [1, 2]").expect("3");
 }
 
 #[test]

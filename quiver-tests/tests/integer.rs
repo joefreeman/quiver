@@ -108,3 +108,56 @@ fn test_chained_operations() {
         )
         .expect("-65536"); // -256 << 8
 }
+
+#[test]
+fn test_div() {
+    quiver().evaluate("[20, 4] ~> %int.div").expect("5");
+    quiver().evaluate("[17, 5] ~> %int.div").expect("3"); // truncates toward zero
+}
+
+#[test]
+fn test_div_by_zero_returns_nil() {
+    quiver().evaluate("[10, 0] ~> %int.div").expect("[]");
+}
+
+#[test]
+fn test_mod() {
+    quiver().evaluate("[17, 5] ~> %int.mod").expect("2");
+}
+
+#[test]
+fn test_mod_by_zero_returns_nil() {
+    quiver().evaluate("[10, 0] ~> %int.mod").expect("[]");
+}
+
+#[test]
+fn test_mod_by_zero_with_fallback() {
+    quiver()
+        .evaluate("{ [10, 0] ~> %int.mod | -1 }")
+        .expect("-1");
+}
+
+#[test]
+fn test_sqrt() {
+    quiver().evaluate("16 ~> %int.sqrt").expect("4");
+}
+
+#[test]
+fn test_sqrt_truncates() {
+    quiver().evaluate("17 ~> %int.sqrt").expect("4");
+}
+
+#[test]
+fn test_sqrt_zero() {
+    quiver().evaluate("0 ~> %int.sqrt").expect("0");
+}
+
+#[test]
+fn test_sqrt_negative_returns_nil() {
+    quiver().evaluate("-4 ~> %int.sqrt").expect("[]");
+}
+
+#[test]
+fn test_sqrt_negative_with_fallback() {
+    quiver().evaluate("-4 ~> { %int.sqrt | 0 }").expect("0");
+}

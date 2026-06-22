@@ -85,7 +85,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
             r#"
             match0 = #'int { =0 },
             a = 0 ~> match0,
-            { a => %math.add [a, 1] | 200 }
+            { a => %num.add [a, 1] | 200 }
             "#,
         )
         .expect("1");
@@ -96,7 +96,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
             r#"
             match0 = #'int { =0 },
             b = 1 ~> match0,
-            { b => %math.add [b, 1] | 200 }
+            { b => %num.add [b, 1] | 200 }
             "#,
         )
         .expect("200");
@@ -111,7 +111,7 @@ fn test_truthiness_narrowing_with_binding() {
             r#"
             match0 = #'int { =0 },
             a = 0 ~> match0,
-            { a ~> =x => %math.add [x, 1] | 200 }
+            { a ~> =x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("1");
@@ -122,7 +122,7 @@ fn test_truthiness_narrowing_with_binding() {
             r#"
             match0 = #'int { =0 },
             b = 1 ~> match0,
-            { b ~> =x => %math.add [x, 1] | 200 }
+            { b ~> =x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("200");
@@ -136,7 +136,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
         .evaluate(
             r#"
             f = #'int { =0 },
-            { 0 ~> f ~> =x => %math.add [x, 1] | 200 }
+            { 0 ~> f ~> =x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("1");
@@ -146,7 +146,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
         .evaluate(
             r#"
             f = #'int { =0 },
-            { 1 ~> f ~> =x => %math.add [x, 1] | 200 }
+            { 1 ~> f ~> =x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("200");
@@ -161,7 +161,7 @@ fn test_inter_chain_narrowing() {
             r#"
             match0 = #'int { =0 },
             a = 0 ~> match0,
-            { a ~> =x, %math.add [x, 1] }
+            { a ~> =x, %num.add [x, 1] }
             "#,
         )
         .expect("1");
@@ -171,7 +171,7 @@ fn test_inter_chain_narrowing() {
         .evaluate(
             r#"
             f = #'int { =0 },
-            { 0 ~> f ~> =x, %math.add [x, 1] }
+            { 0 ~> f ~> =x, %num.add [x, 1] }
             "#,
         )
         .expect("1");
@@ -247,10 +247,10 @@ fn test_complement_propagates_across_multiple_branches() {
             value = 5,
             to_option = #'int { =0 => None | ~ },
             stop = 10 ~> to_option,
-            { stop ~> =None | %math.lt [value, stop] | %math.gt [value, stop] }
+            { stop ~> =None | %num.lt? [value, stop] | %num.gt? [value, stop] }
             "#,
         )
-        .expect("-1");
+        .expect("Ok");
 
     // Test with None value - should match first branch
     quiver()
@@ -259,7 +259,7 @@ fn test_complement_propagates_across_multiple_branches() {
             value = 5,
             to_option = #'int { =0 => None | ~ },
             stop = 0 ~> to_option,
-            { stop ~> =None => 999 | %math.lt [value, stop] | %math.gt [value, stop] }
+            { stop ~> =None => 999 | %num.lt? [value, stop] | %num.gt? [value, stop] }
             "#,
         )
         .expect("999");
@@ -642,4 +642,136 @@ fn test_tuple_pattern_complement_via_variable() {
         "#,
         )
         .expect("Cons[2, Nil]");
+}
+
+// =============================================================================
+// Cross-branch tuple-element narrowing
+// =============================================================================
+//
+// Reaching a later branch means every earlier branch's pattern failed. The negative
+// information from those failures accumulates per tuple element, so a final catch-all
+// `=[a, b]` branch narrows BOTH elements even when the constraints came from separate,
+// non-adjacent branches. Before this was supported, the int-only builtin in the final
+// branch failed to type-check because its operands stayed the full union.
+
+#[test]
+fn test_cross_branch_tuple_narrowing_both_elements_to_int() {
+    // Branch 1 peels Wrap off element 0, branch 2 peels Wrap off element 1; the final
+    // branch therefore sees both elements as 'int, so `__add__` (which requires
+    // ['int, 'int]) type-checks.
+    quiver()
+        .evaluate(
+            r#"
+            'n = 'int | Wrap['int];
+            add = #['n, 'n] {
+              | =[Wrap[a], _] => a
+              | =[_, Wrap[b]] => b
+              | =[a, b] => [a, b] ~> __add__
+            },
+            [2, 3] ~> add
+            "#,
+        )
+        .expect("5");
+}
+
+#[test]
+fn test_cross_branch_tuple_narrowing_mixed_paths() {
+    // The earlier branches still fire for their respective shapes.
+    quiver()
+        .evaluate(
+            r#"
+            'n = 'int | Wrap['int];
+            add = #['n, 'n] {
+              | =[Wrap[a], _] => a
+              | =[_, Wrap[b]] => b
+              | =[a, b] => [a, b] ~> __add__
+            },
+            [Wrap[9], 3] ~> add
+            "#,
+        )
+        .expect("9");
+}
+
+#[test]
+fn test_cross_branch_narrowing_only_previous_branch_was_insufficient() {
+    // Regression: with only single-slot complement tracking, element 0's narrowing from
+    // branch 1 was overwritten by element 1's from branch 2, leaving element 0 a union in
+    // the final branch. Here the final branch uses element 0 as an integer, which only
+    // works if branch 1's narrowing survived branch 2.
+    quiver()
+        .evaluate(
+            r#"
+            'n = 'int | Wrap['int];
+            first = #['n, 'n] {
+              | =[Wrap[a], _] => a
+              | =[_, Wrap[b]] => b
+              | =[a, b] => [a, 100] ~> __add__
+            },
+            [2, 3] ~> first
+            "#,
+        )
+        .expect("102");
+}
+
+// =============================================================================
+// Structural complement: multi-field exhaustiveness & recursive soundness
+// =============================================================================
+
+#[test]
+fn test_multi_field_combination_exhaustive() {
+    // A match splitting on a *combination* of two fields is total; the structural complement
+    // proves it (no spurious `| []`), so the `-> 'int` return annotation is accepted.
+    quiver()
+        .evaluate(
+            r#"
+            'b = True | False;
+            f = #['b, 'b] -> 'int {
+              | =[True, True] => 1
+              | =[True, False] => 2
+              | =[False, x] => 3
+            },
+            [True, False] ~> f
+            "#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_multi_field_non_exhaustive_keeps_nil() {
+    // Dropping a combination leaves the match non-total, so the result type still includes nil
+    // (the structural complement must not *over*-claim exhaustiveness).
+    quiver()
+        .evaluate(
+            r#"
+            'b = True | False;
+            f = #['b, 'b] {
+              | =[True, True] => 1
+              | =[False, x] => 3
+            },
+            [True, True] ~> f
+            "#,
+        )
+        .expect_type("'int | []");
+}
+
+#[test]
+fn test_nested_recursive_pattern_does_not_oversubtract() {
+    // Regression (Phase 0 canary): a nested pattern over a recursive type must NOT let
+    // complement narrowing exclude valid values from later branches. Previously this dropped
+    // a runtime type check and mis-bound `x` to the whole subtree.
+    quiver()
+        .evaluate(
+            r#"
+            'tree = Leaf['int] | Node[^, ^];
+            left = #'tree {
+              | =Node[Node[Leaf[x], _], _] => x
+              | =Node[Leaf[x], _] => x
+              | =Leaf[x] => x
+            },
+            [Node[Node[Leaf[1], Leaf[9]], Leaf[7]] ~> left,
+             Node[Leaf[2], Leaf[8]] ~> left,
+             Leaf[3] ~> left]
+            "#,
+        )
+        .expect("[1, 2, 3]");
 }

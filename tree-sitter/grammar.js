@@ -198,7 +198,7 @@ module.exports = grammar({
     _accessor: $ => seq('.', field('field', choice($.identifier, $.index))),
     index: _ => /\d+/,
 
-    // `%math`, `%math/trig`. The `/` path separator is immediate so a later `mod / x`
+    // `%num`, `%mathx/vec`. The `/` path separator is immediate so a later `mod / x`
     // (with surrounding spaces) is not mistaken for part of the module path.
     import: $ => seq('%', $.identifier, repeat(seq(token.immediate('/'), $.identifier))),
 

@@ -3,10 +3,11 @@ use std::collections::HashSet;
 
 use super::Error;
 
-/// Reserved primitive type names that cannot be used as variable or type alias names
+/// Primitive type names that cannot be redefined as type aliases. They are fine as variable
+/// names — types carry a leading apostrophe (`'int`), so there is no ambiguity with a value.
 pub const RESERVED_NAMES: &[&str] = &["int", "bin"];
 
-/// Check if a name is reserved and cannot be used as a variable or type alias
+/// Check if a name is a primitive type that cannot be redefined as a type alias.
 pub fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }

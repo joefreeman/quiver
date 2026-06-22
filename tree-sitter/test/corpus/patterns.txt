@@ -28,7 +28,7 @@ Point[x, y] = Point[10, 20]
 partial binding
 ==================
 
-(add, mul) = %math
+(add, mul) = %num
 
 ---
 

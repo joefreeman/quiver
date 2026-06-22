@@ -19,7 +19,7 @@ pub enum SymbolKind {
     Variable,
     Parameter,
     Builtin,
-    /// A module import or one of its members (`%math`, `%math.add`).
+    /// A module import or one of its members (`%num`, `%num.add`).
     Import,
     /// A tuple field label (`doubled` in `[ doubled: ... ]`, a module member's name).
     Field,

@@ -45,7 +45,7 @@ take_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
     | {
       it ~> =[value, next],
       n
-      ~> %math.sub [~, 1]
+      ~> %num.sub [~, 1]
       ~> self [&self, &next, ~]
       ~> [value, ~]
     }
@@ -58,7 +58,7 @@ drop_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
     | n ~> =0 => it
     | {
       it ~> =[_, next],
-      n ~> %math.sub [~, 1] ~> self [&self, &next, ~] ~> ^~
+      n ~> %num.sub [~, 1] ~> self [&self, &next, ~] ~> ^~
     }
   }
 },
@@ -127,7 +127,7 @@ enumerate_ = #<'t>[#^ -> 'thunk<['int, 't]>, 'thunk<'t>, 'int] {
   #{
     it ~> =[value, next],
     index
-    ~> %math.add [~, 1]
+    ~> %num.add [~, 1]
     ~> self [&self, &next, ~]
     ~> [[index, value], ~]
   }
@@ -176,7 +176,7 @@ find_index_ = #<'t>['thunk<'t>, #'t -> ('t | []), 'int] {
     | value ~> pred => index
     | {
       index
-      ~> %math.add [~, 1]
+      ~> %num.add [~, 1]
       ~> ^ [&next, &pred, ~]
     }
   }
@@ -207,7 +207,7 @@ nth_ = #<'t>['thunk<'t>, 'int] {
   }
   | =[it, n] => {
     it ~> =[_, next],
-    n ~> %math.sub [~, 1] ~> ^ [&next, ~]
+    n ~> %num.sub [~, 1] ~> ^ [&next, ~]
   }
 },
 
@@ -311,7 +311,7 @@ intersperse_ = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 't] {
 
   count: #<'t>'<'t> {
     =Iter[r],
-    fold_ [&r, 0, #['int, 'int] { %math.add [$0, 1] }]
+    fold_ [&r, 0, #['int, 'int] { %num.add [$0, 1] }]
   },
 
   nth: #<'t>['<'t>, 'int] {

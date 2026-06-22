@@ -50,6 +50,12 @@ pub enum Error {
         expected: String,
         found: String,
     },
+    /// A function body is a non-exhaustive enumeration (some inputs match no branch, so it can
+    /// fall through to `[]`), but its declared return type does not allow `[]`.
+    NonExhaustiveReturn {
+        unhandled: String,
+        declared: String,
+    },
     TupleNotInRegistry {
         tuple_id: usize,
     },
@@ -143,6 +149,16 @@ impl std::fmt::Display for Error {
             Error::TypeAliasMissing(name) => write!(f, "Unknown type alias: {name}"),
             Error::TypeMismatch { expected, found } => {
                 write!(f, "Type mismatch: expected {expected}, found {found}")
+            }
+            Error::NonExhaustiveReturn {
+                unhandled,
+                declared,
+            } => {
+                write!(
+                    f,
+                    "Match is not exhaustive: {unhandled} is unhandled, but the return type \
+                     {declared} does not allow []. Handle it, or declare -> ({declared} | [])."
+                )
             }
             Error::TupleNotInRegistry { tuple_id } => {
                 write!(f, "Tuple type {tuple_id} not in registry")
@@ -263,6 +279,40 @@ struct RippleContext {
     provenance: Provenance,
 }
 
+/// Per-branch dispatch data collected while compiling a function body that is a pure pattern
+/// dispatch on its parameter. `branches` pairs each branch's parameter *guard type* (the
+/// parameter values that reach it) with that branch's inferred result type. `valid` is cleared
+/// if any branch is not a pure parameter dispatch, in which case no case table is recorded.
+struct DispatchCollection {
+    branches: Vec<(usize, usize)>,
+    valid: bool,
+}
+
+/// Whether a branch's condition is a pure pattern match against the flowing parameter — i.e.
+/// the set of parameter values that take it is captured exactly by type narrowing (no
+/// computation that could fail for non-type reasons, and no extra chains). Such branches can
+/// contribute to a function's call-site dispatch table.
+fn branch_is_parameter_dispatch(branch: &ast::Branch) -> bool {
+    branch.condition.chains.len() == 1
+        && branch.condition.chains[0]
+            .terms
+            .iter()
+            .all(|t| matches!(t, ast::Term::Match(_)))
+}
+
+/// The leading pattern of a branch condition (its binding `match_pattern`, or a first
+/// `=pattern` term), through which the branch dispatches on the parameter.
+fn leading_match(branch: &ast::Branch) -> Option<&ast::Match> {
+    let chain = branch.condition.chains.first()?;
+    if let Some(m) = &chain.match_pattern {
+        return Some(m);
+    }
+    match chain.terms.first() {
+        Some(ast::Term::Match(m)) => Some(m),
+        _ => None,
+    }
+}
+
 pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Core components
     codegen: InstructionBuilder,
@@ -287,6 +337,21 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Track the receive type ID of the function currently being compiled
     current_receive_type_id: usize,
 
+    // While compiling a function body, collects per-branch (guard, result) types for the
+    // call-site return-type dispatch. `None` outside a function body.
+    collected_dispatch: Option<DispatchCollection>,
+
+    // Set by the most recent function-body block: the unhandled parameter type when the body is
+    // a non-exhaustive enumeration (every branch a variant pattern, but some variant uncovered).
+    // Consulted by the return-type check to name unhandled cases. `None` if exhaustive or not an
+    // enumeration.
+    last_uncovered: Option<usize>,
+
+    // Case tables for functions that dispatch on their parameter: callable type id → list of
+    // (parameter guard type, branch result type). Consulted at call sites to compute a result
+    // type from the concrete argument type. Survives across module compilation (same Compiler).
+    case_tables: HashMap<usize, Vec<(usize, usize)>>,
+
     // Span of the term currently being compiled, so an error can be located in source.
     // Only set when a recorder is interested (LSP); harmless otherwise.
     current_span: Option<SourceSpan>,
@@ -304,7 +369,7 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
 /// bindings (destructuring, mid-chain `=x`, block branches, and bare partial fields like
 /// `(double)`) for hover/go-to-definition.
 /// Build a hover label from a base symbol and an accessor chain, e.g. `foo` + `[.bar]` →
-/// `foo.bar`, `$` + `[.0]` → `$.0`, `%math` + `[.add]` → `%math.add`.
+/// `foo.bar`, `$` + `[.0]` → `$.0`, `%num` + `[.add]` → `%num.add`.
 fn accessors_label(base: &str, accessors: &[ast::AccessPath]) -> String {
     let mut label = base.to_string();
     for accessor in accessors {
@@ -385,6 +450,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             builtins,
             process_types,
             current_receive_type_id: never_id,
+            collected_dispatch: None,
+            last_uncovered: None,
+            case_tables: HashMap::new(),
             current_span: None,
             recorder,
             _phantom: std::marker::PhantomData,
@@ -707,24 +775,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .lookup_type(type_id)
             .map(|t| t.is_nil())
             .unwrap_or(false)
-    }
-
-    /// Check if a type ID is nil, Ok, or a union containing only nil/Ok
-    fn is_nil_or_ok(&self, type_id: usize) -> bool {
-        match self.program.lookup_type(type_id) {
-            Some(Type::Tuple(id))
-                if *id == quiver_core::types::NIL || *id == quiver_core::types::OK =>
-            {
-                true
-            }
-            Some(Type::Union(members)) => members.iter().all(|&member_id| {
-                self.program
-                    .lookup_type(member_id)
-                    .map(|t| t.is_nil() || t.is_ok())
-                    .unwrap_or(false)
-            }),
-            _ => false,
-        }
     }
 
     /// Check if a type ID contains nil (either is nil or is a union containing nil)
@@ -1094,32 +1144,41 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         receive_types.push(resolved_type);
                     }
                 }
-                ast::Term::Access(access) => {
-                    // Variable reference - look up its type
-                    let Some(ast::AccessSource::Identifier(identifier)) = &access.source else {
-                        continue;
+                ast::Term::Reference(Some(access)) => {
+                    // A referenced receiver (`&f`, `&%int.and`) — the form the tight `!f`/`!var`
+                    // sugar produces. Resolve its type from either a lexical variable or a module
+                    // member, then take its parameter type as the message type.
+                    let receiver_type = match &access.source {
+                        Some(ast::AccessSource::Identifier(identifier)) => {
+                            // Variable reference: try full path first, then base + accessor
+                            // resolution through the type system.
+                            scopes::lookup_variable(&self.scopes, identifier, &access.accessors)
+                                .map(|(t, _)| t)
+                                .or_else(|| {
+                                    let (base_type, _) =
+                                        scopes::lookup_variable(&self.scopes, identifier, &[])?;
+                                    type_queries::resolve_accessor_type(
+                                        self.program,
+                                        base_type,
+                                        &access.accessors,
+                                        identifier,
+                                    )
+                                    .ok()
+                                })
+                        }
+                        Some(ast::AccessSource::Import(module)) => {
+                            // Module member, e.g. `%int.and` — resolve it like the main compiler
+                            // does, so an inline module receiver needs no intermediate binding.
+                            self.resolve_import(module, &access.accessors)
+                                .ok()
+                                .map(|(_, _, resolved_type, _)| resolved_type)
+                        }
+                        _ => continue,
                     };
 
-                    // Resolve variable type: try full path first, then base + accessor resolution
-                    let var_type =
-                        scopes::lookup_variable(&self.scopes, identifier, &access.accessors)
-                            .map(|(t, _)| t)
-                            .or_else(|| {
-                                // Full path not found - try resolving accessors through type system
-                                let (base_type, _) =
-                                    scopes::lookup_variable(&self.scopes, identifier, &[])?;
-                                type_queries::resolve_accessor_type(
-                                    self.program,
-                                    base_type,
-                                    &access.accessors,
-                                    identifier,
-                                )
-                                .ok()
-                            });
-
-                    if let Some(var_type_id) = var_type
+                    if let Some(type_id) = receiver_type
                         && let Some(Type::Callable { parameter, .. }) =
-                            self.program.lookup_type(var_type_id)
+                            self.program.lookup_type(type_id)
                     {
                         receive_types.push(*parameter);
                     }
@@ -1293,6 +1352,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
             }
         }
+        // Start a fresh dispatch collection for this body (saving any outer one, so a function
+        // nested inside another function's body collects independently).
+        let saved_dispatch = self.collected_dispatch.replace(DispatchCollection {
+            branches: Vec::new(),
+            valid: true,
+        });
         let body_type = match function.body {
             Some(body) => {
                 // Function parameters have Provenance::Parameter since they come from callers
@@ -1302,6 +1367,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Provenance::Parameter,
                     None,
                     ScopeKind::Function,
+                    true,
                 )?
             }
             None => {
@@ -1311,6 +1377,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 parameter_type
             }
         };
+        let dispatch = std::mem::replace(&mut self.collected_dispatch, saved_dispatch);
 
         // Validate return type if specified
         if let Some(return_type_ast) = &function.return_type {
@@ -1338,6 +1405,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
 
             if !types_match {
+                // If the *only* reason for the mismatch is the body falling through to nil over a
+                // non-exhaustive enumeration, report the unhandled cases instead of the opaque
+                // `found T | []`. (`last_uncovered` is set only for enumeration bodies.)
+                if let Some(uncovered) = self.last_uncovered
+                    && self.contains_nil(body_type)
+                    && !self.contains_nil(expected_return_type)
+                {
+                    let body_without_nil = self.without_nil(body_type);
+                    if quiver_core::types::is_compatible(
+                        body_without_nil,
+                        expected_return_type,
+                        &*self.program,
+                    ) {
+                        return Err(Error::NonExhaustiveReturn {
+                            unhandled: quiver_core::format::format_type_by_id(
+                                &*self.program,
+                                uncovered,
+                            ),
+                            declared: quiver_core::format::format_type_by_id(
+                                &*self.program,
+                                expected_return_type,
+                            ),
+                        });
+                    }
+                }
                 // Get types for error message
                 let expected_type = self.program.lookup_type(expected_return_type).unwrap();
                 let found_type = self.program.lookup_type(body_type).unwrap();
@@ -1356,6 +1448,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result: body_type,
             receive: receive_type,
         });
+
+        // If every branch of the body was a pure parameter dispatch, record its case table so
+        // calls can specialize the result type to the concrete argument (return-type dispatch).
+        if let Some(dispatch) = dispatch
+            && dispatch.valid
+            && !dispatch.branches.is_empty()
+        {
+            self.case_tables.insert(callable_type_id, dispatch.branches);
+        }
 
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
@@ -1455,7 +1556,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let has_tuple_complement =
             analyze_tuple_pattern_for_complement(&pattern, value_type, self.program).is_some();
 
-        if pattern::prevents_complement_narrowing(&binding_sets, &*self.program)
+        // Complement narrowing is unsound when the pattern constrains a recursive field (the
+        // narrowed type can't capture that constraint), so disable it there too.
+        let prevents = pattern::prevents_complement_narrowing(&binding_sets, &*self.program)
+            || narrowing::pattern_constrains_recursive_field(&pattern, value_type, self.program);
+
+        if prevents
             && !has_tuple_complement
             && let Some(n) = narrowing.as_mut()
         {
@@ -1471,14 +1577,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Register locals for all bindings (indices needed for Load)
         for (variable_name, variable_type) in &bindings {
-            // Check for reserved primitive type names
-            if helpers::is_reserved_name(variable_name) {
-                return Err(Error::TypeUnresolved(format!(
-                    "Cannot use reserved primitive type '{}' as a variable name",
-                    variable_name
-                )));
-            }
-
             let local_index = self.local_count;
             self.local_count += 1;
 
@@ -1537,20 +1635,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // instead of whole-value narrowing.
             // This enables patterns like `=[Nil, ys]` to narrow the first field
             // so subsequent branches know the first field is NOT Nil.
-            let field_complement_info = analyze_tuple_pattern_for_complement(
-                &pattern,
-                value_type,
-                self.program,
-            )
-            .and_then(|(field_idx, constrained_type)| {
-                // Use narrowed field type if available (from complement of previous branch),
-                // otherwise fall back to static field type from tuple definition.
-                // This ensures that for subsequent branches, the "original" type
-                // is the narrowed type, so complement calculation is correct.
-                let original = get_field_narrowing(&self.scopes, &value_provenance, field_idx)
-                    .or_else(|| get_field_type(value_type, field_idx, &*self.program))?;
-                Some((field_idx, original, constrained_type))
-            });
+            let field_complement_info =
+                analyze_tuple_pattern_for_complement(&pattern, value_type, self.program).and_then(
+                    |(field_idx, constrained_type)| {
+                        // Use narrowed field type if available (from complement of previous branch),
+                        // otherwise fall back to static field type from tuple definition.
+                        // This ensures that for subsequent branches, the "original" type
+                        // is the narrowed type, so complement calculation is correct.
+                        // (Sequential, not an `or_else` closure: `get_field_type` now borrows
+                        // `&mut self.program`, which can't be captured alongside `&self.scopes`.)
+                        let original =
+                            match get_field_narrowing(&self.scopes, &value_provenance, field_idx) {
+                                Some(t) => Some(t),
+                                None => get_field_type(value_type, field_idx, self.program),
+                            }?;
+                        Some((field_idx, original, constrained_type))
+                    },
+                );
 
             if let Some((field_idx, original_field_type, constrained_type)) = field_complement_info
             {
@@ -1612,7 +1713,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         parameter_provenance: Provenance,
         on_no_match: Option<usize>,
         scope_kind: ScopeKind,
+        is_function_body: bool,
     ) -> Result<usize, Error> {
+        // Take ownership of the dispatch collection for the duration of this (outermost
+        // function-body) block, so nested blocks — compiled via recursive calls with
+        // `is_function_body == false` — do not collect into it.
+        let mut dispatch = if is_function_body {
+            self.collected_dispatch.take()
+        } else {
+            None
+        };
+
         let mut next_branch_jumps = Vec::new();
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
@@ -1639,8 +1750,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             scope_kind,
         ));
 
-        // Track pending complement narrowing from previous branch
-        let mut pending_complement: Option<(Provenance, usize)> = None;
+        // Negative narrowing information accumulated across previous branches: reaching a
+        // branch means none of the earlier patterns matched, so each entry records "this
+        // provenance is no longer compatible with an earlier branch's pattern". Keyed by
+        // provenance; a later branch refining the same provenance replaces its entry.
+        // Accumulating (rather than carrying only the previous branch's complement) lets
+        // per-element tuple narrowings from non-adjacent branches survive.
+        let mut accumulated_complements: Vec<(Provenance, usize)> = Vec::new();
 
         // Track whether the block exhaustively covers all type variants.
         // Assume not exhaustive until proven otherwise by complement narrowing.
@@ -1649,10 +1765,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         for (i, branch) in expression.branches.iter().enumerate() {
             let is_last_branch = i == expression.branches.len() - 1;
 
-            branch_starts.push(self.codegen.instructions.len());
+            // A branch contributes to the dispatch table only if it is a pure parameter
+            // dispatch; any other branch shape invalidates the whole table.
+            let dispatch_branch = dispatch.is_some() && branch_is_parameter_dispatch(branch);
+            if dispatch.is_some()
+                && !dispatch_branch
+                && let Some(d) = &mut dispatch
+            {
+                d.valid = false;
+            }
 
-            // Track complement from previous branch for potential propagation
-            let mut applied_complement: Option<(Provenance, usize)> = None;
+            branch_starts.push(self.codegen.instructions.len());
 
             if i > 0 {
                 self.codegen.add_instruction(Instruction::Pop);
@@ -1667,18 +1790,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 scope.bindings.clear();
                 scope.narrowings = provenance::Narrowings::default();
 
-                // Apply complement narrowing from previous branch (if available)
-                // Keep a copy to propagate if this branch doesn't record its own narrowing
-                applied_complement = pending_complement.take();
-                if let Some((ref prov, complement)) = applied_complement {
-                    apply_narrowing(&mut self.scopes, prov, complement, self.program);
+                // Re-apply the complement narrowings accumulated from ALL previous branches.
+                // Applying every accumulated complement — not just the immediately preceding
+                // branch's — lets per-element tuple narrowings from non-adjacent branches
+                // survive: matching `=[Rational[..], _]` then `=[_, Rational[..]]` narrows
+                // both elements to 'int in a final `=[a, b]` branch.
+                for (prov, complement) in &accumulated_complements {
+                    apply_narrowing(&mut self.scopes, prov, *complement, self.program);
                 }
             }
 
             // Create a narrowing instance for this branch's condition
             let mut narrowing = Narrowing::new();
-            // Track if we had a complement from previous branch (to propagate if needed)
-            let had_previous_complement = applied_complement.is_some();
 
             // Record existing bindings before compiling condition - we'll narrow new ones later
             let bindings_before_condition: std::collections::HashSet<String> = self
@@ -1696,24 +1819,38 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Some(&mut narrowing),
             )?;
 
-            // If complement narrowing is valid, compute complement for exhaustiveness check
-            // and (for non-last branches) to narrow subsequent branches
+            // Capture this branch's parameter guard (now that the condition's pattern has
+            // narrowed it) and the branch_types length, so we can pair the guard with the
+            // result type pushed below.
+            let branch_guard = if dispatch_branch {
+                Some(self.branch_parameter_guard(branch))
+            } else {
+                None
+            };
+            let branch_types_before = branch_types.len();
+
+            // If complement narrowing is valid, compute the complement for the exhaustiveness
+            // check and (for non-last branches) accumulate it to narrow subsequent branches.
             if let Some((prov, original, narrowed)) = narrowing.take() {
                 let complement = compute_complement(original, narrowed, self.program);
                 if self.is_never(complement) {
                     // All variants covered - block is exhaustive
                     is_exhaustive = true;
                 } else if !is_last_branch {
-                    // Store complement for narrowing subsequent branches
-                    pending_complement = Some((prov, complement));
+                    // Accumulate (or refine) this provenance's complement. It was computed
+                    // against the already-accumulated narrowing for this provenance, so
+                    // replacing any prior entry for the same provenance keeps it correct.
+                    if let Some(entry) =
+                        accumulated_complements.iter_mut().find(|(p, _)| *p == prov)
+                    {
+                        entry.1 = complement;
+                    } else {
+                        accumulated_complements.push((prov, complement));
+                    }
                 }
-            } else if had_previous_complement && !is_last_branch {
-                // This branch didn't record its own narrowing, but we had a complement
-                // from a previous branch. Propagate it to subsequent branches.
-                // This handles cases like { a ~> =None | f[a] | g[a] } where the
-                // narrowing from branch 1 should apply to branches 2 and 3.
-                pending_complement = applied_complement;
             }
+            // A branch that records no narrowing of its own leaves the accumulated complements
+            // untouched; they persist to subsequent branches automatically.
 
             // If condition is compile-time NIL (won't match), skip this branch entirely
             if self.is_nil(condition_type) {
@@ -1721,6 +1858,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Otherwise, nil causes fallthrough to the next branch
                 if is_last_branch {
                     branch_types.push(condition_type);
+                }
+                // A statically-dead branch is an unusual shape for a dispatch function; be
+                // conservative and abandon the case table rather than reason about it.
+                if let Some(d) = &mut dispatch {
+                    d.valid = false;
                 }
                 continue;
             }
@@ -1736,7 +1878,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 next_branch_jumps.push((next_branch_jump, i + 1, needs_cleanup));
 
                 // Apply forward narrowing: if condition succeeded (non-nil), narrow to exclude nil.
-                // This enables type refinement like { a => %math.add[a, 1] } when a: [] | int
+                // This enables type refinement like { a => %num.add[a, 1] } when a: [] | int
                 if self.contains_nil(condition_type) {
                     let truthy_type = self.without_nil(condition_type);
                     // Narrow the source variable if it has trackable provenance
@@ -1824,6 +1966,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if self.local_count > param_local + 1 {
                     self.codegen
                         .add_instruction(Instruction::Reset(param_local + 1));
+                }
+            }
+
+            // Record this branch's (guard, result) for the dispatch table. Exactly one result
+            // type is pushed for a live branch; if the count didn't grow by one (e.g. a
+            // non-last branch whose condition was purely nil), abandon the table.
+            if let Some(d) = &mut dispatch {
+                match branch_guard {
+                    Some(guard) if branch_types.len() == branch_types_before + 1 => {
+                        d.branches.push((guard, branch_types[branch_types_before]));
+                    }
+                    _ => d.valid = false,
                 }
             }
 
@@ -1920,6 +2074,35 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if !is_exhaustive {
             let nil_type = self.program.register_type(Type::nil());
             branch_types.push(nil_type);
+            // A non-exhaustive body can fall through to nil for some arguments, which the
+            // per-branch case table cannot express — so don't use it for return-type dispatch.
+            if let Some(d) = &mut dispatch {
+                d.valid = false;
+            }
+        }
+
+        if is_function_body {
+            // Record the unhandled parameter type if this body is a non-exhaustive *enumeration*
+            // (every branch is a variant pattern, so each contributed a dispatch guard). The
+            // return-type check uses it to name the missing cases. Cleared otherwise.
+            self.last_uncovered = None;
+            let enumeration_guards: Option<Vec<usize>> = if is_exhaustive {
+                None
+            } else {
+                dispatch.as_ref().and_then(|d| {
+                    (!d.branches.is_empty() && d.branches.len() == expression.branches.len())
+                        .then(|| d.branches.iter().map(|(guard, _)| *guard).collect())
+                })
+            };
+            if let Some(guards) = enumeration_guards {
+                let covered = typing::union_type_ids(self.program, guards);
+                let uncovered = compute_complement(parameter_type, covered, self.program);
+                if !self.is_never(uncovered) {
+                    self.last_uncovered = Some(uncovered);
+                }
+            }
+            // Hand the dispatch collection back to the enclosing function body.
+            self.collected_dispatch = dispatch;
         }
 
         Ok(typing::union_type_ids(self.program, branch_types))
@@ -2013,7 +2196,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 end_jumps.push(end_jump);
 
                 // After the jump, if chain could be nil, narrow bindings created in this chain.
-                // This handles cases like `a ~> =x, %math.add[x, 1]` where x needs to be
+                // This handles cases like `a ~> =x, %num.add[x, 1]` where x needs to be
                 // narrowed before the next chain uses it.
                 if self.contains_nil(chain_type) {
                     narrow_nil_from_new_bindings(
@@ -2544,39 +2727,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Validate that a receive function in a select has the correct return type
-    fn validate_receive_function(
-        &mut self,
-        source: &ast::Chain,
-        source_type_id: usize,
-    ) -> Result<(), Error> {
-        // Only validate if this is a callable (receive function)
-        let Some(Type::Callable { result, .. }) = self.program.lookup_type(source_type_id) else {
-            return Ok(());
-        };
-        let result_id = *result;
-
-        // Identity functions (no body) and variable references are always allowed
-        if !source
-            .terms
-            .iter()
-            .any(|term| matches!(term, ast::Term::Function(func) if func.body.is_some()))
-        {
-            return Ok(());
-        }
-
-        // For functions with bodies, the result type must be nil, Ok, or a union of them
-        let is_valid = self.is_nil_or_ok(result_id);
-
-        if !is_valid {
-            return Err(Error::TypeMismatch {
-                expected: "receive function with body must return [] or Ok".to_string(),
-                found: quiver_core::format::format_type_by_id(&*self.program, result_id),
-            });
-        }
-
-        Ok(())
-    }
-
     /// Compile select sources and return their types
     fn compile_select_sources(
         &mut self,
@@ -2603,9 +2753,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
 
             let source_type = self.compile_chain(source.clone(), None, ripple_param)?;
-
-            // Validate receive functions
-            self.validate_receive_function(source, source_type)?;
 
             source_types.push(source_type);
         }
@@ -3285,6 +3432,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     block_provenance,
                     None,
                     ScopeKind::Block,
+                    false,
                 )?;
                 // Block results have unknown provenance
                 Ok((ty, Provenance::Unknown))
@@ -3414,7 +3562,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
 
-                // The reference's span (`foo` in `&foo`, `%math.add` in `&%math.add`), for
+                // The reference's span (`foo` in `&foo`, `%num.add` in `&%num.add`), for
                 // hover and go-to-definition on the referenced symbol.
                 let ref_span = access.span.get();
 
@@ -3692,6 +3840,107 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Materialize the current narrowed type of the block parameter, merging any per-field
+    /// narrowings (recorded against `Provenance::Parameter`) onto a single-tuple base. Used to
+    /// capture a branch's guard type — the parameter values that reach it — for the dispatch
+    /// table. Falls back to the whole-parameter narrowing when the base is not a single tuple.
+    fn current_parameter_guard(&mut self) -> usize {
+        let base =
+            narrowing::get_type_for_provenance(&self.scopes, &Provenance::Parameter, self.program);
+
+        let field_narrowings: Vec<(usize, usize)> = self
+            .scopes
+            .last()
+            .map(|s| {
+                s.narrowings
+                    .fields
+                    .iter()
+                    .filter(|(prov, _, _)| matches!(prov, Provenance::Parameter))
+                    .map(|(_, idx, ty)| (*idx, *ty))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if field_narrowings.is_empty() {
+            return base;
+        }
+
+        let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(base).cloned() else {
+            return base;
+        };
+        let Some(info) = self.program.lookup_tuple(tuple_id).cloned() else {
+            return base;
+        };
+
+        let mut fields = info.fields;
+        for (idx, ty) in field_narrowings {
+            if let Some(field) = fields.get_mut(idx) {
+                field.1 = ty;
+            }
+        }
+        let new_tuple_id = self.program.register_tuple(info.name, fields);
+        self.program.register_type(Type::Tuple(new_tuple_id))
+    }
+
+    /// The parameter guard type for a dispatch branch: the complement-narrowed parameter (from
+    /// `current_parameter_guard`, capturing earlier branches' failures) further refined by this
+    /// branch's own positive pattern. Per-field narrowing is needed because the general narrowing
+    /// machinery only filters top-level union variants, never a single tuple's field types — so a
+    /// pattern like `=[Rational[..], y]` would otherwise leave the parameter unrefined.
+    fn branch_parameter_guard(&mut self, branch: &ast::Branch) -> usize {
+        let base = self.current_parameter_guard();
+
+        let Some(ast::Match::Tuple(pattern)) = leading_match(branch) else {
+            return base;
+        };
+        let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(base).cloned() else {
+            return base;
+        };
+        let Some(info) = self.program.lookup_tuple(tuple_id).cloned() else {
+            return base;
+        };
+        if info.fields.len() != pattern.fields.len() {
+            return base;
+        }
+
+        let mut fields = info.fields;
+        let mut refined = false;
+        for (idx, field) in pattern.fields.iter().enumerate() {
+            if let ast::Match::Tuple(sub) = &field.pattern
+                && let Some(constrained) =
+                    narrowing::matching_tuple_type(sub, fields[idx].1, self.program)
+            {
+                fields[idx].1 = constrained;
+                refined = true;
+            }
+        }
+        if !refined {
+            return base;
+        }
+        let new_tuple_id = self.program.register_tuple(info.name, fields);
+        self.program.register_type(Type::Tuple(new_tuple_id))
+    }
+
+    /// If the called function has a dispatch case table, compute its result type from the
+    /// concrete argument type: the union of the result types of every branch whose parameter
+    /// guard could match the argument. Returns `None` when there is no table or no branch
+    /// applies (the caller then falls back to the function's frozen result type).
+    fn dispatch_result(&mut self, callable_type_id: usize, arg_type: usize) -> Option<usize> {
+        let table = self.case_tables.get(&callable_type_id)?.clone();
+        let results: Vec<usize> = table
+            .into_iter()
+            .filter(|(guard, _)| {
+                quiver_core::types::types_overlap(*guard, arg_type, &*self.program)
+            })
+            .map(|(_, result)| result)
+            .collect();
+        if results.is_empty() {
+            None
+        } else {
+            Some(typing::union_type_ids(self.program, results))
+        }
+    }
+
     fn apply_value_to_type(
         &mut self,
         target_type_id: usize,
@@ -3749,7 +3998,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         found: quiver_core::format::format_type_by_id(&*self.program, value_type),
                     });
                 }
-                result_id
+                // If this function dispatches on its parameter, specialize the result type to
+                // the concrete argument; otherwise fall back to its single frozen result.
+                self.dispatch_result(target_type_id, arg_type)
+                    .unwrap_or(result_id)
             };
 
             // Resolve cycles in result type that refer to the function itself
