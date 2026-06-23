@@ -2,6 +2,8 @@ use crate::bytecode::Constant;
 use crate::program::Program;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
 use crate::value::{Binary, Value};
+use num_bigint::BigInt;
+use num_traits::{One, Signed, Zero};
 
 /// Trait for looking up binary data from Binary references
 pub trait BinaryLookup {
@@ -307,6 +309,16 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                     return format!("{}/{}", numer, denom);
                 }
 
+                // Check for a single-radical surd `Surd[a, b, n]` (`a + b√n`) and render it in
+                // mathematical notation rather than as a raw tuple.
+                if tuple_info.name.as_deref() == Some("Surd")
+                    && let [a_val, b_val, Value::Integer(radicand)] = elements.as_slice()
+                    && let Some((an, ad)) = coeff_ratio(a_val, type_lookup)
+                    && let Some((bn, bd)) = coeff_ratio(b_val, type_lookup)
+                {
+                    return format_surd(&an, &ad, &bn, &bd, radicand);
+                }
+
                 let name = tuple_info.name.as_deref();
                 let field_strs: Vec<String> = elements
                     .iter()
@@ -343,5 +355,56 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                 }
             }
         }
+    }
+}
+
+/// Interpret a surd coefficient — a bare integer or a `Rational[n, d]` tuple — as `(n, d)`.
+fn coeff_ratio<T: TypeLookup>(value: &Value, lookup: &T) -> Option<(BigInt, BigInt)> {
+    match value {
+        Value::Integer(n) => Some((n.clone(), BigInt::one())),
+        Value::Tuple(tuple_id, elements) => {
+            let info = lookup.lookup_tuple(*tuple_id)?;
+            if info.name.as_deref() == Some("Rational")
+                && let [Value::Integer(n), Value::Integer(d)] = elements.as_slice()
+            {
+                return Some((n.clone(), d.clone()));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Render a single-radical surd `(an/ad) + (bn/bd)·√radicand` as e.g. `√2`, `2√2`, `(1/2)√2`,
+/// `1 + √2`, or `3 - 2√2`. Coefficients are canonical (`bn ≠ 0`, denominators positive).
+fn format_surd(an: &BigInt, ad: &BigInt, bn: &BigInt, bd: &BigInt, radicand: &BigInt) -> String {
+    let coeff = |n: &BigInt, d: &BigInt| {
+        if d.is_one() {
+            n.to_string()
+        } else {
+            format!("{}/{}", n, d)
+        }
+    };
+
+    // The √ term, using |b| (its sign is carried by the connector below).
+    let bn_abs = bn.abs();
+    let magnitude = if bn_abs.is_one() && bd.is_one() {
+        String::new() // coefficient 1 → just `√n`
+    } else if bd.is_one() {
+        bn_abs.to_string() // integer coefficient → `k√n`
+    } else {
+        format!("({})", coeff(&bn_abs, bd)) // rational coefficient → `(p/q)√n`
+    };
+    let term = format!("{}√{}", magnitude, radicand);
+
+    if an.is_zero() {
+        if bn.is_negative() {
+            format!("-{}", term)
+        } else {
+            term
+        }
+    } else {
+        let connector = if bn.is_negative() { " - " } else { " + " };
+        format!("{}{}{}", coeff(an, ad), connector, term)
     }
 }
