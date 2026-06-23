@@ -136,6 +136,13 @@ fn test_pin_bin_type() {
 }
 
 #[test]
+fn test_pin_default_type() {
+    // `='` references the enclosing module's default type, like `'int` references a named one.
+    quiver().evaluate("' = A | B;\nA ~> ='").expect("A");
+    quiver().evaluate("' = A | B;\nC ~> ='").expect("[]");
+}
+
+#[test]
 fn test_type_narrowing_in_blocks() {
     // Test type narrowing for int
     quiver()
@@ -162,10 +169,12 @@ fn test_type_narrowing_in_function() {
 
 #[test]
 fn test_narrowing_multiple_matching_variants() {
-    // Multiple variants match the pattern structurally
+    // Multiple variants match the pattern structurally: `=A[x]` covers both `A['int]` and
+    // `A['bin]`, so `x` is `'int | 'bin`. The argument `A[1]` is an `A`, so it always matches —
+    // the unhandled `B` is unreachable here, so the result carries no `| []`.
     quiver()
         .evaluate("f = #(A['int] | A['bin] | B['int]) { =A[x] => x }, A[1] ~> f")
-        .expect_type("'bin | 'int | []");
+        .expect_type("'bin | 'int");
 }
 
 #[test]

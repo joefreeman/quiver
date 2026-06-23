@@ -300,6 +300,16 @@ fn branch_is_parameter_dispatch(branch: &ast::Branch) -> bool {
             .all(|t| matches!(t, ast::Term::Match(_)))
 }
 
+/// The function index of a resolved value, when it is (directly) a function. Used at a call
+/// site to select the callee's dispatch table exactly, by identity rather than by its (possibly
+/// shared) callable type.
+fn value_fn_index(value: &Value) -> Option<usize> {
+    match value {
+        Value::Function(index, _) => Some(*index),
+        _ => None,
+    }
+}
+
 /// The leading pattern of a branch condition (its binding `match_pattern`, or a first
 /// `=pattern` term), through which the branch dispatches on the parameter.
 fn leading_match(branch: &ast::Branch) -> Option<&ast::Match> {
@@ -347,10 +357,18 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // enumeration.
     last_uncovered: Option<usize>,
 
-    // Case tables for functions that dispatch on their parameter: callable type id → list of
-    // (parameter guard type, branch result type). Consulted at call sites to compute a result
-    // type from the concrete argument type. Survives across module compilation (same Compiler).
-    case_tables: HashMap<usize, Vec<(usize, usize)>>,
+    // Case tables for functions that dispatch on their parameter: a list of (parameter guard
+    // type, branch result type), consulted at call sites to compute a result type from the
+    // concrete argument type. Keyed by *function index* (unique per definition), so two
+    // structurally-identical dispatch functions (e.g. `num.add` and `num.div`, which share a
+    // callable type but have different tables) never clobber each other.
+    fn_case_tables: HashMap<usize, Vec<(usize, usize)>>,
+    // Maps a callable *type id* to the function whose table to use when the callee isn't
+    // statically known at the call site (the common case: a local dispatch function). A type
+    // shared by dispatch functions with *differing* tables is ambiguous and absent here; calls
+    // through it then rely on the statically-known callee (imports/direct calls carry it).
+    // Both survive across module compilation (same Compiler instance).
+    case_tables: HashMap<usize, usize>,
 
     // Span of the term currently being compiled, so an error can be located in source.
     // Only set when a recorder is interested (LSP); harmless otherwise.
@@ -452,6 +470,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             current_receive_type_id: never_id,
             collected_dispatch: None,
             last_uncovered: None,
+            fn_case_tables: HashMap::new(),
             case_tables: HashMap::new(),
             current_span: None,
             recorder,
@@ -1442,27 +1461,46 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         let function_instructions = std::mem::take(&mut self.codegen.instructions);
 
-        // Create type information for the function
+        // If every branch of the body was a pure parameter dispatch, record its case table so
+        // calls can specialize the result type to the concrete argument (return-type dispatch).
+        let dispatch_table = dispatch
+            .filter(|d| d.valid && !d.branches.is_empty())
+            .map(|d| d.branches);
+
+        // Create type information for the function.
         let callable_type_id = self.program.register_type(Type::Callable {
             parameter: parameter_type,
             result: body_type,
             receive: receive_type,
         });
 
-        // If every branch of the body was a pure parameter dispatch, record its case table so
-        // calls can specialize the result type to the concrete argument (return-type dispatch).
-        if let Some(dispatch) = dispatch
-            && dispatch.valid
-            && !dispatch.branches.is_empty()
-        {
-            self.case_tables.insert(callable_type_id, dispatch.branches);
-        }
-
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
             captures: unique_captures.len(),
             type_id: callable_type_id,
         });
+
+        // Record the dispatch case table, keyed by this function's (unique) index. Also map the
+        // callable *type* to this function so a call whose callee isn't statically identified can
+        // still specialize — unless another dispatch function already claimed the type with a
+        // *different* table, which makes the type ambiguous (dropped from `case_tables`). Two
+        // functions with an identical table (e.g. `num.add`/`num.sub`) keep the type unambiguous.
+        if let Some(branches) = dispatch_table {
+            let canonical = match self.case_tables.get(&callable_type_id).copied() {
+                None => Some(function_index),
+                Some(existing_fn) => (self.fn_case_tables.get(&existing_fn) == Some(&branches))
+                    .then_some(existing_fn),
+            };
+            match canonical {
+                Some(fi) => {
+                    self.case_tables.insert(callable_type_id, fi);
+                }
+                None => {
+                    self.case_tables.remove(&callable_type_id);
+                }
+            }
+            self.fn_case_tables.insert(function_index, branches);
+        }
 
         self.codegen.instructions = saved_instructions;
         self.scopes = saved_scopes;
@@ -1758,6 +1796,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // per-element tuple narrowings from non-adjacent branches survive.
         let mut accumulated_complements: Vec<(Provenance, usize)> = Vec::new();
 
+        // Parameter guards of the branches that *faithfully* cover their type — i.e. whose
+        // pattern narrows structurally (so its complement is a real type). Value-pattern
+        // branches (`=A[1]`, `=5`, `=&y`, partials) are excluded: their guard is the whole
+        // variant type but at runtime they match only a single value, so they don't actually
+        // cover that region. Used to compute the uncovered (fall-through-to-nil) region for a
+        // non-exhaustive enumeration's synthetic dispatch branch; see below.
+        let mut faithfully_covered: Vec<usize> = Vec::new();
+
         // Track whether the block exhaustively covers all type variants.
         // Assume not exhaustive until proven otherwise by complement narrowing.
         let mut is_exhaustive = false;
@@ -1832,6 +1878,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // If complement narrowing is valid, compute the complement for the exhaustiveness
             // check and (for non-last branches) accumulate it to narrow subsequent branches.
             if let Some((prov, original, narrowed)) = narrowing.take() {
+                // This branch narrowed structurally (its narrowing wasn't disabled by a value
+                // requirement), so it faithfully covers its guard. Record the guard so the
+                // uncovered region can be computed as the complement of these — never the
+                // over-broad guards of value-pattern branches.
+                if let Some(guard) = branch_guard {
+                    faithfully_covered.push(guard);
+                }
                 let complement = compute_complement(original, narrowed, self.program);
                 if self.is_never(complement) {
                     // All variants covered - block is exhaustive
@@ -2069,38 +2122,50 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Pop scope
         self.scopes.pop();
 
+        // The uncovered (fall-through-to-nil) region of a non-exhaustive enumeration. Computed
+        // once and used both to synthesise a dispatch branch and to name the unhandled cases in
+        // a `NonExhaustiveReturn` diagnostic. `None` when the block is exhaustive or isn't a
+        // clean parameter-dispatch enumeration.
+        let mut uncovered_region: Option<usize> = None;
+
         // If the block is not exhaustive, add nil to the result type
         // (since some inputs might not match any branch)
         if !is_exhaustive {
             let nil_type = self.program.register_type(Type::nil());
             branch_types.push(nil_type);
-            // A non-exhaustive body can fall through to nil for some arguments, which the
-            // per-branch case table cannot express — so don't use it for return-type dispatch.
-            if let Some(d) = &mut dispatch {
+            // Inputs matching no explicit branch fall through to nil. For a non-exhaustive
+            // *enumeration* (every branch is a pure parameter dispatch) we model that
+            // fall-through as a synthetic `uncovered -> nil` dispatch branch rather than
+            // abandoning the table. This keeps return-type dispatch valid and precise: an
+            // argument fully within the covered region infers its exact branch result, while an
+            // argument that reaches the uncovered region (a genuinely unhandled variant, or a
+            // nil flowing into an op that only enumerates the non-nil variants) picks up nil —
+            // matching the runtime, which yields nil when no branch matches.
+            //
+            // The uncovered region is the complement of the *faithfully* covered guards, not of
+            // every guard: a value-pattern branch (`=A[1]`) has an over-broad guard (`A['int]`)
+            // but matches only one value, so its slack must remain in the fall-through set or we
+            // would unsoundly type a non-matching argument as non-nil.
+            let is_enumeration = dispatch.as_ref().is_some_and(|d| d.valid);
+            if is_enumeration {
+                let covered = typing::union_type_ids(self.program, faithfully_covered);
+                let uncovered = compute_complement(parameter_type, covered, self.program);
+                if !self.is_never(uncovered) {
+                    uncovered_region = Some(uncovered);
+                    dispatch
+                        .as_mut()
+                        .unwrap()
+                        .branches
+                        .push((uncovered, nil_type));
+                }
+            } else if let Some(d) = &mut dispatch {
                 d.valid = false;
             }
         }
 
         if is_function_body {
-            // Record the unhandled parameter type if this body is a non-exhaustive *enumeration*
-            // (every branch is a variant pattern, so each contributed a dispatch guard). The
-            // return-type check uses it to name the missing cases. Cleared otherwise.
-            self.last_uncovered = None;
-            let enumeration_guards: Option<Vec<usize>> = if is_exhaustive {
-                None
-            } else {
-                dispatch.as_ref().and_then(|d| {
-                    (!d.branches.is_empty() && d.branches.len() == expression.branches.len())
-                        .then(|| d.branches.iter().map(|(guard, _)| *guard).collect())
-                })
-            };
-            if let Some(guards) = enumeration_guards {
-                let covered = typing::union_type_ids(self.program, guards);
-                let uncovered = compute_complement(parameter_type, covered, self.program);
-                if !self.is_never(uncovered) {
-                    self.last_uncovered = Some(uncovered);
-                }
-            }
+            // The uncovered region (if any) names the unhandled cases for the return-type check.
+            self.last_uncovered = uncovered_region;
             // Hand the dispatch collection back to the enclosing function body.
             self.collected_dispatch = dispatch;
         }
@@ -2268,20 +2333,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         let terms: Vec<_> = chain.terms.into_iter().collect();
-        let num_terms = terms.len();
-        for (i, term) in terms.iter().enumerate() {
-            let is_last_term = i == num_terms - 1;
-            // Check if the NEXT term needs the full type including nil:
-            // - Blocks need it for proper pattern matching in branches
-            // - Match needs it for proper type checking
-            let next_needs_full_type = !is_last_term
-                && matches!(
-                    terms.get(i + 1),
-                    Some(ast::Term::Block(_))
-                        | Some(ast::Term::Select(_, _))
-                        | Some(ast::Term::Match(_))
-                );
-
+        for term in terms.iter() {
             let (term_type, term_prov) = self.compile_term(
                 term.clone(),
                 current_type,
@@ -2290,22 +2342,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 ripple_context,
                 narrowing.as_deref_mut(),
             )?;
-            // For non-last terms that aren't followed by pattern matching terms: if the type
-            // contains nil as part of a union (not nil alone), strip nil for subsequent terms.
-            // At runtime, nil causes the chain to short-circuit (or fail), so subsequent
-            // non-pattern terms only see non-nil values.
-            // Pattern matching terms need the full type for proper type checking.
-            // Note: Don't strip if the type IS nil (not a union containing nil), as that
-            // would result in the never type which breaks pattern matching.
-            let should_strip_nil = !is_last_term
-                && !next_needs_full_type
-                && self.contains_nil(term_type)
-                && !self.is_nil(term_type); // Don't strip if type IS nil
-            current_type = Some(if should_strip_nil {
-                self.without_nil(term_type)
-            } else {
-                term_type
-            });
+            // Nil flows through a chain like any other value: within a chain, no term
+            // short-circuits on nil (a failed mid-chain match yields nil that flows into
+            // the next term; the only short-circuit is between `,`-separated chains, handled
+            // in `compile_sequence`). So a term's full type — nil included — flows onward, and
+            // a subsequent term that cannot accept nil is a genuine type error.
+            current_type = Some(term_type);
             current_prov = term_prov;
         }
 
@@ -3106,7 +3148,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
 
                 if let (true, Some(val_type)) = (is_callable, value_type) {
-                    let ty = self.apply_value_to_type(accessed_type, val_type, implicit_flow)?;
+                    let ty =
+                        self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -3142,7 +3185,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.compile_member_access(&name, access.accessors)?;
 
                 if let (true, Some(val_type)) = (is_callable, value_type) {
-                    let ty = self.apply_value_to_type(accessed_type, val_type, implicit_flow)?;
+                    let ty =
+                        self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -3199,7 +3243,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
 
                 if let (true, Some(val_type)) = (is_callable, value_type) {
-                    let ty = self.apply_value_to_type(accessed_type, val_type, implicit_flow)?;
+                    // The resolved member is a concrete function value, so its dispatch table can
+                    // be selected exactly by index — vital when its type is shared with another
+                    // dispatch function (e.g. `%num.add` vs `%num.div`).
+                    let callee_fn = value_fn_index(&resolved_value);
+                    let ty = self.apply_value_to_type(
+                        accessed_type,
+                        val_type,
+                        implicit_flow,
+                        callee_fn,
+                    )?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, Provenance::Unknown))
@@ -3221,7 +3274,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
 
                 if let Some(val_type) = value_type {
-                    let ty = self.apply_value_to_type(callable_type, val_type, implicit_flow)?;
+                    let ty =
+                        self.apply_value_to_type(callable_type, val_type, implicit_flow, None)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((callable_type, Provenance::Unknown))
@@ -3528,7 +3582,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Apply value if present (for message sends like `10 ~> .`)
                 let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(self_type, val_type, false)?
+                    self.apply_value_to_type(self_type, val_type, false, None)?
                 } else {
                     self_type
                 };
@@ -3550,7 +3604,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Apply value if present (for message sends like `10 ~> @1`)
                 let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(process_type, val_type, false)?
+                    self.apply_value_to_type(process_type, val_type, false, None)?
                 } else {
                     process_type
                 };
@@ -3663,7 +3717,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // The callable is below the argument on the stack; swap so the call sees it on top.
                 self.codegen.add_instruction(Instruction::Rotate(2));
                 // An explicit argument (`f [5]`) is type-checked, not an implicit flow.
-                let ty = self.apply_value_to_type(callable_type, arg_type, false)?;
+                let ty = self.apply_value_to_type(callable_type, arg_type, false, None)?;
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Apply(access, arg) => {
@@ -3925,8 +3979,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// concrete argument type: the union of the result types of every branch whose parameter
     /// guard could match the argument. Returns `None` when there is no table or no branch
     /// applies (the caller then falls back to the function's frozen result type).
-    fn dispatch_result(&mut self, callable_type_id: usize, arg_type: usize) -> Option<usize> {
-        let table = self.case_tables.get(&callable_type_id)?.clone();
+    ///
+    /// The table is found by the statically-known callee function index when available (always
+    /// exact), else by the callable type — which resolves only when that type isn't shared by
+    /// dispatch functions with differing tables.
+    fn dispatch_result(
+        &mut self,
+        callable_type_id: usize,
+        callee_fn: Option<usize>,
+        arg_type: usize,
+    ) -> Option<usize> {
+        let fn_index = callee_fn.or_else(|| self.case_tables.get(&callable_type_id).copied())?;
+        let table = self.fn_case_tables.get(&fn_index)?.clone();
         let results: Vec<usize> = table
             .into_iter()
             .filter(|(guard, _)| {
@@ -3946,6 +4010,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         target_type_id: usize,
         value_type: usize,
         implicit_flow: bool,
+        callee_fn: Option<usize>,
     ) -> Result<usize, Error> {
         let target_type =
             self.program
@@ -4000,7 +4065,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 // If this function dispatches on its parameter, specialize the result type to
                 // the concrete argument; otherwise fall back to its single frozen result.
-                self.dispatch_result(target_type_id, arg_type)
+                self.dispatch_result(target_type_id, callee_fn, arg_type)
                     .unwrap_or(result_id)
             };
 

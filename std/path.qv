@@ -73,8 +73,11 @@ parse_ = #['%list<'%str>, '] {
     | =Relative[n] => %num.add [n, 1] ~> Relative[~]
   },
 
-  to_string: #' {
-    to_string_ [~, ""]
+  // Accepts a nil path (e.g. the result of an invalid `join`) and propagates it, so a nil flows
+  // through a `... ~> join ~> to_string` pipeline rather than being a type error. Matching the
+  // module's default type (`='`, a non-nil path) leaves nil to fall through to nil.
+  to_string: #(' | []) {
+    =' => to_string_ [~, ""]
   },
 
   absolute?: #' {

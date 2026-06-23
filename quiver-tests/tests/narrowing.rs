@@ -267,11 +267,14 @@ fn test_complement_propagates_across_multiple_branches() {
 
 #[test]
 fn test_non_type_failable_disables_complement() {
-    // Function call after type check disables complement narrowing
+    // Function call after type check disables complement narrowing, so `x` is not narrowed to
+    // `A` in the fallback branch and `x.a` is a member error. (`some_func` accepts nil because a
+    // failed `=A[a: 'int]` flows nil into it — nil propagates through a chain rather than
+    // short-circuiting it.)
     quiver()
         .evaluate(
             r#"
-            some_func = #(A[a: 'int]) -> A[a: 'int] { $ },
+            some_func = #(A[a: 'int] | []) { $ },
             make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
             { x ~> =A[a: 'int] ~> some_func => 1 | x.a }
@@ -738,17 +741,21 @@ fn test_multi_field_combination_exhaustive() {
 
 #[test]
 fn test_multi_field_non_exhaustive_keeps_nil() {
-    // Dropping a combination leaves the match non-total, so the result type still includes nil
-    // (the structural complement must not *over*-claim exhaustiveness).
+    // Dropping a combination (`[True, False]`) leaves the match non-total. An argument that can
+    // reach that combination — here `['b, 'b]`, since `widen` erases the literal `True` types —
+    // must therefore carry nil, since it falls through to nil at runtime (the structural
+    // complement must not *over*-claim exhaustiveness). A fully-covered argument like the literal
+    // `[True, True]` would correctly infer `'int` with no nil.
     quiver()
         .evaluate(
             r#"
             'b = True | False;
+            widen = #'b { $ },
             f = #['b, 'b] {
               | =[True, True] => 1
               | =[False, x] => 3
             },
-            [True, True] ~> f
+            [True ~> widen, True ~> widen] ~> f
             "#,
         )
         .expect_type("'int | []");

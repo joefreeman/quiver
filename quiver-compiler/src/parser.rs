@@ -1713,8 +1713,13 @@ fn inline_type_expression(input: Span) -> IResult<Span, Type> {
     alt((
         // Parenthesized type expression: ('int | 'bin), ('list<'int>), etc.
         delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+        // Module type: '%mod, '%mod.name. Before type_identifier to match '% first.
+        module_type,
         // Type name, optionally with arguments: 'int, 'list<'int>, 'tree<'int, 'bin>
         type_identifier,
+        // The enclosing module's default type: a bare `'` (or `'<args>`). After the above so
+        // `'int`/`'%mod` win; this lets a pattern reference the default type, e.g. `='`.
+        self_default_type,
         // Partial type whose fields constrain by type: (mode: W), A(x: 'int)
         partial_type,
     ))(input)
