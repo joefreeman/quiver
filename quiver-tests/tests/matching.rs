@@ -143,6 +143,34 @@ fn test_pin_default_type() {
 }
 
 #[test]
+fn test_or_pattern_no_bindings() {
+    // `(p | q)` matches if either alternative matches; here neither binds anything.
+    let src = r#"[[], 5] ~> { =([[], _] | [_, []]) => "nil" | "ok" }"#;
+    quiver().evaluate(src).expect("\"nil\"");
+    let src = r#"[5, 6] ~> { =([[], _] | [_, []]) => "nil" | "ok" }"#;
+    quiver().evaluate(src).expect("\"ok\"");
+}
+
+#[test]
+fn test_or_pattern_shared_binding() {
+    // Both alternatives bind `x`, so the body sees it whichever matched.
+    let src = "'ab = A['int] | B['int];\nf = #'ab { =(A[x] | B[x]) => x },\nB[7] ~> f";
+    quiver().evaluate(src).expect("7");
+}
+
+#[test]
+fn test_or_pattern_inconsistent_bindings_is_error() {
+    // Alternatives that bind different variables are rejected at compile time.
+    let src = "'ab = A['int] | B['int];\nf = #'ab { =(A[x] | B[y]) => 9 },\nA[1] ~> f";
+    quiver().evaluate(src).expect_compile_error(
+        quiver_compiler::compiler::Error::OrPatternBindingMismatch {
+            expected: vec!["x".to_string()],
+            found: vec!["y".to_string()],
+        },
+    );
+}
+
+#[test]
 fn test_type_narrowing_in_blocks() {
     // Test type narrowing for int
     quiver()

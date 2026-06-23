@@ -173,6 +173,12 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             }
+            ast::Match::Or(alternatives) => {
+                // Visit each alternative's nested patterns and references
+                for alternative in alternatives {
+                    self.visit_match(alternative);
+                }
+            }
             // These don't contain nested patterns or references
             ast::Match::Identifier(_, _)
             | ast::Match::Literal(_)

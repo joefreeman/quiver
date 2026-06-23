@@ -299,6 +299,23 @@ P[x: 1, y: 2] ~> =(x: 'int)      // P[x: 1, y: 2]
 
 Identifiers in patterns bind by default. Use `&` to reference an existing variable instead of binding; type references (`'int`, `'point`, …) are always references and need no `&`.
 
+### Alternation
+
+A parenthesised, `|`-separated list of patterns is an *alternation*: it matches if any alternative matches.
+
+```quiver
+[[], 5] ~> =([[], _] | [_, []])   // matches (first element is nil)
+42 ~> =('int | 'bin)              // 42 (type alternatives)
+```
+
+Every alternative must bind the same set of variables, so the body sees them whichever one matched:
+
+```quiver
+shape ~> { =(Circle[r] | Square[r]) => area_from [r] | ... }   // both bind `r`
+```
+
+Binding different variables in different alternatives is a compile error. (A parenthesised group of named fields is a [partial pattern](#destructuring), not an alternation — the two are distinguished by `:`/`,` versus `|`, exactly as for type expressions.)
+
 ## Blocks
 
 A block is a braced expression, `{ … }`. It introduces a scope, and it is where branches (`|`) and condition-consequence matching (`=>`) live — these don't appear at the statement level. Like any chain, each branch starts from the block's parameter, so a value piped into a block is shared across all its branches:

@@ -1725,6 +1725,21 @@ fn inline_type_expression(input: Span) -> IResult<Span, Type> {
     ))(input)
 }
 
+/// An alternation pattern: `(p | q | …)`, two or more `|`-separated patterns in parentheses.
+/// Tried after partial patterns and type expressions, so `(x: T)` stays a partial and
+/// `('int | 'bin)` stays a type union; this captures groups with a genuinely structural
+/// alternative (e.g. `([[], _] | [_, []])`).
+fn or_pattern(input: Span) -> IResult<Span, Vec<Match>> {
+    delimited(
+        pair(char('('), wsc),
+        verify(
+            separated_list1(tuple((wsc, char('|'), wsc)), match_pattern),
+            |alts: &Vec<Match>| alts.len() >= 2,
+        ),
+        pair(wsc, char(')')),
+    )(input)
+}
+
 fn match_pattern(input: Span) -> IResult<Span, Match> {
     alt((
         // Variable pin with & prefix: &name checks against an existing variable's value.
@@ -1746,6 +1761,9 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         // Type reference: 'int, 'list<'t>, ('int | 'bin). Types need no & since they
         // are never bound. Must come after partial patterns to avoid ambiguity with (...).
         map(inline_type_expression, Match::Type),
+        // Alternation of (structural) patterns: `([[], _] | [_, []])`. After the type form so a
+        // pure type union stays a single `Match::Type`.
+        map(or_pattern, Match::Or),
         // Numeric literal patterns: decimal (`=1.5`) and fraction (`=1/3`), before bare
         // literals so the leading digits aren't consumed as a plain integer.
         match_decimal,

@@ -255,8 +255,7 @@ compare_ = #['opt, 'opt] {
   // (`[int, int]` infers `'int`, a rational operand infers `Rational`); surd operands route
   // to the surd kernel and infer the full `'%num` union.
   add: #['opt, 'opt] {
-    | =[[], _] => []
-    | =[_, []] => []
+    | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => surd_add_ [Surd[a, b, n], y]
     | =[x, Surd[a, b, n]] => surd_add_ [x, Surd[a, b, n]]
     | =[Rational[a, b], y] => radd_ [Rational[a, b], y ~> to_rational_]
@@ -264,8 +263,7 @@ compare_ = #['opt, 'opt] {
     | =[a, b] => __add__ [a, b]
   },
   sub: #['opt, 'opt] {
-    | =[[], _] => []
-    | =[_, []] => []
+    | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => surd_sub_ [Surd[a, b, n], y]
     | =[x, Surd[a, b, n]] => surd_sub_ [x, Surd[a, b, n]]
     | =[Rational[a, b], y] => rsub_ [Rational[a, b], y ~> to_rational_]
@@ -273,8 +271,7 @@ compare_ = #['opt, 'opt] {
     | =[a, b] => __subtract__ [a, b]
   },
   mul: #['opt, 'opt] {
-    | =[[], _] => []
-    | =[_, []] => []
+    | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => surd_mul_ [Surd[a, b, n], y]
     | =[x, Surd[a, b, n]] => surd_mul_ [x, Surd[a, b, n]]
     | =[Rational[a, b], y] => rmul_ [Rational[a, b], y ~> to_rational_]
@@ -285,8 +282,7 @@ compare_ = #['opt, 'opt] {
   // Division. With surd operands, rationalize; otherwise exact rational division (always a
   // rational, nil on divide-by-zero).
   div: #['opt, 'opt] {
-    | =[[], _] => []
-    | =[_, []] => []
+    | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => surd_div_ [Surd[a, b, n], y]
     | =[x, Surd[a, b, n]] => surd_div_ [x, Surd[a, b, n]]
     | =[x, y] => {

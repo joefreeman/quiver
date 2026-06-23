@@ -86,6 +86,12 @@ pub enum Error {
     MemberAccessOnNonTuple {
         target: String,
     },
+    /// An alternation pattern (`(p | q)`) whose alternatives bind different variables. Every
+    /// alternative must bind the same set, so the body sees them whichever one matched.
+    OrPatternBindingMismatch {
+        expected: Vec<String>,
+        found: Vec<String>,
+    },
 
     // Positional access
     PositionalIndexOutOfBounds {
@@ -179,6 +185,12 @@ impl std::fmt::Display for Error {
             }
             Error::MemberAccessOnNonTuple { target } => {
                 write!(f, "Cannot access a field on {target} (not a tuple)")
+            }
+            Error::OrPatternBindingMismatch { expected, found } => {
+                write!(
+                    f,
+                    "Alternatives of an or-pattern must bind the same variables (expected {expected:?}, found {found:?})"
+                )
             }
             Error::PositionalIndexOutOfBounds { index } => {
                 write!(f, "Positional index {index} out of bounds")
@@ -429,6 +441,13 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
                         }
                     }
                 }
+            }
+        }
+        ast::Match::Or(alternatives) => {
+            // Each alternative binds the same variables; index every occurrence so go-to-definition
+            // resolves a binding to the arm it was written in.
+            for alternative in alternatives {
+                collect_binding_spans(alternative, out);
             }
         }
         _ => {}

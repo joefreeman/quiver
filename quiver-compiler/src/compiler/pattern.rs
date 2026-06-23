@@ -326,6 +326,16 @@ fn analyze_match_pattern(
             scopes,
             value_provenance,
         ),
+        ast::Match::Or(alternatives) => analyze_or_pattern(
+            env,
+            program,
+            alternatives,
+            value_type_id,
+            path,
+            identifiers,
+            scopes,
+            value_provenance,
+        ),
         ast::Match::Star(name) => {
             analyze_star_pattern(program, name.as_ref(), value_type_id, path, identifiers)
         }
@@ -424,6 +434,74 @@ fn analyze_match_pattern(
             ))
         }
     }
+}
+
+/// Analyze an alternation pattern `(p | q | …)`. Each alternative is analyzed independently and
+/// its binding sets are pooled: at runtime `generate_pattern_code` tries each in turn, so the
+/// pattern matches if any alternative does. The narrowed type is the union of the alternatives'.
+///
+/// Every alternative must bind the same set of variables, so the body sees them whichever one
+/// matched. Each alternative is analyzed in its own identifier scope, so a name bound in two
+/// alternatives is one binding (the alternatives are mutually exclusive) rather than a repeated
+/// identifier (an equality check).
+#[allow(clippy::too_many_arguments)]
+fn analyze_or_pattern(
+    env: &mut super::typing::TypeEnv,
+    program: &mut Program,
+    alternatives: &[ast::Match],
+    value_type_id: usize,
+    path: AccessPath,
+    identifiers: &mut HashMap<String, Identifier>,
+    scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
+) -> Result<(Vec<BindingSet>, usize), Error> {
+    let mut pooled_sets = vec![];
+    let mut narrowed_ids = vec![];
+    let mut expected_names: Option<Vec<String>> = None;
+
+    for alternative in alternatives {
+        let mut alt_identifiers = identifiers.clone();
+        let (sets, narrowed) = analyze_match_pattern(
+            env,
+            program,
+            alternative,
+            value_type_id,
+            path.clone(),
+            &mut alt_identifiers,
+            scopes,
+            value_provenance,
+        )?;
+
+        // An alternative that produces no binding sets is statically dead for this value type
+        // (e.g. `A[x]` against a `B` value): it can never match at runtime, so it neither
+        // contributes bindings nor participates in the same-variables check.
+        if sets.is_empty() {
+            continue;
+        }
+
+        let mut names: Vec<String> = sets
+            .iter()
+            .flat_map(|set| set.bindings.iter().map(|binding| binding.name.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        match &expected_names {
+            None => expected_names = Some(names),
+            Some(expected) if *expected != names => {
+                return Err(Error::OrPatternBindingMismatch {
+                    expected: expected.clone(),
+                    found: names,
+                });
+            }
+            Some(_) => {}
+        }
+
+        pooled_sets.extend(sets);
+        narrowed_ids.push(narrowed);
+    }
+
+    let narrowed_type_id = union_type_ids(program, narrowed_ids);
+    Ok((pooled_sets, narrowed_type_id))
 }
 
 #[allow(clippy::too_many_arguments)]

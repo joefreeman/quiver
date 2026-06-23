@@ -258,6 +258,10 @@ pub enum Match {
     Placeholder,
     Reference(Type),
     Type(Type),
+    /// An alternation of patterns (`(p | q | …)`): matches if any alternative matches. Every
+    /// alternative must bind the same set of variables (so the body sees them regardless of which
+    /// matched).
+    Or(Vec<Match>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
