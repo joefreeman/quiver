@@ -11,6 +11,7 @@
   (partial_type)
   (pattern_tuple)
   (pattern_partial)
+  (pattern_or)
 ] @indent
 
 [

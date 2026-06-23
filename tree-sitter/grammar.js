@@ -80,6 +80,15 @@ module.exports = grammar({
     // `source.field` — greedily attach trailing `.field` accessors to the access rather
     // than treating `.` as a self-send term.
     [$.access],
+    // A parenthesised pattern beginning with an identifier may be a partial pattern
+    // (`(x: …)`, `(x, …)`) or the first alternative of an or-pattern (`(x | …)`); the `:`/`,`
+    // versus `|` that follows decides, via GLR.
+    [$._pattern, $._partial_field],
+    // A parenthesised group of `|`-separated atoms can be read as an or-pattern (of tuple/type
+    // patterns) or as a parenthesised type union; both are accepted for editor purposes.
+    [$.pattern_tuple, $.tuple_type],
+    [$._pattern, $._type_atom],
+    [$.pattern_partial, $.partial_type],
   ],
 
   rules: {
@@ -322,7 +331,10 @@ module.exports = grammar({
       $.string,
       $.pattern_tuple,
       $.pattern_partial,
+      $.pattern_or,
+      $.module_type,
       $.type_identifier,
+      $.self_default_type,
       $._paren_type,
       $.integer,
       $.binary,
@@ -334,6 +346,16 @@ module.exports = grammar({
     pattern_pin: $ => seq('&', $.identifier),
     star: _ => '*',
     placeholder: _ => '_',
+
+    // An alternation of patterns: `(p | q | …)`, two or more `|`-separated patterns. Shares the
+    // parenthesised form with partial patterns and parenthesised type unions; the `|` (rather than
+    // `:`/`,`) and a non-field leading pattern select this.
+    pattern_or: $ => seq(
+      '(', optional($._nl),
+      $._pattern,
+      repeat1(seq(optional($._nl), '|', optional($._nl), $._pattern)),
+      optional($._nl), ')',
+    ),
 
     pattern_tuple: $ => choice(
       seq(field('name', $.tuple_name), immBracketed($, '[', $._pattern_field, ']')),

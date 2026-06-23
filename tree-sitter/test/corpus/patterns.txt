@@ -88,3 +88,41 @@ Point[x, &y] = Point[1, 2]
             (integer)
             (integer)))))))
 
+
+==================
+or-pattern
+==================
+
+x ~> =([[], _] | [_, []])
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (bind_match
+        (pattern_or
+          (pattern_tuple
+            (pattern_tuple)
+            (placeholder))
+          (pattern_tuple
+            (placeholder)
+            (pattern_tuple)))))))
+
+==================
+default type pattern
+==================
+
+x ~> ='
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (bind_match
+        (self_default_type)))))

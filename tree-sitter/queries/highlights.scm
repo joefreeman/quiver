@@ -38,8 +38,11 @@
 ; -------------------------------------------------------------------- imports
 
 ; Colour the whole `%num` / `%mathx/vec` as a single module reference (the `%` sigil
-; included), mirroring how a type name carries its `'` in one `@type` token.
-(import) @module
+; included), mirroring how a type name carries its `'` in one `@type` token. The raised
+; priority keeps the span intact against the narrower captures nested inside it — the
+; `(identifier) @variable` fallback on each path segment and the `/` operator rule —
+; which would otherwise reclaim those bytes under shortest-span overlap resolution.
+((import) @module (#set! "priority" 110))
 
 ; ------------------------------------------------------------------- bindings
 

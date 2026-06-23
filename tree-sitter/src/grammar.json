@@ -1802,7 +1802,19 @@
         },
         {
           "type": "SYMBOL",
+          "name": "pattern_or"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "module_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "type_identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "self_default_type"
         },
         {
           "type": "SYMBOL",
@@ -1850,6 +1862,87 @@
     "placeholder": {
       "type": "STRING",
       "value": "_"
+    },
+    "pattern_or": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_nl"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_pattern"
+        },
+        {
+          "type": "REPEAT1",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_nl"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              },
+              {
+                "type": "STRING",
+                "value": "|"
+              },
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_nl"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              },
+              {
+                "type": "SYMBOL",
+                "name": "_pattern"
+              }
+            ]
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_nl"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
     },
     "pattern_tuple": {
       "type": "CHOICE",
@@ -3930,6 +4023,22 @@
     ],
     [
       "access"
+    ],
+    [
+      "_pattern",
+      "_partial_field"
+    ],
+    [
+      "pattern_tuple",
+      "tuple_type"
+    ],
+    [
+      "_pattern",
+      "_type_atom"
+    ],
+    [
+      "pattern_partial",
+      "partial_type"
     ]
   ],
   "precedences": [],
