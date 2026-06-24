@@ -75,8 +75,18 @@ export class Repl {
   /**
    * Create a new REPL using the given environment
    * @param environment - Environment instance to use
+   * @param files - Optional virtual filesystem (path -> source) imports resolve against. A
+   *   `quiver.toml` entry, if present, defines the module routing table.
    */
-  constructor(environment: Environment);
+  constructor(environment: Environment, files?: Record<string, string>);
+
+  /**
+   * Replace the REPL's virtual filesystem. Subsequent evaluations resolve imports against the
+   * new files; accumulated variables are preserved. Throws if a `quiver.toml` in `files` is
+   * invalid, leaving the current files in place.
+   * @param files - Virtual filesystem (path -> source)
+   */
+  setFiles(files: Record<string, string>): void;
 
   /**
    * Refresh the cache of process types for process references (@N)
@@ -106,9 +116,25 @@ export class Repl {
 }
 "#;
 
-/// Create a resolver with the built-in standard library (embedded in `quiver-compiler`).
-fn create_std_resolver() -> Box<PackageResolver> {
-    Box::new(PackageResolver::inline())
+/// Parse the JS `files` argument — a `Record<string, string>` of virtual path → contents, or
+/// `undefined`/`null` for an empty filesystem — into a map.
+fn parse_files(files: JsValue) -> std::result::Result<HashMap<String, String>, JsValue> {
+    if files.is_undefined() || files.is_null() {
+        Ok(HashMap::new())
+    } else {
+        serde_wasm_bindgen::from_value(files)
+            .map_err(|e| JsValue::from_str(&format!("Invalid files map: {}", e)))
+    }
+}
+
+/// Build a resolver over an in-memory file map. A `quiver.toml` in the map defines the module
+/// routing table; without one, files resolve by path and may shadow the standard library.
+fn create_resolver(
+    files: HashMap<String, String>,
+) -> std::result::Result<Box<PackageResolver>, JsValue> {
+    PackageResolver::memory_files(files)
+        .map(Box::new)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Callback wrapper to store JS callbacks
@@ -554,9 +580,13 @@ pub struct Repl {
 
 #[wasm_bindgen]
 impl Repl {
-    /// Create a new REPL using the given environment
+    /// Create a new REPL using the given environment.
+    ///
+    /// `files` is an optional `Record<string, string>` of virtual path → source (e.g. the
+    /// browser's file explorer), which becomes the in-memory package that imports resolve
+    /// against. A `quiver.toml` entry, if present, defines the module routing table.
     #[wasm_bindgen(constructor)]
-    pub fn new(environment: &Environment) -> std::result::Result<Repl, JsValue> {
+    pub fn new(environment: &Environment, files: JsValue) -> std::result::Result<Repl, JsValue> {
         // Set up panic hook for better error messages
         console_error_panic_hook::set_once();
 
@@ -565,7 +595,7 @@ impl Repl {
             environment.get_shared_state();
 
         // Create REPL
-        let resolver = create_std_resolver();
+        let resolver = create_resolver(parse_files(files)?)?;
         // For WASM, use core modules only (no network builtins)
         let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
             &quiver_core::builtins::core_modules(),
@@ -579,6 +609,17 @@ impl Repl {
             pending_evaluations: evaluations_rc,
             repl: Rc::new(RefCell::new(repl)),
         })
+    }
+
+    /// Replace the REPL's virtual filesystem, so subsequent evaluations resolve imports against
+    /// the new files (and `quiver.toml`). Accumulated variables are preserved; bindings that
+    /// already captured values from a previous version of a module keep those values. Returns an
+    /// error (without disturbing the current resolver) if a `quiver.toml` in `files` is invalid.
+    #[wasm_bindgen(js_name = "setFiles")]
+    pub fn set_files(&mut self, files: JsValue) -> std::result::Result<(), JsValue> {
+        let resolver = create_resolver(parse_files(files)?)?;
+        self.repl.borrow_mut().reload_modules(resolver);
+        Ok(())
     }
 
     /// Refresh the cache of process types

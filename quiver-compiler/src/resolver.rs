@@ -253,6 +253,44 @@ impl PackageResolver {
         Self::base(PackageId::Memory, vec![package], Arc::new(Overlay::new()))
     }
 
+    /// A resolver for an in-memory package whose files (and, optionally, manifest) are supplied
+    /// by the host — e.g. the web file explorer. `files` maps virtual paths (`"mymath/vec.qv"`,
+    /// `"quiver.toml"`) to their contents. A `quiver.toml` in the map defines the module routing
+    /// table; without one, the default in-memory manifest applies (std plus a local `path = "."`,
+    /// so files shadow the standard library and bare names fall through to it). Unlike a
+    /// filesystem package there are no nested manifests: every file belongs to this one package.
+    pub fn memory_files(files: HashMap<String, String>) -> Result<Self, ModuleError> {
+        let manifest = match files.get("quiver.toml") {
+            Some(source) => {
+                Manifest::parse(source).map_err(|e| ModuleError::Manifest(e.to_string()))?
+            }
+            None => Manifest {
+                modules: vec![
+                    crate::manifest::ModuleRule {
+                        name: None,
+                        provider: Provider::Std,
+                    },
+                    crate::manifest::ModuleRule {
+                        name: None,
+                        provider: Provider::Path(".".to_string()),
+                    },
+                ],
+            },
+        };
+        let package = Arc::new(Package {
+            id: PackageId::Memory,
+            manifest,
+            root: PathBuf::new(),
+            vfs: Arc::new(MemoryVfs(files)),
+            on_disk: false,
+        });
+        Ok(Self::base(
+            PackageId::Memory,
+            vec![package],
+            Arc::new(Overlay::new()),
+        ))
+    }
+
     /// A resolver whose entry program has no project — inline `--eval`, the MCP tools, a bare
     /// REPL. The default package is the standard library only.
     pub fn inline() -> Self {
@@ -549,6 +587,77 @@ mod tests {
         assert_eq!(num.origin, ModuleOrigin::Virtual);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_files_default_manifest_maps_paths_and_shadows_std() {
+        let mut files = HashMap::new();
+        files.insert("mymath/vec.qv".to_string(), "VEC".to_string());
+        // A local file named like a std module shadows it (the default manifest's `path = "."`
+        // rule is checked before `std`).
+        files.insert("num.qv".to_string(), "LOCAL_NUM".to_string());
+        let resolver = PackageResolver::memory_files(files).unwrap();
+        let entry = resolver.entry_package();
+
+        let vec = resolver
+            .resolve(&entry, &["mymath".to_string(), "vec".to_string()])
+            .unwrap();
+        assert_eq!(vec.source, "VEC");
+        assert_eq!(vec.id.name, vec!["mymath".to_string(), "vec".to_string()]);
+
+        let num = resolver.resolve(&entry, &["num".to_string()]).unwrap();
+        assert_eq!(num.source, "LOCAL_NUM");
+
+        // A module with no local file still falls through to the standard library.
+        let std_mod = resolver.resolve(&entry, &["list".to_string()]);
+        assert_eq!(std_mod.unwrap().id.package, PackageId::Std);
+    }
+
+    #[test]
+    fn memory_files_honours_virtual_manifest_name_prefix() {
+        let mut files = HashMap::new();
+        files.insert(
+            "quiver.toml".to_string(),
+            r#"modules = [ { std = true }, { name = "mathx", path = "./vendor/mathx/src" } ]"#
+                .to_string(),
+        );
+        files.insert(
+            "vendor/mathx/src/vec.qv".to_string(),
+            "MATHX_VEC".to_string(),
+        );
+        let resolver = PackageResolver::memory_files(files).unwrap();
+        let entry = resolver.entry_package();
+
+        let vec = resolver
+            .resolve(&entry, &["mathx".to_string(), "vec".to_string()])
+            .unwrap();
+        assert_eq!(vec.source, "MATHX_VEC");
+        // The module's canonical name is its file path relative to root, sans extension.
+        assert_eq!(
+            vec.id.name,
+            vec![
+                "vendor".to_string(),
+                "mathx".to_string(),
+                "src".to_string(),
+                "vec".to_string()
+            ]
+        );
+
+        // Without a `path = "."` rule, a bare local file is not importable.
+        assert!(resolver.resolve(&entry, &["vec".to_string()]).is_err());
+    }
+
+    #[test]
+    fn memory_files_rejects_invalid_manifest() {
+        let mut files = HashMap::new();
+        files.insert(
+            "quiver.toml".to_string(),
+            "modules = [ { name = \"x\" } ]".to_string(),
+        );
+        assert!(matches!(
+            PackageResolver::memory_files(files),
+            Err(ModuleError::Manifest(_))
+        ));
     }
 
     #[test]
