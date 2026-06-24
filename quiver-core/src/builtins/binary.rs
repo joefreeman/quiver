@@ -9,6 +9,40 @@ use crate::value::Value;
 use num_bigint::BigInt;
 use std::rc::Rc;
 
+/// Repeat a binary `count` times, sharing the unit lazily (O(1), no materialization).
+/// binary_repeat([bin, count]) -> bin
+pub fn builtin_binary_repeat<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    match arg {
+        Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
+            (Value::Binary(binary), Value::Integer(count)) => {
+                if count.sign() == num_bigint::Sign::Minus {
+                    return Err(Error::InvalidArgument(
+                        "Repeat count cannot be negative".to_string(),
+                    ));
+                }
+                let count = bigint_to_usize(count)?;
+                let unit = executor.get_binary_data(binary)?.clone();
+                let tiled = BinaryData::tiled(Rc::new(unit), count);
+                // allocate_binary_data enforces MAX_BINARY_SIZE against the realized length.
+                let binary = executor.allocate_binary_data(tiled)?;
+                Ok(BuiltinResult::Value(Value::Binary(binary)))
+            }
+            _ => Err(Error::TypeMismatch {
+                expected: "[binary, integer]".to_string(),
+                found: "invalid tuple contents".to_string(),
+            }),
+        },
+        _ => Err(Error::TypeMismatch {
+            expected: "[binary, integer]".to_string(),
+            found: "not a 2-element tuple".to_string(),
+        }),
+    }
+}
+
 /// Create a new zero-filled binary of the specified size
 /// binary_new(size: int) -> bin
 pub fn builtin_binary_new<E: Effect>(

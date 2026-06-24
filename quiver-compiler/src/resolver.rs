@@ -621,30 +621,32 @@ mod tests {
             r#"modules = [ { std = true }, { name = "mathx", path = "./vendor/mathx/src" } ]"#
                 .to_string(),
         );
+        // Use a module name that isn't in the standard library, so the final "not importable"
+        // assertion exercises the prefix rule rather than falling through to a std module.
         files.insert(
-            "vendor/mathx/src/vec.qv".to_string(),
-            "MATHX_VEC".to_string(),
+            "vendor/mathx/src/mat.qv".to_string(),
+            "MATHX_MAT".to_string(),
         );
         let resolver = PackageResolver::memory_files(files).unwrap();
         let entry = resolver.entry_package();
 
-        let vec = resolver
-            .resolve(&entry, &["mathx".to_string(), "vec".to_string()])
+        let mat = resolver
+            .resolve(&entry, &["mathx".to_string(), "mat".to_string()])
             .unwrap();
-        assert_eq!(vec.source, "MATHX_VEC");
+        assert_eq!(mat.source, "MATHX_MAT");
         // The module's canonical name is its file path relative to root, sans extension.
         assert_eq!(
-            vec.id.name,
+            mat.id.name,
             vec![
                 "vendor".to_string(),
                 "mathx".to_string(),
                 "src".to_string(),
-                "vec".to_string()
+                "mat".to_string()
             ]
         );
 
         // Without a `path = "."` rule, a bare local file is not importable.
-        assert!(resolver.resolve(&entry, &["vec".to_string()]).is_err());
+        assert!(resolver.resolve(&entry, &["mat".to_string()]).is_err());
     }
 
     #[test]

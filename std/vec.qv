@@ -1,0 +1,272 @@
+// Packed numeric vectors (fixed-point).
+//
+// A vector is a flat, little-endian, two's-complement byte buffer (`data`) tagged with a
+// lane `dtype` and a `scale` from the `num` tower. The logical value of lane i is
+// `storedᵢ × scale`, so integer lanes represent fractional values exactly without any float
+// type.
+//
+// All numeric work is in the schema-agnostic `__vec_*__` kernels (quiver-core/.../vector.rs),
+// which only ever see raw integer lanes; every scale concern is handled here. Scales are kept
+// in a canonical form (`norm_`: an integer-valued rational is lowered to a bare int) so that
+// structural scale-equality — used by add/sub — is sound, and so reductions over a unit-scale
+// vector come back as plain integers.
+
+'dtype = I32 | I64
+'vec = Vec[dtype: 'dtype, scale: '%num, data: 'bin]
+// A selection mask: one byte per lane (non-zero selects), as produced by the comparisons and
+// consumed by `filter`. Shares its byte-per-lane shape with a future validity/null mask.
+'mask = Mask['bin]
+// Maps one logical value to its stored lane (or nil if it can't be represented).
+'mapper = #'%num -> ('int | [])
+
+// Lane width in bytes for a dtype.
+width_ = #'dtype { | =I32 => 4 | =I64 => 8 },
+
+// Canonical scale form: lower an integer-valued rational to a bare int; leave reduced
+// fractions (and anything else) as-is. Total, so it never introduces nil.
+norm_ = #'%num {
+  | =Rational[n, 1] => n
+  | =Rational[a, b] => Rational[a, b]
+  | =x => x
+},
+
+// Append one signed lane; nil if it doesn't fit the dtype.
+push_ = #['vec, 'int] {
+  =[Vec[dtype: d, scale: s, data: data], n],
+  __vec_push__ [data, d ~> width_, n] ~> =packed,
+  Vec[dtype: d, scale: s, data: packed]
+},
+
+// Fold a list of stored integer lanes onto a vector (tail-recursive).
+of_ = #['vec, '%list<'int>] {
+  | =[v, Nil] => v
+  | =[v, Cons[x, rest]] => [push_ [v, x], rest] ~> ^
+},
+
+// Round a number to the nearest integer, halves away from zero (`to_int` truncates toward
+// zero, so add ±1/2 first depending on sign). Accepts the optional result of a division;
+// nil propagates.
+round_ = #'%num.opt {
+  =x,
+  {
+    | [x, 0] ~> %num.lt? => [x, -1/2] ~> %num.add ~> %num.to_int
+    | [x, 1/2] ~> %num.add ~> %num.to_int
+  }
+},
+
+// lcm of the denominators of a list of numbers (tail-recursive over an accumulator). The
+// finest scale `1/lcm` represents every value exactly.
+lcm_denoms_ = #['int, '%list<'%num>] {
+  | =[acc, Nil] => acc
+  | =[acc, Cons[x, rest]] => {
+    x ~> %num.denom ~> =dx,
+    [[acc, dx] ~> __multiply__, [acc, dx] ~> __gcd__] ~> __divide__ ~> =acc2,
+    [acc2, rest] ~> ^
+  }
+},
+
+// Fold a list of *values* onto a vector, mapping each through `f` to its stored lane. The
+// accumulator carries the mapper by reference. Nil if any value maps to nil (overflow or not
+// representable). `[[vec, mapper], values] -> 'vec | []`.
+buildValues_ = #[['vec, 'mapper], '%list<'%num>] {
+  | =[[v, _], Nil] => v
+  | =[[v, f], Cons[x, rest]] => {
+    x ~> f ~> =stored,
+    [[push_ [v, stored], &f], rest] ~> ^
+  }
+},
+
+// Multiply every lane of a buffer by an integer `factor` (used to rescale to a finer scale).
+// Broadcasts `factor` across the lanes via a tiled single-lane buffer, then a lane-wise
+// multiply — checked, so overflow yields nil. `[data, width, factor] -> 'bin | []`.
+rescale_ = #['bin, 'int, 'int] {
+  =[data, width, factor],
+  0x ~> __vec_push__ [~, width, factor] ~> =unit,
+  data ~> __binary_length__ ~> =bytes,
+  [bytes, width] ~> __divide__ ~> =lanes,
+  [unit, lanes] ~> __binary_repeat__ ~> =bcast,
+  __vec_mul__ [data, bcast, width]
+},
+
+// Coarsest common scale of two scales, with the integer factor each must be rescaled by:
+// `s = gcd(numerators) / lcm(denominators)` (already reduced), `factor_x = s_x / s`.
+// `[sa, sb] -> [s, factor_a, factor_b]`.
+reconcile_ = #['%num, '%num] {
+  =[sa, sb],
+  sa ~> %num.numer ~> =p,
+  sa ~> %num.denom ~> =q,
+  sb ~> %num.numer ~> =r,
+  sb ~> %num.denom ~> =t,
+  [p, r] ~> __gcd__ ~> =g,
+  [[q, t] ~> __multiply__, [q, t] ~> __gcd__] ~> __divide__ ~> =l,
+  Rational[g, l] ~> norm_ ~> =s,
+  [sa, s] ~> %num.div ~> %num.numer ~> =fa,
+  [sb, s] ~> %num.div ~> %num.numer ~> =fb,
+  [s, fa, fb]
+},
+
+// Bring two vectors to a common dtype, width, and scale, rescaling the buffers as needed so
+// they can be combined lane-wise. Fast path when the scales are already equal (repeated `s`).
+// `['vec, 'vec] -> [d, width, scale, data_a, data_b] | []` (nil on dtype mismatch / overflow).
+align_ = #['vec, 'vec] {
+  | =[Vec[dtype: d, scale: s, data: da], Vec[dtype: d, scale: s, data: db]] => {
+    d ~> width_ ~> =w,
+    [d, w, s, da, db]
+  }
+  | =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]] => {
+    d ~> width_ ~> =w,
+    reconcile_ [sa, sb] ~> =[s, fa, fb],
+    rescale_ [da, w, fa] ~> =da2,
+    rescale_ [db, w, fb] ~> =db2,
+    [d, w, s, da2, db2]
+  }
+},
+
+[
+  // An empty vector with the given dtype and (canonicalised) scale.
+  new: #['dtype, '%num] {
+    =[d, scale],
+    Vec[dtype: d, scale: scale ~> norm_, data: 0x]
+  },
+
+  // Build from a dtype, scale, and a list of *stored* integer lanes. Each lane's logical
+  // value is `stored × scale`. Nil if any value overflows the dtype.
+  of: #['dtype, '%num, '%list<'int>] {
+    =[d, scale, xs],
+    [Vec[dtype: d, scale: scale ~> norm_, data: 0x], xs] ~> of_
+  },
+
+  // Build from a dtype, scale, and a list of *values*: each lane is `value / scale`, which
+  // must be an exact integer (nil otherwise, or on overflow).
+  of_exact: #['dtype, '%num, '%list<'%num>] {
+    =[d, scale, values],
+    scale ~> norm_ ~> =s,
+    m = #'%num { [~, s] ~> %num.div ~> =Rational[n, 1], n },
+    [[Vec[dtype: d, scale: s, data: 0x], &m], values] ~> buildValues_
+  },
+
+  // Like `of_exact`, but each lane is `value / scale` rounded to the nearest integer (halves
+  // away from zero) — lossy, never nil for representable magnitudes.
+  of_round: #['dtype, '%num, '%list<'%num>] {
+    =[d, scale, values],
+    scale ~> norm_ ~> =s,
+    m = #'%num { [~, s] ~> %num.div ~> round_ },
+    [[Vec[dtype: d, scale: s, data: 0x], &m], values] ~> buildValues_
+  },
+
+  // Build from a list of values alone, inferring the finest scale (`1/lcm` of all
+  // denominators) that represents every value exactly. Nil on overflow (a very fine inferred
+  // scale can make a lane exceed the dtype).
+  of_values: #['dtype, '%list<'%num>] {
+    =[d, values],
+    [1, values] ~> lcm_denoms_ ~> =cap,
+    Rational[1, cap] ~> norm_ ~> =s,
+    m = #'%num { [~, cap] ~> %num.mul ~> %num.numer },
+    [[Vec[dtype: d, scale: s, data: 0x], &m], values] ~> buildValues_
+  },
+
+  // Append one stored lane.
+  push: &push_,
+
+  // Number of lanes.
+  len: #'vec {
+    =Vec[dtype: d, scale: _, data: data],
+    [data ~> __binary_length__, d ~> width_] ~> __divide__
+  },
+
+  // The vector's scale.
+  scale: #'vec { =Vec[dtype: _, scale: s, data: _] => s },
+
+  // Multiply the whole vector by a number — pure metadata (scale ← scale × q), exact, no
+  // buffer touched and no overflow possible.
+  scale_by: #['vec, '%num] {
+    =[Vec[dtype: d, scale: s, data: data], q],
+    %num.mul [s, q] ~> =scaled,
+    Vec[dtype: d, scale: scaled ~> norm_, data: data]
+  },
+
+  // Read lane `i` as an exact value (`stored × scale`); nil if out of bounds.
+  get: #['vec, 'int] {
+    =[Vec[dtype: d, scale: s, data: data], i],
+    __vec_get__ [data, d ~> width_, i] ~> =raw,
+    %num.mul [raw, s] ~> =scaled,
+    scaled ~> norm_
+  },
+
+  // add/sub require a shared dtype (nil otherwise). Unequal scales are reconciled to their
+  // coarsest common scale (`align_`), exactly; a lane overflow during rescaling or combining
+  // is nil.
+  add: #['vec, 'vec] {
+    align_ ~> =[d, w, s, da, db],
+    __vec_add__ [da, db, w] ~> =packed,
+    Vec[dtype: d, scale: s, data: packed]
+  },
+  sub: #['vec, 'vec] {
+    align_ ~> =[d, w, s, da, db],
+    __vec_sub__ [da, db, w] ~> =packed,
+    Vec[dtype: d, scale: s, data: packed]
+  },
+
+  // mul combines scales exactly (result scale = sₐ × s_b); the lanes just multiply. Dtypes
+  // must match; a lane overflow is nil.
+  mul: #['vec, 'vec] {
+    =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]],
+    __vec_mul__ [da, db, d ~> width_] ~> =packed,
+    %num.mul [sa, sb] ~> =scaled,
+    Vec[dtype: d, scale: scaled ~> norm_, data: packed]
+  },
+
+  // Exact reductions: sum = (Σ stored) × scale, dot = (Σ aᵢbᵢ) × sₐs_b. A unit scale yields a
+  // plain integer; a fractional scale yields a rational.
+  sum: #'vec {
+    =Vec[dtype: d, scale: s, data: data],
+    __vec_sum__ [data, d ~> width_] ~> =total,
+    %num.mul [total, s] ~> =scaled,
+    scaled ~> norm_
+  },
+  dot: #['vec, 'vec] {
+    =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]],
+    __vec_dot__ [da, db, d ~> width_] ~> =raw,
+    %num.mul [sa, sb] ~> =combined,
+    %num.mul [raw, combined] ~> =scaled,
+    scaled ~> norm_
+  },
+
+  // Elementwise comparisons. Both vectors are first brought to a common scale (`align_`), so
+  // the comparison is between *logical* values rather than raw lanes; the result is a `Mask`
+  // with one byte per lane (1 where the predicate holds). Nil on dtype/length mismatch or a
+  // rescale overflow.
+  lt: #['vec, 'vec] {
+    align_ ~> =[_, w, _, da, db],
+    __vec_lt__ [da, db, w] ~> =m,
+    Mask[m]
+  },
+  eq: #['vec, 'vec] {
+    align_ ~> =[_, w, _, da, db],
+    __vec_eq__ [da, db, w] ~> =m,
+    Mask[m]
+  },
+  gt: #['vec, 'vec] {
+    align_ ~> =[_, w, _, da, db],
+    __vec_gt__ [da, db, w] ~> =m,
+    Mask[m]
+  },
+
+  // Keep only the lanes the mask selects (non-zero byte), preserving dtype and scale. The mask
+  // must have one byte per lane (as produced by the comparisons); a length mismatch is nil.
+  filter: #['vec, 'mask] {
+    =[Vec[dtype: d, scale: s, data: data], Mask[m]],
+    __vec_take__ [data, d ~> width_, m] ~> =kept,
+    Vec[dtype: d, scale: s, data: kept]
+  },
+
+  // A `count`-lane vector with every lane's stored value `value` (logical `value × scale`),
+  // stored compactly (tiled) until an operation realises it.
+  fill: #['dtype, '%num, 'int, 'int] {
+    =[d, scale, value, count],
+    scale ~> norm_ ~> =s,
+    Vec[dtype: d, scale: s, data: 0x] ~> push_ [~, value] ~> =unit,
+    __binary_repeat__ [unit.data, count] ~> =tiled,
+    Vec[dtype: d, scale: s, data: tiled]
+  }
+]

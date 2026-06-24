@@ -347,37 +347,41 @@ fn analyze_match_pattern(
             value_type_id,
         )),
         ast::Match::Reference(ast_type) => {
-            // Reference pattern: &<type-expression>
-            // Checks against the type (or variable if it's an identifier)
-
-            // Special case: if it's a bare identifier, check if it's a variable first
+            // Reference pattern `&<identifier>`: pins against a binding already in scope. The
+            // parser only ever produces a bare identifier here — type references (`'int`,
+            // `'point`) parse to `Match::Type` and carry no `&`.
             if let ast::Type::Identifier { name, arguments } = &ast_type
                 && arguments.is_empty()
             {
-                // Try to find variable in scopes (with no accessors)
-                if let Some((var_type_id, _var_index)) =
+                // `&name` must reference a binding already in scope. If it isn't found, it is
+                // undefined — e.g. a name bound by a *sibling* sub-pattern of the same compound
+                // pattern (`=[x, &x]`), which isn't visible yet.
+                let Some((var_type_id, _var_index)) =
                     super::scopes::lookup_variable(scopes, name, &[])
-                {
-                    // It's a variable reference - check against the variable's value at runtime
-                    let requirements = vec![Requirement {
-                        path,
-                        check: RuntimeCheck::Variable(name.clone()),
-                    }];
+                else {
+                    return Err(Error::VariableUndefined(name.clone()));
+                };
 
-                    // Narrow the type by filtering compatible variants with the variable's type
-                    let narrowed_type_id = intersect_types(value_type_id, var_type_id, program);
+                // It's a variable reference - check against the variable's value at runtime
+                let requirements = vec![Requirement {
+                    path,
+                    check: RuntimeCheck::Variable(name.clone()),
+                }];
 
-                    return Ok((
-                        vec![BindingSet {
-                            requirements,
-                            bindings: vec![],
-                        }],
-                        narrowed_type_id,
-                    ));
-                }
+                // Narrow the type by filtering compatible variants with the variable's type
+                let narrowed_type_id = intersect_types(value_type_id, var_type_id, program);
+
+                return Ok((
+                    vec![BindingSet {
+                        requirements,
+                        bindings: vec![],
+                    }],
+                    narrowed_type_id,
+                ));
             }
 
-            // It's a type reference - resolve the ast::Type to a type ID
+            // The parser never produces a non-identifier `&`-reference today; resolve it as a
+            // type as a safe fallback.
             let resolved_type_id =
                 super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
 

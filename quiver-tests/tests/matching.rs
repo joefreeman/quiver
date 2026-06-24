@@ -74,10 +74,10 @@ fn test_pin_against_partial() {
         .expect("A[x: 1]");
     quiver().evaluate("x = 2, A[x: 1] ~> =(x: &x)").expect("[]");
 
-    // Without variable for pin, should error
+    // Without variable for pin, should error: `&x` names an undefined binding.
     quiver()
         .evaluate("A[x: 1] ~> =(x: &x)")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
+        .expect_compile_error(quiver_compiler::compiler::Error::VariableUndefined(
             "x".to_string(),
         ));
 }
@@ -94,9 +94,9 @@ fn test_pin_with_variable_and_repetition() {
 
 #[test]
 fn test_pin_without_variable_single_occurrence() {
-    // Reference with no variable or type should error
+    // Reference with no matching binding should error as an undefined variable.
     quiver().evaluate("5 ~> =&x").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeAliasMissing("x".to_string()),
+        quiver_compiler::compiler::Error::VariableUndefined("x".to_string()),
     );
 }
 
@@ -113,10 +113,10 @@ fn test_pin_from_outer_scope() {
 
 #[test]
 fn test_pin_mixed_repeated_and_single() {
-    // References with no variables should error
+    // References with no matching bindings should error as undefined variables.
     quiver()
         .evaluate("[1, 1, 2] ~> =[&x, &x, &y]")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
+        .expect_compile_error(quiver_compiler::compiler::Error::VariableUndefined(
             "x".to_string(),
         ));
 }

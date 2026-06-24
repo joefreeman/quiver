@@ -26,6 +26,11 @@ pub enum BinaryData {
         right: Rc<BinaryData>,
         total_length: usize,
     },
+
+    /// A `unit` binary repeated `count` times (no allocation until materialized).
+    /// Generalises `Zeroed` (which is `[0x00]` tiled) and gives compact constant/broadcast
+    /// binaries — e.g. a scalar lane tiled across a vector — that realise lazily.
+    Tiled { unit: Rc<BinaryData>, count: usize },
 }
 
 impl BinaryData {
@@ -46,6 +51,7 @@ impl BinaryData {
             BinaryData::Zeroed(len) => *len,
             BinaryData::Slice { length, .. } => *length,
             BinaryData::Concat { total_length, .. } => *total_length,
+            BinaryData::Tiled { unit, count } => unit.len() * count,
         }
     }
 
@@ -91,6 +97,18 @@ impl BinaryData {
         })
     }
 
+    /// Create a binary made of `unit` repeated `count` times in O(1) time, sharing `unit`.
+    /// Normalises the degenerate cases so callers needn't special-case them.
+    pub fn tiled(unit: Rc<BinaryData>, count: usize) -> Self {
+        if count == 0 || unit.is_empty() {
+            return BinaryData::Owned(Vec::new());
+        }
+        if count == 1 {
+            return (*unit).clone();
+        }
+        BinaryData::Tiled { unit, count }
+    }
+
     /// Get the byte at the given index
     /// Returns None if index is out of bounds
     pub fn byte_at(&self, index: usize) -> Option<u8> {
@@ -114,6 +132,9 @@ impl BinaryData {
                     right.byte_at(index - left_len)
                 }
             }
+            // `index < self.len()` is guaranteed above, so a zero-length unit (which makes a
+            // zero-length tile) can't reach here — the modulo is safe.
+            BinaryData::Tiled { unit, .. } => unit.byte_at(index % unit.len()),
         }
     }
 
@@ -143,6 +164,13 @@ impl BinaryData {
             BinaryData::Concat { left, right, .. } => {
                 left.write_to_vec(vec);
                 right.write_to_vec(vec);
+            }
+            BinaryData::Tiled { unit, count } => {
+                let unit_bytes = unit.to_vec();
+                vec.reserve(unit_bytes.len() * count);
+                for _ in 0..*count {
+                    vec.extend_from_slice(&unit_bytes);
+                }
             }
         }
     }
@@ -197,6 +225,25 @@ impl BinaryData {
                         .map(|index| index + left_len)
                 }
             }
+            BinaryData::Tiled { unit, count } => {
+                let unit_len = unit.len();
+                if unit_len == 0 || offset >= unit_len * count {
+                    return None;
+                }
+                let start_unit = offset / unit_len;
+                // The (possibly partial) first unit, searched from the offset within it.
+                if let Some(pos) = unit.find_byte(byte, offset % unit_len) {
+                    return Some(start_unit * unit_len + pos);
+                }
+                // Every later unit is identical, so the first whole one after the partial
+                // settles it (its hit, if any, is at the same in-unit position).
+                if start_unit + 1 < *count
+                    && let Some(pos) = unit.find_byte(byte, 0)
+                {
+                    return Some((start_unit + 1) * unit_len + pos);
+                }
+                None
+            }
         }
     }
 
@@ -206,6 +253,7 @@ impl BinaryData {
             BinaryData::Owned(_) | BinaryData::Zeroed(_) => 0,
             BinaryData::Slice { parent, .. } => parent.depth() + 1,
             BinaryData::Concat { left, right, .. } => left.depth().max(right.depth()) + 1,
+            BinaryData::Tiled { unit, .. } => unit.depth() + 1,
         }
     }
 }

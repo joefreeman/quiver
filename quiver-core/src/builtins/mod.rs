@@ -48,6 +48,7 @@ pub mod binary;
 pub mod integer;
 pub mod io;
 pub mod math;
+pub mod vector;
 
 /// Result of a builtin function execution
 #[derive(Debug)]
@@ -326,6 +327,7 @@ pub fn register_binary_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "binary_new", binary::builtin_binary_new, TypeSpec::Integer => TypeSpec::Binary);
     register_builtin!(registry, "binary_length", binary::builtin_binary_length, TypeSpec::Binary => TypeSpec::Integer);
     register_builtin!(registry, "binary_concat", binary::builtin_binary_concat, bin_bin.clone() => TypeSpec::Binary);
+    register_builtin!(registry, "binary_repeat", binary::builtin_binary_repeat, bin_int.clone() => TypeSpec::Binary);
 
     // Bitwise operations
     register_builtin!(registry, "binary_and", binary::builtin_binary_and, bin_bin.clone() => TypeSpec::Binary);
@@ -374,6 +376,57 @@ pub fn register_integer_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "integer_popcount", integer::builtin_integer_popcount, TypeSpec::Integer => TypeSpec::Integer);
 }
 
+/// Register all packed-vector kernels (schema-agnostic byte-buffer numerics; see
+/// [`vector`]). Lanes are little-endian two's-complement; widths are 4 or 8 bytes.
+pub fn register_vector_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let nil = || TypeSpec::Tuple(None, vec![]);
+    let bin_or_nil = TypeSpec::Union(vec![TypeSpec::Binary, nil()]);
+    let int_or_nil = TypeSpec::Union(vec![TypeSpec::Integer, nil()]);
+    // [bin, bin, width]
+    let bin_bin_int = TypeSpec::Tuple(
+        None,
+        vec![
+            (None, TypeSpec::Binary),
+            (None, TypeSpec::Binary),
+            (None, TypeSpec::Integer),
+        ],
+    );
+    // [bin, width, int] — used for get (index) and push (value)
+    let bin_int_int = TypeSpec::Tuple(
+        None,
+        vec![
+            (None, TypeSpec::Binary),
+            (None, TypeSpec::Integer),
+            (None, TypeSpec::Integer),
+        ],
+    );
+    let bin_int = TypeSpec::Tuple(
+        None,
+        vec![(None, TypeSpec::Binary), (None, TypeSpec::Integer)],
+    );
+    // [data, width, mask] — used for take (gather)
+    let bin_int_bin = TypeSpec::Tuple(
+        None,
+        vec![
+            (None, TypeSpec::Binary),
+            (None, TypeSpec::Integer),
+            (None, TypeSpec::Binary),
+        ],
+    );
+
+    register_builtin!(registry, "vec_add", vector::builtin_vec_add, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vec_sub", vector::builtin_vec_sub, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vec_mul", vector::builtin_vec_mul, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vec_lt", vector::builtin_vec_lt, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vec_eq", vector::builtin_vec_eq, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vec_gt", vector::builtin_vec_gt, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vec_dot", vector::builtin_vec_dot, bin_bin_int => int_or_nil.clone());
+    register_builtin!(registry, "vec_take", vector::builtin_vec_take, bin_int_bin => bin_or_nil.clone());
+    register_builtin!(registry, "vec_get", vector::builtin_vec_get, bin_int_int.clone() => int_or_nil.clone());
+    register_builtin!(registry, "vec_push", vector::builtin_vec_push, bin_int_int => bin_or_nil);
+    register_builtin!(registry, "vec_sum", vector::builtin_vec_sum, bin_int => int_or_nil);
+}
+
 /// Get all core builtin modules. This establishes the full builtin *contract* every host shares:
 /// the pure builtins (math/binary/integer) with their universal implementations, and the IO
 /// builtins' signatures (with placeholder implementations that executing hosts replace via
@@ -383,6 +436,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_math_builtins,
         register_binary_builtins,
         register_integer_builtins,
+        register_vector_builtins,
         io::register_io_signatures,
     ]
 }
