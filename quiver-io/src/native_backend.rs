@@ -10,7 +10,8 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::FromRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
 
 /// Resource metadata stored by the io_uring backend
@@ -28,6 +29,10 @@ pub enum Resource {
         file: File,
         path: String,
     },
+    Dir {
+        /// Lazy iterator over the directory's entries.
+        entries: std::fs::ReadDir,
+    },
     DnsResolver {
         /// Resolved IP addresses (4 bytes for IPv4, 16 bytes for IPv6)
         addresses: Vec<Vec<u8>>,
@@ -42,6 +47,7 @@ impl Resource {
             Resource::TcpSocket { socket, .. } => socket.as_raw_fd(),
             Resource::TcpListener { socket, .. } => socket.as_raw_fd(),
             Resource::File { file, .. } => file.as_raw_fd(),
+            Resource::Dir { .. } => panic!("Dir does not have a file descriptor"),
             Resource::DnsResolver { .. } => {
                 panic!("DnsResolver does not have a file descriptor")
             }
@@ -139,6 +145,14 @@ impl EffectBackend for NativeEffectBackend {
                 self.execute_file_flush(process_id, resource_id)
             }
             NativeEffect::FileClose { resource_id } => self.execute_file_close(resource_id),
+
+            // Filesystem metadata
+            NativeEffect::Stat { path } => self.execute_stat(path),
+
+            // Directory operations
+            NativeEffect::ReadDirOpen { path } => self.execute_read_dir_open(path),
+            NativeEffect::ReadDirNext { resource_id } => self.execute_read_dir_next(resource_id),
+            NativeEffect::ReadDirClose { resource_id } => self.execute_read_dir_close(resource_id),
 
             // DNS operations
             NativeEffect::DnsResolve { hostname } => self.execute_dns_resolve(hostname),
@@ -283,6 +297,142 @@ impl NativeEffectBackend {
         // Return immediate completion with the resource
         let type_id = self.get_resource_type_id("File");
         Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
+    }
+
+    fn execute_stat(&mut self, path: Vec<u8>) -> Result<Option<EffectResult>, Error> {
+        let path_str = String::from_utf8(path)
+            .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in path".to_string()))?;
+
+        // Follows symlinks (like the conventional `stat`); a path that does not exist maps to nil,
+        // while other failures (permission denied, I/O error) propagate as runtime errors.
+        let metadata = match std::fs::metadata(&path_str) {
+            Ok(md) => md,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                return Ok(Some(Ok((Value::nil(), vec![]))));
+            }
+            Err(e) => {
+                return Err(Error::InvalidArgument(format!(
+                    "Failed to stat '{}': {}",
+                    path_str, e
+                )));
+            }
+        };
+
+        // Kind codes match the directory builtin: 0 file, 1 dir, 2 symlink, 3 other. Because
+        // `metadata` follows symlinks, the symlink case never arises here.
+        let kind_code: i64 = if metadata.is_dir() {
+            1
+        } else if metadata.is_symlink() {
+            2
+        } else if metadata.is_file() {
+            0
+        } else {
+            3
+        };
+        let size: u64 = metadata.len();
+        // mtime as nanoseconds since the Unix epoch (0 if the platform cannot report it).
+        let modified_nanos: u128 = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mode: u32 = metadata.permissions().mode() & 0o7777;
+
+        // Transient `[kind, size, modified, mode]` tuple, read by index in `std/fs.qv` (see
+        // `execute_read_dir_next` for why the placeholder tag is fine). All fields are integers, so
+        // no heap side-channel is needed.
+        Ok(Some(Ok((
+            Value::tuple(
+                quiver_core::types::NIL,
+                vec![
+                    Value::Integer(kind_code.into()),
+                    Value::Integer(size.into()),
+                    Value::Integer(modified_nanos.into()),
+                    Value::Integer(mode.into()),
+                ],
+            ),
+            vec![],
+        ))))
+    }
+
+    fn execute_read_dir_open(&mut self, path: Vec<u8>) -> Result<Option<EffectResult>, Error> {
+        let path_str = String::from_utf8(path)
+            .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in path".to_string()))?;
+
+        let entries = std::fs::read_dir(&path_str).map_err(|e| {
+            Error::InvalidArgument(format!("Failed to read directory '{}': {}", path_str, e))
+        })?;
+
+        // Allocate a new resource ID for this directory iterator.
+        let resource_id = self.next_resource_id;
+        self.next_resource_id += 1;
+        self.resources
+            .insert(resource_id, Resource::Dir { entries });
+
+        let type_id = self.get_resource_type_id("Dir");
+        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
+    }
+
+    fn execute_read_dir_next(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Result<Option<EffectResult>, Error> {
+        let resource = self
+            .resources
+            .get_mut(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        let Resource::Dir { entries } = resource else {
+            return Err(Error::InvalidArgument("Resource is not a Dir".to_string()));
+        };
+
+        match entries.next() {
+            Some(Ok(entry)) => {
+                let name_bytes = entry.file_name().into_vec();
+                // The entry's own type, without following symlinks. `d_type` from `getdents` is
+                // essentially free; `file_type()` only falls back to an `lstat` on the rare
+                // filesystems that report `DT_UNKNOWN`. Encoded as a small int the stdlib maps to a
+                // `kind` tag — 0: file, 1: dir, 2: symlink, 3: other (socket/fifo/device/unknown).
+                let kind_code: i64 = match entry.file_type() {
+                    Ok(ft) if ft.is_dir() => 1,
+                    Ok(ft) if ft.is_symlink() => 2,
+                    Ok(ft) if ft.is_file() => 0,
+                    _ => 3,
+                };
+                // Transient `[name, kind_code]` transport pair. `std/fs.qv` binds it whole and
+                // reads the fields by index — it never matches on its shape — so the tuple's type
+                // tag is never inspected; `NIL` is just a valid, registered placeholder id. The
+                // name bytes travel via the heap side-channel (referenced by `Heap(0)`).
+                Ok(Some(Ok((
+                    Value::tuple(
+                        quiver_core::types::NIL,
+                        vec![
+                            Value::Binary(quiver_core::value::Binary::Heap(0)),
+                            Value::Integer(kind_code.into()),
+                        ],
+                    ),
+                    vec![name_bytes],
+                ))))
+            }
+            Some(Err(e)) => Err(Error::InvalidArgument(format!(
+                "Failed to read directory entry: {}",
+                e
+            ))),
+            // Iterator exhausted - return Nil.
+            None => Ok(Some(Ok((Value::nil(), vec![])))),
+        }
+    }
+
+    fn execute_read_dir_close(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Result<Option<EffectResult>, Error> {
+        self.resources
+            .remove(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        Ok(Some(Ok((Value::ok(), vec![]))))
     }
 
     fn execute_dns_resolve(&mut self, hostname: Vec<u8>) -> Result<Option<EffectResult>, Error> {

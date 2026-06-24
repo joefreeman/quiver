@@ -695,12 +695,20 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
                     arguments: vec![],
                 })
             }),
+            // String literal
+            match_string,
+            // Star (optionally named) and placeholder. Before `match_tuple` so `Name*` isn't
+            // first consumed as a bare named tuple, leaving the `*` dangling.
+            star_pattern,
+            // Named/structural tuple pattern: `Dir`, `Circle[r]`, `[a, b]`. Before
+            // `type_identifier` so a bare named tuple in a field is a *value* pattern (matching the
+            // field's runtime value, like `=Dir`), not a type assertion — the latter compiles to a
+            // root type check that cannot narrow a union-typed field.
+            map(match_tuple, Match::Tuple),
             // Type reference: 'int, 'list<'t>
             map(type_identifier, Match::Type),
             // Literals
             map(literal, Match::Literal),
-            // Star (optionally named) and placeholder
-            star_pattern,
             map(char('_'), |_| Match::Placeholder),
             // Identifier
             map(spanned(identifier), |(span, name)| {

@@ -1,0 +1,66 @@
+// A path's type, as reported by the OS. `list` describes the entry itself (symlinks are not
+// followed); `stat` follows symlinks, so it never reports `Symlink`. `Other` covers sockets,
+// FIFOs, devices, and the rare case of an unknown type.
+'kind = File | Dir | Symlink | Other;
+
+// A single directory entry: its name and its kind.
+'entry = Entry[name: Str['bin], kind: 'kind];
+
+// Metadata about a path. `size` is in bytes, `modified` is the mtime in nanoseconds since the Unix
+// epoch, and `mode` is the permission bits (e.g. 0o644 == 420).
+'stat = Stat[kind: 'kind, size: 'int, modified: 'int, mode: 'int];
+
+// Map the OS type code (shared by the directory and stat builtins) to a `kind` tag.
+kind_ = #'int {
+  | =1 => Dir
+  | =2 => Symlink
+  | =3 => Other
+  | File
+},
+
+// Look up metadata for a path, following symlinks. Yields nil if the path does not exist; other
+// failures (e.g. permission denied) are runtime errors. The builtin returns a transient
+// `[kind_code, size, modified, mode]` tuple read by index.
+stat_ = #Str['bin] {
+  .0
+  ~> __stat__ [~]
+  ~> {
+    | <> => []
+    | =s ~> Stat[kind: s.0 ~> kind_, size: s.1, modified: s.2, mode: s.3]
+  }
+},
+
+[
+  // List the entries of a directory, lazily. Yields an `Entry` (name + kind) per item, in the
+  // order the filesystem returns them (unsorted, excluding `.` and `..`). The underlying
+  // directory handle is closed automatically once the iterator is exhausted.
+  list: #Str['bin] {
+    .0
+    ~> __read_dir__ [~]
+    ~> =dir,
+    %iter.unfold [dir, #\Dir {
+      =d,
+      // Each step yields `[name, kind_code]` or nil at the end. The pair is bound whole and read
+      // by index (it is never matched on), so its tuple tag is irrelevant.
+      __read_dir_next__ [d] ~> {
+        | <> => {
+          __read_dir_close__ [d],
+          []
+        }
+        | =e ~> [Entry[name: Str[e.0], kind: e.1 ~> kind_], d]
+      }
+    }]
+  },
+
+  // Metadata for a path, following symlinks. Yields nil if the path does not exist.
+  stat: #Str['bin] { stat_ },
+
+  // Whether a path exists.
+  exists?: #Str['bin] { stat_ => Ok },
+
+  // Whether a path exists and is a directory.
+  dir?: #Str['bin] { stat_ ~> =(kind: Dir) => Ok },
+
+  // Whether a path exists and is a regular file.
+  file?: #Str['bin] { stat_ ~> =(kind: File) => Ok }
+]

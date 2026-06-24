@@ -164,11 +164,17 @@ pub fn apply_narrowing(
                 let intersected = intersect_types(current, narrowed_to_id, program);
                 scope.narrowings.parameter = Some(intersected);
                 let source_prov = param.provenance.clone();
-                Some((source_prov, intersected))
+                Some((source_prov, current, intersected))
             });
 
-            // Now recurse with the borrow released
-            if let Some((source_prov, intersected)) = narrowing_info
+            // Now recurse with the borrow released. Only propagate the narrowing up the parameter's
+            // source provenance when it actually changed the type: once it reaches a fixpoint there
+            // is nothing left to tighten, and continuing would not terminate. (A block parameter
+            // whose source is a field of an enclosing parameter resolves `Parameter` against the
+            // current scope, so without this guard a stable `never` narrowing recurses forever —
+            // Field → Parameter → Field …)
+            if let Some((source_prov, current, intersected)) = narrowing_info
+                && intersected != current
                 && !matches!(source_prov, Provenance::Parameter | Provenance::Unknown)
             {
                 apply_narrowing(scopes, &source_prov, intersected, program);

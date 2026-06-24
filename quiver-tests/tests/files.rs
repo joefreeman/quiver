@@ -475,3 +475,246 @@ fn test_std_file_lines_spanning_chunks() {
 
     let _ = std::fs::remove_file(&temp_path);
 }
+
+#[test]
+fn test_read_dir_single_entry() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_one_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::write(dir.join("only.txt"), b"x").expect("Failed to create test file");
+    let dir_str = dir.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            "{}" ~> %fs.list ~> %list.collect
+        "#,
+            dir_str
+        ))
+        .expect("Cons[Entry[name: \"only.txt\", kind: File], Nil]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_read_dir_reports_kind() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_kind_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::create_dir(dir.join("d")).expect("Failed to create subdir");
+    let dir_str = dir.to_str().unwrap();
+
+    // A single subdirectory must come back with kind Dir.
+    quiver()
+        .with_io()
+        .evaluate(&format!(r#""{}" ~> %fs.list ~> %list.collect"#, dir_str))
+        .expect("Cons[Entry[name: \"d\", kind: Dir], Nil]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Regression: matching a kind tag (from the module's `'%fs.kind` union) inside a nested block via
+// condition-consequence used to send the type narrower into an infinite loop (stack overflow at
+// compile time). It must compile and select the right branch at runtime.
+#[test]
+fn test_read_dir_kind_match_narrows() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_narrow_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::create_dir(dir.join("d")).expect("Failed to create subdir");
+    let dir_str = dir.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            "{}"
+            ~> %fs.list
+            ~> %iter.map [~, #'%fs.entry {{ .kind ~> {{ =Dir => IsDir | NotDir }} }}]
+            ~> %list.collect
+        "#,
+            dir_str
+        ))
+        .expect("Cons[IsDir, Nil]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Regression: the natural `=(kind: Dir)` partial-pattern filter must narrow by the entry's runtime
+// kind. The entries are built with a union-typed `kind`, so this only works if the field match
+// checks the field value (not a root type assertion on the whole `Entry`).
+#[test]
+fn test_read_dir_filter_by_kind() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_filter_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::create_dir(dir.join("sub")).expect("Failed to create subdir");
+    std::fs::write(dir.join("f.txt"), b"x").expect("Failed to create file");
+    let dir_str = dir.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            "{}"
+            ~> %fs.list
+            ~> %iter.filter [~, #'%fs.entry {{ =(kind: Dir) }}]
+            ~> %iter.map [~, #'%fs.entry {{ .name }}]
+            ~> %list.collect
+        "#,
+            dir_str
+        ))
+        .expect("Cons[\"sub\", Nil]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_read_dir_empty() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_empty_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    let dir_str = dir.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            "{}" ~> %fs.list ~> %list.collect
+        "#,
+            dir_str
+        ))
+        .expect("Nil");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_read_dir_count() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_count_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    for name in ["a", "b", "c"] {
+        std::fs::write(dir.join(name), b"").expect("Failed to create test file");
+    }
+    let dir_str = dir.to_str().unwrap();
+
+    // The iterator yields entries in filesystem order (unsorted), so assert on the count rather
+    // than a specific ordering.
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            "{}" ~> %fs.list ~> %iter.count
+        "#,
+            dir_str
+        ))
+        .expect("3");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Regression: a module that is value-cached on an earlier REPL line records the return-type
+// dispatch tables of its functions (e.g. `num.add`). When a *later* line freshly compiles a
+// different module (`str`, via `str.join`) that calls those cached dispatch functions, the tables
+// must be restored — otherwise the dispatch result widens to the frozen `num` type (`'opt`) and a
+// `'int` argument deep inside `str` fails to type-check. Here line 1 caches `iter`/`num` (through
+// `fs`) without `str`; line 2 compiles `str` fresh against them.
+#[test]
+fn test_repl_cached_dispatch_module_then_fresh_consumer() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_repl_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::write(dir.join("only"), b"").expect("Failed to create test file");
+    let dir_str = dir.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(r#""{}" ~> %fs.list ~> %list.collect"#, dir_str))
+        .expect("Cons[Entry[name: \"only\", kind: File], Nil]")
+        .then_evaluate(&format!(
+            r#""{}" ~> %fs.list ~> %iter.map [~, #'%fs.entry {{ .name }}] ~> %str.join [~, " | "]"#,
+            dir_str
+        ))
+        .expect("\"only\"");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_stat_file_kind_and_size() {
+    let dir = std::env::temp_dir().join(format!("quiver_stat_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::write(dir.join("f.txt"), b"hello").expect("Failed to create test file");
+    let path = dir.join("f.txt");
+    let path = path.to_str().unwrap();
+
+    // Asserts on kind + size (mtime/mode vary by environment). Also exercises a literal field match
+    // (`size: 5`) alongside a tag field match (`kind: File`) in one partial pattern.
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#""{}" ~> %fs.stat ~> {{ =(kind: File, size: 5) => Good | Bad }}"#,
+            path
+        ))
+        .expect("Good");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_stat_missing_is_nil() {
+    let path = std::env::temp_dir().join(format!("quiver_stat_missing_{}", std::process::id()));
+    let path = path.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#""{}" ~> %fs.stat ~> {{ <> => Absent | Present }}"#,
+            path
+        ))
+        .expect("Absent");
+}
+
+#[test]
+fn test_fs_predicates() {
+    let dir = std::env::temp_dir().join(format!("quiver_pred_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("sub")).expect("Failed to create subdir");
+    std::fs::write(dir.join("f.txt"), b"x").expect("Failed to create file");
+    let d = dir.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            [
+              "{d}/f.txt" ~> %fs.exists? ~> {{ <> => No | Yes }},
+              "{d}/nope"  ~> %fs.exists? ~> {{ <> => No | Yes }},
+              "{d}/sub"   ~> %fs.dir?    ~> {{ <> => No | Yes }},
+              "{d}/f.txt" ~> %fs.dir?    ~> {{ <> => No | Yes }},
+              "{d}/f.txt" ~> %fs.file?   ~> {{ <> => No | Yes }}
+            ]
+            "#
+        ))
+        .expect("[Yes, No, Yes, No, Yes]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_read_dir_lazy_take() {
+    let dir = std::env::temp_dir().join(format!("quiver_readdir_take_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    for name in ["a", "b", "c"] {
+        std::fs::write(dir.join(name), b"").expect("Failed to create test file");
+    }
+    let dir_str = dir.to_str().unwrap();
+
+    // Taking one entry from a three-entry directory must not require enumerating the rest,
+    // demonstrating the iterator is lazy over the underlying directory handle.
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            "{}" ~> %fs.list ~> %iter.take [~, 1] ~> %iter.count
+        "#,
+            dir_str
+        ))
+        .expect("1");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

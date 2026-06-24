@@ -284,6 +284,41 @@ fn test_narrowing_nested_union_in_field() {
 }
 
 #[test]
+fn test_partial_pattern_field_narrows_union_by_value() {
+    // A partial-pattern field naming a nullary tag (`=(tag: Cat)`) must match the field's *runtime
+    // value*, narrowing a union-typed field. `mk` builds Rec with a union-typed tag, so the value's
+    // concrete type carries the whole union — a root type assertion couldn't distinguish Cat from
+    // Dog, but a field-value check can.
+    quiver()
+        .evaluate(
+            r#"
+            'k = Cat | Dog
+            'rec = Rec[tag: 'k]
+            mk = #'k { Rec[tag: ~] },
+            f = #'rec { =(tag: Cat) => IsCat | No },
+            [Cat ~> mk ~> f, Dog ~> mk ~> f]
+            "#,
+        )
+        .expect("[IsCat, No]");
+}
+
+#[test]
+fn test_partial_pattern_field_tag_with_binding() {
+    // The same field-value match, mixed with a sibling binding via the `(…) = …` form.
+    quiver()
+        .evaluate(
+            r#"
+            'k = Cat | Dog
+            'rec = Rec[tag: 'k, label: 'k]
+            mk = #'k { Rec[tag: ~, label: Dog] },
+            f = #'rec { (tag: Cat, label: l) = ~ => Got[l] | No },
+            [Cat ~> mk ~> f, Dog ~> mk ~> f]
+            "#,
+        )
+        .expect("[Got[Dog], No]");
+}
+
+#[test]
 fn test_narrowing_with_branches() {
     quiver()
         .evaluate("f = #(A | B | C) { =(A | B) => =A }, A ~> f")

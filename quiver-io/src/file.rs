@@ -331,16 +331,211 @@ pub fn builtin_file_close(
     }))
 }
 
+/// read_dir([path: bin]) -> Dir
+/// Open a directory for iteration, returning a resource that yields one entry per `read_dir_next`.
+pub fn builtin_read_dir(
+    process_id: ProcessId,
+    value: &Value,
+    executor: &mut Executor<NativeEffect>,
+) -> Result<BuiltinResult<NativeEffect>, Error> {
+    // Extract [path] tuple
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+
+    if fields.len() != 1 {
+        return Err(Error::ArityMismatch {
+            expected: 1,
+            found: fields.len(),
+        });
+    }
+
+    let path_binary = match &fields[0] {
+        Value::Binary(binary) => *binary,
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: "binary".to_string(),
+                found: fields[0].type_name().to_string(),
+            });
+        }
+    };
+
+    let path_bytes = match &path_binary {
+        Binary::Constant(idx) => {
+            let constant = executor
+                .get_constant(*idx)
+                .ok_or(Error::ConstantUndefined(*idx))?;
+            match constant {
+                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
+                _ => {
+                    return Err(Error::TypeMismatch {
+                        expected: "binary".to_string(),
+                        found: "integer".to_string(),
+                    });
+                }
+            }
+        }
+        Binary::Heap(idx) => executor
+            .get_heap_binary(*idx)
+            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
+            .to_vec(),
+    };
+
+    Ok(BuiltinResult::Action(Action::RequestEffect {
+        process_id,
+        effect: NativeEffect::ReadDirOpen { path: path_bytes },
+    }))
+}
+
+/// stat([path: bin]) -> [kind, size, modified, mode] | Nil
+/// Look up metadata for a path (following symlinks). Yields nil if the path does not exist.
+pub fn builtin_stat(
+    process_id: ProcessId,
+    value: &Value,
+    executor: &mut Executor<NativeEffect>,
+) -> Result<BuiltinResult<NativeEffect>, Error> {
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+
+    if fields.len() != 1 {
+        return Err(Error::ArityMismatch {
+            expected: 1,
+            found: fields.len(),
+        });
+    }
+
+    let path_binary = match &fields[0] {
+        Value::Binary(binary) => *binary,
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: "binary".to_string(),
+                found: fields[0].type_name().to_string(),
+            });
+        }
+    };
+
+    let path_bytes = match &path_binary {
+        Binary::Constant(idx) => {
+            let constant = executor
+                .get_constant(*idx)
+                .ok_or(Error::ConstantUndefined(*idx))?;
+            match constant {
+                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
+                _ => {
+                    return Err(Error::TypeMismatch {
+                        expected: "binary".to_string(),
+                        found: "integer".to_string(),
+                    });
+                }
+            }
+        }
+        Binary::Heap(idx) => executor
+            .get_heap_binary(*idx)
+            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
+            .to_vec(),
+    };
+
+    Ok(BuiltinResult::Action(Action::RequestEffect {
+        process_id,
+        effect: NativeEffect::Stat { path: path_bytes },
+    }))
+}
+
+/// read_dir_next([dir: Dir]) -> bin | Nil
+/// Get the next entry name from a directory, or Nil once exhausted.
+pub fn builtin_read_dir_next(
+    process_id: ProcessId,
+    value: &Value,
+    _executor: &mut Executor<NativeEffect>,
+) -> Result<BuiltinResult<NativeEffect>, Error> {
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+
+    if fields.len() != 1 {
+        return Err(Error::ArityMismatch {
+            expected: 1,
+            found: fields.len(),
+        });
+    }
+
+    let resource_id = match &fields[0] {
+        Value::Resource(id, _) => *id,
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: "resource".to_string(),
+                found: fields[0].type_name().to_string(),
+            });
+        }
+    };
+
+    Ok(BuiltinResult::Action(Action::RequestEffect {
+        process_id,
+        effect: NativeEffect::ReadDirNext { resource_id },
+    }))
+}
+
+/// read_dir_close([dir: Dir]) -> Ok
+/// Close a directory resource.
+pub fn builtin_read_dir_close(
+    process_id: ProcessId,
+    value: &Value,
+    _executor: &mut Executor<NativeEffect>,
+) -> Result<BuiltinResult<NativeEffect>, Error> {
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+
+    if fields.len() != 1 {
+        return Err(Error::ArityMismatch {
+            expected: 1,
+            found: fields.len(),
+        });
+    }
+
+    let resource_id = match &fields[0] {
+        Value::Resource(id, _) => *id,
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: "resource".to_string(),
+                found: fields[0].type_name().to_string(),
+            });
+        }
+    };
+
+    Ok(BuiltinResult::Action(Action::RequestEffect {
+        process_id,
+        effect: NativeEffect::ReadDirClose { resource_id },
+    }))
+}
+
 /// Attach the native (io-uring) implementations of the file builtins. Their signatures are part
 /// of the universal contract (registered everywhere via `core_modules`); this backs them with a
 /// real runtime for an executing host.
 pub fn attach_file_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
-    let implementations: [(&str, BuiltinFn<NativeEffect>); 5] = [
+    let implementations: [(&str, BuiltinFn<NativeEffect>); 9] = [
         ("file_open", builtin_file_open),
         ("file_read", builtin_file_read),
         ("file_write", builtin_file_write),
         ("file_flush", builtin_file_flush),
         ("file_close", builtin_file_close),
+        ("read_dir", builtin_read_dir),
+        ("read_dir_next", builtin_read_dir_next),
+        ("read_dir_close", builtin_read_dir_close),
+        ("stat", builtin_stat),
     ];
     for (name, impl_fn) in implementations {
         registry.attach_implementation(name, impl_fn);

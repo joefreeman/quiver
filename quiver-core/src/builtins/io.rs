@@ -16,9 +16,11 @@ use crate::value::Value;
 /// The file builtins' contract: `(name, parameter, result)` for each.
 fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let file = TypeSpec::Resource("File".to_string());
+    let dir = TypeSpec::Resource("Dir".to_string());
     let bin = TypeSpec::Binary;
     let int = TypeSpec::Integer;
     let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
+    let nil = TypeSpec::Tuple(None, vec![]);
     vec![
         // file_open([path, flags, mode]) -> File
         (
@@ -51,9 +53,13 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
             "file_write",
             TypeSpec::Tuple(
                 None,
-                vec![(None, file.clone()), (None, int.clone()), (None, bin)],
+                vec![
+                    (None, file.clone()),
+                    (None, int.clone()),
+                    (None, bin.clone()),
+                ],
             ),
-            int,
+            int.clone(),
         ),
         // file_flush([File]) -> Ok
         (
@@ -62,7 +68,49 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
             ok.clone(),
         ),
         // file_close([File]) -> Ok
-        ("file_close", TypeSpec::Tuple(None, vec![(None, file)]), ok),
+        (
+            "file_close",
+            TypeSpec::Tuple(None, vec![(None, file)]),
+            ok.clone(),
+        ),
+        // read_dir([path]) -> Dir
+        (
+            "read_dir",
+            TypeSpec::Tuple(None, vec![(None, bin.clone())]),
+            dir.clone(),
+        ),
+        // read_dir_next([Dir]) -> [bin, int] | nil  (entry name + kind code)
+        (
+            "read_dir_next",
+            TypeSpec::Tuple(None, vec![(None, dir.clone())]),
+            TypeSpec::Union(vec![
+                TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, int.clone())]),
+                nil.clone(),
+            ]),
+        ),
+        // read_dir_close([Dir]) -> Ok
+        (
+            "read_dir_close",
+            TypeSpec::Tuple(None, vec![(None, dir)]),
+            ok,
+        ),
+        // stat([path]) -> [kind, size, modified, mode] | nil
+        (
+            "stat",
+            TypeSpec::Tuple(None, vec![(None, bin)]),
+            TypeSpec::Union(vec![
+                TypeSpec::Tuple(
+                    None,
+                    vec![
+                        (None, int.clone()),
+                        (None, int.clone()),
+                        (None, int.clone()),
+                        (None, int),
+                    ],
+                ),
+                nil,
+            ]),
+        ),
     ]
 }
 

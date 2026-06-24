@@ -28,6 +28,22 @@ pub enum NativeEffect {
         resource_id: ResourceId,
     },
 
+    // Filesystem metadata
+    Stat {
+        path: Vec<u8>,
+    },
+
+    // Directory operations
+    ReadDirOpen {
+        path: Vec<u8>,
+    },
+    ReadDirNext {
+        resource_id: ResourceId,
+    },
+    ReadDirClose {
+        resource_id: ResourceId,
+    },
+
     // DNS operations
     DnsResolve {
         hostname: Vec<u8>,
@@ -72,6 +88,8 @@ impl Effect for NativeEffect {
         match self {
             // Resource-creating effects
             NativeEffect::FileOpen { .. }
+            | NativeEffect::Stat { .. }
+            | NativeEffect::ReadDirOpen { .. }
             | NativeEffect::DnsResolve { .. }
             | NativeEffect::TcpConnect { .. }
             | NativeEffect::TcpListen { .. } => None,
@@ -81,6 +99,8 @@ impl Effect for NativeEffect {
             | NativeEffect::FileWrite { resource_id, .. }
             | NativeEffect::FileFlush { resource_id }
             | NativeEffect::FileClose { resource_id }
+            | NativeEffect::ReadDirNext { resource_id }
+            | NativeEffect::ReadDirClose { resource_id }
             | NativeEffect::DnsNext { resource_id }
             | NativeEffect::DnsClose { resource_id }
             | NativeEffect::TcpListenerAccept { resource_id }
