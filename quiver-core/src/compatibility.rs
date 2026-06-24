@@ -91,6 +91,24 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
     compatible_with
 }
 
+/// Map each tuple type-id to a canonical *value-shape* id: the lowest tuple-id that shares its
+/// name and field labels (field *types* ignored). Two tuple values built via paths that inferred
+/// different field types — e.g. a list `Cons` cell from a literal vs. from a recursive helper —
+/// then carry shape-equal ids, so structural value equality (`==`) treats them as equal. The
+/// executor stores only this mapping (indexed by tuple-id), never the names themselves.
+pub fn compute_canonical_tuples(tuples: &[TupleTypeInfo]) -> Vec<usize> {
+    let mut by_shape: HashMap<(Option<String>, Vec<Option<String>>), usize> = HashMap::new();
+    tuples
+        .iter()
+        .enumerate()
+        .map(|(id, info)| {
+            let labels: Vec<Option<String>> =
+                info.fields.iter().map(|(label, _)| label.clone()).collect();
+            *by_shape.entry((info.name.clone(), labels)).or_insert(id)
+        })
+        .collect()
+}
+
 /// Compute parameter compatibility for mailbox filtering.
 /// For each function and builtin, computes which ConcreteTypes are compatible with its parameter type.
 /// Returns (function_param_compatibility, builtin_param_compatibility).

@@ -6,7 +6,8 @@ use quiver_compiler::compiler::{
 };
 use quiver_core::bytecode::{Bytecode, Constant, Function, Instruction};
 use quiver_core::compatibility::{
-    CompatibilityInput, compute_param_compatibility, compute_type_compatibility,
+    CompatibilityInput, compute_canonical_tuples, compute_param_compatibility,
+    compute_type_compatibility,
 };
 use quiver_core::effects::{Effect, EffectBackend};
 use quiver_core::executor::ProgramUpdate;
@@ -754,6 +755,7 @@ impl<E: Effect> Environment<E> {
             };
 
             let type_compatibility = compute_type_compatibility(&input);
+            let canonical_tuples = compute_canonical_tuples(self.program.get_tuples());
             let (function_param_compatibility, builtin_param_compatibility) =
                 compute_param_compatibility(&input);
 
@@ -767,6 +769,7 @@ impl<E: Effect> Environment<E> {
                 type_compatibility,
                 function_param_compatibility,
                 builtin_param_compatibility,
+                canonical_tuples,
             };
 
             let update_cmd = Command::UpdateProgram(update);

@@ -1,6 +1,7 @@
 use crate::bytecode::Bytecode;
 use crate::compatibility::{
-    CompatibilityInput, compute_param_compatibility, compute_type_compatibility,
+    CompatibilityInput, compute_canonical_tuples, compute_param_compatibility,
+    compute_type_compatibility,
 };
 use crate::effects::Effect;
 use crate::error::Error;
@@ -54,6 +55,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     };
 
     let type_compatibility = compute_type_compatibility(&input);
+    let canonical_tuples = compute_canonical_tuples(&bytecode.tuples);
     let (function_param_compatibility, builtin_param_compatibility) = if param_compat {
         compute_param_compatibility(&input)
     } else {
@@ -71,6 +73,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         type_compatibility,
         function_param_compatibility,
         builtin_param_compatibility,
+        canonical_tuples,
     };
 
     executor.update_program(program_update);

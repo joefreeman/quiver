@@ -101,9 +101,46 @@ fn test_collision_remove_all() {
         .expect("5");
 }
 
-// Canonical form: removal restores the same shape insertion would build, so structure depends
-// only on contents. (Asserted on the printed structure rather than `==`, which is currently
-// type-id-sensitive and so unreliable for comparing dicts built different ways — see notes.)
+// Canonical form: a dict's structure depends only on its contents, so dicts with equal contents
+// are `==` regardless of how they were built — insertion order, and insert-then-remove vs. a
+// direct build. (Relies on structural `==`; see test_structural_equality_across_construction.)
+
+#[test]
+fn test_canonical_insertion_order_independent() {
+    quiver()
+        .evaluate(
+            r#"
+            d1 = %dict.new ~> %dict.put [~, "alpha", 1] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "charlie", 3],
+            d2 = %dict.new ~> %dict.put [~, "charlie", 3] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "alpha", 1],
+            [d1, d2] ~> == ~> <> ~> <>
+        "#,
+        )
+        .expect("Ok");
+}
+
+#[test]
+fn test_canonical_remove_matches_direct_build() {
+    // building {a,b,c,d} then removing c equals directly building {a,b,d}
+    quiver()
+        .evaluate(
+            r#"
+            d1 = %dict.new ~> %dict.put [~, "alpha", 1] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "charlie", 3] ~> %dict.put [~, "delta", 4] ~> %dict.remove [~, "charlie"],
+            d2 = %dict.new ~> %dict.put [~, "alpha", 1] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "delta", 4],
+            [d1, d2] ~> == ~> <> ~> <>
+        "#,
+        )
+        .expect("Ok");
+}
+
+#[test]
+fn test_canonical_collision_remove_matches_direct_build() {
+    // a collision that loses one entry equals directly building the single-key dict
+    quiver()
+        .evaluate(&format!(
+            "[{DA} ~> %dict.remove [~, {KA}], %dict.new ~> %dict.put [~, {KB}, 2]] ~> == ~> <> ~> <>"
+        ))
+        .expect("Ok");
+}
 
 #[test]
 fn test_remove_collapses_node_to_leaf() {

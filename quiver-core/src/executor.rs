@@ -31,6 +31,9 @@ pub struct ProgramUpdate {
     pub function_param_compatibility: Vec<HashSet<ConcreteType>>,
     /// For each builtin_id, the set of concrete types compatible with its parameter
     pub builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
+    /// treat structurally-identical tuples built via different paths as equal.
+    pub canonical_tuples: Vec<usize>,
 }
 
 /// Instruction type for profiling statistics (groups parameterized instructions)
@@ -182,6 +185,9 @@ pub struct Executor<E: Effect> {
     builtin_impls: Vec<Option<crate::builtins::BuiltinFn<E>>>,
     tuples: Vec<usize>,     // Tuple arities
     resources: Vec<String>, // Resource type names
+    /// For each tuple_id, a canonical value-shape id (same name + field labels) — used by `==`
+    /// so structurally-identical tuples built via different paths compare equal.
+    canonical_tuples: Vec<usize>,
     /// For each type_id, the set of concrete types compatible with it (for IsType checks)
     type_compatibility: Vec<HashSet<ConcreteType>>,
     /// For each function_id, the set of concrete types compatible with its parameter
@@ -281,6 +287,8 @@ impl<E: Effect> Executor<E> {
             builtins: vec![],
             builtin_impls: vec![],
             tuples: vec![0, 0], // NIL and OK have 0 fields
+            // NIL (id 0) and OK (id 1) are each their own canonical shape; replaced on first update.
+            canonical_tuples: vec![0, 1],
             resources: vec![],
             type_compatibility: vec![],
             function_param_compatibility: vec![],
@@ -643,6 +651,7 @@ impl<E: Effect> Executor<E> {
             self.builtins.push(b.name.clone());
         }
         self.resources = update.resources;
+        self.canonical_tuples = update.canonical_tuples;
         self.type_compatibility = update.type_compatibility;
         self.function_param_compatibility = update.function_param_compatibility;
         self.builtin_param_compatibility = update.builtin_param_compatibility;
@@ -2210,6 +2219,14 @@ impl<E: Effect> Executor<E> {
         }
     }
 
+    /// Canonical value-shape id for a tuple-id (falls back to the id itself if unmapped).
+    fn canonical_tuple(&self, tuple_id: usize) -> usize {
+        self.canonical_tuples
+            .get(tuple_id)
+            .copied()
+            .unwrap_or(tuple_id)
+    }
+
     fn values_equal(&self, a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Integer(a), Value::Integer(b)) => a == b,
@@ -2255,7 +2272,10 @@ impl<E: Effect> Executor<E> {
                 }
             }
             (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
-                type_a == type_b
+                // Compare by canonical value-shape (name + field labels), not raw tuple-id: the
+                // same tuple shape built via paths that inferred different field types gets distinct
+                // ids, but is the same value. Elements are then compared structurally.
+                self.canonical_tuple(*type_a) == self.canonical_tuple(*type_b)
                     && elements_a.len() == elements_b.len()
                     && elements_a
                         .iter()
