@@ -28,20 +28,60 @@ fn remap_type_id(id: usize, type_remap: &HashMap<usize, usize>) -> usize {
     *type_remap.get(&id).unwrap_or(&id)
 }
 
-fn remap_type(ty: Type, type_remap: &HashMap<usize, usize>) -> Type {
+/// Deep-copy a type from a source id space (`src_types` / `src_tuples`) into `program`,
+/// returning an equivalent type whose every child id has been remapped into `program`'s id
+/// space.
+///
+/// Types and tuples are mutually recursive: a type may reference tuples (`Type::Tuple`,
+/// `Type::Partial`) while a tuple's fields reference types. We therefore import a node's
+/// dependencies *before* registering the node itself, so every id it carries is already
+/// remapped into `program`. This is essential because `register_type` / `register_tuple`
+/// deduplicate by structural equality — registering a node with stale (source-space) child
+/// ids would both store wrong references and defeat deduplication.
+///
+/// Recursion terminates because Quiver expresses recursive types with `Type::Cycle` (a depth,
+/// not an id), so there are no id cycles between types and tuples. Per-id results are memoised
+/// in `type_remap` / `tuple_remap`.
+fn import_type_value(
+    program: &mut Program,
+    src_types: &[Type],
+    src_tuples: &[quiver_core::types::TupleTypeInfo],
+    type_remap: &mut HashMap<usize, usize>,
+    tuple_remap: &mut HashMap<usize, usize>,
+    ty: Type,
+) -> Type {
     match ty {
-        Type::Tuple(old_id) => Type::Tuple(remap_type_id(old_id, type_remap)),
+        Type::Tuple(old_tuple_id) => Type::Tuple(import_tuple(
+            program,
+            src_types,
+            src_tuples,
+            type_remap,
+            tuple_remap,
+            old_tuple_id,
+        )),
         Type::Partial { name, fields } => Type::Partial {
             name,
             fields: fields
                 .into_iter()
-                .map(|(fname, ftype)| (fname, remap_type_id(ftype, type_remap)))
+                .map(|(fname, ftype)| {
+                    (
+                        fname,
+                        import_type(
+                            program,
+                            src_types,
+                            src_tuples,
+                            type_remap,
+                            tuple_remap,
+                            ftype,
+                        ),
+                    )
+                })
                 .collect(),
         },
         Type::Union(type_ids) => Type::Union(
             type_ids
                 .into_iter()
-                .map(|t| remap_type_id(t, type_remap))
+                .map(|t| import_type(program, src_types, src_tuples, type_remap, tuple_remap, t))
                 .collect(),
         ),
         Type::Callable {
@@ -49,16 +89,105 @@ fn remap_type(ty: Type, type_remap: &HashMap<usize, usize>) -> Type {
             result,
             receive,
         } => Type::Callable {
-            parameter: remap_type_id(parameter, type_remap),
-            result: remap_type_id(result, type_remap),
-            receive: remap_type_id(receive, type_remap),
+            parameter: import_type(
+                program,
+                src_types,
+                src_tuples,
+                type_remap,
+                tuple_remap,
+                parameter,
+            ),
+            result: import_type(
+                program,
+                src_types,
+                src_tuples,
+                type_remap,
+                tuple_remap,
+                result,
+            ),
+            receive: import_type(
+                program,
+                src_types,
+                src_tuples,
+                type_remap,
+                tuple_remap,
+                receive,
+            ),
         },
         Type::Process { send, receive } => Type::Process {
-            send: send.map(|t| remap_type_id(t, type_remap)),
-            receive: receive.map(|t| remap_type_id(t, type_remap)),
+            send: send
+                .map(|t| import_type(program, src_types, src_tuples, type_remap, tuple_remap, t)),
+            receive: receive
+                .map(|t| import_type(program, src_types, src_tuples, type_remap, tuple_remap, t)),
         },
         other => other,
     }
+}
+
+/// Import the type at `old_id` in the source id space into `program`, returning its `program`
+/// id. See [`import_type_value`] for the deep-copy contract.
+fn import_type(
+    program: &mut Program,
+    src_types: &[Type],
+    src_tuples: &[quiver_core::types::TupleTypeInfo],
+    type_remap: &mut HashMap<usize, usize>,
+    tuple_remap: &mut HashMap<usize, usize>,
+    old_id: usize,
+) -> usize {
+    if let Some(&new_id) = type_remap.get(&old_id) {
+        return new_id;
+    }
+
+    let remapped = import_type_value(
+        program,
+        src_types,
+        src_tuples,
+        type_remap,
+        tuple_remap,
+        src_types[old_id].clone(),
+    );
+
+    let new_id = program.register_type(remapped);
+    type_remap.insert(old_id, new_id);
+    new_id
+}
+
+/// Import the tuple type at `old_id` in the source id space into `program`, returning its
+/// `program` id. See [`import_type_value`] for why dependencies are imported first.
+fn import_tuple(
+    program: &mut Program,
+    src_types: &[Type],
+    src_tuples: &[quiver_core::types::TupleTypeInfo],
+    type_remap: &mut HashMap<usize, usize>,
+    tuple_remap: &mut HashMap<usize, usize>,
+    old_id: usize,
+) -> usize {
+    if let Some(&new_id) = tuple_remap.get(&old_id) {
+        return new_id;
+    }
+
+    let info = src_tuples[old_id].clone();
+    let fields: Vec<_> = info
+        .fields
+        .into_iter()
+        .map(|(name, ftype)| {
+            (
+                name,
+                import_type(
+                    program,
+                    src_types,
+                    src_tuples,
+                    type_remap,
+                    tuple_remap,
+                    ftype,
+                ),
+            )
+        })
+        .collect();
+
+    let new_id = program.register_tuple(info.name, fields);
+    tuple_remap.insert(old_id, new_id);
+    new_id
 }
 
 /// Remap a Function's indices according to the remap tables
@@ -542,28 +671,30 @@ impl<E: Effect> Environment<E> {
             constant_remap.insert(old_idx, new_idx);
         }
 
-        // Merge tuples using Program::register_tuple
-        // Tuples are processed in order, so type references to earlier tuples are already remapped
-        for (old_idx, tuple_info) in bytecode.tuples.iter().enumerate() {
-            // Remap type ID references in fields
-            let remapped_fields: Vec<_> = tuple_info
-                .fields
-                .iter()
-                .map(|(name, type_id)| (name.clone(), remap_type_id(*type_id, &type_remap)))
-                .collect();
-
-            let new_idx = self
-                .program
-                .register_tuple(tuple_info.name.clone(), remapped_fields);
-            tuple_remap.insert(old_idx, new_idx);
+        // Merge types and tuples. They are mutually recursive (a type may reference tuples and
+        // vice versa), so we import every node via `import_type` / `import_tuple`, which import
+        // each node's dependencies before registering it. Iterating over all indices guarantees
+        // every source index ends up in the remap tables (including those reachable only through
+        // function instructions), and memoisation keeps repeated visits cheap.
+        for old_idx in 0..bytecode.types.len() {
+            import_type(
+                &mut self.program,
+                &bytecode.types,
+                &bytecode.tuples,
+                &mut type_remap,
+                &mut tuple_remap,
+                old_idx,
+            );
         }
-
-        // Merge types (used by IsType instructions) using Program::register_type
-        for (old_idx, typ) in bytecode.types.iter().enumerate() {
-            // Remap tuple type references within the type
-            let remapped_type = remap_type(typ.clone(), &type_remap);
-            let new_idx = self.program.register_type(remapped_type);
-            type_remap.insert(old_idx, new_idx);
+        for old_idx in 0..bytecode.tuples.len() {
+            import_tuple(
+                &mut self.program,
+                &bytecode.types,
+                &bytecode.tuples,
+                &mut type_remap,
+                &mut tuple_remap,
+                old_idx,
+            );
         }
 
         // Merge builtins using Program::register_builtin_info
@@ -1157,6 +1288,26 @@ impl<E: Effect> Environment<E> {
         &self.program
     }
 
+    /// Deep-copy a type whose child ids reference this environment's program into `target`,
+    /// returning an equivalent type with every id remapped into `target`'s id space.
+    ///
+    /// Process types (built in the environment's id space by [`Self::get_process_type`]) are
+    /// folded into a REPL's own program this way, so the REPL program stays internally
+    /// consistent — and its emitted bytecode self-contained — rather than carrying dangling
+    /// references into the environment's id space.
+    pub fn import_type_into(&self, target: &mut Program, ty: Type) -> Type {
+        let mut type_remap = HashMap::new();
+        let mut tuple_remap = HashMap::new();
+        import_type_value(
+            target,
+            self.program.get_types(),
+            self.program.get_tuples(),
+            &mut type_remap,
+            &mut tuple_remap,
+            ty,
+        )
+    }
+
     /// Get the formatted type for a process given its function index
     pub fn format_process_type(&self, function_index: usize) -> Option<String> {
         let process_type = self.get_process_type(function_index)?;
@@ -1369,5 +1520,131 @@ impl<E: Effect> Environment<E> {
                 self.resource_ownership.remove(&resource_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quiver_core::bytecode::Bytecode;
+    use quiver_core::types::TupleTypeInfo;
+
+    // Minimal effect for constructing an Environment in tests; no effects are exercised.
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    enum TestEffect {}
+
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    /// A bytecode whose single tuple `[a, b]` has both fields typed as the type at
+    /// `int_index`. Leading `Type::Reference` filler entries shift that index so the tuple's
+    /// field references only resolve correctly if they are remapped during the merge.
+    fn pair_of_ints_bytecode(int_index: usize) -> Bytecode {
+        let mut types = vec![Type::Reference; int_index];
+        types.push(Type::Integer);
+        Bytecode {
+            constants: vec![],
+            functions: vec![],
+            builtins: vec![],
+            entry: None,
+            tuples: vec![TupleTypeInfo {
+                name: None,
+                fields: vec![(None, int_index), (None, int_index)],
+            }],
+            types,
+            resources: vec![],
+        }
+    }
+
+    /// Merging a second, independently-compiled program must not corrupt the field type
+    /// references of its tuples. Before the fix, tuple fields were remapped against an
+    /// empty type table (tuples were merged before types), so the second program's `[a, b]`
+    /// tuple resolved its int fields to whatever happened to sit at the stale index.
+    #[test]
+    fn merged_tuple_fields_keep_their_int_type() {
+        let mut env: Environment<TestEffect> = Environment::new(vec![]);
+
+        // First program: `'int` at index 0, tuple fields point at 0.
+        let first = env.merge_tuples_for_test(pair_of_ints_bytecode(0));
+        // Second program: `'int` at index 1 (with filler at 0), tuple fields point at 1.
+        let second = env.merge_tuples_for_test(pair_of_ints_bytecode(1));
+
+        for tuple_id in [first, second] {
+            let info = env.program.get_tuples()[tuple_id].clone();
+            for (_, field_type_id) in &info.fields {
+                assert_eq!(
+                    env.program.get_types()[*field_type_id],
+                    Type::Integer,
+                    "merged tuple {tuple_id} field should resolve to 'int"
+                );
+            }
+        }
+    }
+
+    /// Process types (for `@N` references) are built in the environment's id space, but are
+    /// injected into a REPL's own, independent program. `import_type_into` must deep-copy them
+    /// so their child ids land in the target program — otherwise the REPL program would carry
+    /// references dangling into the environment's table (the cause of an out-of-bounds panic
+    /// when its bytecode was later merged back).
+    #[test]
+    fn process_type_children_are_deep_imported() {
+        let mut env: Environment<TestEffect> = Environment::new(vec![]);
+
+        // Give the environment program an `'int` at a non-trivial index, then describe a
+        // process that sends and receives it — exactly the shape `enrich_process_types` builds.
+        let int_id = env.program.register_type(Type::Integer);
+        let process_type = Type::Process {
+            send: Some(int_id),
+            receive: Some(int_id),
+        };
+
+        // A REPL's fresh program where that environment id is not yet meaningful.
+        let mut repl_program = Program::new();
+        let imported = env.import_type_into(&mut repl_program, process_type);
+
+        let Type::Process {
+            send: Some(send),
+            receive: Some(receive),
+        } = imported
+        else {
+            panic!("expected a process type with send and receive");
+        };
+        // The child ids now index the REPL program and resolve back to `'int`.
+        assert_eq!(repl_program.get_types()[send], Type::Integer);
+        assert_eq!(repl_program.get_types()[receive], Type::Integer);
+    }
+}
+
+#[cfg(test)]
+impl<E: Effect> Environment<E> {
+    /// Test helper: merge a bytecode's types/tuples and return the merged index of its first
+    /// tuple. Mirrors the type/tuple half of `merge_bytecode` without requiring workers.
+    fn merge_tuples_for_test(&mut self, bytecode: Bytecode) -> usize {
+        let mut type_remap: HashMap<usize, usize> = HashMap::new();
+        let mut tuple_remap: HashMap<usize, usize> = HashMap::new();
+        for old_idx in 0..bytecode.types.len() {
+            import_type(
+                &mut self.program,
+                &bytecode.types,
+                &bytecode.tuples,
+                &mut type_remap,
+                &mut tuple_remap,
+                old_idx,
+            );
+        }
+        for old_idx in 0..bytecode.tuples.len() {
+            import_tuple(
+                &mut self.program,
+                &bytecode.types,
+                &bytecode.tuples,
+                &mut type_remap,
+                &mut tuple_remap,
+                old_idx,
+            );
+        }
+        tuple_remap[&0]
     }
 }

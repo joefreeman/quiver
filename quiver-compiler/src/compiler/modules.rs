@@ -18,6 +18,16 @@ pub struct CachedModule {
     pub module_type: Type,
     /// Binary data extracted from executor heap, keyed by heap index
     pub binary_data: HashMap<usize, Vec<u8>>,
+    /// Return-type dispatch tables produced while compiling this module (and its nested imports),
+    /// keyed by function index. A value-cached module is not recompiled when reused, so these are
+    /// restored into the compiler on a cache hit — otherwise a freshly-compiled caller couldn't
+    /// specialise the result type of this module's dispatch functions (e.g. `num.add`) and would
+    /// fall back to their widened frozen result. Type/function IDs stay valid across REPL lines
+    /// because the program grows append-only.
+    pub fn_case_tables: HashMap<usize, Vec<(usize, usize)>>,
+    /// Companion to [`Self::fn_case_tables`]: maps a callable *type* ID to the dispatch function
+    /// to use when a call's callee isn't statically known.
+    pub case_tables: HashMap<usize, usize>,
 }
 
 #[derive(Clone)]

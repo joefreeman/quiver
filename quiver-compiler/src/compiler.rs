@@ -2459,7 +2459,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Get or compute cached module value
         let cached = if let Some(cached) = self.module_cache.get_cached_module(&id) {
-            cached.clone()
+            let cached = cached.clone();
+            // The module won't be recompiled, so restore the return-type dispatch tables it
+            // produced. Without this a freshly-compiled caller in this pass can't specialise the
+            // result of the module's dispatch functions (e.g. `num.add`), silently widening their
+            // result to the frozen type. Keep any entry this pass already established (a function
+            // index is unique to one function, so `fn_case_tables` never genuinely conflicts).
+            for (k, v) in &cached.fn_case_tables {
+                self.fn_case_tables.entry(*k).or_insert_with(|| v.clone());
+            }
+            for (k, v) in &cached.case_tables {
+                self.case_tables.entry(*k).or_insert(*v);
+            }
+            cached
         } else {
             self.module_cache.import_stack.push(id.clone());
             let cached = self.import_and_cache_module(&resolved);
@@ -2521,6 +2533,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // document being indexed. (A module that fails to compile aborts the whole
         // compilation, so not restoring on the error path is acceptable.)
         let saved_recorder = self.recorder.take();
+        // Snapshot the dispatch tables so we can capture exactly the entries this module (and its
+        // nested imports) adds, to store on the cached module. These tables intentionally persist
+        // across the module boundary (the parent must see them when compiling cold), so the delta
+        // is what distinguishes this module's contribution.
+        let dispatch_fn_before = self.fn_case_tables.clone();
+        let dispatch_case_before = self.case_tables.clone();
 
         // Reset to clean state for module compilation
         self.local_count = 0;
@@ -2611,10 +2629,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut binary_data = HashMap::new();
         modules::extract_binary_data(&module_value, &executor, &mut binary_data);
 
+        // Capture the dispatch-table entries this module added (new or changed since the
+        // snapshot), so a later cache hit can restore them without recompiling the module.
+        let fn_case_tables: HashMap<usize, Vec<(usize, usize)>> = self
+            .fn_case_tables
+            .iter()
+            .filter(|(k, v)| dispatch_fn_before.get(*k) != Some(*v))
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        let case_tables: HashMap<usize, usize> = self
+            .case_tables
+            .iter()
+            .filter(|(k, v)| dispatch_case_before.get(*k) != Some(*v))
+            .map(|(k, v)| (*k, *v))
+            .collect();
+
         let cached = modules::CachedModule {
             value: module_value,
             module_type,
             binary_data,
+            fn_case_tables,
+            case_tables,
         };
 
         // Cache the module

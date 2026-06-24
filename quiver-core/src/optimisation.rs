@@ -5,10 +5,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Tree shake bytecode to remove unreachable code.
 /// Returns an optimized Bytecode with only reachable functions, constants, builtins, tuples, and types.
 pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
-    // Helper to collect type_ids transitively from a Type
+    // Collect the type ids referenced transitively from a Type, descending through tuples into
+    // their field types. Types and tuples are mutually recursive, so this recurses with
+    // `collect_tuple_refs`; the `used_types` / `used_tuples` insert-guards bound the recursion
+    // (the id graph is a DAG — recursive types are expressed with `Type::Cycle`, not id cycles).
     fn collect_type_refs(
         type_id: usize,
         types: &[Type],
+        tuples: &[TupleTypeInfo],
         used_types: &mut HashSet<usize>,
         used_tuples: &mut HashSet<usize>,
         used_resources: &mut HashSet<String>,
@@ -23,7 +27,14 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
             Type::Integer | Type::Binary | Type::Reference | Type::Variable(_) | Type::Cycle(_) => {
             }
             Type::Tuple(tuple_id) => {
-                used_tuples.insert(*tuple_id);
+                collect_tuple_refs(
+                    *tuple_id,
+                    types,
+                    tuples,
+                    used_types,
+                    used_tuples,
+                    used_resources,
+                );
             }
             Type::Partial { fields, .. } => {
                 // Collect type references from partial fields
@@ -31,6 +42,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     collect_type_refs(
                         *field_type_id,
                         types,
+                        tuples,
                         used_types,
                         used_tuples,
                         used_resources,
@@ -42,26 +54,77 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 result,
                 receive,
             } => {
-                collect_type_refs(*parameter, types, used_types, used_tuples, used_resources);
-                collect_type_refs(*result, types, used_types, used_tuples, used_resources);
-                collect_type_refs(*receive, types, used_types, used_tuples, used_resources);
+                collect_type_refs(
+                    *parameter,
+                    types,
+                    tuples,
+                    used_types,
+                    used_tuples,
+                    used_resources,
+                );
+                collect_type_refs(
+                    *result,
+                    types,
+                    tuples,
+                    used_types,
+                    used_tuples,
+                    used_resources,
+                );
+                collect_type_refs(
+                    *receive,
+                    types,
+                    tuples,
+                    used_types,
+                    used_tuples,
+                    used_resources,
+                );
             }
             Type::Union(type_ids) => {
                 for &tid in type_ids {
-                    collect_type_refs(tid, types, used_types, used_tuples, used_resources);
+                    collect_type_refs(tid, types, tuples, used_types, used_tuples, used_resources);
                 }
             }
             Type::Process { send, receive } => {
                 if let Some(tid) = send {
-                    collect_type_refs(*tid, types, used_types, used_tuples, used_resources);
+                    collect_type_refs(*tid, types, tuples, used_types, used_tuples, used_resources);
                 }
                 if let Some(tid) = receive {
-                    collect_type_refs(*tid, types, used_types, used_tuples, used_resources);
+                    collect_type_refs(*tid, types, tuples, used_types, used_tuples, used_resources);
                 }
             }
             Type::Resource(name) => {
                 used_resources.insert(name.clone());
             }
+        }
+    }
+
+    // Mark a tuple as used and descend into its field types. Field types may reference further
+    // tuples, so reaching every transitively-referenced tuple here (rather than in a single
+    // snapshot pass) is what keeps the type/tuple closure complete — an incomplete closure drops
+    // a still-referenced type and leaves a dangling id after remapping.
+    fn collect_tuple_refs(
+        tuple_id: usize,
+        types: &[Type],
+        tuples: &[TupleTypeInfo],
+        used_types: &mut HashSet<usize>,
+        used_tuples: &mut HashSet<usize>,
+        used_resources: &mut HashSet<String>,
+    ) {
+        if !used_tuples.insert(tuple_id) {
+            return; // Already processed
+        }
+        let Some(tuple_info) = tuples.get(tuple_id) else {
+            return;
+        };
+        for (_, field_type_id) in &tuple_info.fields {
+            collect_type_refs(
+                *field_type_id,
+                types,
+                tuples,
+                used_types,
+                used_tuples,
+                used_resources,
+            );
         }
     }
 
@@ -74,8 +137,22 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
     let mut used_resources: HashSet<String> = HashSet::new();
 
     // Always keep NIL and OK tuples (indices 0 and 1)
-    used_tuples.insert(0);
-    used_tuples.insert(1);
+    collect_tuple_refs(
+        0,
+        &bytecode.types,
+        &bytecode.tuples,
+        &mut used_types,
+        &mut used_tuples,
+        &mut used_resources,
+    );
+    collect_tuple_refs(
+        1,
+        &bytecode.types,
+        &bytecode.tuples,
+        &mut used_types,
+        &mut used_tuples,
+        &mut used_resources,
+    );
 
     // BFS through reachable functions
     let mut queue: VecDeque<usize> = VecDeque::new();
@@ -94,6 +171,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         collect_type_refs(
             function.type_id,
             &bytecode.types,
+            &bytecode.tuples,
             &mut used_types,
             &mut used_tuples,
             &mut used_resources,
@@ -108,20 +186,35 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     used_constants.insert(*id);
                 }
                 Instruction::Tuple(id) => {
-                    used_tuples.insert(*id);
+                    collect_tuple_refs(
+                        *id,
+                        &bytecode.types,
+                        &bytecode.tuples,
+                        &mut used_types,
+                        &mut used_tuples,
+                        &mut used_resources,
+                    );
                     // Also mark the corresponding Type::Tuple as used for IsType compatibility checks
                     if let Some(type_id) = bytecode
                         .types
                         .iter()
                         .position(|t| matches!(t, Type::Tuple(tid) if *tid == *id))
                     {
-                        used_types.insert(type_id);
+                        collect_type_refs(
+                            type_id,
+                            &bytecode.types,
+                            &bytecode.tuples,
+                            &mut used_types,
+                            &mut used_tuples,
+                            &mut used_resources,
+                        );
                     }
                 }
                 Instruction::IsType(id) => {
                     collect_type_refs(
                         *id,
                         &bytecode.types,
+                        &bytecode.tuples,
                         &mut used_types,
                         &mut used_tuples,
                         &mut used_resources,
@@ -138,12 +231,15 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         }
     }
 
-    // Collect types from builtins
+    // Collect types from builtins. `collect_type_refs` descends through tuples into their field
+    // types, so the type/tuple closure is complete after this — no separate tuple-field pass is
+    // needed.
     for &builtin_id in &used_builtins {
         if let Some(builtin) = bytecode.builtins.get(builtin_id) {
             collect_type_refs(
                 builtin.param_type,
                 &bytecode.types,
+                &bytecode.tuples,
                 &mut used_types,
                 &mut used_tuples,
                 &mut used_resources,
@@ -151,26 +247,11 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
             collect_type_refs(
                 builtin.result_type,
                 &bytecode.types,
+                &bytecode.tuples,
                 &mut used_types,
                 &mut used_tuples,
                 &mut used_resources,
             );
-        }
-    }
-
-    // Collect types from tuple fields
-    let tuples_snapshot: Vec<usize> = used_tuples.iter().copied().collect();
-    for tuple_id in tuples_snapshot {
-        if let Some(tuple_info) = bytecode.tuples.get(tuple_id) {
-            for (_, field_type_id) in &tuple_info.fields {
-                collect_type_refs(
-                    *field_type_id,
-                    &bytecode.types,
-                    &mut used_types,
-                    &mut used_tuples,
-                    &mut used_resources,
-                );
-            }
         }
     }
 

@@ -105,10 +105,16 @@ impl<E: Effect> Repl<E> {
         let mut program = self.program.clone();
         let mut module_cache = self.module_cache.clone();
 
-        // Convert process types from Type to type IDs for the compiler
+        // Convert process types (for `@N` references) from Type to type IDs for the compiler.
+        // These types are built in the environment's id space, so deep-import them into this
+        // REPL's program first; registering them directly would leave their child ids dangling
+        // (referencing the environment's table, not ours) and corrupt the REPL program.
         let process_type_ids: HashMap<usize, (usize, usize)> = process_types
             .into_iter()
-            .map(|(pid, (ty, func_idx))| (pid, (program.register_type(ty), func_idx)))
+            .map(|(pid, (ty, func_idx))| {
+                let local_ty = env.import_type_into(&mut program, ty);
+                (pid, (program.register_type(local_ty), func_idx))
+            })
             .collect();
 
         // Convert last_result_type from Type to type ID for the compiler
