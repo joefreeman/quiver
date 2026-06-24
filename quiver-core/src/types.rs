@@ -347,6 +347,12 @@ fn check_type_relation<T: TypeLookup>(
 
         // Union on right side: self must match ANY variant (same for both modes)
         (_, Type::Union(variants)) => {
+            // Record the coinductive hypothesis (as the union-on-left arm does) so a back-edge
+            // that returns to this same pair — e.g. a recursive type reached through a
+            // union-on-right then a cycle — terminates at the assumption check above instead of
+            // recursing without bound.
+            assumptions.insert(key);
+
             let already_on_stack = type_stack.contains(&pattern_id);
             if !already_on_stack {
                 type_stack.push(pattern_id);

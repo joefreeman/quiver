@@ -1227,44 +1227,35 @@ pub fn unify(
             Ok(())
         }
 
-        // Handle cycles in pattern - for recursive types like list<t>
-        (Type::Cycle(_depth), _concrete_type) => {
-            // Cycles in patterns should unify with any concrete type
-            // This is sound because cycles represent recursive occurrences
-            // The actual structure is checked when constructing the concrete value
-            Ok(())
-        }
-
-        // Handle cycles in concrete type - shouldn't happen in practice
-        (_pattern_type, Type::Cycle(_depth)) => {
-            // If concrete has a cycle, something went wrong - concrete types
-            // shouldn't have unresolved cycles
-            Err(Error::TypeUnresolved(format!(
-                "Concrete type contains cycle: pattern={:?}",
-                pattern
-            )))
-        }
+        // Handle cycles on either side - for recursive types like list<t>.
+        // A `Cycle` is a back-reference to an enclosing μ-binder, i.e. a recursive
+        // occurrence of the surrounding type. The two sides can legitimately be unrolled to
+        // different depths (one shows the expanded union, the other still holds the cycle),
+        // so a cycle unifies with whatever stands at the same position on the other side.
+        // This is sound because the recursive structure is checked at every non-cyclic
+        // position; the back-edge carries no additional constraint to verify here.
+        (Type::Cycle(_depth), _) | (_, Type::Cycle(_depth)) => Ok(()),
 
         // Never type (empty union) unifies with anything
         (Type::Union(variants), _) if variants.is_empty() => Ok(()),
         (_, Type::Union(variants)) if variants.is_empty() => Ok(()),
 
-        // Union types - concrete must be a union too, unify variants
+        // Union types - the argument's type (`concrete`) must be a subtype of the parameter's
+        // type (`pattern`): every concrete variant has to unify with at least one pattern
+        // variant, binding the pattern's type variables. The reverse — requiring every pattern
+        // variant to appear in the argument — would wrongly reject a narrower argument (e.g. a
+        // list builder that only ever returns `Cons` flowing where `Cons | Nil` is expected).
         (Type::Union(pattern_variants), Type::Union(concrete_variants)) => {
-            // For union unification, we need to ensure all pattern variants
-            // can be unified with at least one concrete variant
-            // This is conservative but sound
-            if pattern_variants.is_empty() && concrete_variants.is_empty() {
-                return Ok(());
+            if concrete_variants.is_empty() {
+                return Ok(()); // the empty union (NEVER) is a subtype of anything
             }
 
             let pattern_variants = pattern_variants.clone();
             let concrete_variants = concrete_variants.clone();
 
-            // Try to unify each pattern variant with each concrete variant
-            for &pattern_variant in &pattern_variants {
+            for &concrete_variant in &concrete_variants {
                 let mut found_match = false;
-                for &concrete_variant in &concrete_variants {
+                for &pattern_variant in &pattern_variants {
                     let mut temp_bindings = bindings.clone();
                     if unify(
                         &mut temp_bindings,
@@ -1289,7 +1280,7 @@ pub fn unify(
                 }
                 if !found_match {
                     return Err(Error::TypeUnresolved(
-                        "Cannot unify union variant: pattern has variant that doesn't match any concrete variant".to_string()
+                        "Cannot unify union variant: concrete has variant that doesn't match any pattern variant".to_string()
                     ));
                 }
             }
