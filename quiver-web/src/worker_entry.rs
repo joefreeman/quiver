@@ -9,6 +9,13 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
+/// How long the worker keeps stepping within a single tick before yielding to the event loop.
+/// Bounds the number of event-loop hops to ~`elapsed / STEP_SLICE_MS` regardless of how many
+/// bytecode instructions the work takes, while staying short enough to service incoming commands
+/// promptly. (Each `step` runs up to `MAX_STEP_UNITS` instructions, so the actual slice may
+/// overshoot by one step's worth.)
+const STEP_SLICE_MS: f64 = 8.0;
+
 /// Main entry point for the worker
 /// Call this from the worker's JS context
 #[wasm_bindgen]
@@ -115,18 +122,28 @@ fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSende
     let worker = Rc::new(RefCell::new(worker));
 
     let pump = Pump::new(move || {
-        let current_time_ms = js_sys::Date::now() as u64;
+        let slice_start = js_sys::Date::now();
 
-        if worker.borrow_mut().step(current_time_ms).is_err() {
-            // Worker has sent a WorkerError event to the environment; stop the loop.
-            return Tick::Idle;
+        // Run a batch of steps before yielding. One event-loop hop per ~slice (not per
+        // `MAX_STEP_UNITS` instructions) is what keeps a long, busy computation fast; see
+        // `STEP_SLICE_MS`.
+        loop {
+            let current_time_ms = js_sys::Date::now() as u64;
+            if worker.borrow_mut().step(current_time_ms).is_err() {
+                // Worker has sent a WorkerError event to the environment; stop the loop.
+                return Tick::Idle;
+            }
+            if !worker.borrow().has_runnable() {
+                break;
+            }
+            if js_sys::Date::now() - slice_start >= STEP_SLICE_MS {
+                // Budget spent but work remains: yield to the event loop, then resume immediately.
+                return Tick::Busy;
+            }
         }
 
         let worker = worker.borrow();
-        if worker.has_runnable() {
-            // More processes are queued; yield to the event loop, then step again immediately.
-            Tick::Busy
-        } else if let Some(deadline_ms) = worker.next_timeout_ms() {
+        if let Some(deadline_ms) = worker.next_timeout_ms() {
             // Nothing runnable, but a select timeout is pending — wake exactly when it expires.
             Tick::WakeAt(deadline_ms as f64)
         } else {

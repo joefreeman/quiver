@@ -29,7 +29,9 @@ features = [
     "Worker",
     "WorkerOptions",
     "WorkerType",
+    "MessageChannel",
     "MessageEvent",
+    "MessagePort",
     "DedicatedWorkerGlobalScope",
     "console",
 ]
