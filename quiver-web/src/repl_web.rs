@@ -376,7 +376,7 @@ impl Environment {
                         }
 
                         if let Some(callback) = callbacks.remove(&request_id) {
-                            callbacks_to_invoke.push((callback, result));
+                            callbacks_to_invoke.push((request_id, callback, result));
                         }
                     }
                     Ok(None) => {
@@ -397,8 +397,10 @@ impl Environment {
             did_work = true;
         }
 
-        // Invoke callbacks outside of the borrow
-        for (callback, result) in callbacks_to_invoke {
+        // Invoke callbacks outside of the borrow. A successful line's orphaned locals were already
+        // released by the worker when it delivered the result (the keep-set rode along with the
+        // result request), so inspectors reflect the post-evaluation heap with nothing to do here.
+        for (_request_id, callback, result) in callbacks_to_invoke {
             Self::handle_result(&environment.borrow(), callback, result);
         }
 
@@ -415,10 +417,10 @@ impl Environment {
         for (source, callback, repl) in evaluations_to_process {
             let process_types = cached_process_types.borrow().clone();
 
-            match repl
-                .borrow_mut()
-                .evaluate(&mut environment.borrow_mut(), &source, process_types)
-            {
+            let outcome =
+                repl.borrow_mut()
+                    .evaluate(&mut environment.borrow_mut(), &source, process_types);
+            match outcome {
                 Ok(Some(request_id)) => {
                     pending_callbacks.borrow_mut().insert(request_id, callback);
                 }
@@ -592,6 +594,12 @@ impl Environment {
                 // Not used in the web API
                 callback.invoke::<()>(crate::types::Result::err("Unexpected result type: Locals"));
             }
+            RequestResult::WorkerInfo(_) => {
+                // Not used in the web API
+                callback.invoke::<()>(crate::types::Result::err(
+                    "Unexpected result type: WorkerInfo",
+                ));
+            }
             RequestResult::ProcessTypes(_) => {
                 // Process types are cached automatically by the polling loop
                 // Just return success to the callback
@@ -692,13 +700,6 @@ impl Repl {
             self.repl.clone(),
         ));
         wake(&self.pump);
-    }
-
-    /// Compact locals to remove unused variables (optimization, safe to skip)
-    pub fn compact(&mut self) {
-        self.repl
-            .borrow_mut()
-            .compact(&mut self.environment.borrow_mut());
     }
 
     /// Get all variables (synchronous)

@@ -93,7 +93,18 @@ pub fn execute_bytecode_sync_with<E: Effect>(
 
         if let Some(result) = &process.result {
             match result {
-                Ok(value) => return Ok((value.clone(), executor)),
+                Ok(value) => {
+                    let value = value.clone();
+                    // Validate the reference-count wiring against the tracing oracle on every
+                    // compile-time/sync execution (debug only). A violation means a value-movement
+                    // site is mis-wired; this is the end-to-end check for the refcount work.
+                    if cfg!(debug_assertions)
+                        && let Err(e) = executor.check_refcounts()
+                    {
+                        panic!("refcount invariant violated after sync execution: {e}");
+                    }
+                    return Ok((value, executor));
+                }
                 Err(e) => return Err(e.clone()),
             }
         }

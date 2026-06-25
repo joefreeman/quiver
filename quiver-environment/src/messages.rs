@@ -64,14 +64,22 @@ pub enum Command<E: Effect> {
         function_index: usize,
     },
 
-    /// Request process result
+    /// Request process result.
+    /// `keep_locals`, when present, is the REPL's keep-set: on successful completion the worker
+    /// releases every local *not* listed (the finished line's parameter and temporaries), reclaiming
+    /// their heap in place without re-indexing. `None` for non-REPL one-shot requests, which keep
+    /// all locals.
     GetResult {
         request_id: u64,
         process_id: ProcessId,
+        keep_locals: Option<Vec<usize>>,
     },
 
     /// Request all process statuses
     GetStatuses { request_id: u64 },
+
+    /// Request worker info (memory/heap snapshot)
+    GetWorkerInfo { request_id: u64 },
 
     /// Request all process types (for REPL process references)
     GetProcessTypes { request_id: u64 },
@@ -154,6 +162,12 @@ pub enum Event<E: Effect> {
     StatusesResponse {
         request_id: u64,
         result: Result<HashMap<ProcessId, ProcessStatus>, crate::environment::EnvironmentError>,
+    },
+
+    /// Response to GetWorkerInfo
+    WorkerInfoResponse {
+        request_id: u64,
+        result: Result<quiver_core::process::WorkerInfo, crate::environment::EnvironmentError>,
     },
 
     /// Response to GetProcessTypes (returns function indices, Environment reconstructs types)

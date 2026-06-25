@@ -159,6 +159,32 @@ impl ExecutionStats {
     }
 }
 
+/// A snapshot of binary-heap occupancy, for leak detection and REPL/test introspection.
+///
+/// `slots` counts every heap slot allocated so far (the heap is currently append-only, so this
+/// includes dead slots); `reachable` counts those still referenced from a live root — any
+/// process's stack/locals/mailbox/result/select state, plus the constant-binary cache. The
+/// gap, [`HeapStats::dead`], is garbage: the binaries a future reclamation pass will collect,
+/// and the quantity a manual refcount must drive to zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapStats {
+    /// Total heap slots allocated (live + dead).
+    pub slots: usize,
+    /// Slots reachable from a live root.
+    pub reachable: usize,
+    /// Total bytes across all slots.
+    pub total_bytes: usize,
+    /// Bytes across reachable slots only.
+    pub reachable_bytes: usize,
+}
+
+impl HeapStats {
+    /// Slots allocated but no longer reachable — the leak a reclamation pass would collect.
+    pub fn dead(&self) -> usize {
+        self.slots - self.reachable
+    }
+}
+
 /// Result of processing a select source
 enum SelectResult {
     /// Select should complete with this value
@@ -196,6 +222,22 @@ pub struct Executor<E: Effect> {
     builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
     // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
     heap: Vec<BinaryData>,
+    // Reference count per heap slot, parallel to `heap`. A freshly allocated slot starts at 0
+    // ("floating" — held only in a transient Rust local); it gains a count as it enters rooted
+    // storage (stack/locals/tuple/etc.) via `retain` and loses it via `release`. The invariant
+    // (validated by `check_refcounts`) is `refcounts[i] > 0  <=>  slot i is reachable`.
+    refcounts: Vec<u32>,
+    // Reclamation (a slot reaching count 0 is reusable). `pending_free` queues slots whose count
+    // hit 0; `process_pending_free` (at the start of `step`, a quiescent point) actually frees
+    // those still at 0 — deferred so that moves (release-then-retain) and in-flight Actions
+    // carrying a value out of `step` don't reclaim a slot still in use. `free` is the reuse pool;
+    // `freed[i]` marks a slot currently free (guards double-free and powers debug use-after-free
+    // assertions in `retain`/`release`/`get_binary_data`).
+    free: Vec<usize>,
+    pending_free: Vec<usize>,
+    freed: Vec<bool>,
+    // Cumulative count of slots reclaimed (for the worker inspector's "reclaimed this session").
+    reclaimed: usize,
     // Cache of constant binaries already materialised on the heap, keyed by constant index,
     // so a binary literal in a loop is allocated once rather than on every load.
     constant_binaries: Vec<Option<Binary>>,
@@ -243,9 +285,15 @@ impl<E: Effect> Executor<E> {
                     }),
                 }
             }
-            Binary::Heap(index) => self.heap.get(*index).ok_or_else(|| {
-                Error::InvalidArgument(format!("Heap binary index {} not found", index))
-            }),
+            Binary::Heap(index) => {
+                debug_assert!(
+                    !self.freed.get(*index).copied().unwrap_or(false),
+                    "access of freed heap slot {index} (use-after-free)"
+                );
+                self.heap.get(*index).ok_or_else(|| {
+                    Error::InvalidArgument(format!("Heap binary index {} not found", index))
+                })
+            }
         }
     }
 
@@ -258,14 +306,263 @@ impl<E: Effect> Executor<E> {
                 MAX_BINARY_SIZE
             )));
         }
-        let index = self.heap.len();
-        self.heap.push(data);
-        Ok(Binary::Heap(index))
+        // Reuse a reclaimed slot if one is available, else grow the heap. Either way the slot
+        // starts floating at count 0 until it enters rooted storage (see `retain`).
+        if let Some(index) = self.free.pop() {
+            self.heap[index] = data;
+            self.refcounts[index] = 0;
+            self.freed[index] = false;
+            Ok(Binary::Heap(index))
+        } else {
+            let index = self.heap.len();
+            self.heap.push(data);
+            self.refcounts.push(0);
+            self.freed.push(false);
+            Ok(Binary::Heap(index))
+        }
+    }
+
+    /// Reclaim slots whose count has settled at 0. Called at a safe point (the start of `step`),
+    /// where no transient Rust-local Value handle or in-flight Action references a slot — so a
+    /// slot still at 0 here is genuinely unreferenced. A slot re-retained since being queued
+    /// (count > 0) is skipped; `freed` guards against double-freeing a duplicate queue entry.
+    fn process_pending_free(&mut self) {
+        while let Some(index) = self.pending_free.pop() {
+            if self.refcounts[index] == 0 && !self.freed[index] {
+                self.heap[index] = BinaryData::new(Vec::new()); // drop the data, reclaim memory
+                self.freed[index] = true;
+                self.free.push(index);
+                self.reclaimed += 1;
+            }
+        }
+    }
+
+    /// Account for a value entering rooted storage: increment the count of every heap slot it
+    /// references, recursing through tuples/functions. Deep and symmetric with [`release`];
+    /// each `retain` must be matched by exactly one `release` when the reference leaves storage.
+    ///
+    fn retain(&mut self, value: &Value) {
+        match value {
+            Value::Binary(Binary::Heap(idx)) => {
+                debug_assert!(
+                    !self.freed[*idx],
+                    "retain of freed heap slot {idx} (use-after-free)"
+                );
+                self.refcounts[*idx] += 1;
+            }
+            Value::Tuple(_, elements) | Value::Function(_, elements) => {
+                for element in elements.iter() {
+                    self.retain(element);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Account for a value leaving rooted storage: the inverse of [`retain`]. A debug build
+    /// panics on underflow — a `release` without a matching `retain`, i.e. an unwired insertion
+    /// site. Reclamation is not yet enabled, so a count reaching 0 leaves the slot in place.
+    fn release(&mut self, value: &Value) {
+        match value {
+            Value::Binary(Binary::Heap(idx)) => {
+                debug_assert!(
+                    !self.freed[*idx],
+                    "release of freed heap slot {idx} (use-after-free)"
+                );
+                debug_assert!(
+                    self.refcounts[*idx] > 0,
+                    "release underflow on heap slot {idx} (release without a matching retain)"
+                );
+                self.refcounts[*idx] = self.refcounts[*idx].saturating_sub(1);
+                if self.refcounts[*idx] == 0 {
+                    // Defer the actual free to the next safe point (see `process_pending_free`).
+                    self.pending_free.push(*idx);
+                }
+            }
+            Value::Tuple(_, elements) | Value::Function(_, elements) => {
+                for element in elements.iter() {
+                    self.release(element);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // --- Choke points for rooted storage. The interpreter routes stack/locals mutations through
+    // these so the reference counts stay in step with what is reachable. `proc` is the running
+    // process, which during a `step` is owned separately from `self`, so retaining/releasing
+    // against `self` alongside a `proc` borrow is conflict-free. Pure reordering (rotate/swap)
+    // does not change the stored multiset and is left as a raw `proc.stack` call.
+
+    /// Push a value onto the process stack, retaining its heap references.
+    fn push_value(&mut self, proc: &mut Process, value: Value) {
+        self.retain(&value);
+        proc.stack.push(value);
+    }
+
+    /// Pop a value off the process stack, releasing its heap references. The returned handle is
+    /// still valid (reclamation is off); re-inserting it via another `push_*` re-retains it, so a
+    /// pop-then-push "move" nets to zero.
+    fn pop_value(&mut self, proc: &mut Process) -> Option<Value> {
+        let value = proc.stack.pop();
+        if let Some(value) = &value {
+            self.release(value);
+        }
+        value
+    }
+
+    /// Push a value into the process's locals, retaining its heap references.
+    fn push_local(&mut self, proc: &mut Process, value: Value) {
+        self.retain(&value);
+        proc.locals.push(value);
+    }
+
+    /// Truncate the process's locals to `len`, releasing every dropped binding.
+    fn truncate_locals(&mut self, proc: &mut Process, len: usize) {
+        if proc.locals.len() > len {
+            let dropped = proc.locals.split_off(len);
+            for value in &dropped {
+                self.release(value);
+            }
+        }
+    }
+
+    /// Like [`truncate_locals`] but addresses the process by id, for callers (e.g. frame teardown
+    /// in the step loop) that hold only `&mut self`, not a separate `&mut Process`.
+    fn truncate_locals_pid(&mut self, pid: ProcessId, len: usize) {
+        let dropped = match self.get_process_mut(pid) {
+            Some(process) if process.locals.len() > len => process.locals.split_off(len),
+            _ => return,
+        };
+        for value in &dropped {
+            self.release(value);
+        }
+    }
+
+    /// Replace a process's locals wholesale, retaining the incoming bindings and releasing the
+    /// outgoing ones so the reference counts stay correct. Returns `false` if the process is gone.
+    /// Used by the REPL's between-evaluation compaction (the caller selects which bindings to keep).
+    pub fn replace_locals(&mut self, process_id: ProcessId, new_locals: Vec<Value>) -> bool {
+        if self.get_process(process_id).is_none() {
+            return false;
+        }
+        for value in &new_locals {
+            self.retain(value);
+        }
+        let old = std::mem::replace(
+            &mut self.get_process_mut(process_id).unwrap().locals,
+            new_locals,
+        );
+        for value in &old {
+            self.release(value);
+        }
+        true
+    }
+
+    /// Release the locals at every index *not* in `keep`, overwriting each with nil so its heap
+    /// references are dropped. Unlike [`replace_locals`], indices are left in place (no re-indexing),
+    /// so binding indices stay valid. Used by the REPL to reclaim a finished line's orphaned
+    /// parameter and temporaries at the moment its result is delivered, without disturbing the
+    /// host's binding map. Returns `false` if the process is gone.
+    pub fn release_orphan_locals(&mut self, process_id: ProcessId, keep: &[usize]) -> bool {
+        let keep: HashSet<usize> = keep.iter().copied().collect();
+        let Some(process) = self.get_process_mut(process_id) else {
+            return false;
+        };
+        let mut orphans = Vec::new();
+        for (index, slot) in process.locals.iter_mut().enumerate() {
+            if !keep.contains(&index) {
+                orphans.push(std::mem::replace(slot, Value::nil()));
+            }
+        }
+        for value in &orphans {
+            self.release(value);
+        }
+        true
+    }
+
+    /// Validate the reference-count invariant against the tracing oracle: every heap slot must
+    /// have a positive count exactly when it is reachable from a root ([`reachable_heap_indices`]).
+    /// Returns the first violating slot, so it doubles as a debug assertion (the wiring is
+    /// correct iff this stays `Ok` at every quiescent point) and a test oracle.
+    pub fn check_refcounts(&self) -> Result<(), String> {
+        let reachable = self.reachable_heap_indices();
+        for index in 0..self.heap.len() {
+            let counted = self.refcounts[index] > 0;
+            let live = reachable.contains(&index);
+            if counted != live {
+                return Err(format!(
+                    "heap slot {index}: refcount={} but reachable={live}",
+                    self.refcounts[index]
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Create a binary from Vec<u8>
     pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
         self.allocate_binary_data(BinaryData::new(bytes))
+    }
+
+    /// The set of heap-slot indices reachable from any live root: every process's
+    /// Value-bearing state (stack, locals, mailbox, result, select sources/receiving, awaited
+    /// results) plus the constant-binary cache (which pins its materialised slots for the
+    /// program's lifetime). This is the tracing *oracle* against which incremental refcounts
+    /// will be validated — a slot is correctly live iff it appears here.
+    ///
+    /// Meaningful at a quiescent point (between steps); during a `step` the running process is
+    /// temporarily removed from the table and would be missed.
+    pub fn reachable_heap_indices(&self) -> HashSet<usize> {
+        let mut indices = HashSet::new();
+        for process in self.processes.values() {
+            for value in &process.stack {
+                collect_heap_indices(value, &mut indices);
+            }
+            for value in &process.locals {
+                collect_heap_indices(value, &mut indices);
+            }
+            for value in &process.mailbox {
+                collect_heap_indices(value, &mut indices);
+            }
+            if let Some(Ok(value)) = &process.result {
+                collect_heap_indices(value, &mut indices);
+            }
+            if let Some(state) = &process.select_state {
+                for value in &state.sources {
+                    collect_heap_indices(value, &mut indices);
+                }
+                if let Some((_, value)) = &state.receiving {
+                    collect_heap_indices(value, &mut indices);
+                }
+            }
+            for value in process.awaiting.values().flatten() {
+                collect_heap_indices(value, &mut indices);
+            }
+        }
+        for binary in self.constant_binaries.iter().flatten() {
+            if let Binary::Heap(idx) = binary {
+                indices.insert(*idx);
+            }
+        }
+        indices
+    }
+
+    /// Snapshot heap occupancy (see [`HeapStats`]). Read-only; call at a quiescent point.
+    pub fn heap_stats(&self) -> HeapStats {
+        let reachable = self.reachable_heap_indices();
+        let total_bytes = self.heap.iter().map(BinaryData::len).sum();
+        let reachable_bytes = reachable
+            .iter()
+            .filter_map(|&idx| self.heap.get(idx))
+            .map(BinaryData::len)
+            .sum();
+        HeapStats {
+            slots: self.heap.len(),
+            reachable: reachable.len(),
+            total_bytes,
+            reachable_bytes,
+        }
     }
 
     pub fn new(
@@ -294,6 +591,11 @@ impl<E: Effect> Executor<E> {
             function_param_compatibility: vec![],
             builtin_param_compatibility: vec![],
             heap: vec![],
+            refcounts: vec![],
+            free: vec![],
+            pending_free: vec![],
+            freed: vec![],
+            reclaimed: 0,
             constant_binaries: vec![],
             builtins_registry,
             stats: ExecutionStats::new(),
@@ -338,7 +640,8 @@ impl<E: Effect> Executor<E> {
         let captures_count = captures.len();
         for value in captures {
             let injected = self.inject_heap_data(value, &heap_data)?;
-
+            // Injected into rooted storage (the new frame's locals).
+            self.retain(&injected);
             let process = self
                 .get_process_mut(id)
                 .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -347,6 +650,7 @@ impl<E: Effect> Executor<E> {
 
         // Push argument onto stack
         let injected_arg = self.inject_heap_data(argument, &heap_data)?;
+        self.retain(&injected_arg);
         let process = self
             .get_process_mut(id)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -428,9 +732,13 @@ impl<E: Effect> Executor<E> {
         // Inject heap data into the result value
         let injected_result = self.inject_heap_data(result, &heap)?;
 
-        // Store the result in the process's awaiting map
-        if let Some(process) = self.get_process_mut(awaiter) {
-            process.awaiting.insert(awaited, Some(injected_result));
+        // Store the result in the process's awaiting map (retaining as it enters storage).
+        if self.get_process(awaiter).is_some() {
+            self.retain(&injected_result);
+            self.get_process_mut(awaiter)
+                .unwrap()
+                .awaiting
+                .insert(awaited, Some(injected_result));
         }
 
         // Re-queue awaiter to retry its Select instruction
@@ -458,6 +766,11 @@ impl<E: Effect> Executor<E> {
                 err_msg
             ))),
         };
+
+        // Retain the success value as it enters the stack (below).
+        if let Ok(value) = &value_result {
+            self.retain(value);
+        }
 
         // Get process and update based on result
         let process = self
@@ -496,8 +809,12 @@ impl<E: Effect> Executor<E> {
         // Inject heap data into the message value
         let injected_message = self.inject_heap_data(message, &heap)?;
 
-        if let Some(process) = self.processes.get_mut(&id) {
-            process.mailbox.push_back(injected_message);
+        if self.get_process(id).is_some() {
+            self.retain(&injected_message);
+            self.get_process_mut(id)
+                .unwrap()
+                .mailbox
+                .push_back(injected_message);
         }
 
         // Re-queue if the process is selecting (waiting for messages)
@@ -579,6 +896,91 @@ impl<E: Effect> Executor<E> {
         self.process_function_indices.insert(id, function_index);
     }
 
+    /// Distinct heap-slot indices reachable from a set of values.
+    fn heap_set<'a>(&self, values: impl Iterator<Item = &'a Value>) -> HashSet<usize> {
+        let mut set = HashSet::new();
+        for value in values {
+            collect_heap_indices(value, &mut set);
+        }
+        set
+    }
+
+    /// Total bytes occupied by a set of heap slots.
+    fn heap_bytes(&self, indices: &HashSet<usize>) -> usize {
+        indices
+            .iter()
+            .filter_map(|&i| self.heap.get(i))
+            .map(BinaryData::len)
+            .sum()
+    }
+
+    fn usage(&self, indices: &HashSet<usize>) -> crate::process::HeapUsage {
+        crate::process::HeapUsage {
+            slots: indices.len(),
+            bytes: self.heap_bytes(indices),
+        }
+    }
+
+    /// A process's per-root binary-heap footprint (see [`crate::process::ProcessHeapUsage`]).
+    fn process_heap_usage(&self, process: &Process) -> crate::process::ProcessHeapUsage {
+        let stack = self.heap_set(process.stack.iter());
+        let locals = self.heap_set(process.locals.iter());
+        let mailbox = self.heap_set(process.mailbox.iter());
+
+        // The total is the union across every root, deduplicated.
+        let mut total = &stack | &locals;
+        total.extend(&mailbox);
+        if let Some(Ok(value)) = &process.result {
+            collect_heap_indices(value, &mut total);
+        }
+        if let Some(state) = &process.select_state {
+            for value in &state.sources {
+                collect_heap_indices(value, &mut total);
+            }
+            if let Some((_, value)) = &state.receiving {
+                collect_heap_indices(value, &mut total);
+            }
+        }
+        for value in process.awaiting.values().flatten() {
+            collect_heap_indices(value, &mut total);
+        }
+
+        crate::process::ProcessHeapUsage {
+            stack: self.usage(&stack),
+            locals: self.usage(&locals),
+            mailbox: self.usage(&mailbox),
+            total: self.usage(&total),
+        }
+    }
+
+    /// A snapshot of this worker's executor for the `\w` inspector (see
+    /// [`crate::process::WorkerInfo`]).
+    pub fn worker_info(&self) -> crate::process::WorkerInfo {
+        let reachable = self.reachable_heap_indices();
+        let constant_indices: HashSet<usize> = self
+            .constant_binaries
+            .iter()
+            .flatten()
+            .filter_map(|b| match b {
+                Binary::Heap(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        crate::process::WorkerInfo {
+            worker_id: self.worker_id,
+            process_ids: self.processes.keys().copied().collect(),
+            heap_slots: self.heap.len(),
+            live_slots: reachable.len(),
+            free_slots: self.free.len(),
+            pending_free: self.pending_free.len(),
+            reclaimed: self.reclaimed,
+            live_bytes: self.heap_bytes(&reachable),
+            total_bytes: self.heap.iter().map(BinaryData::len).sum(),
+            constant_slots: constant_indices.len(),
+            constant_bytes: self.heap_bytes(&constant_indices),
+        }
+    }
+
     pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
         self.processes.get(&id).map(|process| {
             // Extract heap data from result if present
@@ -609,6 +1011,7 @@ impl<E: Effect> Executor<E> {
                 mailbox_size: process.mailbox.len(),
                 persistent: process.persistent,
                 result,
+                heap: self.process_heap_usage(process),
             }
         })
     }
@@ -660,6 +1063,10 @@ impl<E: Effect> Executor<E> {
     /// Execute up to max_units instruction units for a single process.
     /// Returns (did_work, optional_action) where did_work indicates if any instructions were executed.
     pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> (bool, Option<Action<E>>) {
+        // Reclaim slots that settled at count 0 since the last step. Doing it here (a quiescent
+        // point — any Action returned by the previous step has been handled by the Environment,
+        // and no Rust-local Value handles are live) is what makes deferred reclamation safe.
+        self.process_pending_free();
         // Check for expired timeouts before processing
         self.check_expired_timeouts(current_time_ms);
         // Pop process from queue
@@ -741,36 +1148,41 @@ impl<E: Effect> Executor<E> {
                 break; // No frames to pop
             }
 
-            // Now get mutable borrow to modify process
-            let process = self
-                .get_process_mut(current_pid)
-                .expect("Process should exist");
+            // Pop the exhausted frame and decide what to release; the local-release happens after
+            // the process borrow ends, since it needs `&mut self`.
+            let clear_base = {
+                let process = self
+                    .get_process_mut(current_pid)
+                    .expect("Process should exist");
 
-            // Frame exhausted - pop it without stack manipulation
-            // (the result is already on the stack from the last instruction)
-            let frame = process.frames.pop().unwrap();
-            let is_last_frame = process.frames.is_empty();
+                // Frame exhausted - pop it without stack manipulation
+                // (the result is already on the stack from the last instruction)
+                let frame = process.frames.pop().unwrap();
+                let is_last_frame = process.frames.is_empty();
 
-            // Clear locals from the popped frame (including captures)
-            // For persistent processes, only keep locals if this was the last (top-level) frame
-            let should_clear_locals = !process.persistent || !is_last_frame;
-            if should_clear_locals {
-                process.locals.truncate(frame.locals_base);
-            }
+                // Clear locals from the popped frame (including captures). For persistent
+                // processes, only keep locals if this was the last (top-level) frame.
+                let should_clear_locals = !process.persistent || !is_last_frame;
 
-            // Check if we're in an active select and returning to the select instruction
-            let should_skip_increment = if let Some(ref select_state) = process.select_state {
-                let current_frame = process.frames.len().saturating_sub(1);
-                let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
-                select_state.frame == current_frame
-                    && select_state.instruction == current_instruction
-            } else {
-                false
+                // Check if we're in an active select and returning to the select instruction
+                let should_skip_increment = if let Some(ref select_state) = process.select_state {
+                    let current_frame = process.frames.len().saturating_sub(1);
+                    let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+                    select_state.frame == current_frame
+                        && select_state.instruction == current_instruction
+                } else {
+                    false
+                };
+
+                // Increment counter of calling frame unless we're in an active select
+                if !should_skip_increment && let Some(calling_frame) = process.frames.last_mut() {
+                    calling_frame.counter += 1;
+                }
+
+                should_clear_locals.then_some(frame.locals_base)
             };
-
-            // Increment counter of calling frame unless we're in an active select
-            if !should_skip_increment && let Some(calling_frame) = process.frames.last_mut() {
-                calling_frame.counter += 1;
+            if let Some(base) = clear_base {
+                self.truncate_locals_pid(current_pid, base);
             }
         }
 
@@ -833,6 +1245,14 @@ impl<E: Effect> Executor<E> {
                             .ok();
                     }
                 }
+            }
+
+            // Validate the refcount invariant at this quiescent point (debug only) — the
+            // worker/concurrency-path counterpart of the check in `execute_bytecode_sync`. This
+            // catches *leaks* (missing releases) that the `release` underflow assert cannot.
+            #[cfg(debug_assertions)]
+            if let Err(e) = self.check_refcounts() {
+                panic!("refcount invariant violated at process {current_pid} completion: {e}");
             }
         } else {
             let should_requeue =
@@ -990,6 +1410,8 @@ impl<E: Effect> Executor<E> {
             self.constant_binaries.resize(index + 1, None);
         }
         self.constant_binaries[index] = Some(binary);
+        // The constant cache is itself a root, so it holds a reference to the materialised slot.
+        self.retain(&Value::Binary(binary));
         Ok(binary)
     }
 
@@ -1010,47 +1432,42 @@ impl<E: Effect> Executor<E> {
             None => Value::Binary(self.cached_constant_binary(index)?),
         };
 
-        let process = &mut *proc;
-        process.stack.push(value);
+        self.push_value(proc, value);
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
     }
 
     fn handle_pop(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-        process.stack.pop().ok_or(Error::StackUnderflow)?;
+        self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
     }
 
     fn handle_duplicate(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-        let value = process.stack.last().ok_or(Error::StackUnderflow)?.clone();
-        process.stack.push(value);
+        let value = proc.stack.last().ok_or(Error::StackUnderflow)?.clone();
+        self.push_value(proc, value);
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
     }
 
     fn handle_pick(&mut self, proc: &mut Process, n: usize) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-
-        if process.stack.len() <= n {
+        if proc.stack.len() <= n {
             return Err(Error::StackUnderflow);
         }
-        let index = process.stack.len() - 1 - n;
-        let value = process.stack[index].clone();
-        process.stack.push(value);
+        let index = proc.stack.len() - 1 - n;
+        let value = proc.stack[index].clone();
+        self.push_value(proc, value);
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
@@ -1079,32 +1496,30 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         index: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-
-        let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+        let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
         let actual_index = frame.locals_base + index;
 
-        let value = process
+        let value = proc
             .locals
             .get(actual_index)
             .cloned()
             .ok_or_else(|| Error::VariableUndefined(format!("local[{}]", index)))?;
 
-        process.stack.push(value);
+        self.push_value(proc, value);
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
     }
 
     fn handle_store(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
+        // Move the top of the stack into locals: release (leaving the stack) then retain
+        // (entering locals) nets to zero, keeping the binding's reference.
+        let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+        self.push_local(proc, value);
 
-        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-        process.locals.push(value);
-
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
@@ -1124,26 +1539,26 @@ impl<E: Effect> Executor<E> {
                 found: format!("unknown type ({:?})", type_id),
             })?;
 
-        let process = &mut *proc;
-
+        // Pop the fields (releasing each as it leaves the stack), then push the tuple, whose
+        // deep retain re-counts them in their new home — a net-zero move into the tuple.
         let mut values = Vec::new();
         for _ in 0..size {
-            let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+            let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
             values.push(value);
         }
         values.reverse();
-        process.stack.push(Value::tuple(type_id, values));
+        self.push_value(proc, Value::tuple(type_id, values));
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
     }
 
     fn handle_get(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-
-        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        // Releasing the tuple drops the counts of all its fields; pushing the extracted field
+        // re-counts that one. The other fields are correctly released (no longer referenced).
+        let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
         match value {
             Value::Tuple(_, elements) => {
@@ -1151,9 +1566,9 @@ impl<E: Effect> Executor<E> {
                     .get(index)
                     .ok_or(Error::FieldAccessInvalid(index))?
                     .clone();
-                process.stack.push(element);
+                self.push_value(proc, element);
 
-                if let Some(frame) = process.frames.last_mut() {
+                if let Some(frame) = proc.frames.last_mut() {
                     frame.counter += 1;
                 }
                 Ok(None)
@@ -1170,18 +1585,14 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         pattern_type_id: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let value = proc.stack.pop().ok_or(Error::StackUnderflow)?;
+        let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
         // Use precomputed type compatibility instead of runtime type checking
         let is_match = self.check_type_compatible(&value, pattern_type_id);
 
-        let process = &mut *proc;
+        self.push_value(proc, if is_match { Value::ok() } else { Value::nil() });
 
-        process
-            .stack
-            .push(if is_match { Value::ok() } else { Value::nil() });
-
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
@@ -1246,13 +1657,11 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         offset: isize,
     ) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-
-        let condition = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let condition = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
         let should_jump = !condition.is_nil();
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             if should_jump {
                 // Jump modifies counter directly
                 // Add 1 to offset because in the old code, JumpIf got the centralized increment
@@ -1283,33 +1692,29 @@ impl<E: Effect> Executor<E> {
                 self.get_function(function_index)
                     .ok_or(Error::FunctionUndefined(function_index))?;
 
-                // Now modify process
-                let process = &mut *proc;
+                // Pop the function (discarded) and the parameter (re-pushed for the callee).
+                // Captures are cloned into the new frame's locals.
+                self.pop_value(proc); // function
+                let parameter = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
-                // Pop function and parameter
-                process.stack.pop();
-                let parameter = process.stack.pop().ok_or(Error::StackUnderflow)?;
-
-                let locals_base = process.locals.len();
+                let locals_base = proc.locals.len();
                 let captures_count = captures.len();
 
-                process.stack.push(parameter);
-                process.locals.extend(captures.iter().cloned());
+                self.push_value(proc, parameter);
+                for capture in captures.iter() {
+                    self.push_local(proc, capture.clone());
+                }
 
-                process
-                    .frames
+                proc.frames
                     .push(Frame::new(function_index, locals_base, captures_count));
 
                 // Don't increment counter - new frame starts at 0
                 Ok(None)
             }
             Value::Builtin(builtin_id) => {
-                // Pop function and parameter
-                let parameter = {
-                    let process = &mut *proc;
-                    process.stack.pop(); // Pop function
-                    process.stack.pop().ok_or(Error::StackUnderflow)?
-                };
+                // Pop function (discarded) and parameter (consumed by the builtin).
+                self.pop_value(proc); // function
+                let parameter = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
                 // Resolve the implementation directly by id (no String clone / HashMap lookup).
                 let builtin = self
@@ -1344,14 +1749,13 @@ impl<E: Effect> Executor<E> {
                 // Handle both immediate and action results
                 match result {
                     crate::builtins::BuiltinResult::Value(value) => {
-                        // Immediate result: push value and increment counter
-                        let process = &mut *proc;
-
-                        process.stack.push(value);
+                        // Immediate result: push value (retaining any freshly allocated binaries)
+                        // and increment counter.
+                        self.push_value(proc, value);
 
                         // Unlike regular calls, builtins don't create a new frame
                         // So we need to manually increment the counter
-                        if let Some(frame) = process.frames.last_mut() {
+                        if let Some(frame) = proc.frames.last_mut() {
                             frame.counter += 1;
                         }
                         Ok(None)
@@ -1381,30 +1785,24 @@ impl<E: Effect> Executor<E> {
         recurse: bool,
     ) -> Result<Option<Action<E>>, Error> {
         if recurse {
-            let process = &mut *proc;
-
-            let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
-            let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+            let argument = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+            let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
             let locals_base = frame.locals_base;
             let captures_count = frame.captures_count;
             let function_index = frame.function_index;
 
-            // Clear current frame's locals, but keep captures
-            process.locals.truncate(locals_base + captures_count);
+            // Clear current frame's locals, but keep captures (releasing what's dropped).
+            self.truncate_locals(proc, locals_base + captures_count);
 
-            process.stack.push(argument);
-            *process.frames.last_mut().unwrap() =
+            self.push_value(proc, argument);
+            *proc.frames.last_mut().unwrap() =
                 Frame::new(function_index, locals_base, captures_count);
 
             // Don't increment counter - frame was reset to 0
             Ok(None)
         } else {
-            let (function_value, argument) = {
-                let process = &mut *proc;
-                let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-                let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
-                (function_value, argument)
-            };
+            let function_value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+            let argument = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
             match function_value {
                 Value::Function(function_index, captures) => {
@@ -1412,20 +1810,20 @@ impl<E: Effect> Executor<E> {
                     self.get_function(function_index)
                         .ok_or(Error::FunctionUndefined(function_index))?;
 
-                    let process = &mut *proc;
-
-                    let frame = process.frames.last().ok_or(Error::FrameUnderflow)?;
+                    let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
                     let locals_base = frame.locals_base;
 
-                    // Clear current frame's locals
-                    process.locals.truncate(locals_base);
+                    // Clear current frame's locals (releasing the old captures/bindings).
+                    self.truncate_locals(proc, locals_base);
 
                     // Extend with captures for new function
                     let captures_count = captures.len();
-                    process.locals.extend(captures.iter().cloned());
+                    for capture in captures.iter() {
+                        self.push_local(proc, capture.clone());
+                    }
 
-                    process.stack.push(argument);
-                    *process.frames.last_mut().unwrap() =
+                    self.push_value(proc, argument);
+                    *proc.frames.last_mut().unwrap() =
                         Frame::new(function_index, locals_base, captures_count);
 
                     // Don't increment counter - frame was reset to 0
@@ -1446,19 +1844,18 @@ impl<E: Effect> Executor<E> {
             .ok_or(Error::FunctionUndefined(function_index))?;
         let capture_count = func.captures;
 
-        let process = &mut *proc;
-
-        // Pop capture values from stack (in reverse order, then reverse to restore)
+        // Pop capture values off the stack (releasing each); the function value's deep retain
+        // re-counts them in their new home — a net-zero move into the closure.
         let mut captures = Vec::with_capacity(capture_count);
         for _ in 0..capture_count {
-            captures.push(process.stack.pop().ok_or(Error::StackUnderflow)?);
+            captures.push(self.pop_value(proc).ok_or(Error::StackUnderflow)?);
         }
         captures.reverse();
 
         let function_value = Value::Function(function_index, Arc::new(captures));
-        process.stack.push(function_value);
+        self.push_value(proc, function_value);
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
@@ -1469,15 +1866,15 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         index: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-
-        let frame = process.frames.last_mut().ok_or(Error::FrameUnderflow)?;
+        let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
         let target = frame.locals_base + index;
-        if target > process.locals.len() {
+        if target > proc.locals.len() {
             return Err(Error::StackUnderflow);
         }
-        process.locals.truncate(target);
-        frame.counter += 1;
+        self.truncate_locals(proc, target);
+        if let Some(frame) = proc.frames.last_mut() {
+            frame.counter += 1;
+        }
         Ok(None)
     }
 
@@ -1490,12 +1887,10 @@ impl<E: Effect> Executor<E> {
         if index >= self.builtins.len() {
             return Err(Error::BuiltinUndefined(index));
         }
-        let process = &mut *proc;
+        // Push builtin by index (no heap references).
+        self.push_value(proc, Value::Builtin(index));
 
-        // Push builtin by index
-        process.stack.push(Value::Builtin(index));
-
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
@@ -1506,20 +1901,14 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         count: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-
-        let values = {
-            if count > process.stack.len() {
-                return Err(Error::StackUnderflow);
-            }
-
-            let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
-                values.push(process.stack.pop().ok_or(Error::StackUnderflow)?);
-            }
-            values.reverse();
-            values
-        };
+        if count > proc.stack.len() {
+            return Err(Error::StackUnderflow);
+        }
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(self.pop_value(proc).ok_or(Error::StackUnderflow)?);
+        }
+        values.reverse();
 
         let first = &values[0];
         let all_equal = values.iter().all(|value| self.values_equal(first, value));
@@ -1530,20 +1919,16 @@ impl<E: Effect> Executor<E> {
             Value::nil()
         };
 
-        let process = &mut *proc;
+        self.push_value(proc, result);
 
-        process.stack.push(result);
-
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
     }
 
     fn handle_not(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
-        let process = &mut *proc;
-
-        let value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
         let result = if value.is_nil() {
             Value::ok()
@@ -1551,9 +1936,9 @@ impl<E: Effect> Executor<E> {
             Value::nil()
         };
 
-        process.stack.push(result);
+        self.push_value(proc, result);
 
-        if let Some(frame) = process.frames.last_mut() {
+        if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
         }
         Ok(None)
@@ -1574,12 +1959,18 @@ impl<E: Effect> Executor<E> {
             });
         }
 
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-        let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let (function_value, argument) = {
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+            let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
+            (function_value, argument)
+        };
+        // Both leave this process's stack — carried by the Spawn action and re-injected into the
+        // new process by `spawn_process`. Release here so the caller's counts drop.
+        self.release(&function_value);
+        self.release(&argument);
 
         let (function_index, captures) = match function_value {
             Value::Function(idx, caps) => (idx, caps),
@@ -1619,12 +2010,18 @@ impl<E: Effect> Executor<E> {
             });
         }
 
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let target_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-        let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
+        let (target_value, message) = {
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            let target_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
+            let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
+            (target_value, message)
+        };
+        // The message leaves this process's stack (carried by the Deliver action, or dropped on a
+        // type error); release it. `target_value` is a process/resource handle (no heap
+        // references) — it is pushed back or dropped, needing no accounting.
+        self.release(&message);
 
         match target_value {
             Value::Process(target_pid, _) => {
@@ -1732,12 +2129,17 @@ impl<E: Effect> Executor<E> {
             ));
         }
 
-        // If we just finished executing a receive function, pop the result
+        // If we just finished executing a receive function, pop the verdict. It is only inspected
+        // for truthiness (then dropped), so release it as it leaves the stack.
         if select_state.receiving.is_some() {
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-            Ok(Some(process.stack.pop().ok_or(Error::StackUnderflow)?))
+            let verdict = {
+                let process = self
+                    .get_process_mut(pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                process.stack.pop().ok_or(Error::StackUnderflow)?
+            };
+            self.release(&verdict);
+            Ok(Some(verdict))
         } else {
             Ok(None)
         }
@@ -2007,21 +2409,36 @@ impl<E: Effect> Executor<E> {
                 .ok_or(Error::InvalidArgument("Select state missing".to_string()))?;
             let msg_idx = select_state.cursors.get(receive_idx).copied().unwrap_or(0);
 
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-            if msg_idx < process.mailbox.len() {
-                process.mailbox.remove(msg_idx);
+            let removed = {
+                let process = self
+                    .get_process_mut(pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                if msg_idx < process.mailbox.len() {
+                    process.mailbox.remove(msg_idx)
+                } else {
+                    None
+                }
+            };
+            if let Some(removed) = &removed {
+                self.release(removed); // accepted message leaves the mailbox
             }
             Ok(Some(message_value.clone()))
         } else {
-            // Nil result - increment cursor and reset receiving
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-            if let Some(state) = &mut process.select_state {
-                state.cursors[receive_idx] += 1;
-                state.receiving = None;
+            // Nil result - increment cursor and reset receiving (releasing the held message).
+            let dropped = {
+                let process = self
+                    .get_process_mut(pid)
+                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                match &mut process.select_state {
+                    Some(state) => {
+                        state.cursors[receive_idx] += 1;
+                        state.receiving.take().map(|(_, message)| message)
+                    }
+                    None => None,
+                }
+            };
+            if let Some(message) = &dropped {
+                self.release(message);
             }
             Ok(None)
         }
@@ -2071,11 +2488,18 @@ impl<E: Effect> Executor<E> {
 
                 if is_type_only {
                     // Type-only receiver - skip calling, just complete with the message
-                    let process = self
-                        .get_process_mut(pid)
-                        .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-                    if msg_idx < process.mailbox.len() {
-                        process.mailbox.remove(msg_idx);
+                    let removed = {
+                        let process = self
+                            .get_process_mut(pid)
+                            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+                        if msg_idx < process.mailbox.len() {
+                            process.mailbox.remove(msg_idx)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(removed) = &removed {
+                        self.release(removed); // message leaves the mailbox
                     }
                     return Ok(SelectResult::Complete(message));
                 } else {
@@ -2120,13 +2544,16 @@ impl<E: Effect> Executor<E> {
             .remove(&pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
+        // The message clone enters the select_state.receiving slot.
+        self.retain(&message);
         if let Some(state) = &mut proc.select_state {
             state.receiving = Some((receive_idx, message.clone()));
             state.cursors[receive_idx] = msg_idx;
         }
 
-        proc.stack.push(message);
-        proc.stack.push(source.clone());
+        // The message (parameter) and source (the receive function) enter the call's stack frame.
+        self.push_value(&mut proc, message);
+        self.push_value(&mut proc, source.clone());
 
         // Call the function - when it returns, handle_select will be called again
         let result = self.handle_call(&mut proc, pid);
@@ -2169,14 +2596,26 @@ impl<E: Effect> Executor<E> {
         pid: ProcessId,
         result: Value,
     ) -> Result<Option<Action<E>>, Error> {
+        // Tear down the select state, releasing the references it held (the source list and any
+        // in-flight received message), then push the result (retaining it on the stack).
+        let state = self
+            .get_process_mut(pid)
+            .ok_or(Error::InvalidArgument("Process not found".to_string()))?
+            .select_state
+            .take();
+        if let Some(state) = state {
+            for source in &state.sources {
+                self.release(source);
+            }
+            if let Some((_, message)) = &state.receiving {
+                self.release(message);
+            }
+        }
+
+        self.retain(&result);
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        // Clean up select state
-        process.select_state = None;
-
-        // Push result
         process.stack.push(result);
 
         // Increment frame counter
@@ -2428,15 +2867,268 @@ impl<E: Effect> Executor<E> {
         value: Value,
         heap_data: &[Vec<u8>],
     ) -> Result<Value, Error> {
-        // Allocate all heap data to executor and build index mapping
+        // Allocate all heap data to executor and build index mapping. Goes through
+        // `allocate_binary_data` so `refcounts` stays parallel to `heap` (the injected slots
+        // start floating at 0; the receiving process's placement sites retain them).
         let mut index_map = HashMap::new();
         for (new_idx, bytes) in heap_data.iter().enumerate() {
-            let heap_idx = self.heap.len();
-            self.heap.push(BinaryData::new(bytes.clone()));
+            let Binary::Heap(heap_idx) = self.allocate_binary(bytes.clone())? else {
+                unreachable!("allocate_binary always returns a heap binary")
+            };
             index_map.insert(new_idx, heap_idx);
         }
 
         // Remap value indices
         remap_heap_indices(&value, &index_map)
+    }
+}
+
+#[cfg(test)]
+mod heap_stats_tests {
+    use super::*;
+    use crate::builtins::BuiltinRegistry;
+    use crate::process::SelectState;
+    use crate::value::ResourceId;
+    use serde::{Deserialize, Serialize};
+
+    // A do-nothing effect so we can build a bare Executor without a host backend.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestEffect;
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    fn executor() -> Executor<TestEffect> {
+        Executor::new(BuiltinRegistry::new(), false, 0)
+    }
+
+    fn bin(value: &Binary) -> Value {
+        Value::Binary(*value)
+    }
+
+    #[test]
+    fn counts_slots_bytes_and_reachable() {
+        let mut ex = executor();
+        let b0 = ex.allocate_binary(vec![1, 2, 3]).unwrap(); // Heap(0), reachable
+        let b1 = ex.allocate_binary(vec![4, 5]).unwrap(); // Heap(1), reachable
+        let _b2 = ex.allocate_binary(vec![6]).unwrap(); // Heap(2), dead
+
+        let mut p = Process::new(false);
+        p.stack.push(bin(&b0));
+        p.locals.push(bin(&b1));
+        ex.processes.insert(0, p);
+
+        let stats = ex.heap_stats();
+        assert_eq!(stats.slots, 3);
+        assert_eq!(stats.reachable, 2);
+        assert_eq!(stats.dead(), 1); // the unreferenced b2 is garbage
+        assert_eq!(stats.total_bytes, 3 + 2 + 1);
+        assert_eq!(stats.reachable_bytes, 3 + 2);
+    }
+
+    #[test]
+    fn finds_binaries_nested_in_tuples() {
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![7, 7]).unwrap();
+
+        let mut p = Process::new(false);
+        // A binary buried two tuples deep must still be reached.
+        let inner = Value::tuple(0, vec![bin(&b)]);
+        p.locals.push(Value::tuple(0, vec![Value::nil(), inner]));
+        ex.processes.insert(0, p);
+
+        assert_eq!(ex.reachable_heap_indices(), HashSet::from([0]));
+    }
+
+    #[test]
+    fn sweeps_every_root_kind() {
+        let mut ex = executor();
+        let in_stack = ex.allocate_binary(vec![0]).unwrap();
+        let in_locals = ex.allocate_binary(vec![1]).unwrap();
+        let in_mailbox = ex.allocate_binary(vec![2]).unwrap();
+        let in_result = ex.allocate_binary(vec![3]).unwrap();
+        let in_select = ex.allocate_binary(vec![4]).unwrap();
+        let in_receiving = ex.allocate_binary(vec![5]).unwrap();
+        let in_awaiting = ex.allocate_binary(vec![6]).unwrap();
+        let dead = ex.allocate_binary(vec![9]).unwrap();
+
+        let mut p = Process::new(false);
+        p.stack.push(bin(&in_stack));
+        p.locals.push(bin(&in_locals));
+        p.mailbox.push_back(bin(&in_mailbox));
+        p.result = Some(Ok(bin(&in_result)));
+        p.select_state = Some(SelectState {
+            frame: 0,
+            instruction: 0,
+            sources: vec![bin(&in_select)],
+            cursors: vec![],
+            start_time: None,
+            receiving: Some((0, bin(&in_receiving))),
+        });
+        p.awaiting.insert(1, Some(bin(&in_awaiting)));
+        ex.processes.insert(0, p);
+
+        let reachable = ex.reachable_heap_indices();
+        // Every root kind contributes; only `dead` is missing.
+        assert_eq!(reachable.len(), 7);
+        for b in [
+            in_stack,
+            in_locals,
+            in_mailbox,
+            in_result,
+            in_select,
+            in_receiving,
+            in_awaiting,
+        ] {
+            let Binary::Heap(i) = b else { unreachable!() };
+            assert!(reachable.contains(&i));
+        }
+        let Binary::Heap(d) = dead else {
+            unreachable!()
+        };
+        assert!(!reachable.contains(&d));
+    }
+
+    #[test]
+    fn constant_cache_pins_slots() {
+        let mut ex = executor();
+        let pinned = ex.allocate_binary(vec![1, 2, 3, 4]).unwrap();
+        // No process references it, but the constant cache does, so it stays reachable.
+        ex.constant_binaries.push(Some(pinned));
+
+        let stats = ex.heap_stats();
+        assert_eq!(stats.slots, 1);
+        assert_eq!(stats.reachable, 1);
+        assert_eq!(stats.dead(), 0);
+    }
+
+    // --- refcount engine (the value-movement bookkeeping the interpreter will drive) ---
+
+    #[test]
+    fn retain_release_round_trip_keeps_invariant() {
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![1, 2, 3]).unwrap();
+        // Floating: count 0, not reachable — consistent.
+        assert_eq!(ex.refcounts[0], 0);
+        assert!(ex.check_refcounts().is_ok());
+
+        // Enter rooted storage (a process's stack) -> retain.
+        let value = bin(&b);
+        ex.retain(&value);
+        let mut p = Process::new(false);
+        p.stack.push(value);
+        ex.processes.insert(0, p);
+        assert_eq!(ex.refcounts[0], 1);
+        assert!(ex.check_refcounts().is_ok());
+
+        // Leave storage -> release. Back to floating/consistent.
+        let value = ex.get_process_mut(0).unwrap().stack.pop().unwrap();
+        ex.release(&value);
+        assert_eq!(ex.refcounts[0], 0);
+        assert!(ex.check_refcounts().is_ok());
+    }
+
+    #[test]
+    fn retain_recurses_into_nested_tuples() {
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![9]).unwrap();
+        let tuple = Value::tuple(0, vec![Value::nil(), bin(&b)]);
+
+        ex.retain(&tuple); // deep: bumps the nested binary
+        let mut p = Process::new(false);
+        p.locals.push(tuple);
+        ex.processes.insert(0, p);
+
+        assert_eq!(ex.refcounts[0], 1);
+        assert!(ex.check_refcounts().is_ok());
+    }
+
+    #[test]
+    fn shared_references_count_each_path() {
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![1]).unwrap();
+        let tuple = Value::tuple(0, vec![bin(&b)]);
+
+        // Two stack slots each hold the tuple -> two reference paths to the binary.
+        let mut p = Process::new(false);
+        ex.retain(&tuple);
+        p.stack.push(tuple.clone());
+        ex.retain(&tuple);
+        p.stack.push(tuple);
+        ex.processes.insert(0, p);
+        assert_eq!(ex.refcounts[0], 2);
+        assert!(ex.check_refcounts().is_ok());
+
+        // Drop one path: still reachable via the other slot (presence-consistent).
+        let value = ex.get_process_mut(0).unwrap().stack.pop().unwrap();
+        ex.release(&value);
+        assert_eq!(ex.refcounts[0], 1);
+        assert!(ex.check_refcounts().is_ok());
+    }
+
+    #[test]
+    fn check_catches_missing_retain() {
+        // A binary rooted on the stack but never retained: reachable yet count 0.
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![1]).unwrap();
+        let mut p = Process::new(false);
+        p.stack.push(bin(&b));
+        ex.processes.insert(0, p);
+        assert!(ex.check_refcounts().is_err());
+    }
+
+    #[test]
+    fn check_catches_missing_release() {
+        // A binary retained but never rooted (a leak): count 1 yet unreachable.
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![1]).unwrap();
+        ex.retain(&bin(&b));
+        assert!(ex.check_refcounts().is_err());
+    }
+
+    // --- reclamation (deferred free + slot reuse) ---
+
+    #[test]
+    fn reclaims_and_reuses_slots() {
+        let mut ex = executor();
+        let b0 = ex.allocate_binary(vec![1, 2, 3]).unwrap(); // Heap(0)
+        let Binary::Heap(i0) = b0 else { unreachable!() };
+        ex.retain(&bin(&b0)); // rooted (count 1)
+        ex.release(&bin(&b0)); // count 0 -> queued, but not yet freed (deferred)
+        assert!(!ex.freed[i0]);
+        assert_eq!(ex.heap.len(), 1);
+
+        ex.process_pending_free(); // what `step` does at a safe point
+        assert!(ex.freed[i0]);
+        assert_eq!(ex.free, vec![i0]);
+
+        // The next allocation reuses the slot instead of growing the heap.
+        let b1 = ex.allocate_binary(vec![9]).unwrap();
+        let Binary::Heap(i1) = b1 else { unreachable!() };
+        assert_eq!(i1, i0, "freed slot should be reused");
+        assert_eq!(
+            ex.heap.len(),
+            1,
+            "heap must not grow while a free slot exists"
+        );
+        assert!(!ex.freed[i1]);
+    }
+
+    #[test]
+    fn deferral_protects_a_move() {
+        // A release-then-retain "move" must NOT reclaim the slot: by the time the deferred free
+        // runs, the count is back above zero, so the slot is kept.
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![1]).unwrap();
+        let Binary::Heap(i) = b else { unreachable!() };
+        ex.retain(&bin(&b)); // on the stack (count 1)
+        ex.release(&bin(&b)); // pop: count 0 -> queued
+        ex.retain(&bin(&b)); // re-push (the move): count 1
+
+        ex.process_pending_free();
+        assert!(!ex.freed[i], "a re-retained slot must not be reclaimed");
+        assert!(ex.free.is_empty());
     }
 }

@@ -9,11 +9,17 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_STEP_UNITS: usize = 1000;
 
+/// A pending result request: the request id, plus an optional keep-set whose complement is released
+/// from the process's locals once it completes (the REPL's orphaned-local reclaim).
+type PendingResultRequest = (u64, Option<Vec<usize>>);
+
 pub struct Worker<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> {
     executor: Executor<E>,
     awaited: HashSet<ProcessId>,
     awaiters_for_target: HashMap<ProcessId, Vec<ProcessId>>, // target -> list of awaiters
-    pending_result_requests: HashMap<ProcessId, Vec<u64>>,   // process_id -> list of request_ids
+    // process_id -> pending result requests; each request's keep-set drives orphaned-local release
+    // once the process completes (see `Command::GetResult`).
+    pending_result_requests: HashMap<ProcessId, Vec<PendingResultRequest>>,
     receiver: R,
     sender: S,
 }
@@ -119,11 +125,15 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             Command::GetResult {
                 request_id,
                 process_id,
+                keep_locals,
             } => {
-                self.get_result(request_id, process_id)?;
+                self.get_result(request_id, process_id, keep_locals)?;
             }
             Command::GetStatuses { request_id } => {
                 self.get_statuses(request_id)?;
+            }
+            Command::GetWorkerInfo { request_id } => {
+                self.get_worker_info(request_id)?;
             }
             Command::GetProcessTypes { request_id } => {
                 self.get_process_types(request_id)?;
@@ -448,54 +458,55 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         &mut self,
         request_id: u64,
         process_id: ProcessId,
+        keep_locals: Option<Vec<usize>>,
     ) -> Result<(), EnvironmentError> {
-        // Check if process exists
+        // Determine completion state up front, so the (mutable) reclaim below doesn't overlap the
+        // (immutable) borrow of the result value during heap extraction.
         let process = self
             .executor
             .get_process(process_id)
             .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
+        let completed_ok = match &process.result {
+            Some(Ok(_)) => true,
+            Some(Err(_)) => false,
+            None => {
+                // Process not done yet - register the request with its keep-set.
+                self.pending_result_requests
+                    .entry(process_id)
+                    .or_default()
+                    .push((request_id, keep_locals));
+                return Ok(());
+            }
+        };
 
-        // Check if process has a result
-        match &process.result {
-            Some(Ok(value)) => {
-                // Process completed successfully - send response immediately
+        // On success, reclaim the finished line's orphaned locals before reporting the result, so
+        // heap inspectors reflect the post-line state. Skipped on error: a partially-executed line
+        // may not have populated its kept slots.
+        if completed_ok && let Some(keep) = &keep_locals {
+            self.executor.release_orphan_locals(process_id, keep);
+        }
+
+        let stats = if self.executor.stats.total_instructions() > 0 {
+            Some(self.executor.stats.clone())
+        } else {
+            None
+        };
+        let process = self.executor.get_process(process_id).unwrap();
+        let result = match process.result.as_ref().unwrap() {
+            Ok(value) => {
                 let (extracted_value, heap) = self
                     .executor
                     .extract_heap_data(value)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-
-                let stats = if self.executor.stats.total_instructions() > 0 {
-                    Some(self.executor.stats.clone())
-                } else {
-                    None
-                };
-                self.sender.send(Event::ResultResponse {
-                    request_id,
-                    result: Ok((extracted_value, heap)),
-                    stats,
-                })?;
+                Ok((extracted_value, heap))
             }
-            Some(Err(error)) => {
-                // Process failed - send error response immediately
-                let stats = if self.executor.stats.total_instructions() > 0 {
-                    Some(self.executor.stats.clone())
-                } else {
-                    None
-                };
-                self.sender.send(Event::ResultResponse {
-                    request_id,
-                    result: Err(error.clone()),
-                    stats,
-                })?;
-            }
-            None => {
-                // Process not done yet - register the request
-                self.pending_result_requests
-                    .entry(process_id)
-                    .or_default()
-                    .push(request_id);
-            }
-        }
+            Err(error) => Err(error.clone()),
+        };
+        self.sender.send(Event::ResultResponse {
+            request_id,
+            result,
+            stats,
+        })?;
 
         Ok(())
     }
@@ -505,6 +516,15 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         self.sender.send(Event::StatusesResponse {
             request_id,
             result: Ok(statuses),
+        })?;
+        Ok(())
+    }
+
+    fn get_worker_info(&mut self, request_id: u64) -> Result<(), EnvironmentError> {
+        let info = self.executor.worker_info();
+        self.sender.send(Event::WorkerInfoResponse {
+            request_id,
+            result: Ok(info),
         })?;
         Ok(())
     }
@@ -572,13 +592,13 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         process_id: ProcessId,
         keep_indices: Vec<usize>,
     ) -> Result<(), EnvironmentError> {
+        // Build the kept values (preserving the specific LocalNotFound error on a bad index)...
         let process = self
             .executor
-            .get_process_mut(process_id)
+            .get_process(process_id)
             .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
 
-        // Create a new locals vector with only the values we want to keep
-        let mut new_locals = Vec::new();
+        let mut new_locals = Vec::with_capacity(keep_indices.len());
         for &index in &keep_indices {
             match process.locals.get(index) {
                 Some(value) => new_locals.push(value.clone()),
@@ -588,7 +608,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
         }
 
-        process.locals = new_locals;
+        // ...then swap them in via the executor so the dropped bindings are released.
+        if !self.executor.replace_locals(process_id, new_locals) {
+            return Err(EnvironmentError::ProcessNotFound(process_id));
+        }
         Ok(())
     }
 
@@ -646,14 +669,23 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         let pending_pids: Vec<ProcessId> = self.pending_result_requests.keys().copied().collect();
         for process_id in pending_pids {
             if let Some(result) = self.extract_completed_result(process_id)?
-                && let Some(request_ids) = self.pending_result_requests.remove(&process_id)
+                && let Some(requests) = self.pending_result_requests.remove(&process_id)
             {
+                // On success, reclaim each requester's orphaned locals (idempotent across identical
+                // keep-sets) before reporting, mirroring the immediate path in `get_result`.
+                if result.is_ok() {
+                    for (_, keep_locals) in &requests {
+                        if let Some(keep) = keep_locals {
+                            self.executor.release_orphan_locals(process_id, keep);
+                        }
+                    }
+                }
                 let stats = if self.executor.stats.total_instructions() > 0 {
                     Some(self.executor.stats.clone())
                 } else {
                     None
                 };
-                for request_id in request_ids {
+                for (request_id, _) in requests {
                     self.sender.send(Event::ResultResponse {
                         request_id,
                         result: result.clone(),

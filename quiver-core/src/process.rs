@@ -17,6 +17,43 @@ pub enum ProcessStatus {
     Completed,
 }
 
+/// Distinct heap slots (and their total bytes) reachable from some set of values.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct HeapUsage {
+    pub slots: usize,
+    pub bytes: usize,
+}
+
+/// A process's binary-heap footprint, broken down by root. The per-root figures count distinct
+/// slots reachable from that root; `total` is distinct across *all* roots (including result/select/
+/// awaiting), so the per-root figures may overlap each other and need not sum to it. Binaries
+/// shared with other processes are included here too — this is "reachable from", not "owned by".
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ProcessHeapUsage {
+    pub stack: HeapUsage,
+    pub locals: HeapUsage,
+    pub mailbox: HeapUsage,
+    pub total: HeapUsage,
+}
+
+/// A worker's executor snapshot, for the `\w` inspector. Heap slots are `live + free`; `live` is
+/// reachable from a root, `free` are reclaimed-and-reusable, `pending` await the next reclamation.
+/// `constant_*` is the share of the live heap pinned by the constant-binary cache.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkerInfo {
+    pub worker_id: u16,
+    pub process_ids: Vec<ProcessId>,
+    pub heap_slots: usize,
+    pub live_slots: usize,
+    pub free_slots: usize,
+    pub pending_free: usize,
+    pub reclaimed: usize,
+    pub live_bytes: usize,
+    pub total_bytes: usize,
+    pub constant_slots: usize,
+    pub constant_bytes: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub id: ProcessId,
@@ -28,6 +65,7 @@ pub struct ProcessInfo {
     pub mailbox_size: usize,
     pub persistent: bool,
     pub result: Option<ProcessResult>,
+    pub heap: ProcessHeapUsage,
 }
 
 #[derive(Debug, Clone)]

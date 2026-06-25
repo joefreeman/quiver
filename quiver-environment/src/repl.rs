@@ -90,13 +90,8 @@ impl<E: Effect> Repl<E> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
-        // Re-align the persistent process's locals with the binding indices before compiling.
-        // Each evaluated line stores its parameter (the previous result) and any temporaries into
-        // the process's locals, which are never otherwise reclaimed — so without this the physical
-        // local positions drift away from the compiler-assigned binding indices, and variable
-        // lookups read stale slots. Compaction keeps only the bound variables (re-indexed
-        // contiguously) so every line begins from an aligned state. This is correctness-critical,
-        // not an optimisation, so the REPL performs it itself rather than relying on the host.
+        // Re-align the persistent process's locals with the binding indices before compiling, so
+        // each line begins from an aligned state (see `compact`).
         self.compact(env);
 
         // Clone the program and module cache for compilation; the compiler mutates these in
@@ -197,9 +192,12 @@ impl<E: Effect> Repl<E> {
             }
         };
 
-        // Request the result
+        // Request the result, handing the worker this line's keep-set so it releases the line's
+        // orphaned locals (its parameter and temporaries) the moment the result is delivered. This
+        // is the GC early-release; the next line's pre-compile `compact` still does the
+        // correctness-critical re-indexing, so the two are not redundant.
         let request_id = env
-            .request_result(repl_process_id)
+            .request_result(repl_process_id, Some(self.keep_indices()))
             .map_err(ReplError::Environment)?;
 
         Ok(Some(request_id))
@@ -258,27 +256,35 @@ impl<E: Effect> Repl<E> {
         vars.into_iter().map(|(name, ty, _)| (name, ty)).collect()
     }
 
-    /// Compact locals to remove unused variables (optimization, safe to skip)
-    pub fn compact(&mut self, env: &mut Environment<E>) {
+    /// Sorted local indices of every currently-bound variable. These are the slots that must
+    /// survive compaction; everything else in the process's locals (the line's parameter and
+    /// temporaries) is orphaned once the line finishes.
+    fn keep_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .bindings
+            .values()
+            .filter_map(|binding| match binding {
+                Binding::Variable { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        indices.sort();
+        indices
+    }
+
+    /// Re-align the process's locals with the binding indices: keep only the bound variables,
+    /// re-indexed contiguously, and rewrite the binding map to match. Called by `evaluate` before
+    /// compiling each line — without it the physical local positions drift from the compiler's
+    /// binding indices and lookups read stale slots, so this is correctness-critical, not an
+    /// optimisation. (The worker separately releases a finished line's orphaned locals at result
+    /// delivery; see `keep_indices` and `Command::GetResult`.)
+    fn compact(&mut self, env: &mut Environment<E>) {
         // Silently ignore if no REPL process exists yet
         let Some(repl_process_id) = self.repl_process_id else {
             return;
         };
 
-        // Keep all variables currently in the bindings map
-        // Sort indices to ensure consistent ordering
-        let mut keep_indices: Vec<usize> = self
-            .bindings
-            .values()
-            .filter_map(|binding| {
-                if let Binding::Variable { index, .. } = binding {
-                    Some(*index)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        keep_indices.sort();
+        let keep_indices = self.keep_indices();
 
         // Build mapping from old index to new index
         let mut index_mapping = HashMap::new();

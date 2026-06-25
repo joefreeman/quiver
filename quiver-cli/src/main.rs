@@ -377,7 +377,7 @@ fn execute_bytecode_with_environment(
 
     // Request the result
     let request_id = environment
-        .request_result(process_id)
+        .request_result(process_id, None)
         .map_err(|e| format!("Failed to request result: {:?}", e))?;
 
     // Event loop

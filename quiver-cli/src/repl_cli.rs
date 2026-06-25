@@ -233,6 +233,8 @@ impl ReplCli {
                 println!("{}", "  \\v - List variables".bright_black());
                 println!("{}", "  \\p - List processes".bright_black());
                 println!("{}", "  \\p X - Inspect process with ID X".bright_black());
+                println!("{}", "  \\w - List workers".bright_black());
+                println!("{}", "  \\w X - Inspect worker with ID X".bright_black());
                 println!(
                     "{}",
                     "  \\x - Show (compile-time) type of last expression".bright_black()
@@ -275,6 +277,17 @@ impl ReplCli {
                     "{}",
                     format!("Invalid process ID: {}", process_id_str).red()
                 ),
+            },
+
+            ["w"] => {
+                self.list_workers();
+            }
+
+            ["w", worker_id_str] => match worker_id_str.parse::<usize>() {
+                Ok(id) => self.inspect_worker(id),
+                Err(_) => {
+                    eprintln!("{}", format!("Invalid worker ID: {}", worker_id_str).red())
+                }
             },
 
             _ => {
@@ -366,10 +379,23 @@ impl ReplCli {
                     format!("  Status: {:?}", info.status)
                 };
                 println!("{}", status_line.bright_black());
-                println!("{}", format!("  Stack: {}", info.stack_size).bright_black());
                 println!(
                     "{}",
-                    format!("  Locals: {}", info.locals_count).bright_black()
+                    format!(
+                        "  Stack: {} ({})",
+                        info.stack_size,
+                        format_bytes(info.heap.stack.bytes)
+                    )
+                    .bright_black()
+                );
+                println!(
+                    "{}",
+                    format!(
+                        "  Locals: {} ({})",
+                        info.locals_count,
+                        format_bytes(info.heap.locals.bytes)
+                    )
+                    .bright_black()
                 );
                 println!(
                     "{}",
@@ -377,7 +403,24 @@ impl ReplCli {
                 );
                 println!(
                     "{}",
-                    format!("  Mailbox: {}", info.mailbox_size).bright_black()
+                    format!(
+                        "  Mailbox: {} ({})",
+                        info.mailbox_size,
+                        format_bytes(info.heap.mailbox.bytes)
+                    )
+                    .bright_black()
+                );
+                // Distinct across all roots, so it is ≤ the sum of the per-root figures above
+                // (a binary referenced from two roots is counted once here).
+                println!(
+                    "{}",
+                    format!(
+                        "  Heap: {} slot{} · {}",
+                        info.heap.total.slots,
+                        if info.heap.total.slots == 1 { "" } else { "s" },
+                        format_bytes(info.heap.total.bytes)
+                    )
+                    .bright_black()
                 );
 
                 // Show type
@@ -407,6 +450,106 @@ impl ReplCli {
             }
             Ok(_) => eprintln!("{}", "Unexpected result type".red()),
             Err(e) => eprintln!("{}", format!("Error inspecting process: {}", e).red()),
+        }
+    }
+
+    fn list_workers(&mut self) {
+        let request_id = match self.environment.lock().unwrap().request_worker_info() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("{}", format!("Error requesting worker info: {}", e).red());
+                return;
+            }
+        };
+
+        match self.wait_for_result(request_id) {
+            Ok(RequestResult::WorkerInfo(workers)) => {
+                println!("{}", format!("Workers ({}):", workers.len()).bright_black());
+                for worker in workers {
+                    let proc_count = worker.process_ids.len();
+                    let mut line = format!(
+                        "  Worker {}: {} proc{} · heap {}/{} live",
+                        worker.worker_id,
+                        proc_count,
+                        if proc_count == 1 { "" } else { "s" },
+                        worker.live_slots,
+                        worker.heap_slots
+                    );
+                    if worker.free_slots > 0 {
+                        line.push_str(&format!(" ({} free)", worker.free_slots));
+                    }
+                    line.push_str(&format!(" · {}", format_bytes(worker.live_bytes)));
+                    if worker.reclaimed > 0 {
+                        line.push_str(&format!(" · {} reclaimed", worker.reclaimed));
+                    }
+                    println!("{}", line.bright_black());
+                }
+            }
+            Ok(_) => eprintln!("{}", "Unexpected result type".red()),
+            Err(e) => eprintln!("{}", format!("Error getting worker info: {}", e).red()),
+        }
+    }
+
+    fn inspect_worker(&mut self, id: usize) {
+        let request_id = match self.environment.lock().unwrap().request_worker_info() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("{}", format!("Error requesting worker info: {}", e).red());
+                return;
+            }
+        };
+
+        match self.wait_for_result(request_id) {
+            Ok(RequestResult::WorkerInfo(workers)) => {
+                match workers.iter().find(|w| w.worker_id as usize == id) {
+                    Some(worker) => {
+                        println!("{}", format!("Worker {}:", worker.worker_id).bright_black());
+                        let pids: Vec<String> =
+                            worker.process_ids.iter().map(|p| p.to_string()).collect();
+                        println!(
+                            "{}",
+                            format!(
+                                "  Processes: {}  [{}]",
+                                worker.process_ids.len(),
+                                pids.join(", ")
+                            )
+                            .bright_black()
+                        );
+                        println!(
+                            "{}",
+                            format!(
+                                "  Heap: {} slots ({} live, {} free, {} pending) · {} live / {} total",
+                                worker.heap_slots,
+                                worker.live_slots,
+                                worker.free_slots,
+                                worker.pending_free,
+                                format_bytes(worker.live_bytes),
+                                format_bytes(worker.total_bytes)
+                            )
+                            .bright_black()
+                        );
+                        println!(
+                            "{}",
+                            format!(
+                                "  Constants: {} slots · {}",
+                                worker.constant_slots,
+                                format_bytes(worker.constant_bytes)
+                            )
+                            .bright_black()
+                        );
+                        println!(
+                            "{}",
+                            format!("  Reclaimed: {} slots this session", worker.reclaimed)
+                                .bright_black()
+                        );
+                    }
+                    None => {
+                        eprintln!("{}", format!("Worker {} not found", id).red());
+                    }
+                }
+            }
+            Ok(_) => eprintln!("{}", "Unexpected result type".red()),
+            Err(e) => eprintln!("{}", format!("Error inspecting worker: {}", e).red()),
         }
     }
 
@@ -451,8 +594,9 @@ impl ReplCli {
             .map_err(ReplError::Environment)?
         {
             RequestResult::Result(Ok((value, heap)), _) => {
-                // Locals are re-aligned by `Repl::evaluate` itself (it compacts before each
-                // line), so the host no longer needs to compact here.
+                // The worker has already released this line's orphaned locals as part of delivering
+                // the result (the keep-set was handed to it via `request_result`), so `\p`/`\w`
+                // reflect the post-line heap with no extra round-trip here.
                 Ok(Some(EvaluationResult { value, heap }))
             }
             RequestResult::Result(Err(e), _) => Err(ReplError::Runtime(e)),
@@ -529,5 +673,18 @@ impl Drop for ReplCli {
         if let Some(handle) = self.stepping_thread.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// Human-readable byte count for the REPL inspectors (e.g. `0 B`, `1.2 KB`, `3.4 MB`).
+fn format_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if (bytes as f64) < MB {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MB)
     }
 }
