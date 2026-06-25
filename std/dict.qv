@@ -172,13 +172,12 @@ put_ = #<'v>[#^ -> '<'v>, '<'v>, 'key, 'v, 'int, 'int] {
 // on its contents (not on insertion/removal order): no children left collapses to `Empty`, and a
 // lone child that is a `Leaf`/`Collision` is hoisted up — insertion never builds a single-`Leaf`
 // node, so leaving one would be non-canonical. A lone `Node` child is a real shared-hash-prefix
-// level and is kept. (A single entry via length-then-wildcard-tail rather than `=Cons[c, Nil]`,
-// which the compiler's complement-narrowing currently fails to match on a computed recursive list.)
+// level and is kept.
 collapse_node_ = #<'v>['int, 'list<'<'v>>] {
   =[bitmap, children],
   { | children ~> =Nil => Empty
-    | length_ [children, 0] ~> =1 =>
-      children ~> { =Cons[only, _] => only ~> { | =Node[_, _] => Node[bitmap, children] | =leaf => leaf } }
+    | children ~> =Cons[only, Nil] =>
+      only ~> { | =Node[_, _] => Node[bitmap, children] | =leaf => leaf }
     | Node[bitmap, children] }
 };
 
@@ -198,7 +197,7 @@ remove_ = #<'v>[#^ -> '<'v>, '<'v>, 'key, 'int, 'int] {
     | =Collision[chash, entries] => {
       kept = bucket_remove_ [entries, key, Nil],
       { | kept ~> =Nil => Empty
-        | length_ [kept, 0] ~> =1 => kept ~> { =Cons[[k, v], _] => Leaf[chash, k, v] }
+        | kept ~> =Cons[[k, v], Nil] => Leaf[chash, k, v]
         | Collision[chash, kept] }
     }
     | =Node[bitmap, children] => {

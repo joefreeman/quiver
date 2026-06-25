@@ -151,6 +151,19 @@ pub fn lookup_variable(
     Some((*ty, *index))
 }
 
+/// Look up a variable's *declared* type, ignoring any runtime narrowings.
+/// Unlike `lookup_variable`, this returns the type the binding was defined with.
+pub fn lookup_declared_variable_type(scopes: &[Scope], name: &str) -> Option<usize> {
+    let full_name = helpers::make_capture_name(name, &[]);
+    scopes
+        .iter()
+        .rev()
+        .find_map(|s| match s.bindings.get(&full_name) {
+            Some(Binding::Variable { ty, .. }) => Some(*ty),
+            _ => None,
+        })
+}
+
 /// Look up the provenance stored for a variable.
 /// Returns the provenance that was stored when the variable was defined.
 pub fn lookup_variable_provenance(scopes: &[Scope], name: &str) -> Option<super::Provenance> {

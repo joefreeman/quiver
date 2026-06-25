@@ -246,6 +246,30 @@ pub fn get_type_for_provenance(
     }
 }
 
+/// The *declared* (un-narrowed) type for a provenance — i.e. ignoring runtime narrowings, unlike
+/// [`get_type_for_provenance`]. Used to resolve a recursive field's `Cycle` to the boundary fixed
+/// by the type *definition*: complement narrowing can drop sibling variants from the scrutinee
+/// (e.g. `Nil` after a `=Nil` branch), which would leave a kept variant's recursive field a
+/// dangling cycle. The field's type is fixed by the definition, so resolve against that.
+pub fn get_declared_type_for_provenance(
+    scopes: &[Scope],
+    provenance: &Provenance,
+    program: &mut Program,
+) -> Option<usize> {
+    match provenance {
+        Provenance::Variable(name) => super::scopes::lookup_declared_variable_type(scopes, name),
+        Provenance::Field(parent, idx) => {
+            let parent_id = get_declared_type_for_provenance(scopes, parent, program)?;
+            get_field_type(parent_id, *idx, program)
+        }
+        Provenance::Parameter => scopes
+            .last()
+            .and_then(|s| s.parameter.as_ref())
+            .map(|p| p.ty),
+        Provenance::Tuple(_) | Provenance::Unknown => None,
+    }
+}
+
 /// Whether a type transitively contains a `Cycle` node (i.e. is recursive). Used to gate the
 /// structural narrowing operations, which would otherwise call `is_compatible`/`types_overlap`
 /// on a bare `Cycle` — those answer optimistically without the enclosing `type_stack`, which is

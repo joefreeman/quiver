@@ -782,3 +782,72 @@ fn test_nested_recursive_pattern_does_not_oversubtract() {
         )
         .expect("[1, 2, 3]");
 }
+
+#[test]
+fn test_complement_narrowing_preserves_recursive_tail() {
+    // Regression: after a `=Nil` branch, complement narrowing refines the scrutinee to `Cons['t, ^]`.
+    // The kept tail `^` is a de-Bruijn cycle relative to the removed union boundary, so a naive
+    // resolution against the narrowed type would lose `Nil`, and a later `=Cons[h, Nil]` would never
+    // match a one-element list (falling through to `Many`). The fix resolves a recursive field's
+    // cycle against the scrutinee's *declared* type, so the tail keeps `Nil | Cons[…]`.
+    let f = r#"
+        'list<'t> = Nil | Cons['t, ^];
+        f = #<'t>'list<'t> {
+          | =Nil => Z
+          | =Cons[h, Nil] => One
+          | =Cons[_, _] => Many
+        },
+    "#;
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Nil] ~> f"))
+        .expect("One");
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Cons[2, Nil]] ~> f"))
+        .expect("Many");
+    quiver().evaluate(&format!("{f} Nil ~> f")).expect("Z");
+}
+
+#[test]
+fn test_complement_narrowing_preserves_recursive_tail_nested() {
+    // Same fix, but the literal `Nil` to match sits two levels deep in the recursive tail.
+    let f = r#"
+        'list<'t> = Nil | Cons['t, ^];
+        f = #<'t>'list<'t> {
+          | =Nil => Z
+          | =Cons[h, Cons[g, Nil]] => Two
+          | =Cons[h, Nil] => One
+          | =Cons[_, _] => Many
+        },
+    "#;
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Cons[2, Nil]] ~> f"))
+        .expect("Two");
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Nil] ~> f"))
+        .expect("One");
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Cons[2, Cons[3, Nil]]] ~> f"))
+        .expect("Many");
+}
+
+#[test]
+fn test_complement_narrowing_preserves_recursive_tail_computed() {
+    // The scrutinee is produced by a recursive (tail-reversing) function, not a literal, so its
+    // static type flows through the generic machinery before reaching the match.
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            rc = #<'t>['list<'t>, 'list<'t>] {
+              =[acc, rest], acc ~> { | =Nil => rest | =Cons[h, t] => ^ [t, Cons[h, rest]] }
+            },
+            f = #<'t>'list<'t> {
+              | =Nil => Z
+              | =Cons[h, Nil] => One
+              | =Cons[_, _] => Many
+            },
+            rc [Cons[1, Nil], Nil] ~> f
+            "#,
+        )
+        .expect("One");
+}

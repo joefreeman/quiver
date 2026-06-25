@@ -574,13 +574,33 @@ fn analyze_match_tuple_pattern(
             let field = &tuple.fields[*pattern_idx];
             let raw_field_type_id = tuple_fields[*actual_idx];
 
-            // Resolve Type::Cycle references to the actual type
-            // Only Cycle(1) points to the immediate boundary (value_type)
+            // Resolve Type::Cycle references to the actual type.
+            // Only Cycle(1) points to the immediate boundary (the scrutinee's union).
             // Higher depths point to outer boundaries (e.g., enclosing function types)
-            // and should be kept as-is since they refer to types outside this tuple
+            // and should be kept as-is since they refer to types outside this tuple.
+            //
+            // Resolve against the scrutinee's *declared* type rather than `value_type_id`: the
+            // field's type is the recursion boundary fixed by the type definition, but
+            // `value_type_id` may have been complement-narrowed (dropping sibling variants such as
+            // `Nil` after a `=Nil` branch). Using the narrowed view would dangle this cycle and
+            // wrongly exclude those variants from the field — e.g. a `Cons` tail losing `Nil`, so
+            // `=Cons[h, Nil]` could never match. Fall back to `value_type_id` when the declared
+            // type is unavailable (e.g. unknown provenance).
+            // Only the top-level scrutinee (`path` empty) can be complement-narrowed; at nested
+            // depths `value_type_id` is the already-resolved field type, which is the correct
+            // boundary. So consult the declared type only at the top level.
             let mut field_type_id =
                 if let Some(Type::Cycle(1)) = program.lookup_type(raw_field_type_id) {
-                    value_type_id
+                    if path.is_empty() {
+                        super::narrowing::get_declared_type_for_provenance(
+                            scopes,
+                            value_provenance,
+                            program,
+                        )
+                        .unwrap_or(value_type_id)
+                    } else {
+                        value_type_id
+                    }
                 } else {
                     raw_field_type_id
                 };
