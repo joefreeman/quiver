@@ -2,6 +2,7 @@ use crate::error::Error;
 use crate::process::ProcessId;
 use crate::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 /// Structured error type for effect operations
@@ -108,4 +109,32 @@ pub trait EffectBackend: Send {
     /// The backend should close the resource and remove it from its registry.
     /// If the resource doesn't exist, this should be a no-op.
     fn close_resource(&mut self, resource_id: ResourceId);
+
+    /// Supply the type ids the backend needs to stamp real values onto effect results.
+    ///
+    /// A backend has no access to the type registry, so it can't invent ids for the composite
+    /// values it produces. Instead the environment pushes them here, sourced from the program:
+    /// `resources` is the resource-type-name list (a name's index is its resource type id), and
+    /// `results` maps a builtin name to the type ids of its composite result (see
+    /// [`ResultTupleInfo`]). Called on every program load/update; ids are append-only, so the
+    /// tables only ever grow.
+    ///
+    /// Default no-op — for backends that produce no such values (e.g. a type-checking host).
+    fn set_type_ids(&mut self, _resources: &[String], _results: &[(String, ResultTupleInfo)]) {}
+}
+
+/// The tuple type ids a backend needs to stamp a builtin's composite result value.
+///
+/// A result may be a single top-level tuple (`tuple_id`) that nests named tag variants — e.g.
+/// `directory_next`'s `[bin, (File | Dir | Symlink | Other)]`. The backend stamps `tuple_id` on
+/// the outer tuple and picks the inner tag's id from `variants` by the name it's producing.
+#[derive(Clone, Debug, Default)]
+pub struct ResultTupleInfo {
+    /// The outer (top-level, non-nil) result tuple id.
+    pub tuple_id: usize,
+    /// Nullary named tag variants reachable in the result type, keyed by name — e.g. `File`/`Dir`.
+    /// Lets the backend stamp the specific tag it produces from a name it knows statically. Keyed
+    /// by name because a nullary named tuple is nominal: its name is its complete identity (see
+    /// `collect_named_variants`). Field-bearing tuples are structural and excluded.
+    pub variants: HashMap<String, usize>,
 }

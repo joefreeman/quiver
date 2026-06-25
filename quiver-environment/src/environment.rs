@@ -9,11 +9,11 @@ use quiver_core::compatibility::{
     CompatibilityInput, compute_canonical_tuples, compute_param_compatibility,
     compute_type_compatibility,
 };
-use quiver_core::effects::{Effect, EffectBackend};
+use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::ProgramUpdate;
 use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::program::Program;
-use quiver_core::types::{Type, TypeLookup};
+use quiver_core::types::{NIL, OK, Type, TypeLookup};
 use quiver_core::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -366,6 +366,20 @@ impl<E: Effect> Environment<E> {
     /// Set the effect backend for executing platform-specific effects
     pub fn set_effect_backend(&mut self, backend: Box<dyn EffectBackend<E = E>>) {
         self.effect_backend = Some(backend);
+        // Hand the backend the type ids it needs for any program already loaded (the backend may
+        // be attached after the program). Re-pushed on each subsequent merge; see merge_bytecode.
+        self.push_type_ids_to_backend();
+    }
+
+    /// Push the type ids the backend needs to stamp real values onto effect results: the resource
+    /// type names, and each builtin's composite-result tuple id. Called whenever the program or
+    /// the backend changes; tables are append-only so this only ever grows them.
+    fn push_type_ids_to_backend(&mut self) {
+        let resources = self.program.collect_resource_names();
+        let results = composite_result_infos(&self.program);
+        if let Some(backend) = self.effect_backend.as_mut() {
+            backend.set_type_ids(&resources, &results);
+        }
     }
 
     /// Process events from workers, route actions
@@ -827,6 +841,10 @@ impl<E: Effect> Environment<E> {
                     .send(update_cmd.clone())
                     .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
             }
+
+            // Hand the backend the (now possibly larger) set of type ids it needs to stamp real
+            // values onto effect results.
+            self.push_type_ids_to_backend();
         }
 
         // Return remapped entry function index
@@ -1756,5 +1774,87 @@ impl<E: Effect> Environment<E> {
             );
         }
         tuple_remap[&0]
+    }
+}
+
+/// For each builtin whose result has exactly one top-level non-trivial tuple variant, the builtin
+/// name paired with the type ids a backend needs to stamp that result (see [`ResultTupleInfo`]):
+/// the outer tuple id, plus every named tuple variant reachable in the result type (e.g. the
+/// `File`/`Dir`/… kind tags nested inside). `NIL`/`OK` are excluded — the backend builds those
+/// directly. A result with zero or several top-level tuple variants is skipped (the latter would
+/// need per-variant outer selection, which no current builtin requires).
+fn composite_result_infos(program: &Program) -> Vec<(String, ResultTupleInfo)> {
+    let types = program.get_types();
+    let mut out = Vec::new();
+    for builtin in program.get_builtins() {
+        let mut tuple_ids = Vec::new();
+        collect_result_tuple_ids(types, builtin.result_type, &mut tuple_ids);
+        if let [tuple_id] = tuple_ids[..] {
+            let mut variants = HashMap::new();
+            collect_named_variants(
+                program,
+                builtin.result_type,
+                &mut HashSet::new(),
+                &mut variants,
+            );
+            out.push((builtin.name.clone(), ResultTupleInfo { tuple_id, variants }));
+        }
+    }
+    out
+}
+
+/// Collect the top-level non-trivial (non-`NIL`/`OK`) tuple ids of `type_id`, descending through
+/// unions but *not* into tuple fields (those are the nested variants — see below).
+fn collect_result_tuple_ids(types: &[Type], type_id: usize, out: &mut Vec<usize>) {
+    match types.get(type_id) {
+        Some(Type::Tuple(tuple_id)) if *tuple_id != NIL && *tuple_id != OK => out.push(*tuple_id),
+        Some(Type::Union(members)) => {
+            for &member in members {
+                collect_result_tuple_ids(types, member, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect every *nullary* named tuple reachable in `type_id` (descending through unions and into
+/// tuple fields), keyed by name — e.g. the `File`/`Dir`/`Symlink`/`Other` kind tags nested in a
+/// directory entry's result.
+///
+/// Restricted to nullary (field-less) tags on purpose: a nullary named tuple is *nominal* — its
+/// name is its complete identity, since `register_tuple` dedups `(name, [])` to a single id (just
+/// as the type system identifies resources by name alone). A field-bearing tuple is *structural*,
+/// identified by its full `(name, fields)` shape, so two such variants could share a name; those
+/// are deliberately excluded rather than collide here. A backend that ever needs to produce one
+/// would error in `result_info`/`kind_tag` rather than be mis-stamped (selecting among structural
+/// variants needs value-directed resolution, which nothing requires yet).
+fn collect_named_variants(
+    program: &Program,
+    type_id: usize,
+    visited: &mut HashSet<usize>,
+    out: &mut HashMap<String, usize>,
+) {
+    if !visited.insert(type_id) {
+        return;
+    }
+    match program.get_types().get(type_id) {
+        Some(Type::Tuple(tuple_id)) => {
+            let tuple = &program.get_tuples()[*tuple_id];
+            if let Some(name) = &tuple.name
+                && tuple.fields.is_empty()
+            {
+                out.insert(name.clone(), *tuple_id);
+            }
+            let field_types: Vec<usize> = tuple.fields.iter().map(|(_, t)| *t).collect();
+            for field_type in field_types {
+                collect_named_variants(program, field_type, visited, out);
+            }
+        }
+        Some(Type::Union(members)) => {
+            for member in members.clone() {
+                collect_named_variants(program, member, visited, out);
+            }
+        }
+        _ => {}
     }
 }

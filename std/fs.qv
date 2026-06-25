@@ -10,23 +10,15 @@
 // epoch, and `mode` is the permission bits (e.g. 0o644 == 420).
 'stat = Stat[kind: 'kind, size: 'int, modified: 'int, mode: 'int];
 
-// Map the OS type code (shared by the directory and stat builtins) to a `kind` tag.
-kind_ = #'int {
-  | =1 => Dir
-  | =2 => Symlink
-  | =3 => Other
-  | File
-},
-
 // Look up metadata for a path, following symlinks. Yields nil if the path does not exist; other
 // failures (e.g. permission denied) are runtime errors. The builtin returns a transient
-// `[kind_code, size, modified, mode]` tuple read by index.
+// `[kind, size, modified, mode]` tuple read by index, with `kind` already a `'kind` tag.
 stat_ = #Str['bin] {
   .0
   ~> __filesystem_stat__
   ~> {
     | <> => []
-    | =s ~> Stat[kind: s.0 ~> kind_, size: s.1, modified: s.2, mode: s.3]
+    | =s ~> Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
   }
 },
 
@@ -40,14 +32,13 @@ stat_ = #Str['bin] {
     ~> =dir,
     %iter.unfold [dir, #\Dir {
       =d,
-      // Each step yields `[name, kind_code]` or nil at the end. The pair is bound whole and read
-      // by index (it is never matched on), so its tuple tag is irrelevant.
+      // Each step yields `[name, kind]` or nil at the end, with `kind` already a `'kind` tag.
       __directory_next__ d ~> {
         | <> => {
           __directory_close__ d,
           []
         }
-        | =e ~> [Entry[name: Str[e.0], kind: e.1 ~> kind_], d]
+        | =e ~> [Entry[name: Str[e.0], kind: e.1], d]
       }
     }]
   },

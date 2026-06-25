@@ -2851,6 +2851,10 @@ fn collect_heap_indices(value: &Value, indices: &mut HashSet<usize>) {
 }
 
 /// Remap heap indices in a value according to the provided mapping
+/// Remap the heap-binary indices in a value that has crossed a registry-less boundary (an effect
+/// result or an incoming message) into this executor's heap via `index_map`. Tuple/function ids
+/// are left untouched — the producer (a registry-ful process, or a backend handed its type ids)
+/// already stamped real ids.
 fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Result<Value, Error> {
     match value {
         Value::Binary(Binary::Heap(old_idx)) => {

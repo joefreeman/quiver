@@ -21,6 +21,14 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let int = TypeSpec::Integer;
     let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
     let nil = TypeSpec::Tuple(None, vec![]);
+    // A path's kind, as a tag (mirrors `std/fs.qv`'s `'kind`). The directory and stat builtins
+    // produce this directly, so the stdlib no longer remaps an int code.
+    let kind = TypeSpec::Union(vec![
+        TypeSpec::Tuple(Some("File"), vec![]),
+        TypeSpec::Tuple(Some("Dir"), vec![]),
+        TypeSpec::Tuple(Some("Symlink"), vec![]),
+        TypeSpec::Tuple(Some("Other"), vec![]),
+    ]);
     vec![
         // file_open([path, flags, mode]) -> File
         (
@@ -67,12 +75,12 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
         ("file_close", file, ok.clone()),
         // directory_read(path) -> Dir
         ("directory_read", bin.clone(), dir.clone()),
-        // directory_next(Dir) -> [bin, int] | nil  (entry name + kind code)
+        // directory_next(Dir) -> [bin, kind] | nil  (entry name + kind tag)
         (
             "directory_next",
             dir.clone(),
             TypeSpec::Union(vec![
-                TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, int.clone())]),
+                TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, kind.clone())]),
                 nil.clone(),
             ]),
         ),
@@ -86,7 +94,7 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
                 TypeSpec::Tuple(
                     None,
                     vec![
-                        (None, int.clone()),
+                        (None, kind),
                         (None, int.clone()),
                         (None, int.clone()),
                         (None, int),

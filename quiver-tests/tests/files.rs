@@ -670,6 +670,67 @@ fn test_stat_missing_is_nil() {
         .expect("Absent");
 }
 
+// Regression: the composite tuples returned by the filesystem builtins must carry their *real*
+// declared result type — including the nested `File`/`Dir`/… kind tag. The backend has no type
+// registry of its own, so the environment pushes it each builtin's result type ids (outer tuple +
+// named variants, see `set_type_ids`/`ResultTupleInfo`), and the backend stamps them directly. A
+// regular file's stat result must therefore match `[File, 'int, 'int, 'int]` as a type, and *not*
+// the old all-int `['int, 'int, 'int, 'int]` shape.
+#[test]
+fn test_stat_result_has_its_real_declared_type() {
+    let dir = std::env::temp_dir().join(format!("quiver_stat_shape_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::write(dir.join("f.txt"), b"hello").expect("Failed to create test file");
+    let path = dir.join("f.txt");
+    let path = path.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            p = "{path}" ~> .0,
+            s = __filesystem_stat__ p,
+            [
+              s ~> =[File, 'int, 'int, 'int] ~> {{ <> => No | Yes }},
+              s ~> =['int, 'int, 'int, 'int] ~> {{ <> => No | Yes }}
+            ]
+            "#
+        ))
+        .expect("[Yes, No]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Companion for the directory-entry tuple `[name, kind]`. Its first field is a heap binary (the
+// entry name via the side-channel) and its second is a nested kind tag, so this exercises the real
+// outer tuple id, the nested variant id, and heap injection together. The `warm` line registers a
+// same-arity `[int, int]` first — the collision that defeated an earlier arity-based guess. With
+// the real declared ids stamped, a regular-file entry matches `[bin, File]` and *not* `['int, 'int]`.
+#[test]
+fn test_directory_entry_has_its_real_declared_type() {
+    let dir = std::env::temp_dir().join(format!("quiver_entry_shape_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::write(dir.join("only"), b"").expect("Failed to create test file");
+    let dir_str = dir.to_str().unwrap();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            warm = [1, 2] ~> =['int, 'int],
+            d = "{dir_str}" ~> .0 ~> __directory_read__,
+            e = __directory_next__ d,
+            [
+              e ~> =['bin, File] ~> {{ <> => No | Yes }},
+              e ~> =['int, 'int] ~> {{ <> => No | Yes }}
+            ]
+            "#
+        ))
+        .expect("[Yes, No]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn test_fs_predicates() {
     let dir = std::env::temp_dir().join(format!("quiver_pred_{}", std::process::id()));

@@ -1,7 +1,7 @@
 use crate::effects::NativeEffect;
 use io_uring::{IoUring as IoUringRing, opcode, types};
 use quiver_core::ProcessId;
-use quiver_core::effects::{EffectBackend, EffectError, EffectResult};
+use quiver_core::effects::{EffectBackend, EffectError, EffectResult, ResultTupleInfo};
 use quiver_core::error::Error;
 use quiver_core::value::{ResourceId, Value};
 use socket2::Socket;
@@ -81,8 +81,11 @@ pub struct NativeEffectBackend {
     resources: HashMap<ResourceId, Resource>,
     /// Counter for allocating resource IDs
     next_resource_id: ResourceId,
-    /// Mapping from resource type name to type ID (set from bytecode)
+    /// Mapping from resource type name to type ID (pushed by the environment via `set_type_ids`)
     resource_type_ids: HashMap<String, usize>,
+    /// Mapping from builtin name to the type ids of its composite result, so effect results can be
+    /// stamped with real type ids (pushed by the environment via `set_type_ids`).
+    result_infos: HashMap<String, ResultTupleInfo>,
 }
 
 impl NativeEffectBackend {
@@ -98,23 +101,34 @@ impl NativeEffectBackend {
             resources: HashMap::new(),
             next_resource_id: 1,
             resource_type_ids: HashMap::new(),
+            result_infos: HashMap::new(),
         })
     }
 
-    /// Set the resource type ID mapping from bytecode resources list
-    pub fn set_resource_type_ids(&mut self, resources: &[String]) {
-        self.resource_type_ids.clear();
-        for (type_id, name) in resources.iter().enumerate() {
-            self.resource_type_ids.insert(name.clone(), type_id);
-        }
-    }
-
-    /// Get the type ID for a resource type name
+    /// Get the type ID for a resource type name. Falls back to 0 only if the tables haven't been
+    /// pushed yet (which shouldn't happen for an executing host — see `set_type_ids`).
     fn get_resource_type_id(&self, name: &str) -> usize {
-        // Return the type ID if known, or 0 as a fallback
-        // (type ID 0 is a valid fallback since type checking happens at compile time)
         *self.resource_type_ids.get(name).unwrap_or(&0)
     }
+
+    /// The type ids to stamp on the composite result of the named builtin. Errors if they weren't
+    /// pushed (a wiring bug — the environment pushes these for every loaded program).
+    fn result_info(&self, builtin: &str) -> Result<&ResultTupleInfo, Error> {
+        self.result_infos.get(builtin).ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "no result type ids registered for builtin `{builtin}`"
+            ))
+        })
+    }
+}
+
+/// Build a `kind` tag value (`File`/`Dir`/`Symlink`/`Other`) from its name, using the real tuple
+/// ids carried in `info.variants`.
+fn kind_tag(info: &ResultTupleInfo, name: &str) -> Result<Value, Error> {
+    let id = info.variants.get(name).copied().ok_or_else(|| {
+        Error::InvalidArgument(format!("no tuple id registered for kind tag `{name}`"))
+    })?;
+    Ok(Value::tuple(id, vec![]))
 }
 
 /// EffectBackend implementation for NativeEffect
@@ -231,6 +245,17 @@ impl EffectBackend for NativeEffectBackend {
         // Remove resource from registry - Drop impl will close the FD
         self.resources.remove(&resource_id);
     }
+
+    fn set_type_ids(&mut self, resources: &[String], results: &[(String, ResultTupleInfo)]) {
+        self.resource_type_ids.clear();
+        for (type_id, name) in resources.iter().enumerate() {
+            self.resource_type_ids.insert(name.clone(), type_id);
+        }
+        self.result_infos.clear();
+        for (name, info) in results {
+            self.result_infos.insert(name.clone(), info.clone());
+        }
+    }
 }
 
 impl NativeEffectBackend {
@@ -318,17 +343,18 @@ impl NativeEffectBackend {
             }
         };
 
-        // Kind codes match the directory builtin: 0 file, 1 dir, 2 symlink, 3 other. Because
-        // `metadata` follows symlinks, the symlink case never arises here.
-        let kind_code: i64 = if metadata.is_dir() {
-            1
+        let info = self.result_info("filesystem_stat")?;
+        // The `kind` tag. `metadata` follows symlinks, so the symlink case never actually arises.
+        let kind_name = if metadata.is_dir() {
+            "Dir"
         } else if metadata.is_symlink() {
-            2
+            "Symlink"
         } else if metadata.is_file() {
-            0
+            "File"
         } else {
-            3
+            "Other"
         };
+        let kind = kind_tag(info, kind_name)?;
         let size: u64 = metadata.len();
         // mtime as nanoseconds since the Unix epoch (0 if the platform cannot report it).
         let modified_nanos: u128 = metadata
@@ -339,14 +365,13 @@ impl NativeEffectBackend {
             .unwrap_or(0);
         let mode: u32 = metadata.permissions().mode() & 0o7777;
 
-        // Transient `[kind, size, modified, mode]` tuple, read by index in `std/fs.qv` (see
-        // `execute_read_dir_next` for why the placeholder tag is fine). All fields are integers, so
-        // no heap side-channel is needed.
+        // `[kind, size, modified, mode]` tuple, stamped with `filesystem_stat`'s real result type
+        // ids (pushed by the environment — the backend has no type registry of its own).
         Ok(Some(Ok((
             Value::tuple(
-                quiver_core::types::NIL,
+                info.tuple_id,
                 vec![
-                    Value::Integer(kind_code.into()),
+                    kind,
                     Value::Integer(size.into()),
                     Value::Integer(modified_nanos.into()),
                     Value::Integer(mode.into()),
@@ -378,6 +403,9 @@ impl NativeEffectBackend {
         &mut self,
         resource_id: ResourceId,
     ) -> Result<Option<EffectResult>, Error> {
+        // Fetch the result type ids up front (cloned), before the mutable borrow of
+        // `self.resources` below.
+        let info = self.result_info("directory_next")?.clone();
         let resource = self
             .resources
             .get_mut(&resource_id)
@@ -392,25 +420,20 @@ impl NativeEffectBackend {
                 let name_bytes = entry.file_name().into_vec();
                 // The entry's own type, without following symlinks. `d_type` from `getdents` is
                 // essentially free; `file_type()` only falls back to an `lstat` on the rare
-                // filesystems that report `DT_UNKNOWN`. Encoded as a small int the stdlib maps to a
-                // `kind` tag — 0: file, 1: dir, 2: symlink, 3: other (socket/fifo/device/unknown).
-                let kind_code: i64 = match entry.file_type() {
-                    Ok(ft) if ft.is_dir() => 1,
-                    Ok(ft) if ft.is_symlink() => 2,
-                    Ok(ft) if ft.is_file() => 0,
-                    _ => 3,
+                // filesystems that report `DT_UNKNOWN`. `Other` covers socket/fifo/device/unknown.
+                let kind_name = match entry.file_type() {
+                    Ok(ft) if ft.is_dir() => "Dir",
+                    Ok(ft) if ft.is_symlink() => "Symlink",
+                    Ok(ft) if ft.is_file() => "File",
+                    _ => "Other",
                 };
-                // Transient `[name, kind_code]` transport pair. `std/fs.qv` binds it whole and
-                // reads the fields by index — it never matches on its shape — so the tuple's type
-                // tag is never inspected; `NIL` is just a valid, registered placeholder id. The
-                // name bytes travel via the heap side-channel (referenced by `Heap(0)`).
+                let kind = kind_tag(&info, kind_name)?;
+                // `[name, kind]` pair, stamped with `directory_next`'s real result type ids (pushed
+                // by the environment). The name bytes travel via the heap side-channel (`Heap(0)`).
                 Ok(Some(Ok((
                     Value::tuple(
-                        quiver_core::types::NIL,
-                        vec![
-                            Value::Binary(quiver_core::value::Binary::Heap(0)),
-                            Value::Integer(kind_code.into()),
-                        ],
+                        info.tuple_id,
+                        vec![Value::Binary(quiver_core::value::Binary::Heap(0)), kind],
                     ),
                     vec![name_bytes],
                 ))))
