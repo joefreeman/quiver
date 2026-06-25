@@ -6,6 +6,7 @@
 //! that bookkeeping lives in `std/vec.qv`. Anything that could overflow the lane width is
 //! **checked**, returning nil (`[]`) rather than wrapping, matching the language's
 //! nil-propagation convention. Reductions accumulate into `BigInt`, so they never overflow.
+use crate::binary::BinaryData;
 use crate::builtins::{BuiltinResult, bigint_to_i64};
 use crate::effects::Effect;
 use crate::error::Error;
@@ -14,6 +15,7 @@ use crate::process::ProcessId;
 use crate::value::Value;
 use num_bigint::BigInt;
 use num_traits::Zero;
+use std::rc::Rc;
 
 /// Read lane `i` from a contiguous little-endian signed buffer. The caller guarantees
 /// `width ∈ {4, 8}` and that the lane is in bounds.
@@ -76,8 +78,8 @@ fn elementwise<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let a = executor.get_binary_data(a)?.to_vec();
-    let b = executor.get_binary_data(b)?.to_vec();
+    let a = executor.materialize(a)?;
+    let b = executor.materialize(b)?;
 
     if a.len() != b.len() || a.len() % width != 0 {
         return Ok(nil());
@@ -139,8 +141,8 @@ fn compare<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let a = executor.get_binary_data(a)?.to_vec();
-    let b = executor.get_binary_data(b)?.to_vec();
+    let a = executor.materialize(a)?;
+    let b = executor.materialize(b)?;
 
     if a.len() != b.len() || a.len() % width != 0 {
         return Ok(nil());
@@ -199,8 +201,8 @@ pub fn builtin_vec_take<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let data = executor.get_binary_data(data)?.to_vec();
-    let mask = executor.get_binary_data(mask)?.to_vec();
+    let data = executor.materialize(data)?;
+    let mask = executor.materialize(mask)?;
 
     if data.len() % width != 0 || mask.len() != data.len() / width {
         return Ok(nil());
@@ -232,7 +234,7 @@ pub fn builtin_vec_get<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let bytes = executor.get_binary_data(binary)?.to_vec();
+    let bytes = executor.materialize(binary)?;
 
     let Some(index) = index.try_into().ok().filter(|i: &usize| {
         bytes.len() % width == 0 && (*i + 1).saturating_mul(width) <= bytes.len()
@@ -247,8 +249,9 @@ pub fn builtin_vec_get<E: Effect>(
 /// Append one signed lane: `vec_push([bin, width, value]) -> bin | []`.
 /// Nil if `value` doesn't fit the lane width, or the buffer is ragged.
 ///
-/// TODO: this clones the whole buffer per push, so folding it to build a vector is O(n²).
-/// Fine for small vectors; a bulk packer is the eventual replacement.
+/// Appends via an O(1) `Concat`: cloning the existing buffer is a refcount bump (`Owned` is
+/// `Rc`-backed), so folding this to build a vector is O(n), not O(n²). The result is a rope
+/// that materialises (and compacts) lazily on the next full read — see `Executor::materialize`.
 pub fn builtin_vec_push<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
@@ -262,17 +265,30 @@ pub fn builtin_vec_push<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let mut bytes = executor.get_binary_data(binary)?.to_vec();
 
     let Some(value) = value.try_into().ok().filter(|v| fits(*v, width)) else {
         return Ok(nil());
     };
-    if bytes.len() % width != 0 {
+
+    let old = executor.get_binary_data(binary)?;
+    let old_len = old.len();
+    if old_len % width != 0 {
         return Ok(nil());
     }
-    push_lane(&mut bytes, width, value);
+
+    let mut lane_bytes = Vec::with_capacity(width);
+    push_lane(&mut lane_bytes, width, value);
+    let lane = BinaryData::new(lane_bytes);
+
+    // Empty buffer: the lane *is* the new buffer (avoids a degenerate `Concat` over nil).
+    // Otherwise share `old` (O(1) clone) as the left of a fresh `Concat`.
+    let appended = if old_len == 0 {
+        lane
+    } else {
+        BinaryData::concat(Rc::new(old.clone()), Rc::new(lane))
+    };
     Ok(BuiltinResult::Value(Value::Binary(
-        executor.allocate_binary(bytes)?,
+        executor.allocate_binary_data(appended)?,
     )))
 }
 
@@ -290,7 +306,7 @@ pub fn builtin_vec_sum<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let bytes = executor.get_binary_data(binary)?.to_vec();
+    let bytes = executor.materialize(binary)?;
     if bytes.len() % width != 0 {
         return Ok(nil());
     }
@@ -316,8 +332,8 @@ pub fn builtin_vec_dot<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let a = executor.get_binary_data(a)?.to_vec();
-    let b = executor.get_binary_data(b)?.to_vec();
+    let a = executor.materialize(a)?;
+    let b = executor.materialize(b)?;
     if a.len() != b.len() || a.len() % width != 0 {
         return Ok(nil());
     }

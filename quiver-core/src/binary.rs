@@ -7,8 +7,11 @@ pub const MAX_BINARY_SIZE: usize = 16 * 1024 * 1024;
 /// Supports O(1) slicing and concatenation through structural sharing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryData {
-    /// Raw owned bytes
-    Owned(Vec<u8>),
+    /// Raw bytes. `Rc`-wrapped so cloning a `BinaryData` is always O(1) (a refcount bump) —
+    /// in particular `concat(Owned, _)` shares the buffer rather than copying it. The bytes are
+    /// never mutated through this `Rc` (values are immutable; the heap-slot refcount, not the
+    /// inner `Rc` count, is the uniqueness signal), so sharing is sound.
+    Owned(Rc<Vec<u8>>),
 
     /// Zero-filled binary of given length (no allocation until materialized)
     Zeroed(usize),
@@ -36,7 +39,7 @@ pub enum BinaryData {
 impl BinaryData {
     /// Create a new owned binary from a Vec<u8>
     pub fn new(bytes: Vec<u8>) -> Self {
-        BinaryData::Owned(bytes)
+        BinaryData::Owned(Rc::new(bytes))
     }
 
     /// Create a zero-filled binary of the given length without allocating
@@ -82,7 +85,7 @@ impl BinaryData {
 
         // Empty slice
         if length == 0 {
-            return Some(BinaryData::Owned(Vec::new()));
+            return Some(BinaryData::new(Vec::new()));
         }
 
         // Full slice - return parent
@@ -101,7 +104,7 @@ impl BinaryData {
     /// Normalises the degenerate cases so callers needn't special-case them.
     pub fn tiled(unit: Rc<BinaryData>, count: usize) -> Self {
         if count == 0 || unit.is_empty() {
-            return BinaryData::Owned(Vec::new());
+            return BinaryData::new(Vec::new());
         }
         if count == 1 {
             return (*unit).clone();
@@ -147,29 +150,38 @@ impl BinaryData {
         result
     }
 
-    /// Helper to write bytes to a vector (used by to_vec)
-    fn write_to_vec(&self, vec: &mut Vec<u8>) {
-        match self {
-            BinaryData::Owned(bytes) => vec.extend_from_slice(bytes),
-            BinaryData::Zeroed(len) => vec.resize(vec.len() + len, 0),
-            BinaryData::Slice {
-                parent,
-                offset,
-                length,
-            } => {
-                // For slices, we need to extract the specific range
-                let parent_vec = parent.to_vec();
-                vec.extend_from_slice(&parent_vec[*offset..*offset + *length]);
-            }
-            BinaryData::Concat { left, right, .. } => {
-                left.write_to_vec(vec);
-                right.write_to_vec(vec);
-            }
-            BinaryData::Tiled { unit, count } => {
-                let unit_bytes = unit.to_vec();
-                vec.reserve(unit_bytes.len() * count);
-                for _ in 0..*count {
-                    vec.extend_from_slice(&unit_bytes);
+    /// Helper to write bytes to a vector (used by to_vec).
+    ///
+    /// Iterative: a left-leaning `Concat` spine can be n deep (a vector built by repeated
+    /// push), so recursing the spine would overflow the stack. We walk an explicit work-list
+    /// instead, emitting nodes left-to-right. `Slice`/`Tiled` still flatten their (shallow)
+    /// parent/unit via `to_vec`, which is itself iterative — the deep structure we create is
+    /// always a `Concat` spine, never nested slices.
+    fn write_to_vec(&self, out: &mut Vec<u8>) {
+        let mut stack: Vec<&BinaryData> = vec![self];
+        while let Some(node) = stack.pop() {
+            match node {
+                BinaryData::Owned(bytes) => out.extend_from_slice(bytes.as_slice()),
+                BinaryData::Zeroed(len) => out.resize(out.len() + len, 0),
+                BinaryData::Slice {
+                    parent,
+                    offset,
+                    length,
+                } => {
+                    let parent_vec = parent.to_vec();
+                    out.extend_from_slice(&parent_vec[*offset..*offset + *length]);
+                }
+                BinaryData::Concat { left, right, .. } => {
+                    // Emit left before right: push right first so left pops next.
+                    stack.push(right);
+                    stack.push(left);
+                }
+                BinaryData::Tiled { unit, count } => {
+                    let unit_bytes = unit.to_vec();
+                    out.reserve(unit_bytes.len() * count);
+                    for _ in 0..*count {
+                        out.extend_from_slice(&unit_bytes);
+                    }
                 }
             }
         }
@@ -255,6 +267,57 @@ impl BinaryData {
             BinaryData::Concat { left, right, .. } => left.depth().max(right.depth()) + 1,
             BinaryData::Tiled { unit, .. } => unit.depth() + 1,
         }
+    }
+}
+
+thread_local! {
+    /// A shared empty leaf used to vacate `Rc` child slots during iterative drop without
+    /// allocating. Cloning it is a refcount bump; it holds no children, so it drops trivially.
+    static EMPTY_RC: Rc<BinaryData> = Rc::new(BinaryData::Zeroed(0));
+}
+
+impl Drop for BinaryData {
+    /// Drop iteratively. The default (recursive) drop would walk a left-leaning `Concat` spine
+    /// — n deep for a vector built by repeated push — and overflow the stack. Instead we move
+    /// owned children onto an explicit work-list and drop them one at a time, descending only
+    /// into `Rc`s we uniquely own (a shared child must stay intact; its `Rc` just decrements).
+    fn drop(&mut self) {
+        // Fast path: leaves have no `Rc` children, so their fields drop trivially (an `Owned`
+        // buffer's `Rc<Vec>` simply decrements). This keeps the common flat-binary drop cheap.
+        match self {
+            BinaryData::Owned(_) | BinaryData::Zeroed(_) => return,
+            _ => {}
+        }
+
+        let empty = EMPTY_RC.with(|e| e.clone());
+        let mut stack: Vec<Rc<BinaryData>> = Vec::new();
+        take_children(self, &empty, &mut stack);
+        while let Some(rc) = stack.pop() {
+            // Sole owner: take the inner node and vacate ITS children before it drops, so its
+            // own (recursive) drop sees only empty leaves and terminates immediately. Shared:
+            // dropping `rc` here just decrements, leaving the still-referenced subtree intact.
+            if let Ok(mut inner) = Rc::try_unwrap(rc) {
+                take_children(&mut inner, &empty, &mut stack);
+            }
+        }
+    }
+}
+
+/// Replace each `Rc` child of `node` with the shared empty leaf, pushing the originals onto
+/// `stack`. After this, `node`'s own drop is non-recursive (its children are leaves).
+fn take_children(node: &mut BinaryData, empty: &Rc<BinaryData>, stack: &mut Vec<Rc<BinaryData>>) {
+    match node {
+        BinaryData::Concat { left, right, .. } => {
+            stack.push(std::mem::replace(left, empty.clone()));
+            stack.push(std::mem::replace(right, empty.clone()));
+        }
+        BinaryData::Slice { parent, .. } => {
+            stack.push(std::mem::replace(parent, empty.clone()));
+        }
+        BinaryData::Tiled { unit, .. } => {
+            stack.push(std::mem::replace(unit, empty.clone()));
+        }
+        BinaryData::Owned(_) | BinaryData::Zeroed(_) => {}
     }
 }
 
@@ -371,6 +434,29 @@ mod tests {
         let data = BinaryData::new(vec![1, 2, 3]);
         let collected: Vec<u8> = data.iter().collect();
         assert_eq!(collected, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn deep_rope_read_and_drop_are_stack_safe() {
+        // A left-leaning `Concat` spine of this depth would overflow a recursive `to_vec` or a
+        // recursive `Drop`. Run on a deliberately small stack so the test only passes if both
+        // are iterative — i.e. we don't silently rely on the worker's oversized stack.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let depth = 100_000;
+                let mut acc = Rc::new(BinaryData::new(vec![0u8]));
+                for i in 1..depth {
+                    let lane = Rc::new(BinaryData::new(vec![(i & 0xff) as u8]));
+                    acc = Rc::new(BinaryData::concat(acc, lane));
+                }
+                // Read: iterative `write_to_vec` must not recurse the spine.
+                assert_eq!(acc.to_vec().len(), depth);
+                // Drop: leaving scope tears the deep rope down via the iterative `Drop`.
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

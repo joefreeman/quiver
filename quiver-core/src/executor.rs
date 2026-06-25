@@ -9,6 +9,7 @@ use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -503,6 +504,32 @@ impl<E: Effect> Executor<E> {
     /// Create a binary from Vec<u8>
     pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
         self.allocate_binary_data(BinaryData::new(bytes))
+    }
+
+    /// Read a binary's bytes, compacting a heap-stored rope to a flat `Owned` in place as a
+    /// side effect. Flattening is content-preserving, so it is sound no matter how many
+    /// references share the slot — a rope's children are internal `Rc`s, not heap slots, so no
+    /// heap refcount changes and compaction is invisible to [`check_refcounts`]. After the first
+    /// materialize, a vector built up by repeated push is contiguous, so subsequent reads and
+    /// random access are cheap. Returns the bytes as a shared `Rc<Vec<u8>>`: the same allocation
+    /// is stored in the slot and returned, so there is no extra copy.
+    pub fn materialize(&mut self, binary: &Binary) -> Result<Rc<Vec<u8>>, Error> {
+        if let Binary::Heap(index) = binary {
+            debug_assert!(
+                !self.freed.get(*index).copied().unwrap_or(false),
+                "materialize of freed heap slot {index} (use-after-free)"
+            );
+            if let BinaryData::Owned(rc) = &self.heap[*index] {
+                return Ok(rc.clone()); // already flat — O(1) share
+            }
+            // Flatten once; storing and returning the same `Rc` keeps the peak at ~2× (the
+            // rope is dropped as the slot is overwritten), with no further copy.
+            let rc = Rc::new(self.heap[*index].to_vec());
+            self.heap[*index] = BinaryData::Owned(rc.clone());
+            return Ok(rc);
+        }
+        // Non-heap (constant): flatten without write-back.
+        Ok(Rc::new(self.get_binary_data(binary)?.to_vec()))
     }
 
     /// The set of heap-slot indices reachable from any live root: every process's
