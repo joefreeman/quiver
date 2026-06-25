@@ -1,3 +1,4 @@
+use crate::pump::{Pump, Tick};
 use crate::types::*;
 use crate::web_transport::WebWorkerHandle;
 use quiver_compiler::PackageResolver;
@@ -155,7 +156,10 @@ impl CallbackHandle {
 
 use crate::effects::WebEffect;
 
-type EventLoopClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
+/// Shared handle to the main-thread event-driven loop. Held by `Environment`, the per-worker
+/// `onmessage` handlers, and each `Repl`, so any of them can `wake()` the loop when they queue
+/// work. Wrapped in `Option` because the worker handlers are created before the pump exists.
+type PumpHandle = Rc<RefCell<Option<Pump>>>;
 type SharedEnvironment = Rc<RefCell<quiver_environment::Environment<WebEffect>>>;
 type SharedCallbacks = Rc<RefCell<HashMap<u64, CallbackHandle>>>;
 type SharedProcessTypes = Rc<RefCell<HashMap<usize, (quiver_core::types::Type, usize)>>>;
@@ -169,11 +173,19 @@ type SharedPendingEvaluations = Rc<
     >,
 >;
 
+/// Wake the main-thread loop if it exists yet. A no-op before `Environment::new` installs the
+/// pump, which is fine: nothing queues work against the environment before then.
+fn wake(handle: &PumpHandle) {
+    if let Some(pump) = handle.borrow().as_ref() {
+        pump.wake();
+    }
+}
+
 #[wasm_bindgen(skip_typescript)]
 pub struct Environment {
     environment: SharedEnvironment,
     running: Rc<RefCell<bool>>,
-    event_loop_closure: EventLoopClosure,
+    pump: PumpHandle,
     pending_callbacks: SharedCallbacks,
     cached_process_types: SharedProcessTypes,
     pending_evaluations: SharedPendingEvaluations,
@@ -191,6 +203,10 @@ impl Environment {
         let worker_factory: js_sys::Function = worker_factory.into();
         // Set up panic hook for better error messages
         console_error_panic_hook::set_once();
+
+        // The main-thread event loop, installed at the end of this function. The per-worker
+        // `onmessage` handlers below capture this handle so an incoming event can wake the loop.
+        let pump: PumpHandle = Rc::new(RefCell::new(None));
 
         // Create workers by calling the factory function
         let mut workers: Vec<Box<dyn WorkerHandle<WebEffect>>> = Vec::new();
@@ -214,6 +230,7 @@ impl Environment {
             let pending_commands = handle.pending_commands();
             let event_queue_for_closure = event_queue.clone();
             let worker_for_closure = worker.clone();
+            let pump_for_closure = pump.clone();
             let worker_id = i;
 
             // Set up message handler for worker events
@@ -238,6 +255,8 @@ impl Environment {
                         match serde_json::from_str::<quiver_environment::Event<WebEffect>>(&text) {
                             Ok(event) => {
                                 event_queue_for_closure.borrow_mut().push_back(event);
+                                // Wake the loop so it drains the event; it may be sleeping.
+                                wake(&pump_for_closure);
                             }
                             Err(e) => {
                                 web_sys::console::error_1(
@@ -262,11 +281,23 @@ impl Environment {
         let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let cached_process_types = Rc::new(RefCell::new(HashMap::new()));
         let pending_evaluations = Rc::new(RefCell::new(Vec::new()));
+        let running = Rc::new(RefCell::new(false));
+
+        // Install the event-driven main-thread loop. It starts idle (running == false); `start()`
+        // arms it. The worker `onmessage` handlers above and the JS-facing methods below wake it
+        // whenever they queue work, so it only ticks when there is something to do.
+        *pump.borrow_mut() = Some(Self::build_pump(
+            environment_rc.clone(),
+            running.clone(),
+            pending_callbacks.clone(),
+            cached_process_types.clone(),
+            pending_evaluations.clone(),
+        ));
 
         Ok(Self {
             environment: environment_rc,
-            running: Rc::new(RefCell::new(false)),
-            event_loop_closure: Rc::new(RefCell::new(None)),
+            running,
+            pump,
             pending_callbacks,
             cached_process_types,
             pending_evaluations,
@@ -281,13 +312,127 @@ impl Environment {
         SharedCallbacks,
         SharedProcessTypes,
         SharedPendingEvaluations,
+        PumpHandle,
     ) {
         (
             self.environment.clone(),
             self.pending_callbacks.clone(),
             self.cached_process_types.clone(),
             self.pending_evaluations.clone(),
+            self.pump.clone(),
         )
+    }
+
+    /// Build the main-thread loop. Each tick advances the environment and drains ready work; the
+    /// returned `Tick` keeps it running while work flows and lets it sleep once everything is
+    /// quiet (waiting for a `wake` from a worker event or a JS-side call).
+    fn build_pump(
+        environment: SharedEnvironment,
+        running: Rc<RefCell<bool>>,
+        pending_callbacks: SharedCallbacks,
+        cached_process_types: SharedProcessTypes,
+        pending_evaluations: SharedPendingEvaluations,
+    ) -> Pump {
+        Pump::new(move || {
+            if !*running.borrow() {
+                return Tick::Idle;
+            }
+            let did_work = Self::run_tick(
+                &environment,
+                &pending_callbacks,
+                &cached_process_types,
+                &pending_evaluations,
+            );
+            // If this tick did something it may have produced follow-up work; run once more. When a
+            // tick finds nothing to do we go idle — the next change arrives via a wake.
+            if did_work { Tick::Busy } else { Tick::Idle }
+        })
+    }
+
+    /// Run one iteration of the main-thread loop: advance the environment (draining worker events
+    /// and effect completions), resolve any ready request callbacks, and dispatch queued
+    /// evaluations. Returns whether any work was done this tick.
+    fn run_tick(
+        environment: &SharedEnvironment,
+        pending_callbacks: &SharedCallbacks,
+        cached_process_types: &SharedProcessTypes,
+        pending_evaluations: &SharedPendingEvaluations,
+    ) -> bool {
+        // Step the environment
+        let mut did_work = environment.borrow_mut().step().unwrap_or(false);
+
+        // Process pending callbacks
+        let mut callbacks_to_invoke = Vec::new();
+        {
+            let mut callbacks = pending_callbacks.borrow_mut();
+            let request_ids: Vec<u64> = callbacks.keys().copied().collect();
+
+            for request_id in request_ids {
+                match environment.borrow_mut().poll_request(request_id) {
+                    Ok(Some(result)) => {
+                        // Cache process types if this is a ProcessTypes result
+                        if let RequestResult::ProcessTypes(ref types) = result {
+                            *cached_process_types.borrow_mut() = types.clone();
+                        }
+
+                        if let Some(callback) = callbacks.remove(&request_id) {
+                            callbacks_to_invoke.push((callback, result));
+                        }
+                    }
+                    Ok(None) => {
+                        // Not ready yet
+                    }
+                    Err(e) => {
+                        // Error polling request
+                        if let Some(callback) = callbacks.remove(&request_id) {
+                            callback.invoke::<()>(crate::types::Result::err(e.to_string()));
+                        }
+                        did_work = true;
+                    }
+                }
+            }
+        }
+
+        if !callbacks_to_invoke.is_empty() {
+            did_work = true;
+        }
+
+        // Invoke callbacks outside of the borrow
+        for (callback, result) in callbacks_to_invoke {
+            Self::handle_result(&environment.borrow(), callback, result);
+        }
+
+        // Process pending evaluations
+        let evaluations_to_process = {
+            let mut evals = pending_evaluations.borrow_mut();
+            std::mem::take(&mut *evals)
+        };
+
+        if !evaluations_to_process.is_empty() {
+            did_work = true;
+        }
+
+        for (source, callback, repl) in evaluations_to_process {
+            let process_types = cached_process_types.borrow().clone();
+
+            match repl
+                .borrow_mut()
+                .evaluate(&mut environment.borrow_mut(), &source, process_types)
+            {
+                Ok(Some(request_id)) => {
+                    pending_callbacks.borrow_mut().insert(request_id, callback);
+                }
+                Ok(None) => {
+                    callback.invoke(crate::types::Result::ok(None::<EvaluationResult>));
+                }
+                Err(e) => {
+                    callback
+                        .invoke::<EvaluationResult>(crate::types::Result::err(format!("{}", e)));
+                }
+            }
+        }
+
+        did_work
     }
 
     /// Start the event loop
@@ -297,131 +442,15 @@ impl Environment {
         }
 
         *self.running.borrow_mut() = true;
-
-        let environment = self.environment.clone();
-        let running = self.running.clone();
-        let pending_callbacks = self.pending_callbacks.clone();
-        let cached_process_types = self.cached_process_types.clone();
-        let pending_evaluations = self.pending_evaluations.clone();
-
-        // Use self.event_loop_closure as the holder directly
-        let closure_holder = self.event_loop_closure.clone();
-
-        // Create the closure that captures the closure holder
-        let tick_fn = Closure::wrap(Box::new(move || {
-            if !*running.borrow() {
-                return; // Stop the loop
-            }
-
-            // Step the environment
-            let _ = environment.borrow_mut().step();
-
-            // Process pending callbacks
-            let mut callbacks_to_invoke = Vec::new();
-            {
-                let mut callbacks = pending_callbacks.borrow_mut();
-                let request_ids: Vec<u64> = callbacks.keys().copied().collect();
-
-                for request_id in request_ids {
-                    match environment.borrow_mut().poll_request(request_id) {
-                        Ok(Some(result)) => {
-                            // Cache process types if this is a ProcessTypes result
-                            if let RequestResult::ProcessTypes(ref types) = result {
-                                *cached_process_types.borrow_mut() = types.clone();
-                            }
-
-                            if let Some(callback) = callbacks.remove(&request_id) {
-                                callbacks_to_invoke.push((callback, result));
-                            }
-                        }
-                        Ok(None) => {
-                            // Not ready yet
-                        }
-                        Err(e) => {
-                            // Error polling request
-                            if let Some(callback) = callbacks.remove(&request_id) {
-                                callback.invoke::<()>(crate::types::Result::err(e.to_string()));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Invoke callbacks outside of the borrow
-            for (callback, result) in callbacks_to_invoke {
-                Self::handle_result(&environment.borrow(), callback, result);
-            }
-
-            // Process pending evaluations
-            let evaluations_to_process = {
-                let mut evals = pending_evaluations.borrow_mut();
-                std::mem::take(&mut *evals)
-            };
-
-            for (source, callback, repl) in evaluations_to_process {
-                let process_types = cached_process_types.borrow().clone();
-
-                match repl.borrow_mut().evaluate(
-                    &mut environment.borrow_mut(),
-                    &source,
-                    process_types,
-                ) {
-                    Ok(Some(request_id)) => {
-                        pending_callbacks.borrow_mut().insert(request_id, callback);
-                    }
-                    Ok(None) => {
-                        callback.invoke(crate::types::Result::ok(None::<EvaluationResult>));
-                    }
-                    Err(e) => {
-                        callback.invoke::<EvaluationResult>(crate::types::Result::err(format!(
-                            "{}",
-                            e
-                        )));
-                    }
-                }
-            }
-
-            // Schedule next tick if still running
-            if *running.borrow() {
-                let window = js_sys::global();
-                let set_timeout = js_sys::Reflect::get(&window, &JsValue::from_str("setTimeout"))
-                    .expect("setTimeout not found");
-                let set_timeout: js_sys::Function = set_timeout.dyn_into().unwrap();
-
-                // Get reference to self from the holder
-                let closure_ref = closure_holder.borrow();
-                if let Some(ref callback) = *closure_ref {
-                    let _ = set_timeout.call2(
-                        &window,
-                        callback.as_ref().unchecked_ref(),
-                        &JsValue::from_f64(0.0),
-                    );
-                }
-            }
-        }) as Box<dyn FnMut()>);
-
-        // Store the closure in the holder
-        *self.event_loop_closure.borrow_mut() = Some(tick_fn);
-
-        // Start the loop with the first tick
-        let window = js_sys::global();
-        let set_timeout = js_sys::Reflect::get(&window, &JsValue::from_str("setTimeout"))
-            .expect("setTimeout not found");
-        let set_timeout: js_sys::Function = set_timeout.dyn_into().unwrap();
-
-        let closure_ref = self.event_loop_closure.borrow();
-        if let Some(ref cb) = *closure_ref {
-            let _ = set_timeout.call2(
-                &window,
-                cb.as_ref().unchecked_ref(),
-                &JsValue::from_f64(0.0),
-            );
-        }
+        wake(&self.pump);
     }
 
     /// Stop the event loop
     pub fn stop(&mut self) {
         *self.running.borrow_mut() = false;
+        if let Some(pump) = self.pump.borrow().as_ref() {
+            pump.cancel();
+        }
     }
 
     /// Get all process statuses
@@ -433,6 +462,7 @@ impl Environment {
                 self.pending_callbacks
                     .borrow_mut()
                     .insert(request_id, CallbackHandle::new(callback));
+                wake(&self.pump);
             }
             Err(e) => {
                 let cb = CallbackHandle::new(callback);
@@ -450,6 +480,7 @@ impl Environment {
                 self.pending_callbacks
                     .borrow_mut()
                     .insert(request_id, CallbackHandle::new(callback));
+                wake(&self.pump);
             }
             Err(e) => {
                 let cb = CallbackHandle::new(callback);
@@ -575,6 +606,7 @@ pub struct Repl {
     environment: SharedEnvironment,
     pending_callbacks: SharedCallbacks,
     pending_evaluations: SharedPendingEvaluations,
+    pump: PumpHandle,
     repl: Rc<RefCell<quiver_environment::Repl<WebEffect>>>,
 }
 
@@ -591,7 +623,7 @@ impl Repl {
         console_error_panic_hook::set_once();
 
         // Get shared state from environment
-        let (env_rc, callbacks_rc, _process_types_rc, evaluations_rc) =
+        let (env_rc, callbacks_rc, _process_types_rc, evaluations_rc, pump) =
             environment.get_shared_state();
 
         // Create REPL
@@ -607,6 +639,7 @@ impl Repl {
             environment: env_rc,
             pending_callbacks: callbacks_rc,
             pending_evaluations: evaluations_rc,
+            pump,
             repl: Rc::new(RefCell::new(repl)),
         })
     }
@@ -632,10 +665,11 @@ impl Repl {
 
         match self.environment.borrow_mut().request_process_types() {
             Ok(request_id) => {
-                // The polling loop will automatically cache the types and invoke the callback
+                // The loop will cache the types and invoke the callback; wake it to do so.
                 self.pending_callbacks
                     .borrow_mut()
                     .insert(request_id, CallbackHandle::new(callback));
+                wake(&self.pump);
             }
             Err(e) => {
                 let cb = CallbackHandle::new(callback);
@@ -650,13 +684,14 @@ impl Repl {
     pub fn evaluate(&mut self, source: String, callback: JsValue) {
         let callback: js_sys::Function = callback.into();
 
-        // Queue the evaluation to be processed by the polling loop
-        // This avoids RefCell borrow conflicts
+        // Queue the evaluation to be processed by the loop (avoids RefCell borrow conflicts), then
+        // wake the loop so it dispatches it.
         self.pending_evaluations.borrow_mut().push((
             source,
             CallbackHandle::new(callback),
             self.repl.clone(),
         ));
+        wake(&self.pump);
     }
 
     /// Compact locals to remove unused variables (optimization, safe to skip)

@@ -62,6 +62,19 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         Ok(did_work)
     }
 
+    /// Whether a process is queued to run immediately. Event-driven runtimes keep stepping while
+    /// this is true and go idle once it is false (and no timeout is pending).
+    pub fn has_runnable(&self) -> bool {
+        self.executor.has_runnable()
+    }
+
+    /// Earliest absolute clock time (ms) at which a pending select timeout expires, if any. When
+    /// idle, an event-driven runtime can schedule a single timer for this instant rather than
+    /// polling the clock. `None` means nothing time-based is pending — wait for a command.
+    pub fn next_timeout_ms(&self) -> Option<u64> {
+        self.executor.next_timeout_ms()
+    }
+
     fn handle_command(&mut self, command: Command<E>) -> Result<(), EnvironmentError> {
         match command {
             Command::UpdateProgram(update) => {

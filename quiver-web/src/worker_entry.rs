@@ -1,4 +1,5 @@
 use crate::effects::WebEffect;
+use crate::pump::{Pump, Tick};
 use crate::web_transport::{WebCommandReceiver, WebEventSender};
 use quiver_environment::{Command, EnvironmentError, Event, Worker};
 use std::cell::RefCell;
@@ -56,6 +57,11 @@ pub fn worker_main() {
     let evt_sender_for_closure = evt_sender_clone.clone();
     let command_queue_for_init = command_queue.clone();
 
+    // The worker's event-driven loop, created once we receive the init message. Incoming commands
+    // wake it; between commands (and with no runnable processes or pending timeout) it sleeps.
+    let pump: Rc<RefCell<Option<Pump>>> = Rc::new(RefCell::new(None));
+    let pump_for_closure = pump.clone();
+
     // Set up message handler - handles both init and commands
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
@@ -75,13 +81,17 @@ pub fn worker_main() {
                     *initialized_clone.borrow_mut() = true;
 
                     // Start the worker loop
-                    start_worker_loop(worker);
+                    *pump_for_closure.borrow_mut() = Some(start_worker_loop(worker));
                 }
             } else {
                 // Already initialized - parse as Command
                 match serde_json::from_str::<Command<WebEffect>>(&text) {
                     Ok(cmd) => {
                         command_queue_clone.borrow_mut().push_back(cmd);
+                        // Wake the loop so it processes the command; it may be sleeping.
+                        if let Some(pump) = pump_for_closure.borrow().as_ref() {
+                            pump.wake();
+                        }
                     }
                     Err(e) => {
                         web_sys::console::error_1(
@@ -97,50 +107,33 @@ pub fn worker_main() {
     onmessage.forget(); // Keep closure alive
 }
 
-fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSender>) {
+/// Drive the worker with an event-driven [`Pump`]. Each tick steps the worker once; the pump then
+/// keeps stepping while there are runnable processes, schedules a single timer for the next pending
+/// `select` timeout when idle-but-timing, and otherwise sleeps until a command wakes it. The
+/// returned pump is stored by the caller so incoming commands can `wake()` it.
+fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSender>) -> Pump {
     let worker = Rc::new(RefCell::new(worker));
-    let worker_clone = worker.clone();
 
-    let closure = Rc::new(RefCell::new(None::<Closure<dyn FnMut()>>));
-    let closure_clone = closure.clone();
-
-    *closure.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-        // Get current time from JavaScript
+    let pump = Pump::new(move || {
         let current_time_ms = js_sys::Date::now() as u64;
 
-        // Step the worker
-        let should_continue = match worker_clone.borrow_mut().step(current_time_ms) {
-            Ok(_work_done) => true,
-            Err(_e) => {
-                // Worker will send WorkerError event to environment
-                false
-            }
-        };
-
-        if should_continue {
-            // Schedule next step
-            let window = js_sys::global();
-            let set_timeout = js_sys::Reflect::get(&window, &JsValue::from_str("setTimeout"))
-                .expect("setTimeout not found");
-            let set_timeout: js_sys::Function = set_timeout.dyn_into().unwrap();
-
-            let closure_ref = closure_clone.borrow();
-            let callback = closure_ref.as_ref().unwrap();
-
-            let _ = set_timeout.call2(
-                &window,
-                callback.as_ref().unchecked_ref(),
-                &JsValue::from_f64(0.0),
-            );
+        if worker.borrow_mut().step(current_time_ms).is_err() {
+            // Worker has sent a WorkerError event to the environment; stop the loop.
+            return Tick::Idle;
         }
-    }) as Box<dyn FnMut()>));
 
-    // Start the loop
-    let closure_ref = closure.borrow();
-    let callback = closure_ref.as_ref().unwrap();
-    callback
-        .as_ref()
-        .unchecked_ref::<js_sys::Function>()
-        .call0(&JsValue::NULL)
-        .unwrap();
+        let worker = worker.borrow();
+        if worker.has_runnable() {
+            // More processes are queued; yield to the event loop, then step again immediately.
+            Tick::Busy
+        } else if let Some(deadline_ms) = worker.next_timeout_ms() {
+            // Nothing runnable, but a select timeout is pending — wake exactly when it expires.
+            Tick::WakeAt(deadline_ms as f64)
+        } else {
+            // Fully idle: wait for a command to arrive (which wakes the pump).
+            Tick::Idle
+        }
+    });
+    pump.start();
+    pump
 }

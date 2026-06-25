@@ -1,4 +1,5 @@
 mod effects;
+mod pump;
 mod repl_web;
 mod types;
 mod web_transport;

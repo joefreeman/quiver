@@ -2187,6 +2187,36 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
+    /// Whether any process is queued to run immediately. Event-driven runtimes use this to
+    /// decide whether to keep stepping (true) or go idle and wait for a wake (false).
+    pub fn has_runnable(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Earliest absolute clock time (ms, same scale as the `current_time_ms` passed to `step`)
+    /// at which a pending select timeout will expire, or `None` if no selecting process has a
+    /// timeout. Event-driven runtimes schedule a single timer for this instant instead of
+    /// polling the clock. Mirrors the expiry rule in `check_expired_timeouts`.
+    pub fn next_timeout_ms(&self) -> Option<u64> {
+        self.selecting
+            .iter()
+            .filter_map(|pid| {
+                let process = self.get_process(*pid)?;
+                let select_state = process.select_state.as_ref()?;
+                let start_time = select_state.start_time?;
+                let timeout = select_state
+                    .sources
+                    .iter()
+                    .filter_map(|source| match source {
+                        Value::Integer(ms) => Some(ms.to_i64().unwrap_or(i64::MAX).max(0) as u64),
+                        _ => None,
+                    })
+                    .min()?;
+                Some(start_time.saturating_add(timeout))
+            })
+            .min()
+    }
+
     fn check_expired_timeouts(&mut self, current_time_ms: u64) {
         // Scan selecting processes for expired select timeouts
         let expired: Vec<ProcessId> = self
