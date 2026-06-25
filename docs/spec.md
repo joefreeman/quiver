@@ -464,7 +464,7 @@ is *called* unless prefixed with `&`:
 ```quiver
 &double                  // Reference to double (not called)
 map [xs, &double]        // Pass double as an argument (without &, double would be called)
-[add: &__add__]          // A record of functions; & references a builtin without calling it
+[add: &__integer_add__]          // A record of functions; & references a builtin without calling it
 ```
 
 A function is applied to an argument by writing the argument after it, separated by a
@@ -701,8 +701,8 @@ The following standard library modules are available:
 Built-in functions can be accessed using double underscores, although access via the standard library should be preferred.
 
 ```quiver
-sum = [3, 4] ~> __add__               // Built-in addition
-doubled = [x, 2] ~> __multiply__      // Built-in multiplication
+sum = [3, 4] ~> __integer_add__               // Built-in addition
+doubled = [x, 2] ~> __integer_multiply__      // Built-in multiplication
 ```
 
 ## Examples

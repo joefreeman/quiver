@@ -4,7 +4,7 @@ use common::*;
 #[test]
 fn test_simple_assignment() {
     quiver()
-        .evaluate("1 ~> =x, 2 ~> =y, [x, y] ~> __add__")
+        .evaluate("1 ~> =x, 2 ~> =y, [x, y] ~> __integer_add__")
         .expect("3");
 
     quiver().evaluate("x = 42; x").expect("42");
@@ -13,7 +13,7 @@ fn test_simple_assignment() {
 #[test]
 fn test_tuple_destructuring() {
     quiver()
-        .evaluate("[1, 2] ~> =[a, b], [a, b] ~> __add__")
+        .evaluate("[1, 2] ~> =[a, b], [a, b] ~> __integer_add__")
         .expect("3");
 
     quiver().evaluate("[x, y] = [1, 2]; y").expect("2");
@@ -41,7 +41,7 @@ fn test_nested_field_assignment() {
 #[test]
 fn test_partial_tuple_assignment() {
     quiver()
-        .evaluate("[x: 1, y: 2, z: 3] ~> =(x, y), [x, y] ~> __add__")
+        .evaluate("[x: 1, y: 2, z: 3] ~> =(x, y), [x, y] ~> __integer_add__")
         .expect("3");
 }
 
@@ -75,7 +75,7 @@ fn test_named_partial_pattern_in_block() {
             r#"
             A[x: 5, y: 10] ~> {
               | =B(x, y) => 0
-              | =A(x, y) => [x, y] ~> __add__
+              | =A(x, y) => [x, y] ~> __integer_add__
             }
             "#,
         )
@@ -85,11 +85,11 @@ fn test_named_partial_pattern_in_block() {
 #[test]
 fn test_star_assignment() {
     quiver()
-        .evaluate("[a: 1, b: 2] ~> =*, [a, b] ~> __add__")
+        .evaluate("[a: 1, b: 2] ~> =*, [a, b] ~> __integer_add__")
         .expect("3");
 
     quiver()
-        .evaluate("* = [a: 1, b: 2]; [a, b] ~> __add__")
+        .evaluate("* = [a: 1, b: 2]; [a, b] ~> __integer_add__")
         .expect("3");
 }
 
@@ -97,11 +97,11 @@ fn test_star_assignment() {
 fn test_named_star_assignment() {
     // A named star binds all named fields, like `*`, but also requires the tuple name.
     quiver()
-        .evaluate("Config[a: 1, b: 2] ~> =Config*, [a, b] ~> __add__")
+        .evaluate("Config[a: 1, b: 2] ~> =Config*, [a, b] ~> __integer_add__")
         .expect("3");
 
     quiver()
-        .evaluate("Config* = Config[a: 1, b: 2]; [a, b] ~> __add__")
+        .evaluate("Config* = Config[a: 1, b: 2]; [a, b] ~> __integer_add__")
         .expect("3");
 }
 
@@ -180,8 +180,8 @@ fn test_union_match_with_tuples() {
         .evaluate(
             r#"
             A[3] ~> {
-              | =A[x] => [x, 1] ~> __add__
-              | =B[x] => [x, 2] ~> __add__
+              | =A[x] => [x, 1] ~> __integer_add__
+              | =B[x] => [x, 2] ~> __integer_add__
             }
             "#,
         )
@@ -244,7 +244,7 @@ fn test_match_union_in_nested_tuple() {
             'option = Some['int] | None;
             #['option, 'int] {
               | =[None, z] => 0
-              | =[Some[x], z] => [x, z] ~> __add__
+              | =[Some[x], z] => [x, z] ~> __integer_add__
             } ~> =f,
             [Some[5], 2] ~> f
             "#,
@@ -255,7 +255,7 @@ fn test_match_union_in_nested_tuple() {
 #[test]
 fn test_multiple_placeholders() {
     quiver()
-        .evaluate("[1, 2, 3, 4, 5] ~> =[_, x, _, y, _], [x, y] ~> __add__")
+        .evaluate("[1, 2, 3, 4, 5] ~> =[_, x, _, y, _], [x, y] ~> __integer_add__")
         .expect("6");
 }
 

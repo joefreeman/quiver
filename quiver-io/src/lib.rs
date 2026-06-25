@@ -2,6 +2,7 @@ pub mod effects;
 pub mod file;
 pub mod native_backend;
 pub mod network;
+mod util;
 
 pub use effects::NativeEffect;
 pub use file::attach_file_builtins;

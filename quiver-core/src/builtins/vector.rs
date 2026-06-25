@@ -97,8 +97,8 @@ fn elementwise<E: Effect>(
     )))
 }
 
-/// Elementwise addition: `vec_add([bin, bin, width]) -> bin | []`
-pub fn builtin_vec_add<E: Effect>(
+/// Elementwise addition: `vector_add([bin, bin, width]) -> bin | []`
+pub fn builtin_vector_add<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -106,8 +106,8 @@ pub fn builtin_vec_add<E: Effect>(
     elementwise(arg, executor, i64::checked_add)
 }
 
-/// Elementwise subtraction: `vec_sub([bin, bin, width]) -> bin | []`
-pub fn builtin_vec_sub<E: Effect>(
+/// Elementwise subtraction: `vector_subtract([bin, bin, width]) -> bin | []`
+pub fn builtin_vector_subtract<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -115,8 +115,8 @@ pub fn builtin_vec_sub<E: Effect>(
     elementwise(arg, executor, i64::checked_sub)
 }
 
-/// Elementwise multiplication: `vec_mul([bin, bin, width]) -> bin | []`
-pub fn builtin_vec_mul<E: Effect>(
+/// Elementwise multiplication: `vector_multiply([bin, bin, width]) -> bin | []`
+pub fn builtin_vector_multiply<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -158,8 +158,8 @@ fn compare<E: Effect>(
     )))
 }
 
-/// Elementwise less-than mask: `vec_lt([bin, bin, width]) -> bin | []`.
-pub fn builtin_vec_lt<E: Effect>(
+/// Elementwise less-than mask: `vector_less_than([bin, bin, width]) -> bin | []`.
+pub fn builtin_vector_less_than<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -167,8 +167,8 @@ pub fn builtin_vec_lt<E: Effect>(
     compare(arg, executor, |a, b| a < b)
 }
 
-/// Elementwise equality mask: `vec_eq([bin, bin, width]) -> bin | []`.
-pub fn builtin_vec_eq<E: Effect>(
+/// Elementwise equality mask: `vector_equal([bin, bin, width]) -> bin | []`.
+pub fn builtin_vector_equal<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -176,8 +176,8 @@ pub fn builtin_vec_eq<E: Effect>(
     compare(arg, executor, |a, b| a == b)
 }
 
-/// Elementwise greater-than mask: `vec_gt([bin, bin, width]) -> bin | []`.
-pub fn builtin_vec_gt<E: Effect>(
+/// Elementwise greater-than mask: `vector_greater_than([bin, bin, width]) -> bin | []`.
+pub fn builtin_vector_greater_than<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -185,10 +185,10 @@ pub fn builtin_vec_gt<E: Effect>(
     compare(arg, executor, |a, b| a > b)
 }
 
-/// Gather the lanes selected by a mask: `vec_take([data, width, mask]) -> bin | []`. `mask` is
+/// Gather the lanes selected by a mask: `vector_take([data, width, mask]) -> bin | []`. `mask` is
 /// one byte per lane (non-zero selects); the kept lanes are packed, in order, into a fresh
 /// buffer. Nil if the mask length doesn't match the lane count, or the data buffer is ragged.
-pub fn builtin_vec_take<E: Effect>(
+pub fn builtin_vector_take<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -219,9 +219,9 @@ pub fn builtin_vec_take<E: Effect>(
     )))
 }
 
-/// Read one lane as a signed integer: `vec_get([bin, width, index]) -> int | []`.
+/// Read one lane as a signed integer: `vector_get([bin, width, index]) -> int | []`.
 /// Nil for a negative or out-of-bounds index, or a ragged buffer.
-pub fn builtin_vec_get<E: Effect>(
+pub fn builtin_vector_get<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -246,13 +246,13 @@ pub fn builtin_vec_get<E: Effect>(
     )))))
 }
 
-/// Append one signed lane: `vec_push([bin, width, value]) -> bin | []`.
+/// Append one signed lane: `vector_push([bin, width, value]) -> bin | []`.
 /// Nil if `value` doesn't fit the lane width, or the buffer is ragged.
 ///
 /// Appends via an O(1) `Concat`: cloning the existing buffer is a refcount bump (`Owned` is
 /// `Rc`-backed), so folding this to build a vector is O(n), not O(n²). The result is a rope
 /// that materialises (and compacts) lazily on the next full read — see `Executor::materialize`.
-pub fn builtin_vec_push<E: Effect>(
+pub fn builtin_vector_push<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -292,8 +292,8 @@ pub fn builtin_vec_push<E: Effect>(
     )))
 }
 
-/// Sum of all lanes: `vec_sum([bin, width]) -> int | []`. Exact (BigInt), so never overflows.
-pub fn builtin_vec_sum<E: Effect>(
+/// Sum of all lanes: `vector_sum([bin, width]) -> int | []`. Exact (BigInt), so never overflows.
+pub fn builtin_vector_sum<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,
@@ -317,9 +317,9 @@ pub fn builtin_vec_sum<E: Effect>(
     Ok(BuiltinResult::Value(Value::Integer(acc)))
 }
 
-/// Dot product: `vec_dot([bin, bin, width]) -> int | []`. Exact (BigInt); nil on length
+/// Dot product: `vector_dot([bin, bin, width]) -> int | []`. Exact (BigInt); nil on length
 /// mismatch or a ragged buffer.
-pub fn builtin_vec_dot<E: Effect>(
+pub fn builtin_vector_dot<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
     executor: &mut Executor<E>,

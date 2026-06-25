@@ -66,7 +66,7 @@ fn test_spawn_juxtaposed_argument_equals_piped() {
 fn test_spawn_juxtaposed_argument_flows_chained_value() {
     // The chained value flows into the juxtaposed argument (via `~`), like a call argument.
     quiver()
-        .evaluate("f = #['int, 'int] { __add__ }, p = 10 ~> @f [~, 5], !p")
+        .evaluate("f = #['int, 'int] { __integer_add__ }, p = 10 ~> @f [~, 5], !p")
         .expect("15");
 }
 
@@ -251,13 +251,13 @@ fn test_await_simple() {
 
 #[test]
 fn test_await_returns_process_result() {
-    quiver().evaluate("!@#{ [1, 2] ~> __add__ }").expect("3");
+    quiver().evaluate("!@#{ [1, 2] ~> __integer_add__ }").expect("3");
 }
 
 #[test]
 fn test_await_with_captures() {
     quiver()
-        .evaluate("x = 10, !@#{ [x, 32] ~> __add__ }")
+        .evaluate("x = 10, !@#{ [x, 32] ~> __integer_add__ }")
         .expect("42");
 }
 
@@ -542,7 +542,7 @@ fn test_receive_type_from_variable() {
         .evaluate(
             r#"
             receiver_func = #'int,
-            p = @#{ ! [&receiver_func] ~> [~, 100] ~> __add__ },
+            p = @#{ ! [&receiver_func] ~> [~, 100] ~> __integer_add__ },
             42 ~> p, !p
             "#,
         )
@@ -693,7 +693,7 @@ fn test_receive_type_in_builtin_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 10 ~> @#'int { __add__ [~, !#'int] },
+            p = 10 ~> @#'int { __integer_add__ [~, !#'int] },
             32 ~> p, !p
             "#,
         )
@@ -706,7 +706,7 @@ fn test_receive_type_in_tail_call_argument() {
     quiver()
         .evaluate(
             r#"
-            f = #['int, 'int] { __add__ },
+            f = #['int, 'int] { __integer_add__ },
             p = 10 ~> @#'int { ^f [~, !#'int] },
             32 ~> p, !p
             "#,

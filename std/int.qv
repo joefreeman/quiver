@@ -5,19 +5,19 @@
   // Integer quotient, truncating toward zero. Division by zero fails to nil.
   div: #['int, 'int] {
     | =[a, 0] => []
-    | __divide__
+    | __integer_divide__
   },
 
   // Integer modulo. A zero divisor fails to nil.
   mod: #['int, 'int] {
     | =[a, 0] => []
-    | __modulo__
+    | __integer_modulo__
   },
 
   // Integer square root (floor). Negative input fails to nil.
   sqrt: #'int {
-    | __compare__ [~, 0] ~> =-1 => []
-    | __sqrt__
+    | __integer_compare__ [~, 0] ~> =-1 => []
+    | __integer_sqrt__
   },
 
   and: &__integer_and__,

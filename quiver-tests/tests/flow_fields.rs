@@ -3,7 +3,7 @@
 mod common;
 use common::*;
 
-const INC: &str = "inc = #'int { [~, 1] ~> __add__ },";
+const INC: &str = "inc = #'int { [~, 1] ~> __integer_add__ },";
 
 #[test]
 fn callable_field_is_called_with_flow() {
@@ -31,7 +31,7 @@ fn nil_arg_callable_field_called_with_nil_param() {
 fn amp_builtin_reference_in_record() {
     // `&__builtin__` stores a builtin as a value (e.g. a module export tuple).
     quiver()
-        .evaluate("r = [a: &__add__], r.a [3, 4]")
+        .evaluate("r = [a: &__integer_add__], r.a [3, 4]")
         .expect("7");
 }
 

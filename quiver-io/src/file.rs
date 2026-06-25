@@ -1,4 +1,5 @@
 use crate::effects::NativeEffect;
+use crate::util::expect_resource;
 use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult, bigint_to_i64};
 use quiver_core::error::Error;
 use quiver_core::executor::Executor;
@@ -260,30 +261,7 @@ pub fn builtin_file_flush(
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract file resource from tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     // Return Action to request flush operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
@@ -292,37 +270,14 @@ pub fn builtin_file_flush(
     }))
 }
 
-/// file_close([file]) -> Ok
+/// file_close(file) -> Ok
 /// Close a file (async)
 pub fn builtin_file_close(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract file resource from tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     // Return Action to request close operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
@@ -331,34 +286,19 @@ pub fn builtin_file_close(
     }))
 }
 
-/// read_dir([path: bin]) -> Dir
-/// Open a directory for iteration, returning a resource that yields one entry per `read_dir_next`.
-pub fn builtin_read_dir(
+/// directory_read(path: bin) -> Dir
+/// Open a directory for iteration, returning a resource that yields one entry per `directory_next`.
+pub fn builtin_directory_read(
     process_id: ProcessId,
     value: &Value,
     executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract [path] tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let path_binary = match &fields[0] {
+    let path_binary = match value {
         Value::Binary(binary) => *binary,
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
-                found: fields[0].type_name().to_string(),
+                found: value.type_name().to_string(),
             });
         }
     };
@@ -390,33 +330,19 @@ pub fn builtin_read_dir(
     }))
 }
 
-/// stat([path: bin]) -> [kind, size, modified, mode] | Nil
+/// filesystem_stat(path: bin) -> [kind, size, modified, mode] | Nil
 /// Look up metadata for a path (following symlinks). Yields nil if the path does not exist.
-pub fn builtin_stat(
+pub fn builtin_filesystem_stat(
     process_id: ProcessId,
     value: &Value,
     executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let path_binary = match &fields[0] {
+    let path_binary = match value {
         Value::Binary(binary) => *binary,
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
-                found: fields[0].type_name().to_string(),
+                found: value.type_name().to_string(),
             });
         }
     };
@@ -448,36 +374,14 @@ pub fn builtin_stat(
     }))
 }
 
-/// read_dir_next([dir: Dir]) -> bin | Nil
+/// directory_next(dir: Dir) -> bin | Nil
 /// Get the next entry name from a directory, or Nil once exhausted.
-pub fn builtin_read_dir_next(
+pub fn builtin_directory_next(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
@@ -485,36 +389,14 @@ pub fn builtin_read_dir_next(
     }))
 }
 
-/// read_dir_close([dir: Dir]) -> Ok
+/// directory_close(dir: Dir) -> Ok
 /// Close a directory resource.
-pub fn builtin_read_dir_close(
+pub fn builtin_directory_close(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
@@ -532,10 +414,10 @@ pub fn attach_file_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
         ("file_write", builtin_file_write),
         ("file_flush", builtin_file_flush),
         ("file_close", builtin_file_close),
-        ("read_dir", builtin_read_dir),
-        ("read_dir_next", builtin_read_dir_next),
-        ("read_dir_close", builtin_read_dir_close),
-        ("stat", builtin_stat),
+        ("directory_read", builtin_directory_read),
+        ("directory_next", builtin_directory_next),
+        ("directory_close", builtin_directory_close),
+        ("filesystem_stat", builtin_filesystem_stat),
     ];
     for (name, impl_fn) in implementations {
         registry.attach_implementation(name, impl_fn);

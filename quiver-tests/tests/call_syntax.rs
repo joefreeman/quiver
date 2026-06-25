@@ -3,7 +3,7 @@
 mod common;
 use common::*;
 
-const ADD: &str = "add = #['int, 'int] { __add__ },";
+const ADD: &str = "add = #['int, 'int] { __integer_add__ },";
 const INC: &str = "inc = #'int { %num.add [~, 1] },";
 
 #[test]
@@ -23,7 +23,7 @@ fn bare_argument_call() {
 #[test]
 fn adjacent_call_is_a_parse_error() {
     quiver()
-        .evaluate("add = #['int, 'int] { __add__ }, add[3, 4]")
+        .evaluate("add = #['int, 'int] { __integer_add__ }, add[3, 4]")
         .expect_parse_failure();
 }
 
@@ -49,7 +49,7 @@ fn spread_stays_adjacent() {
 #[test]
 fn field_access_call_is_spaced() {
     quiver()
-        .evaluate("m = [add: #['int, 'int] { __add__ }], m.add [3, 4]")
+        .evaluate("m = [add: #['int, 'int] { __integer_add__ }], m.add [3, 4]")
         .expect("7");
 }
 

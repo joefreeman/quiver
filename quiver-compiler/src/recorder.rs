@@ -30,7 +30,7 @@ pub enum SymbolKind {
 
 /// The semantic facts about one reference: its (narrowed) type, where it is defined, what
 /// kind of symbol it is, and a display label (the symbol's name, `$`, or a builtin name)
-/// for richer hover text like `__add__: #['int, 'int] -> 'int`.
+/// for richer hover text like `__integer_add__: #['int, 'int] -> 'int`.
 #[derive(Debug, Clone)]
 pub struct SemanticInfo {
     pub type_id: usize,

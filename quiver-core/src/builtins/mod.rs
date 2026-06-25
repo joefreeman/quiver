@@ -47,7 +47,6 @@ pub fn bigint_from_str(s: &str) -> Result<BigInt, Error> {
 pub mod binary;
 pub mod integer;
 pub mod io;
-pub mod math;
 pub mod vector;
 
 /// Result of a builtin function execution
@@ -258,32 +257,6 @@ impl<E: Effect> BuiltinRegistry<E> {
     }
 }
 
-/// Register all math builtins (arithmetic and mathematical functions)
-pub fn register_math_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    // Common type specification for binary integer operations
-    let int_int = TypeSpec::Tuple(
-        None,
-        vec![(None, TypeSpec::Integer), (None, TypeSpec::Integer)],
-    );
-
-    // Math functions
-    register_builtin!(registry, "abs", math::builtin_math_abs, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(registry, "sqrt", math::builtin_math_sqrt, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(registry, "sin", math::builtin_math_sin, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(registry, "cos", math::builtin_math_cos, TypeSpec::Integer => TypeSpec::Integer);
-
-    // Arithmetic operations - operate on [int, int] tuples
-    register_builtin!(registry, "add", math::builtin_add, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(registry, "subtract", math::builtin_subtract, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(registry, "multiply", math::builtin_multiply, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(registry, "divide", math::builtin_divide, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(registry, "modulo", math::builtin_modulo, int_int.clone() => TypeSpec::Integer);
-    register_builtin!(registry, "gcd", math::builtin_gcd, int_int.clone() => TypeSpec::Integer);
-
-    // Comparison operations - operate on [int, int] tuples
-    register_builtin!(registry, "compare", math::builtin_compare, int_int => TypeSpec::Integer);
-}
-
 /// Register all binary builtins (binary data manipulation)
 pub fn register_binary_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     // Common type specifications
@@ -359,7 +332,7 @@ pub fn register_binary_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "binary_append", binary::builtin_binary_append, bin_int_int => TypeSpec::Binary);
 }
 
-/// Register all integer bitwise builtins
+/// Register all integer builtins: arithmetic/math (arbitrary-precision) and bitwise (64-bit).
 pub fn register_integer_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     // Common type specification
     let int_int = TypeSpec::Tuple(
@@ -367,12 +340,27 @@ pub fn register_integer_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
         vec![(None, TypeSpec::Integer), (None, TypeSpec::Integer)],
     );
 
+    // Unary math functions
+    register_builtin!(registry, "integer_abs", integer::builtin_integer_abs, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "integer_sqrt", integer::builtin_integer_sqrt, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "integer_sin", integer::builtin_integer_sin, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "integer_cos", integer::builtin_integer_cos, TypeSpec::Integer => TypeSpec::Integer);
+
+    // Arithmetic operations - operate on [int, int] tuples
+    register_builtin!(registry, "integer_add", integer::builtin_integer_add, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_subtract", integer::builtin_integer_subtract, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_multiply", integer::builtin_integer_multiply, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_divide", integer::builtin_integer_divide, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_modulo", integer::builtin_integer_modulo, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_gcd", integer::builtin_integer_gcd, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_compare", integer::builtin_integer_compare, int_int.clone() => TypeSpec::Integer);
+
     // Integer bitwise operations
     register_builtin!(registry, "integer_and", integer::builtin_integer_and, int_int.clone() => TypeSpec::Integer);
     register_builtin!(registry, "integer_or", integer::builtin_integer_or, int_int.clone() => TypeSpec::Integer);
     register_builtin!(registry, "integer_xor", integer::builtin_integer_xor, int_int.clone() => TypeSpec::Integer);
     register_builtin!(registry, "integer_not", integer::builtin_integer_not, TypeSpec::Integer => TypeSpec::Integer);
-    register_builtin!(registry, "integer_shift", integer::builtin_integer_shift, int_int.clone() => TypeSpec::Integer);
+    register_builtin!(registry, "integer_shift", integer::builtin_integer_shift, int_int => TypeSpec::Integer);
     register_builtin!(registry, "integer_popcount", integer::builtin_integer_popcount, TypeSpec::Integer => TypeSpec::Integer);
 }
 
@@ -414,26 +402,25 @@ pub fn register_vector_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
         ],
     );
 
-    register_builtin!(registry, "vec_add", vector::builtin_vec_add, bin_bin_int.clone() => bin_or_nil.clone());
-    register_builtin!(registry, "vec_sub", vector::builtin_vec_sub, bin_bin_int.clone() => bin_or_nil.clone());
-    register_builtin!(registry, "vec_mul", vector::builtin_vec_mul, bin_bin_int.clone() => bin_or_nil.clone());
-    register_builtin!(registry, "vec_lt", vector::builtin_vec_lt, bin_bin_int.clone() => bin_or_nil.clone());
-    register_builtin!(registry, "vec_eq", vector::builtin_vec_eq, bin_bin_int.clone() => bin_or_nil.clone());
-    register_builtin!(registry, "vec_gt", vector::builtin_vec_gt, bin_bin_int.clone() => bin_or_nil.clone());
-    register_builtin!(registry, "vec_dot", vector::builtin_vec_dot, bin_bin_int => int_or_nil.clone());
-    register_builtin!(registry, "vec_take", vector::builtin_vec_take, bin_int_bin => bin_or_nil.clone());
-    register_builtin!(registry, "vec_get", vector::builtin_vec_get, bin_int_int.clone() => int_or_nil.clone());
-    register_builtin!(registry, "vec_push", vector::builtin_vec_push, bin_int_int => bin_or_nil);
-    register_builtin!(registry, "vec_sum", vector::builtin_vec_sum, bin_int => int_or_nil);
+    register_builtin!(registry, "vector_add", vector::builtin_vector_add, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vector_subtract", vector::builtin_vector_subtract, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vector_multiply", vector::builtin_vector_multiply, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vector_less_than", vector::builtin_vector_less_than, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vector_equal", vector::builtin_vector_equal, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vector_greater_than", vector::builtin_vector_greater_than, bin_bin_int.clone() => bin_or_nil.clone());
+    register_builtin!(registry, "vector_dot", vector::builtin_vector_dot, bin_bin_int => int_or_nil.clone());
+    register_builtin!(registry, "vector_take", vector::builtin_vector_take, bin_int_bin => bin_or_nil.clone());
+    register_builtin!(registry, "vector_get", vector::builtin_vector_get, bin_int_int.clone() => int_or_nil.clone());
+    register_builtin!(registry, "vector_push", vector::builtin_vector_push, bin_int_int => bin_or_nil);
+    register_builtin!(registry, "vector_sum", vector::builtin_vector_sum, bin_int => int_or_nil);
 }
 
 /// Get all core builtin modules. This establishes the full builtin *contract* every host shares:
-/// the pure builtins (math/binary/integer) with their universal implementations, and the IO
+/// the pure builtins (integer/binary/vector) with their universal implementations, and the IO
 /// builtins' signatures (with placeholder implementations that executing hosts replace via
 /// [`BuiltinRegistry::attach_implementation`]).
 pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![
-        register_math_builtins,
         register_binary_builtins,
         register_integer_builtins,
         register_vector_builtins,

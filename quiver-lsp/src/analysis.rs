@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn valid_program_has_no_diagnostics() {
         // A program that both parses and typechecks: integer add.
-        assert!(diagnostics("[1, 2] ~> __add__").is_empty());
+        assert!(diagnostics("[1, 2] ~> __integer_add__").is_empty());
     }
 
     #[test]
@@ -141,8 +141,8 @@ mod tests {
 
     #[test]
     fn type_error_is_reported_with_a_range() {
-        // `__add__` expects integers; a reference to an undefined variable fails to compile.
-        let diags = diagnostics("nope ~> __add__");
+        // `__integer_add__` expects integers; a reference to an undefined variable fails to compile.
+        let diags = diagnostics("nope ~> __integer_add__");
         assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
     }
 
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn hover_on_a_builtin_shows_its_signature_and_label() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "[1, 2] ~> __add__";
+        let text = "[1, 2] ~> __integer_add__";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -303,10 +303,10 @@ mod tests {
         );
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.expect("program");
-        let offset = text.find("__add__").unwrap();
+        let offset = text.find("__integer_add__").unwrap();
         let info = semantics.at_offset(offset).expect("builtin recorded");
         assert_eq!(info.kind, SymbolKind::Builtin);
-        assert_eq!(info.label.as_deref(), Some("__add__"));
+        assert_eq!(info.label.as_deref(), Some("__integer_add__"));
         // The recorded type is the callable signature, not the applied result.
         let sig = quiver_core::format::format_type_by_id(&program, info.type_id);
         assert!(sig.starts_with('#'), "expected a signature, got {sig:?}");
@@ -360,14 +360,14 @@ mod tests {
     #[test]
     fn hover_on_a_builtin_reference_is_recorded() {
         use quiver_compiler::recorder::SymbolKind;
-        // `&__add__` references the builtin without applying it.
-        let text = "&__add__";
+        // `&__integer_add__` references the builtin without applying it.
+        let text = "&__integer_add__";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
-        let offset = text.find("__add__").unwrap();
+        let offset = text.find("__integer_add__").unwrap();
         let info = semantics.at_offset(offset).expect("builtin ref recorded");
         assert_eq!(info.kind, SymbolKind::Builtin);
-        assert_eq!(info.label.as_deref(), Some("__add__"));
+        assert_eq!(info.label.as_deref(), Some("__integer_add__"));
     }
 
     #[test]
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn local_references_finds_all_uses_in_the_file() {
         // `x` is bound once and used twice.
-        let text = "x = 5\n[x, x] ~> __add__";
+        let text = "x = 5\n[x, x] ~> __integer_add__";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let use_offset = text.rfind('x').unwrap();
@@ -626,7 +626,7 @@ mod tests {
     fn hover_on_a_call_argument_tuple_shows_its_type() {
         use quiver_compiler::recorder::SymbolKind;
         // The `[` of a call's argument tuple hovers as that tuple's type.
-        let text = "__add__ [3, 4]";
+        let text = "__integer_add__ [3, 4]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn operator_hover_covers_only_the_token_not_the_interior() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "f = #'int { [~, 1] ~> __add__ },\nt = [a: 1, b: 2]";
+        let text = "f = #'int { [~, 1] ~> __integer_add__ },\nt = [a: 1, b: 2]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -672,7 +672,7 @@ mod tests {
         );
         // ...but the interior does not (the `~>` inside the body, the `,` inside the tuple).
         assert!(
-            !is_expression(text.find("~> __add").unwrap()),
+            !is_expression(text.find("~> __integer_add").unwrap()),
             "fn body interior"
         );
         assert!(!is_expression(text.find(", b").unwrap()), "tuple interior");
@@ -698,8 +698,8 @@ mod tests {
     #[test]
     fn builtin_span_excludes_the_argument() {
         // Hovering inside the argument must not resolve to the builtin: the builtin's
-        // recorded span covers only `__add__`, not `[1, 2]`.
-        let text = "__add__ [1, 2]";
+        // recorded span covers only `__integer_add__`, not `[1, 2]`.
+        let text = "__integer_add__ [1, 2]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let arg_offset = text.find('1').unwrap();

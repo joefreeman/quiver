@@ -9,13 +9,13 @@ const ADD: &str = r#"
 'n = 'int | Rational['int, 'int];
 radd_ = #[Rational['int, 'int], Rational['int, 'int]] {
   =[Rational[a, b], Rational[c, d]],
-  Rational[__add__ [__multiply__ [a, d], __multiply__ [c, b]], __multiply__ [b, d]]
+  Rational[__integer_add__ [__integer_multiply__ [a, d], __integer_multiply__ [c, b]], __integer_multiply__ [b, d]]
 };
 tr_ = #'n { | =Rational[n, d] => Rational[n, d] | =n => Rational[n, 1] };
 add = #['n, 'n] {
   | =[Rational[a, b], y] => radd_ [Rational[a, b], y ~> tr_]
   | =[x, Rational[c, d]] => radd_ [x ~> tr_, Rational[c, d]]
-  | =[a, b] => __add__ [a, b]
+  | =[a, b] => __integer_add__ [a, b]
 };
 "#;
 
@@ -120,7 +120,7 @@ fn test_num_div_always_rational() {
 #[test]
 fn test_nested_cross_field_dispatch() {
     // Dispatch narrows tuple fields *below the root*: reaching the final branch, both nested
-    // elements are 'int, so the int-only `__add__` type-checks. (Was a compile error before
+    // elements are 'int, so the int-only `__integer_add__` type-checks. (Was a compile error before
     // structural narrowing.)
     quiver()
         .evaluate(
@@ -129,7 +129,7 @@ fn test_nested_cross_field_dispatch() {
             f = #[p: ['n, 'n]] {
               | =[p: [Rational[a, b], y]] => Rat
               | =[p: [x, Rational[c, d]]] => Rat
-              | =[p: [a, b]] => [a, b] ~> __add__
+              | =[p: [a, b]] => [a, b] ~> __integer_add__
             },
             [p: [2, 3]] ~> f
             "#,

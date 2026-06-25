@@ -3,13 +3,13 @@
 [
   resolve: #Str['bin] {
     .0
-    ~> __dns_resolve__ [~]
+    ~> __dns_resolve__
     ~> =resolver,
     %iter.unfold [resolver, #\DnsResolver {
       =r,
-      __dns_next__ [r] ~> {
+      __dns_next__ r ~> {
         | <> => {
-          __dns_close__ [r],
+          __dns_close__ r,
           []
         }
         | =b ~> {

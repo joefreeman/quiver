@@ -6,8 +6,8 @@ fn test_tail_call() {
     quiver()
         .evaluate(
             r#"
-            g = #'int { [~, 2] ~> __multiply__ },
-            f = #'int { [~, 1] ~> __add__ ~> ^g },
+            g = #'int { [~, 2] ~> __integer_multiply__ },
+            f = #'int { [~, 1] ~> __integer_add__ ~> ^g },
             1 ~> f
             "#,
         )
@@ -21,7 +21,7 @@ fn test_countdown() {
             r#"
             countdown = #'int {
               | =0 => 0
-              | [~, 1] ~> __subtract__ ~> ^
+              | [~, 1] ~> __integer_subtract__ ~> ^
             },
             5 ~> countdown
             "#,
@@ -50,8 +50,8 @@ fn test_factorial() {
             f = #['int, 'int] {
               | =[1, y] => y
               | =[x, y] => [
-                [x, 1] ~> __subtract__,
-                [x, y] ~> __multiply__
+                [x, 1] ~> __integer_subtract__,
+                [x, y] ~> __integer_multiply__
               ] ~> ^
             },
             fact = #'int { f [~, 1] },
@@ -73,7 +73,7 @@ fn test_ripple_tail_call_with_argument() {
     quiver()
         .evaluate(
             r#"
-            g = #'int { [~, 2] ~> __multiply__ },
+            g = #'int { [~, 2] ~> __integer_multiply__ },
             f = #'int { &g ~> ^~ $ },
             5 ~> f
             "#,

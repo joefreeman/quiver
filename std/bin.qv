@@ -1,5 +1,5 @@
 byte_bit = #'int {
-  [__divide__ [$, 8], __modulo__ [$, 8]]
+  [__integer_divide__ [$, 8], __integer_modulo__ [$, 8]]
 },
 
 [

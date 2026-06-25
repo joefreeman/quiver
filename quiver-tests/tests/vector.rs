@@ -128,7 +128,7 @@ fn test_binary_repeat_tiles_buffer() {
              (new) = %list\n\
              unit = vec.of [I32, 1, new ~> %list.prepend [~, 7]],\n\
              tiled = __binary_repeat__ [unit.data, 3],\n\
-             [tiled, 4] ~> __vec_sum__",
+             [tiled, 4] ~> __vector_sum__",
         )
         .expect("21");
 }

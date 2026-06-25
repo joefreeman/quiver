@@ -660,7 +660,7 @@ fn test_tuple_pattern_complement_via_variable() {
 #[test]
 fn test_cross_branch_tuple_narrowing_both_elements_to_int() {
     // Branch 1 peels Wrap off element 0, branch 2 peels Wrap off element 1; the final
-    // branch therefore sees both elements as 'int, so `__add__` (which requires
+    // branch therefore sees both elements as 'int, so `__integer_add__` (which requires
     // ['int, 'int]) type-checks.
     quiver()
         .evaluate(
@@ -669,7 +669,7 @@ fn test_cross_branch_tuple_narrowing_both_elements_to_int() {
             add = #['n, 'n] {
               | =[Wrap[a], _] => a
               | =[_, Wrap[b]] => b
-              | =[a, b] => [a, b] ~> __add__
+              | =[a, b] => [a, b] ~> __integer_add__
             },
             [2, 3] ~> add
             "#,
@@ -687,7 +687,7 @@ fn test_cross_branch_tuple_narrowing_mixed_paths() {
             add = #['n, 'n] {
               | =[Wrap[a], _] => a
               | =[_, Wrap[b]] => b
-              | =[a, b] => [a, b] ~> __add__
+              | =[a, b] => [a, b] ~> __integer_add__
             },
             [Wrap[9], 3] ~> add
             "#,
@@ -708,7 +708,7 @@ fn test_cross_branch_narrowing_only_previous_branch_was_insufficient() {
             first = #['n, 'n] {
               | =[Wrap[a], _] => a
               | =[_, Wrap[b]] => b
-              | =[a, b] => [a, 100] ~> __add__
+              | =[a, b] => [a, 100] ~> __integer_add__
             },
             [2, 3] ~> first
             "#,

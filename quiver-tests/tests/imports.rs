@@ -5,7 +5,7 @@ use std::collections::HashMap;
 #[test]
 fn test_module_import() {
     let mut modules = HashMap::new();
-    modules.insert(vec!["mymath".to_string()], "[add: &__add__]".to_string());
+    modules.insert(vec!["mymath".to_string()], "[add: &__integer_add__]".to_string());
 
     quiver()
         .with_modules(modules)
@@ -18,7 +18,7 @@ fn test_destructured_import() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["mymath".to_string()],
-        r#"[add: &__add__, sub: &__subtract__]"#.to_string(),
+        r#"[add: &__integer_add__, sub: &__integer_subtract__]"#.to_string(),
     );
 
     quiver()
@@ -35,7 +35,7 @@ fn test_destructured_import() {
 #[test]
 fn test_star_import() {
     let mut modules = HashMap::new();
-    modules.insert(vec!["mymath".to_string()], "[add: &__add__]".to_string());
+    modules.insert(vec!["mymath".to_string()], "[add: &__integer_add__]".to_string());
 
     quiver()
         .with_modules(modules)
@@ -48,7 +48,7 @@ fn test_import_function_with_capture() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["capture".to_string()],
-        "x = 42, #{ [x, 2] ~> __multiply__ }".to_string(),
+        "x = 42, #{ [x, 2] ~> __integer_multiply__ }".to_string(),
     );
 
     quiver()
@@ -64,8 +64,8 @@ fn test_import_nested_function_captures() {
         vec!["nested".to_string()],
         r#"
         x = 10,
-        inner = #{ [x, 1] ~> __add__ },
-        #{ inner [] ~> [~, 2] ~> __multiply__ }
+        inner = #{ [x, 1] ~> __integer_add__ },
+        #{ inner [] ~> [~, 2] ~> __integer_multiply__ }
         "#
         .to_string(),
     );
@@ -81,7 +81,7 @@ fn test_import_tuple_with_captured_function() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["tuple_capture".to_string()],
-        "x = 5, y = 3, [x, #{ [x, y] ~> __add__ }, y]".to_string(),
+        "x = 5, y = 3, [x, #{ [x, y] ~> __integer_add__ }, y]".to_string(),
     );
 
     quiver()
@@ -95,13 +95,13 @@ fn test_multi_level_import_with_captures() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["level1".to_string()],
-        "base = 100, #{ [base, 1] ~> __add__ }".to_string(),
+        "base = 100, #{ [base, 1] ~> __integer_add__ }".to_string(),
     );
     modules.insert(
         vec!["level2".to_string()],
         r#"
         x = 3,
-        #{ %level1 [] ~> [~, x] ~> __multiply__ }
+        #{ %level1 [] ~> [~, x] ~> __integer_multiply__ }
         "#
         .to_string(),
     );
@@ -109,7 +109,7 @@ fn test_multi_level_import_with_captures() {
         vec!["level3".to_string()],
         r#"
         x = 5,
-        [#{ %level2 [] }, #{ %level2 [] ~> [~, x] ~> __add__ }]
+        [#{ %level2 [] }, #{ %level2 [] ~> [~, x] ~> __integer_add__ }]
         "#
         .to_string(),
     );
@@ -137,7 +137,7 @@ fn test_named_module_type_alias() {
         .evaluate(
             r#"
             'ok = '%types.ok;
-            double = #'ok { =Ok[x] => [x, 2] ~> __multiply__ },
+            double = #'ok { =Ok[x] => [x, 2] ~> __integer_multiply__ },
             Ok[21] ~> double
             "#,
         )

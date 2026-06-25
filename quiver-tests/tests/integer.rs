@@ -87,8 +87,8 @@ fn test_extract_hash_bits() {
             r#"
             hash = 305419896,
             depth = 1,
-            shift = [depth, 5] ~> __multiply__,
-            shifted = [hash, [0, shift] ~> __subtract__] ~> %int.shift,
+            shift = [depth, 5] ~> __integer_multiply__,
+            shifted = [hash, [0, shift] ~> __integer_subtract__] ~> %int.shift,
             [shifted, 31] ~> %int.and
             "#,
         )

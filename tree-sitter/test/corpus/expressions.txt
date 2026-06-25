@@ -112,7 +112,7 @@ ripple
 builtin and access
 ==================
 
-math.add [1, 2] ~> __multiply__ [~, 3]
+math.add [1, 2] ~> __integer_multiply__ [~, 3]
 
 ---
 

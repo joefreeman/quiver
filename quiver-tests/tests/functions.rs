@@ -14,7 +14,7 @@ fn test_nil_function() {
 #[test]
 fn test_function_with_parameter() {
     quiver()
-        .evaluate("inc = #'int { =x => [x, 1] ~> __add__ }, 3 ~> inc")
+        .evaluate("inc = #'int { =x => [x, 1] ~> __integer_add__ }, 3 ~> inc")
         .expect("4");
 }
 
@@ -31,7 +31,7 @@ fn test_function_with_tuple_parameter() {
         .evaluate(
             r#"
             f = #Point[x: 'int, y: 'int] {
-              =Point[x: x, y: y] => [x, y] ~> __add__
+              =Point[x: x, y: y] => [x, y] ~> __integer_add__
             },
             Point[x: 1, y: 2] ~> f
             "#,
@@ -52,7 +52,7 @@ fn test_higher_order_function() {
         .evaluate(
             r#"
             apply = #[#'int -> 'int, 'int] { =[f, x] => x ~> f },
-            double = #'int { =x => [x, 2] ~> __multiply__ },
+            double = #'int { =x => [x, 2] ~> __integer_multiply__ },
             [&double, 5] ~> apply
             "#,
         )
@@ -65,7 +65,7 @@ fn test_nested_function_return() {
         .evaluate(
             r#"
             f = #'int {
-              =x => #'int { =y => [x, y] ~> __add__ }
+              =x => #'int { =y => [x, y] ~> __integer_add__ }
             },
             3 ~> f ~> =g,
             5 ~> g
@@ -201,7 +201,7 @@ fn test_function_parameter_contravariance() {
 fn test_apply_value_to_inline_function() {
     // Inline functions are not auto-called; bind first, then call
     quiver()
-        .evaluate("f = #'int { [~, 2] ~> __add__ }, 5 ~> f")
+        .evaluate("f = #'int { [~, 2] ~> __integer_add__ }, 5 ~> f")
         .expect("7");
 }
 
@@ -250,21 +250,21 @@ fn test_dollar_parameter_reference() {
 #[test]
 fn test_dollar_with_tuple_field_access() {
     quiver()
-        .evaluate("f = #['int, 'int] { [$.0, $.1] ~> __add__ }, [10, 20] ~> f")
+        .evaluate("f = #['int, 'int] { [$.0, $.1] ~> __integer_add__ }, [10, 20] ~> f")
         .expect("30");
 }
 
 #[test]
 fn test_dollar_dotless_index_shorthand() {
     quiver()
-        .evaluate("f = #['int, 'int] { [$0, $1] ~> __add__ }, [10, 20] ~> f")
+        .evaluate("f = #['int, 'int] { [$0, $1] ~> __integer_add__ }, [10, 20] ~> f")
         .expect("30");
 }
 
 #[test]
 fn test_dollar_dotless_field_shorthand() {
     quiver()
-        .evaluate("f = #Point[x: 'int, y: 'int] { [$x, $y] ~> __add__ }, Point[x: 10, y: 20] ~> f")
+        .evaluate("f = #Point[x: 'int, y: 'int] { [$x, $y] ~> __integer_add__ }, Point[x: 10, y: 20] ~> f")
         .expect("30");
 }
 
@@ -278,7 +278,7 @@ fn test_dollar_dotless_shorthand_then_dotted() {
 #[test]
 fn test_dollar_in_nested_block() {
     quiver()
-        .evaluate("f = #'int { 100 ~> { __add__ [~, $] } }, 7 ~> f")
+        .evaluate("f = #'int { 100 ~> { __integer_add__ [~, $] } }, 7 ~> f")
         .expect("107");
 }
 
@@ -287,7 +287,7 @@ fn test_dollar_with_named_tuple_field() {
     quiver()
         .evaluate(
             r#"
-            f = #Point[x: 'int, y: 'int] { [$.x, $.y] ~> __add__ },
+            f = #Point[x: 'int, y: 'int] { [$.x, $.y] ~> __integer_add__ },
             Point[x: 10, y: 20] ~> f
             "#,
         )
@@ -297,14 +297,14 @@ fn test_dollar_with_named_tuple_field() {
 #[test]
 fn test_function_with_return_type() {
     quiver()
-        .evaluate("f = #'int -> 'int { __add__ [~, 1] }, 5 ~> f")
+        .evaluate("f = #'int -> 'int { __integer_add__ [~, 1] }, 5 ~> f")
         .expect("6");
 }
 
 #[test]
 fn test_function_return_type_mismatch() {
     quiver()
-        .evaluate("f = #'int -> 'bin { __add__ [~, 1] }, 5 ~> f")
+        .evaluate("f = #'int -> 'bin { __integer_add__ [~, 1] }, 5 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "'bin".to_string(),
             found: "'int".to_string(),
@@ -316,7 +316,7 @@ fn test_function_with_tuple_return_type() {
     quiver()
         .evaluate(
             r#"
-            f = #['int, 'int] -> 'int { [$.0, $.1] ~> __add__ },
+            f = #['int, 'int] -> 'int { [$.0, $.1] ~> __integer_add__ },
             [3, 4] ~> f
             "#,
         )
@@ -328,7 +328,7 @@ fn test_function_tuple_return_type_mismatch() {
     quiver()
         .evaluate(
             r#"
-            f = #['int, 'int] -> 'bin { [$.0, $.1] ~> __add__ },
+            f = #['int, 'int] -> 'bin { [$.0, $.1] ~> __integer_add__ },
             [3, 4] ~> f
             "#,
         )
@@ -382,8 +382,8 @@ fn test_function_with_complex_return_type() {
     quiver()
         .evaluate(
             r#"
-            double = #'int -> 'int { __multiply__ [~, 2] },
-            square = #'int -> 'int { __multiply__ [~, ~] },
+            double = #'int -> 'int { __integer_multiply__ [~, 2] },
+            square = #'int -> 'int { __integer_multiply__ [~, ~] },
             5 ~> double ~> square
             "#,
         )
@@ -396,7 +396,7 @@ fn test_function_with_named_tuple_return_type() {
         .evaluate(
             r#"
             f = #'int -> Point[x: 'int, y: 'int] {
-                =n => Point[x: n, y: [n, n] ~> __multiply__]
+                =n => Point[x: n, y: [n, n] ~> __integer_multiply__]
             },
             3 ~> f
             "#,

@@ -18,11 +18,11 @@ fn test_file_write_and_read() {
 
             write_file = __file_open__ ["{}" ~> .0, 577, 420],
             __file_write__ [write_file, 0, "Hello, World!" ~> .0],
-            __file_close__ [write_file],
+            __file_close__ write_file,
 
             read_file = __file_open__ ["{}" ~> .0, 0, 0],
             data = __file_read__ [read_file, 0, 4096],
-            __file_close__ [read_file],
+            __file_close__ read_file,
 
             Str[data]
         "#,
@@ -48,17 +48,17 @@ fn test_file_append() {
             // O_WRONLY | O_CREAT | O_TRUNC = 577
             write_file = __file_open__ ["{}" ~> .0, 577, 420],
             __file_write__ [write_file, 0, "First line\n" ~> .0],
-            __file_close__ [write_file],
+            __file_close__ write_file,
 
             // Write at offset 11 (length of "First line\n")
             append_file = __file_open__ ["{}" ~> .0, 1, 420],
             __file_write__ [append_file, 11, "Second line\n" ~> .0],
-            __file_close__ [append_file],
+            __file_close__ append_file,
 
             // Read everything
             read_file = __file_open__ ["{}" ~> .0, 0, 0],
             data = __file_read__ [read_file, 0, 4096],
-            __file_close__ [read_file],
+            __file_close__ read_file,
 
             Str[data]
         "#,
@@ -112,8 +112,8 @@ fn test_file_flush() {
             r#"
             file = __file_open__ ["{}" ~> .0, 577, 420],
             __file_write__ [file, 0, "Flushed data" ~> .0],
-            __file_flush__ [file],
-            __file_close__ [file],
+            __file_flush__ file,
+            __file_close__ file,
             Ok
         "#,
             path_str
@@ -143,11 +143,11 @@ fn test_multiple_writes() {
             __file_write__ [file, 0, "Line 1\n" ~> .0],
             __file_write__ [file, 7, "Line 2\n" ~> .0],
             __file_write__ [file, 14, "Line 3\n" ~> .0],
-            __file_close__ [file],
+            __file_close__ file,
 
             read_file = __file_open__ ["{}" ~> .0, 0, 0],
             data = __file_read__ [read_file, 0, 4096],
-            __file_close__ [read_file],
+            __file_close__ read_file,
 
             Str[data]
         "#,
@@ -174,7 +174,7 @@ fn test_read_from_closed_file() {
         .evaluate(&format!(
             r#"
             file = __file_open__ ["{}" ~> .0, 0, 0],
-            __file_close__ [file],
+            __file_close__ file,
             __file_read__ [file, 0, 1024]
         "#,
             path_str

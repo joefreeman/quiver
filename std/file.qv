@@ -21,7 +21,7 @@ serve = #\File {
       [fd, offset, data] ~> __file_write__ ~> Reply[id, ~] ~> reply,
       fd ~> ^
     }
-    | =Close => __file_close__ [fd]
+    | =Close => __file_close__ fd
   }
 },
 

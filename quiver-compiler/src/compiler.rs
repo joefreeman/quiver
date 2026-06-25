@@ -3313,7 +3313,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
             }
             Some(ast::AccessSource::Builtin(name)) => {
-                // A builtin (`__add__`): a globally-resolved callable. Its signature is recorded
+                // A builtin (`__integer_add__`): a globally-resolved callable. Its signature is recorded
                 // as the access base by `record_access_components`.
                 if let Some(span) = access.base_span.get() {
                     self.current_span = Some(span);

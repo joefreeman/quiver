@@ -98,10 +98,10 @@ pub enum Term {
     Select(Option<Vec<Chain>>, Spanned),
     Process(usize),
     /// Reference operator (`&`). None creates a new unique ref, Some references a value
-    /// (a variable, import member, or builtin — `&x`, `&m.f`, `&__add__`).
+    /// (a variable, import member, or builtin — `&x`, `&m.f`, `&__integer_add__`).
     Reference(Option<Access>),
     /// Function application: a looked-up callable head (an [`Access`] whose source is a variable,
-    /// `$`, import member, or builtin) applied to an argument. `f 5`, `f [1, 2]`, `__add__ [3,4]`.
+    /// `$`, import member, or builtin) applied to an argument. `f 5`, `f [1, 2]`, `__integer_add__ [3,4]`.
     /// The flowing value goes into the argument (evaluated as a flow position); the head is then
     /// invoked with it. Bare-accessor (`.f`) and ripple (`~`) heads are not applicable this way.
     Apply(Access, Box<Term>),
@@ -195,7 +195,7 @@ pub enum AccessSource {
     Import(Vec<String>),
     /// Self reference `.` - the current process
     Self_,
-    /// Builtin like `__add__` — a globally-resolved callable, looked up in the builtin
+    /// Builtin like `__integer_add__` — a globally-resolved callable, looked up in the builtin
     /// registry rather than the lexical scope.
     Builtin(String),
     /// Tail call (`^`, `^f`, `^f.field`): `None` recurses into the current function, `Some(name)`

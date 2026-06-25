@@ -103,7 +103,7 @@ fn reclamation_bounds_heap_growth() {
     // With reclamation the discarded slots are reused, so the heap stays far below the iteration
     // count (without it, each iteration would strand a slot, growing the heap to ~2000).
     let ex = run(
-        "count = #'int { | =0 => Ok | =n => { __binary_concat__ [0x01, 0x02], [n, 1] ~> __subtract__ ~> ^ } }, count 2000",
+        "count = #'int { | =0 => Ok | =n => { __binary_concat__ [0x01, 0x02], [n, 1] ~> __integer_subtract__ ~> ^ } }, count 2000",
     );
     let stats = ex.heap_stats();
     println!("reclamation loop heap stats: {stats:?}");

@@ -1,37 +1,23 @@
 use crate::effects::NativeEffect;
+use crate::util::expect_resource;
 use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult, bigint_to_i64};
 use quiver_core::error::Error;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId};
 use quiver_core::value::{Binary, Value};
 
-/// dns_resolve([hostname: bin]) -> Resource<DnsResolver>
+/// dns_resolve(hostname: bin) -> Resource<DnsResolver>
 /// Start DNS resolution for a hostname (UTF-8 bytes), returning an iterator resource
 pub fn builtin_dns_resolve(
     process_id: ProcessId,
     value: &Value,
     executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract [hostname] tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
     // Get hostname binary
-    let Value::Binary(hostname_binary) = &fields[0] else {
+    let Value::Binary(hostname_binary) = value else {
         return Err(Error::TypeMismatch {
             expected: "binary".to_string(),
-            found: fields[0].type_name().to_string(),
+            found: value.type_name().to_string(),
         });
     };
 
@@ -66,37 +52,14 @@ pub fn builtin_dns_resolve(
     }))
 }
 
-/// dns_next([resolver: Resource<DnsResolver>]) -> bin | Nil
+/// dns_next(resolver: Resource<DnsResolver>) -> bin | Nil
 /// Get the next IP address from a DNS resolver, or Nil if exhausted
 pub fn builtin_dns_next(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract [resolver] tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
@@ -104,37 +67,14 @@ pub fn builtin_dns_next(
     }))
 }
 
-/// dns_close([resolver: Resource<DnsResolver>]) -> Ok
+/// dns_close(resolver: Resource<DnsResolver>) -> Ok
 /// Close a DNS resolver resource
 pub fn builtin_dns_close(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract [resolver] tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     Ok(BuiltinResult::Action(Action::RequestEffect {
         process_id,
@@ -417,37 +357,14 @@ pub fn builtin_tcp_socket_write(
     }))
 }
 
-/// tcp_socket_close([socket]) -> Ok
+/// tcp_socket_close(socket) -> Ok
 /// Close a TCP socket (async)
 pub fn builtin_tcp_socket_close(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract socket resource from tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     // Return Action to request close operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
@@ -456,37 +373,14 @@ pub fn builtin_tcp_socket_close(
     }))
 }
 
-/// tcp_listener_accept([listener]) -> TcpSocket
+/// tcp_listener_accept(listener) -> TcpSocket
 /// Accept a connection on a TCP listener (async)
 pub fn builtin_tcp_listener_accept(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract listener resource from tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     // Return Action to request accept operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {
@@ -495,37 +389,14 @@ pub fn builtin_tcp_listener_accept(
     }))
 }
 
-/// tcp_listener_close([listener]) -> Ok
+/// tcp_listener_close(listener) -> Ok
 /// Close a TCP listener (async)
 pub fn builtin_tcp_listener_close(
     process_id: ProcessId,
     value: &Value,
     _executor: &mut Executor<NativeEffect>,
 ) -> Result<BuiltinResult<NativeEffect>, Error> {
-    // Extract listener resource from tuple
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    if fields.len() != 1 {
-        return Err(Error::ArityMismatch {
-            expected: 1,
-            found: fields.len(),
-        });
-    }
-
-    let resource_id = match &fields[0] {
-        Value::Resource(id, _) => *id,
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "resource".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let resource_id = expect_resource(value)?;
 
     // Return Action to request close operation from Environment
     Ok(BuiltinResult::Action(Action::RequestEffect {

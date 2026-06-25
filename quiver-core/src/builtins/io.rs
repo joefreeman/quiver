@@ -61,43 +61,27 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
             ),
             int.clone(),
         ),
-        // file_flush([File]) -> Ok
+        // file_flush(File) -> Ok
+        ("file_flush", file.clone(), ok.clone()),
+        // file_close(File) -> Ok
+        ("file_close", file, ok.clone()),
+        // directory_read(path) -> Dir
+        ("directory_read", bin.clone(), dir.clone()),
+        // directory_next(Dir) -> [bin, int] | nil  (entry name + kind code)
         (
-            "file_flush",
-            TypeSpec::Tuple(None, vec![(None, file.clone())]),
-            ok.clone(),
-        ),
-        // file_close([File]) -> Ok
-        (
-            "file_close",
-            TypeSpec::Tuple(None, vec![(None, file)]),
-            ok.clone(),
-        ),
-        // read_dir([path]) -> Dir
-        (
-            "read_dir",
-            TypeSpec::Tuple(None, vec![(None, bin.clone())]),
+            "directory_next",
             dir.clone(),
-        ),
-        // read_dir_next([Dir]) -> [bin, int] | nil  (entry name + kind code)
-        (
-            "read_dir_next",
-            TypeSpec::Tuple(None, vec![(None, dir.clone())]),
             TypeSpec::Union(vec![
                 TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, int.clone())]),
                 nil.clone(),
             ]),
         ),
-        // read_dir_close([Dir]) -> Ok
+        // directory_close(Dir) -> Ok
+        ("directory_close", dir, ok),
+        // filesystem_stat(path) -> [kind, size, modified, mode] | nil
         (
-            "read_dir_close",
-            TypeSpec::Tuple(None, vec![(None, dir)]),
-            ok,
-        ),
-        // stat([path]) -> [kind, size, modified, mode] | nil
-        (
-            "stat",
-            TypeSpec::Tuple(None, vec![(None, bin)]),
+            "filesystem_stat",
+            bin,
             TypeSpec::Union(vec![
                 TypeSpec::Tuple(
                     None,
@@ -124,21 +108,13 @@ fn network_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
     let nil = TypeSpec::Tuple(None, vec![]);
     vec![
-        (
-            "dns_resolve",
-            TypeSpec::Tuple(None, vec![(None, bin.clone())]),
-            dns.clone(),
-        ),
+        ("dns_resolve", bin.clone(), dns.clone()),
         (
             "dns_next",
-            TypeSpec::Tuple(None, vec![(None, dns.clone())]),
+            dns.clone(),
             TypeSpec::Union(vec![bin.clone(), nil]),
         ),
-        (
-            "dns_close",
-            TypeSpec::Tuple(None, vec![(None, dns)]),
-            ok.clone(),
-        ),
+        ("dns_close", dns, ok.clone()),
         (
             "tcp_connect",
             TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, int.clone())]),
@@ -159,21 +135,9 @@ fn network_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
             TypeSpec::Tuple(None, vec![(None, socket.clone()), (None, bin)]),
             int,
         ),
-        (
-            "tcp_socket_close",
-            TypeSpec::Tuple(None, vec![(None, socket.clone())]),
-            ok.clone(),
-        ),
-        (
-            "tcp_listener_accept",
-            TypeSpec::Tuple(None, vec![(None, listener.clone())]),
-            socket,
-        ),
-        (
-            "tcp_listener_close",
-            TypeSpec::Tuple(None, vec![(None, listener)]),
-            ok,
-        ),
+        ("tcp_socket_close", socket.clone(), ok.clone()),
+        ("tcp_listener_accept", listener.clone(), socket),
+        ("tcp_listener_close", listener, ok),
     ]
 }
 

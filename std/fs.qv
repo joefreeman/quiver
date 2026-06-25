@@ -23,7 +23,7 @@ kind_ = #'int {
 // `[kind_code, size, modified, mode]` tuple read by index.
 stat_ = #Str['bin] {
   .0
-  ~> __stat__ [~]
+  ~> __filesystem_stat__
   ~> {
     | <> => []
     | =s ~> Stat[kind: s.0 ~> kind_, size: s.1, modified: s.2, mode: s.3]
@@ -36,15 +36,15 @@ stat_ = #Str['bin] {
   // directory handle is closed automatically once the iterator is exhausted.
   list: #Str['bin] {
     .0
-    ~> __read_dir__ [~]
+    ~> __directory_read__
     ~> =dir,
     %iter.unfold [dir, #\Dir {
       =d,
       // Each step yields `[name, kind_code]` or nil at the end. The pair is bound whole and read
       // by index (it is never matched on), so its tuple tag is irrelevant.
-      __read_dir_next__ [d] ~> {
+      __directory_next__ d ~> {
         | <> => {
-          __read_dir_close__ [d],
+          __directory_close__ d,
           []
         }
         | =e ~> [Entry[name: Str[e.0], kind: e.1 ~> kind_], d]

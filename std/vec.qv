@@ -5,7 +5,7 @@
 // `storedᵢ × scale`, so integer lanes represent fractional values exactly without any float
 // type.
 //
-// All numeric work is in the schema-agnostic `__vec_*__` kernels (quiver-core/.../vector.rs),
+// All numeric work is in the schema-agnostic `__vector_*__` kernels (quiver-core/.../vector.rs),
 // which only ever see raw integer lanes; every scale concern is handled here. Scales are kept
 // in a canonical form (`norm_`: an integer-valued rational is lowered to a bare int) so that
 // structural scale-equality — used by add/sub — is sound, and so reductions over a unit-scale
@@ -33,7 +33,7 @@ norm_ = #'%num {
 // Append one signed lane; nil if it doesn't fit the dtype.
 push_ = #['vec, 'int] {
   =[Vec[dtype: d, scale: s, data: data], n],
-  __vec_push__ [data, d ~> width_, n] ~> =packed,
+  __vector_push__ [data, d ~> width_, n] ~> =packed,
   Vec[dtype: d, scale: s, data: packed]
 },
 
@@ -60,7 +60,7 @@ lcm_denoms_ = #['int, '%list<'%num>] {
   | =[acc, Nil] => acc
   | =[acc, Cons[x, rest]] => {
     x ~> %num.denom ~> =dx,
-    [[acc, dx] ~> __multiply__, [acc, dx] ~> __gcd__] ~> __divide__ ~> =acc2,
+    [[acc, dx] ~> __integer_multiply__, [acc, dx] ~> __integer_gcd__] ~> __integer_divide__ ~> =acc2,
     [acc2, rest] ~> ^
   }
 },
@@ -81,11 +81,11 @@ buildValues_ = #[['vec, 'mapper], '%list<'%num>] {
 // multiply — checked, so overflow yields nil. `[data, width, factor] -> 'bin | []`.
 rescale_ = #['bin, 'int, 'int] {
   =[data, width, factor],
-  0x ~> __vec_push__ [~, width, factor] ~> =unit,
+  0x ~> __vector_push__ [~, width, factor] ~> =unit,
   data ~> __binary_length__ ~> =bytes,
-  [bytes, width] ~> __divide__ ~> =lanes,
+  [bytes, width] ~> __integer_divide__ ~> =lanes,
   [unit, lanes] ~> __binary_repeat__ ~> =bcast,
-  __vec_mul__ [data, bcast, width]
+  __vector_multiply__ [data, bcast, width]
 },
 
 // Coarsest common scale of two scales, with the integer factor each must be rescaled by:
@@ -97,8 +97,8 @@ reconcile_ = #['%num, '%num] {
   sa ~> %num.denom ~> =q,
   sb ~> %num.numer ~> =r,
   sb ~> %num.denom ~> =t,
-  [p, r] ~> __gcd__ ~> =g,
-  [[q, t] ~> __multiply__, [q, t] ~> __gcd__] ~> __divide__ ~> =l,
+  [p, r] ~> __integer_gcd__ ~> =g,
+  [[q, t] ~> __integer_multiply__, [q, t] ~> __integer_gcd__] ~> __integer_divide__ ~> =l,
   Rational[g, l] ~> norm_ ~> =s,
   [sa, s] ~> %num.div ~> %num.numer ~> =fa,
   [sb, s] ~> %num.div ~> %num.numer ~> =fb,
@@ -171,7 +171,7 @@ align_ = #['vec, 'vec] {
   // Number of lanes.
   len: #'vec {
     =Vec[dtype: d, scale: _, data: data],
-    [data ~> __binary_length__, d ~> width_] ~> __divide__
+    [data ~> __binary_length__, d ~> width_] ~> __integer_divide__
   },
 
   // The vector's scale.
@@ -188,7 +188,7 @@ align_ = #['vec, 'vec] {
   // Read lane `i` as an exact value (`stored × scale`); nil if out of bounds.
   get: #['vec, 'int] {
     =[Vec[dtype: d, scale: s, data: data], i],
-    __vec_get__ [data, d ~> width_, i] ~> =raw,
+    __vector_get__ [data, d ~> width_, i] ~> =raw,
     %num.mul [raw, s] ~> =scaled,
     scaled ~> norm_
   },
@@ -198,12 +198,12 @@ align_ = #['vec, 'vec] {
   // is nil.
   add: #['vec, 'vec] {
     align_ ~> =[d, w, s, da, db],
-    __vec_add__ [da, db, w] ~> =packed,
+    __vector_add__ [da, db, w] ~> =packed,
     Vec[dtype: d, scale: s, data: packed]
   },
   sub: #['vec, 'vec] {
     align_ ~> =[d, w, s, da, db],
-    __vec_sub__ [da, db, w] ~> =packed,
+    __vector_subtract__ [da, db, w] ~> =packed,
     Vec[dtype: d, scale: s, data: packed]
   },
 
@@ -211,7 +211,7 @@ align_ = #['vec, 'vec] {
   // must match; a lane overflow is nil.
   mul: #['vec, 'vec] {
     =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]],
-    __vec_mul__ [da, db, d ~> width_] ~> =packed,
+    __vector_multiply__ [da, db, d ~> width_] ~> =packed,
     %num.mul [sa, sb] ~> =scaled,
     Vec[dtype: d, scale: scaled ~> norm_, data: packed]
   },
@@ -220,13 +220,13 @@ align_ = #['vec, 'vec] {
   // plain integer; a fractional scale yields a rational.
   sum: #'vec {
     =Vec[dtype: d, scale: s, data: data],
-    __vec_sum__ [data, d ~> width_] ~> =total,
+    __vector_sum__ [data, d ~> width_] ~> =total,
     %num.mul [total, s] ~> =scaled,
     scaled ~> norm_
   },
   dot: #['vec, 'vec] {
     =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]],
-    __vec_dot__ [da, db, d ~> width_] ~> =raw,
+    __vector_dot__ [da, db, d ~> width_] ~> =raw,
     %num.mul [sa, sb] ~> =combined,
     %num.mul [raw, combined] ~> =scaled,
     scaled ~> norm_
@@ -238,17 +238,17 @@ align_ = #['vec, 'vec] {
   // rescale overflow.
   lt: #['vec, 'vec] {
     align_ ~> =[_, w, _, da, db],
-    __vec_lt__ [da, db, w] ~> =m,
+    __vector_less_than__ [da, db, w] ~> =m,
     Mask[m]
   },
   eq: #['vec, 'vec] {
     align_ ~> =[_, w, _, da, db],
-    __vec_eq__ [da, db, w] ~> =m,
+    __vector_equal__ [da, db, w] ~> =m,
     Mask[m]
   },
   gt: #['vec, 'vec] {
     align_ ~> =[_, w, _, da, db],
-    __vec_gt__ [da, db, w] ~> =m,
+    __vector_greater_than__ [da, db, w] ~> =m,
     Mask[m]
   },
 
@@ -256,7 +256,7 @@ align_ = #['vec, 'vec] {
   // must have one byte per lane (as produced by the comparisons); a length mismatch is nil.
   filter: #['vec, 'mask] {
     =[Vec[dtype: d, scale: s, data: data], Mask[m]],
-    __vec_take__ [data, d ~> width_, m] ~> =kept,
+    __vector_take__ [data, d ~> width_, m] ~> =kept,
     Vec[dtype: d, scale: s, data: kept]
   },
 

@@ -1,7 +1,7 @@
 //! A no-op effect for the language server.
 //!
 //! The LSP type-checks but never executes code, so it needs a `BuiltinRegistry` (to
-//! type-check builtin calls like `__add__`) without depending on a real I/O backend.
+//! type-check builtin calls like `__integer_add__`) without depending on a real I/O backend.
 //! `quiver-io`'s `NativeEffect` pulls in io-uring (Linux-only), which an editor-hosted
 //! server can't require — so we supply our own trivial effect instead.
 
