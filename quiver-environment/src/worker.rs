@@ -1,17 +1,32 @@
 use crate::environment::{EnvironmentError, ProcessResultsMap, RuntimeResult};
-use crate::messages::{Command, Event};
+use crate::messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 use crate::transport::{CommandReceiver, EventSender};
 use quiver_core::effects::Effect;
 use quiver_core::executor::Executor;
-use quiver_core::process::{Action, Frame, ProcessId, ProcessStatus};
+use quiver_core::process::{Action, Frame, ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::value::Value;
 use std::collections::{HashMap, HashSet};
 
 const MAX_STEP_UNITS: usize = 1000;
 
+/// Minimum wall-clock gap between non-forced subscription pushes for a given subscription. Coalesces
+/// rapid churn (e.g. a tight spawn/complete loop, or a mailbox filling fast) into at most ~10
+/// updates/sec, which is ample for a human-facing inspector. Bypassed by the forced flush on settle
+/// (see `flush_subscriptions`), so the final state after a burst is never delayed.
+const MIN_FLUSH_INTERVAL_MS: u64 = 100;
+
 /// A pending result request: the request id, plus an optional keep-set whose complement is released
 /// from the process's locals once it completes (the REPL's orphaned-local reclaim).
 type PendingResultRequest = (u64, Option<Vec<usize>>);
+
+/// A standing subscription held by the worker. `last_sent` is the most recently pushed payload,
+/// used for change-detection so identical snapshots aren't re-sent; `last_flush_ms` drives the
+/// throttle (see [`MIN_FLUSH_INTERVAL_MS`]).
+struct WorkerSubscription {
+    kind: SubscriptionKind,
+    last_sent: Option<SubscriptionPayload>,
+    last_flush_ms: u64,
+}
 
 pub struct Worker<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> {
     executor: Executor<E>,
@@ -20,8 +35,61 @@ pub struct Worker<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> {
     // process_id -> pending result requests; each request's keep-set drives orphaned-local release
     // once the process completes (see `Command::GetResult`).
     pending_result_requests: HashMap<ProcessId, Vec<PendingResultRequest>>,
+    // Standing subscriptions, keyed by the environment-allocated subscription id. Pushed by
+    // `flush_subscriptions` at tick boundaries.
+    subscriptions: HashMap<u64, WorkerSubscription>,
+    // This worker's id, stamped into `SubscriptionUpdate` events so the environment can merge.
+    worker_id: crate::WorkerId,
     receiver: R,
     sender: S,
+}
+
+/// Whether a freshly computed subscription payload differs from the last one pushed. For statuses
+/// this is a plain map comparison. For process info we compare only the cheap scalar fields and the
+/// result's presence/ok-ness — deliberately *not* the result value or heap contents, which would
+/// mean deep-comparing arbitrary values (and heaps) on every tick. A change to those without any
+/// observable scalar moving is not worth a re-push.
+fn payload_changed(old: &SubscriptionPayload, new: &SubscriptionPayload) -> bool {
+    match (old, new) {
+        (SubscriptionPayload::ProcessStatuses(a), SubscriptionPayload::ProcessStatuses(b)) => {
+            a != b
+        }
+        (SubscriptionPayload::ProcessInfo(a), SubscriptionPayload::ProcessInfo(b)) => {
+            process_info_changed(a, b)
+        }
+        // Kinds never change for a given subscription; differing variants would be a bug, but treat
+        // as changed rather than silently swallow.
+        _ => true,
+    }
+}
+
+fn process_info_changed(old: &Option<ProcessInfo>, new: &Option<ProcessInfo>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (Some(a), Some(b)) => {
+            a.status != b.status
+                || a.function_index != b.function_index
+                || a.stack_size != b.stack_size
+                || a.locals_count != b.locals_count
+                || a.frames_count != b.frames_count
+                || a.mailbox_size != b.mailbox_size
+                || a.persistent != b.persistent
+                || result_discriminant(&a.result) != result_discriminant(&b.result)
+                || a.heap.total.slots != b.heap.total.slots
+                || a.heap.total.bytes != b.heap.total.bytes
+        }
+        _ => true,
+    }
+}
+
+/// 0 = still running, 1 = completed ok, 2 = failed. Lets `process_info_changed` notice a process
+/// finishing without deep-comparing the (non-`PartialEq`) result value.
+fn result_discriminant(result: &Option<quiver_core::process::ProcessResult>) -> u8 {
+    match result {
+        None => 0,
+        Some(Ok(_)) => 1,
+        Some(Err(_)) => 2,
+    }
 }
 
 impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
@@ -37,6 +105,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             awaited: HashSet::new(),
             awaiters_for_target: HashMap::new(),
             pending_result_requests: HashMap::new(),
+            subscriptions: HashMap::new(),
+            worker_id: worker_id as crate::WorkerId,
             receiver,
             sender,
         }
@@ -79,6 +149,54 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     /// polling the clock. `None` means nothing time-based is pending — wait for a command.
     pub fn next_timeout_ms(&self) -> Option<u64> {
         self.executor.next_timeout_ms()
+    }
+
+    /// Push any changed subscriptions to the environment. Called at tick boundaries by the worker
+    /// loop: with `force = false` on a busy-yield (subject to the [`MIN_FLUSH_INTERVAL_MS`]
+    /// throttle) and `force = true` on settle to idle (bypassing the throttle so the final state
+    /// after a burst always lands). Change-detection is applied either way — an unchanged snapshot
+    /// is never re-sent.
+    pub fn flush_subscriptions(
+        &mut self,
+        now_ms: u64,
+        force: bool,
+    ) -> Result<(), EnvironmentError> {
+        if self.subscriptions.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<u64> = self.subscriptions.keys().copied().collect();
+        for id in ids {
+            let sub = &self.subscriptions[&id];
+            if !force && now_ms.saturating_sub(sub.last_flush_ms) < MIN_FLUSH_INTERVAL_MS {
+                continue;
+            }
+            let payload = self.compute_payload(&sub.kind);
+            if let Some(last) = &sub.last_sent
+                && !payload_changed(last, &payload)
+            {
+                continue;
+            }
+            self.sender.send(Event::SubscriptionUpdate {
+                subscription_id: id,
+                worker_id: self.worker_id,
+                payload: payload.clone(),
+            })?;
+            let sub = self.subscriptions.get_mut(&id).unwrap();
+            sub.last_sent = Some(payload);
+            sub.last_flush_ms = now_ms;
+        }
+        Ok(())
+    }
+
+    fn compute_payload(&self, kind: &SubscriptionKind) -> SubscriptionPayload {
+        match kind {
+            SubscriptionKind::ProcessStatuses => {
+                SubscriptionPayload::ProcessStatuses(self.executor.get_process_statuses())
+            }
+            SubscriptionKind::ProcessInfo { process_id } => {
+                SubscriptionPayload::ProcessInfo(self.executor.get_process_info(*process_id))
+            }
+        }
     }
 
     fn handle_command(&mut self, command: Command<E>) -> Result<(), EnvironmentError> {
@@ -159,6 +277,25 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
             Command::GetExecutionStats { request_id } => {
                 self.get_execution_stats(request_id)?;
+            }
+            Command::Subscribe {
+                subscription_id,
+                kind,
+            } => {
+                // Register; the initial snapshot is pushed by the next `flush_subscriptions` (the
+                // tick that processed this command flushes on settle), so `last_flush_ms` starts at
+                // 0 to guarantee that first push is never throttled.
+                self.subscriptions.insert(
+                    subscription_id,
+                    WorkerSubscription {
+                        kind,
+                        last_sent: None,
+                        last_flush_ms: 0,
+                    },
+                );
+            }
+            Command::Unsubscribe { subscription_id } => {
+                self.subscriptions.remove(&subscription_id);
             }
             Command::EffectCompletion {
                 process_id,

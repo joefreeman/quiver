@@ -138,9 +138,18 @@ fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSende
             }
             if js_sys::Date::now() - slice_start >= STEP_SLICE_MS {
                 // Budget spent but work remains: yield to the event loop, then resume immediately.
+                // Push subscriptions for the slice's worth of churn, throttled (not forced).
+                let now = js_sys::Date::now() as u64;
+                let _ = worker.borrow_mut().flush_subscriptions(now, false);
                 return Tick::Busy;
             }
         }
+
+        // Settled (nothing runnable): force a final subscription flush so the post-burst state
+        // always lands, bypassing the throttle. Process status can only change as a result of a
+        // step, so flushing at every tick boundary catches every transition.
+        let now = js_sys::Date::now() as u64;
+        let _ = worker.borrow_mut().flush_subscriptions(now, true);
 
         let worker = worker.borrow();
         if let Some(deadline_ms) = worker.next_timeout_ms() {

@@ -293,6 +293,45 @@ impl From<quiver_core::process::ProcessStatus> for ProcessStatus {
     }
 }
 
+/// Distinct heap slots (and their total bytes) reachable from some root.
+#[derive(Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct HeapUsage {
+    pub slots: usize,
+    pub bytes: usize,
+}
+
+impl From<quiver_core::process::HeapUsage> for HeapUsage {
+    fn from(usage: quiver_core::process::HeapUsage) -> Self {
+        Self {
+            slots: usage.slots,
+            bytes: usage.bytes,
+        }
+    }
+}
+
+/// A process's binary-heap footprint, broken down by root. `total` is distinct across all roots, so
+/// the per-root figures may overlap and need not sum to it (see the core `ProcessHeapUsage`).
+#[derive(Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct ProcessHeapUsage {
+    pub stack: HeapUsage,
+    pub locals: HeapUsage,
+    pub mailbox: HeapUsage,
+    pub total: HeapUsage,
+}
+
+impl From<quiver_core::process::ProcessHeapUsage> for ProcessHeapUsage {
+    fn from(usage: quiver_core::process::ProcessHeapUsage) -> Self {
+        Self {
+            stack: usage.stack.into(),
+            locals: usage.locals.into(),
+            mailbox: usage.mailbox.into(),
+            total: usage.total.into(),
+        }
+    }
+}
+
 /// Process info for inspection
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
@@ -311,6 +350,7 @@ pub struct ProcessInfo {
     pub mailbox_size: usize,
     pub persistent: bool,
     pub result: Option<Result<EvaluationResult>>,
+    pub heap: ProcessHeapUsage,
 }
 
 #[derive(Serialize, Deserialize, Tsify)]

@@ -54,6 +54,29 @@ export class Environment {
   getProcessInfo(pid: number, callback: ProcessInfoCallback): void;
 
   /**
+   * Subscribe to live process-status updates. The callback fires with an initial snapshot and
+   * again on every change, until `unsubscribe` is called with the returned id.
+   * @param callback - Callback invoked with process statuses on every change
+   * @returns A subscription id to pass to `unsubscribe`
+   */
+  subscribeProcessStatuses(callback: ProcessStatusesCallback): number;
+
+  /**
+   * Subscribe to live info for a single process (status, stats, mailbox/heap sizes, result).
+   * The callback fires with an initial snapshot and again on every change, until `unsubscribe`.
+   * @param pid - Process ID
+   * @param callback - Callback invoked with process info on every change
+   * @returns A subscription id to pass to `unsubscribe`
+   */
+  subscribeProcessInfo(pid: number, callback: ProcessInfoCallback): number;
+
+  /**
+   * Cancel a subscription created by `subscribeProcessStatuses` / `subscribeProcessInfo`.
+   * @param subscriptionId - The id returned by the subscribe call
+   */
+  unsubscribe(subscriptionId: number): void;
+
+  /**
    * Format a value for display
    * @param value - Value to format
    * @param heap - Heap data
@@ -187,6 +210,9 @@ pub struct Environment {
     running: Rc<RefCell<bool>>,
     pump: PumpHandle,
     pending_callbacks: SharedCallbacks,
+    // Persistent callbacks for standing subscriptions. Unlike `pending_callbacks`, an entry here is
+    // re-invoked on every update and only removed by `unsubscribe`.
+    subscription_callbacks: SharedCallbacks,
     cached_process_types: SharedProcessTypes,
     pending_evaluations: SharedPendingEvaluations,
 }
@@ -279,6 +305,7 @@ impl Environment {
         let environment = quiver_environment::Environment::new(workers);
         let environment_rc = Rc::new(RefCell::new(environment));
         let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let subscription_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let cached_process_types = Rc::new(RefCell::new(HashMap::new()));
         let pending_evaluations = Rc::new(RefCell::new(Vec::new()));
         let running = Rc::new(RefCell::new(false));
@@ -290,6 +317,7 @@ impl Environment {
             environment_rc.clone(),
             running.clone(),
             pending_callbacks.clone(),
+            subscription_callbacks.clone(),
             cached_process_types.clone(),
             pending_evaluations.clone(),
         ));
@@ -299,6 +327,7 @@ impl Environment {
             running,
             pump,
             pending_callbacks,
+            subscription_callbacks,
             cached_process_types,
             pending_evaluations,
         })
@@ -330,6 +359,7 @@ impl Environment {
         environment: SharedEnvironment,
         running: Rc<RefCell<bool>>,
         pending_callbacks: SharedCallbacks,
+        subscription_callbacks: SharedCallbacks,
         cached_process_types: SharedProcessTypes,
         pending_evaluations: SharedPendingEvaluations,
     ) -> Pump {
@@ -340,6 +370,7 @@ impl Environment {
             let did_work = Self::run_tick(
                 &environment,
                 &pending_callbacks,
+                &subscription_callbacks,
                 &cached_process_types,
                 &pending_evaluations,
             );
@@ -355,11 +386,26 @@ impl Environment {
     fn run_tick(
         environment: &SharedEnvironment,
         pending_callbacks: &SharedCallbacks,
+        subscription_callbacks: &SharedCallbacks,
         cached_process_types: &SharedProcessTypes,
         pending_evaluations: &SharedPendingEvaluations,
     ) -> bool {
         // Step the environment
         let mut did_work = environment.borrow_mut().step().unwrap_or(false);
+
+        // Deliver any standing-subscription updates produced by this step. Unlike one-shot
+        // requests, the callback stays registered (re-invoked on each future update); it is only
+        // removed by `unsubscribe`. Last-wins per subscription, so each fires at most once per tick.
+        let subscription_updates = environment.borrow_mut().take_subscription_updates();
+        if !subscription_updates.is_empty() {
+            did_work = true;
+            for (subscription_id, result) in subscription_updates {
+                let callbacks = subscription_callbacks.borrow();
+                if let Some(callback) = callbacks.get(&subscription_id) {
+                    Self::handle_result(&environment.borrow(), callback, result);
+                }
+            }
+        }
 
         // Process pending callbacks
         let mut callbacks_to_invoke = Vec::new();
@@ -401,7 +447,7 @@ impl Environment {
         // released by the worker when it delivered the result (the keep-set rode along with the
         // result request), so inspectors reflect the post-evaluation heap with nothing to do here.
         for (_request_id, callback, result) in callbacks_to_invoke {
-            Self::handle_result(&environment.borrow(), callback, result);
+            Self::handle_result(&environment.borrow(), &callback, result);
         }
 
         // Process pending evaluations
@@ -491,6 +537,58 @@ impl Environment {
         }
     }
 
+    /// Subscribe to live process-status updates. The callback fires with an initial snapshot and
+    /// again on every change, until `unsubscribe` is called with the returned id.
+    #[wasm_bindgen(js_name = "subscribeProcessStatuses")]
+    pub fn subscribe_process_statuses(
+        &mut self,
+        callback: JsValue,
+    ) -> std::result::Result<f64, JsValue> {
+        let callback: js_sys::Function = callback.into();
+        match self.environment.borrow_mut().subscribe_process_statuses() {
+            Ok(subscription_id) => {
+                self.subscription_callbacks
+                    .borrow_mut()
+                    .insert(subscription_id, CallbackHandle::new(callback));
+                wake(&self.pump);
+                Ok(subscription_id as f64)
+            }
+            Err(e) => Err(JsValue::from_str(&e.to_string())),
+        }
+    }
+
+    /// Subscribe to live info for a single process (status, stats, mailbox/heap sizes, result).
+    /// The callback fires with an initial snapshot and again on every change, until `unsubscribe`.
+    #[wasm_bindgen(js_name = "subscribeProcessInfo")]
+    pub fn subscribe_process_info(
+        &mut self,
+        pid: usize,
+        callback: JsValue,
+    ) -> std::result::Result<f64, JsValue> {
+        let callback: js_sys::Function = callback.into();
+        match self.environment.borrow_mut().subscribe_process_info(pid) {
+            Ok(subscription_id) => {
+                self.subscription_callbacks
+                    .borrow_mut()
+                    .insert(subscription_id, CallbackHandle::new(callback));
+                wake(&self.pump);
+                Ok(subscription_id as f64)
+            }
+            Err(e) => Err(JsValue::from_str(&e.to_string())),
+        }
+    }
+
+    /// Cancel a subscription created by `subscribeProcessStatuses` / `subscribeProcessInfo`.
+    #[wasm_bindgen(js_name = "unsubscribe")]
+    pub fn unsubscribe(&mut self, subscription_id: f64) {
+        let subscription_id = subscription_id as u64;
+        self.subscription_callbacks
+            .borrow_mut()
+            .remove(&subscription_id);
+        let _ = self.environment.borrow_mut().unsubscribe(subscription_id);
+        wake(&self.pump);
+    }
+
     /// Format a value for display
     #[wasm_bindgen(js_name = "formatValue")]
     pub fn format_value(
@@ -524,7 +622,7 @@ impl Environment {
     // Helper to convert RequestResult to appropriate callback invocation
     fn handle_result(
         env: &quiver_environment::Environment<WebEffect>,
-        callback: CallbackHandle,
+        callback: &CallbackHandle,
         result: RequestResult,
     ) {
         match result {
@@ -585,6 +683,7 @@ impl Environment {
                         mailbox_size: info.mailbox_size,
                         persistent: info.persistent,
                         result,
+                        heap: info.heap.into(),
                     }
                 });
 

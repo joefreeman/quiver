@@ -1,3 +1,4 @@
+use crate::WorkerId;
 use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
 use quiver_core::effects::Effect;
 use quiver_core::executor::ProgramUpdate;
@@ -5,6 +6,24 @@ use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// What a standing subscription observes. Unlike the one-shot `Get*` requests, a worker keeps a
+/// subscription registered and re-pushes a [`SubscriptionPayload`] whenever the observed state
+/// changes (see `Worker::flush_subscriptions`). New observable kinds are added here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SubscriptionKind {
+    /// All process statuses owned by the worker.
+    ProcessStatuses,
+    /// Detailed info for a single process (stats, mailbox/heap sizes, result).
+    ProcessInfo { process_id: ProcessId },
+}
+
+/// The data a worker pushes for a subscription. Variants correspond to [`SubscriptionKind`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SubscriptionPayload {
+    ProcessStatuses(HashMap<ProcessId, ProcessStatus>),
+    ProcessInfo(Option<ProcessInfo>),
+}
 
 /// Commands sent from Environment to Workers
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +125,18 @@ pub enum Command<E: Effect> {
     /// Request execution statistics
     GetExecutionStats { request_id: u64 },
 
+    /// Install a standing subscription. The worker pushes a `SubscriptionUpdate` immediately (the
+    /// initial snapshot) and again on every subsequent change until unsubscribed. The same
+    /// `subscription_id` is used across all workers a subscription fans out to.
+    Subscribe {
+        subscription_id: u64,
+        kind: SubscriptionKind,
+    },
+
+    /// Remove a standing subscription. Broadcast to all workers; a worker without that
+    /// subscription simply ignores it.
+    Unsubscribe { subscription_id: u64 },
+
     /// Effect operation completed
     EffectCompletion {
         process_id: ProcessId,
@@ -192,6 +223,15 @@ pub enum Event<E: Effect> {
     StatsResponse {
         request_id: u64,
         result: Result<quiver_core::executor::ExecutionStats, crate::environment::EnvironmentError>,
+    },
+
+    /// Push for a standing subscription: the worker's current view of the observed state. Carries
+    /// `worker_id` so the environment can merge updates from the several workers a `ProcessStatuses`
+    /// subscription fans out to.
+    SubscriptionUpdate {
+        subscription_id: u64,
+        worker_id: WorkerId,
+        payload: SubscriptionPayload,
     },
 
     /// Worker encountered an unrecoverable error

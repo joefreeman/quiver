@@ -1,5 +1,5 @@
 use crate::WorkerId;
-use crate::messages::{Command, Event};
+use crate::messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 use crate::transport::WorkerHandle;
 use quiver_compiler::compiler::{
     Binding, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
@@ -330,6 +330,40 @@ struct PendingAwait {
     responses: WorkerResponsesMap,
 }
 
+/// Environment-side state for a standing subscription. `per_worker` holds the latest payload pushed
+/// by each worker; for a `ProcessStatuses` subscription (fanned out to all workers) these are merged
+/// into the combined view, while a `ProcessInfo` subscription only ever has its single owning
+/// worker's entry. Each push replaces that worker's entry (last-wins) and re-merges.
+struct SubscriptionState {
+    kind: SubscriptionKind,
+    per_worker: HashMap<WorkerId, SubscriptionPayload>,
+}
+
+impl SubscriptionState {
+    /// Collapse the per-worker payloads into the single user-facing result delivered to the
+    /// subscriber.
+    fn merge(&self) -> RequestResult {
+        match self.kind {
+            SubscriptionKind::ProcessStatuses => {
+                let mut merged = HashMap::new();
+                for payload in self.per_worker.values() {
+                    if let SubscriptionPayload::ProcessStatuses(statuses) = payload {
+                        merged.extend(statuses.clone());
+                    }
+                }
+                RequestResult::Statuses(merged)
+            }
+            SubscriptionKind::ProcessInfo { .. } => {
+                let info = self.per_worker.values().find_map(|payload| match payload {
+                    SubscriptionPayload::ProcessInfo(info) => Some(info.clone()),
+                    _ => None,
+                });
+                RequestResult::ProcessInfo(info.flatten())
+            }
+        }
+    }
+}
+
 pub struct Environment<E: Effect> {
     workers: Vec<Box<dyn WorkerHandle<E>>>,
     // Accumulated program state with full type information
@@ -339,6 +373,13 @@ pub struct Environment<E: Effect> {
     pending_requests: HashMap<u64, Option<RequestResult>>,
     // Maps aggregation_id -> Aggregation (either Statuses or ProcessTypes)
     aggregations: HashMap<u64, Aggregation>,
+    // Standing subscriptions, keyed by subscription id. Distinct from `pending_requests`/
+    // `aggregations`: these are never torn down on response — they live until `unsubscribe`.
+    subscriptions: HashMap<u64, SubscriptionState>,
+    // Latest merged result per subscription, awaiting delivery to the subscriber. Last-wins: a
+    // slow consumer only ever sees the most recent snapshot, never a backlog. Drained by
+    // `take_subscription_updates`.
+    subscription_updates: HashMap<u64, RequestResult>,
     next_request_id: u64,
     next_process_id: ProcessId,
 
@@ -356,6 +397,8 @@ impl<E: Effect> Environment<E> {
             pending_awaits: HashMap::new(),
             pending_requests: HashMap::new(),
             aggregations: HashMap::new(),
+            subscriptions: HashMap::new(),
+            subscription_updates: HashMap::new(),
             next_request_id: 0,
             next_process_id: 0,
             effect_backend: None,
@@ -630,6 +673,77 @@ impl<E: Effect> Environment<E> {
         Ok(request_id)
     }
 
+    /// Subscribe to all process statuses across all workers. Returns the subscription id; the
+    /// subscriber receives the merged statuses via [`Self::take_subscription_updates`], first as an
+    /// initial snapshot and then on every change, until [`Self::unsubscribe`].
+    pub fn subscribe_process_statuses(&mut self) -> Result<u64, EnvironmentError> {
+        let subscription_id = self.allocate_request_id();
+        self.subscriptions.insert(
+            subscription_id,
+            SubscriptionState {
+                kind: SubscriptionKind::ProcessStatuses,
+                per_worker: HashMap::new(),
+            },
+        );
+        for worker in &mut self.workers {
+            worker
+                .send(Command::Subscribe {
+                    subscription_id,
+                    kind: SubscriptionKind::ProcessStatuses,
+                })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        Ok(subscription_id)
+    }
+
+    /// Subscribe to detailed info for a single process. Routed to the owning worker only.
+    pub fn subscribe_process_info(&mut self, pid: ProcessId) -> Result<u64, EnvironmentError> {
+        let worker_id = *self
+            .process_router
+            .get(&pid)
+            .ok_or(EnvironmentError::ProcessNotFound(pid))?;
+        let subscription_id = self.allocate_request_id();
+        self.subscriptions.insert(
+            subscription_id,
+            SubscriptionState {
+                kind: SubscriptionKind::ProcessInfo { process_id: pid },
+                per_worker: HashMap::new(),
+            },
+        );
+        self.workers[worker_id]
+            .send(Command::Subscribe {
+                subscription_id,
+                kind: SubscriptionKind::ProcessInfo { process_id: pid },
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        Ok(subscription_id)
+    }
+
+    /// Cancel a subscription. Broadcast to all workers (a worker without it ignores the command),
+    /// which keeps this correct regardless of which workers the subscription fanned out to. Drops
+    /// any update not yet taken.
+    pub fn unsubscribe(&mut self, subscription_id: u64) -> Result<(), EnvironmentError> {
+        if self.subscriptions.remove(&subscription_id).is_none() {
+            return Ok(());
+        }
+        self.subscription_updates.remove(&subscription_id);
+        for worker in &mut self.workers {
+            worker
+                .send(Command::Unsubscribe { subscription_id })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Take and clear all pending subscription updates: `(subscription_id, merged_result)` pairs.
+    /// The caller looks each id up against its registered (persistent) callback. Order is
+    /// unspecified; at most one entry per subscription (last-wins).
+    pub fn take_subscription_updates(&mut self) -> Vec<(u64, RequestResult)> {
+        std::mem::take(&mut self.subscription_updates)
+            .into_iter()
+            .collect()
+    }
+
     /// Request process locals
     pub fn request_locals(
         &mut self,
@@ -896,6 +1010,11 @@ impl<E: Effect> Environment<E> {
             Event::LocalsResponse { request_id, result } => {
                 self.handle_locals_response(request_id, result)
             }
+            Event::SubscriptionUpdate {
+                subscription_id,
+                worker_id,
+                payload,
+            } => self.handle_subscription_update(subscription_id, worker_id, payload),
             Event::WorkerError { error } => self.handle_worker_error(error),
             Event::EffectRequest { process_id, effect } => {
                 self.handle_effect_request(process_id, effect)
@@ -1371,6 +1490,22 @@ impl<E: Effect> Environment<E> {
         let info = result?;
         self.pending_requests
             .insert(request_id, Some(RequestResult::ProcessInfo(info)));
+        Ok(())
+    }
+
+    fn handle_subscription_update(
+        &mut self,
+        subscription_id: u64,
+        worker_id: WorkerId,
+        payload: SubscriptionPayload,
+    ) -> Result<(), EnvironmentError> {
+        // A late update for an already-cancelled subscription: just drop it.
+        let Some(state) = self.subscriptions.get_mut(&subscription_id) else {
+            return Ok(());
+        };
+        state.per_worker.insert(worker_id, payload);
+        let merged = state.merge();
+        self.subscription_updates.insert(subscription_id, merged);
         Ok(())
     }
 
