@@ -4,6 +4,7 @@
 'command =
   | Read['int, 'int, @Reply['ref, 'bin], 'ref]
   | Write['int, 'bin, @Reply['ref, 'int], 'ref]
+  | Flush[@Reply['ref, Ok], 'ref]
   | Close;
 
 ' = File[@'command];
@@ -18,6 +19,10 @@ serve = #\File {
     }
     | =Write[offset, data, reply, id] => {
       [$, offset, data] ~> __file_write__ ~> Reply[id, ~] ~> reply,
+      ^ $
+    }
+    | =Flush[reply, id] => {
+      __file_flush__ $ ~> Reply[id, ~] ~> reply,
       ^ $
     }
     | =Close => __file_close__ $
@@ -77,9 +82,14 @@ lines_step = #[', 'int, 'bin, 'int] {
 },
 
 [
-  // Open a file. Defaults to read-only; pass `mode: W` to create/truncate for writing.
-  open: #(['%path] | ['%path, mode: R | W]) {
-    flags = { =(mode: W) => 577 | 0 },
+  // Open a file. Defaults to read-only; pass `mode: W` to create/truncate for writing, or
+  // `mode: A` to create/append (in append mode every write goes to the end of the file, so the
+  // offset passed to `write` is ignored). Flags are the OS open(2) bits: W = 577
+  // (O_WRONLY|O_CREAT|O_TRUNC), A = 1089 (O_WRONLY|O_CREAT|O_APPEND).
+  open: #(['%path] | ['%path, mode: R | W | A]) {
+    // Match the mode tag's value (a partial pattern like `(mode: W)` only tests that a `mode`
+    // field is present, not its value, so read the field and match it).
+    flags = { =(mode: m) => m ~> { =W => 577 | =A => 1089 | 0 } | 0 },
     name = $0 ~> %path.to_string ~> .0,
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
     File[[name, flags, 420] ~> __file_open__ ~> @serve]
@@ -100,6 +110,14 @@ lines_step = #[', 'int, 'bin, 'int] {
     id = &,
     Write[offset, data, &., id] ~> f.0,
     !#Reply['ref, 'int] { =Reply[&id, _], Ok } ~> { =Reply[_, written] => written }
+  },
+
+  // Flush buffered writes durably to disk (fsync), returning Ok once complete.
+  flush: #' {
+    =f,
+    id = &,
+    Flush[&., id] ~> f.0,
+    !#Reply['ref, Ok] { =Reply[&id, _], Ok } ~> { =Reply[_, ok] => ok }
   },
 
   // Close the file, releasing the descriptor and stopping its process.

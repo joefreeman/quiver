@@ -216,6 +216,84 @@ compare = #['opt, 'opt] {
   | =[x, y] => __integer_compare__ [x, y]
 },
 
+// Truncate toward zero to a bare integer. For a surd `a + b√n`, work with `|v|` (so the
+// floor is non-negative): clear denominators to `(P + Q√n)/D` with `D > 0`, bound the
+// (irrational) numerator between consecutive integers using the exact integer √ of `Q²·n`,
+// and floor-divide that bound by `D` — then reapply the sign. Exact, with one integer √. Lives
+// at the top level (rather than only in the record) so `floor`/`ceil`/`round` can reuse it.
+to_int = #'opt {
+  | =Surd[a, b, n] => {
+      ar = to_rational a,
+      br = to_rational b,
+      ssign [ar, br, n] ~> =sgn,
+      { __integer_compare__ [sgn, 0] ~> =-1 => [ar ~> rneg, br ~> rneg] | [ar, br] }
+        ~> =[Rational[pa, qa], Rational[pb, qb]],
+      p = __integer_multiply__ [pa, qb],
+      q = __integer_multiply__ [pb, qa],
+      d = __integer_multiply__ [qa, qb],
+      s = __integer_multiply__ [__integer_multiply__ [q, q], n] ~> __integer_sqrt__,
+      nlo = { __integer_compare__ [q, 0] ~> =1 => __integer_add__ [p, s] | __integer_subtract__ [p, __integer_add__ [s, 1]] },
+      __integer_multiply__ [sgn, __integer_divide__ [nlo, d]]
+    }
+  | ='coeff => {
+      $ ~> to_rational ~> =Rational[m, d],
+      __integer_divide__ [m, d]
+    }
+},
+
+// Sign of a number: -1, 0, or 1 (nil for a nil operand).
+sign = #'opt { compare [$, 0] },
+
+// Smaller / larger of two numbers (nil if either operand is nil).
+min = #['opt, 'opt] {
+  | =([[], _] | [_, []]) => []
+  | compare ~> =1 => $1
+  | $0
+},
+max = #['opt, 'opt] {
+  | =([[], _] | [_, []]) => []
+  | compare ~> =-1 => $1
+  | $0
+},
+
+// Clamp x to the range [lo, hi] (nil if any operand is nil).
+clamp = #['opt, 'opt, 'opt] {
+  | =([[], _, _] | [_, [], _] | [_, _, []]) => []
+  | =[x, lo, hi] => {
+    | compare [x, lo] ~> =-1 => lo
+    | compare [x, hi] ~> =1 => hi
+    | x
+  }
+},
+
+// Floor / ceil to a bare integer (nil for a nil operand). Built on the toward-zero `to_int`,
+// nudging by one when the truncation sits on the wrong side of x. The nudge is only reached
+// for a non-nil operand, so nil flows straight through.
+floor = #'opt {
+  t = to_int $,
+  { compare [$, t] ~> =-1 => __integer_subtract__ [t, 1] | t }
+},
+ceil = #'opt {
+  t = to_int $,
+  { compare [$, t] ~> =1 => __integer_add__ [t, 1] | t }
+},
+
+// Round to the nearest integer, halves away from zero (nil for a nil operand). Compares x with
+// the midpoint `floor(x) + 1/2` (an exact rational), so no tower arithmetic is needed; a tie
+// (only possible for a rational x) breaks away from zero by the sign of the floor.
+round = #'opt {
+  | =[] => []
+  | floor ~> =f => {
+    mid = f ~> __integer_multiply__ [~, 2] ~> __integer_add__ [~, 1] ~> Rational[~, 2],
+    {
+      | compare [$, mid] ~> =1 => __integer_add__ [f, 1]
+      | compare [$, mid] ~> =-1 => f
+      | __integer_compare__ [f, 0] ~> =-1 => f
+      | __integer_add__ [f, 1]
+    }
+  }
+},
+
 [
   numer: #'opt {
     | =Surd[a, b, n] => []
@@ -307,29 +385,18 @@ compare = #['opt, 'opt] {
     | ='int => __integer_abs__ $
   },
 
-  // Truncate toward zero to a bare integer. For a surd `a + b√n`, work with `|v|` (so the
-  // floor is non-negative): clear denominators to `(P + Q√n)/D` with `D > 0`, bound the
-  // (irrational) numerator between consecutive integers using the exact integer √ of `Q²·n`,
-  // and floor-divide that bound by `D` — then reapply the sign. Exact, with one integer √.
-  to_int: #'opt {
-    | =Surd[a, b, n] => {
-        ar = to_rational a,
-        br = to_rational b,
-        ssign [ar, br, n] ~> =sign,
-        { __integer_compare__ [sign, 0] ~> =-1 => [ar ~> rneg, br ~> rneg] | [ar, br] }
-          ~> =[Rational[pa, qa], Rational[pb, qb]],
-        p = __integer_multiply__ [pa, qb],
-        q = __integer_multiply__ [pb, qa],
-        d = __integer_multiply__ [qa, qb],
-        s = __integer_multiply__ [__integer_multiply__ [q, q], n] ~> __integer_sqrt__,
-        nlo = { __integer_compare__ [q, 0] ~> =1 => __integer_add__ [p, s] | __integer_subtract__ [p, __integer_add__ [s, 1]] },
-        __integer_multiply__ [sign, __integer_divide__ [nlo, d]]
-      }
-    | ='coeff => {
-        $ ~> to_rational ~> =Rational[m, d],
-        __integer_divide__ [m, d]
-      }
-  },
+  // Truncate toward zero / round toward ∓∞ / round to nearest, each to a bare integer. See the
+  // top-level bindings of the same names.
+  to_int: &to_int,
+  floor: &floor,
+  ceil: &ceil,
+  round: &round,
+
+  // Sign (-1/0/1), and the smaller/larger/clamped of numbers.
+  sign: &sign,
+  min: &min,
+  max: &max,
+  clamp: &clamp,
 
   eq?: #['opt, 'opt] { compare ~> =0, Ok },
   lt?: #['opt, 'opt] { compare ~> =-1, Ok },

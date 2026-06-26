@@ -43,14 +43,6 @@ of = #['vec, '%list<'int>] {
   | =[v, Cons[x, rest]] => [push [v, x], rest] ~> ^
 },
 
-// Round a number to the nearest integer, halves away from zero (`to_int` truncates toward
-// zero, so add ±1/2 first depending on sign). Accepts the optional result of a division;
-// nil propagates.
-round = #'%num.opt {
-  | [$, 0] ~> %num.lt? => [$, -1/2] ~> %num.add ~> %num.to_int
-  | [$, 1/2] ~> %num.add ~> %num.to_int
-},
-
 // lcm of the denominators of a list of numbers (tail-recursive over an accumulator). The
 // finest scale `1/lcm` represents every value exactly.
 lcm_denoms = #['int, '%list<'%num>] {
@@ -147,7 +139,7 @@ align = #['vec, 'vec] {
   of_round: #['dtype, '%num, '%list<'%num>] {
     =[d, scale, values],
     scale ~> norm ~> =s,
-    m = #'%num { [~, s] ~> %num.div ~> round },
+    m = #'%num { [~, s] ~> %num.div ~> %num.round },
     buildValues [[Vec[dtype: d, scale: s, data: 0x], &m], values]
   },
 
