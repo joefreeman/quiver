@@ -849,6 +849,10 @@ fn analyze_partial_pattern(
     let value_type_sources = extract_field_sources(program, value_type_id);
     let needs_type_check = value_type_sources.len() > 1;
 
+    // Narrowed type accumulated per matchable variant, reconstructed with field-level precision so
+    // a later branch's complement reflects the field check (e.g. `mode: R | A` after `=(mode: W)`).
+    let mut narrowed_type_ids: Vec<usize> = Vec::new();
+
     // Create a binding set for each matching type
     for field_match in &matching_types {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
@@ -858,9 +862,14 @@ fn analyze_partial_pattern(
 
         let mut requirements = vec![];
 
-        // Get field info based on match type
-        let (fields, field_indices): (Vec<(Option<String>, usize)>, &Vec<usize>) = match field_match
-        {
+        // Field info plus how to rebuild this variant's narrowed type once its fields are refined:
+        // a concrete tuple match reconstructs `Type::Tuple` with the narrowed fields; a partial
+        // match (`Some` name vs `None`) keeps the input type.
+        let (mut fields, field_indices, narrowed_tuple_name): (
+            Vec<(Option<String>, usize)>,
+            &Vec<usize>,
+            Option<Option<String>>,
+        ) = match field_match {
             FieldMatch::Tuple {
                 tuple_id,
                 field_indices,
@@ -874,14 +883,17 @@ fn analyze_partial_pattern(
                     });
                 }
 
-                let tuple_fields = program
-                    .lookup_tuple(*tuple_id)
-                    .ok_or(Error::TupleNotInRegistry {
-                        tuple_id: *tuple_id,
-                    })?
-                    .fields
-                    .clone();
-                (tuple_fields, field_indices)
+                let tuple_info =
+                    program
+                        .lookup_tuple(*tuple_id)
+                        .ok_or(Error::TupleNotInRegistry {
+                            tuple_id: *tuple_id,
+                        })?;
+                (
+                    tuple_info.fields.clone(),
+                    field_indices,
+                    Some(tuple_info.name.clone()),
+                )
             }
             FieldMatch::Partial {
                 fields,
@@ -893,11 +905,22 @@ fn analyze_partial_pattern(
                     .map(|(name, type_id)| (Some(name.clone()), *type_id))
                     .collect();
                 // No type check needed for partials - they're type constraints, not concrete types
-                (converted, field_indices)
+                (converted, field_indices, None)
             }
         };
 
-        let mut bindings = Vec::new();
+        // Seed with the base requirements (the type check, if any). Each field then refines these
+        // sets: a field whose nested pattern yields several binding sets (e.g. an alternation) fans
+        // out via a cartesian product, and a field whose nested pattern can never match collapses
+        // the variant to no binding sets. The latter is what makes `=(mode: W)` correctly fail
+        // against a field typed `A`, rather than silently matching because the field check was
+        // dropped on the floor.
+        let mut current_binding_sets = vec![BindingSet {
+            requirements,
+            bindings: vec![],
+        }];
+        let mut unmatchable = false;
+
         for (i, partial_field) in partial_pattern.fields.iter().enumerate() {
             let field_name = &partial_field.name;
             let nested_pattern = &partial_field.pattern;
@@ -906,10 +929,10 @@ fn analyze_partial_pattern(
             let mut field_path = path.clone();
             field_path.push(idx);
 
-            // If the field has a nested pattern, analyze it recursively
+            // If the field has a nested pattern, analyze it recursively and combine.
             if let Some(nested_pattern) = nested_pattern {
                 let field_provenance = value_provenance.field(idx);
-                let (nested_binding_sets, _) = analyze_match_pattern(
+                let (field_binding_sets, field_narrowed_type_id) = analyze_match_pattern(
                     env,
                     program,
                     nested_pattern,
@@ -920,67 +943,100 @@ fn analyze_partial_pattern(
                     &field_provenance,
                 )?;
 
-                // Merge nested binding sets into current requirements and bindings
-                for nested_set in nested_binding_sets {
-                    requirements.extend(nested_set.requirements);
-                    bindings.extend(nested_set.bindings);
+                if field_binding_sets.is_empty() {
+                    // The nested pattern can never match this field's type, so this variant can't
+                    // match at all.
+                    current_binding_sets.clear();
+                    unmatchable = true;
+                    break;
                 }
+
+                // Record the field's narrowed type for the reconstructed variant. Leave recursive
+                // `Cycle(1)` fields alone to avoid materializing an infinite type.
+                if !matches!(program.lookup_type(field_type_id), Some(Type::Cycle(1))) {
+                    fields[idx].1 = field_narrowed_type_id;
+                }
+
+                let mut combined = Vec::new();
+                for current in &current_binding_sets {
+                    for field_set in &field_binding_sets {
+                        let mut requirements = current.requirements.clone();
+                        requirements.extend(field_set.requirements.clone());
+                        let mut bindings = current.bindings.clone();
+                        bindings.extend(field_set.bindings.clone());
+                        combined.push(BindingSet {
+                            requirements,
+                            bindings,
+                        });
+                    }
+                }
+                current_binding_sets = combined;
             } else {
-                // No nested pattern - use field name for binding/checking
+                // No nested pattern - bind the field by name (or, if repeated, equality-check it).
+                let (extra_requirement, extra_binding) =
+                    if let Some(info) = variant_identifiers.get_mut(field_name) {
+                        // Repeated identifier - mark as repeated and add a Path equality check.
+                        info.is_repeated = true;
+                        (
+                            Some(Requirement {
+                                path: info.first_path.clone(),
+                                check: RuntimeCheck::Path(field_path),
+                            }),
+                            None,
+                        )
+                    } else {
+                        // First occurrence - record it and create a binding. Strip [] because if
+                        // the binding executes, the value is not [].
+                        variant_identifiers.insert(
+                            field_name.clone(),
+                            Identifier {
+                                first_path: field_path.clone(),
+                                is_repeated: false,
+                            },
+                        );
+                        let var_type_id = without_nil(field_type_id, program);
+                        (
+                            None,
+                            Some(Binding {
+                                name: field_name.clone(),
+                                path: field_path,
+                                var_type_id,
+                            }),
+                        )
+                    };
 
-                // Check if we've seen this identifier before
-                if let Some(info) = variant_identifiers.get_mut(field_name) {
-                    // Repeated identifier - mark as repeated and add Path requirement
-                    info.is_repeated = true;
-                    requirements.push(Requirement {
-                        path: info.first_path.clone(),
-                        check: RuntimeCheck::Path(field_path),
-                    });
-                } else {
-                    // First occurrence - record it
-                    variant_identifiers.insert(
-                        field_name.clone(),
-                        Identifier {
-                            first_path: field_path.clone(),
-                            is_repeated: false,
-                        },
-                    );
-
-                    // Create a binding for this identifier
-                    // Strip [] from binding type because if the binding executes, the value is not []
-                    let var_type_id = without_nil(field_type_id, program);
-                    bindings.push(Binding {
-                        name: field_name.clone(),
-                        path: field_path,
-                        var_type_id,
-                    });
+                for set in &mut current_binding_sets {
+                    if let Some(requirement) = &extra_requirement {
+                        set.requirements.push(requirement.clone());
+                    }
+                    if let Some(binding) = &extra_binding {
+                        set.bindings.push(binding.clone());
+                    }
                 }
             }
         }
 
-        binding_sets.push(BindingSet {
-            requirements,
-            bindings,
-        });
+        if unmatchable {
+            continue;
+        }
+
+        binding_sets.extend(current_binding_sets);
+
+        // Reconstruct this variant's narrowed type from its (possibly refined) fields.
+        match narrowed_tuple_name {
+            Some(name) => {
+                let narrowed_tuple_id = program.register_tuple(name, fields);
+                narrowed_type_ids.push(program.register_type(Type::Tuple(narrowed_tuple_id)));
+            }
+            None => narrowed_type_ids.push(value_type_id),
+        }
     }
 
-    // Construct narrowed type from matching types
-    // For tuples, narrow to concrete tuple types; for partials, keep the input type
-    let narrowed_type_id = if matching_types.is_empty() {
+    // For tuples, narrow to the reconstructed (field-refined) tuple types; for partials, the input
+    // type. No matchable variant means the pattern can't match (never).
+    let narrowed_type_id = if narrowed_type_ids.is_empty() {
         program.never()
     } else {
-        let mut narrowed_type_ids: Vec<usize> = Vec::new();
-        for field_match in &matching_types {
-            match field_match {
-                FieldMatch::Tuple { tuple_id, .. } => {
-                    narrowed_type_ids.push(program.register_type(Type::Tuple(*tuple_id)));
-                }
-                FieldMatch::Partial { .. } => {
-                    // For partials, keep the original partial type
-                    narrowed_type_ids.push(value_type_id);
-                }
-            }
-        }
         union_type_ids(program, narrowed_type_ids)
     };
 

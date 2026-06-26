@@ -87,9 +87,7 @@ lines_step = #[', 'int, 'bin, 'int] {
   // offset passed to `write` is ignored). Flags are the OS open(2) bits: W = 577
   // (O_WRONLY|O_CREAT|O_TRUNC), A = 1089 (O_WRONLY|O_CREAT|O_APPEND).
   open: #(['%path] | ['%path, mode: R | W | A]) {
-    // Match the mode tag's value (a partial pattern like `(mode: W)` only tests that a `mode`
-    // field is present, not its value, so read the field and match it).
-    flags = { =(mode: m) => m ~> { =W => 577 | =A => 1089 | 0 } | 0 },
+    flags = { =(mode: W) => 577 | =(mode: A) => 1089 | 0 },
     name = $0 ~> %path.to_string ~> .0,
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
     File[[name, flags, 420] ~> __file_open__ ~> @serve]

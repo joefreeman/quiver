@@ -319,6 +319,42 @@ fn test_partial_pattern_field_tag_with_binding() {
 }
 
 #[test]
+fn test_partial_pattern_nullary_tag_field_value_is_checked() {
+    // Regression: a partial-pattern field naming a nullary tag must check the field's *value*, not
+    // merely that the field is present. `=(mode: W)` against a `mode: A` field can never match, so
+    // it must fall through to the `A` branch — before the fix the unsatisfiable field check was
+    // dropped and the partial matched unconditionally (yielding 1 here).
+    quiver()
+        .evaluate("[mode: A] ~> { =(mode: W) => 1 | =(mode: A) => 2 | 0 }")
+        .expect("2");
+
+    // A partial still requires the field's presence: no `mode` field means no match.
+    quiver()
+        .evaluate("[other: 1] ~> { =(mode: W) => 1 | 0 }")
+        .expect("0");
+}
+
+#[test]
+fn test_partial_pattern_sequential_branches_narrow_union_field() {
+    // Regression: once `=(mode: W)` fails, the complement must narrow only the field (dropping W),
+    // not remove the whole `mode`-bearing variant — so the later `=(mode: A)` / `=(mode: R)`
+    // branches still match. This mirrors `std/file.qv`'s open-mode flag dispatch.
+    quiver()
+        .evaluate(
+            r#"
+            f = #([a: 'int] | [a: 'int, mode: R | W | A]) {
+              | =(mode: W) => 1
+              | =(mode: A) => 2
+              | =(mode: R) => 3
+              | 0
+            },
+            [[a: 1, mode: A] ~> f, [a: 1, mode: W] ~> f, [a: 1, mode: R] ~> f, [a: 1] ~> f]
+            "#,
+        )
+        .expect("[2, 1, 3, 0]");
+}
+
+#[test]
 fn test_narrowing_with_branches() {
     quiver()
         .evaluate("f = #(A | B | C) { =(A | B) => =A }, A ~> f")

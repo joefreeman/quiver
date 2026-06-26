@@ -251,7 +251,9 @@ fn test_await_simple() {
 
 #[test]
 fn test_await_returns_process_result() {
-    quiver().evaluate("!@#{ [1, 2] ~> __integer_add__ }").expect("3");
+    quiver()
+        .evaluate("!@#{ [1, 2] ~> __integer_add__ }")
+        .expect("3");
 }
 
 #[test]

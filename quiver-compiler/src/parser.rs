@@ -113,7 +113,9 @@ impl ErrorKind {
             ErrorKind::MissingClosingBrace => "Add '}' to close the block",
             ErrorKind::MissingClosingBracket => "Add ']' to close the tuple",
             ErrorKind::MissingClosingParen => "Add ')' to close the parenthesized expression",
-            ErrorKind::ExpectedPipe => "Chains use '~>' to pipe values, e.g. '[1, 2] ~> __integer_add__'",
+            ErrorKind::ExpectedPipe => {
+                "Chains use '~>' to pipe values, e.g. '[1, 2] ~> __integer_add__'"
+            }
             ErrorKind::InvalidFunctionBody => "A function body should be a valid expression",
             ErrorKind::HexMalformed(_) => {
                 "Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F"

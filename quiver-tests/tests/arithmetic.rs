@@ -8,17 +8,23 @@ fn test_addition() {
 
 #[test]
 fn test_subtraction() {
-    quiver().evaluate("[8, 5] ~> __integer_subtract__").expect("3");
+    quiver()
+        .evaluate("[8, 5] ~> __integer_subtract__")
+        .expect("3");
 }
 
 #[test]
 fn test_multiplication() {
-    quiver().evaluate("[4, 5] ~> __integer_multiply__").expect("20");
+    quiver()
+        .evaluate("[4, 5] ~> __integer_multiply__")
+        .expect("20");
 }
 
 #[test]
 fn test_division() {
-    quiver().evaluate("[10, 2] ~> __integer_divide__").expect("5");
+    quiver()
+        .evaluate("[10, 2] ~> __integer_divide__")
+        .expect("5");
 }
 
 #[test]
@@ -32,7 +38,9 @@ fn test_division_by_zero() {
 
 #[test]
 fn test_modulo() {
-    quiver().evaluate("[9, 5] ~> __integer_modulo__").expect("4");
+    quiver()
+        .evaluate("[9, 5] ~> __integer_modulo__")
+        .expect("4");
 }
 
 #[test]

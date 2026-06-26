@@ -3,15 +3,21 @@ use common::*;
 
 #[test]
 fn test_less_than() {
-    quiver().evaluate("[1, 5] ~> __integer_compare__").expect("-1");
+    quiver()
+        .evaluate("[1, 5] ~> __integer_compare__")
+        .expect("-1");
 }
 
 #[test]
 fn test_greater_than() {
-    quiver().evaluate("[7, 2] ~> __integer_compare__").expect("1");
+    quiver()
+        .evaluate("[7, 2] ~> __integer_compare__")
+        .expect("1");
 }
 
 #[test]
 fn test_equal() {
-    quiver().evaluate("[2, 2] ~> __integer_compare__").expect("0");
+    quiver()
+        .evaluate("[2, 2] ~> __integer_compare__")
+        .expect("0");
 }
