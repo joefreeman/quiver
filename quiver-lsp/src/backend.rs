@@ -289,6 +289,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
@@ -525,6 +526,58 @@ impl LanguageServer for Backend {
             })
             .collect();
         Ok(Some(locations))
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some(offset) = self.offset_at(&uri, position) else {
+            return Ok(None);
+        };
+        let Some(doc) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let Some(analysis) = self.analyses.get(&uri) else {
+            return Ok(None);
+        };
+        let Some(semantics) = &analysis.semantics else {
+            return Ok(None);
+        };
+
+        let highlight = |span, kind| DocumentHighlight {
+            range: span_to_range(&doc.text, &doc.line_index, span),
+            kind: Some(kind),
+        };
+
+        // An import symbol: highlight its occurrences within this file only. Document highlight is
+        // single-file, so unlike `references` there's no project-wide scan.
+        if let Some((module, member)) = semantics.import_at(offset) {
+            let highlights = semantics
+                .import_references(&module, member.as_deref())
+                .into_iter()
+                .map(|span| highlight(span, DocumentHighlightKind::READ))
+                .collect();
+            return Ok(Some(highlights));
+        }
+
+        // Local symbol: every occurrence in this document, with the binding marked as a write.
+        let definition = semantics.local_definition_at(offset);
+        let highlights = semantics
+            .local_references(offset, true)
+            .into_iter()
+            .map(|span| {
+                let kind = if Some(span) == definition {
+                    DocumentHighlightKind::WRITE
+                } else {
+                    DocumentHighlightKind::READ
+                };
+                highlight(span, kind)
+            })
+            .collect();
+        Ok(Some(highlights))
     }
 
     async fn document_symbol(

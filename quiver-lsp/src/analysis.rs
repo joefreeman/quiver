@@ -488,6 +488,23 @@ mod tests {
     }
 
     #[test]
+    fn local_definition_at_identifies_the_binding_site() {
+        // Drives document-highlight's WRITE-vs-READ distinction: the binding is the definition,
+        // every use resolves back to it.
+        let text = "x = 5\n[x, x] ~> __integer_add__";
+        let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
+        let semantics = analysis.semantics.expect("semantics");
+        let binding = 0;
+        let use_offset = text.rfind('x').unwrap();
+
+        let def = semantics.local_definition_at(binding).expect("definition");
+        // From the binding site and from a use, the same definition span is reported.
+        assert_eq!(semantics.local_definition_at(use_offset), Some(def));
+        // The definition span is the binding occurrence itself.
+        assert!(def.offset <= binding && binding < def.offset + def.length);
+    }
+
+    #[test]
     fn import_references_match_a_member_across_a_file() {
         use quiver_compiler::PackageResolver;
 

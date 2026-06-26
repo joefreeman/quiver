@@ -152,7 +152,7 @@ impl Recorder {
     /// The definition span of the local symbol at `offset` — whether the cursor is on a use
     /// (returns what it resolves to) or on the binding itself. `None` if the symbol at `offset`
     /// is not a local with a definition in this document (e.g. an import or builtin).
-    fn local_definition_at(&self, offset: usize) -> Option<SourceSpan> {
+    pub fn local_definition_at(&self, offset: usize) -> Option<SourceSpan> {
         // Cursor on a reference: the smallest entry covering `offset` that has a definition.
         if let Some(def) = self
             .entries
