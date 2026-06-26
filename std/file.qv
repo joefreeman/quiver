@@ -11,17 +11,16 @@
 // The file process loop. The descriptor is held as the parameter (rather than reopened) and
 // threaded through each tail call, so the file is opened exactly once.
 serve = #\File {
-  =fd,
   !#'command ~> {
     | =Read[offset, length, reply, id] => {
-      [fd, offset, length] ~> __file_read__ ~> Reply[id, ~] ~> reply,
-      fd ~> ^
+      [$, offset, length] ~> __file_read__ ~> Reply[id, ~] ~> reply,
+      ^ $
     }
     | =Write[offset, data, reply, id] => {
-      [fd, offset, data] ~> __file_write__ ~> Reply[id, ~] ~> reply,
-      fd ~> ^
+      [$, offset, data] ~> __file_write__ ~> Reply[id, ~] ~> reply,
+      ^ $
     }
-    | =Close => __file_close__ fd
+    | =Close => __file_close__ $
   }
 },
 
@@ -34,7 +33,7 @@ do_read = #[', 'int, 'int] {
 },
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
-read_all_ = #[', 'int, 'bin] {
+read_all = #[', 'int, 'bin] {
   =[f, offset, acc],
   chunk = do_read [f, offset, 65536],
   chunk ~> %bin.length ~> {
@@ -49,9 +48,9 @@ read_all_ = #[', 'int, 'bin] {
 // further 64KB chunks only when the remaining buffer holds no complete line. When a chunk is
 // read without completing a line it loops (via `^`) rather than emitting, so the buffer is
 // compacted once per chunk read, keeping the whole pass linear.
-lines_step_ = #[', 'int, 'bin, 'int] {
+lines_step = #[', 'int, 'bin, 'int] {
   =[f, offset, buf, pos],
-  len = buf ~> %bin.length,
+  len = %bin.length buf,
   %bin.index [buf, 10, pos] ~> {
     | =index => {
       line = %bin.slice [buf, pos, index],
@@ -90,10 +89,10 @@ lines_step_ = #[', 'int, 'bin, 'int] {
   read: #[', 'int, 'int] { do_read },
 
   // Read the entire file from the start, returning all its bytes.
-  read_all: #' { read_all_ [~, 0, 0x] },
+  read_all: #' { read_all [~, 0, 0x] },
 
   // Iterate over the lines of the file (newline-separated, without the trailing newline).
-  lines: #' { %iter.unfold [[~, 0, 0x, 0], &lines_step_] },
+  lines: #' { %iter.unfold [[~, 0, 0x, 0], &lines_step] },
 
   // Write `data` starting at `offset`, returning the number of bytes written.
   write: #[', 'int, 'bin] {

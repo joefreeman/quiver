@@ -13,10 +13,8 @@
 // Look up metadata for a path, following symlinks. Yields nil if the path does not exist; other
 // failures (e.g. permission denied) are runtime errors. The builtin returns a transient
 // `[kind, size, modified, mode]` tuple read by index, with `kind` already a `'kind` tag.
-stat_ = #Str['bin] {
-  .0
-  ~> __filesystem_stat__
-  ~> {
+stat = #Str['bin] {
+  .0 ~> __filesystem_stat__ ~> {
     | <> => []
     | =s ~> Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
   }
@@ -27,31 +25,24 @@ stat_ = #Str['bin] {
   // order the filesystem returns them (unsorted, excluding `.` and `..`). The underlying
   // directory handle is closed automatically once the iterator is exhausted.
   list: #Str['bin] {
-    .0
-    ~> __directory_read__
-    ~> =dir,
-    %iter.unfold [dir, #\Dir {
-      =d,
-      // Each step yields `[name, kind]` or nil at the end, with `kind` already a `'kind` tag.
-      __directory_next__ d ~> {
-        | <> => {
-          __directory_close__ d,
-          []
-        }
-        | =e ~> [Entry[name: Str[e.0], kind: e.1], d]
+    // Each step yields an `Entry` or nil at the end, with `kind` already a `'kind` tag.
+    .0 ~> __directory_read__ ~> %iter.unfold [~, #\Dir {
+      __directory_next__ $ ~> {
+        | <> => { __directory_close__ $, [] }
+        | =e ~> [Entry[name: Str[e.0], kind: e.1], $]
       }
     }]
   },
 
   // Metadata for a path, following symlinks. Yields nil if the path does not exist.
-  stat: #Str['bin] { stat_ },
+  stat: #Str['bin] { stat },
 
   // Whether a path exists.
-  exists?: #Str['bin] { stat_ => Ok },
+  exists?: #Str['bin] { stat => Ok },
 
   // Whether a path exists and is a directory.
-  dir?: #Str['bin] { stat_ ~> =(kind: Dir) => Ok },
+  dir?: #Str['bin] { stat ~> =(kind: Dir) => Ok },
 
   // Whether a path exists and is a regular file.
-  file?: #Str['bin] { stat_ ~> =(kind: File) => Ok }
+  file?: #Str['bin] { stat ~> =(kind: File) => Ok }
 ]

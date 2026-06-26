@@ -1,6 +1,6 @@
 ' = Root | Relative['int] | Path['%str, ^];
 
-join_ = #[#^ -> (' | []), ', '] {
+join = #[#^ -> (' | []), ', '] {
   =[self, p1, p2],
   [p1, p2] ~> {
     | =[_, Root] => []
@@ -12,32 +12,20 @@ join_ = #[#^ -> (' | []), ', '] {
   }
 },
 
-to_string_ = #[', '%str] {
-  | =[Root, acc] => {
-    | acc ~> %str.empty? => "/"
-    | %str.concat ["/", acc]
-  }
-  | =[Relative[0], acc] => {
-    | acc ~> %str.empty? => "."
-    | acc
-  }
+to_string = #[', '%str] {
+  | =[Root, acc] => { %str.empty? acc => "/" | %str.concat ["/", acc] }
+  | =[Relative[0], acc] => { %str.empty? acc => "." | acc }
   | =[Relative[n], acc] => {
-    prefix = {
-      | acc ~> %str.empty? => ".."
-      | %str.concat ["../", acc]
-    },
+    prefix = { %str.empty? acc => ".." | %str.concat ["../", acc] },
     %num.sub [n, 1] ~> Relative[~] ~> ^ [~, prefix]
   }
   | =[Path[s, parent], acc] => {
-    new_acc = {
-      | acc ~> %str.empty? => s
-      | %str.concat [s, "/"] ~> %str.concat [~, acc]
-    },
+    new_acc = { %str.empty? acc => s | %str.concat [s, "/"] ~> %str.concat [~, acc] },
     ^ [parent, new_acc]
   }
 },
 
-parse_ = #['%list<'%str>, '] {
+parse = #['%list<'%str>, '] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => head ~> {
     | %str.empty? => ^ [tail, acc]
@@ -58,8 +46,8 @@ parse_ = #['%list<'%str>, '] {
   parse: #'%str {
     %str.split [~, "/"] ~> %list.collect ~> {
       | =Nil => Relative[0]
-      | =Cons[first, rest], first ~> %str.empty? => parse_ [rest, Root]
-      | parse_ [~, Relative[0]]
+      | =Cons[first, rest], %str.empty? first => parse [rest, Root]
+      | parse [~, Relative[0]]
     }
   },
 
@@ -77,20 +65,20 @@ parse_ = #['%list<'%str>, '] {
   // through a `... ~> join ~> to_string` pipeline rather than being a type error. Matching the
   // module's default type (`='`, a non-nil path) leaves nil to fall through to nil.
   to_string: #(' | []) {
-    =' => to_string_ [~, ""]
+    =' => to_string [~, ""]
   },
 
   absolute?: #' {
     | =Root => Ok
-    | =Path[_, p] => p ~> ^
+    | =Path[_, p] => ^ p
   },
 
   relative?: #' {
     | =Relative[_] => Ok
-    | =Path[_, p] => p ~> ^
+    | =Path[_, p] => ^ p
   },
 
   join: #[', '] {
-    join_ [&join_, ...]
+    join [&join, ...]
   }
 ]

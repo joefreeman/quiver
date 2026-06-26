@@ -1,10 +1,8 @@
 '<'t> = Nil | Cons['t, ^];
 
-reverse_ = #<'t>['<'t>, '<'t>] {
+reverse = #<'t>['<'t>, '<'t>] {
   | =[Nil, xs] => xs
-  | =[Cons[head, tail], xs] => {
-    Cons[head, xs] ~> ^ [tail, ~]
-  }
+  | =[Cons[head, tail], xs] => Cons[head, xs] ~> ^ [tail, ~]
 },
 
 [
@@ -27,21 +25,18 @@ reverse_ = #<'t>['<'t>, '<'t>] {
   },
 
   append: #<'t>['<'t>, 't] {
-    reverse_ [$0, Nil] ~> reverse_ [Cons[$1, ~], Nil]
+    reverse [$0, Nil] ~> reverse [Cons[$1, ~], Nil]
   },
 
   reverse: #<'t>'<'t> {
-    reverse_ [~, Nil]
+    reverse [~, Nil]
   },
 
   iter: #<'t>'<'t> {
-    %iter.unfold [~, #<'t>'<'t> {
-      | =Cons[head, tail] => [head, tail]
-      | =Nil => []
-    }]
+    %iter.unfold [~, #<'t>'<'t> { =Cons[head, tail] => [head, tail] | =Nil => [] }]
   },
 
   collect: #<'t>'%iter<'t> {
-    %iter.fold [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> reverse_ [~, Nil]
+    %iter.fold [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> reverse [~, Nil]
   }
 ]

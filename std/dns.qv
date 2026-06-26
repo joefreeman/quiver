@@ -2,25 +2,10 @@
 
 [
   resolve: #Str['bin] {
-    .0
-    ~> __dns_resolve__
-    ~> =resolver,
-    %iter.unfold [resolver, #\DnsResolver {
-      =r,
-      __dns_next__ r ~> {
-        | <> => {
-          __dns_close__ r,
-          []
-        }
-        | =b ~> {
-          b
-          ~> __binary_length__
-          ~> {
-            | =4 => IPv4[b]
-            | =16 => IPv6[b]
-          }
-          ~> [~, r]
-        }
+    .0 ~> __dns_resolve__ ~> %iter.unfold [~, #\DnsResolver {
+      __dns_next__ $ ~> {
+        | <> => { __dns_close__ $, [] }
+        | =b ~> __binary_length__ ~> { =4 => IPv4[b] | =16 => IPv6[b] } ~> [~, $]
       }
     }]
   }

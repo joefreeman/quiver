@@ -1,6 +1,4 @@
-byte_bit = #'int {
-  [__integer_divide__ [$, 8], __integer_modulo__ [$, 8]]
-},
+byte_bit = #'int { [__integer_divide__ [$, 8], __integer_modulo__ [$, 8]] },
 
 [
   new: &__binary_new__,
