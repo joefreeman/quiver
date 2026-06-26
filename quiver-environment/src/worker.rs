@@ -57,6 +57,8 @@ fn payload_changed(old: &SubscriptionPayload, new: &SubscriptionPayload) -> bool
         (SubscriptionPayload::ProcessInfo(a), SubscriptionPayload::ProcessInfo(b)) => {
             process_info_changed(a, b)
         }
+        // WorkerInfo is all scalar/Vec fields, so a direct compare is cheap.
+        (SubscriptionPayload::WorkerInfo(a), SubscriptionPayload::WorkerInfo(b)) => a != b,
         // Kinds never change for a given subscription; differing variants would be a bug, but treat
         // as changed rather than silently swallow.
         _ => true,
@@ -195,6 +197,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
             SubscriptionKind::ProcessInfo { process_id } => {
                 SubscriptionPayload::ProcessInfo(self.executor.get_process_info(*process_id))
+            }
+            SubscriptionKind::WorkerInfo => {
+                SubscriptionPayload::WorkerInfo(self.executor.worker_info())
             }
         }
     }

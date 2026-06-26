@@ -2,7 +2,7 @@ use crate::WorkerId;
 use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
 use quiver_core::effects::Effect;
 use quiver_core::executor::ProgramUpdate;
-use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
+use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus, WorkerInfo};
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,6 +16,8 @@ pub enum SubscriptionKind {
     ProcessStatuses,
     /// Detailed info for a single process (stats, mailbox/heap sizes, result).
     ProcessInfo { process_id: ProcessId },
+    /// The worker's executor snapshot (heap/memory stats and owned process ids).
+    WorkerInfo,
 }
 
 /// The data a worker pushes for a subscription. Variants correspond to [`SubscriptionKind`].
@@ -23,6 +25,7 @@ pub enum SubscriptionKind {
 pub enum SubscriptionPayload {
     ProcessStatuses(HashMap<ProcessId, ProcessStatus>),
     ProcessInfo(Option<ProcessInfo>),
+    WorkerInfo(WorkerInfo),
 }
 
 /// Commands sent from Environment to Workers

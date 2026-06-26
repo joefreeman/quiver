@@ -360,6 +360,18 @@ impl SubscriptionState {
                 });
                 RequestResult::ProcessInfo(info.flatten())
             }
+            SubscriptionKind::WorkerInfo => {
+                let mut workers: Vec<quiver_core::process::WorkerInfo> = self
+                    .per_worker
+                    .values()
+                    .filter_map(|payload| match payload {
+                        SubscriptionPayload::WorkerInfo(info) => Some(info.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                workers.sort_by_key(|w| w.worker_id);
+                RequestResult::WorkerInfo(workers)
+            }
         }
     }
 }
@@ -690,6 +702,28 @@ impl<E: Effect> Environment<E> {
                 .send(Command::Subscribe {
                     subscription_id,
                     kind: SubscriptionKind::ProcessStatuses,
+                })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        Ok(subscription_id)
+    }
+
+    /// Subscribe to live worker info (executor heap/memory snapshots) across all workers. The
+    /// subscriber receives a `Vec<WorkerInfo>` sorted by worker id, refreshed on every change.
+    pub fn subscribe_worker_info(&mut self) -> Result<u64, EnvironmentError> {
+        let subscription_id = self.allocate_request_id();
+        self.subscriptions.insert(
+            subscription_id,
+            SubscriptionState {
+                kind: SubscriptionKind::WorkerInfo,
+                per_worker: HashMap::new(),
+            },
+        );
+        for worker in &mut self.workers {
+            worker
+                .send(Command::Subscribe {
+                    subscription_id,
+                    kind: SubscriptionKind::WorkerInfo,
                 })
                 .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }

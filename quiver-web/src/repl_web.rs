@@ -18,6 +18,7 @@ export type EvaluateCallback = (result: Result<EvaluationResult | null>) => void
 export type VariablesCallback = (result: Result<Variable[]>) => void;
 export type ProcessStatusesCallback = (result: Result<Process[]>) => void;
 export type ProcessInfoCallback = (result: Result<ProcessInfo | null>) => void;
+export type WorkerInfoCallback = (result: Result<WorkerInfo[]>) => void;
 
 export class Environment {
   free(): void;
@@ -71,7 +72,16 @@ export class Environment {
   subscribeProcessInfo(pid: number, callback: ProcessInfoCallback): number;
 
   /**
-   * Cancel a subscription created by `subscribeProcessStatuses` / `subscribeProcessInfo`.
+   * Subscribe to live worker info (executor heap/memory snapshots across all workers). The
+   * callback fires with an initial snapshot and again on every change, until `unsubscribe`.
+   * @param callback - Callback invoked with the worker list on every change
+   * @returns A subscription id to pass to `unsubscribe`
+   */
+  subscribeWorkerInfo(callback: WorkerInfoCallback): number;
+
+  /**
+   * Cancel a subscription created by `subscribeProcessStatuses` / `subscribeProcessInfo` /
+   * `subscribeWorkerInfo`.
    * @param subscriptionId - The id returned by the subscribe call
    */
   unsubscribe(subscriptionId: number): void;
@@ -134,9 +144,9 @@ export class Repl {
   getVariables(callback: VariablesCallback): void;
 
   /**
-   * Compact locals to remove unused variables (optimization, safe to skip)
+   * The id of this REPL's persistent process.
    */
-  compact(): void;
+  readonly processId: number;
 }
 "#;
 
@@ -578,7 +588,28 @@ impl Environment {
         }
     }
 
-    /// Cancel a subscription created by `subscribeProcessStatuses` / `subscribeProcessInfo`.
+    /// Subscribe to live worker info (executor heap/memory snapshots across all workers). The
+    /// callback fires with an initial snapshot and again on every change, until `unsubscribe`.
+    #[wasm_bindgen(js_name = "subscribeWorkerInfo")]
+    pub fn subscribe_worker_info(
+        &mut self,
+        callback: JsValue,
+    ) -> std::result::Result<f64, JsValue> {
+        let callback: js_sys::Function = callback.into();
+        match self.environment.borrow_mut().subscribe_worker_info() {
+            Ok(subscription_id) => {
+                self.subscription_callbacks
+                    .borrow_mut()
+                    .insert(subscription_id, CallbackHandle::new(callback));
+                wake(&self.pump);
+                Ok(subscription_id as f64)
+            }
+            Err(e) => Err(JsValue::from_str(&e.to_string())),
+        }
+    }
+
+    /// Cancel a subscription created by `subscribeProcessStatuses` / `subscribeProcessInfo` /
+    /// `subscribeWorkerInfo`.
     #[wasm_bindgen(js_name = "unsubscribe")]
     pub fn unsubscribe(&mut self, subscription_id: f64) {
         let subscription_id = subscription_id as u64;
@@ -693,11 +724,10 @@ impl Environment {
                 // Not used in the web API
                 callback.invoke::<()>(crate::types::Result::err("Unexpected result type: Locals"));
             }
-            RequestResult::WorkerInfo(_) => {
-                // Not used in the web API
-                callback.invoke::<()>(crate::types::Result::err(
-                    "Unexpected result type: WorkerInfo",
-                ));
+            RequestResult::WorkerInfo(workers) => {
+                let js_workers: Vec<WorkerInfo> =
+                    workers.into_iter().map(WorkerInfo::from).collect();
+                callback.invoke(crate::types::Result::ok(js_workers));
             }
             RequestResult::ProcessTypes(_) => {
                 // Process types are cached automatically by the polling loop
@@ -814,5 +844,11 @@ impl Repl {
 
         let cb = CallbackHandle::new(callback);
         cb.invoke(crate::types::Result::ok(js_vars));
+    }
+
+    /// The id of this REPL's persistent process.
+    #[wasm_bindgen(getter, js_name = "processId")]
+    pub fn process_id(&self) -> usize {
+        self.repl.borrow().process_id()
     }
 }

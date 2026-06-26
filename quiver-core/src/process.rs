@@ -39,7 +39,7 @@ pub struct ProcessHeapUsage {
 /// A worker's executor snapshot, for the `\w` inspector. Heap slots are `live + free`; `live` is
 /// reachable from a root, `free` are reclaimed-and-reusable, `pending` await the next reclamation.
 /// `constant_*` is the share of the live heap pinned by the constant-binary cache.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerInfo {
     pub worker_id: u16,
     pub process_ids: Vec<ProcessId>,

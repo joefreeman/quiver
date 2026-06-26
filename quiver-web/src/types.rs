@@ -360,6 +360,42 @@ pub struct Process {
     pub status: ProcessStatus,
 }
 
+/// A worker's executor snapshot (heap/memory stats and owned process ids), for the Workers view.
+#[derive(Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerInfo {
+    pub worker_id: usize,
+    pub process_ids: Vec<usize>,
+    pub heap_slots: usize,
+    pub live_slots: usize,
+    pub free_slots: usize,
+    pub pending_free: usize,
+    pub reclaimed: usize,
+    pub live_bytes: usize,
+    pub total_bytes: usize,
+    pub constant_slots: usize,
+    pub constant_bytes: usize,
+}
+
+impl From<quiver_core::process::WorkerInfo> for WorkerInfo {
+    fn from(w: quiver_core::process::WorkerInfo) -> Self {
+        Self {
+            worker_id: w.worker_id as usize,
+            process_ids: w.process_ids,
+            heap_slots: w.heap_slots,
+            live_slots: w.live_slots,
+            free_slots: w.free_slots,
+            pending_free: w.pending_free,
+            reclaimed: w.reclaimed,
+            live_bytes: w.live_bytes,
+            total_bytes: w.total_bytes,
+            constant_slots: w.constant_slots,
+            constant_bytes: w.constant_bytes,
+        }
+    }
+}
+
 /// Evaluation result with value and heap
 #[derive(Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi)]
