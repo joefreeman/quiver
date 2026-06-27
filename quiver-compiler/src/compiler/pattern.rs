@@ -340,19 +340,8 @@ fn analyze_match_pattern(
             // Type-ascribed binding `(T)x`: assert the value has type `T` (narrowing it), then bind
             // `name` to the whole value at the *narrowed* type, so `('int)x` binds `x: 'int`. This
             // is the `Type` check plus a whole-value binding — the type carries no bindings itself.
-            let resolved_type_id =
-                super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
-            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
-            let mut requirements = if is_compatible(value_type_id, resolved_type_id, program)
-                && narrowed_type_id == value_type_id
-            {
-                vec![]
-            } else {
-                vec![Requirement {
-                    path: path.clone(),
-                    check: RuntimeCheck::TypeId(resolved_type_id),
-                }]
-            };
+            let (mut requirements, narrowed_type_id) =
+                type_check_requirements(env, program, scopes, ast_type, value_type_id, &path)?;
             let bindings = match identifiers.get_mut(name) {
                 // A repeated binder (`=[('int)x, x]`) becomes a runtime equality check against the
                 // first occurrence, exactly like a repeated plain identifier.
@@ -424,26 +413,11 @@ fn analyze_match_pattern(
             ))
         }
         ast::Match::Type(ast_type) => {
-            // Inline type expression without & prefix
-            // Resolve the ast::Type to a type ID
-            let resolved_type_id =
-                super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
-
-            // Narrow the type by filtering compatible variants
-            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
-
-            // Only add runtime check if value_type is not already exactly the resolved type
-            let requirements = if is_compatible(value_type_id, resolved_type_id, program)
-                && narrowed_type_id == value_type_id
-            {
-                vec![] // No runtime check needed - value_type is already compatible
-            } else {
-                vec![Requirement {
-                    path,
-                    check: RuntimeCheck::TypeId(resolved_type_id),
-                }]
-            };
-
+            // A type assertion, e.g. `='int` or an intersection `=('t & 'u)`. Each intersection
+            // member is checked separately (see `type_check_requirements`); the narrowed type
+            // folds them all in.
+            let (requirements, narrowed_type_id) =
+                type_check_requirements(env, program, scopes, ast_type, value_type_id, &path)?;
             Ok((
                 vec![BindingSet {
                     requirements,
@@ -453,6 +427,39 @@ fn analyze_match_pattern(
             ))
         }
     }
+}
+
+/// Compute the runtime type-check requirements and narrowed type for a `Type` match — including a
+/// `&`-intersection. Each intersection member is checked separately (an exact `IsType` per
+/// member), so partial-type constraints compose soundly: `intersect_types` widens for partials, so
+/// a single folded `IsType` would be unsound. The narrowed type folds every member in. A member
+/// already implied by the (accumulated) value type adds no runtime check.
+fn type_check_requirements(
+    env: &mut super::typing::TypeEnv,
+    program: &mut Program,
+    scopes: &[super::scopes::Scope],
+    ast_type: &ast::Type,
+    value_type_id: usize,
+    path: &AccessPath,
+) -> Result<(Vec<Requirement>, usize), Error> {
+    let members: Vec<&ast::Type> = match ast_type {
+        ast::Type::Intersection(members) => members.iter().collect(),
+        other => vec![other],
+    };
+    let mut requirements = Vec::new();
+    let mut narrowed = value_type_id;
+    for member in members {
+        let resolved = super::typing::resolve_ast_type(env, scopes, member.clone(), program)?;
+        let next = intersect_types(narrowed, resolved, program);
+        if !(is_compatible(narrowed, resolved, program) && next == narrowed) {
+            requirements.push(Requirement {
+                path: path.clone(),
+                check: RuntimeCheck::TypeId(resolved),
+            });
+        }
+        narrowed = next;
+    }
+    Ok((requirements, narrowed))
 }
 
 /// Analyze an alternation pattern `(p | q | …)`. Each alternative is analyzed independently and

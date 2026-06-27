@@ -791,6 +791,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 Ok(())
             }
+            ast::Type::Intersection(members) => {
+                for member in members {
+                    Self::validate_type_ast(member)?;
+                }
+                Ok(())
+            }
             ast::Type::Identifier { arguments, .. }
             | ast::Type::ModuleType { arguments, .. }
             | ast::Type::SelfDefault { arguments } => {

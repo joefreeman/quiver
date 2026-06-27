@@ -144,6 +144,7 @@ fn ast_contains_cycle(typ: &ast::Type) -> bool {
     match typ {
         ast::Type::Cycle(_) => true,
         ast::Type::Union(union) => union.types.iter().any(ast_contains_cycle),
+        ast::Type::Intersection(members) => members.iter().any(ast_contains_cycle),
         ast::Type::Tuple(tuple) => tuple.fields.iter().any(|f| match f {
             ast::FieldType::Field { type_def, .. } => ast_contains_cycle(type_def),
             ast::FieldType::Spread { .. } => false,
@@ -667,6 +668,29 @@ fn resolve_ast_type_impl(
             *recursion_depth -= 1;
 
             Ok(union_type_ids(program, resolved_type_ids))
+        }
+        ast::Type::Intersection(members) => {
+            if members.is_empty() {
+                return Err(Error::TypeUnresolved("Empty intersection type".to_string()));
+            }
+            // Resolve each member and fold with `intersect_types`: the result is the most specific
+            // type satisfying all members (`never` when they're disjoint, e.g. `'int & 'bin`).
+            let mut resolved: Option<usize> = None;
+            for member_type in members {
+                let member_id = resolve_ast_type_impl(
+                    recursion_depth,
+                    env,
+                    scopes_ref,
+                    member_type,
+                    program,
+                    type_bindings,
+                )?;
+                resolved = Some(match resolved {
+                    None => member_id,
+                    Some(acc) => super::narrowing::intersect_types(acc, member_id, program),
+                });
+            }
+            Ok(resolved.expect("intersection has at least one member"))
         }
         ast::Type::Cycle(target_depth) => {
             // ^ or ^N syntax for cycle references

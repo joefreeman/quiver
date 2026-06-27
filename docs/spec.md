@@ -111,6 +111,18 @@ Type parameters are inferred from usage. When a function with type parameters is
   | Rectangle[width: 'int, height: 'int]
 ```
 
+### Intersection types
+
+`'t & 'u` is the type of values satisfying *every* member. It binds tighter than `|`, so `'t & 'u | 'v` is `('t & 'u) | 'v`. Disjoint members intersect to nothing, so `'int & 'bin` is uninhabited (it matches no value). Intersection is most useful for composing partial-type constraints:
+
+```quiver
+'readable = (read: (#'bin -> Ok))
+'writable = (write: (#'bin -> Ok))
+'rw = 'readable & 'writable          // a tuple with both fields
+
+x ~> =('rw)                          // in matching, each member is checked separately
+```
+
 ### Recursive types
 
 Use `^` to refer back to the root of the types, or `^1`/`^2`/etc to refer to ancestral type boundaries (i.e., unions) from the root.
@@ -237,7 +249,7 @@ is_valid?!     // Combined
 
 ## Pattern matching
 
-Pattern matching binds variables and tests values. Patterns can appear before a chain (`x = ...`) or within a chain (`... ~> =x`). The expression evaluates to the value being matched, or nil (`[]`) if the expression doesn't match.
+Pattern matching binds variables and tests values. Patterns can appear before a chain (`x = ...`) or within a chain (`... ~> =x`). A match **evaluates to `Ok` if it succeeds and nil (`[]`) if it fails** — the matched value does not flow onward, but any variables the pattern binds are in scope afterwards. So an in-chain match doubles as a guard, and within a `,`-separated sequence a failing match short-circuits (the basis for nil-propagation). A bare binder (`=x`) always succeeds — it binds any value, including `[]` — whereas a type, literal, or structural pattern fails when it doesn't match. To keep using a matched value, reference the variable it bound: `expr ~> =x, x ~> ...`.
 
 ### Binding
 
@@ -271,7 +283,8 @@ Mix literals with bindings to test and extract:
 Point[x: 0, y] = Point[0, 10]    // Succeeds if x=0, binds y to 10
 Point[x: 0, y] = Point[1, 10]    // Fails (evaluates to [])
 
-5 ~> =x ~> =5                    // Bind then compare
+5 ~> =5                          // Literal match (Ok)
+5 ~> =6                          // Fails ([])
 role ~> ="admin"                 // String matching
 ```
 
@@ -281,7 +294,7 @@ Use `&` to check against an existing variable, instead of binding:
 
 ```quiver
 y = 2
-2 ~> =&y                          // 2 (matches)
+2 ~> =&y                          // Ok (matches)
 3 ~> =&y                          // [] (doesn't match)
 
 Point[x, &y] = Point[1, 2]       // Binds x, checks y is 2
@@ -292,20 +305,32 @@ A[x, B[&y, C[z]]]                // Mixed; x and z bound; y pinned
 Type references need no `&`: because types are never bound, a type name (carrying its `'` prefix) is always a reference:
 
 ```quiver
-42 ~> ='int                       // 42
-A[2] ~> =A[&y]                   // A[2]
-P[x: 1, y: 2] ~> =(x: 'int)      // P[x: 1, y: 2]
+42 ~> ='int                       // Ok
+A[2] ~> =A[&y]                   // Ok
+P[x: 1, y: 2] ~> =(x: 'int)      // Ok
 ```
 
 Identifiers in patterns bind by default. Use `&` to reference an existing variable instead of binding; type references (`'int`, `'point`, …) are always references and need no `&`.
+
+### Type-ascribed binding
+
+A parenthesised type immediately followed by an identifier, `(T)x`, asserts the value's type *and* binds the whole value (at the narrowed type) to `x`. The identifier must be adjacent (no space after `)`). It composes anywhere a pattern can, including field values — so it can narrow a union variant by field type and capture the field in one step:
+
+```quiver
+42 ~> =('int)x                    // x = 42, asserted 'int
+shape ~> =A[a: ('int)n]           // matches A whose field a is an int, binds n to it
+[] ~> =('int)x                    // fails ([]) — nil isn't an int, so this propagates
+```
+
+This is also the idiom for "bind, but fail (propagate) on the wrong type": `find [...] ~> =('int)i` binds `i` only when the result is a non-nil int.
 
 ### Alternation
 
 A parenthesised, `|`-separated list of patterns is an *alternation*: it matches if any alternative matches.
 
 ```quiver
-[[], 5] ~> =([[], _] | [_, []])   // matches (first element is nil)
-42 ~> =('int | 'bin)              // 42 (type alternatives)
+[[], 5] ~> =([[], _] | [_, []])   // Ok (first element is nil)
+42 ~> =('int | 'bin)              // Ok (type alternatives)
 ```
 
 Every alternative must bind the same set of variables, so the body sees them whichever one matched:

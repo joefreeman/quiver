@@ -290,6 +290,10 @@ pub enum Type {
     Tuple(TupleType),
     Function(FunctionType),
     Union(UnionType),
+    /// A type intersection `'t & 'u`: values satisfying *every* member. Binds tighter than a
+    /// union. Resolves by intersecting the members (so `'int & 'bin` is `never`); when matched,
+    /// each member is checked separately so partial-type constraints compose soundly.
+    Intersection(Vec<Type>),
     Identifier {
         name: String,
         arguments: Vec<Type>,

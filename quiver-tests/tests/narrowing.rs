@@ -49,7 +49,8 @@ fn test_parameter_provenance_narrowing() {
 
 #[test]
 fn test_type_intersection_from_multiple_checks() {
-    // x ~> =&t ~> ^u narrows to intersection B | C
+    // Two separate type assertions on the same value narrow it to their intersection (here, B —
+    // the only common variant that `x = B` can be). The dedicated `'t & 'u` syntax is tested below.
     quiver()
         .evaluate(
             r#"
@@ -850,4 +851,74 @@ fn test_complement_narrowing_preserves_recursive_tail_computed() {
             "#,
         )
         .expect("One");
+}
+
+// --- Type intersection syntax (`'t & 'u`) ----------------------------------------------------
+// The separate-match form (`x ~> ='t, x ~> ='u`) above is still supported and tested; these check
+// the dedicated `&` syntax produces the same narrowing and matches member-by-member.
+
+#[test]
+fn test_type_intersection_syntax_matches() {
+    // `=('t & 'u)` succeeds for a value in both members, fails for a value in only one.
+    quiver()
+        .evaluate("'t = A | B | C;\n'u = B | C | D;\nB ~> =('t & 'u)")
+        .expect("Ok");
+    quiver()
+        .evaluate("'t = A | B | C;\n'u = B | C | D;\nA ~> =('t & 'u)")
+        .expect("[]");
+}
+
+#[test]
+fn test_type_intersection_syntax_narrows_like_separate_matches() {
+    // Same value, same narrowing as the separate-match form `x ~> ='t, x ~> ='u, x`.
+    quiver()
+        .evaluate(
+            r#"
+            't = A | B | C;
+            'u = B | C | D;
+            x = B,
+            x ~> =('t & 'u), x
+            "#,
+        )
+        .expect_type("B");
+}
+
+#[test]
+fn test_type_intersection_in_type_definition() {
+    // `'both = 't & 'u` resolves to the common variants and works as a parameter type.
+    quiver()
+        .evaluate(
+            r#"
+            't = A | B | C;
+            'u = B | C | D;
+            'both = 't & 'u;
+            f = #'both { $ },
+            B ~> f
+            "#,
+        )
+        .expect_type("B | C");
+}
+
+#[test]
+fn test_type_intersection_of_partials_checks_every_member() {
+    // Soundness: each member is checked separately, so a value satisfying only one partial fails —
+    // even though `intersect_types` widens partial intersections internally.
+    quiver()
+        .evaluate("[x: 1, y: 2] ~> =((x: 'int) & (y: 'int))")
+        .expect("Ok");
+    quiver()
+        .evaluate("[x: 1] ~> =((x: 'int) & (y: 'int))")
+        .expect("[]");
+}
+
+#[test]
+fn test_type_intersection_disjoint_is_never() {
+    // Disjoint members intersect to `never`, so the match can never succeed.
+    quiver().evaluate("42 ~> =('int & 'bin)").expect("[]");
+}
+
+#[test]
+fn test_type_intersection_binds_tighter_than_union() {
+    // `'a & 'b | 'c` parses as `('a & 'b) | 'c`: A matches via the `| A` arm.
+    quiver().evaluate("A ~> =('int & 'int | A)").expect("Ok");
 }

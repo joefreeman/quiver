@@ -1132,6 +1132,26 @@ fn base_type(input: Span) -> IResult<Span, Type> {
     ))(input)
 }
 
+/// A type intersection `'t & 'u & …` — one or more `base_type`s joined by `&`. Binds tighter
+/// than union (`|`), so `'t & 'u | 'v` is `('t & 'u) | 'v`. A single member is just that type.
+fn intersection_type(input: Span) -> IResult<Span, Type> {
+    map(
+        tuple((
+            base_type,
+            many0(preceded(tuple((wsc, char('&'), wsc)), base_type)),
+        )),
+        |(first, rest)| {
+            if rest.is_empty() {
+                first
+            } else {
+                let mut types = vec![first];
+                types.extend(rest);
+                Type::Intersection(types)
+            }
+        },
+    )(input)
+}
+
 fn type_definition(input: Span) -> IResult<Span, Type> {
     alt((
         function_type,
@@ -1139,10 +1159,10 @@ fn type_definition(input: Span) -> IResult<Span, Type> {
             tuple((
                 // Optional leading | for multi-line union types
                 opt(tuple((wsc, char('|'), wsc))),
-                // First type
-                base_type,
-                // Remaining types separated by |
-                many0(preceded(tuple((wsc, char('|'), wsc)), base_type)),
+                // First member (an intersection, which binds tighter than `|`)
+                intersection_type,
+                // Remaining members separated by |
+                many0(preceded(tuple((wsc, char('|'), wsc)), intersection_type)),
             )),
             |(_, first, rest)| {
                 let mut types = vec![first];
