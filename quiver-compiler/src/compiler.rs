@@ -2356,9 +2356,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         input_type: Option<usize>,
         mut narrowing: Option<&mut Narrowing>,
     ) -> Result<(usize, Provenance), Error> {
-        let has_input = input_type.is_some();
+        // The sequence's result/short-circuit type, accumulated across chains.
         let mut last_type = input_type;
         let mut last_prov = Provenance::Unknown;
+        // The value threaded into the next chain: the previous chain's result, which is left on the
+        // stack. `None` means there is no threaded value yet, so the first chain starts from the
+        // block parameter (via `implicit_continuation`) — unless the caller supplied an
+        // `input_type` (the value is then already on the stack).
+        let mut threaded: Option<(usize, Provenance)> =
+            input_type.map(|t| (t, Provenance::Unknown));
         let mut end_jumps = Vec::new();
 
         for (i, chain) in sequence.chains.iter().enumerate() {
@@ -2369,61 +2375,34 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 .map(|s| s.bindings.keys().cloned().collect())
                 .unwrap_or_default();
 
+            // A chain after the first threads from the previous chain's result (on the stack). That
+            // value is non-nil — a nil result short-circuits to the end — so strip nil from its
+            // type. The first chain has no threaded value and loads the block parameter instead.
+            let chain_input = threaded.map(|(t, p)| (self.without_nil(t), p));
+
             let (chain_type, chain_prov) = self.compile_chain_with_input(
                 chain.clone(),
                 on_no_match,
                 None,
-                if i == 0 {
-                    last_type.map(|t| (t, Provenance::Unknown))
-                } else {
-                    None
-                },
+                chain_input,
                 narrowing.as_deref_mut(),
-                true, // implicit_continuation: block-level chains load parameter
+                true, // implicit_continuation: only consulted for the first chain (no threaded input)
                 None,
             )?;
 
-            // Check if the previous type contained nil and we're not on the first chain
+            // If a prior chain could short-circuit to nil, the sequence's result includes nil.
             let should_propagate_nil =
                 i > 0 && last_type.as_ref().is_some_and(|&t| self.contains_nil(t));
-
-            // Special handling when input_type was provided (consequence with multiple chains)
-            // In this case, chains are alternatives and we should combine their success types
-            if has_input && i > 0 {
-                // Strip nil from previous chains since it causes jump to next chain
-                let prev_success_types: Vec<usize> = if let Some(prev) = last_type {
-                    if let Some(ty) = self.program.lookup_type(prev) {
-                        match ty {
-                            Type::Union(types) => types
-                                .iter()
-                                .filter(|&type_id| !self.is_nil(*type_id))
-                                .copied()
-                                .collect(),
-                            _ if !self.is_nil(prev) => vec![prev],
-                            _ => vec![],
-                        }
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
-
-                let mut combined = prev_success_types;
-                combined.push(chain_type);
-                last_type = Some(typing::union_type_ids(self.program, combined));
-                // Multiple chains = unknown provenance
-                last_prov = Provenance::Unknown;
+            last_type = Some(if should_propagate_nil {
+                let nil_type_id = self.program.register_type(Type::nil());
+                typing::union_type_ids(self.program, vec![chain_type, nil_type_id])
             } else {
-                // Normal case: propagate nil if previous chain could be nil
-                last_type = Some(if should_propagate_nil {
-                    let nil_type_id = self.program.register_type(Type::nil());
-                    typing::union_type_ids(self.program, vec![chain_type, nil_type_id])
-                } else {
-                    chain_type
-                });
-                last_prov = chain_prov;
-            }
+                chain_type
+            });
+            last_prov = chain_prov.clone();
+
+            // Thread this chain's result into the next chain.
+            threaded = Some((chain_type, chain_prov));
 
             // If last_type is NIL, subsequent chains are unreachable - break early
             if let Some(last_type_id) = last_type
@@ -2433,11 +2412,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
 
             if i < sequence.chains.len() - 1 {
-                let end_jump = self.codegen.emit_duplicate_jump_if_nil_pop();
+                // Keep the result on the stack for the next chain (threading); short-circuit to the
+                // end of the sequence if it is nil.
+                let end_jump = self.codegen.emit_duplicate_jump_if_nil();
                 end_jumps.push(end_jump);
 
                 // After the jump, if chain could be nil, narrow bindings created in this chain.
-                // This handles cases like `a ~> =x, %num.add[x, 1]` where x needs to be
+                // This handles cases like `a ~> =x, [x, 1] ~> %num.add` where x needs to be
                 // narrowed before the next chain uses it.
                 if self.contains_nil(chain_type) {
                     narrow_nil_from_new_bindings(

@@ -66,18 +66,10 @@ impl InstructionBuilder {
         self.add_instruction(Instruction::JumpIf(offset));
     }
 
-    /// Emits common pattern: Duplicate -> Not -> JumpIf (returns jump address for patching) -> Pop
-    /// Used for early termination when value is nil
-    pub fn emit_duplicate_jump_if_nil_pop(&mut self) -> usize {
-        self.add_instruction(Instruction::Duplicate);
-        self.add_instruction(Instruction::Not);
-        let jump_addr = self.emit_jump_if_placeholder();
-        self.add_instruction(Instruction::Pop);
-        jump_addr
-    }
-
-    /// Like emit_duplicate_jump_if_nil_pop, but keeps the value on the stack
-    /// for use by a consequence expression. Jumps if nil, otherwise leaves value on stack.
+    /// Emits the common pattern Duplicate -> Not -> JumpIf (returns the jump address for patching),
+    /// keeping the tested value on the stack on both paths. Used to short-circuit a sequence on a
+    /// nil step while threading the (non-nil) value into the next step, and to keep a condition's
+    /// value available to its consequence.
     pub fn emit_duplicate_jump_if_nil(&mut self) -> usize {
         self.add_instruction(Instruction::Duplicate);
         self.add_instruction(Instruction::Not);
