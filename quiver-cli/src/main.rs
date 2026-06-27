@@ -77,6 +77,13 @@ enum Commands {
     Inspect {
         input: Option<String>,
     },
+
+    Format {
+        input: Option<String>,
+
+        #[arg(short, long)]
+        eval: Option<String>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -95,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             profile,
         }) => run_command(input, eval, quiet, profile)?,
         Some(Commands::Inspect { input }) => inspect_command(input)?,
+        Some(Commands::Format { input, eval }) => format_command(input, eval)?,
         None => run_repl()?,
     }
 
@@ -261,6 +269,31 @@ fn compile_command(
     } else {
         println!("{}", json);
     }
+
+    Ok(())
+}
+
+/// Parse source and print it back as canonical argument-first Quiver source.
+fn format_command(
+    input: Option<String>,
+    eval: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (source, source_id) = if let Some(code) = eval {
+        (code, "eval".to_string())
+    } else if let Some(path) = input {
+        (fs::read_to_string(&path)?, path)
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+        (buffer, "stdin".to_string())
+    };
+
+    let ast = match parse(&source) {
+        Ok(ast) => ast,
+        Err(e) => handle_parse_error(e, &source, &source_id),
+    };
+
+    println!("{}", quiver_compiler::format_program(&ast));
 
     Ok(())
 }

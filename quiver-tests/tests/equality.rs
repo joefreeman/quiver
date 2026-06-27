@@ -47,7 +47,7 @@ fn test_structural_equality_across_construction() {
     quiver()
         .evaluate(
             "mk = #<'t>['t, 't] { =[x, y], Cons[x, Cons[y, Nil]] }, \
-             [Cons[1, Cons[2, Nil]], mk [1, 2]] ~> ==",
+             [Cons[1, Cons[2, Nil]], [1, 2] ~> mk] ~> ==",
         )
         .expect("Cons[1, Cons[2, Nil]]");
 }

@@ -6,10 +6,10 @@ fn test_map() {
     quiver()
         .evaluate(
             r#"
-            inc = #'int { %num.add [~, 1] },
+            inc = #'int { [~, 1] ~> %num.add },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.map [~, &inc]
+            ~> [~, &inc] ~> %iter.map
             ~> %list.collect
             "#,
         )
@@ -21,10 +21,10 @@ fn test_filter() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.filter [~, &even?]
+            ~> [~, &even?] ~> %iter.filter
             ~> %list.collect
             "#,
         )
@@ -38,7 +38,7 @@ fn test_take() {
             r#"
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.take [~, 3]
+            ~> [~, 3] ~> %iter.take
             ~> %list.collect
             "#,
         )
@@ -52,7 +52,7 @@ fn test_drop() {
             r#"
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.drop [~, 2]
+            ~> [~, 2] ~> %iter.drop
             ~> %list.collect
             "#,
         )
@@ -66,7 +66,7 @@ fn test_take_while() {
             r#"
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.take_while [~, #'int { =3 ~> <> }]
+            ~> [~, #'int { =3 ~> <> }] ~> %iter.take_while
             ~> %list.collect
             "#,
         )
@@ -80,7 +80,7 @@ fn test_drop_while() {
             r#"
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.drop_while [~, #'int { =2 ~> <> }]
+            ~> [~, #'int { =2 ~> <> }] ~> %iter.drop_while
             ~> %list.collect
             "#,
         )
@@ -95,7 +95,7 @@ fn test_flat_map() {
             f = #'int { Cons[~, Cons[~, Nil]] ~> %list.iter },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.flat_map [~, &f]
+            ~> [~, &f] ~> %iter.flat_map
             ~> %list.collect
             "#,
         )
@@ -150,7 +150,7 @@ fn test_cycle() {
             Cons[1, Cons[2, Nil]]
             ~> %list.iter
             ~> %iter.cycle
-            ~> %iter.take [~, 5]
+            ~> [~, 5] ~> %iter.take
             ~> %list.collect
             "#,
         )
@@ -164,7 +164,7 @@ fn test_repeat() {
             r#"
             42
             ~> %iter.repeat
-            ~> %iter.take [~, 3]
+            ~> [~, 3] ~> %iter.take
             ~> %list.collect
             "#,
         )
@@ -178,7 +178,7 @@ fn test_fold() {
             r#"
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.fold [~, 0, &%num.add]
+            ~> [~, 0, &%num.add] ~> %iter.fold
             "#,
         )
         .expect("6");
@@ -191,7 +191,7 @@ fn test_find() {
             r#"
             Cons[10, Cons[20, Cons[30, Nil]]]
             ~> %list.iter
-            ~> %iter.find [~, #'int { %num.gt? [~, 15] }]
+            ~> [~, #'int { [~, 15] ~> %num.gt? }] ~> %iter.find
             "#,
         )
         .expect("20");
@@ -202,10 +202,10 @@ fn test_any() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.any? [~, &even?]
+            ~> [~, &even?] ~> %iter.any?
             "#,
         )
         .expect("Ok");
@@ -213,10 +213,10 @@ fn test_any() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Cons[1, Cons[3, Nil]]
             ~> %list.iter
-            ~> %iter.any? [~, &even?]
+            ~> [~, &even?] ~> %iter.any?
             "#,
         )
         .expect("[]");
@@ -224,10 +224,10 @@ fn test_any() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Nil
             ~> %list.iter
-            ~> %iter.any? [~, &even?]
+            ~> [~, &even?] ~> %iter.any?
             "#,
         )
         .expect("[]");
@@ -238,10 +238,10 @@ fn test_all() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Cons[2, Cons[4, Cons[6, Nil]]]
             ~> %list.iter
-            ~> %iter.all? [~, &even?]
+            ~> [~, &even?] ~> %iter.all?
             "#,
         )
         .expect("Ok");
@@ -249,10 +249,10 @@ fn test_all() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Cons[1, Cons[3, Nil]]
             ~> %list.iter
-            ~> %iter.all? [~, &even?]
+            ~> [~, &even?] ~> %iter.all?
             "#,
         )
         .expect("[]");
@@ -260,10 +260,10 @@ fn test_all() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Nil
             ~> %list.iter
-            ~> %iter.all? [~, &even?]
+            ~> [~, &even?] ~> %iter.all?
             "#,
         )
         .expect("Ok");
@@ -299,7 +299,7 @@ fn test_nth() {
             r#"
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.nth [~, 1]
+            ~> [~, 1] ~> %iter.nth
             "#,
         )
         .expect("2");
@@ -309,7 +309,7 @@ fn test_nth() {
             r#"
             Cons[1, Nil]
             ~> %list.iter
-            ~> %iter.nth [~, 1]
+            ~> [~, 1] ~> %iter.nth
             "#,
         )
         .expect("[]");
@@ -326,8 +326,8 @@ fn test_filter_long_skip_run_is_tail_recursive() {
             50000
             ~> %range.to
             ~> %range.iter
-            ~> %iter.filter [~, #'int { =49999 }]
-            ~> %iter.nth [~, 0]
+            ~> [~, #'int { =49999 }] ~> %iter.filter
+            ~> [~, 0] ~> %iter.nth
             "#,
         )
         .expect("49999");
@@ -338,10 +338,10 @@ fn test_find_index() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.find_index [~, &even?]
+            ~> [~, &even?] ~> %iter.find_index
             "#,
         )
         .expect("1");
@@ -349,10 +349,10 @@ fn test_find_index() {
     quiver()
         .evaluate(
             r#"
-            even? = #'int { %int.mod [~, 2] ~> =0 },
+            even? = #'int { [~, 2] ~> %int.mod ~> =0 },
             Cons[1, Nil]
             ~> %list.iter
-            ~> %iter.find_index [~, &even?]
+            ~> [~, &even?] ~> %iter.find_index
             "#,
         )
         .expect("[]");
@@ -365,7 +365,7 @@ fn test_intersperse() {
             r#"
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.intersperse [~, 0]
+            ~> [~, 0] ~> %iter.intersperse
             ~> %list.collect
             "#,
         )
@@ -376,7 +376,7 @@ fn test_intersperse() {
             r#"
             Cons[42, Nil]
             ~> %list.iter
-            ~> %iter.intersperse [~, 0]
+            ~> [~, 0] ~> %iter.intersperse
             ~> %list.collect
             "#,
         )
@@ -387,7 +387,7 @@ fn test_intersperse() {
             r#"
             Nil
             ~> %list.iter
-            ~> %iter.intersperse [~, 0]
+            ~> [~, 0] ~> %iter.intersperse
             ~> %list.collect
             "#,
         )

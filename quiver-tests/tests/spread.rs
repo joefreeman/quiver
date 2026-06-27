@@ -83,7 +83,7 @@ fn test_spread_union_single_spread() {
             r#"
             't = [x: 'int] | [y: 'int];
             f = #[v: 't] { =[v: v] => [z: 0, ...v] },
-            f [v: [x: 1]]
+            [v: [x: 1]] ~> f
             "#,
         )
         .expect("[z: 0, x: 1]");
@@ -97,7 +97,7 @@ fn test_spread_union_cartesian_product() {
             'ta = [x: 'int] | [y: 'int];
             'tb = [z: 'int] | [w: 'int];
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
-            f [a: [x: 1], b: [z: 2]]
+            [a: [x: 1], b: [z: 2]] ~> f
             "#,
         )
         .expect("[x: 1, z: 2]");
@@ -111,7 +111,7 @@ fn test_spread_union_multiple_spreads() {
             'ta = [x: 'int];
             'tb = [z: 'int] | [w: 'int];
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
-            f [a: [x: 1], b: [w: 2]]
+            [a: [x: 1], b: [w: 2]] ~> f
             "#,
         )
         .expect("[x: 1, w: 2]");
@@ -125,7 +125,7 @@ fn test_spread_same_fields_different_sources() {
             'ta = [x: 'int];
             'tb = [x: 'int, y: 'int] | [y: 'int];
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
-            [f [a: [x: 1], b: [x: 2, y: 3]], f [a: [x: 4], b: [y: 5]]]
+            [[a: [x: 1], b: [x: 2, y: 3]] ~> f, [a: [x: 4], b: [y: 5]] ~> f]
             "#,
         )
         .expect("[[x: 2, y: 3], [x: 4, y: 5]]");

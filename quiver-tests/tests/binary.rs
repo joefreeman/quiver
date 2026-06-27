@@ -232,22 +232,22 @@ fn test_append() {
 fn test_index() {
     // 'hello' = 68 65 6c 6c 6f; find 'l' (0x6c) and 'o' (0x6f).
     quiver()
-        .evaluate("%bin.index [0x68656c6c6f, 108, 0]")
+        .evaluate("[0x68656c6c6f, 108, 0] ~> %bin.index")
         .expect("2");
     // Search respects the offset: the second 'l' is at index 3.
     quiver()
-        .evaluate("%bin.index [0x68656c6c6f, 108, 3]")
+        .evaluate("[0x68656c6c6f, 108, 3] ~> %bin.index")
         .expect("3");
     quiver()
-        .evaluate("%bin.index [0x68656c6c6f, 111, 0]")
+        .evaluate("[0x68656c6c6f, 111, 0] ~> %bin.index")
         .expect("4");
     // Absent byte yields nil.
     quiver()
-        .evaluate("%bin.index [0x68656c6c6f, 122, 0]")
+        .evaluate("[0x68656c6c6f, 122, 0] ~> %bin.index")
         .expect("[]");
     // Offset past the end yields nil.
     quiver()
-        .evaluate("%bin.index [0x68656c6c6f, 104, 5]")
+        .evaluate("[0x68656c6c6f, 104, 5] ~> %bin.index")
         .expect("[]");
 }
 
@@ -255,6 +255,6 @@ fn test_index() {
 fn test_index_across_concat() {
     // Concatenation builds a rope; search must cross the boundary. '6162' ++ '0a63' -> ab\nc.
     quiver()
-        .evaluate("[0x6162, 0x0a63] ~> %bin.concat ~> %bin.index [~, 10, 0]")
+        .evaluate("[0x6162, 0x0a63] ~> %bin.concat ~> [~, 10, 0] ~> %bin.index")
         .expect("2");
 }

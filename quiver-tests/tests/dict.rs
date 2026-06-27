@@ -15,7 +15,8 @@ const FROM: &str = r#"
 // holding both (which forms a single `Collision` node).
 const KA: &str = "0x0a59538016";
 const KB: &str = "0xfd3eb827ca";
-const DA: &str = "%dict.new ~> %dict.put [~, 0x0a59538016, 1] ~> %dict.put [~, 0xfd3eb827ca, 2]";
+const DA: &str =
+    "%dict.new ~> [~, 0x0a59538016, 1] ~> %dict.put ~> [~, 0xfd3eb827ca, 2] ~> %dict.put";
 
 #[test]
 fn test_collision_forms_collision_node() {
@@ -30,10 +31,10 @@ fn test_collision_forms_collision_node() {
 #[test]
 fn test_collision_get_both() {
     quiver()
-        .evaluate(&format!("{DA} ~> %dict.get [~, {KA}]"))
+        .evaluate(&format!("{DA} ~> [~, {KA}] ~> %dict.get"))
         .expect("1");
     quiver()
-        .evaluate(&format!("{DA} ~> %dict.get [~, {KB}]"))
+        .evaluate(&format!("{DA} ~> [~, {KB}] ~> %dict.get"))
         .expect("2");
 }
 
@@ -49,16 +50,16 @@ fn test_collision_overwrite() {
     // overwriting one colliding key updates only its bucket entry, leaving the other intact
     quiver()
         .evaluate(&format!(
-            "{DA} ~> %dict.put [~, {KA}, 9] ~> %dict.get [~, {KA}]"
+            "{DA} ~> [~, {KA}, 9] ~> %dict.put ~> [~, {KA}] ~> %dict.get"
         ))
         .expect("9");
     quiver()
         .evaluate(&format!(
-            "{DA} ~> %dict.put [~, {KA}, 9] ~> %dict.get [~, {KB}]"
+            "{DA} ~> [~, {KA}, 9] ~> %dict.put ~> [~, {KB}] ~> %dict.get"
         ))
         .expect("2");
     quiver()
-        .evaluate(&format!("{DA} ~> %dict.put [~, {KA}, 9] ~> %dict.count"))
+        .evaluate(&format!("{DA} ~> [~, {KA}, 9] ~> %dict.put ~> %dict.count"))
         .expect("2");
 }
 
@@ -67,16 +68,16 @@ fn test_collision_remove_one() {
     // removing one colliding key leaves the other retrievable; the removed key is gone
     quiver()
         .evaluate(&format!(
-            "{DA} ~> %dict.remove [~, {KA}] ~> %dict.get [~, {KB}]"
+            "{DA} ~> [~, {KA}] ~> %dict.remove ~> [~, {KB}] ~> %dict.get"
         ))
         .expect("2");
     quiver()
         .evaluate(&format!(
-            "{DA} ~> %dict.remove [~, {KA}] ~> %dict.get [~, {KA}]"
+            "{DA} ~> [~, {KA}] ~> %dict.remove ~> [~, {KA}] ~> %dict.get"
         ))
         .expect("[]");
     quiver()
-        .evaluate(&format!("{DA} ~> %dict.remove [~, {KA}] ~> %dict.count"))
+        .evaluate(&format!("{DA} ~> [~, {KA}] ~> %dict.remove ~> %dict.count"))
         .expect("1");
 }
 
@@ -84,7 +85,9 @@ fn test_collision_remove_one() {
 fn test_collision_remove_absent() {
     // removing a non-colliding, absent key leaves the bucket intact
     quiver()
-        .evaluate(&format!(r#"{DA} ~> %dict.remove [~, "zz"] ~> %dict.count"#))
+        .evaluate(&format!(
+            r#"{DA} ~> [~, "zz"] ~> %dict.remove ~> %dict.count"#
+        ))
         .expect("2");
 }
 
@@ -93,11 +96,11 @@ fn test_collision_remove_all() {
     // emptying a collision bucket collapses to Empty (no nil corruption) and the dict is reusable
     quiver()
         .evaluate(&format!(
-            "{DA} ~> %dict.remove [~, {KA}] ~> %dict.remove [~, {KB}] ~> %dict.count"
+            "{DA} ~> [~, {KA}] ~> %dict.remove ~> [~, {KB}] ~> %dict.remove ~> %dict.count"
         ))
         .expect("0");
     quiver()
-        .evaluate(&format!(r#"{DA} ~> %dict.remove [~, {KA}] ~> %dict.remove [~, {KB}] ~> %dict.put [~, "c", 5] ~> %dict.get [~, "c"]"#))
+        .evaluate(&format!(r#"{DA} ~> [~, {KA}] ~> %dict.remove ~> [~, {KB}] ~> %dict.remove ~> [~, "c", 5] ~> %dict.put ~> [~, "c"] ~> %dict.get"#))
         .expect("5");
 }
 
@@ -110,8 +113,8 @@ fn test_canonical_insertion_order_independent() {
     quiver()
         .evaluate(
             r#"
-            d1 = %dict.new ~> %dict.put [~, "alpha", 1] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "charlie", 3],
-            d2 = %dict.new ~> %dict.put [~, "charlie", 3] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "alpha", 1],
+            d1 = %dict.new ~> [~, "alpha", 1] ~> %dict.put ~> [~, "bravo", 2] ~> %dict.put ~> [~, "charlie", 3] ~> %dict.put,
+            d2 = %dict.new ~> [~, "charlie", 3] ~> %dict.put ~> [~, "bravo", 2] ~> %dict.put ~> [~, "alpha", 1] ~> %dict.put,
             [d1, d2] ~> == ~> <> ~> <>
         "#,
         )
@@ -124,8 +127,8 @@ fn test_canonical_remove_matches_direct_build() {
     quiver()
         .evaluate(
             r#"
-            d1 = %dict.new ~> %dict.put [~, "alpha", 1] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "charlie", 3] ~> %dict.put [~, "delta", 4] ~> %dict.remove [~, "charlie"],
-            d2 = %dict.new ~> %dict.put [~, "alpha", 1] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "delta", 4],
+            d1 = %dict.new ~> [~, "alpha", 1] ~> %dict.put ~> [~, "bravo", 2] ~> %dict.put ~> [~, "charlie", 3] ~> %dict.put ~> [~, "delta", 4] ~> %dict.put ~> [~, "charlie"] ~> %dict.remove,
+            d2 = %dict.new ~> [~, "alpha", 1] ~> %dict.put ~> [~, "bravo", 2] ~> %dict.put ~> [~, "delta", 4] ~> %dict.put,
             [d1, d2] ~> == ~> <> ~> <>
         "#,
         )
@@ -137,7 +140,7 @@ fn test_canonical_collision_remove_matches_direct_build() {
     // a collision that loses one entry equals directly building the single-key dict
     quiver()
         .evaluate(&format!(
-            "[{DA} ~> %dict.remove [~, {KA}], %dict.new ~> %dict.put [~, {KB}, 2]] ~> == ~> <> ~> <>"
+            "[{DA} ~> [~, {KA}] ~> %dict.remove, %dict.new ~> [~, {KB}, 2] ~> %dict.put] ~> == ~> <> ~> <>"
         ))
         .expect("Ok");
 }
@@ -147,7 +150,7 @@ fn test_remove_collapses_node_to_leaf() {
     // removing one of two keys under a Node hoists the lone surviving Leaf up to where the Node
     // was — the same shape as a one-key dict — rather than leaving a degenerate single-child Node.
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.put [~, "b", 2] ~> %dict.remove [~, "b"]"#)
+        .evaluate(r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "b", 2] ~> %dict.put ~> [~, "b"] ~> %dict.remove"#)
         .expect(r#"Leaf[3826002220, "a", 1]"#);
 }
 
@@ -155,14 +158,14 @@ fn test_remove_collapses_node_to_leaf() {
 fn test_remove_collapses_collision_to_leaf() {
     // removing one of two colliding keys collapses the Collision bucket back to a Leaf
     quiver()
-        .evaluate(&format!("{DA} ~> %dict.remove [~, {KA}]"))
+        .evaluate(&format!("{DA} ~> [~, {KA}] ~> %dict.remove"))
         .expect(r#"Leaf[3521592947, 0xfd3eb827ca, 2]"#);
 }
 
 #[test]
 fn test_new_get_empty() {
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.get [~, "a"]"#)
+        .evaluate(r#"%dict.new ~> [~, "a"] ~> %dict.get"#)
         .expect("[]");
 }
 
@@ -170,7 +173,7 @@ fn test_new_get_empty() {
 fn test_put_get() {
     quiver()
         .evaluate(
-            r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.put [~, "b", 2] ~> %dict.get [~, "b"]"#,
+            r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "b", 2] ~> %dict.put ~> [~, "b"] ~> %dict.get"#,
         )
         .expect("2");
 }
@@ -178,7 +181,7 @@ fn test_put_get() {
 #[test]
 fn test_get_missing() {
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.get [~, "z"]"#)
+        .evaluate(r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "z"] ~> %dict.get"#)
         .expect("[]");
 }
 
@@ -186,7 +189,7 @@ fn test_get_missing() {
 fn test_overwrite() {
     quiver()
         .evaluate(
-            r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.put [~, "a", 99] ~> %dict.get [~, "a"]"#,
+            r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "a", 99] ~> %dict.put ~> [~, "a"] ~> %dict.get"#,
         )
         .expect("99");
 }
@@ -194,45 +197,49 @@ fn test_overwrite() {
 #[test]
 fn test_overwrite_keeps_count() {
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.put [~, "a", 9] ~> %dict.count"#)
+        .evaluate(
+            r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "a", 9] ~> %dict.put ~> %dict.count"#,
+        )
         .expect("1");
 }
 
 #[test]
 fn test_binary_keys() {
     quiver()
-        .evaluate("%dict.new ~> %dict.put [~, 0x01, 7] ~> %dict.get [~, 0x01]")
+        .evaluate("%dict.new ~> [~, 0x01, 7] ~> %dict.put ~> [~, 0x01] ~> %dict.get")
         .expect("7");
 }
 
 #[test]
 fn test_has() {
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.has? [~, "a"]"#)
+        .evaluate(r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "a"] ~> %dict.has?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.has? [~, "q"]"#)
+        .evaluate(r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "q"] ~> %dict.has?"#)
         .expect("[]");
 }
 
 #[test]
 fn test_remove() {
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.put [~, "b", 2] ~> %dict.remove [~, "b"] ~> %dict.get [~, "b"]"#)
+        .evaluate(r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "b", 2] ~> %dict.put ~> [~, "b"] ~> %dict.remove ~> [~, "b"] ~> %dict.get"#)
         .expect("[]");
 }
 
 #[test]
 fn test_remove_keeps_others() {
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.put [~, "b", 2] ~> %dict.remove [~, "b"] ~> %dict.get [~, "a"]"#)
+        .evaluate(r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "b", 2] ~> %dict.put ~> [~, "b"] ~> %dict.remove ~> [~, "a"] ~> %dict.get"#)
         .expect("1");
 }
 
 #[test]
 fn test_remove_absent_noop() {
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "a", 1] ~> %dict.remove [~, "z"] ~> %dict.count"#)
+        .evaluate(
+            r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "z"] ~> %dict.remove ~> %dict.count"#,
+        )
         .expect("1");
 }
 
@@ -242,9 +249,9 @@ fn test_immutability() {
     quiver()
         .evaluate(
             r#"
-            d = %dict.new ~> %dict.put [~, "a", 1],
-            d ~> %dict.put [~, "a", 99],
-            d ~> %dict.get [~, "a"]
+            d = %dict.new ~> [~, "a", 1] ~> %dict.put,
+            d ~> [~, "a", 99] ~> %dict.put,
+            d ~> [~, "a"] ~> %dict.get
         "#,
         )
         .expect("1");
@@ -260,13 +267,13 @@ fn test_count_many() {
 #[test]
 fn test_get_many() {
     quiver()
-        .evaluate(&format!(r#"{FROM} ~> %dict.get [~, "golf"]"#))
+        .evaluate(&format!(r#"{FROM} ~> [~, "golf"] ~> %dict.get"#))
         .expect("7");
     quiver()
-        .evaluate(&format!(r#"{FROM} ~> %dict.get [~, "lima"]"#))
+        .evaluate(&format!(r#"{FROM} ~> [~, "lima"] ~> %dict.get"#))
         .expect("12");
     quiver()
-        .evaluate(&format!(r#"{FROM} ~> %dict.get [~, "alpha"]"#))
+        .evaluate(&format!(r#"{FROM} ~> [~, "alpha"] ~> %dict.get"#))
         .expect("1");
 }
 
@@ -274,7 +281,7 @@ fn test_get_many() {
 fn test_remove_many_then_count() {
     quiver()
         .evaluate(&format!(
-            r#"{FROM} ~> %dict.remove [~, "echo"] ~> %dict.count"#
+            r#"{FROM} ~> [~, "echo"] ~> %dict.remove ~> %dict.count"#
         ))
         .expect("11");
 }
@@ -283,13 +290,13 @@ fn test_remove_many_then_count() {
 fn test_remove_many_then_get() {
     quiver()
         .evaluate(&format!(
-            r#"{FROM} ~> %dict.remove [~, "echo"] ~> %dict.get [~, "echo"]"#
+            r#"{FROM} ~> [~, "echo"] ~> %dict.remove ~> [~, "echo"] ~> %dict.get"#
         ))
         .expect("[]");
     // an unrelated key survives the removal
     quiver()
         .evaluate(&format!(
-            r#"{FROM} ~> %dict.remove [~, "echo"] ~> %dict.get [~, "india"]"#
+            r#"{FROM} ~> [~, "echo"] ~> %dict.remove ~> [~, "india"] ~> %dict.get"#
         ))
         .expect("9");
 }
@@ -297,7 +304,7 @@ fn test_remove_many_then_get() {
 #[test]
 fn test_from_later_wins() {
     quiver()
-        .evaluate(r#"Cons[["k", 1], Cons[["k", 2], Nil]] ~> %dict.from ~> %dict.get [~, "k"]"#)
+        .evaluate(r#"Cons[["k", 1], Cons[["k", 2], Nil]] ~> %dict.from ~> [~, "k"] ~> %dict.get"#)
         .expect("2");
 }
 
@@ -306,9 +313,9 @@ fn test_merge_b_wins() {
     quiver()
         .evaluate(
             r#"
-            a = %dict.new ~> %dict.put [~, "k", 1],
-            b = %dict.new ~> %dict.put [~, "k", 9],
-            %dict.merge [a, b] ~> %dict.get [~, "k"]
+            a = %dict.new ~> [~, "k", 1] ~> %dict.put,
+            b = %dict.new ~> [~, "k", 9] ~> %dict.put,
+            [a, b] ~> %dict.merge ~> [~, "k"] ~> %dict.get
         "#,
         )
         .expect("9");
@@ -319,9 +326,9 @@ fn test_merge_keeps_disjoint() {
     quiver()
         .evaluate(
             r#"
-            a = %dict.new ~> %dict.put [~, "x", 1],
-            b = %dict.new ~> %dict.put [~, "y", 2],
-            %dict.merge [a, b] ~> %dict.get [~, "x"]
+            a = %dict.new ~> [~, "x", 1] ~> %dict.put,
+            b = %dict.new ~> [~, "y", 2] ~> %dict.put,
+            [a, b] ~> %dict.merge ~> [~, "x"] ~> %dict.get
         "#,
         )
         .expect("1");
@@ -339,7 +346,7 @@ fn test_iter_sum_values() {
     // sum every value via the entry iterator: 1 + 2 + ... + 12 = 78
     quiver()
         .evaluate(&format!(
-            "{FROM} ~> %dict.iter ~> %iter.map [~, #['bin, 'int] {{ $1 }}] ~> %iter.fold [~, 0, #['int, 'int] {{ %num.add }}]"
+            "{FROM} ~> %dict.iter ~> [~, #['bin, 'int] {{ $1 }}] ~> %iter.map ~> [~, 0, #['int, 'int] {{ %num.add }}] ~> %iter.fold"
         ))
         .expect("78");
 }
@@ -348,7 +355,7 @@ fn test_iter_sum_values() {
 fn test_keys_present() {
     // every original key is found via has?
     quiver()
-        .evaluate(&format!(r#"{FROM} ~> =d, ["alpha", "delta", "kilo"] ~> {{ =[a, b, c], [d ~> %dict.has? [~, a], d ~> %dict.has? [~, b], d ~> %dict.has? [~, c]] }}"#))
+        .evaluate(&format!(r#"{FROM} ~> =d, ["alpha", "delta", "kilo"] ~> {{ =[a, b, c], [d ~> [~, a] ~> %dict.has?, d ~> [~, b] ~> %dict.has?, d ~> [~, c] ~> %dict.has?] }}"#))
         .expect("[Ok, Ok, Ok]");
 }
 
@@ -359,11 +366,11 @@ fn test_repl_continuation_across_lines() {
     // type that balloons across lines — which previously overflowed the stack on the third line.
     quiver()
         .evaluate("%dict.new")
-        .then_evaluate(r#"%dict.put [~, "a", 1]"#)
-        .then_evaluate(r#"%dict.put [~, "b", 2]"#)
-        .then_evaluate(r#"%dict.put [~, "c", 3]"#)
-        .then_evaluate(r#"%dict.remove [~, "a"]"#)
-        .then_evaluate(r#"%dict.get [~, "c"]"#)
+        .then_evaluate(r#"[~, "a", 1] ~> %dict.put"#)
+        .then_evaluate(r#"[~, "b", 2] ~> %dict.put"#)
+        .then_evaluate(r#"[~, "c", 3] ~> %dict.put"#)
+        .then_evaluate(r#"[~, "a"] ~> %dict.remove"#)
+        .then_evaluate(r#"[~, "c"] ~> %dict.get"#)
         .expect("3");
 }
 
@@ -372,10 +379,10 @@ fn test_string_and_binary_keys_distinct() {
     // The string "A" (Str[0x41]) and the raw binary 0x41 are distinct keys.
     quiver()
         .evaluate(
-            r#"%dict.new ~> %dict.put [~, "A", 1] ~> %dict.put [~, 0x41, 2] ~> %dict.get [~, "A"]"#,
+            r#"%dict.new ~> [~, "A", 1] ~> %dict.put ~> [~, 0x41, 2] ~> %dict.put ~> [~, "A"] ~> %dict.get"#,
         )
         .expect("1");
     quiver()
-        .evaluate(r#"%dict.new ~> %dict.put [~, "A", 1] ~> %dict.put [~, 0x41, 2] ~> %dict.get [~, 0x41]"#)
+        .evaluate(r#"%dict.new ~> [~, "A", 1] ~> %dict.put ~> [~, 0x41, 2] ~> %dict.put ~> [~, 0x41] ~> %dict.get"#)
         .expect("2");
 }

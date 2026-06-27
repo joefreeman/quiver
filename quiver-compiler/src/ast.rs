@@ -85,12 +85,10 @@ pub enum Term {
     Access(Access),
     Equality,
     Not,
-    /// Spawn a process from a function (`@f`, `@~`, `@{ … }`). The optional second field is a
-    /// juxtaposed init argument (`@f x`); `None` means the argument comes from the chained value
-    /// (`x ~> @f`) or is nil. The argument follows the same flow rules as a call argument: for a
-    /// named/literal function the chained value flows into it; for a ripple function (`@~`) the
-    /// chained value *is* the function, so the argument is evaluated without it.
-    Spawn(Box<Term>, Option<Box<Term>>, Spanned),
+    /// Spawn a process from a function (`@f`, `@~`, `@{ … }`). The init argument comes from the
+    /// chained value (`x ~> @f`), or is nil. For `@~` the chained value *is* the function, which
+    /// is therefore spawned with a nil argument (so `@~` requires a nilary function).
+    Spawn(Box<Term>, Spanned),
     Self_,
     /// Select operation. None means bare `!` (postfix form using chained value).
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
@@ -100,11 +98,6 @@ pub enum Term {
     /// Reference operator (`&`). None creates a new unique ref, Some references a value
     /// (a variable, import member, or builtin — `&x`, `&m.f`, `&__integer_add__`).
     Reference(Option<Access>),
-    /// Function application: a looked-up callable head (an [`Access`] whose source is a variable,
-    /// `$`, import member, or builtin) applied to an argument. `f 5`, `f [1, 2]`, `__integer_add__ [3,4]`.
-    /// The flowing value goes into the argument (evaluated as a flow position); the head is then
-    /// invoked with it. Bare-accessor (`.f`) and ripple (`~`) heads are not applicable this way.
-    Apply(Access, Box<Term>),
 }
 
 impl Term {
@@ -201,8 +194,9 @@ pub enum AccessSource {
     /// Tail call (`^`, `^f`, `^f.field`): `None` recurses into the current function, `Some(name)`
     /// tail-calls `name`. Compiled with the tail-call instruction (TCO), not a normal call.
     TailCall(Option<String>),
-    /// Ripple tail call (`^~`): tail-calls the flowing value (which must be a function). The init
-    /// argument is supplied by juxtaposition (`^~ x`), since the flowing value is the function.
+    /// Ripple tail call (`^~`): tail-calls the flowing value, which must be a nilary function (it
+    /// is called with nil). The flowing-value analogue of `^`/`^f` — tail recursion, not
+    /// application; to tail-call with an argument, bind the function and use `arg ~> ^name`.
     TailCallRipple,
 }
 

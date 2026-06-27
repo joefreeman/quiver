@@ -100,10 +100,10 @@ fn test_pin_without_variable_single_occurrence() {
 fn test_pin_from_outer_scope() {
     // Pin pattern should be able to reference variables from outer scopes
     quiver()
-        .evaluate("x = 5, f = #{ A[5] ~> =A[&x] }, f []")
+        .evaluate("x = 5, f = #{ A[5] ~> =A[&x] }, [] ~> f")
         .expect("Ok");
     quiver()
-        .evaluate("x = 5, f = #{ A[6] ~> =A[&x] }, f []")
+        .evaluate("x = 5, f = #{ A[6] ~> =A[&x] }, [] ~> f")
         .expect("[]");
 }
 
@@ -496,7 +496,7 @@ fn test_variable_pattern_matching_in_branches() {
               }
             },
 
-            [f [Nil, Cons[1, Nil]], f [Cons[1, Nil], Cons[2, Nil]]]
+            [[Nil, Cons[1, Nil]] ~> f, [Cons[1, Nil], Cons[2, Nil]] ~> f]
             "#,
         )
         .expect("[Cons[1, Nil], Cons[2, Nil]]");
@@ -508,7 +508,7 @@ fn test_as_pattern_binds_and_asserts_type() {
     quiver().evaluate("42 ~> =('int)x, x").expect("42");
     // The binding is at the narrowed type, so `x` is usable as an int.
     quiver()
-        .evaluate("42 ~> =('int)x, __integer_add__ [x, 1]")
+        .evaluate("42 ~> =('int)x, [x, 1] ~> __integer_add__")
         .expect("43");
     // A type mismatch fails the match (yields nil), like any failed match.
     quiver().evaluate("0x0a ~> =('int)x").expect("[]");
@@ -520,7 +520,7 @@ fn test_as_pattern_propagates_nil() {
     // A non-nil value binds and continues; a nil value fails the assertion and short-circuits.
     quiver()
         .evaluate(
-            "opt = #'int { | =0 => [] | $ }, 5 ~> opt ~> =('int)x, x ~> __integer_add__ [~, 1]",
+            "opt = #'int { | =0 => [] | $ }, 5 ~> opt ~> =('int)x, x ~> [~, 1] ~> __integer_add__",
         )
         .expect("6");
     quiver()

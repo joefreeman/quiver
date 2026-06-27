@@ -1,11 +1,13 @@
 pub mod ast;
 pub mod compiler;
+pub mod format;
 pub mod manifest;
 pub mod parser;
 pub mod recorder;
 pub mod resolver;
 
 pub use compiler::Compiler;
+pub use format::format_program;
 pub use manifest::{Manifest, ManifestError};
 pub use parser::parse;
 pub use resolver::{

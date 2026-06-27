@@ -31,7 +31,7 @@ fn nil_arg_callable_field_called_with_nil_param() {
 fn amp_builtin_reference_in_record() {
     // `&__builtin__` stores a builtin as a value (e.g. a module export tuple).
     quiver()
-        .evaluate("r = [a: &__integer_add__], r.a [3, 4]")
+        .evaluate("r = [a: &__integer_add__], [3, 4] ~> r.a")
         .expect("7");
 }
 
@@ -66,7 +66,7 @@ fn higher_order_argument_needs_amp() {
     // Passing a function as an argument requires `&`; it is then applied inside.
     quiver()
         .evaluate(&format!(
-            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 ~> $.0 }}, twice [&inc, 5]"
+            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 ~> $.0 }}, [&inc, 5] ~> twice"
         ))
         .expect("7");
 }
@@ -75,7 +75,7 @@ fn higher_order_argument_needs_amp() {
 fn nil_arg_callable_passed_then_called() {
     // A nil-arg function passed by `&`, then explicitly called.
     quiver()
-        .evaluate("g = #{ 42 }, t = [&g], t.0 []")
+        .evaluate("g = #{ 42 }, t = [&g], [] ~> t.0")
         .expect("42");
 }
 

@@ -5,11 +5,11 @@
 sum_ = #['list<'int>, 'int] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => {
-    %num.add [head, acc] ~> ^ [tail, ~]
+    [head, acc] ~> %num.add ~> [tail, ~] ~> ^
   }
 },
 
-sum = #'list<'int> { sum_ [~, 0] },
+sum = #'list<'int> { [~, 0] ~> sum_ },
 
 #{
   // Build and sum a list

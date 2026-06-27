@@ -118,19 +118,19 @@ fn test_nested_function_captures() {
 
 #[test]
 fn test_function_call_syntax() {
-    quiver().evaluate("%num.add [3, 4]").expect("7");
+    quiver().evaluate("[3, 4] ~> %num.add").expect("7");
 }
 
 #[test]
 fn test_function_call_with_ripple() {
     quiver()
-        .evaluate("%num.add [1, 2] ~> %num.mul [~, 3]")
+        .evaluate("[1, 2] ~> %num.add ~> [~, 3] ~> %num.mul")
         .expect("9");
 }
 
 #[test]
 fn test_function_call_no_args() {
-    quiver().evaluate("f = #{ 42 }, f []").expect("42");
+    quiver().evaluate("f = #{ 42 }, f").expect("42");
 }
 
 #[test]
@@ -149,25 +149,36 @@ fn test_function_call_with_spread() {
             r#"
             f = #['int, 'int, 'int] {
               $.0
-              ~> %num.add [~, $.1]
-              ~> %num.add [~, $.2]
+              ~> [~, $.1] ~> %num.add
+              ~> [~, $.2] ~> %num.add
             },
-            [1, 2] ~> f [..., 3]
+            [1, 2] ~> [..., 3] ~> f
             "#,
         )
         .expect("6");
 }
 
 #[test]
-fn calling_via_a_bare_ripple() {
-    // `~ [args]` applies the flowing value (a function) to the argument.
-    quiver().evaluate("&%num.add ~> ~ [3, 4]").expect("7");
+fn applying_a_flowing_function_requires_binding() {
+    // Applying the flowing value as a function (`~ [args]`) was removed with argument-first
+    // syntax — there is no argument-first form for it. Bind the function to a name first,
+    // then call it argument-first.
+    quiver()
+        .evaluate("&%num.add ~> ~ [3, 4]")
+        .expect_parse_failure();
+    quiver().evaluate("f = &%num.add, [3, 4] ~> f").expect("7");
 }
 
 #[test]
-fn calling_via_a_ripple_field_access() {
-    // `~.field [args]` reads a field off the flowing value and applies the argument to it.
-    quiver().evaluate("%num ~> ~.add [1, 2]").expect("3");
+fn applying_a_flowing_field_function_requires_binding() {
+    // Likewise `~.field [args]` (apply a function read off the flowing value) was removed:
+    // read the field into a binding first, then call it argument-first.
+    quiver()
+        .evaluate("%num ~> ~.add [1, 2]")
+        .expect_parse_failure();
+    quiver()
+        .evaluate("add = &%num.add, [1, 2] ~> add")
+        .expect("3");
 }
 
 #[test]
@@ -278,7 +289,7 @@ fn test_dollar_dotless_shorthand_then_dotted() {
 #[test]
 fn test_dollar_in_nested_block() {
     quiver()
-        .evaluate("f = #'int { 100 ~> { __integer_add__ [~, $] } }, 7 ~> f")
+        .evaluate("f = #'int { 100 ~> { [~, $] ~> __integer_add__ } }, 7 ~> f")
         .expect("107");
 }
 
@@ -297,14 +308,14 @@ fn test_dollar_with_named_tuple_field() {
 #[test]
 fn test_function_with_return_type() {
     quiver()
-        .evaluate("f = #'int -> 'int { __integer_add__ [~, 1] }, 5 ~> f")
+        .evaluate("f = #'int -> 'int { [~, 1] ~> __integer_add__ }, 5 ~> f")
         .expect("6");
 }
 
 #[test]
 fn test_function_return_type_mismatch() {
     quiver()
-        .evaluate("f = #'int -> 'bin { __integer_add__ [~, 1] }, 5 ~> f")
+        .evaluate("f = #'int -> 'bin { [~, 1] ~> __integer_add__ }, 5 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "'bin".to_string(),
             found: "'int".to_string(),
@@ -382,8 +393,8 @@ fn test_function_with_complex_return_type() {
     quiver()
         .evaluate(
             r#"
-            double = #'int -> 'int { __integer_multiply__ [~, 2] },
-            square = #'int -> 'int { __integer_multiply__ [~, ~] },
+            double = #'int -> 'int { [~, 2] ~> __integer_multiply__ },
+            square = #'int -> 'int { [~, ~] ~> __integer_multiply__ },
             5 ~> double ~> square
             "#,
         )
@@ -449,16 +460,16 @@ fn test_nilary_call_ignores_block_parameter() {
 
 #[test]
 fn test_nilary_call_explicit_nil_argument() {
-    quiver().evaluate("make = #{ 99 }, make []").expect("99");
+    // A nilary function ignores the flowing value, so flowing nil into it just calls it.
+    quiver().evaluate("make = #{ 99 }, [] ~> make").expect("99");
 }
 
 #[test]
 fn test_nilary_call_rejects_explicit_argument() {
-    // An explicit argument is not an implicit flow, so handing a value to a nilary function errors.
+    // Argument-first application has no way to hand an explicit argument to a nilary function:
+    // juxtaposition (`make [5]`) is no longer valid syntax, and a flowing value is ignored. So
+    // the old "explicit argument is type-checked and rejected" case is now a parse error.
     quiver()
         .evaluate("make = #{ 99 }, make [5]")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "function parameter compatible with []".to_string(),
-            found: "['int]".to_string(),
-        });
+        .expect_parse_failure();
 }

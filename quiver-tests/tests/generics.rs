@@ -57,7 +57,7 @@ fn test_generic_function_multiple_type_params() {
         .evaluate(
             r#"
             pair = #<'a, 'b>['a, 'b] { =[x, y] => [y, x] },
-            pair [1, 0x00]
+            [1, 0x00] ~> pair
             "#,
         )
         .expect("[0x00, 1]");
@@ -108,8 +108,8 @@ fn test_heterogeneous_list_via_widening() {
         .evaluate(
             r#"
             %list.new
-              ~> %list.append [~, 5]
-              ~> %list.append [~, "a"],
+              ~> [~, 5] ~> %list.append
+              ~> [~, "a"] ~> %list.append,
             "#,
         )
         .expect_type("Cons[('int | Str['bin]), μ1] | Nil");

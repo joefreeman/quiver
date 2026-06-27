@@ -26,12 +26,12 @@ stat = #Str['bin] {
   // directory handle is closed automatically once the iterator is exhausted.
   list: #Str['bin] {
     // Each step yields an `Entry` or nil at the end, with `kind` already a `'kind` tag.
-    .0 ~> __directory_read__ ~> %iter.unfold [~, #\Dir {
-      __directory_next__ $ ~> {
-        | <> => { __directory_close__ $, [] }
+    .0 ~> __directory_read__ ~> [~, #\Dir {
+      $ ~> __directory_next__ ~> {
+        | <> => { $ ~> __directory_close__, [] }
         | =e ~> [Entry[name: Str[e.0], kind: e.1], $]
       }
-    }]
+    }] ~> %iter.unfold
   },
 
   // Metadata for a path, following symlinks. Yields nil if the path does not exist.

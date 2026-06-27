@@ -1,22 +1,24 @@
-// Tests for the space-separated call syntax: `f [args]` and `f x`, with adjacent
+// Tests for the argument-first call syntax: `[args] ~> f` and `x ~> f`, with adjacent
 // brackets reserved for tuple construction / spread.
 mod common;
 use common::*;
 
 const ADD: &str = "add = #['int, 'int] { __integer_add__ },";
-const INC: &str = "inc = #'int { %num.add [~, 1] },";
+const INC: &str = "inc = #'int { [~, 1] ~> %num.add },";
 
 #[test]
 fn spaced_bracket_call() {
-    quiver().evaluate(&format!("{ADD} add [3, 4]")).expect("7");
+    quiver()
+        .evaluate(&format!("{ADD} [3, 4] ~> add"))
+        .expect("7");
 }
 
 #[test]
 fn bare_argument_call() {
-    // `f x` applies f to the bare value x (not wrapped in a tuple).
-    quiver().evaluate(&format!("{INC} inc 5")).expect("6");
+    // `x ~> f` applies f to the bare value x (not wrapped in a tuple).
+    quiver().evaluate(&format!("{INC} 5 ~> inc")).expect("6");
     quiver()
-        .evaluate(&format!("{INC} x = 5, inc x"))
+        .evaluate(&format!("{INC} x = 5, x ~> inc"))
         .expect("6");
 }
 
@@ -29,7 +31,7 @@ fn adjacent_call_is_a_parse_error() {
 
 #[test]
 fn nil_call_is_spaced() {
-    quiver().evaluate("f = #{ 42 }, f []").expect("42");
+    quiver().evaluate("f = #{ 42 }, [] ~> f").expect("42");
 }
 
 #[test]
@@ -49,7 +51,7 @@ fn spread_stays_adjacent() {
 #[test]
 fn field_access_call_is_spaced() {
     quiver()
-        .evaluate("m = [add: #['int, 'int] { __integer_add__ }], m.add [3, 4]")
+        .evaluate("m = [add: #['int, 'int] { __integer_add__ }], [3, 4] ~> m.add")
         .expect("7");
 }
 
@@ -59,7 +61,7 @@ fn tail_call_is_spaced() {
         .evaluate(
             "count_down = #'int {
                | =0 => Done
-               | %num.sub [~, 1] ~> ^
+               | [~, 1] ~> %num.sub ~> ^
              },
              3 ~> count_down",
         )
@@ -70,7 +72,7 @@ fn tail_call_is_spaced() {
 fn bare_amp_passes_function() {
     quiver()
         .evaluate(&format!(
-            "{INC} apply = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 }}, apply [&inc, 5]"
+            "{INC} apply = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 }}, [&inc, 5] ~> apply"
         ))
         .expect("6");
 }
@@ -93,6 +95,6 @@ fn application_does_not_cross_newline() {
 #[test]
 fn comment_after_call() {
     quiver()
-        .evaluate(&format!("{ADD} add [3, 4]  // sum"))
+        .evaluate(&format!("{ADD} [3, 4] ~> add  // sum"))
         .expect("7");
 }

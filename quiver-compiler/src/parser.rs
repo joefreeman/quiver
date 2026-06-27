@@ -334,9 +334,8 @@ fn bracket_args(input: Span) -> IResult<Span, (SourceSpan, Vec<TupleField>)> {
 }
 
 /// An adjacent `[...]` immediately after an access head, allowed only when it begins with a
-/// spread (`a[..., y]`, `~[..., y]`) — a tuple spread-update, not a call. A call uses a space
-/// (`f [1, 2]`) and is parsed as a juxtaposition application (`Term::Apply`); an adjacent
-/// non-spread bracket (`f[1]`) is rejected, so it fails as a syntax error.
+/// spread (`a[..., y]`, `~[..., y]`) — a tuple spread-update. Application is argument-first
+/// (`[1, 2] ~> f`), so an adjacent non-spread bracket (`f[1]`) is rejected as a syntax error.
 fn adjacent_spread_args(input: Span) -> IResult<Span, (SourceSpan, Vec<TupleField>)> {
     verify(
         bracket_args,
@@ -1610,7 +1609,7 @@ fn not_term(input: Span) -> IResult<Span, Term> {
 }
 
 // Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
-// argument is filled in later by `term()` if one is juxtaposed (`@'int { … } 5`).
+// argument, if any, comes from the chained value (`x ~> @{ … }`).
 fn spawn_of_function(parameter_type: Option<Type>, body: Expression) -> Term {
     Term::Spawn(
         Box::new(Term::Function(Function {
@@ -1620,7 +1619,6 @@ fn spawn_of_function(parameter_type: Option<Type>, body: Expression) -> Term {
             body: Some(body),
             span: Spanned::default(),
         })),
-        None,
         Spanned::default(),
     )
 }
@@ -1666,7 +1664,6 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                     base_span: Spanned::default(),
                     span: Spanned::default(),
                 }))),
-                None,
                 Spanned::default(),
             )
         }),
@@ -1674,7 +1671,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
     // Attach the `@` span to the spawn, for hover (shows the process type).
     let term = match term {
         // Stamp just the `@`, not the spawned function body.
-        Term::Spawn(inner, arg, _) => Term::Spawn(inner, arg, Spanned(Some(token_span(start, 1)))),
+        Term::Spawn(inner, _) => Term::Spawn(inner, Spanned(Some(token_span(start, 1)))),
         other => other,
     };
     Ok((rest, term))
@@ -1941,41 +1938,6 @@ fn primary(input: Span) -> IResult<Span, Term> {
     ))(input)
 }
 
-/// A term is a primary optionally applied to a single argument by juxtaposition
-/// (`f 1`, `f x`, `f &g`). The gap is horizontal whitespace so it doesn't cross the
-/// newline that separates statements. Bracket calls (`f [1, 2]`) are handled within
-/// the primary itself, so only a non-bracket argument is consumed here.
-fn term(input: Span) -> IResult<Span, Term> {
-    let (input, head) = primary(input)?;
-    // Application by juxtaposition targets an applicable head: a looked-up callable `Access` (a
-    // variable, `$`, import member, builtin, tail call, or a ripple — `~ [args]`, `~.f [args]`,
-    // where the ripple head consumes the flowing value and the argument applies to it), or a
-    // spawn (`@f x` supplies the spawned function's init argument, mirroring `x ~> @f`).
-    // A *bare* field access (`.f`) is the one access that can't be applied — bind it first, or
-    // write `~.f`. A literal/tuple/function-literal head isn't applicable either (`#{…} 5` is a
-    // syntax error).
-    let applicable = match &head {
-        Term::Access(access) => access.source.is_some(),
-        Term::Spawn(..) => true,
-        _ => false,
-    };
-    if !applicable {
-        return Ok((input, head));
-    }
-    // The `~` of a `~>` chain separator begins a valid primary (a ripple), so guard against
-    // consuming it as an application argument.
-    let (input, arg) = opt(preceded(pair(hspace1, not(peek(tag("~>")))), primary))(input)?;
-    let Some(arg) = arg else {
-        return Ok((input, head));
-    };
-    let term = match head {
-        Term::Access(access) => Term::Apply(access, Box::new(arg)),
-        Term::Spawn(function, _, span) => Term::Spawn(function, Some(Box::new(arg)), span),
-        _ => unreachable!("only applicable heads reach here"),
-    };
-    Ok((input, term))
-}
-
 fn chain(input: Span) -> IResult<Span, Chain> {
     alt((
         // Match pattern: pattern = chain_inner
@@ -2000,8 +1962,14 @@ fn chain(input: Span) -> IResult<Span, Chain> {
 }
 
 fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {
-    // Chain is a sequence of terms separated by ~>
-    separated_list1(tuple((ws1, tag("~>"), ws1)), term)(input)
+    // A chain is `~>`-separated terms; each term is a bare `primary`. Application is
+    // argument-first (`[args] ~> f`), so there is no juxtaposition (`f [args]`) to parse —
+    // a callable consumes the flowing value as the next chain step. The only forms that
+    // "apply" the flowing value as a function are the bare ripple terms `~`, `^~`, `@~`
+    // (and `~.f`), which are primaries in their own right and take no juxtaposed argument:
+    // `^~`/`@~` can only hand the flowing function a nil argument, so they require it to be
+    // nilary; to pass an argument, bind the function first and name it.
+    separated_list1(tuple((ws1, tag("~>"), ws1)), primary)(input)
 }
 
 fn sequence(input: Span) -> IResult<Span, Sequence> {

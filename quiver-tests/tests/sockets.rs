@@ -39,10 +39,10 @@ fn test_tcp_client_connect_and_write() {
         .with_io()
         .evaluate(&format!(
             r#"
-            socket = __tcp_connect__ [0x7f000001, {}],
-            __tcp_socket_write__ [socket, "Hello from Quiver!" ~> .0],
-            response = __tcp_socket_read__ [socket, 4096],
-            __tcp_socket_close__ socket,
+            socket = [0x7f000001, {}] ~> __tcp_connect__,
+            [socket, "Hello from Quiver!" ~> .0] ~> __tcp_socket_write__,
+            response = [socket, 4096] ~> __tcp_socket_read__,
+            socket ~> __tcp_socket_close__,
             Str[response]
         "#,
             port
@@ -66,14 +66,14 @@ fn test_tcp_server_accept_and_respond() {
             .with_io()
             .evaluate(&format!(
                 r#"
-                listener = __tcp_listen__ [{}, 10],
+                listener = [{}, 10] ~> __tcp_listen__,
 
                 // Accept one connection and echo
-                client = __tcp_listener_accept__ listener,
-                request = __tcp_socket_read__ [client, 4096],
-                __tcp_socket_write__ [client, request],
-                __tcp_socket_close__ client,
-                __tcp_listener_close__ listener,
+                client = listener ~> __tcp_listener_accept__,
+                request = [client, 4096] ~> __tcp_socket_read__,
+                [client, request] ~> __tcp_socket_write__,
+                client ~> __tcp_socket_close__,
+                listener ~> __tcp_listener_close__,
 
                 Ok
                 "#,
@@ -134,16 +134,16 @@ fn test_tcp_multiple_connections() {
         .evaluate(&format!(
             r#"
             // First connection
-            socket1 = __tcp_connect__ [0x7f000001, {}],
-            __tcp_socket_write__ [socket1, "First" ~> .0],
-            response1 = __tcp_socket_read__ [socket1, 4096],
-            __tcp_socket_close__ socket1,
+            socket1 = [0x7f000001, {}] ~> __tcp_connect__,
+            [socket1, "First" ~> .0] ~> __tcp_socket_write__,
+            response1 = [socket1, 4096] ~> __tcp_socket_read__,
+            socket1 ~> __tcp_socket_close__,
 
             // Second connection
-            socket2 = __tcp_connect__ [0x7f000001, {}],
-            __tcp_socket_write__ [socket2, "Second" ~> .0],
-            response2 = __tcp_socket_read__ [socket2, 4096],
-            __tcp_socket_close__ socket2,
+            socket2 = [0x7f000001, {}] ~> __tcp_connect__,
+            [socket2, "Second" ~> .0] ~> __tcp_socket_write__,
+            response2 = [socket2, 4096] ~> __tcp_socket_read__,
+            socket2 ~> __tcp_socket_close__,
 
             [Str[response1], Str[response2]]
         "#,
@@ -165,17 +165,17 @@ fn test_socket_type_checking() {
             // Function that handles a socket
             handle_socket = #\TcpSocket {
                 =s,
-                data = __tcp_socket_read__ [s, 4096],
-                __tcp_socket_write__ [s, data],
-                __tcp_socket_close__ s
+                data = [s, 4096] ~> __tcp_socket_read__,
+                [s, data] ~> __tcp_socket_write__,
+                s ~> __tcp_socket_close__
             },
 
             // Function that handles a listener
             handle_listener = #\TcpListener {
                 =l,
-                client = __tcp_listener_accept__ l,
-                __tcp_socket_close__ client,
-                __tcp_listener_close__ l
+                client = l ~> __tcp_listener_accept__,
+                client ~> __tcp_socket_close__,
+                l ~> __tcp_listener_close__
             },
 
             // Should type check
@@ -216,10 +216,10 @@ fn test_binary_data_over_socket() {
         .with_io()
         .evaluate(&format!(
             r#"
-            socket = __tcp_connect__ [0x7f000001, {}],
-            __tcp_socket_write__ [socket, 0xdeadbeef],
-            response = __tcp_socket_read__ [socket, 4096],
-            __tcp_socket_close__ socket,
+            socket = [0x7f000001, {}] ~> __tcp_connect__,
+            [socket, 0xdeadbeef] ~> __tcp_socket_write__,
+            response = [socket, 4096] ~> __tcp_socket_read__,
+            socket ~> __tcp_socket_close__,
             response
         "#,
             port
@@ -253,9 +253,9 @@ fn test_write_to_closed_socket() {
         .with_io()
         .evaluate(&format!(
             r#"
-        socket = __tcp_connect__ [0x7f000001, {}],
-        __tcp_socket_close__ socket,
-        __tcp_socket_write__ [socket, "test" ~> .0]
+        socket = [0x7f000001, {}] ~> __tcp_connect__,
+        socket ~> __tcp_socket_close__,
+        [socket, "test" ~> .0] ~> __tcp_socket_write__
     "#,
             port
         ))

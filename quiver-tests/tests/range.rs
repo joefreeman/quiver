@@ -23,7 +23,7 @@ fn test_range_from() {
             10
             ~> %range.from
             ~> %range.iter
-            ~> %iter.take [~, 5]
+            ~> [~, 5] ~> %iter.take
             ~> %list.collect
             "#,
         )
@@ -94,7 +94,7 @@ fn test_range_infinite() {
             [0, None, 3]
             ~> %range.new
             ~> %range.iter
-            ~> %iter.take [~, 4]
+            ~> [~, 4] ~> %iter.take
             ~> %list.collect
             "#,
         )

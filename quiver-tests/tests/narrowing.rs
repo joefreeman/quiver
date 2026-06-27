@@ -86,7 +86,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
             r#"
             match0 = #'int { =0 => $ },
             a = 0 ~> match0,
-            { a => %num.add [a, 1] | 200 }
+            { a => [a, 1] ~> %num.add | 200 }
             "#,
         )
         .expect("1");
@@ -97,7 +97,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
             r#"
             match0 = #'int { =0 => $ },
             b = 1 ~> match0,
-            { b => %num.add [b, 1] | 200 }
+            { b => [b, 1] ~> %num.add | 200 }
             "#,
         )
         .expect("200");
@@ -112,7 +112,7 @@ fn test_truthiness_narrowing_with_binding() {
             r#"
             match0 = #'int { =0 => $ },
             a = 0 ~> match0,
-            { a ~> =x, x => %num.add [x, 1] | 200 }
+            { a ~> =x, x => [x, 1] ~> %num.add | 200 }
             "#,
         )
         .expect("1");
@@ -123,7 +123,7 @@ fn test_truthiness_narrowing_with_binding() {
             r#"
             match0 = #'int { =0 => $ },
             b = 1 ~> match0,
-            { b ~> =x, x => %num.add [x, 1] | 200 }
+            { b ~> =x, x => [x, 1] ~> %num.add | 200 }
             "#,
         )
         .expect("200");
@@ -137,7 +137,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
         .evaluate(
             r#"
             f = #'int { =0 => $ },
-            { 0 ~> f ~> =x, x => %num.add [x, 1] | 200 }
+            { 0 ~> f ~> =x, x => [x, 1] ~> %num.add | 200 }
             "#,
         )
         .expect("1");
@@ -147,7 +147,7 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
         .evaluate(
             r#"
             f = #'int { =0 => $ },
-            { 1 ~> f ~> =x, x => %num.add [x, 1] | 200 }
+            { 1 ~> f ~> =x, x => [x, 1] ~> %num.add | 200 }
             "#,
         )
         .expect("200");
@@ -162,7 +162,7 @@ fn test_inter_chain_narrowing() {
             r#"
             match0 = #'int { =0 => $ },
             a = 0 ~> match0,
-            { a ~> =x, %num.add [x, 1] }
+            { a ~> =x, [x, 1] ~> %num.add }
             "#,
         )
         .expect("1");
@@ -172,7 +172,7 @@ fn test_inter_chain_narrowing() {
         .evaluate(
             r#"
             f = #'int { =0 => $ },
-            { 0 ~> f ~> =x, %num.add [x, 1] }
+            { 0 ~> f ~> =x, [x, 1] ~> %num.add }
             "#,
         )
         .expect("1");
@@ -248,7 +248,7 @@ fn test_complement_propagates_across_multiple_branches() {
             value = 5,
             to_option = #'int { =0 => None | ~ },
             stop = 10 ~> to_option,
-            { stop ~> =None | %num.lt? [value, stop] | %num.gt? [value, stop] }
+            { stop ~> =None | [value, stop] ~> %num.lt? | [value, stop] ~> %num.gt? }
             "#,
         )
         .expect("Ok");
@@ -260,7 +260,7 @@ fn test_complement_propagates_across_multiple_branches() {
             value = 5,
             to_option = #'int { =0 => None | ~ },
             stop = 0 ~> to_option,
-            { stop ~> =None => 999 | %num.lt? [value, stop] | %num.gt? [value, stop] }
+            { stop ~> =None => 999 | [value, stop] ~> %num.lt? | [value, stop] ~> %num.gt? }
             "#,
         )
         .expect("999");
@@ -511,7 +511,7 @@ fn test_tuple_pattern_complement_first_field() {
               | =[Nil, ys] => ys
               | =[Cons[head, tail], ys] => ys
             },
-            f [Nil, Cons[1, Nil]]
+            [Nil, Cons[1, Nil]] ~> f
         "#,
         )
         .expect("Cons[1, Nil]");
@@ -528,7 +528,7 @@ fn test_tuple_pattern_complement_second_field() {
               | =[n, Nil] => n
               | =[n, Cons[_, _]] => n
             },
-            f [42, Cons[1, Nil]]
+            [42, Cons[1, Nil]] ~> f
         "#,
         )
         .expect("42");
@@ -546,7 +546,7 @@ fn test_tuple_pattern_complement_three_variants() {
               | =[B[_], n] => n
               | =[C[_], n] => n
             },
-            f [B[1], 42]
+            [B[1], 42] ~> f
         "#,
         )
         .expect("42");
@@ -561,9 +561,9 @@ fn test_tuple_pattern_complement_exhaustive() {
             'list<'t> = Nil | Cons['t, ^];
             reverse_ = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
               | =[Nil, ys] => ys
-              | =[Cons[head, tail], ys] => Cons[head, ys] ~> ^ [tail, ~]
+              | =[Cons[head, tail], ys] => Cons[head, ys] ~> [tail, ~] ~> ^
             },
-            reverse_ [Cons[1, Cons[2, Nil]], Nil]
+            [Cons[1, Cons[2, Nil]], Nil] ~> reverse_
         "#,
         )
         .expect("Cons[2, Cons[1, Nil]]");
@@ -582,7 +582,7 @@ fn test_tuple_pattern_multiple_constraining_fields_not_exhaustive() {
               | =[Nil, Nil] => 0
               | =[Cons[_, _], Cons[_, _]] => 1
             },
-            f [Nil, Nil]
+            [Nil, Nil] ~> f
         "#,
         )
         .expect_type("'int | []");
@@ -599,7 +599,7 @@ fn test_tuple_pattern_nested_pattern_not_complement() {
               | =[Nil, n] => n
               | =[Cons[Nil, _], n] => n
             },
-            f [Nil, 42]
+            [Nil, 42] ~> f
         "#,
         )
         .expect_type("'int | []");
@@ -620,7 +620,7 @@ fn test_tuple_pattern_complement_via_binding() {
                 | =[Cons[head, tail], zs] => zs
               }
             },
-            f [Nil, Cons[1, Nil]]
+            [Nil, Cons[1, Nil]] ~> f
         "#,
         )
         .expect("Cons[1, Nil]");
@@ -642,7 +642,7 @@ fn test_tuple_pattern_complement_via_variable() {
                 | =[Cons[head, tail], zs] => zs
               }
             },
-            f [Cons[1, Nil], Cons[2, Nil]]
+            [Cons[1, Nil], Cons[2, Nil]] ~> f
         "#,
         )
         .expect("Cons[2, Nil]");
@@ -840,14 +840,14 @@ fn test_complement_narrowing_preserves_recursive_tail_computed() {
             r#"
             'list<'t> = Nil | Cons['t, ^];
             rc = #<'t>['list<'t>, 'list<'t>] {
-              =[acc, rest], acc ~> { | =Nil => rest | =Cons[h, t] => ^ [t, Cons[h, rest]] }
+              =[acc, rest], acc ~> { | =Nil => rest | =Cons[h, t] => [t, Cons[h, rest]] ~> ^ }
             },
             f = #<'t>'list<'t> {
               | =Nil => Z
               | =Cons[h, Nil] => One
               | =Cons[_, _] => Many
             },
-            rc [Cons[1, Nil], Nil] ~> f
+            [Cons[1, Nil], Nil] ~> rc ~> f
             "#,
         )
         .expect("One");

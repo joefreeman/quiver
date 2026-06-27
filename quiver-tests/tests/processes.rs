@@ -48,9 +48,9 @@ fn test_spawn_with_argument() {
 
 #[test]
 fn test_spawn_juxtaposed_argument() {
-    // `@f x` supplies the spawned function's init argument by juxtaposition.
+    // `x ~> @f` supplies the spawned function's init argument from the chained value.
     quiver()
-        .evaluate("f = #'int { $ }, p = @f 42, !p")
+        .evaluate("f = #'int { $ }, p = 42 ~> @f, !p")
         .expect("42");
 }
 
@@ -64,17 +64,22 @@ fn test_spawn_juxtaposed_argument_equals_piped() {
 
 #[test]
 fn test_spawn_juxtaposed_argument_flows_chained_value() {
-    // The chained value flows into the juxtaposed argument (via `~`), like a call argument.
+    // The chained value flows into the argument tuple (via `~`), like a call argument.
     quiver()
-        .evaluate("f = #['int, 'int] { __integer_add__ }, p = 10 ~> @f [~, 5], !p")
+        .evaluate("f = #['int, 'int] { __integer_add__ }, p = 10 ~> [~, 5] ~> @f, !p")
         .expect("15");
 }
 
 #[test]
-fn test_spawn_ripple_with_juxtaposed_argument() {
-    // `@~ x`: the chained value is the function to spawn; `x` is its init argument.
+fn spawn_ripple_with_juxtaposed_argument_is_removed() {
+    // `@~ x` (spawn the flowing function with an init argument) was removed with argument-first
+    // syntax. Spawn a *named* function argument-first instead (`x ~> @f`); bare `@~` survives
+    // only for a nilary target.
     quiver()
         .evaluate("f = #'int { $ }, p = &f ~> @~ 42, !p")
+        .expect_parse_failure();
+    quiver()
+        .evaluate("f = #'int { $ }, p = 42 ~> @f, !p")
         .expect("42");
 }
 
@@ -669,7 +674,7 @@ fn test_receive_type_in_function_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 20 ~> @#'int { %int.div [~, !#'int] },
+            p = 20 ~> @#'int { [~, !#'int] ~> %int.div },
             2 ~> p, !p
             "#,
         )
@@ -695,7 +700,7 @@ fn test_receive_type_in_builtin_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 10 ~> @#'int { __integer_add__ [~, !#'int] },
+            p = 10 ~> @#'int { [~, !#'int] ~> __integer_add__ },
             32 ~> p, !p
             "#,
         )
@@ -709,7 +714,7 @@ fn test_receive_type_in_tail_call_argument() {
         .evaluate(
             r#"
             f = #['int, 'int] { __integer_add__ },
-            p = 10 ~> @#'int { ^f [~, !#'int] },
+            p = 10 ~> @#'int { [~, !#'int] ~> ^f },
             32 ~> p, !p
             "#,
         )
@@ -839,8 +844,9 @@ fn test_process_reference_after_completion() {
         .expect("42");
 }
 
-// A nilary process function ignores an implicitly-flowing init value (like a nilary call), but an
-// explicit juxtaposed argument is still type-checked.
+// A nilary process function ignores an implicitly-flowing init value (like a nilary call). The
+// juxtaposed-argument spawn form (`@f x`) no longer exists, so supplying one is rejected at parse
+// time.
 
 #[test]
 fn test_nilary_spawn_ignores_chained_value() {
@@ -849,10 +855,7 @@ fn test_nilary_spawn_ignores_chained_value() {
 
 #[test]
 fn test_nilary_spawn_rejects_juxtaposed_argument() {
-    quiver().evaluate("p = @{ 99 } 5, !p").expect_compile_error(
-        quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "[]".to_string(),
-            found: "'int".to_string(),
-        },
-    );
+    quiver()
+        .evaluate("p = @{ 99 } 5, !p")
+        .expect_parse_failure();
 }

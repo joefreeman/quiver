@@ -9,13 +9,13 @@ const ADD: &str = r#"
 'n = 'int | Rational['int, 'int];
 radd_ = #[Rational['int, 'int], Rational['int, 'int]] {
   =[Rational[a, b], Rational[c, d]],
-  Rational[__integer_add__ [__integer_multiply__ [a, d], __integer_multiply__ [c, b]], __integer_multiply__ [b, d]]
+  Rational[[[a, d] ~> __integer_multiply__, [c, b] ~> __integer_multiply__] ~> __integer_add__, [b, d] ~> __integer_multiply__]
 };
 tr_ = #'n { | =Rational[n, d] => Rational[n, d] | =n => Rational[n, 1] };
 add = #['n, 'n] {
-  | =[Rational[a, b], y] => radd_ [Rational[a, b], y ~> tr_]
-  | =[x, Rational[c, d]] => radd_ [x ~> tr_, Rational[c, d]]
-  | =[a, b] => __integer_add__ [a, b]
+  | =[Rational[a, b], y] => [Rational[a, b], y ~> tr_] ~> radd_
+  | =[x, Rational[c, d]] => [x ~> tr_, Rational[c, d]] ~> radd_
+  | =[a, b] => [a, b] ~> __integer_add__
 };
 "#;
 

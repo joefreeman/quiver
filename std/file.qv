@@ -15,17 +15,17 @@ serve = #\File {
   !#'command ~> {
     | =Read[offset, length, reply, id] => {
       [$, offset, length] ~> __file_read__ ~> Reply[id, ~] ~> reply,
-      ^ $
+      $ ~> ^
     }
     | =Write[offset, data, reply, id] => {
       [$, offset, data] ~> __file_write__ ~> Reply[id, ~] ~> reply,
-      ^ $
+      $ ~> ^
     }
     | =Flush[reply, id] => {
-      __file_flush__ $ ~> Reply[id, ~] ~> reply,
-      ^ $
+      $ ~> __file_flush__ ~> Reply[id, ~] ~> reply,
+      $ ~> ^
     }
-    | =Close => __file_close__ $
+    | =Close => $ ~> __file_close__
   }
 },
 
@@ -40,10 +40,10 @@ do_read = #[', 'int, 'int] {
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
 read_all = #[', 'int, 'bin] {
   =[f, offset, acc],
-  chunk = do_read [f, offset, 65536],
+  chunk = [f, offset, 65536] ~> do_read,
   chunk ~> %bin.length ~> {
     | =0 => acc
-    | =n => [acc, chunk] ~> %bin.concat ~> ^ [f, %num.add [offset, n], ~]
+    | =n => [acc, chunk] ~> %bin.concat ~> [f, [offset, n] ~> %num.add, ~] ~> ^
   }
 },
 
@@ -55,12 +55,12 @@ read_all = #[', 'int, 'bin] {
 // compacted once per chunk read, keeping the whole pass linear.
 lines_step = #[', 'int, 'bin, 'int] {
   =[f, offset, buf, pos],
-  len = %bin.length buf,
-  %bin.index [buf, 10, pos] ~> {
+  len = buf ~> %bin.length,
+  [buf, 10, pos] ~> %bin.index ~> {
     | =[] => {
       // No newline in the remaining buffer: keep the unconsumed tail and read more.
-      leftover = %bin.slice [buf, pos, len],
-      chunk = do_read [f, offset, 65536],
+      leftover = [buf, pos, len] ~> %bin.slice,
+      chunk = [f, offset, 65536] ~> do_read,
       chunk ~> %bin.length ~> {
         | =0 => {
           // EOF: emit the final unterminated line if there is one, otherwise stop.
@@ -69,14 +69,14 @@ lines_step = #[', 'int, 'bin, 'int] {
         }
         | =n => {
           n
-          ~> %num.add [offset, ~]
-          ~> ^ [f, ~, %bin.concat [leftover, chunk], 0]
+          ~> [offset, ~] ~> %num.add
+          ~> [f, ~, [leftover, chunk] ~> %bin.concat, 0] ~> ^
         }
       }
     }
     | =index => {
-      line = %bin.slice [buf, pos, index],
-      [Str[line], [f, offset, buf, %num.add [index, 1]]]
+      line = [buf, pos, index] ~> %bin.slice,
+      [Str[line], [f, offset, buf, [index, 1] ~> %num.add]]
     }
   }
 },
@@ -97,10 +97,10 @@ lines_step = #[', 'int, 'bin, 'int] {
   read: #[', 'int, 'int] { do_read },
 
   // Read the entire file from the start, returning all its bytes.
-  read_all: #' { read_all [~, 0, 0x] },
+  read_all: #' { [~, 0, 0x] ~> read_all },
 
   // Iterate over the lines of the file (newline-separated, without the trailing newline).
-  lines: #' { %iter.unfold [[~, 0, 0x, 0], &lines_step] },
+  lines: #' { [[~, 0, 0x, 0], &lines_step] ~> %iter.unfold },
 
   // Write `data` starting at `offset`, returning the number of bytes written.
   write: #[', 'int, 'bin] {

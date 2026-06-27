@@ -12,8 +12,8 @@ fn test_prepend() {
         .evaluate(
             r#"
             %list.new
-            ~> %list.prepend [~, 10]
-            ~> %list.prepend [~, 20]
+            ~> [~, 10] ~> %list.prepend
+            ~> [~, 20] ~> %list.prepend
             "#,
         )
         .expect("Cons[20, Cons[10, Nil]]");
@@ -27,8 +27,8 @@ fn test_head() {
         .evaluate(
             r#"
             %list.new
-            ~> %list.prepend [~, 10]
-            ~> %list.prepend [~, 20]
+            ~> [~, 10] ~> %list.prepend
+            ~> [~, 20] ~> %list.prepend
             ~> %list.head
             "#,
         )
@@ -41,8 +41,8 @@ fn test_tail() {
         .evaluate(
             r#"
             %list.new
-            ~> %list.prepend [~, 10]
-            ~> %list.prepend [~, 20]
+            ~> [~, 10] ~> %list.prepend
+            ~> [~, 20] ~> %list.prepend
             ~> %list.tail
             "#,
         )
@@ -52,7 +52,7 @@ fn test_tail() {
         .evaluate(
             r#"
             %list.new
-            ~> %list.prepend [~, 10]
+            ~> [~, 10] ~> %list.prepend
             ~> %list.tail
             "#,
         )
@@ -66,22 +66,22 @@ fn test_is_empty() {
     quiver().evaluate("%list.new ~> %list.empty?").expect("Ok");
 
     quiver()
-        .evaluate("%list.new ~> %list.prepend [~, 10] ~> %list.empty?")
+        .evaluate("%list.new ~> [~, 10] ~> %list.prepend ~> %list.empty?")
         .expect("[]");
 }
 
 #[test]
 fn test_append() {
     quiver()
-        .evaluate("%list.new ~> %list.append [~, 10]")
+        .evaluate("%list.new ~> [~, 10] ~> %list.append")
         .expect("Cons[10, Nil]");
 
     quiver()
         .evaluate(
             r#"
             %list.new
-            ~> %list.append [~, 10]
-            ~> %list.append [~, 20]
+            ~> [~, 10] ~> %list.append
+            ~> [~, 20] ~> %list.append
             "#,
         )
         .expect("Cons[10, Cons[20, Nil]]");
@@ -90,8 +90,8 @@ fn test_append() {
         .evaluate(
             r#"
             %list.new
-            ~> %list.prepend [~, 10]
-            ~> %list.append [~, 20]
+            ~> [~, 10] ~> %list.prepend
+            ~> [~, 20] ~> %list.append
             "#,
         )
         .expect("Cons[10, Cons[20, Nil]]");
@@ -104,15 +104,15 @@ fn test_reverse() {
         .expect("Nil");
 
     quiver()
-        .evaluate("%list.new ~> %list.prepend [~, 10] ~> %list.reverse")
+        .evaluate("%list.new ~> [~, 10] ~> %list.prepend ~> %list.reverse")
         .expect("Cons[10, Nil]");
 
     quiver()
         .evaluate(
             r#"
             %list.new
-            ~> %list.prepend [~, 10]
-            ~> %list.prepend [~, 20]
+            ~> [~, 10] ~> %list.prepend
+            ~> [~, 20] ~> %list.prepend
             ~> %list.reverse
             "#,
         )
@@ -122,9 +122,9 @@ fn test_reverse() {
         .evaluate(
             r#"
             %list.new
-            ~> %list.prepend [~, 10]
-            ~> %list.prepend [~, 20]
-            ~> %list.prepend [~, 30]
+            ~> [~, 10] ~> %list.prepend
+            ~> [~, 20] ~> %list.prepend
+            ~> [~, 30] ~> %list.prepend
             ~> %list.reverse
             "#,
         )

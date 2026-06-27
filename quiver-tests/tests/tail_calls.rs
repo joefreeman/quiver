@@ -35,7 +35,7 @@ fn test_tail_call_with_arguments() {
         .evaluate(
             r#"
             g = #['int, 'int] { %num.mul },
-            f = #'int { %num.add [~, 1] ~> ^g [~ , 2] },
+            f = #'int { [~, 1] ~> %num.add ~> [~ , 2] ~> ^g },
             1 ~> f
             "#,
         )
@@ -54,7 +54,7 @@ fn test_factorial() {
                 [x, y] ~> __integer_multiply__
               ] ~> ^
             },
-            fact = #'int { f [~, 1] },
+            fact = #'int { [~, 1] ~> f },
             5 ~> fact
             "#,
         )
@@ -63,18 +63,23 @@ fn test_factorial() {
 
 #[test]
 fn test_tail_call_with_nil_argument() {
-    quiver().evaluate("f = #{ ^ [] }");
+    quiver().evaluate("f = #{ [] ~> ^ }");
     quiver().evaluate("f = #{ ^ }");
 }
 
 #[test]
-fn test_ripple_tail_call_with_argument() {
-    // `^~ x` tail-calls the flowing value (here `g`) with `x`. Non-recursive, so it terminates.
+fn ripple_tail_call_with_argument_is_removed() {
+    // `^~ x` (tail-call the flowing function with an explicit argument) was removed with
+    // argument-first syntax. Tail-call a *named* function argument-first instead (`x ~> ^g`);
+    // the flowing-value form `^~` survives only without an argument (nilary target).
+    quiver()
+        .evaluate("g = #'int { [~, 2] ~> __integer_multiply__ }, f = #'int { &g ~> ^~ $ }, 5 ~> f")
+        .expect_parse_failure();
     quiver()
         .evaluate(
             r#"
             g = #'int { [~, 2] ~> __integer_multiply__ },
-            f = #'int { &g ~> ^~ $ },
+            f = #'int { $ ~> ^g },
             5 ~> f
             "#,
         )
@@ -89,7 +94,7 @@ fn test_ripple_tail_call_without_argument() {
             r#"
             g = #{ 42 },
             f = #{ &g ~> ^~ },
-            f []
+            [] ~> f
             "#,
         )
         .expect("42");
@@ -97,9 +102,10 @@ fn test_ripple_tail_call_without_argument() {
 
 #[test]
 fn test_ripple_tail_call_requires_function() {
-    // `^~` on a non-function flowing value is a type error.
+    // `^~` on a non-function flowing value is a type error. (Bare `^~`, since the
+    // argument-supplying `^~ x` form was removed; the flowing int is not callable.)
     quiver()
-        .evaluate("f = #'int { ^~ 3 }, 5 ~> f")
+        .evaluate("f = #'int { ^~ }, 5 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function".to_string(),
             found: "'int".to_string(),

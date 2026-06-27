@@ -137,11 +137,11 @@ fn test_split_returns_iterator() {
     // The result is a lazy iterator: bound to a variable it is a value (wrapped in
     // Iter[...]), so it flows through a chain without being called - no `&` needed.
     quiver()
-        .evaluate(r#"parts = %str.split ["1,2,3", ","], parts ~> %str.join [~, " + "]"#)
+        .evaluate(r#"parts = ["1,2,3", ","] ~> %str.split, parts ~> [~, " + "] ~> %str.join"#)
         .expect("\"1 + 2 + 3\"");
     // Laziness: the first field can be taken without materialising the rest.
     quiver()
-        .evaluate(r#"["a,b,c", ","] ~> %str.split ~> %iter.nth [~, 0]"#)
+        .evaluate(r#"["a,b,c", ","] ~> %str.split ~> [~, 0] ~> %iter.nth"#)
         .expect("\"a\"");
 }
 
@@ -287,7 +287,7 @@ fn test_iter_with_transformations() {
             r#"
             "hello"
             ~> %str.iter
-            ~> %iter.take [~, 3]
+            ~> [~, 3] ~> %iter.take
             ~> %str.collect
             "#,
         )
@@ -298,7 +298,7 @@ fn test_iter_with_transformations() {
             r#"
             "hello"
             ~> %str.iter
-            ~> %iter.drop [~, 2]
+            ~> [~, 2] ~> %iter.drop
             ~> %str.collect
             "#,
         )
@@ -312,16 +312,16 @@ fn test_join() {
             r#"
             Cons["one", Cons["two", Cons["three", Nil]]]
             ~> %list.iter
-            ~> %str.join [~, ", "]
+            ~> [~, ", "] ~> %str.join
             "#,
         )
         .expect("\"one, two, three\"");
 
     quiver()
-        .evaluate(r#"Cons["only", Nil] ~> %list.iter ~> %str.join [~, ", "]"#)
+        .evaluate(r#"Cons["only", Nil] ~> %list.iter ~> [~, ", "] ~> %str.join"#)
         .expect("\"only\"");
 
     quiver()
-        .evaluate(r#"Nil ~> %list.iter ~> %str.join [~, ", "]"#)
+        .evaluate(r#"Nil ~> %list.iter ~> [~, ", "] ~> %str.join"#)
         .expect("\"\"");
 }

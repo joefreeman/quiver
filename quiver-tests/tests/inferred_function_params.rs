@@ -12,7 +12,7 @@ fn test_inferred_mapper_through_iter_map() {
             r#"
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.map [~, #{ %num.mul [$, 10] }]
+            ~> [~, #{ [$, 10] ~> %num.mul }] ~> %iter.map
             ~> %list.collect
             "#,
         )
@@ -26,7 +26,7 @@ fn test_inferred_predicate_through_iter_filter() {
             r#"
             Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
             ~> %list.iter
-            ~> %iter.filter [~, #{ %int.mod [$, 2] ~> =0 }]
+            ~> [~, #{ [$, 2] ~> %int.mod ~> =0 }] ~> %iter.filter
             ~> %list.collect
             "#,
         )
@@ -42,7 +42,7 @@ fn test_inferred_tuple_param_through_iter_fold() {
             r#"
             Cons[1, Cons[2, Cons[3, Nil]]]
             ~> %list.iter
-            ~> %iter.fold [~, 0, #{ %num.add [$0, $1] }]
+            ~> [~, 0, #{ [$0, $1] ~> %num.add }] ~> %iter.fold
             "#,
         )
         .expect("6");
@@ -57,9 +57,9 @@ fn test_inferred_param_via_local_higher_order_function() {
             'list<'t> = Nil | Cons['t, ^]
             map = #<'t, 'u>['list<'t>, #'t -> 'u, 'list<'u>] {
               =[lst, f, acc],
-              lst ~> { =Nil => acc | =Cons[h, t] => ^ [t, &f, Cons[f h, acc]] }
+              lst ~> { =Nil => acc | =Cons[h, t] => [t, &f, Cons[h ~> f, acc]] ~> ^ }
             },
-            Cons[[1, 10], Cons[[2, 20], Nil]] ~> map [~, #{ $0 }, Nil]
+            Cons[[1, 10], Cons[[2, 20], Nil]] ~> [~, #{ $0 }, Nil] ~> map
             "#,
         )
         .expect("Cons[2, Cons[1, Nil]]");
@@ -71,8 +71,8 @@ fn test_inferred_param_concrete_callee() {
     quiver()
         .evaluate(
             r#"
-            run = #[#'int -> 'int] { =[g], g 10 },
-            run [#{ %num.add [$, 1] }]
+            run = #[#'int -> 'int] { =[g], 10 ~> g },
+            [#{ [$, 1] ~> %num.add }] ~> run
             "#,
         )
         .expect("11");
