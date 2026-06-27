@@ -3,21 +3,33 @@
  * @author Quiver
  * @license MIT
  *
- * Quiver is a statically-typed functional language with postfix flow. The grammar
- * mirrors quiver-compiler/src/parser.rs.
+ * Quiver is a statically-typed functional language. Data flows left→right through
+ * transformation pipelines. The grammar mirrors quiver-compiler/src/parser.rs.
  *
- * Whitespace handling: spaces, tabs and comments are `extras` (ignored everywhere),
- * but newlines are significant. A newline (or `;`) separates top-level statements, and
- * a newline prevents juxtaposition application (`f x`) from crossing lines. Continuation
- * points (after `~>`, `,`, `|`, `=>`, `=`, and inside brackets) explicitly permit
- * newlines via the `_nl` helper.
+ * Surface syntax (post whitespace-migration):
+ * - **Application is argument-first.** A callable term consumes the flowing value; build
+ *   the argument tuple first, then name the function: `[3, 4] num.add`. There is no
+ *   `f x` / `f [args]` juxtaposition.
+ * - **A chain is space-separated terms.** The value flows through them; nil passes through
+ *   (no short-circuit). `~>` is an *optional* separator equivalent to a space, and doubles
+ *   as a **line continuation**: a chain ends at a bare newline, but a newline followed by
+ *   `~>` continues it.
+ * - **A sequence is chains separated by comma or newline** (the two are synonyms). This is
+ *   where the value short-circuits on nil and where binding scope advances.
+ * - **The program is one sequence** of chains with type-alias declarations interspersed,
+ *   all separated by the sequence separator. There is no `;`.
+ *
+ * Whitespace handling: spaces, tabs and comments are `extras` (ignored everywhere), but
+ * newlines are significant. A newline (or comma) separates the chains of a sequence;
+ * continuation points (after `~>`, `,`, `|`, `=>`, `=`, and inside brackets) explicitly
+ * permit newlines via the `_nl` helper.
  */
 
 /* eslint-disable arrow-parens */
 /* eslint-disable camelcase */
 
 /// Comma-separated list (one or more) allowing newlines around commas. Used inside
-/// brackets/parens/angles where there is no statement terminator to conflict with.
+/// brackets/parens/angles where there is no sequence separator to conflict with.
 function commaSep1($, rule) {
   return seq(
     rule,
@@ -65,14 +77,14 @@ module.exports = grammar({
     [$._type, $.union_type],
     [$.union_type],
     // A function/function-type may have optional trailing parts (return type, body); a
-    // newline after a complete one ends the statement rather than extending it.
+    // newline after a complete one ends the chain rather than extending it.
     [$.function],
     [$.function_type],
-    // A trailing comma after a chain may end the expression or precede a further chain
-    // on the next line.
+    // After a chain, a separator (comma/newline) may continue the current sequence
+    // (another chain) or end it so the surrounding construct can take a trailing separator.
     [$.expression],
     // After a term, a newline may continue the chain (next line starts with `~>`) or end
-    // the statement.
+    // the chain.
     [$.chain],
     // After a branch condition, a newline may precede `=>` (its consequence) or the next
     // branch / block close.
@@ -92,29 +104,30 @@ module.exports = grammar({
   ],
 
   rules: {
+    // The program is a single sequence of chains with type-alias declarations
+    // interspersed, all separated by the sequence separator (comma or newline, which are
+    // synonyms). Consecutive chains group into an `expression`; type aliases break a run.
     source_file: $ => seq(
-      optional($._terminator),
+      optional($._sep),
       optional(seq(
-        $._statement,
-        repeat(seq($._terminator, $._statement)),
-        optional($._terminator),
+        $._top_level_item,
+        repeat(seq($._sep, $._top_level_item)),
+        optional($._sep),
       )),
     ),
 
-    // One or more newlines and/or semicolons: separates top-level statements.
-    _terminator: $ => repeat1(choice('\n', ';')),
+    _top_level_item: $ => choice($.type_alias, $.expression),
+
+    // The sequence separator: one or more commas/newlines (they are synonyms), collapsing
+    // runs. This is where the flow short-circuits on nil and binding scope advances.
+    _sep: _ => prec.right(repeat1(choice('\n', ','))),
 
     // One or more newlines: a continuation point inside an unfinished construct.
     _nl: _ => prec.right(repeat1('\n')),
 
     comment: _ => token(seq('//', /[^\n]*/)),
 
-    // ------------------------------------------------------------------ statements
-
-    _statement: $ => choice(
-      $.type_alias,
-      $.expression,
-    ),
+    // ----------------------------------------------------------------- type aliases
 
     // A named alias (`'point = ...`) or the module's nameless default-type marker
     // (`' = ...` / `'<'t> = ...`), where the name is a bare `'`.
@@ -131,19 +144,31 @@ module.exports = grammar({
 
     // ----------------------------------------------------------------- expressions
 
-    // A comma-separated sequence of chains. Newlines are allowed only after a comma so
-    // that a bare newline ends the statement instead of continuing the expression.
+    // A sequence of chains separated by the sequence separator (comma or newline). Used at
+    // the top level (grouping a run of chains) and as block/branch bodies.
     expression: $ => seq(
       $.chain,
-      repeat(seq(',', optional($._nl), $.chain)),
-      optional(','),
+      repeat(seq($._sep, $.chain)),
     ),
 
+    // A chain is a sequence of `primary` terms; the value flows left→right through them,
+    // with nil passing through (no short-circuit — that is the sequence separator's job).
+    // Terms are joined by horizontal whitespace (`a b c`) or, equivalently, by an optional
+    // `~>` — which doubles as an explicit line continuation: a chain ends at a bare
+    // newline, but a newline followed by `~>` continues it. Application is argument-first
+    // (`[args] f`); there is no juxtaposition.
     chain: $ => seq(
-      optional(seq(field('binding', $._binding_target), '=', optional($._nl))),
-      $._term,
-      repeat(seq(optional($._nl), '~>', optional($._nl), $._term)),
+      // `pattern = chain` binding. The real parser distinguishes a binding (`x = e`, `=`
+      // space-surrounded) from an in-chain match (`e =x`, `=` glued) by spacing; tree-sitter
+      // treats whitespace as `extras`, so when the leading term is a binding target followed
+      // by `=`, prefer the binding reading via dynamic precedence.
+      optional(prec.dynamic(1, seq(field('binding', $._binding_target), '=', optional($._nl)))),
+      $._primary,
+      repeat(seq(optional($._pipe), $._primary)),
     ),
+
+    // The optional, explicit chain separator / line continuation.
+    _pipe: $ => seq(optional($._nl), '~>', optional($._nl)),
 
     // The forms valid as the target of a chain binding (`x = ...`, `[a, b] = ...`,
     // `(add, mul) = ...`, `* = ...`). A bare type or literal is never a binding target,
@@ -155,15 +180,6 @@ module.exports = grammar({
       $.star,
       $.placeholder,
     ),
-
-    _term: $ => choice($.application, $._primary),
-
-    // Juxtaposition application: `f 5`, `double x`, `map [xs, &f]`. The two operands are
-    // adjacent on the same line (no `~>` between them; a newline would end the term).
-    application: $ => prec.left(seq(
-      field('function', $._primary),
-      field('argument', $._primary),
-    )),
 
     _primary: $ => choice(
       $.string,
@@ -182,13 +198,26 @@ module.exports = grammar({
       $.tuple,
       $.function,
       $.block,
+      $.spread_update,
       $.access,
+    ),
+
+    // Name-preserving spread-update: `a[..., y]` / `~[..., y]`. The bracket is adjacent (no
+    // space) and begins with a spread, distinguishing it from `a [..., y]` (two terms) and
+    // from a plain spread tuple `[...a, y]`. The result inherits the source tuple's name.
+    spread_update: $ => seq(
+      field('source', choice($.ripple, $.identifier)),
+      token.immediate('['), optional($._nl),
+      $.spread,
+      repeat(seq(optional($._nl), ',', optional($._nl), $._field)),
+      optional(seq(optional($._nl), ',')),
+      optional($._nl), ']',
     ),
 
     // ----------------------------------------------------------------------- access
 
     // A variable/parameter/ripple/import optionally followed by `.field`/`.0` accessors,
-    // or a leading accessor with no source (`~> .name`).
+    // or a leading accessor with no source (`.name` as a chain step).
     access: $ => choice(
       seq(field('source', $._access_source), repeat($._accessor)),
       repeat1($._accessor),
@@ -218,10 +247,12 @@ module.exports = grammar({
     equality: _ => '==',
     not: _ => '<>',
 
-    // `^`, `^f`, `^math.mul` tail calls. An argument, if any, is applied by juxtaposition.
+    // Tail calls: `^` (self), `^name`, `^name.field`, `^.field`, and `^~` (tail-call the
+    // flowing value). Application is argument-first, so a tail call takes no juxtaposed
+    // argument — the argument is the preceding term.
     tail_call: $ => prec.right(seq(
       '^',
-      optional(field('function', $.identifier)),
+      optional(choice($.ripple, field('function', $.identifier))),
       repeat($._accessor),
     )),
 
@@ -241,32 +272,40 @@ module.exports = grammar({
 
     // -------------------------------------------------------------------- select / @
 
-    // `!`, `![a, b]`, `!p`, `!'int { ... }`, `!(type)`, `!1000`. The non-bracket sources
-    // are restricted (no tuples) so that a `[` after `!` is unambiguously a source list.
+    // The select operator, `!`:
+    //   - `! [a, b]`   general race/await form: a tuple of sources (each a chain)
+    //   - `!'int`      body-less identity receive on a named type
+    //   - `!#'int`     body-less identity receive on a `#`-type
+    //   - `!(type)`    body-less identity receive on a parenthesised type
+    //   - `!p` / `!f`  single source (process to await, or function to receive on)
+    //   - `!@N`/`!@f`  process reference / spawn source
+    //   - `!1000`      timeout source
+    //   - `!`          bare (postfix) form, uses the chained value
+    // The shorthands are body-less: a `{ … }` after a select is a separate chain step that
+    // handles the received message. Filters use the general form `! [#T { filter }]`.
     select: $ => prec.right(seq(
       '!',
       optional(choice(
-        field('sources', bracketed($, '[', $.chain, ']')),
-        seq($.receive_type, optional($.block)),
-        seq('(', optional($._nl), $._type, optional($._nl), ')', optional($.block)),
+        seq('[', optional($._nl), optional(commaSep1($, field('sources', $.chain))), optional($._nl), ']'),
+        seq('(', optional($._nl), $._type, optional($._nl), ')'),
+        $.receive_type,
+        seq('#', field('receive', $._type_atom)),
         $.access,
-        $.function,
         $.process_ref,
         $.spawn,
-        $.reference,
         $.integer,
       )),
     )),
 
     receive_type: $ => $.type_identifier,
 
-    // `@f` spawn, `@{ ... }`/`@'int { ... }` spawn shorthand, `@5` process ref.
+    // `@N` process reference.
     process_ref: $ => seq('@', $.index),
 
     // `@f`/`@~` (spawn a function value), and the spawn shorthands `@{ ... }`,
-    // `@'int { ... }`, `@(type) { ... }`, `@[...] { ... }`, `@Name { ... }`. The operand
-    // is restricted (no value tuples/literals) so a `[`/`Name` after `@` is unambiguously
-    // a type parameter rather than a value.
+    // `@'int { ... }`, `@(type) { ... }`, `@[...] { ... }`, `@Name { ... }`. The spawn
+    // sugar keeps its body. The operand is restricted (no value tuples/literals) so a
+    // `[`/`Name` after `@` is unambiguously a type parameter rather than a value.
     spawn: $ => prec.right(seq(
       '@',
       optional(choice(
@@ -305,8 +344,8 @@ module.exports = grammar({
 
     // ----------------------------------------------------------------------- tuples
 
-    // `Name[...]` (immediate bracket) is a named tuple; `Name [...]` (with a space) is
-    // instead application of the bare tuple `Name` to a tuple, handled by `application`.
+    // `Name[...]` (immediate bracket) is a named tuple. Application is argument-first, so a
+    // `Name [...]` with a space is two separate terms, not application.
     tuple: $ => choice(
       seq(field('name', $.tuple_name), immBracketed($, '[', $._field, ']')),
       bracketed($, '[', $._field, ']'),

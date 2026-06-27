@@ -1,5 +1,22 @@
 ==================
-chain with pipes
+chain by whitespace
+==================
+
+5 double increment
+
+---
+
+(source_file
+  (expression
+    (chain
+      (integer)
+      (access
+        source: (identifier))
+      (access
+        source: (identifier)))))
+
+==================
+chain with pipe operator
 ==================
 
 5 ~> double ~> increment
@@ -79,21 +96,19 @@ a[..., y: 3]
 (source_file
   (expression
     (chain
-      (application
-        function: (access
-          source: (identifier))
-        argument: (tuple
-          (spread)
-          (named_field
-            name: (identifier)
-            (chain
-              (integer))))))))
+      (spread_update
+        source: (identifier)
+        (spread)
+        (named_field
+          name: (identifier)
+          (chain
+            (integer)))))))
 
 ==================
 ripple
 ==================
 
-5 ~> [~, 1]
+5 [~, 1]
 
 ---
 
@@ -112,28 +127,25 @@ ripple
 builtin and access
 ==================
 
-math.add [1, 2] ~> __integer_multiply__ [~, 3]
+[1, 2] math.add [~, 3] __integer_multiply__
 
 ---
 
 (source_file
   (expression
     (chain
-      (application
-        function: (access
-          source: (identifier)
-          field: (identifier))
-        argument: (tuple
-          (chain
-            (integer))
-          (chain
-            (integer))))
-      (application
-        function: (builtin)
-        argument: (tuple
-          (chain
-            (access
-              source: (ripple)))
-          (chain
-            (integer)))))))
-
+      (tuple
+        (chain
+          (integer))
+        (chain
+          (integer)))
+      (access
+        source: (identifier)
+        field: (identifier))
+      (tuple
+        (chain
+          (access
+            source: (ripple)))
+        (chain
+          (integer)))
+      (builtin))))

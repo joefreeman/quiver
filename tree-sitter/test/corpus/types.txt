@@ -154,15 +154,18 @@ g = #' { 0 }
               name: (type_name))))
         (block
           (branch
-            condition: (expression (chain (integer))))))))
-  (expression
+            condition: (expression
+              (chain
+                (integer)))))))
     (chain
       binding: (identifier)
       (function
         parameter: (self_default_type)
         (block
           (branch
-            condition: (expression (chain (integer)))))))))
+            condition: (expression
+              (chain
+                (integer)))))))))
 
 ==================
 function type alias

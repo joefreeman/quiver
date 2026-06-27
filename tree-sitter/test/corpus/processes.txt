@@ -2,7 +2,7 @@
 spawn and receive
 ==================
 
-p = @{ !'int ~> { | =0 => "done" | ^ [] } }
+p = @{ !'int { =0 => "done" | [] ^ } }
 
 ---
 
@@ -31,28 +31,26 @@ p = @{ !'int ~> { | =0 => "done" | ^ [] } }
                   (branch
                     condition: (expression
                       (chain
-                        (application
-                          function: (tail_call)
-                          argument: (tuple))))))))))))))
+                        (tuple)
+                        (tail_call)))))))))))))
 
 ==================
 spawn typed and await
 ==================
 
-p = [42, 100] ~> @['int, 'int] { $ }, !p
+p = [42, 100] @['int, 'int] { $ }, !p
 
 ---
 
 (source_file
   (expression
     (chain
-      (application
-        function: (access
-          source: (identifier))
-        argument: (bind_match
-          (pattern_tuple
-            (integer)
-            (integer))))
+      binding: (identifier)
+      (tuple
+        (chain
+          (integer))
+        (chain
+          (integer)))
       (spawn
         parameter: (tuple_type
           (type_identifier
@@ -74,7 +72,7 @@ p = [42, 100] ~> @['int, 'int] { $ }, !p
 select with timeout
 ==================
 
-p1 ~> ![~, 1000]
+p1 ! [~, 1000]
 
 ---
 
@@ -94,7 +92,7 @@ p1 ~> ![~, 1000]
 send and self
 ==================
 
-42 ~> pid, &. ~> =self_pid
+42 pid, &. =self_pid
 
 ---
 
@@ -109,4 +107,3 @@ send and self
         (self))
       (bind_match
         (identifier)))))
-

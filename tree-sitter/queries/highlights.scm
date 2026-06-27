@@ -30,9 +30,9 @@
 
 (builtin) @function.builtin
 
-; The leading identifier of an application's callable head is highlighted as a call.
-(application
-  function: (access source: (identifier) @function.call))
+; Application is argument-first (`[args] f`), so a call head is just an ordinary access
+; term and can't be distinguished syntactically from a value reference; the tail-call
+; target, however, is unambiguously a call.
 (tail_call function: (identifier) @function.call)
 
 ; -------------------------------------------------------------------- imports
@@ -97,7 +97,6 @@
   ":"
   "|"
   "."
-  ";"
 ] @punctuation.delimiter
 
 (placeholder) @comment.unused

@@ -9,20 +9,16 @@ Point[x, y] = Point[10, 20]
 (source_file
   (expression
     (chain
-      (application
-        function: (tuple
-          name: (tuple_name)
-          (chain
-            (access
-              source: (identifier)))
-          (chain
-            (access
-              source: (identifier))))
-        argument: (bind_match
-          (pattern_tuple
-            name: (tuple_name)
-            (integer)
-            (integer)))))))
+      binding: (pattern_tuple
+        name: (tuple_name)
+        (identifier)
+        (identifier))
+      (tuple
+        name: (tuple_name)
+        (chain
+          (integer))
+        (chain
+          (integer))))))
 
 ==================
 partial binding
@@ -72,28 +68,23 @@ Point[x, &y] = Point[1, 2]
 (source_file
   (expression
     (chain
-      (application
-        function: (tuple
-          name: (tuple_name)
-          (chain
-            (access
-              source: (identifier)))
-          (chain
-            (reference
-              (access
-                source: (identifier)))))
-        argument: (bind_match
-          (pattern_tuple
-            name: (tuple_name)
-            (integer)
-            (integer)))))))
-
+      binding: (pattern_tuple
+        name: (tuple_name)
+        (identifier)
+        (pattern_pin
+          (identifier)))
+      (tuple
+        name: (tuple_name)
+        (chain
+          (integer))
+        (chain
+          (integer))))))
 
 ==================
 or-pattern
 ==================
 
-x ~> =([[], _] | [_, []])
+x =([[], _] | [_, []])
 
 ---
 
@@ -115,7 +106,7 @@ x ~> =([[], _] | [_, []])
 default type pattern
 ==================
 
-x ~> ='
+x ='
 
 ---
 
