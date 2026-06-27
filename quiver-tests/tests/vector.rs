@@ -284,7 +284,7 @@ fn test_of_exact_not_representable_is_nil() {
             "vec = %vec\n\
              (prepend, new) = %list\n\
              vs = new ~> prepend [~, 1/3]\n\
-             vec.of_exact [I32, 1/2, vs] ~> =r, vec.sum r",
+             vec.of_exact [I32, 1/2, vs] ~> =r, r, vec.sum r",
         )
         .expect("[]");
 }

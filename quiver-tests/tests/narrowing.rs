@@ -56,7 +56,7 @@ fn test_type_intersection_from_multiple_checks() {
             't = A | B | C;
             'u = B | C | D;
             x = B,
-            x ~> ='t ~> ='u, x
+            x ~> ='t, x ~> ='u, x
             "#,
         )
         .expect_type("B");
@@ -83,7 +83,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
     quiver()
         .evaluate(
             r#"
-            match0 = #'int { =0 },
+            match0 = #'int { =0 => $ },
             a = 0 ~> match0,
             { a => %num.add [a, 1] | 200 }
             "#,
@@ -94,7 +94,7 @@ fn test_truthiness_narrowing_in_branch_condition() {
     quiver()
         .evaluate(
             r#"
-            match0 = #'int { =0 },
+            match0 = #'int { =0 => $ },
             b = 1 ~> match0,
             { b => %num.add [b, 1] | 200 }
             "#,
@@ -109,9 +109,9 @@ fn test_truthiness_narrowing_with_binding() {
     quiver()
         .evaluate(
             r#"
-            match0 = #'int { =0 },
+            match0 = #'int { =0 => $ },
             a = 0 ~> match0,
-            { a ~> =x => %num.add [x, 1] | 200 }
+            { a ~> =x, x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("1");
@@ -120,9 +120,9 @@ fn test_truthiness_narrowing_with_binding() {
     quiver()
         .evaluate(
             r#"
-            match0 = #'int { =0 },
+            match0 = #'int { =0 => $ },
             b = 1 ~> match0,
-            { b ~> =x => %num.add [x, 1] | 200 }
+            { b ~> =x, x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("200");
@@ -135,8 +135,8 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
     quiver()
         .evaluate(
             r#"
-            f = #'int { =0 },
-            { 0 ~> f ~> =x => %num.add [x, 1] | 200 }
+            f = #'int { =0 => $ },
+            { 0 ~> f ~> =x, x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("1");
@@ -145,8 +145,8 @@ fn test_truthiness_narrowing_with_unknown_provenance() {
     quiver()
         .evaluate(
             r#"
-            f = #'int { =0 },
-            { 1 ~> f ~> =x => %num.add [x, 1] | 200 }
+            f = #'int { =0 => $ },
+            { 1 ~> f ~> =x, x => %num.add [x, 1] | 200 }
             "#,
         )
         .expect("200");
@@ -159,7 +159,7 @@ fn test_inter_chain_narrowing() {
     quiver()
         .evaluate(
             r#"
-            match0 = #'int { =0 },
+            match0 = #'int { =0 => $ },
             a = 0 ~> match0,
             { a ~> =x, %num.add [x, 1] }
             "#,
@@ -170,7 +170,7 @@ fn test_inter_chain_narrowing() {
     quiver()
         .evaluate(
             r#"
-            f = #'int { =0 },
+            f = #'int { =0 => $ },
             { 0 ~> f ~> =x, %num.add [x, 1] }
             "#,
         )
@@ -231,7 +231,7 @@ fn test_multiple_type_checks_same_provenance_complement() {
             't = A | B | C;
             'u = B | C;
             x = A,
-            { x ~> ='t ~> ='u => 1 | x }
+            { x ~> ='t, x ~> ='u => 1 | x }
             "#,
         )
         .expect_type("A");
@@ -277,7 +277,7 @@ fn test_non_type_failable_disables_complement() {
             some_func = #(A[a: 'int] | []) { $ },
             make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
             x = 0 ~> make_ab,
-            { x ~> =A[a: 'int] ~> some_func => 1 | x.a }
+            { x ~> =A[a: 'int], x ~> some_func => 1 | x.a }
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {

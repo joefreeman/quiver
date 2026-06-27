@@ -128,7 +128,7 @@ fn test_named_star_discriminates_union() {
 #[test]
 fn test_ignore_placeholder() {
     quiver().evaluate("[1, 2] ~> =[a, _], a").expect("1");
-    quiver().evaluate("[1, 2] ~> =_").expect("[1, 2]");
+    quiver().evaluate("[1, 2] ~> =_").expect("Ok");
     quiver().evaluate("_ = [1, 2]").expect("Ok");
 }
 
@@ -274,7 +274,7 @@ fn test_deeply_nested_tuple_pattern() {
 
 #[test]
 fn test_empty_tuple_pattern() {
-    quiver().evaluate("[] ~> =[]").expect("[]");
+    quiver().evaluate("[] ~> =[]").expect("Ok");
     quiver().evaluate("[1] ~> =[]").expect("[]");
 }
 
@@ -349,13 +349,13 @@ fn test_recursive_destructuring() {
 
 #[test]
 fn test_comparison_with_literal() {
-    quiver().evaluate("10 ~> =10").expect("10");
+    quiver().evaluate("10 ~> =10").expect("Ok");
     quiver().evaluate("10 ~> =5").expect("[]");
 }
 
 #[test]
 fn test_wildcard() {
-    quiver().evaluate("42 ~> =_").expect("42");
+    quiver().evaluate("42 ~> =_").expect("Ok");
 }
 
 #[test]

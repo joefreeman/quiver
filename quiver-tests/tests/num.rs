@@ -174,18 +174,18 @@ fn test_le_gt_ge() {
 fn test_match_decimal_literal() {
     quiver()
         .evaluate("[0.1, 0.2] ~> %num.add ~> =0.3")
-        .expect("3/10");
+        .expect("Ok");
 }
 
 #[test]
 fn test_match_fraction_literal() {
-    quiver().evaluate("2/4 ~> =1/2").expect("1/2");
+    quiver().evaluate("2/4 ~> =1/2").expect("Ok");
 }
 
 #[test]
 fn test_match_integer_valued_literal() {
     // `4/2` is the rational 2/1, so it matches the rational pattern `=2/1`, not `=2`.
-    quiver().evaluate("4/2 ~> =2/1").expect("2/1");
+    quiver().evaluate("4/2 ~> =2/1").expect("Ok");
     quiver().evaluate("4/2 ~> =2").expect("[]");
 }
 

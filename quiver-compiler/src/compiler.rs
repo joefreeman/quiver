@@ -6,7 +6,7 @@ mod modules;
 mod narrowing;
 use narrowing::{
     Narrowing, analyze_tuple_pattern_for_complement, apply_narrowing, compute_complement,
-    get_field_narrowing, get_field_type, narrow_nil_from_new_bindings,
+    get_field_narrowing, get_field_type, get_type_for_provenance, narrow_nil_from_new_bindings,
 };
 mod pattern;
 mod provenance;
@@ -1864,9 +1864,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         self.codegen.patch_jump_to_here(success_jump_addr);
 
-        // Compute final type - if return_ok, replace value type with Ok
+        // Compute final type - if return_ok, replace the matched (success) type with Ok.
+        // `result_type` is the matched portion, already widened with nil when the match can fail.
+        // A `result_type` that is *exactly* nil has no success component: the match can never
+        // succeed. When the value itself can't be nil this means the pattern is unsatisfiable, so
+        // the term is statically dead (nil) — emitting `Ok | []` here would wrongly keep a dead
+        // branch alive. (If the value can be nil the pattern matches that nil value, so it stays a
+        // real success.)
         let final_type = if return_ok {
-            if self.contains_nil(result_type) {
+            if self.is_nil(result_type) && !self.contains_nil(value_type) {
+                result_type
+            } else if self.contains_nil(result_type) {
                 let ok_type_id = self.program.register_type(Type::ok());
                 let nil_type_id = self.program.register_type(Type::nil());
                 typing::union_type_ids(self.program, vec![ok_type_id, nil_type_id])
@@ -2070,17 +2078,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 next_branch_jumps.push((next_branch_jump, i + 1, needs_cleanup));
 
                 // Apply forward narrowing: if condition succeeded (non-nil), narrow to exclude nil.
-                // This enables type refinement like { a => %num.add[a, 1] } when a: [] | int
+                // This enables type refinement like { a => %num.add[a, 1] } when a: [] | int.
                 if self.contains_nil(condition_type) {
-                    let truthy_type = self.without_nil(condition_type);
-                    // Narrow the source variable if it has trackable provenance
+                    // Narrow the source value if it has trackable provenance. Narrow it to exclude
+                    // nil from *its own current type* — not from `condition_type`. For a plain
+                    // truthiness test (`a`) these coincide. For a `=PATTERN` match they don't: the
+                    // condition value is the verdict `Ok | []`, whose truthy part `Ok` is unrelated
+                    // to the matched value, so narrowing the provenance to `Ok` would collapse it to
+                    // never. `compile_match` has already narrowed the provenance to the matched
+                    // type, so dropping nil from that current type is the correct refinement.
                     if !matches!(condition_prov, Provenance::Unknown) {
-                        apply_narrowing(
-                            &mut self.scopes,
-                            &condition_prov,
-                            truthy_type,
-                            self.program,
-                        );
+                        let current =
+                            get_type_for_provenance(&self.scopes, &condition_prov, self.program);
+                        let truthy_type = self.without_nil(current);
+                        if !self.is_never(truthy_type) {
+                            apply_narrowing(
+                                &mut self.scopes,
+                                &condition_prov,
+                                truthy_type,
+                                self.program,
+                            );
+                        }
                     }
                     // Narrow all bindings created during the condition that contain nil.
                     // This handles cases like { 0 ~> f ~> =x => ... } where x has Unknown
@@ -3757,10 +3775,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     val_type,
                     value_provenance.clone(),
                     on_no_match,
-                    false,
+                    true,
                     narrowing,
                 )?;
-                // Match result preserves provenance of matched value
+                // Preserve the matched value's provenance: a chain/branch that follows a
+                // `=PATTERN` still narrows the original value (the match recorded its structural
+                // narrowing against this provenance inside `compile_match`). The term now yields
+                // the verdict `Ok`/`[]` rather than the matched value, so callers that interpret
+                // the *verdict* as the provenance's value (the `=>` forward nil-narrowing) guard
+                // against the disjoint verdict type collapsing the matched type to never.
                 Ok((ty, value_provenance))
             }
             ast::Term::Spawn(function, argument, span) => {

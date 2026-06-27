@@ -24,7 +24,7 @@
   | Node['int, (Nil | Cons[^, ^1])];
 
 // --- key hashing -------------------------------------------------------------
-key_bytes = #'key { =Str[b] => b | ='bin };
+key_bytes = #'key { =Str[b] => b | ='bin => $ };
 hash = #'key { __binary_hash32__ key_bytes };
 
 // 5-bit hash fragment at `shift` bits, and the compact child index for a slot bit.
