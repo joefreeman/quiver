@@ -5,27 +5,27 @@
   | Read['int, 'int, @Reply['ref, 'bin], 'ref]
   | Write['int, 'bin, @Reply['ref, 'int], 'ref]
   | Flush[@Reply['ref, Ok], 'ref]
-  | Close;
+  | Close
 
-' = File[@'command];
+' = File[@'command]
 
 // The file process loop. The descriptor is held as the parameter (rather than reopened) and
 // threaded through each tail call, so the file is opened exactly once.
 serve = #\File {
-  !#'command ~> {
+  !#'command {
     | =Read[offset, length, reply, id] => {
-      [$, offset, length] ~> __file_read__ ~> Reply[id, ~] ~> reply,
-      $ ~> ^
+      [$, offset, length] __file_read__ Reply[id, ~] reply,
+      $ ^
     }
     | =Write[offset, data, reply, id] => {
-      [$, offset, data] ~> __file_write__ ~> Reply[id, ~] ~> reply,
-      $ ~> ^
+      [$, offset, data] __file_write__ Reply[id, ~] reply,
+      $ ^
     }
     | =Flush[reply, id] => {
-      $ ~> __file_flush__ ~> Reply[id, ~] ~> reply,
-      $ ~> ^
+      $ __file_flush__ Reply[id, ~] reply,
+      $ ^
     }
-    | =Close => $ ~> __file_close__
+    | =Close => $ __file_close__
   }
 },
 
@@ -33,17 +33,17 @@ serve = #\File {
 do_read = #[', 'int, 'int] {
   =[f, offset, length],
   id = &,
-  Read[offset, length, &., id] ~> f.0,
-  !#Reply['ref, 'bin] { =Reply[&id, _], Ok } ~> { =Reply[_, data] => data }
+  Read[offset, length, &., id] f.0,
+  ! [#Reply['ref, 'bin] { =Reply[&id, _], Ok }] { =Reply[_, data] => data }
 },
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
 read_all = #[', 'int, 'bin] {
   =[f, offset, acc],
-  chunk = [f, offset, 65536] ~> do_read,
-  chunk ~> %bin.length ~> {
+  chunk = [f, offset, 65536] do_read,
+  chunk %bin.length {
     | =0 => acc
-    | =n => [acc, chunk] ~> %bin.concat ~> [f, [offset, n] ~> %num.add, ~] ~> ^
+    | =n => [acc, chunk] %bin.concat [f, [offset, n] %num.add, ~] ^
   }
 },
 
@@ -55,28 +55,26 @@ read_all = #[', 'int, 'bin] {
 // compacted once per chunk read, keeping the whole pass linear.
 lines_step = #[', 'int, 'bin, 'int] {
   =[f, offset, buf, pos],
-  len = buf ~> %bin.length,
-  [buf, 10, pos] ~> %bin.index ~> {
+  len = buf %bin.length,
+  [buf, 10, pos] %bin.index {
     | =[] => {
       // No newline in the remaining buffer: keep the unconsumed tail and read more.
-      leftover = [buf, pos, len] ~> %bin.slice,
-      chunk = [f, offset, 65536] ~> do_read,
-      chunk ~> %bin.length ~> {
+      leftover = [buf, pos, len] %bin.slice,
+      chunk = [f, offset, 65536] do_read,
+      chunk %bin.length {
         | =0 => {
           // EOF: emit the final unterminated line if there is one, otherwise stop.
-          | leftover ~> %bin.length ~> =0 => []
+          | leftover %bin.length =0 => []
           | [Str[leftover], [f, offset, 0x, 0]]
         }
         | =n => {
-          n
-          ~> [offset, ~] ~> %num.add
-          ~> [f, ~, [leftover, chunk] ~> %bin.concat, 0] ~> ^
+          n [offset, ~] %num.add [f, ~, [leftover, chunk] %bin.concat, 0] ^
         }
       }
     }
     | =index => {
-      line = [buf, pos, index] ~> %bin.slice,
-      [Str[line], [f, offset, buf, [index, 1] ~> %num.add]]
+      line = [buf, pos, index] %bin.slice,
+      [Str[line], [f, offset, buf, [index, 1] %num.add]]
     }
   }
 },
@@ -88,39 +86,39 @@ lines_step = #[', 'int, 'bin, 'int] {
   // (O_WRONLY|O_CREAT|O_TRUNC), A = 1089 (O_WRONLY|O_CREAT|O_APPEND).
   open: #(['%path] | ['%path, mode: R | W | A]) {
     flags = { =(mode: W) => 577 | =(mode: A) => 1089 | 0 },
-    name = $0 ~> %path.to_string ~> .0,
+    name = $0 %path.to_string .0,
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
-    File[[name, flags, 420] ~> __file_open__ ~> @serve]
+    File[[name, flags, 420] __file_open__ @serve]
   },
 
   // Read `length` bytes starting at `offset`.
   read: #[', 'int, 'int] { do_read },
 
   // Read the entire file from the start, returning all its bytes.
-  read_all: #' { [~, 0, 0x] ~> read_all },
+  read_all: #' { [~, 0, 0x] read_all },
 
   // Iterate over the lines of the file (newline-separated, without the trailing newline).
-  lines: #' { [[~, 0, 0x, 0], &lines_step] ~> %iter.unfold },
+  lines: #' { [[~, 0, 0x, 0], &lines_step] %iter.unfold },
 
   // Write `data` starting at `offset`, returning the number of bytes written.
   write: #[', 'int, 'bin] {
     =[f, offset, data],
     id = &,
-    Write[offset, data, &., id] ~> f.0,
-    !#Reply['ref, 'int] { =Reply[&id, _], Ok } ~> { =Reply[_, written] => written }
+    Write[offset, data, &., id] f.0,
+    ! [#Reply['ref, 'int] { =Reply[&id, _], Ok }] { =Reply[_, written] => written }
   },
 
   // Flush buffered writes durably to disk (fsync), returning Ok once complete.
   flush: #' {
     =f,
     id = &,
-    Flush[&., id] ~> f.0,
-    !#Reply['ref, Ok] { =Reply[&id, _], Ok } ~> { =Reply[_, ok] => ok }
+    Flush[&., id] f.0,
+    ! [#Reply['ref, Ok] { =Reply[&id, _], Ok }] { =Reply[_, ok] => ok }
   },
 
   // Close the file, releasing the descriptor and stopping its process.
   close: #' {
-    Close ~> $0,
+    Close $0,
     Ok
   }
 ]

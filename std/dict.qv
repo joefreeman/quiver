@@ -14,176 +14,176 @@
 // the inline recursive list `(Nil | Cons[^, ^1])` because a type can't name itself; helpers
 // nonetheless take the `'list` alias, which unifies with the inline form.
 
-'key = Str['bin] | 'bin;
-'list<'t> = Nil | Cons['t, ^];
+'key = Str['bin] | 'bin
+'list<'t> = Nil | Cons['t, ^]
 
 '<'v> =
   | Empty
   | Leaf['int, 'key, 'v]
   | Collision['int, 'list<['key, 'v]>]
-  | Node['int, (Nil | Cons[^, ^1])];
+  | Node['int, (Nil | Cons[^, ^1])]
 
 // --- key hashing -------------------------------------------------------------
-key_bytes = #'key { =Str[b] => b | ='bin => $ };
-hash = #'key { key_bytes ~> __binary_hash32__ };
+key_bytes = #'key { =Str[b] => b | ='bin => $ }
+hash = #'key { key_bytes __binary_hash32__ }
 
 // 5-bit hash fragment at `shift` bits, and the compact child index for a slot bit.
-fragment = #['int, 'int] { =[hash, shift], [hash, [0, shift] ~> %num.sub] ~> %int.shift ~> [~, 31] ~> %int.and };
-slot_index = #['int, 'int] { =[bitmap, bit], [bit, 1] ~> %num.sub ~> [bitmap, ~] ~> %int.and ~> %int.popcount };
+fragment = #['int, 'int] { =[hash, shift], [hash, [0, shift] %num.sub] %int.shift [~, 31] %int.and }
+slot_index = #['int, 'int] { =[bitmap, bit], [bit, 1] %num.sub [bitmap, ~] %int.and %int.popcount }
 
 // --- generic list helpers (tail-recursive, à la %list) -----------------------
 revcat = #<'t>['list<'t>, 'list<'t>] {
   =[acc, rest],
-  acc ~> { =Nil => rest | =Cons[h, t] => [t, Cons[h, rest]] ~> ^ }
-};
+  acc { =Nil => rest | =Cons[h, t] => [t, Cons[h, rest]] ^ }
+}
 
 length = #<'t>['list<'t>, 'int] {
   =[lst, n],
-  lst ~> { =Nil => n | =Cons[_, t] => [t, [n, 1] ~> %num.add] ~> ^ }
-};
+  lst { =Nil => n | =Cons[_, t] => [t, [n, 1] %num.add] ^ }
+}
 
 map = #<'t, 'u>['list<'t>, #'t -> 'u, 'list<'u>] {
   =[lst, f, acc],
-  lst ~> { =Nil => [acc, Nil] ~> revcat | =Cons[h, t] => [t, &f, Cons[h ~> f, acc]] ~> ^ }
-};
+  lst { =Nil => [acc, Nil] revcat | =Cons[h, t] => [t, &f, Cons[h f, acc]] ^ }
+}
 
 // child at a compact index; `Empty` past the end (never reached for a set slot). Returning a
 // node — total, rather than failing to nil on `Nil` — keeps `[]` out of the tree-op result types.
 child_at = #<'v>['list<'<'v>>, 'int] {
   =[children, idx],
-  children ~> { =Nil => Empty | =Cons[h, t] => { idx ~> =0 => h | [t, [idx, 1] ~> %num.sub] ~> ^ } }
-};
+  children { =Nil => Empty | =Cons[h, t] => { idx =0 => h | [t, [idx, 1] %num.sub] ^ } }
+}
 
 insert_at = #<'t>['list<'t>, 'int, 't, 'list<'t>] {
   =[lst, idx, val, acc],
   {
-    | idx ~> =0 => [acc, Cons[val, lst]] ~> revcat
-    | lst ~> {
-      | =Nil => [acc, Cons[val, Nil]] ~> revcat
-      | =Cons[h, t] => [t, [idx, 1] ~> %num.sub, val, Cons[h, acc]] ~> ^
+    | idx =0 => [acc, Cons[val, lst]] revcat
+    | lst {
+      | =Nil => [acc, Cons[val, Nil]] revcat
+      | =Cons[h, t] => [t, [idx, 1] %num.sub, val, Cons[h, acc]] ^
     }
   }
-};
+}
 
 update_at = #<'t>['list<'t>, 'int, 't, 'list<'t>] {
   =[lst, idx, val, acc],
-  lst ~> {
-    | =Nil => [acc, Nil] ~> revcat
-    | =Cons[h, t] => { idx ~> =0 => [acc, Cons[val, t]] ~> revcat | [t, [idx, 1] ~> %num.sub, val, Cons[h, acc]] ~> ^ }
+  lst {
+    | =Nil => [acc, Nil] revcat
+    | =Cons[h, t] => { idx =0 => [acc, Cons[val, t]] revcat | [t, [idx, 1] %num.sub, val, Cons[h, acc]] ^ }
   }
-};
+}
 
 remove_at = #<'t>['list<'t>, 'int, 'list<'t>] {
   =[lst, idx, acc],
-  lst ~> {
-    | =Nil => [acc, Nil] ~> revcat
-    | =Cons[h, t] => { idx ~> =0 => [acc, t] ~> revcat | [t, [idx, 1] ~> %num.sub, Cons[h, acc]] ~> ^ }
+  lst {
+    | =Nil => [acc, Nil] revcat
+    | =Cons[h, t] => { idx =0 => [acc, t] revcat | [t, [idx, 1] %num.sub, Cons[h, acc]] ^ }
   }
-};
+}
 
 // --- collision buckets -------------------------------------------------------
 bucket_get = #<'v>['list<['key, 'v]>, 'key] {
   =[entries, key],
-  entries ~> { =Nil => [] | =Cons[[k, v], t] => { [k, key] ~> == => v | [t, key] ~> ^ } }
-};
+  entries { =Nil => [] | =Cons[[k, v], t] => { [k, key] == => v | [t, key] ^ } }
+}
 
 bucket_put = #<'v>['list<['key, 'v]>, 'key, 'v, 'list<['key, 'v]>] {
   =[entries, key, value, acc],
-  entries ~> {
-    | =Nil => [acc, Cons[[key, value], Nil]] ~> revcat
+  entries {
+    | =Nil => [acc, Cons[[key, value], Nil]] revcat
     | =Cons[[k, v], t] => {
-      | [k, key] ~> == => [acc, Cons[[key, value], t]] ~> revcat
-      | [t, key, value, Cons[[k, v], acc]] ~> ^
+      | [k, key] == => [acc, Cons[[key, value], t]] revcat
+      | [t, key, value, Cons[[k, v], acc]] ^
     }
   }
-};
+}
 
 bucket_remove = #<'v>['list<['key, 'v]>, 'key, 'list<['key, 'v]>] {
   =[entries, key, acc],
-  entries ~> {
-    | =Nil => [acc, Nil] ~> revcat
-    | =Cons[[k, v], t] => { [k, key] ~> == => [acc, t] ~> revcat | [t, key, Cons[[k, v], acc]] ~> ^ }
+  entries {
+    | =Nil => [acc, Nil] revcat
+    | =Cons[[k, v], t] => { [k, key] == => [acc, t] revcat | [t, key, Cons[[k, v], acc]] ^ }
   }
-};
+}
 
 // --- tree operations ---------------------------------------------------------
 get = #<'v>['<'v>, 'key, 'int, 'int] {
   =[node, key, hash, shift],
-  node ~> {
+  node {
     | =Empty => []
-    | =Leaf[_, k, v] => { [k, key] ~> == => v | [] }
-    | =Collision[_, entries] => [entries, key] ~> bucket_get
+    | =Leaf[_, k, v] => { [k, key] == => v | [] }
+    | =Collision[_, entries] => [entries, key] bucket_get
     | =Node[bitmap, children] => {
-      bit = [hash, shift] ~> fragment ~> [1, ~] ~> %int.shift,
+      bit = [hash, shift] fragment [1, ~] %int.shift,
       {
-        | [bitmap, bit] ~> %int.and ~> =0 => []
-        | child = [children, [bitmap, bit] ~> slot_index] ~> child_at,
-          [child, key, hash, [shift, 5] ~> %num.add] ~> ^
+        | [bitmap, bit] %int.and =0 => []
+        | child = [children, [bitmap, bit] slot_index] child_at,
+          [child, key, hash, [shift, 5] %num.add] ^
       }
     }
   }
-};
+}
 
 // split two single entries (differing keys) into a fresh subtree at `shift`.
 split_pair = #<'v>[#^ -> '<'v>, 'int, 'key, 'v, 'int, 'key, 'v, 'int] {
   =[self, h1, k1, v1, h2, k2, v2, shift],
   {
-    | [h1, h2] ~> == => Collision[h1, [[Nil, k1, v1, Nil] ~> bucket_put, k2, v2, Nil] ~> bucket_put]
-    | f1 = [h1, shift] ~> fragment,
-      f2 = [h2, shift] ~> fragment,
+    | [h1, h2] == => Collision[h1, [[Nil, k1, v1, Nil] bucket_put, k2, v2, Nil] bucket_put]
+    | f1 = [h1, shift] fragment,
+      f2 = [h2, shift] fragment,
       {
-        | [f1, f2] ~> == =>
-          Node[[1, f1] ~> %int.shift, Cons[[&self, h1, k1, v1, h2, k2, v2, [shift, 5] ~> %num.add] ~> self, Nil]]
-        | bitmap = [[1, f1] ~> %int.shift, [1, f2] ~> %int.shift] ~> %int.or,
+        | [f1, f2] == =>
+          Node[[1, f1] %int.shift, Cons[[&self, h1, k1, v1, h2, k2, v2, [shift, 5] %num.add] self, Nil]]
+        | bitmap = [[1, f1] %int.shift, [1, f2] %int.shift] %int.or,
           {
-            | [f1, f2] ~> %num.lt? => Node[bitmap, Cons[Leaf[h1, k1, v1], Cons[Leaf[h2, k2, v2], Nil]]]
+            | [f1, f2] %num.lt? => Node[bitmap, Cons[Leaf[h1, k1, v1], Cons[Leaf[h2, k2, v2], Nil]]]
             | Node[bitmap, Cons[Leaf[h2, k2, v2], Cons[Leaf[h1, k1, v1], Nil]]]
           }
       }
   }
-};
+}
 
 // split an existing node (a collision) against a new entry whose hash differs from it.
 split_node = #<'v>[#^ -> '<'v>, '<'v>, 'int, 'int, 'key, 'v, 'int] {
   =[self, cnode, chash, hash, key, value, shift],
-  fc = [chash, shift] ~> fragment,
-  fh = [hash, shift] ~> fragment,
+  fc = [chash, shift] fragment,
+  fh = [hash, shift] fragment,
   {
-    | [fc, fh] ~> == =>
-      Node[[1, fc] ~> %int.shift, Cons[[&self, cnode, chash, hash, key, value, [shift, 5] ~> %num.add] ~> self, Nil]]
-    | bitmap = [[1, fc] ~> %int.shift, [1, fh] ~> %int.shift] ~> %int.or,
+    | [fc, fh] == =>
+      Node[[1, fc] %int.shift, Cons[[&self, cnode, chash, hash, key, value, [shift, 5] %num.add] self, Nil]]
+    | bitmap = [[1, fc] %int.shift, [1, fh] %int.shift] %int.or,
       {
-        | [fc, fh] ~> %num.lt? => Node[bitmap, Cons[cnode, Cons[Leaf[hash, key, value], Nil]]]
+        | [fc, fh] %num.lt? => Node[bitmap, Cons[cnode, Cons[Leaf[hash, key, value], Nil]]]
         | Node[bitmap, Cons[Leaf[hash, key, value], Cons[cnode, Nil]]]
       }
   }
-};
+}
 
 put = #<'v>[#^ -> '<'v>, '<'v>, 'key, 'v, 'int, 'int] {
   =[self, node, key, value, hash, shift],
-  node ~> {
+  node {
     | =Empty => Leaf[hash, key, value]
     | =Leaf[lhash, lkey, lvalue] => {
-      | [lkey, key] ~> == => Leaf[hash, key, value]
-      | [&split_pair, lhash, lkey, lvalue, hash, key, value, shift] ~> split_pair
+      | [lkey, key] == => Leaf[hash, key, value]
+      | [&split_pair, lhash, lkey, lvalue, hash, key, value, shift] split_pair
     }
     | =Collision[chash, entries] => {
-      | [chash, hash] ~> == => Collision[chash, [entries, key, value, Nil] ~> bucket_put]
-      | [&split_node, node, chash, hash, key, value, shift] ~> split_node
+      | [chash, hash] == => Collision[chash, [entries, key, value, Nil] bucket_put]
+      | [&split_node, node, chash, hash, key, value, shift] split_node
     }
     | =Node[bitmap, children] => {
-      bit = [hash, shift] ~> fragment ~> [1, ~] ~> %int.shift,
-      idx = [bitmap, bit] ~> slot_index,
+      bit = [hash, shift] fragment [1, ~] %int.shift,
+      idx = [bitmap, bit] slot_index,
       {
-        | [bitmap, bit] ~> %int.and ~> =0 =>
-          Node[[bitmap, bit] ~> %int.or, [children, idx, Leaf[hash, key, value], Nil] ~> insert_at]
-        | child = [children, idx] ~> child_at,
-          new_child = [&self, child, key, value, hash, [shift, 5] ~> %num.add] ~> self,
-          Node[bitmap, [children, idx, new_child, Nil] ~> update_at]
+        | [bitmap, bit] %int.and =0 =>
+          Node[[bitmap, bit] %int.or, [children, idx, Leaf[hash, key, value], Nil] insert_at]
+        | child = [children, idx] child_at,
+          new_child = [&self, child, key, value, hash, [shift, 5] %num.add] self,
+          Node[bitmap, [children, idx, new_child, Nil] update_at]
       }
     }
   }
-};
+}
 
 // Canonicalize a node from its bitmap + children after a removal, so a dict's shape depends only
 // on its contents (not on insertion/removal order): no children left collapses to `Empty`, and a
@@ -193,105 +193,104 @@ put = #<'v>[#^ -> '<'v>, '<'v>, 'key, 'v, 'int, 'int] {
 collapse_node = #<'v>['int, 'list<'<'v>>] {
   =[bitmap, children],
   {
-    | children ~> =Nil => Empty
-    | children ~> =Cons[only, Nil] => only ~> { =Node[_, _] => Node[bitmap, children] | =leaf => leaf }
+    | children =Nil => Empty
+    | children =Cons[only, Nil] => only { =Node[_, _] => Node[bitmap, children] | =leaf => leaf }
     | Node[bitmap, children]
   }
-};
+}
 
 // Drop the slot for `bit` (its child became `Empty`), then canonicalize. Non-recursive so the
 // generic `remove_at` call sits outside `remove`'s self-passing recursion — where (a quirk of
 // the type inferencer) it would otherwise leak its function type into the result type.
 remove_slot = #<'v>['int, 'int, 'list<'<'v>>, 'int] {
   =[bitmap, bit, children, idx],
-  [[bitmap, bit ~> %int.not] ~> %int.and, [children, idx, Nil] ~> remove_at] ~> collapse_node
-};
+  [[bitmap, bit %int.not] %int.and, [children, idx, Nil] remove_at] collapse_node
+}
 
 remove = #<'v>[#^ -> '<'v>, '<'v>, 'key, 'int, 'int] {
   =[self, node, key, hash, shift],
-  node ~> {
+  node {
     | =Empty => Empty
-    | =Leaf[lhash, k, v] => { [k, key] ~> == => Empty | Leaf[lhash, k, v] }
+    | =Leaf[lhash, k, v] => { [k, key] == => Empty | Leaf[lhash, k, v] }
     | =Collision[chash, entries] => {
-      kept = [entries, key, Nil] ~> bucket_remove,
+      kept = [entries, key, Nil] bucket_remove,
       {
-        | kept ~> =Nil => Empty
-        | kept ~> =Cons[[k, v], Nil] => Leaf[chash, k, v]
+        | kept =Nil => Empty
+        | kept =Cons[[k, v], Nil] => Leaf[chash, k, v]
         | Collision[chash, kept]
       }
     }
     | =Node[bitmap, children] => {
-      bit = [hash, shift] ~> fragment ~> [1, ~] ~> %int.shift,
+      bit = [hash, shift] fragment [1, ~] %int.shift,
       {
-        | [bitmap, bit] ~> %int.and ~> =0 => Node[bitmap, children]
-        | idx = [bitmap, bit] ~> slot_index,
-          child = [children, idx] ~> child_at,
-          [&self, child, key, hash, [shift, 5] ~> %num.add] ~> self ~> {
-            | =Empty => [bitmap, bit, children, idx] ~> remove_slot
-            | =new => [bitmap, [children, idx, new, Nil] ~> update_at] ~> collapse_node
+        | [bitmap, bit] %int.and =0 => Node[bitmap, children]
+        | idx = [bitmap, bit] slot_index,
+          child = [children, idx] child_at,
+          [&self, child, key, hash, [shift, 5] %num.add] self {
+            | =Empty => [bitmap, bit, children, idx] remove_slot
+            | =new => [bitmap, [children, idx, new, Nil] update_at] collapse_node
           }
       }
     }
   }
-};
+}
 
 // collect every entry by walking a worklist of pending nodes (order is unspecified).
 entries = #<'v>['list<'<'v>>, 'list<['key, 'v]>] {
   =[worklist, acc],
-  worklist ~> {
+  worklist {
     | =Nil => acc
-    | =Cons[node, rest] => node ~> {
-      | =Empty => [rest, acc] ~> ^
-      | =Leaf[_, k, v] => [rest, Cons[[k, v], acc]] ~> ^
-      | =Collision[_, ents] => [rest, [ents, acc] ~> revcat] ~> ^
-      | =Node[_, children] => [[children, rest] ~> revcat, acc] ~> ^
+    | =Cons[node, rest] => node {
+      | =Empty => [rest, acc] ^
+      | =Leaf[_, k, v] => [rest, Cons[[k, v], acc]] ^
+      | =Collision[_, ents] => [rest, [ents, acc] revcat] ^
+      | =Node[_, children] => [[children, rest] revcat, acc] ^
     }
   }
-};
+}
 
 from = #<'v>[#^ -> '<'v>, '<'v>, 'list<['key, 'v]>] {
   =[self, d, pairs],
-  pairs ~> {
+  pairs {
     | =Nil => d
-    | =Cons[[k, val], t] => [&put, d, k, val, k ~> hash, 0] ~> put ~> [&self, ~, t] ~> self
+    | =Cons[[k, val], t] => [&put, d, k, val, k hash, 0] put [&self, ~, t] self
   }
-};
+}
 
 [
   // An empty dict.
   new: #{ Empty },
 
   // The value stored for `key`, or nil (`[]`) if absent.
-  get: #<'v>['<'v>, 'key] { [$0, $1, $1 ~> hash, 0] ~> get },
+  get: #<'v>['<'v>, 'key] { [$0, $1, $1 hash, 0] get },
 
   // A dict with `key` mapped to `value` (replacing any existing mapping).
-  put: #<'v>['<'v>, 'key, 'v] { [&put, $0, $1, $2, $1 ~> hash, 0] ~> put },
+  put: #<'v>['<'v>, 'key, 'v] { [&put, $0, $1, $2, $1 hash, 0] put },
 
   // A dict with `key` removed (unchanged if absent).
-  remove: #<'v>['<'v>, 'key] { [&remove, $0, $1, $1 ~> hash, 0] ~> remove },
+  remove: #<'v>['<'v>, 'key] { [&remove, $0, $1, $1 hash, 0] remove },
 
   // Ok if `key` is present, else nil.
-  has?: #<'v>['<'v>, 'key] { [$0, $1, $1 ~> hash, 0] ~> get, Ok },
+  has?: #<'v>['<'v>, 'key] { [$0, $1, $1 hash, 0] get, Ok },
 
   // Number of entries.
-  count: #<'v>'<'v> { Cons[~, Nil] ~> [~, Nil] ~> entries ~> [~, 0] ~> length },
+  count: #<'v>'<'v> { Cons[~, Nil] [~, Nil] entries [~, 0] length },
 
   // All entries as a list of [key, value] pairs (unspecified order).
-  entries: #<'v>'<'v> { Cons[~, Nil] ~> [~, Nil] ~> entries },
+  entries: #<'v>'<'v> { Cons[~, Nil] [~, Nil] entries },
 
   // All keys / values as lists (unspecified order).
-  keys: #<'v>'<'v> { Cons[~, Nil] ~> [~, Nil] ~> entries ~> [~, #{ $0 }, Nil] ~> map },
-  values: #<'v>'<'v> { Cons[~, Nil] ~> [~, Nil] ~> entries ~> [~, #{ $1 }, Nil] ~> map },
+  keys: #<'v>'<'v> { Cons[~, Nil] [~, Nil] entries [~, #{ $0 }, Nil] map },
+  values: #<'v>'<'v> { Cons[~, Nil] [~, Nil] entries [~, #{ $1 }, Nil] map },
 
   // An iterator over entries.
   iter: #<'v>'<'v> {
-    Cons[~, Nil] ~> [~, Nil] ~> entries
-    ~> [~, #<'v>'list<['key, 'v]> { =Cons[e, t] => [e, t] | =Nil => [] }] ~> %iter.unfold
+    Cons[~, Nil] [~, Nil] entries [~, #<'v>'list<['key, 'v]> { =Cons[e, t] => [e, t] | =Nil => [] }] %iter.unfold
   },
 
   // Build a dict from a list of [key, value] pairs (later pairs win).
-  from: #<'v>'list<['key, 'v]> { [&from, Empty, ~] ~> from },
+  from: #<'v>'list<['key, 'v]> { [&from, Empty, ~] from },
 
   // All entries of `b` put into `a` (b's values win on conflict).
-  merge: #<'v>['<'v>, '<'v>] { Cons[$1, Nil] ~> [~, Nil] ~> entries ~> [&from, $0, ~] ~> from }
+  merge: #<'v>['<'v>, '<'v>] { Cons[$1, Nil] [~, Nil] entries [&from, $0, ~] from }
 ]

@@ -2,7 +2,7 @@
 //!
 //! Its defining transformation is **argument-first** lowering: a function application written as
 //! juxtaposition (`f [args]`, `f x`) is rendered with the argument as a *preceding* chain term and
-//! the callable following — `[args] ~> f`, `x ~> f`. The one exception is the ripple family
+//! the callable following — `[args] f`, `x f`. The one exception is the ripple family
 //! (`~`, `~.f`, `^~`, `@~`), where the flowing value *is* the callable, so the argument genuinely
 //! cannot precede it; those stay juxtaposed.
 //!
@@ -95,15 +95,11 @@ fn render_chain(chain: &Chain) -> String {
     out
 }
 
-/// Render the terms of a chain joined by ` ~> `. Each term is a single chain element: application
-/// is argument-first (`[args] ~> f` is two terms — the tuple and the callable), so a term never
+/// Render the terms of a chain joined by ` `. Each term is a single chain element: application
+/// is argument-first (`[args] f` is two terms — the tuple and the callable), so a term never
 /// expands into several elements.
 fn render_terms(terms: &[Term]) -> String {
-    terms
-        .iter()
-        .map(render_term)
-        .collect::<Vec<_>>()
-        .join(" ~> ")
+    terms.iter().map(render_term).collect::<Vec<_>>().join(" ")
 }
 
 /// Render a single chain term.
@@ -538,26 +534,26 @@ mod tests {
         // and reach a print fixpoint.
         let corpus: &[&str] = &[
             // --- argument-first application ---
-            "[3, 4] ~> add ~> [~, 2] ~> mul",
-            "x ~> f",
-            "[[x] ~> g, y] ~> f",
-            "[3, 4] ~> __integer_add__",
-            "&g ~> f",
-            "5 ~> f",
+            "[3, 4] add [~, 2] mul",
+            "x f",
+            "[[x] g, y] f",
+            "[3, 4] __integer_add__",
+            "&g f",
+            "5 f",
             // --- bare ripple (flowing-value) terms: no juxtaposed argument ---
-            "5 ~> ~",
-            "num ~> ~.add",
-            "&g ~> ^~",
-            "&g ~> @~",
+            "5 ~",
+            "num ~.add",
+            "&g ^~",
+            "&g @~",
             // --- argument-first tail calls ---
-            "[a, b] ~> ^",
-            "[x] ~> ^foo",
+            "[a, b] ^",
+            "[x] ^foo",
             // --- spawn ---
             "@f",
             "@{ 5 }",
             "@'int { $ }",
             "@('int | 'bin) { $ }",
-            "x ~> @counter",
+            "x @counter",
             // --- select / process / references ---
             "!'int",
             "!'int { =0 => Ok | [] }",
@@ -568,22 +564,22 @@ mod tests {
             "&",
             "&.",
             "&__integer_add__",
-            "42 ~> pid",
+            "42 pid",
             "@3",
             // --- ripple / spread values ---
-            "5 ~> [~, 1]",
-            "0 ~> Point[x: ~, y: ~]",
+            "5 [~, 1]",
+            "0 Point[x: ~, y: ~]",
             "a[..., y: 3]",
             "~[..., y: 3]",
-            "A[x: 1] ~> B[...]",
+            "A[x: 1] B[...]",
             "[...a, ...b]",
             "[w: 0, ...a]",
             // --- field access / self / operators ---
-            "point.x ~> .name",
-            "$ ~> $.x ~> $.0",
-            "5 ~> ==",
-            "[] ~> <>",
-            "42 ~> .",
+            "point.x .name",
+            "$ $.x $.0",
+            "5 ==",
+            "[] <>",
+            "42 .",
             // --- match forms ---
             "=Point[x, y]",
             "=(x: 'int)",
@@ -604,17 +600,17 @@ mod tests {
             "[x: a, y: b] = p",
             "Config(host, port) = c",
             // --- blocks / branches / consequence ---
-            "v ~> { =0 => \"zero\" | \"neg\" }",
-            "item ~> { is_valid? ~> process | [] ~> show_error }",
-            "{ =Square[x] ~> [x, 10] ~> num.gt? => \"large\" | \"small\" }",
+            "v { =0 => \"zero\" | \"neg\" }",
+            "item { is_valid? process | [] show_error }",
+            "{ =Square[x] [x, 10] num.gt? => \"large\" | \"small\" }",
             // --- functions ---
-            "xs ~> [~, #{ $0 }, Nil] ~> map",
+            "xs [~, #{ $0 }, Nil] map",
             "#['int, 'int] { =[a, b] => [b, a] }",
             "#<'t>'t { $ }",
             "#'int",
             "#'int -> 'bin { $ }",
             // --- multi-chain sequences & control flow ---
-            "tag = &, [tag, 42] ~> =[&tag, x], x",
+            "tag = &, [tag, 42] =[&tag, x], x",
             "[], 5",
             // --- type aliases: unions, intersections, partials, modules, recursion ---
             "'bool = True | False",

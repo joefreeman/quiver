@@ -16,13 +16,13 @@ fn test_file_write_and_read() {
             // O_RDONLY = 0
             // Mode 0o644 = 420
 
-            write_file = ["{}" ~> .0, 577, 420] ~> __file_open__,
-            [write_file, 0, "Hello, World!" ~> .0] ~> __file_write__,
-            write_file ~> __file_close__,
+            write_file = ["{}" .0, 577, 420] __file_open__,
+            [write_file, 0, "Hello, World!" .0] __file_write__,
+            write_file __file_close__,
 
-            read_file = ["{}" ~> .0, 0, 0] ~> __file_open__,
-            data = [read_file, 0, 4096] ~> __file_read__,
-            read_file ~> __file_close__,
+            read_file = ["{}" .0, 0, 0] __file_open__,
+            data = [read_file, 0, 4096] __file_read__,
+            read_file __file_close__,
 
             Str[data]
         "#,
@@ -46,19 +46,19 @@ fn test_file_append() {
         .evaluate(&format!(
             r#"
             // O_WRONLY | O_CREAT | O_TRUNC = 577
-            write_file = ["{}" ~> .0, 577, 420] ~> __file_open__,
-            [write_file, 0, "First line\n" ~> .0] ~> __file_write__,
-            write_file ~> __file_close__,
+            write_file = ["{}" .0, 577, 420] __file_open__,
+            [write_file, 0, "First line\n" .0] __file_write__,
+            write_file __file_close__,
 
             // Write at offset 11 (length of "First line\n")
-            append_file = ["{}" ~> .0, 1, 420] ~> __file_open__,
-            [append_file, 11, "Second line\n" ~> .0] ~> __file_write__,
-            append_file ~> __file_close__,
+            append_file = ["{}" .0, 1, 420] __file_open__,
+            [append_file, 11, "Second line\n" .0] __file_write__,
+            append_file __file_close__,
 
             // Read everything
-            read_file = ["{}" ~> .0, 0, 0] ~> __file_open__,
-            data = [read_file, 0, 4096] ~> __file_read__,
-            read_file ~> __file_close__,
+            read_file = ["{}" .0, 0, 0] __file_open__,
+            data = [read_file, 0, 4096] __file_read__,
+            read_file __file_close__,
 
             Str[data]
         "#,
@@ -80,7 +80,7 @@ fn test_file_type_checking() {
             // Function that takes a file and returns data
             read_from_file = #\File {
                 =f,
-                data = [f, 0, 1024] ~> __file_read__,
+                data = [f, 0, 1024] __file_read__,
                 data
             },
 
@@ -95,7 +95,7 @@ fn test_file_type_checking() {
 fn test_file_resource_type() {
     quiver()
         .with_io()
-        .evaluate(r#"["/tmp/foo" ~> .0, 577, 420] ~> __file_open__"#)
+        .evaluate(r#"["/tmp/foo" .0, 577, 420] __file_open__"#)
         .expect_type("\\File");
 }
 
@@ -110,10 +110,10 @@ fn test_file_flush() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = ["{}" ~> .0, 577, 420] ~> __file_open__,
-            [file, 0, "Flushed data" ~> .0] ~> __file_write__,
-            file ~> __file_flush__,
-            file ~> __file_close__,
+            file = ["{}" .0, 577, 420] __file_open__,
+            [file, 0, "Flushed data" .0] __file_write__,
+            file __file_flush__,
+            file __file_close__,
             Ok
         "#,
             path_str
@@ -139,15 +139,15 @@ fn test_multiple_writes() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = ["{}" ~> .0, 577, 420] ~> __file_open__,
-            [file, 0, "Line 1\n" ~> .0] ~> __file_write__,
-            [file, 7, "Line 2\n" ~> .0] ~> __file_write__,
-            [file, 14, "Line 3\n" ~> .0] ~> __file_write__,
-            file ~> __file_close__,
+            file = ["{}" .0, 577, 420] __file_open__,
+            [file, 0, "Line 1\n" .0] __file_write__,
+            [file, 7, "Line 2\n" .0] __file_write__,
+            [file, 14, "Line 3\n" .0] __file_write__,
+            file __file_close__,
 
-            read_file = ["{}" ~> .0, 0, 0] ~> __file_open__,
-            data = [read_file, 0, 4096] ~> __file_read__,
-            read_file ~> __file_close__,
+            read_file = ["{}" .0, 0, 0] __file_open__,
+            data = [read_file, 0, 4096] __file_read__,
+            read_file __file_close__,
 
             Str[data]
         "#,
@@ -173,9 +173,9 @@ fn test_read_from_closed_file() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__,
-            file ~> __file_close__,
-            [file, 0, 1024] ~> __file_read__
+            file = ["{}" .0, 0, 0] __file_open__,
+            file __file_close__,
+            [file, 0, 1024] __file_read__
         "#,
             path_str
         ))
@@ -202,12 +202,12 @@ fn test_resource_ownership_transfers_on_send() {
         .with_io()
         .evaluate(&format!(
             r#"
-            'reader = Read[\File];
+            'reader = Read[\File],
             r = @{{
-                !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~> Str[~] }}
+                !#'reader {{ =Read[f] => [f, 0, 5] __file_read__ Str[~] }}
             }},
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__,
-            Read[file] ~> r,
+            file = ["{}" .0, 0, 0] __file_open__,
+            Read[file] r,
             !r
         "#,
             path_str
@@ -232,13 +232,13 @@ fn test_resource_ownership_enforced_after_transfer() {
         .with_io()
         .evaluate(&format!(
             r#"
-            'holder = Hold[\File];
+            'holder = Hold[\File],
             h = @{{
-                !#'holder ~> {{ =Hold[_] => ^ }}
+                !#'holder {{ =Hold[_] => ^ }}
             }},
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__,
-            Hold[file] ~> h,
-            [file, 0, 5] ~> __file_read__
+            file = ["{}" .0, 0, 0] __file_open__,
+            Hold[file] h,
+            [file, 0, 5] __file_read__
         "#,
             path_str
         ))
@@ -263,14 +263,14 @@ fn test_resource_cleanup_on_owner_completion() {
         .with_io()
         .evaluate(&format!(
             r#"
-            'reader = Read[\File];
+            'reader = Read[\File],
             r = @{{
-                !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~> Str[~] }}
+                !#'reader {{ =Read[f] => [f, 0, 5] __file_read__ Str[~] }}
             }},
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__,
-            Read[file] ~> r,
+            file = ["{}" .0, 0, 0] __file_open__,
+            Read[file] r,
             !r,
-            [file, 0, 5] ~> __file_read__
+            [file, 0, 5] __file_read__
         "#,
             path_str
         ))
@@ -295,13 +295,13 @@ fn test_std_file_write_then_read() {
         .evaluate(&format!(
             r#"
             file = %file,
-            p = "{}" ~> %path.parse,
-            w = [p, mode: W] ~> file.open,
-            [w, 0, "Hello, write!" ~> .0] ~> file.write,
-            w ~> file.close,
-            r = [p] ~> file.open,
-            data = [r, 0, 4096] ~> file.read,
-            r ~> file.close,
+            p = "{}" %path.parse,
+            w = [p, mode: W] file.open,
+            [w, 0, "Hello, write!" .0] file.write,
+            w file.close,
+            r = [p] file.open,
+            data = [r, 0, 4096] file.read,
+            r file.close,
             Str[data]
         "#,
             path_str
@@ -324,12 +324,12 @@ fn test_std_file_sequential_reads() {
         .evaluate(&format!(
             r#"
             file = %file,
-            p = "{}" ~> %path.parse,
-            r = [p] ~> file.open,
-            a = [r, 0, 3] ~> file.read,
-            b = [r, 3, 3] ~> file.read,
-            c = [r, 6, 4] ~> file.read,
-            r ~> file.close,
+            p = "{}" %path.parse,
+            r = [p] file.open,
+            a = [r, 0, 3] file.read,
+            b = [r, 3, 3] file.read,
+            c = [r, 6, 4] file.read,
+            r file.close,
             [Str[a], Str[b], Str[c]]
         "#,
             path_str
@@ -352,10 +352,10 @@ fn test_std_file_write_returns_byte_count() {
         .evaluate(&format!(
             r#"
             file = %file,
-            p = "{}" ~> %path.parse,
-            w = [p, mode: W] ~> file.open,
-            n = [w, 0, "Hello, write!" ~> .0] ~> file.write,
-            w ~> file.close,
+            p = "{}" %path.parse,
+            w = [p, mode: W] file.open,
+            n = [w, 0, "Hello, write!" .0] file.write,
+            w file.close,
             n
         "#,
             path_str
@@ -379,11 +379,11 @@ fn test_std_file_read_all() {
         .evaluate(&format!(
             r#"
             file = %file,
-            p = "{}" ~> %path.parse,
-            r = [p] ~> file.open,
-            all = r ~> file.read_all,
-            r ~> file.close,
-            all ~> %bin.length
+            p = "{}" %path.parse,
+            r = [p] file.open,
+            all = r file.read_all,
+            r file.close,
+            all %bin.length
         "#,
             path_str
         ))
@@ -406,9 +406,9 @@ fn test_std_file_lines() {
         .evaluate(&format!(
             r#"
             file = %file,
-            r = "{}" ~> %path.parse ~> [~] ~> file.open,
-            ls = r ~> file.lines ~> %list.collect,
-            r ~> file.close,
+            r = "{}" %path.parse [~] file.open,
+            ls = r file.lines %list.collect,
+            r file.close,
             ls
         "#,
             path_str
@@ -433,9 +433,9 @@ fn test_std_file_lines_no_trailing_newline() {
         .evaluate(&format!(
             r#"
             file = %file,
-            r = "{}" ~> %path.parse ~> [~] ~> file.open,
-            ls = r ~> file.lines ~> %list.collect,
-            r ~> file.close,
+            r = "{}" %path.parse [~] file.open,
+            ls = r file.lines %list.collect,
+            r file.close,
             ls
         "#,
             path_str
@@ -462,11 +462,9 @@ fn test_std_file_lines_spanning_chunks() {
         .evaluate(&format!(
             r#"
             file = %file,
-            r = "{}" ~> %path.parse ~> [~] ~> file.open,
-            lengths = r ~> file.lines
-              ~> [~, #Str['bin] {{ .0 ~> %bin.length }}] ~> %iter.map
-              ~> %list.collect,
-            r ~> file.close,
+            r = "{}" %path.parse [~] file.open,
+            lengths = r file.lines [~, #Str['bin] {{ .0 %bin.length }}] %iter.map %list.collect,
+            r file.close,
             lengths
         "#,
             path_str
@@ -487,7 +485,7 @@ fn test_read_dir_single_entry() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~> %list.collect
+            "{}" %fs.list %list.collect
         "#,
             dir_str
         ))
@@ -506,7 +504,7 @@ fn test_read_dir_reports_kind() {
     // A single subdirectory must come back with kind Dir.
     quiver()
         .with_io()
-        .evaluate(&format!(r#""{}" ~> %fs.list ~> %list.collect"#, dir_str))
+        .evaluate(&format!(r#""{}" %fs.list %list.collect"#, dir_str))
         .expect("Cons[Entry[name: \"d\", kind: Dir], Nil]");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -526,10 +524,7 @@ fn test_read_dir_kind_match_narrows() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}"
-            ~> %fs.list
-            ~> [~, #'%fs.entry {{ .kind ~> {{ =Dir => IsDir | NotDir }} }}] ~> %iter.map
-            ~> %list.collect
+            "{}" %fs.list [~, #'%fs.entry {{ .kind {{ =Dir => IsDir | NotDir }} }}] %iter.map %list.collect
         "#,
             dir_str
         ))
@@ -553,11 +548,7 @@ fn test_read_dir_filter_by_kind() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}"
-            ~> %fs.list
-            ~> [~, #'%fs.entry {{ =(kind: Dir) }}] ~> %iter.filter
-            ~> [~, #'%fs.entry {{ .name }}] ~> %iter.map
-            ~> %list.collect
+            "{}" %fs.list [~, #'%fs.entry {{ =(kind: Dir) }}] %iter.filter [~, #'%fs.entry {{ .name }}] %iter.map %list.collect
         "#,
             dir_str
         ))
@@ -576,7 +567,7 @@ fn test_read_dir_empty() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~> %list.collect
+            "{}" %fs.list %list.collect
         "#,
             dir_str
         ))
@@ -600,7 +591,7 @@ fn test_read_dir_count() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~> %iter.count
+            "{}" %fs.list %iter.count
         "#,
             dir_str
         ))
@@ -624,10 +615,10 @@ fn test_repl_cached_dispatch_module_then_fresh_consumer() {
 
     quiver()
         .with_io()
-        .evaluate(&format!(r#""{}" ~> %fs.list ~> %list.collect"#, dir_str))
+        .evaluate(&format!(r#""{}" %fs.list %list.collect"#, dir_str))
         .expect("Cons[Entry[name: \"only\", kind: File], Nil]")
         .then_evaluate(&format!(
-            r#""{}" ~> %fs.list ~> [~, #'%fs.entry {{ .name }}] ~> %iter.map ~> [~, " | "] ~> %str.join"#,
+            r#""{}" %fs.list [~, #'%fs.entry {{ .name }}] %iter.map [~, " | "] %str.join"#,
             dir_str
         ))
         .expect("\"only\"");
@@ -648,7 +639,7 @@ fn test_stat_file_kind_and_size() {
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" ~> %fs.stat ~> {{ =(kind: File, size: 5) => Good | Bad }}"#,
+            r#""{}" %fs.stat {{ =(kind: File, size: 5) => Good | Bad }}"#,
             path
         ))
         .expect("Good");
@@ -664,7 +655,7 @@ fn test_stat_missing_is_nil() {
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" ~> %fs.stat ~> {{ <> => Absent | Present }}"#,
+            r#""{}" %fs.stat {{ <> => Absent | Present }}"#,
             path
         ))
         .expect("Absent");
@@ -688,11 +679,11 @@ fn test_stat_result_has_its_real_declared_type() {
         .with_io()
         .evaluate(&format!(
             r#"
-            p = "{path}" ~> .0,
-            s = p ~> __filesystem_stat__,
+            p = "{path}" .0,
+            s = p __filesystem_stat__,
             [
-              s ~> =[File, 'int, 'int, 'int] ~> {{ <> => No | Yes }},
-              s ~> =['int, 'int, 'int, 'int] ~> {{ <> => No | Yes }}
+              s =[File, 'int, 'int, 'int] {{ <> => No | Yes }},
+              s =['int, 'int, 'int, 'int] {{ <> => No | Yes }}
             ]
             "#
         ))
@@ -717,12 +708,12 @@ fn test_directory_entry_has_its_real_declared_type() {
         .with_io()
         .evaluate(&format!(
             r#"
-            warm = [1, 2] ~> =['int, 'int],
-            d = "{dir_str}" ~> .0 ~> __directory_read__,
-            e = d ~> __directory_next__,
+            warm = [1, 2] =['int, 'int],
+            d = "{dir_str}" .0 __directory_read__,
+            e = d __directory_next__,
             [
-              e ~> =['bin, File] ~> {{ <> => No | Yes }},
-              e ~> =['int, 'int] ~> {{ <> => No | Yes }}
+              e =['bin, File] {{ <> => No | Yes }},
+              e =['int, 'int] {{ <> => No | Yes }}
             ]
             "#
         ))
@@ -743,11 +734,11 @@ fn test_fs_predicates() {
         .evaluate(&format!(
             r#"
             [
-              "{d}/f.txt" ~> %fs.exists? ~> {{ <> => No | Yes }},
-              "{d}/nope"  ~> %fs.exists? ~> {{ <> => No | Yes }},
-              "{d}/sub"   ~> %fs.dir?    ~> {{ <> => No | Yes }},
-              "{d}/f.txt" ~> %fs.dir?    ~> {{ <> => No | Yes }},
-              "{d}/f.txt" ~> %fs.file?   ~> {{ <> => No | Yes }}
+              "{d}/f.txt" %fs.exists? {{ <> => No | Yes }},
+              "{d}/nope"  %fs.exists? {{ <> => No | Yes }},
+              "{d}/sub"   %fs.dir?    {{ <> => No | Yes }},
+              "{d}/f.txt" %fs.dir?    {{ <> => No | Yes }},
+              "{d}/f.txt" %fs.file?   {{ <> => No | Yes }}
             ]
             "#
         ))
@@ -771,7 +762,7 @@ fn test_read_dir_lazy_take() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~> [~, 1] ~> %iter.take ~> %iter.count
+            "{}" %fs.list [~, 1] %iter.take %iter.count
         "#,
             dir_str
         ))

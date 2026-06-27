@@ -11,21 +11,21 @@ use std::time::Instant;
 const WORKLOADS: &[(&str, &str, i64, i64, &str)] = &[
     (
         "arith_loop",
-        r#"f = #int { | =0 => Ok | %num.sub [~, 1] ~> ^ }, {N} ~> f"#,
+        r#"f = #int { | =0 => Ok | %num.sub [~, 1] ^ }, {N} f"#,
         300_000,
         2,
         "builtin/dispatch",
     ),
     (
         "fib_naive",
-        r#"fib = #[#^ -> int, int] { =[self, n], { %num.lt? [n, 2] => n | [self [self, %num.sub [n, 1]], self [self, %num.sub [n, 2]]] ~> %num.add } }, [fib, {N}] ~> fib"#,
+        r#"fib = #[#^ -> int, int] { =[self, n], { %num.lt? [n, 2] => n | [self [self, %num.sub [n, 1]], self [self, %num.sub [n, 2]]] %num.add } }, [fib, {N}] fib"#,
         28,
         2,
         "call/frame churn (per-unit N/A)",
     ),
     (
         "range_count",
-        r#"[0, {N}] ~> %range.between ~> %range.iter ~> %iter.count"#,
+        r#"[0, {N}] %range.between %range.iter %iter.count"#,
         100_000,
         2,
         "iterator/closures",
@@ -34,25 +34,25 @@ const WORKLOADS: &[(&str, &str, i64, i64, &str)] = &[
         // Manual O(N) Cons build + destructure-sum: isolates tuple alloc/clone/destructure
         // without std list.collect (which is O(N^2)).
         "list_build_sum",
-        r#"list : Nil | Cons[int, ^];
-build = #[list, int] { | =[acc, 0] => acc | =[acc, n] => [Cons[n, acc], %num.sub [n, 1]] ~> ^ },
-sum = #[list, int] { | =[Nil, acc] => acc | =[Cons[h, t], acc] => [t, %num.add [acc, h]] ~> ^ },
-xs = [Nil, {N}] ~> build,
-[xs, 0] ~> sum"#,
+        r#"list : Nil | Cons[int, ^],
+build = #[list, int] { | =[acc, 0] => acc | =[acc, n] => [Cons[n, acc], %num.sub [n, 1]] ^ },
+sum = #[list, int] { | =[Nil, acc] => acc | =[Cons[h, t], acc] => [t, %num.add [acc, h]] ^ },
+xs = [Nil, {N}] build,
+[xs, 0] sum"#,
         1_000,
         2,
         "A: cons build + destructure (O(N^2) today via deep clone)",
     ),
     (
         "tuple_match",
-        r#"f = #[int, [int, int]] { | =[0, _] => Ok | =[n, [a, b]] => [%num.sub [n, 1], [a, b]] ~> ^ }, [{N}, [3, 4]] ~> f"#,
+        r#"f = #[int, [int, int]] { | =[0, _] => Ok | =[n, [a, b]] => [%num.sub [n, 1], [a, b]] ^ }, [{N}, [3, 4]] f"#,
         300_000,
         2,
         "A: nested tuple clone/destructure",
     ),
     (
         "binary_const_loop",
-        r#"f = #int { | =0 => Ok | b = 'deadbeefcafe0011223344', %num.sub [~, 1] ~> ^ }, {N} ~> f"#,
+        r#"f = #int { | =0 => Ok | b = 'deadbeefcafe0011223344', %num.sub [~, 1] ^ }, {N} f"#,
         300_000,
         2,
         "C: constant binary load",

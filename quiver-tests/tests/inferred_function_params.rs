@@ -10,10 +10,7 @@ fn test_inferred_mapper_through_iter_map() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Nil]]]
-            ~> %list.iter
-            ~> [~, #{ [$, 10] ~> %num.mul }] ~> %iter.map
-            ~> %list.collect
+            Cons[1, Cons[2, Cons[3, Nil]]] %list.iter [~, #{ [$, 10] %num.mul }] %iter.map %list.collect
             "#,
         )
         .expect("Cons[10, Cons[20, Cons[30, Nil]]]");
@@ -24,10 +21,7 @@ fn test_inferred_predicate_through_iter_filter() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
-            ~> %list.iter
-            ~> [~, #{ [$, 2] ~> %int.mod ~> =0 }] ~> %iter.filter
-            ~> %list.collect
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] %list.iter [~, #{ [$, 2] %int.mod =0 }] %iter.filter %list.collect
             "#,
         )
         .expect("Cons[2, Cons[4, Nil]]");
@@ -40,9 +34,7 @@ fn test_inferred_tuple_param_through_iter_fold() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Nil]]]
-            ~> %list.iter
-            ~> [~, 0, #{ [$0, $1] ~> %num.add }] ~> %iter.fold
+            Cons[1, Cons[2, Cons[3, Nil]]] %list.iter [~, 0, #{ [$0, $1] %num.add }] %iter.fold
             "#,
         )
         .expect("6");
@@ -57,9 +49,9 @@ fn test_inferred_param_via_local_higher_order_function() {
             'list<'t> = Nil | Cons['t, ^]
             map = #<'t, 'u>['list<'t>, #'t -> 'u, 'list<'u>] {
               =[lst, f, acc],
-              lst ~> { =Nil => acc | =Cons[h, t] => [t, &f, Cons[h ~> f, acc]] ~> ^ }
+              lst { =Nil => acc | =Cons[h, t] => [t, &f, Cons[h f, acc]] ^ }
             },
-            Cons[[1, 10], Cons[[2, 20], Nil]] ~> [~, #{ $0 }, Nil] ~> map
+            Cons[[1, 10], Cons[[2, 20], Nil]] [~, #{ $0 }, Nil] map
             "#,
         )
         .expect("Cons[2, Cons[1, Nil]]");
@@ -71,8 +63,8 @@ fn test_inferred_param_concrete_callee() {
     quiver()
         .evaluate(
             r#"
-            run = #[#'int -> 'int] { =[g], 10 ~> g },
-            [#{ [$, 1] ~> %num.add }] ~> run
+            run = #[#'int -> 'int] { =[g], 10 g },
+            [#{ [$, 1] %num.add }] run
             "#,
         )
         .expect("11");
@@ -81,11 +73,11 @@ fn test_inferred_param_concrete_callee() {
 #[test]
 fn test_unannotated_literal_without_context_stays_nilary() {
     // With no expected type from context, `#{ ... }` keeps its nilary-function meaning.
-    quiver().evaluate("f = #{ 42 }, 99 ~> f").expect("42");
+    quiver().evaluate("f = #{ 42 }, 99 f").expect("42");
 }
 
 #[test]
 fn test_explicit_nil_parameter_form() {
     // `#[] { ... }` forces a nil parameter even where a context type is available.
-    quiver().evaluate("f = #[] { 7 }, 99 ~> f").expect("7");
+    quiver().evaluate("f = #[] { 7 }, 99 f").expect("7");
 }

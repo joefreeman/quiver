@@ -1,17 +1,17 @@
 // Define a recursive list type
-'list<'t> = Nil | Cons['t, ^];
+'list<'t> = Nil | Cons['t, ^]
 
 // Compute the sum of a list using tail recursion
 sum_ = #['list<'int>, 'int] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => {
-    [head, acc] ~> %num.add ~> [tail, ~] ~> ^
+    [head, acc] %num.add [tail, ~] ^
   }
 },
 
-sum = #'list<'int> { [~, 0] ~> sum_ },
+sum = #'list<'int> { [~, 0] sum_ },
 
 #{
   // Build and sum a list
-  Cons[1, Cons[2, Cons[3, Nil]]] ~> sum
+  Cons[1, Cons[2, Cons[3, Nil]]] sum
 }

@@ -39,7 +39,7 @@ fn test_spread_with_unnamed_fields_prepended() {
 #[test]
 fn test_spread_multiple_merges() {
     quiver()
-        .evaluate("a = [y: 2], [x: 3] ~> [...a, ..., z: 4]")
+        .evaluate("a = [y: 2], [x: 3] [...a, ..., z: 4]")
         .expect("[y: 2, x: 3, z: 4]");
 }
 
@@ -52,7 +52,7 @@ fn test_spread_with_new_name() {
 
 #[test]
 fn test_spread_empty_tuple() {
-    quiver().evaluate("a = []; [...a, x: 1]").expect("[x: 1]");
+    quiver().evaluate("a = [], [...a, x: 1]").expect("[x: 1]");
 }
 
 #[test]
@@ -81,9 +81,9 @@ fn test_spread_union_single_spread() {
     quiver()
         .evaluate(
             r#"
-            't = [x: 'int] | [y: 'int];
+            't = [x: 'int] | [y: 'int],
             f = #[v: 't] { =[v: v] => [z: 0, ...v] },
-            [v: [x: 1]] ~> f
+            [v: [x: 1]] f
             "#,
         )
         .expect("[z: 0, x: 1]");
@@ -94,10 +94,10 @@ fn test_spread_union_cartesian_product() {
     quiver()
         .evaluate(
             r#"
-            'ta = [x: 'int] | [y: 'int];
-            'tb = [z: 'int] | [w: 'int];
+            'ta = [x: 'int] | [y: 'int],
+            'tb = [z: 'int] | [w: 'int],
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
-            [a: [x: 1], b: [z: 2]] ~> f
+            [a: [x: 1], b: [z: 2]] f
             "#,
         )
         .expect("[x: 1, z: 2]");
@@ -108,10 +108,10 @@ fn test_spread_union_multiple_spreads() {
     quiver()
         .evaluate(
             r#"
-            'ta = [x: 'int];
-            'tb = [z: 'int] | [w: 'int];
+            'ta = [x: 'int],
+            'tb = [z: 'int] | [w: 'int],
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
-            [a: [x: 1], b: [w: 2]] ~> f
+            [a: [x: 1], b: [w: 2]] f
             "#,
         )
         .expect("[x: 1, w: 2]");
@@ -122,10 +122,10 @@ fn test_spread_same_fields_different_sources() {
     quiver()
         .evaluate(
             r#"
-            'ta = [x: 'int];
-            'tb = [x: 'int, y: 'int] | [y: 'int];
+            'ta = [x: 'int],
+            'tb = [x: 'int, y: 'int] | [y: 'int],
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] },
-            [[a: [x: 1], b: [x: 2, y: 3]] ~> f, [a: [x: 4], b: [y: 5]] ~> f]
+            [[a: [x: 1], b: [x: 2, y: 3]] f, [a: [x: 4], b: [y: 5]] f]
             "#,
         )
         .expect("[[x: 2, y: 3], [x: 4, y: 5]]");
@@ -162,35 +162,35 @@ fn test_identifier_spread_multiple_fields() {
 #[test]
 fn test_ripple_spread_preserves_name() {
     quiver()
-        .evaluate("A[x: 1] ~> ~[..., y: 2]")
+        .evaluate("A[x: 1] ~[..., y: 2]")
         .expect("A[x: 1, y: 2]");
 }
 
 #[test]
 fn test_ripple_spread_field_override() {
     quiver()
-        .evaluate("A[x: 1, y: 2] ~> ~[..., y: 99]")
+        .evaluate("A[x: 1, y: 2] ~[..., y: 99]")
         .expect("A[x: 1, y: 99]");
 }
 
 #[test]
 fn test_ripple_spread_unnamed_tuple() {
     quiver()
-        .evaluate("[x: 1] ~> ~[..., y: 2]")
+        .evaluate("[x: 1] ~[..., y: 2]")
         .expect("[x: 1, y: 2]");
 }
 
 #[test]
 fn test_ripple_spread_multiple_fields() {
     quiver()
-        .evaluate("Point[x: 10, y: 20] ~> ~[..., z: 30, color: 0xff]")
+        .evaluate("Point[x: 10, y: 20] ~[..., z: 30, color: 0xff]")
         .expect("Point[x: 10, y: 20, z: 30, color: 0xff]");
 }
 
 #[test]
 fn test_nested_spread_with_ripple_context() {
     quiver()
-        .evaluate("[1, 2, 3] ~> [outer: ~, nested: [inner: ~, ...]]")
+        .evaluate("[1, 2, 3] [outer: ~, nested: [inner: ~, ...]]")
         .expect("[outer: [1, 2, 3], nested: [inner: [1, 2, 3], 1, 2, 3]]");
 }
 
@@ -198,7 +198,7 @@ fn test_nested_spread_with_ripple_context() {
 fn test_identifier_spread_with_ripple_in_field() {
     // Ripple in field value should resolve to the chained value, not the spread source
     quiver()
-        .evaluate("a = A[x: 1, y: 2], 3 ~> a[..., y: ~]")
+        .evaluate("a = A[x: 1, y: 2], 3 a[..., y: ~]")
         .expect("A[x: 1, y: 3]");
 }
 
@@ -206,10 +206,10 @@ fn test_identifier_spread_with_ripple_in_field() {
 fn spread_source_is_captured_in_a_closure() {
     // A closure that spreads a variable (`[...a]` or the `a` of `a[..., y]`) must capture it.
     quiver()
-        .evaluate("a = A[x: 1], g = #{ a[..., y: 2] }, [] ~> g")
+        .evaluate("a = A[x: 1], g = #{ a[..., y: 2] }, [] g")
         .expect("A[x: 1, y: 2]");
     quiver()
-        .evaluate("a = [x: 1], g = #{ [...a, y: 2] }, [] ~> g")
+        .evaluate("a = [x: 1], g = #{ [...a, y: 2] }, [] g")
         .expect("[x: 1, y: 2]");
 }
 
@@ -217,6 +217,6 @@ fn spread_source_is_captured_in_a_closure() {
 fn test_identifier_spread_with_ripple_replacing_multiple_fields() {
     // Ripple can be used in multiple fields
     quiver()
-        .evaluate("a = A[x: 1, y: 2, z: 3], 99 ~> a[..., y: ~, z: ~]")
+        .evaluate("a = A[x: 1, y: 2, z: 3], 99 a[..., y: ~, z: ~]")
         .expect("A[x: 1, y: 99, z: 99]");
 }

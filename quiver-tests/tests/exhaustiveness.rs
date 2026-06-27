@@ -11,12 +11,12 @@ fn test_non_exhaustive_enumeration_names_unhandled() {
     quiver()
         .evaluate(
             r#"
-            'shape = Circle['int] | Rectangle['int, 'int] | Triangle['int];
+            'shape = Circle['int] | Rectangle['int, 'int] | Triangle['int],
             area = #'shape -> 'int {
               | =Circle[r] => r
               | =Rectangle[w, h] => w
             },
-            Circle[1] ~> area
+            Circle[1] area
             "#,
         )
         .expect_compile_error(Error::NonExhaustiveReturn {
@@ -30,12 +30,12 @@ fn test_exhaustive_enumeration_compiles() {
     quiver()
         .evaluate(
             r#"
-            'shape = Circle['int] | Rectangle['int, 'int];
+            'shape = Circle['int] | Rectangle['int, 'int],
             area = #'shape -> 'int {
               | =Circle[r] => r
               | =Rectangle[w, h] => w
             },
-            Rectangle[3, 4] ~> area
+            Rectangle[3, 4] area
             "#,
         )
         .expect("3");
@@ -48,9 +48,9 @@ fn test_partial_match_without_annotation_is_allowed() {
     quiver()
         .evaluate(
             r#"
-            'shape = Circle['int] | Rectangle['int, 'int];
+            'shape = Circle['int] | Rectangle['int, 'int],
             is_circle? = #'shape { =Circle[_] => Ok },
-            Rectangle[1, 2] ~> is_circle?
+            Rectangle[1, 2] is_circle?
             "#,
         )
         .expect("[]");
@@ -62,12 +62,12 @@ fn test_genuine_mismatch_still_reports_type_mismatch() {
     quiver()
         .evaluate(
             r#"
-            'shape = Circle['int] | Rectangle['int, 'int];
+            'shape = Circle['int] | Rectangle['int, 'int],
             f = #'shape -> 'bin {
               | =Circle[r] => r
               | =Rectangle[w, h] => w
             },
-            Circle[1] ~> f
+            Circle[1] f
             "#,
         )
         .expect_compile_error(Error::TypeMismatch {

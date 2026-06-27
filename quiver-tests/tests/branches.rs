@@ -29,7 +29,7 @@ fn test_branch_with_failing_consequence() {
 #[test]
 fn test_branch_pattern_matching() {
     quiver()
-        .evaluate("B[42] ~> { =A[a] => 1 | =B[b] => 2 }")
+        .evaluate("B[42] { =A[a] => 1 | =B[b] => 2 }")
         .expect("2");
 }
 
@@ -37,14 +37,14 @@ fn test_branch_pattern_matching() {
 fn test_use_continuation_in_consequence() {
     // Consequence receives the block parameter via implicit continuation
     quiver()
-        .evaluate("42 ~> { =10 => 100 | =42 => [~, ~] }")
+        .evaluate("42 { =10 => 100 | =42 => [~, ~] }")
         .expect("[42, 42]");
 }
 
 #[test]
 fn test_string_match() {
     quiver()
-        .evaluate("\"bar\" ~> { =\"foo\" => 1 | =\"bar\" => 2 }")
+        .evaluate("\"bar\" { =\"foo\" => 1 | =\"bar\" => 2 }")
         .expect("2");
 }
 
@@ -57,7 +57,7 @@ fn test_consequence_ripple_is_block_parameter_not_condition_result() {
         .evaluate(
             r#"
             ok? = #'int { =0 => Ok },
-            0 ~> { | ok? => ~ | 999 }
+            0 { | ok? => ~ | 999 }
             "#,
         )
         .expect("0");
@@ -70,7 +70,7 @@ fn test_consequence_ripple_in_tuple() {
         .evaluate(
             r#"
             ok? = #'int { =0 => Ok },
-            0 ~> { | ok? => [~, 1] | [~, 2] }
+            0 { | ok? => [~, 1] | [~, 2] }
             "#,
         )
         .expect("[0, 1]");
@@ -83,7 +83,7 @@ fn test_consequence_ripple_fallback_branch() {
         .evaluate(
             r#"
             ok? = #'int { =0 => Ok },
-            5 ~> { | ok? => [~, 1] | [~, 2] }
+            5 { | ok? => [~, 1] | [~, 2] }
             "#,
         )
         .expect("[5, 2]");
@@ -110,5 +110,5 @@ fn test_toplevel_branch_in_block() {
 #[test]
 fn test_toplevel_sequence_bindings_persist() {
     // A statement is a branchless sequence sharing the enclosing scope, so its bindings persist.
-    quiver().evaluate("x = 5, y = 10; [x, y]").expect("[5, 10]");
+    quiver().evaluate("x = 5, y = 10, [x, y]").expect("[5, 10]");
 }

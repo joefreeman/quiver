@@ -23,16 +23,14 @@ type OpFn = fn(&str, usize) -> String;
 // op name -> source-building closure
 fn ops() -> Vec<(&'static str, OpFn)> {
     vec![
-        ("length", |s, _n| format!(r#""{s}" ~> %str.length"#)),
+        ("length", |s, _n| format!(r#""{s}" %str.length"#)),
         ("iter_count", |s, _n| {
-            format!(r#""{s}" ~> %str.iter ~> %iter.count"#)
+            format!(r#""{s}" %str.iter %iter.count"#)
         }),
         ("iter_collect", |s, _n| {
-            format!(r#""{s}" ~> %str.iter ~> %str.collect"#)
+            format!(r#""{s}" %str.iter %str.collect"#)
         }),
-        ("slice_all", |s, n| {
-            format!(r#"["{s}", 0, {n}] ~> %str.slice"#)
-        }),
+        ("slice_all", |s, n| format!(r#"["{s}", 0, {n}] %str.slice"#)),
     ]
 }
 
@@ -40,7 +38,7 @@ fn ops() -> Vec<(&'static str, OpFn)> {
 #[ignore]
 fn bench_unicode() {
     // Warm: first evaluate compiles the std graph once.
-    let mut tr = quiver().evaluate(r#""warm" ~> %str.length"#);
+    let mut tr = quiver().evaluate(r#""warm" %str.length"#);
 
     println!(
         "\n{:<14} {:<8} {:>12} {:>12} {:>10}",

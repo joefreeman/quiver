@@ -3,34 +3,30 @@ use common::*;
 
 #[test]
 fn test_addition() {
-    quiver().evaluate("[1, 2] ~> __integer_add__").expect("3");
+    quiver().evaluate("[1, 2] __integer_add__").expect("3");
 }
 
 #[test]
 fn test_subtraction() {
-    quiver()
-        .evaluate("[8, 5] ~> __integer_subtract__")
-        .expect("3");
+    quiver().evaluate("[8, 5] __integer_subtract__").expect("3");
 }
 
 #[test]
 fn test_multiplication() {
     quiver()
-        .evaluate("[4, 5] ~> __integer_multiply__")
+        .evaluate("[4, 5] __integer_multiply__")
         .expect("20");
 }
 
 #[test]
 fn test_division() {
-    quiver()
-        .evaluate("[10, 2] ~> __integer_divide__")
-        .expect("5");
+    quiver().evaluate("[10, 2] __integer_divide__").expect("5");
 }
 
 #[test]
 fn test_division_by_zero() {
     quiver()
-        .evaluate("[10, 0] ~> __integer_divide__")
+        .evaluate("[10, 0] __integer_divide__")
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "Division by zero".to_string(),
         ));
@@ -38,15 +34,13 @@ fn test_division_by_zero() {
 
 #[test]
 fn test_modulo() {
-    quiver()
-        .evaluate("[9, 5] ~> __integer_modulo__")
-        .expect("4");
+    quiver().evaluate("[9, 5] __integer_modulo__").expect("4");
 }
 
 #[test]
 fn test_modulo_by_zero() {
     quiver()
-        .evaluate("[10, 0] ~> __integer_modulo__")
+        .evaluate("[10, 0] __integer_modulo__")
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "Modulo by zero".to_string(),
         ));
@@ -57,7 +51,7 @@ fn test_builtin_sqrt_negative_errors() {
     quiver()
         .evaluate(
             r#"
-            -4 ~> __integer_sqrt__
+            -4 __integer_sqrt__
             "#,
         )
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(

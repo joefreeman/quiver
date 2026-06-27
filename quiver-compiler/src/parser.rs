@@ -3,7 +3,7 @@ use nom::{
     IResult, Slice,
     branch::alt,
     bytes::complete::{tag, take_while},
-    character::complete::{char, digit1, multispace0, multispace1, satisfy, space1},
+    character::complete::{char, digit1, line_ending, multispace0, multispace1, satisfy, space1},
     combinator::{map, map_res, not, opt, peek, recognize, success, value as nom_value, verify},
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
@@ -87,7 +87,7 @@ impl std::fmt::Display for ErrorKind {
                 write!(f, "Missing closing parenthesis: expected ')'")
             }
 
-            ErrorKind::ExpectedPipe => write!(f, "Expected '~>' in chain"),
+            ErrorKind::ExpectedPipe => write!(f, "Expected a term after '~>'"),
             ErrorKind::InvalidFunctionBody => write!(f, "Invalid function body"),
 
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
@@ -114,7 +114,7 @@ impl ErrorKind {
             ErrorKind::MissingClosingBracket => "Add ']' to close the tuple",
             ErrorKind::MissingClosingParen => "Add ')' to close the parenthesized expression",
             ErrorKind::ExpectedPipe => {
-                "Chains use '~>' to pipe values, e.g. '[1, 2] ~> __integer_add__'"
+                "'~>' continues a chain and must be followed by a term, e.g. '[1, 2] ~> __integer_add__'"
             }
             ErrorKind::InvalidFunctionBody => "A function body should be a valid expression",
             ErrorKind::HexMalformed(_) => {
@@ -1312,15 +1312,17 @@ fn make_receive(param_type: Type, body: Option<Expression>) -> Term {
 // mirroring function application (`f [...]`). The tight forms (no space) are shorthand for
 // selecting on a single source.
 //
-// Syntax forms:
-// - ! [...]          - Tuple of source chains (general form; space required)
+// Syntax forms (the type shorthands are *body-less* identity receives — a `{ … }` after a select
+// is a handler chain-step that processes the received message, not a filter):
+// - ! [...]          - Tuple of source chains (general form; space required). A filter is a
+//                      function *with a body* here: `! [#'int { =42 => Ok }]` (only the general
+//                      form can filter — it leaves a non-matching message in the mailbox, whereas
+//                      a handler block consumes the message and discards it if it doesn't match).
 // - !                - Bare select (postfix form, empty sources)
-// - !(type) { ... }  - Receive function with explicit type
 // - !(type)          - Identity receive with explicit type
-// - !'type { ... }   - Receive function with named type
-// - !'type           - Identity receive for a type
+// - !'type           - Identity receive for a named type
+// - !#type           - Identity receive for a `#`-typed message
 // - !var             - Single source (variable/process)
-// - !#f              - Single source (function)
 // - !@p              - Single source (spawn)
 // - !1000            - Single source (timeout literal)
 fn select_term(input: Span) -> IResult<Span, Term> {
@@ -1338,26 +1340,22 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 ),
                 |sources| Term::Select(Some(sources), Spanned::default()),
             ),
-            // (type) with optional body - parenthesized receive type
+            // (type) - parenthesized receive type (body-less identity receive).
             map(
-                pair(
-                    delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
-                    opt(preceded(opt(ws1), block)),
-                ),
-                |(param_type, body)| make_receive(param_type, body),
+                delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+                |param_type| make_receive(param_type, None),
             ),
-            // 'type with optional filter body: !'int, !'int { ... }
-            map(
-                pair(type_identifier, opt(preceded(opt(ws1), block))),
-                |(param_type, body)| make_receive(param_type, body),
-            ),
+            // 'type - named receive type (body-less identity receive): `!'int`.
+            map(type_identifier, |param_type| make_receive(param_type, None)),
             // access (variable / module member) → reference it as a single source. Select
             // sources are a tuple of values, so a callable source must be referenced rather
             // than called: the tight form `!f` desugars to `! [&f]` (the `&` is part of the
             // sugar). A process variable references harmlessly (`&p` is just `p`).
             map(access, |acc| single_source(Term::Reference(Some(acc)))),
-            // #function
-            map(function, |f| single_source(Term::Function(f))),
+            // #type - `#`-typed receive (body-less identity receive): `!#'int`, `!#Reply[...]`.
+            map(preceded(char('#'), function_input_type), |param_type| {
+                make_receive(param_type, None)
+            }),
             // @N process reference (must come before spawn_term to match @1 before @f)
             map(process_ref_term, single_source),
             // @spawn
@@ -1962,22 +1960,51 @@ fn chain(input: Span) -> IResult<Span, Chain> {
 }
 
 fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {
-    // A chain is `~>`-separated terms; each term is a bare `primary`. Application is
-    // argument-first (`[args] ~> f`), so there is no juxtaposition (`f [args]`) to parse —
-    // a callable consumes the flowing value as the next chain step. The only forms that
-    // "apply" the flowing value as a function are the bare ripple terms `~`, `^~`, `@~`
-    // (and `~.f`), which are primaries in their own right and take no juxtaposed argument:
-    // `^~`/`@~` can only hand the flowing function a nil argument, so they require it to be
-    // nilary; to pass an argument, bind the function first and name it.
-    separated_list1(tuple((ws1, tag("~>"), ws1)), primary)(input)
+    // A chain is a sequence of `primary` terms; the value flows left→right through them, with nil
+    // passing through (no short-circuit — that is the sequence separator's job). Terms are joined
+    // by horizontal whitespace (`a b c`), or, equivalently, by an optional `~>` — which doubles as
+    // an explicit **line continuation**: a chain ends at a bare newline, but a newline followed by
+    // `~>` continues it, so a long chain can span lines:
+    //   foo
+    //   ~> bar
+    //   ~> baz
+    // (`~>` is just the separator written explicitly; `a ~> b` and `a b` are identical.)
+    //
+    // Application is argument-first (`[args] f`); there is no juxtaposition. The bare ripple terms
+    // `~`, `^~`, `@~`, `~.f` are primaries in their own right and take no juxtaposed argument
+    // (`^~`/`@~` hand the flowing function a nil argument, so it must be nilary; to pass an
+    // argument, bind the function first and name it).
+    separated_list1(
+        alt((nom_value((), tuple((ws1, tag("~>"), ws1))), hspace1)),
+        primary,
+    )(input)
+}
+
+/// Separator between the chains of a sequence: a comma or a newline (they are synonyms), with
+/// surrounding horizontal whitespace and line comments, collapsing runs of them. Unlike the
+/// chain-step separator (horizontal whitespace), this is where the value short-circuits on nil and
+/// a new binding scope point begins. A newline therefore ends a chain and starts the next step.
+fn seq_sep(input: Span) -> IResult<Span, ()> {
+    nom_value(
+        (),
+        tuple((
+            // Leading horizontal whitespace / line comments (a newline here is the separator).
+            many0(alt((nom_value((), space1), nom_value((), comment)))),
+            // The separator itself: a comma or a newline.
+            alt((nom_value((), char(',')), nom_value((), line_ending))),
+            // Collapse any following whitespace, comments, and further separators.
+            many0(alt((
+                nom_value((), multispace1),
+                nom_value((), comment),
+                nom_value((), char(',')),
+            ))),
+        )),
+    )(input)
 }
 
 fn sequence(input: Span) -> IResult<Span, Sequence> {
     map(
-        terminated(
-            separated_list1(tuple((ws0, char(','), wsc)), chain),
-            opt(pair(ws0, char(','))),
-        ),
+        terminated(separated_list1(seq_sep, chain), opt(seq_sep)),
         |chains| Sequence { chains },
     )(input)
 }
@@ -2006,42 +2033,21 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
     )(input)
 }
 
-fn statement_expression(input: Span) -> IResult<Span, Statement> {
-    // A statement is a single sequence: branches (`|`/`=>`) require a block.
-    map(sequence, Statement::Expression)(input)
+/// A top-level item: a type alias or a value-producing sequence. A statement-level expression is a
+/// branchless sequence (branches `|`/`=>` require a block).
+fn top_level_item(input: Span) -> IResult<Span, Statement> {
+    alt((type_alias, map(sequence, Statement::Expression)))(input)
 }
 
-fn statement(input: Span) -> IResult<Span, Statement> {
-    preceded(ws_with_comments, alt((type_alias, statement_expression)))(input)
-}
-
-/// Separator between top-level statements: a newline or semicolon, surrounded by
-/// horizontal whitespace and line comments. Bare horizontal whitespace is deliberately
-/// not a separator, so a stray trailing token - e.g. the `b` in `f a b` - is a syntax
-/// error rather than a silent second statement.
-fn statement_separator(input: Span) -> IResult<Span, ()> {
-    nom_value(
-        (),
-        tuple((
-            many0(alt((nom_value((), space1), nom_value((), comment)))),
-            alt((char('\n'), char(';'))),
-            wsc,
-        )),
-    )(input)
-}
-
-fn statements(input: Span) -> IResult<Span, Vec<Statement>> {
-    terminated(
-        separated_list0(statement_separator, statement),
-        opt(pair(ws0, char(';'))),
-    )(input)
-}
-
+/// A program is a single threaded sequence of chains with type-alias declarations interspersed —
+/// all separated by the sequence separator (comma or newline, which are synonyms). The chains
+/// thread and short-circuit as one sequence; type aliases are transparent to that flow. (There is
+/// no separate statement separator and no `;`.)
 fn program(input: Span) -> IResult<Span, Program> {
     map(
         delimited(
             ws_with_comments,
-            statements,
+            terminated(separated_list0(seq_sep, top_level_item), opt(seq_sep)),
             pair(ws_with_comments, nom::combinator::eof),
         ),
         |statements| Program { statements },
@@ -2102,7 +2108,7 @@ mod tests {
 
     #[test]
     fn test_valid_program_parses() {
-        let source = "#{ [1, 2] ~> __integer_add__ }";
+        let source = "#{ [1, 2] __integer_add__ }";
         let result = parse(source);
         assert!(result.is_ok());
     }
@@ -2114,7 +2120,7 @@ mod tests {
 
     #[test]
     fn parse_populates_access_spans() {
-        let source = "point ~> double";
+        let source = "point double";
         let program = parse(source).unwrap();
         let Statement::Expression(expr) = &program.statements[0] else {
             panic!("expected expression statement");

@@ -556,35 +556,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         compiler.current_receive_type_id =
             compiler.extract_receive_type_from_statements(&ast_program.statements)?;
 
-        let num_statements = ast_program.statements.len();
-        let mut result_type_id = compiler.program.register_type(Type::nil());
-        for (i, statement) in ast_program.statements.into_iter().enumerate() {
-            let is_last = i == num_statements - 1;
-            let is_expression = matches!(&statement, ast::Statement::Expression(_));
-
-            let statement_type_id = match compiler.compile_statement(statement) {
-                Ok(ty) => ty,
-                Err(error) => {
-                    // The recorder is caller-owned, so whatever it gathered before the error
-                    // (and the program it indexes) is still available to the caller for
-                    // hover/go-to-definition on the parts that compiled.
-                    return Err(LocatedError {
-                        error,
-                        span: compiler.current_span,
-                    });
-                }
-            };
-
-            // Track the type of the last statement
-            if is_last {
-                result_type_id = statement_type_id;
+        // The recorder is caller-owned, so whatever it gathered before an error (and the program it
+        // indexes) is still available to the caller for hover/go-to-definition on the parts that
+        // compiled.
+        let result_type_id = match compiler.compile_top_level(ast_program.statements) {
+            Ok(ty) => ty,
+            Err(error) => {
+                return Err(LocatedError {
+                    error,
+                    span: compiler.current_span,
+                });
             }
-
-            // Pop intermediate expression results, keeping only the last one
-            if !is_last && is_expression {
-                compiler.codegen.add_instruction(Instruction::Pop);
-            }
-        }
+        };
 
         // Extract bindings from the global scope
         let bindings: HashMap<String, Binding> = compiler.scopes[0]
@@ -664,24 +647,49 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    fn compile_statement(&mut self, statement: ast::Statement) -> Result<usize, Error> {
-        match statement {
-            ast::Statement::TypeAlias {
-                name,
-                type_parameters,
-                type_definition,
-                ..
-            } => {
-                self.compile_type_alias(name.as_deref(), type_parameters, type_definition)?;
-                Ok(self.program.register_type(Type::nil()))
-            }
-            ast::Statement::Expression(sequence) => {
-                // A statement is a branchless sequence compiled in the current scope, so its
-                // bindings persist to later statements.
-                let (result_type, _) = self.compile_sequence(sequence, None, None, None)?;
-                Ok(result_type)
+    /// Compile a program/module body: a single threaded sequence of expression chains with
+    /// type-alias declarations interspersed. Expressions thread (each one starts from the previous
+    /// one's result) and short-circuit on nil, just like the chains within a sequence; type aliases
+    /// are transparent to that flow. Bindings persist across the whole body. Leaves the final value
+    /// on the stack and returns its type (nil if there are no expressions).
+    fn compile_top_level(&mut self, statements: Vec<ast::Statement>) -> Result<usize, Error> {
+        let last_expr_index = statements
+            .iter()
+            .rposition(|s| matches!(s, ast::Statement::Expression(_)));
+        let mut result_type_id = self.program.register_type(Type::nil());
+        let mut threaded: Option<usize> = None;
+        let mut end_jumps = Vec::new();
+        for (i, statement) in statements.into_iter().enumerate() {
+            match statement {
+                ast::Statement::TypeAlias {
+                    name,
+                    type_parameters,
+                    type_definition,
+                    ..
+                } => {
+                    // Transparent to the value flow: registers the alias, no stack effect.
+                    self.compile_type_alias(name.as_deref(), type_parameters, type_definition)?;
+                }
+                ast::Statement::Expression(sequence) => {
+                    // Thread from the previous expression's result (left on the stack), nil-stripped
+                    // since a nil result short-circuits to the end.
+                    let input = threaded.map(|t| self.without_nil(t));
+                    let (ty, _prov) = self.compile_sequence(sequence, None, input, None)?;
+                    result_type_id = ty;
+                    // Keep the value on the stack for the next expression and short-circuit on nil,
+                    // unless this is the final expression (its result is the module value).
+                    if Some(i) != last_expr_index {
+                        end_jumps.push(self.codegen.emit_duplicate_jump_if_nil());
+                    }
+                    threaded = Some(ty);
+                }
             }
         }
+        let end_addr = self.codegen.instructions.len();
+        for jump in end_jumps {
+            self.codegen.patch_jump_to_addr(jump, end_addr);
+        }
+        Ok(result_type_id)
     }
 
     /// Compile a type alias. `name` is `None` for the module's nameless default-type
@@ -2740,20 +2748,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         self.scopes = vec![Scope::new(HashMap::new(), scope_parameter, ScopeKind::Root)];
 
-        // Compile statements and track the result type of the last statement
-        let num_statements = parsed.statements.len();
-        let mut result_type_id = self.program.register_type(Type::nil());
-        for (i, statement) in parsed.statements.into_iter().enumerate() {
-            let is_last = i == num_statements - 1;
-            let is_expression = matches!(&statement, ast::Statement::Expression(_));
-
-            result_type_id = self.compile_statement(statement)?;
-
-            // Pop intermediate expression results, keeping only the last one
-            if !is_last && is_expression {
-                self.codegen.add_instruction(Instruction::Pop);
-            }
-        }
+        // Compile the module body as one threaded sequence; the final value is the module value.
+        let result_type_id = self.compile_top_level(parsed.statements)?;
         let module_type = self
             .program
             .lookup_type(result_type_id)

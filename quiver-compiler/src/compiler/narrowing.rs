@@ -781,6 +781,11 @@ pub fn narrow_nil_from_new_bindings(
                     let ty_ref = program.lookup_type(*ty)?;
                     if ty_ref.contains_nil(program) {
                         let without_nil = ty_ref.without_nil(program);
+                        // A purely-nil binding can't be narrowed to non-nil — stripping nil would
+                        // leave `never`, which is wrong (the binding really is nil here). Leave it.
+                        if matches!(&without_nil, Type::Union(variants) if variants.is_empty()) {
+                            return None;
+                        }
                         let new_id = program.register_type(without_nil);
                         return Some((name.clone(), new_id));
                     }

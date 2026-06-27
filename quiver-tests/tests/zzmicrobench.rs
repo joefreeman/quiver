@@ -31,9 +31,10 @@ fn per_iter_ns(body_tmpl: &str) -> f64 {
 fn micro() {
     // Each loop iteration: match(=0) + build arg tuple(s) + builtin call(s) + tail-call.
     // Top-level (not wrapped in #{...}) so the harness actually executes the call.
-    let loop_1b = r#"f = #int { | =0 => Ok | %num.sub [~, 1] ~> ^ }, {N} ~> f"#;
-    let loop_2b = r#"f = #int { | =0 => Ok | %num.sub [~, 1] ~> %num.add [~, 0] ~> ^ }, {N} ~> f"#;
-    let loop_3b = r#"f = #int { | =0 => Ok | %num.sub [~, 1] ~> %num.add [~, 0] ~> %num.add [~, 0] ~> ^ }, {N} ~> f"#;
+    let loop_1b = r#"f = #int { | =0 => Ok | %num.sub [~, 1] ^ }, {N} f"#;
+    let loop_2b = r#"f = #int { | =0 => Ok | %num.sub [~, 1] %num.add [~, 0] ^ }, {N} f"#;
+    let loop_3b =
+        r#"f = #int { | =0 => Ok | %num.sub [~, 1] %num.add [~, 0] %num.add [~, 0] ^ }, {N} f"#;
 
     let t1 = per_iter_ns(loop_1b);
     let t2 = per_iter_ns(loop_2b);
