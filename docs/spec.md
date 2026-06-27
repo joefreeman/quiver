@@ -410,7 +410,13 @@ Functions always have a single parameter and a result. The parameter is explicit
 
 Functions are defined with `#... { ... }` syntax, where the first `...` is the type definition of the parameter, and the second `...` is the function body (a 'block'; see above).
 
-Functions taking a nil parameter can be defined with the shorthand, `#{ ... }`.
+The parameter type may be omitted, writing just `#{ ... }`. Such a literal **infers its parameter type from context** when it appears directly as a call argument (the whole argument, or a top-level field of the argument's bracket tuple) and the callee's corresponding parameter type is known. Type variables in that expected type are pinned by the sibling arguments, so the inferring literal must come *after* the arguments that determine its type:
+
+```quiver
+xs ~> map [~, #{ $0 }, Nil]   // #{ $0 } infers its parameter from map's #'t -> 'u argument
+```
+
+When no expected type is available — or it resolves to a bare, unpinned type variable — `#{ ... }` falls back to a **nil parameter**, the shorthand for a nilary function. To force a nil parameter even where a context type is available, write the parameter explicitly as `#[] { ... }`.
 
 The function parameter can be accessed using `$` (e.g., `$.x`, `$.0`). Unlike `~>`, which refers to a block's parameter, `$` always refers to the enclosing function's parameter.
 

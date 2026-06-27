@@ -280,8 +280,8 @@ from = #<'v>[#^ -> '<'v>, '<'v>, 'list<['key, 'v]>] {
   entries: #<'v>'<'v> { Cons[~, Nil] ~> entries [~, Nil] },
 
   // All keys / values as lists (unspecified order).
-  keys: #<'v>'<'v> { Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #<'a>['key, 'a] { $0 }, Nil] },
-  values: #<'v>'<'v> { Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #<'a>['key, 'a] { $1 }, Nil] },
+  keys: #<'v>'<'v> { Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #{ $0 }, Nil] },
+  values: #<'v>'<'v> { Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #{ $1 }, Nil] },
 
   // An iterator over entries.
   iter: #<'v>'<'v> {

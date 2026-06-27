@@ -879,6 +879,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         name: ast::TupleName,
         fields: Vec<ast::TupleField>,
         ripple_context: Option<&RippleContext>,
+        // The tuple type this tuple is expected to produce (from a call argument's callee). Its
+        // fields drive parameter inference for un-annotated function-literal fields.
+        expected: Option<usize>,
     ) -> Result<(usize, Provenance), Error> {
         helpers::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
@@ -897,10 +900,21 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return spread::compile_tuple_with_spread(self, tuple_name, fields, ripple_context);
         }
 
+        // Per-field expected types from a positionally-matching expected tuple type, used to infer
+        // un-annotated function-literal fields (e.g. `map [xs, #{ $0 }, Nil]`). `bindings` solves
+        // the expected type's variables left-to-right, so an earlier field (`xs`) can pin a
+        // variable (`'t`) that a later function field's parameter (`#'t -> 'u`) depends on.
+        let expected_fields = expected.and_then(|e| self.expected_tuple_fields(e, fields.len()));
+        let mut bindings: HashMap<String, usize> = HashMap::new();
+
         // Compile field values and collect their types and provenances
         let mut field_types = Vec::new();
         let mut field_provenances = Vec::new();
         for (fields_compiled, field) in fields.iter().enumerate() {
+            // This field's expected type, with the variables solved so far substituted in.
+            let field_expected = expected_fields
+                .as_ref()
+                .map(|efs| typing::substitute(efs[fields_compiled], &bindings, self.program));
             let (field_type, field_prov) = match &field.value {
                 ast::FieldValue::Chain(chain) => {
                     // Each field chain receives a copy of the enclosing (piped) value as its
@@ -916,12 +930,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // The input value carries the piped value (and its provenance); nested
                     // tuples re-derive their own ripple context from it, so we pass no parent
                     // ripple_context here (which would otherwise have a stale stack offset).
-                    self.compile_chain_with_input(chain.clone(), None, None, input, None, false)?
+                    self.compile_chain_with_input(
+                        chain.clone(),
+                        None,
+                        None,
+                        input,
+                        None,
+                        false,
+                        field_expected,
+                    )?
                 }
                 ast::FieldValue::Spread(_) => {
                     unreachable!("Spread should be handled by compile_tuple_with_spread")
                 }
             };
+            // Grow the bindings by unifying the expected field type against the compiled type, so a
+            // later field's expected type sees the variables this field pinned. Best-effort: a
+            // mismatch here is reported properly later, when the whole tuple is applied to the
+            // callee, so only commit bindings on success.
+            if let Some(efs) = &expected_fields {
+                let mut trial = bindings.clone();
+                if typing::unify(&mut trial, efs[fields_compiled], field_type, self.program).is_ok()
+                {
+                    bindings = trial;
+                }
+            }
             // Record the field label's type for hover (named source fields only) — e.g. a
             // module's `[ double: #..., triple: #... ]` exposes each member's signature.
             if let (Some(name), Some(span)) = (&field.name, field.name_span.get()) {
@@ -953,6 +986,75 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.program.register_type(Type::Tuple(tuple_id)),
             Provenance::Tuple(field_provenances),
         ))
+    }
+
+    /// The positional field types of `expected` if it is a tuple type with exactly `arity`
+    /// fields, for driving per-field inference. A non-tuple or mismatched arity yields `None`
+    /// (no inference), so the existing all-or-nothing call check still produces any real error.
+    fn expected_tuple_fields(&self, expected: usize, arity: usize) -> Option<Vec<usize>> {
+        let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(expected) else {
+            return None;
+        };
+        let info = self.program.lookup_tuple(*tuple_id)?;
+        if info.fields.len() != arity {
+            return None;
+        }
+        Some(info.fields.iter().map(|(_, ty)| *ty).collect())
+    }
+
+    /// The parameter type of an applied head (`f` in `f [args]`), resolved without emitting code,
+    /// so a function-literal argument can infer its parameter from it. Returns `None` when the
+    /// head isn't a statically-resolvable callable (e.g. `~`, `^`, or a non-callable), leaving
+    /// the argument to compile without an expected type.
+    fn callee_parameter_type(&mut self, access: &ast::Access) -> Option<usize> {
+        let callable = match &access.source {
+            Some(ast::AccessSource::Identifier(name) | ast::AccessSource::TailCall(Some(name))) => {
+                // A captured member (`iter.fold` inside a closure) is bound under its full path, so
+                // try that first; otherwise resolve the base binding (`iter`, a local record) and
+                // follow the accessors (`.fold`) to the member.
+                if let Some((ty, _)) =
+                    scopes::lookup_variable(&self.scopes, name, &access.accessors)
+                {
+                    ty
+                } else {
+                    let base =
+                        scopes::lookup_variable(&self.scopes, name, &[]).map(|(ty, _)| ty)?;
+                    self.follow_accessors(base, &access.accessors)?
+                }
+            }
+            Some(ast::AccessSource::Import(module)) => {
+                // `resolve_import` applies the accessors, yielding the member type directly.
+                self.resolve_import(module, &access.accessors)
+                    .ok()
+                    .map(|(_, _, ty, _)| ty)?
+            }
+            Some(ast::AccessSource::Builtin(name)) => {
+                // A builtin's signature gives its parameter directly — no need to assemble a
+                // Callable just to take it apart again below.
+                let (param, _) = self.builtins.resolve_signature(name, self.program)?;
+                return Some(self.program.register_type(param));
+            }
+            Some(ast::AccessSource::Parameter) => {
+                let base = scopes::get_function_parameter(&self.scopes)
+                    .ok()
+                    .map(|(ty, _)| ty)?;
+                self.follow_accessors(base, &access.accessors)?
+            }
+            _ => return None,
+        };
+        match self.program.lookup_type(callable)? {
+            Type::Callable { parameter, .. } => Some(*parameter),
+            _ => None,
+        }
+    }
+
+    /// Resolve a chain of field/index accessors against a type, for type-only inspection.
+    /// Returns the base type unchanged when there are no accessors.
+    fn follow_accessors(&mut self, base: usize, accessors: &[ast::AccessPath]) -> Option<usize> {
+        if accessors.is_empty() {
+            return Some(base);
+        }
+        type_queries::resolve_accessor_type(self.program, base, accessors, "callee").ok()
     }
 
     /// Unify multiple receive types into a single type.
@@ -1230,7 +1332,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
-    fn compile_function(&mut self, function: ast::Function) -> Result<usize, Error> {
+    /// Compile a function literal. `expected_parameter` is the parameter type the use site
+    /// expects (from a call argument's callee), used to infer the parameter of an un-annotated
+    /// literal (`#{ $0 }`); it is ignored when the literal declares its own parameter type.
+    fn compile_function(
+        &mut self,
+        function: ast::Function,
+        expected_parameter: Option<usize>,
+    ) -> Result<usize, Error> {
         let mut function_params: HashSet<String> = HashSet::new();
 
         if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
@@ -1271,7 +1380,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.program,
                 )?
             }
-            None => self.program.register_type(Type::nil()),
+            None => {
+                // No annotation: infer the parameter from the expected callable type at the use
+                // site when one is available and usable. A bare type variable (`'t`) is not usable
+                // — there's nothing to pin it, so the literal couldn't act on its parameter — so
+                // fall back to nil, preserving the `#{ ... }` nilary-function shorthand.
+                let usable = expected_parameter
+                    .filter(|&ep| !matches!(self.program.lookup_type(ep), Some(Type::Variable(_))));
+                match usable {
+                    Some(ep) => ep,
+                    None => self.program.register_type(Type::nil()),
+                }
+            }
         };
 
         // Extract receive type from function body
@@ -2224,6 +2344,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 },
                 narrowing.as_deref_mut(),
                 true, // implicit_continuation: block-level chains load parameter
+                None,
             )?;
 
             // Check if the previous type contained nil and we're not on the first chain
@@ -2322,9 +2443,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         ripple_context: Option<&RippleContext>,
     ) -> Result<(usize, Provenance), Error> {
         // Tuple fields don't have implicit continuation - they start with no input
-        self.compile_chain_with_input(chain, on_no_match, ripple_context, None, None, false)
+        self.compile_chain_with_input(chain, on_no_match, ripple_context, None, None, false, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_chain_with_input(
         &mut self,
         chain: ast::Chain,
@@ -2333,6 +2455,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         input: Option<(usize, Provenance)>,
         mut narrowing: Option<&mut Narrowing>,
         implicit_continuation: bool,
+        // The type the chain is expected to produce; flows to the final term (the chain's result)
+        // so an un-annotated function-literal at the chain's tail can infer its parameter.
+        expected: Option<usize>,
     ) -> Result<(usize, Provenance), Error> {
         // Determine initial value:
         // - If input_type is provided, use it (value already on stack)
@@ -2352,7 +2477,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         let terms: Vec<_> = chain.terms.into_iter().collect();
-        for term in terms.iter() {
+        let last_index = terms.len().saturating_sub(1);
+        for (i, term) in terms.iter().enumerate() {
+            // Only the final term produces the chain's result, so the expected type applies there.
+            let term_expected = (i == last_index).then_some(expected).flatten();
             let (term_type, term_prov) = self.compile_term(
                 term.clone(),
                 current_type,
@@ -2360,6 +2488,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 on_no_match,
                 ripple_context,
                 narrowing.as_deref_mut(),
+                term_expected,
             )?;
             // Nil flows through a chain like any other value: within a chain, no term
             // short-circuits on nil (a failed mid-chain match yields nil that flows into
@@ -2877,7 +3006,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // The argument does not receive the chained value (which is the function), so compile
             // it without one. Stack: [function] -> [function, argument] -> [argument, function].
             let (arg_type, _) =
-                self.compile_term(argument, None, Provenance::Unknown, None, None, None)?;
+                self.compile_term(argument, None, Provenance::Unknown, None, None, None, None)?;
             self.codegen.add_instruction(Instruction::Rotate(2));
             return self.emit_arg_spawn(fn_type, arg_type);
         }
@@ -2886,11 +3015,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // exactly like a call argument. Compile the argument first (consuming the chained value),
         // then the function on top. Stack: [argument] -> [argument, function].
         if let Some(argument) = argument {
-            let (arg_type, arg_prov) =
-                self.compile_term(argument, value_type, Provenance::Unknown, None, None, None)?;
+            let (arg_type, arg_prov) = self.compile_term(
+                argument,
+                value_type,
+                Provenance::Unknown,
+                None,
+                None,
+                None,
+                None,
+            )?;
             let _ = arg_prov;
             let (fn_type, _) =
-                self.compile_term(function, None, Provenance::Unknown, None, None, None)?;
+                self.compile_term(function, None, Provenance::Unknown, None, None, None, None)?;
             return self.emit_arg_spawn(fn_type, arg_type);
         }
 
@@ -2898,7 +3034,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // process function ignores this implicit flow and is spawned with nil — the value is
         // discarded, like a call (an explicit juxtaposed argument, handled above, stays checked).
         let (fn_type, _prov) =
-            self.compile_term(function, None, Provenance::Unknown, None, None, None)?;
+            self.compile_term(function, None, Provenance::Unknown, None, None, None, None)?;
 
         let param_is_nil = matches!(
             self.program.lookup_type(fn_type),
@@ -3470,6 +3606,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(typing::union_type_ids(self.program, result_types))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_term(
         &mut self,
         term: ast::Term,
@@ -3478,6 +3615,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
         mut narrowing: Option<&mut Narrowing>,
+        // The type this term is expected to produce (from a call argument's callee). Only used to
+        // infer un-annotated function-literal parameters; ignored by every other term.
+        expected: Option<usize>,
     ) -> Result<(usize, Provenance), Error> {
         // Track the span of the term being compiled so a compile error can be located.
         if let Some(span) = term.span() {
@@ -3512,7 +3652,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
 
                 let (ty, tuple_prov) =
-                    self.compile_tuple(tuple.name, tuple.fields, ripple_context_param)?;
+                    self.compile_tuple(tuple.name, tuple.fields, ripple_context_param, expected)?;
                 // Hover on the tuple (its `[` / name) shows the constructed composite type.
                 self.record_typed(tuple_span, ty, SymbolKind::Expression, None);
                 // Return tuple provenance for field access tracking
@@ -3553,7 +3693,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
 
                 let span = func.span.get();
-                let function_type = self.compile_function(func)?;
+                // An un-annotated literal infers its parameter from the expected callable type.
+                let expected_parameter = func
+                    .parameter_type
+                    .is_none()
+                    .then_some(expected)
+                    .flatten()
+                    .and_then(|exp| match self.program.lookup_type(exp) {
+                        Some(Type::Callable { parameter, .. }) => Some(*parameter),
+                        _ => None,
+                    });
+                let function_type = self.compile_function(func, expected_parameter)?;
                 // Hover on `#` shows the inferred function type.
                 self.record_typed(span, function_type, SymbolKind::Expression, None);
                 Ok((function_type, Provenance::Unknown))
@@ -3766,8 +3916,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     ripple_context,
                     true,
                 )?;
-                let (arg_type, _) =
-                    self.compile_term(*arg, None, Provenance::Unknown, on_no_match, None, None)?;
+                let (arg_type, _) = self.compile_term(
+                    *arg,
+                    None,
+                    Provenance::Unknown,
+                    on_no_match,
+                    None,
+                    None,
+                    None,
+                )?;
                 // The callable is below the argument on the stack; swap so the call sees it on top.
                 self.codegen.add_instruction(Instruction::Rotate(2));
                 // An explicit argument (`f [5]`) is type-checked, not an implicit flow.
@@ -3776,7 +3933,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             ast::Term::Apply(access, arg) => {
                 // Looked-up head: the flowing value flows into the argument (so `f [~, 1]` works),
-                // and the head is then invoked with the argument's result.
+                // and the head is then invoked with the argument's result. The head's parameter
+                // type (resolved without emitting code) is the expected type of the argument, so
+                // an un-annotated function-literal argument can infer its parameter from it.
+                let expected_arg = self.callee_parameter_type(&access);
                 let (arg_type, arg_prov) = self.compile_term(
                     *arg,
                     value_type,
@@ -3784,6 +3944,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     on_no_match,
                     ripple_context,
                     None,
+                    expected_arg,
                 )?;
                 // A builtin/tail call can fail for non-type reasons, so disable complement narrowing.
                 if matches!(
@@ -4299,7 +4460,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         match argument {
             Some(arg) => {
-                self.compile_term(arg, None, Provenance::Unknown, None, None, None)?;
+                // The tail-call target's parameter is the expected type of the argument, so an
+                // un-annotated function-literal argument can infer its parameter from it.
+                self.compile_term(
+                    arg,
+                    None,
+                    Provenance::Unknown,
+                    None,
+                    None,
+                    None,
+                    Some(parameter),
+                )?;
             }
             None => {
                 // No argument: the function must take nil.
