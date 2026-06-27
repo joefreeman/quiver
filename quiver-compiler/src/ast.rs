@@ -256,12 +256,20 @@ pub enum Match {
     /// requires the value to be named, mirroring a named partial pattern.
     Star(Option<String>),
     Placeholder,
-    Reference(Type),
+    /// A pin against an existing binding: `&name` matches only if the value equals the value
+    /// currently bound to `name`. The `Spanned` covers the `name` (for go-to-definition).
+    Reference(String, Spanned),
     Type(Type),
     /// An alternation of patterns (`(p | q | …)`): matches if any alternative matches. Every
     /// alternative must bind the same set of variables (so the body sees them regardless of which
     /// matched).
     Or(Vec<Match>),
+    /// A type-ascribed binding `(T)x`: assert the value has type `T`, then bind the whole value
+    /// — at the narrowed type — to `x`. The parenthesised part is a *type*, never a pattern, so
+    /// it carries no bindings of its own; only the trailing identifier binds. Composes anywhere a
+    /// pattern can appear, including field values (`A[a: ('int)x]`), so it can narrow-and-capture
+    /// a union variant in one step. The `Spanned` covers the binding identifier.
+    As(Type, String, Spanned),
 }
 
 #[derive(Debug, Clone, PartialEq)]

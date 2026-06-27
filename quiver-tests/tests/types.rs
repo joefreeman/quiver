@@ -1237,9 +1237,7 @@ fn test_unnamed_partial_type_without_parens() {
     // Unnamed partial type without extra parentheses: =(x: 'int)
     quiver().evaluate("A[x: 1] ~> =(x: 'int)").expect("Ok");
 
-    quiver()
-        .evaluate("[x: 1, y: 2] ~> =(x: 'int)")
-        .expect("Ok");
+    quiver().evaluate("[x: 1, y: 2] ~> =(x: 'int)").expect("Ok");
 
     // Type mismatch should fail
     quiver().evaluate("A[x: 0xff] ~> =(x: 'int)").expect("[]");

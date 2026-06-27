@@ -150,14 +150,9 @@ impl<'a> FreeVariableCollector<'a> {
 
     fn visit_match(&mut self, pattern: &ast::Match) {
         match pattern {
-            ast::Match::Reference(ty) => {
-                // Check if this is a bare identifier reference (could be a variable)
-                if let ast::Type::Identifier { name, arguments } = ty
-                    && arguments.is_empty()
-                {
-                    // This could be a variable reference like &x
-                    self.visit_identifier(name, vec![]);
-                }
+            ast::Match::Reference(name, _) => {
+                // `&name` references an existing variable.
+                self.visit_identifier(name, vec![]);
             }
             ast::Match::Tuple(tuple) => {
                 // Recursively visit fields in tuple patterns
@@ -179,8 +174,10 @@ impl<'a> FreeVariableCollector<'a> {
                     self.visit_match(alternative);
                 }
             }
-            // These don't contain nested patterns or references
-            ast::Match::Identifier(_, _)
+            // These don't contain nested patterns or variable references (the as-binder's
+            // parenthesised part is a type, which binds nothing and names no variable).
+            ast::Match::As(_, _, _)
+            | ast::Match::Identifier(_, _)
             | ast::Match::Literal(_)
             | ast::Match::Star(_)
             | ast::Match::Placeholder

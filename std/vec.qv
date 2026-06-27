@@ -33,7 +33,7 @@ norm = #'%num {
 // Append one signed lane; nil if it doesn't fit the dtype.
 push = #['vec, 'int] {
   =[Vec[dtype: d, scale: s, data: data], n],
-  __vector_push__ [data, width d, n] ~> =packed, packed,
+  __vector_push__ [data, width d, n] ~> =('bin)packed,
   Vec[dtype: d, scale: s, data: packed]
 },
 
@@ -105,8 +105,8 @@ align = #['vec, 'vec] {
   | =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]] => {
     d ~> width ~> =w,
     reconcile [sa, sb] ~> =[s, fa, fb],
-    rescale [da, w, fa] ~> =da2, da2,
-    rescale [db, w, fb] ~> =db2, db2,
+    rescale [da, w, fa] ~> =('bin)da2,
+    rescale [db, w, fb] ~> =('bin)db2,
     [d, w, s, da2, db2]
   }
 },
@@ -187,12 +187,12 @@ align = #['vec, 'vec] {
   // is nil.
   add: #['vec, 'vec] {
     align ~> =[d, w, s, da, db],
-    __vector_add__ [da, db, w] ~> =packed, packed,
+    __vector_add__ [da, db, w] ~> =('bin)packed,
     Vec[dtype: d, scale: s, data: packed]
   },
   sub: #['vec, 'vec] {
     align ~> =[d, w, s, da, db],
-    __vector_subtract__ [da, db, w] ~> =packed, packed,
+    __vector_subtract__ [da, db, w] ~> =('bin)packed,
     Vec[dtype: d, scale: s, data: packed]
   },
 
@@ -200,7 +200,7 @@ align = #['vec, 'vec] {
   // must match; a lane overflow is nil.
   mul: #['vec, 'vec] {
     =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]],
-    __vector_multiply__ [da, db, width d] ~> =packed, packed,
+    __vector_multiply__ [da, db, width d] ~> =('bin)packed,
     %num.mul [sa, sb] ~> =scaled,
     Vec[dtype: d, scale: norm scaled, data: packed]
   },
@@ -227,17 +227,17 @@ align = #['vec, 'vec] {
   // rescale overflow.
   lt: #['vec, 'vec] {
     align ~> =[_, w, _, da, db],
-    __vector_less_than__ [da, db, w] ~> =m, m,
+    __vector_less_than__ [da, db, w] ~> =('bin)m,
     Mask[m]
   },
   eq: #['vec, 'vec] {
     align ~> =[_, w, _, da, db],
-    __vector_equal__ [da, db, w] ~> =m, m,
+    __vector_equal__ [da, db, w] ~> =('bin)m,
     Mask[m]
   },
   gt: #['vec, 'vec] {
     align ~> =[_, w, _, da, db],
-    __vector_greater_than__ [da, db, w] ~> =m, m,
+    __vector_greater_than__ [da, db, w] ~> =('bin)m,
     Mask[m]
   },
 
@@ -245,7 +245,7 @@ align = #['vec, 'vec] {
   // must have one byte per lane (as produced by the comparisons); a length mismatch is nil.
   filter: #['vec, 'mask] {
     =[Vec[dtype: d, scale: s, data: data], Mask[m]],
-    __vector_take__ [data, width d, m] ~> =kept, kept,
+    __vector_take__ [data, width d, m] ~> =('bin)kept,
     Vec[dtype: d, scale: s, data: kept]
   },
 

@@ -132,7 +132,7 @@ from_chars = #'%iter<'int> {
       =start,
       {
         | start ~> %num.gt? [~, haystack_len] => []
-        | find_index [haystack, delim, start, end] ~> =index, index =>
+        | find_index [haystack, delim, start, end] ~> =('int)index =>
           [haystack ~> %bin.slice [~, start, index] ~> Str[~], %num.add [index, delim_len]]
         | [haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~], %num.add [haystack_len, 1]]
       }
@@ -158,7 +158,7 @@ from_chars = #'%iter<'int> {
       | needle_len ~> =0 => 0  // Empty string is at index 0
       | %num.gt? [needle_len, haystack_len] => []  // Needle longer than haystack
       | {
-        haystack_len ~> %num.sub [~, needle_len] ~> find_index [haystack, needle, 0, ~] ~> =byte_pos, byte_pos,
+        haystack_len ~> %num.sub [~, needle_len] ~> find_index [haystack, needle, 0, ~] ~> =('int)byte_pos,
         byte_pos_to_char_idx [haystack, 0, byte_pos, 0]
       }
     }

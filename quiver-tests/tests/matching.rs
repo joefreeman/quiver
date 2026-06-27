@@ -69,9 +69,7 @@ fn test_pin_against_partial() {
     quiver().evaluate("A[x: 1, y: 2] ~> =(x: b), b").expect("1");
 
     // Pinning: (field_name: &var) checks field against variable value
-    quiver()
-        .evaluate("x = 1, A[x: 1] ~> =(x: &x)")
-        .expect("Ok");
+    quiver().evaluate("x = 1, A[x: 1] ~> =(x: &x)").expect("Ok");
     quiver().evaluate("x = 2, A[x: 1] ~> =(x: &x)").expect("[]");
 
     // Without variable for pin, should error: `&x` names an undefined binding.
@@ -85,9 +83,7 @@ fn test_pin_against_partial() {
 #[test]
 fn test_pin_with_variable_and_repetition() {
     // When variable exists and identifier is repeated, check both Variable and FieldEquality
-    quiver()
-        .evaluate("x = 5, [5, 5] ~> =[&x, &x]")
-        .expect("Ok");
+    quiver().evaluate("x = 5, [5, 5] ~> =[&x, &x]").expect("Ok");
     quiver().evaluate("x = 5, [5, 6] ~> =[&x, &x]").expect("[]"); // Fails field equality
     quiver().evaluate("x = 5, [4, 4] ~> =[&x, &x]").expect("[]"); // Fails variable check
 }
@@ -504,4 +500,64 @@ fn test_variable_pattern_matching_in_branches() {
             "#,
         )
         .expect("[Cons[1, Nil], Cons[2, Nil]]");
+}
+
+#[test]
+fn test_as_pattern_binds_and_asserts_type() {
+    // `('int)x` matches the value against `'int` AND binds the whole value to `x`.
+    quiver().evaluate("42 ~> =('int)x, x").expect("42");
+    // The binding is at the narrowed type, so `x` is usable as an int.
+    quiver()
+        .evaluate("42 ~> =('int)x, __integer_add__ [x, 1]")
+        .expect("43");
+    // A type mismatch fails the match (yields nil), like any failed match.
+    quiver().evaluate("0x0a ~> =('int)x").expect("[]");
+}
+
+#[test]
+fn test_as_pattern_propagates_nil() {
+    // The key use: assert-and-bind that fails (propagates) on nil, replacing the `=x, x` re-emit.
+    // A non-nil value binds and continues; a nil value fails the assertion and short-circuits.
+    quiver()
+        .evaluate(
+            "opt = #'int { | =0 => [] | $ }, 5 ~> opt ~> =('int)x, x ~> __integer_add__ [~, 1]",
+        )
+        .expect("6");
+    quiver()
+        .evaluate("opt = #'int { | =0 => [] | $ }, 0 ~> opt ~> =('int)x, x")
+        .expect("[]");
+}
+
+#[test]
+fn test_as_pattern_narrows_union_in_field() {
+    // Nested in a field, the as-binder narrows a union variant by field type and binds the field.
+    quiver()
+        .evaluate("f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int)x] => x | NoMatch }, A[a: 5] ~> f")
+        .expect("5");
+    // The other variant fails the field-type assertion.
+    quiver()
+        .evaluate(
+            "f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int)x] => x | NoMatch }, A[a: 0x0a] ~> f",
+        )
+        .expect("NoMatch");
+    // The partial-pattern spelling works identically.
+    quiver()
+        .evaluate("A[a: 5] ~> =A(a: ('int)x), x")
+        .expect("5");
+}
+
+#[test]
+fn test_as_pattern_captures_whole_value() {
+    // At the top level the binder captures the whole value, ascribed the parenthesised type.
+    quiver()
+        .evaluate("A[a: 5] ~> =(A[a: 'int])whole, whole")
+        .expect("A[a: 5]");
+}
+
+#[test]
+fn test_as_pattern_with_union_type() {
+    quiver()
+        .evaluate("0x0a ~> =('int | 'bin)x, x")
+        .expect("0x0a");
+    quiver().evaluate("42 ~> =('int | 'bin)x, x").expect("42");
 }

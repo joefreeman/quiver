@@ -336,6 +336,57 @@ fn analyze_match_pattern(
             scopes,
             value_provenance,
         ),
+        ast::Match::As(ast_type, name, _) => {
+            // Type-ascribed binding `(T)x`: assert the value has type `T` (narrowing it), then bind
+            // `name` to the whole value at the *narrowed* type, so `('int)x` binds `x: 'int`. This
+            // is the `Type` check plus a whole-value binding — the type carries no bindings itself.
+            let resolved_type_id =
+                super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
+            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
+            let mut requirements = if is_compatible(value_type_id, resolved_type_id, program)
+                && narrowed_type_id == value_type_id
+            {
+                vec![]
+            } else {
+                vec![Requirement {
+                    path: path.clone(),
+                    check: RuntimeCheck::TypeId(resolved_type_id),
+                }]
+            };
+            let bindings = match identifiers.get_mut(name) {
+                // A repeated binder (`=[('int)x, x]`) becomes a runtime equality check against the
+                // first occurrence, exactly like a repeated plain identifier.
+                Some(info) => {
+                    info.is_repeated = true;
+                    requirements.push(Requirement {
+                        path: info.first_path.clone(),
+                        check: RuntimeCheck::Path(path.clone()),
+                    });
+                    vec![]
+                }
+                None => {
+                    identifiers.insert(
+                        name.clone(),
+                        Identifier {
+                            first_path: path.clone(),
+                            is_repeated: false,
+                        },
+                    );
+                    vec![Binding {
+                        name: name.clone(),
+                        path: path.clone(),
+                        var_type_id: narrowed_type_id,
+                    }]
+                }
+            };
+            Ok((
+                vec![BindingSet {
+                    requirements,
+                    bindings,
+                }],
+                narrowed_type_id,
+            ))
+        }
         ast::Match::Star(name) => {
             analyze_star_pattern(program, name.as_ref(), value_type_id, path, identifiers)
         }
@@ -346,59 +397,23 @@ fn analyze_match_pattern(
             }],
             value_type_id,
         )),
-        ast::Match::Reference(ast_type) => {
-            // Reference pattern `&<identifier>`: pins against a binding already in scope. The
-            // parser only ever produces a bare identifier here — type references (`'int`,
-            // `'point`) parse to `Match::Type` and carry no `&`.
-            if let ast::Type::Identifier { name, arguments } = &ast_type
-                && arguments.is_empty()
-            {
-                // `&name` must reference a binding already in scope. If it isn't found, it is
-                // undefined — e.g. a name bound by a *sibling* sub-pattern of the same compound
-                // pattern (`=[x, &x]`), which isn't visible yet.
-                let Some((var_type_id, _var_index)) =
-                    super::scopes::lookup_variable(scopes, name, &[])
-                else {
-                    return Err(Error::VariableUndefined(name.clone()));
-                };
-
-                // It's a variable reference - check against the variable's value at runtime
-                let requirements = vec![Requirement {
-                    path,
-                    check: RuntimeCheck::Variable(name.clone()),
-                }];
-
-                // Narrow the type by filtering compatible variants with the variable's type
-                let narrowed_type_id = intersect_types(value_type_id, var_type_id, program);
-
-                return Ok((
-                    vec![BindingSet {
-                        requirements,
-                        bindings: vec![],
-                    }],
-                    narrowed_type_id,
-                ));
-            }
-
-            // The parser never produces a non-identifier `&`-reference today; resolve it as a
-            // type as a safe fallback.
-            let resolved_type_id =
-                super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
-
-            // Narrow the type by filtering compatible variants
-            let narrowed_type_id = intersect_types(value_type_id, resolved_type_id, program);
-
-            // Only add runtime check if value_type is not already exactly the resolved type
-            let requirements = if is_compatible(value_type_id, resolved_type_id, program)
-                && narrowed_type_id == value_type_id
-            {
-                vec![] // No runtime check needed - value_type is already compatible
-            } else {
-                vec![Requirement {
-                    path,
-                    check: RuntimeCheck::TypeId(resolved_type_id),
-                }]
+        ast::Match::Reference(name, _) => {
+            // Pin pattern `&name`: check the value equals the value bound to `name` at runtime.
+            // `name` must reference a binding already in scope — if it isn't found it's undefined,
+            // e.g. a name bound by a *sibling* sub-pattern of the same compound pattern (`=[x, &x]`),
+            // which isn't visible yet.
+            let Some((var_type_id, _var_index)) = super::scopes::lookup_variable(scopes, name, &[])
+            else {
+                return Err(Error::VariableUndefined(name.clone()));
             };
+
+            let requirements = vec![Requirement {
+                path,
+                check: RuntimeCheck::Variable(name.clone()),
+            }];
+
+            // Narrow the type by intersecting with the pinned variable's type.
+            let narrowed_type_id = intersect_types(value_type_id, var_type_id, program);
 
             Ok((
                 vec![BindingSet {

@@ -691,17 +691,17 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
     fn nested_pattern(input: Span) -> IResult<Span, Match> {
         alt((
             // Variable pin with & prefix
-            map(preceded(char('&'), identifier), |name| {
-                Match::Reference(Type::Identifier {
-                    name,
-                    arguments: vec![],
-                })
+            map(preceded(char('&'), spanned(identifier)), |(span, name)| {
+                Match::Reference(name, Spanned(Some(span)))
             }),
             // String literal
             match_string,
             // Star (optionally named) and placeholder. Before `match_tuple` so `Name*` isn't
             // first consumed as a bare named tuple, leaving the `*` dangling.
             star_pattern,
+            // As-pattern `(P)x` as a field value (`A(a: ('int)x)`) — narrow-and-capture a field.
+            // Before `type_identifier` so `('int)x` isn't read as a bare type leaving `x` dangling.
+            as_pattern,
             // Named/structural tuple pattern: `Dir`, `Circle[r]`, `[a, b]`. Before
             // `type_identifier` so a bare named tuple in a field is a *value* pattern (matching the
             // field's runtime value, like `=Dir`), not a type assertion — the latter compiles to a
@@ -1750,20 +1750,34 @@ fn or_pattern(input: Span) -> IResult<Span, Vec<Match>> {
     )(input)
 }
 
+/// Parse a type-ascribed binding: a *parenthesised type* immediately followed by a binding
+/// identifier, e.g. `('int)x` or `('int | 'bin)x`. Asserts the value's type and binds the whole
+/// (narrowed) value to the trailing identifier. The identifier must be *adjacent* — no whitespace
+/// after `)` — so `('int) x` is not an as-pattern (the `x` is left for the next term). The leading
+/// `(` is required, so a bare type (`'int`, `A['int]`) is never silently turned into a binder.
+fn as_pattern(input: Span) -> IResult<Span, Match> {
+    // Require a parenthesised type. `peek('(')` keeps a bare type like `A['int]` from being read
+    // as `('A['int]')` + binder; and lets a non-type `(x)` fall through to the partial-pattern rule.
+    peek(char('('))(input)?;
+    let (input, ty) = inline_type_expression(input)?;
+    let (input, (span, name)) = spanned(identifier)(input)?;
+    Ok((input, Match::As(ty, name, Spanned(Some(span)))))
+}
+
 fn match_pattern(input: Span) -> IResult<Span, Match> {
     alt((
         // Variable pin with & prefix: &name checks against an existing variable's value.
-        map(preceded(char('&'), identifier), |name| {
-            Match::Reference(Type::Identifier {
-                name,
-                arguments: vec![],
-            })
+        map(preceded(char('&'), spanned(identifier)), |(span, name)| {
+            Match::Reference(name, Spanned(Some(span)))
         }),
         // Try string literals first (before tuples and literals)
         match_string,
         // Star (optionally named): `*` or `Name*`. Before match_tuple so `Name*` isn't
         // first consumed as a bare named tuple, leaving the `*` dangling.
         star_pattern,
+        // As-pattern `(P)x` — before the bare paren-forms below, which would otherwise consume
+        // `(P)` and leave the trailing binder dangling.
+        as_pattern,
         // Try match tuple (handles both [..] and Name[..])
         map(match_tuple, Match::Tuple),
         // Try partial patterns before inline types (partial patterns use parentheses too)

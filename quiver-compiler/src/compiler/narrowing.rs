@@ -612,7 +612,7 @@ fn classify_field_pattern(
             }
         }
 
-        ast::Match::Reference(_) => {
+        ast::Match::Reference(_, _) => {
             // Reference patterns are type-checking patterns
             FieldPatternKind::Complex
         }

@@ -450,6 +450,12 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
                 collect_binding_spans(alternative, out);
             }
         }
+        ast::Match::As(_, name, span) => {
+            // The type-ascribed binder `(T)x` binds `x`; the type part carries no bindings.
+            if let Some(span) = span.get() {
+                out.push((name.clone(), span));
+            }
+        }
         _ => {}
     }
 }
@@ -1857,6 +1863,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Only patch fail_jump_addr if we didn't use on_no_match
         if on_no_match.is_none() {
             self.codegen.patch_jump_to_here(fail_jump_addr);
+
+            // The success path stored a local for each binding (sequential `Store`), so a
+            // fall-through failure must allocate the same locals — filled with nil, since nothing
+            // matched — to keep local indices aligned for whatever follows this match in the
+            // chain. (Without this, a `=('int)x` that fails at runtime mid-chain would leave the
+            // continuation's `Load`s reading shifted slots.) When `on_no_match` is set the failure
+            // jumps elsewhere and resets locals, so no fill is needed.
+            for _ in 0..bindings.len() {
+                self.codegen.add_instruction(Instruction::Tuple(NIL));
+                self.codegen.add_instruction(Instruction::Store);
+            }
         }
         // Failure path: pop the value and push nil
         self.codegen.add_instruction(Instruction::Pop);

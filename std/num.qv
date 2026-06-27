@@ -158,14 +158,14 @@ surd_add = #[', '] {
   =[x, y],
   x ~> explode ~> =[a1, b1, n1],
   y ~> explode ~> =[a2, b2, n2],
-  radical [b1, n1, b2, n2] ~> =n, n,
+  radical [b1, n1, b2, n2] ~> =('int)n,
   build [radd [a1, a2], radd [b1, b2], n]
 },
 surd_sub = #[', '] {
   =[x, y],
   x ~> explode ~> =[a1, b1, n1],
   y ~> explode ~> =[a2, b2, n2],
-  radical [b1, n1, b2, n2] ~> =n, n,
+  radical [b1, n1, b2, n2] ~> =('int)n,
   build [rsub [a1, a2], rsub [b1, b2], n]
 },
 // (a₁ + b₁√n)(a₂ + b₂√n) = (a₁a₂ + b₁b₂·n) + (a₁b₂ + a₂b₁)√n.
@@ -173,7 +173,7 @@ surd_mul = #[', '] {
   =[x, y],
   x ~> explode ~> =[a1, b1, n1],
   y ~> explode ~> =[a2, b2, n2],
-  radical [b1, n1, b2, n2] ~> =n, n,
+  radical [b1, n1, b2, n2] ~> =('int)n,
   build [
     radd [rmul [a1, a2], rmul [rmul [b1, b2], Rational[n, 1]]],
     radd [rmul [a1, b2], rmul [a2, b1]],
@@ -185,7 +185,7 @@ surd_div = #[', '] {
   =[x, y],
   x ~> explode ~> =[a1, b1, n1],
   y ~> explode ~> =[a2, b2, n2],
-  radical [b1, n1, b2, n2] ~> =n, n,
+  radical [b1, n1, b2, n2] ~> =('int)n,
   dd = rsub [rmul [a2, a2], rmul [rmul [b2, b2], Rational[n, 1]]],
   {
     | dd ~> rsign ~> =0 => []
@@ -200,7 +200,7 @@ surd_compare = #[', '] {
   =[x, y],
   x ~> explode ~> =[a1, b1, n1],
   y ~> explode ~> =[a2, b2, n2],
-  radical [b1, n1, b2, n2] ~> =n, n,
+  radical [b1, n1, b2, n2] ~> =('int)n,
   ssign [rsub [a1, a2], rsub [b1, b2], n]
 },
 
