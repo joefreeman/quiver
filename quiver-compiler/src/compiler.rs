@@ -1299,7 +1299,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         receive_types.push(resolved_type);
                     }
                 }
-                ast::Term::Reference(Some(access)) => {
+                ast::Term::Reference(access) => {
                     // A referenced receiver (`&f`, `&%int.and`) — the form the tight `!f`/`!var`
                     // sugar produces. Resolve its type from either a lexical variable or a module
                     // member, then take its parameter type as the message type.
@@ -3832,7 +3832,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
                 Ok((result_type, Provenance::Unknown))
             }
-            ast::Term::Reference(Some(access)) => {
+            ast::Term::Reference(access) => {
                 // Explicit reference: drop incoming value and load the referenced value without calling
                 if value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
@@ -3910,16 +3910,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         "Reference requires an identifier (e.g., &f)".to_string(),
                     )),
                 }
-            }
-            ast::Term::Reference(None) => {
-                // Standalone & - create a new unique ref
-                // Drop incoming value if present
-                if value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::Pop);
-                }
-                self.codegen.add_instruction(Instruction::Reference);
-                let ref_type = self.program.register_type(Type::Reference);
-                Ok((ref_type, Provenance::Unknown))
             }
         }
     }

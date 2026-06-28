@@ -116,8 +116,7 @@ fn render_term(term: &Term) -> String {
         Term::Self_ => ".".to_string(),
         Term::Select(sources, _) => render_select(sources),
         Term::Process(index) => format!("@{}", index),
-        Term::Reference(None) => "&".to_string(),
-        Term::Reference(Some(access)) => format!("&{}", render_access(access)),
+        Term::Reference(access) => format!("&{}", render_access(access)),
         Term::Spawn(func, _) => render_spawn_head(func),
     }
 }
@@ -561,7 +560,6 @@ mod tests {
             "!p",
             "! []",
             "&f",
-            "&",
             "&.",
             "&__integer_add__",
             "42 pid",
@@ -610,7 +608,7 @@ mod tests {
             "#'int",
             "#'int -> 'bin { $ }",
             // --- multi-chain sequences & control flow ---
-            "tag = &, [tag, 42] =[&tag, x], x",
+            "tag = %ref, [tag, 42] =[&tag, x], x",
             "[], 5",
             // --- type aliases: unions, intersections, partials, modules, recursion ---
             "'bool = True | False",

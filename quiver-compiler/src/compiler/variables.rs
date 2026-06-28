@@ -105,12 +105,9 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             }
-            ast::Term::Reference(Some(access)) => {
+            ast::Term::Reference(access) => {
                 // Reference to a value - same variable capture as Access
                 self.visit_access_capture(access);
-            }
-            ast::Term::Reference(None) => {
-                // Ref creation doesn't capture any variables
             }
         }
     }

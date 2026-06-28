@@ -32,7 +32,7 @@ serve = #\File {
 // Send a read request to a file process and wait for the correlated reply.
 do_read = #[', 'int, 'int] {
   =[f, offset, length],
-  id = &,
+  id = %ref,
   Read[offset, length, &., id] f.0,
   ! [#Reply['ref, 'bin] { =Reply[&id, _], Ok }] { =Reply[_, data] => data }
 },
@@ -103,7 +103,7 @@ lines_step = #[', 'int, 'bin, 'int] {
   // Write `data` starting at `offset`, returning the number of bytes written.
   write: #[', 'int, 'bin] {
     =[f, offset, data],
-    id = &,
+    id = %ref,
     Write[offset, data, &., id] f.0,
     ! [#Reply['ref, 'int] { =Reply[&id, _], Ok }] { =Reply[_, written] => written }
   },
@@ -111,7 +111,7 @@ lines_step = #[', 'int, 'bin, 'int] {
   // Flush buffered writes durably to disk (fsync), returning Ok once complete.
   flush: #' {
     =f,
-    id = &,
+    id = %ref,
     Flush[&., id] f.0,
     ! [#Reply['ref, Ok] { =Reply[&id, _], Ok }] { =Reply[_, ok] => ok }
   },

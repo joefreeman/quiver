@@ -1,0 +1,3 @@
+// Unique, opaque identifiers. Unlike other standard-library modules this is a single nilary
+// function rather than a record: `ref = %ref, tag = ref` mints a fresh ref each call.
+&__reference__

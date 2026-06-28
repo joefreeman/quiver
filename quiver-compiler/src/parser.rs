@@ -1351,7 +1351,7 @@ fn select_term(input: Span) -> IResult<Span, Term> {
             // sources are a tuple of values, so a callable source must be referenced rather
             // than called: the tight form `!f` desugars to `! [&f]` (the `&` is part of the
             // sugar). A process variable references harmlessly (`&p` is just `p`).
-            map(access, |acc| single_source(Term::Reference(Some(acc)))),
+            map(access, |acc| single_source(Term::Reference(acc))),
             // #type - `#`-typed receive (body-less identity receive): `!#'int`, `!#Reply[...]`.
             map(preceded(char('#'), function_input_type), |param_type| {
                 make_receive(param_type, None)
@@ -1877,25 +1877,23 @@ fn process_ref_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
-/// Reference term: &identifier, &module.func, &. (explicit reference without calling), or standalone & (create ref)
+/// Reference term: &identifier, &module.func, or &. — an explicit reference, without calling.
 fn reference_term(input: Span) -> IResult<Span, Term> {
     preceded(
         char('&'),
         alt((
             // &. - reference to self
             map(char('.'), |_| {
-                Term::Reference(Some(Access {
+                Term::Reference(Access {
                     source: Some(AccessSource::Self_),
                     accessors: vec![],
                     accessor_spans: vec![],
                     base_span: Spanned::default(),
                     span: Spanned::default(),
-                }))
+                })
             }),
             // &identifier, &module.func, or &__builtin__ (a builtin is an access source)
-            map(access, |a| Term::Reference(Some(a))),
-            // Standalone & - create a new unique ref
-            success(Term::Reference(None)),
+            map(access, Term::Reference),
         )),
     )(input)
 }

@@ -256,14 +256,15 @@ module.exports = grammar({
       repeat($._accessor),
     )),
 
-    // Bare `&` (new ref), `&name`/`&mod.f` (reference), `&.` (self ref), `&__b__`.
+    // `&name`/`&mod.f` (reference), `&.` (self ref), `&__b__`. References a value without
+    // calling it; the target is required (a fresh ref is minted via the `%ref` module).
     reference: $ => prec.right(seq(
       '&',
-      optional(choice(
+      choice(
         $.self,
         $.builtin,
         $.access,
-      )),
+      ),
     )),
 
     // `.` referring to the current process (not followed by an identifier/digit, which

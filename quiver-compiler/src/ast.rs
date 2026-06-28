@@ -95,9 +95,9 @@ pub enum Term {
     /// The `Spanned` is the `!`, for hover (shows the received/awaited result type).
     Select(Option<Vec<Chain>>, Spanned),
     Process(usize),
-    /// Reference operator (`&`). None creates a new unique ref, Some references a value
-    /// (a variable, import member, or builtin — `&x`, `&m.f`, `&__integer_add__`).
-    Reference(Option<Access>),
+    /// Reference operator (`&`): references a value without calling it — a variable, import
+    /// member, builtin, or self (`&x`, `&m.f`, `&__integer_add__`, `&.`).
+    Reference(Access),
 }
 
 impl Term {

@@ -47,6 +47,7 @@ pub fn bigint_from_str(s: &str) -> Result<BigInt, Error> {
 pub mod binary;
 pub mod integer;
 pub mod io;
+pub mod reference;
 pub mod vector;
 
 /// Result of a builtin function execution
@@ -63,6 +64,7 @@ pub enum BuiltinResult<E: Effect> {
 pub enum TypeSpec {
     Integer,
     Binary,
+    Reference,
     Tuple(Option<&'static str>, Vec<(Option<&'static str>, TypeSpec)>),
     Union(Vec<TypeSpec>),
     Process(Option<Box<TypeSpec>>, Option<Box<TypeSpec>>), // Process type: (send, receive)
@@ -75,6 +77,7 @@ impl TypeSpec {
         match self {
             TypeSpec::Integer => program.register_type(Type::Integer),
             TypeSpec::Binary => program.register_type(Type::Binary),
+            TypeSpec::Reference => program.register_type(Type::Reference),
             TypeSpec::Tuple(name, field_specs) => {
                 let fields: Vec<(Option<String>, usize)> = field_specs
                     .iter()
@@ -113,6 +116,7 @@ impl TypeSpec {
         match self {
             TypeSpec::Integer => Type::Integer,
             TypeSpec::Binary => Type::Binary,
+            TypeSpec::Reference => Type::Reference,
             TypeSpec::Tuple(name, field_specs) => {
                 let fields: Vec<(Option<String>, usize)> = field_specs
                     .iter()
@@ -415,6 +419,12 @@ pub fn register_vector_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "vector_sum", vector::builtin_vector_sum, bin_int => int_or_nil);
 }
 
+/// Register the reference builtin (`%ref`): a nilary function minting a unique, opaque ref.
+pub fn register_reference_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let nil = TypeSpec::Tuple(None, vec![]);
+    register_builtin!(registry, "reference", reference::builtin_reference, nil => TypeSpec::Reference);
+}
+
 /// Get all core builtin modules. This establishes the full builtin *contract* every host shares:
 /// the pure builtins (integer/binary/vector) with their universal implementations, and the IO
 /// builtins' signatures (with placeholder implementations that executing hosts replace via
@@ -424,6 +434,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_binary_builtins,
         register_integer_builtins,
         register_vector_builtins,
+        register_reference_builtins,
         io::register_io_signatures,
     ]
 }

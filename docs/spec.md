@@ -435,12 +435,19 @@ x = coords .0            // Positional access in pipeline
 
 ### Ref creation
 
-Standalone `&` creates a unique, opaque identifier. Refs support equality and pattern matching.
+The `%ref` module is a single nilary function that mints a unique, opaque identifier (of type `'ref`). Unlike other standard-library modules — which import a record of functions — `%ref` *is* the function, so each evaluation yields a fresh ref. Refs support equality and pattern matching.
 
 ```quiver
-tag = &,
+tag = %ref,                   // mint a ref inline
 [tag, 42] =[&tag, x],
 x   // 42
+```
+
+To name the minting function, bind it by reference (`&`, like any function value) and call it repeatedly:
+
+```quiver
+ref = &%ref,
+[ref, ref] ==   // [] — two distinct refs are not equal
 ```
 
 ## Functions
@@ -753,6 +760,7 @@ The following standard library modules are available:
 - `num`
 - `int`
 - `list`
+- `ref`
 
 ## Built-in functions
 

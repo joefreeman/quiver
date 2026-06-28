@@ -82,6 +82,5 @@ pub enum Instruction {
     Send,
     Self_,
     Select,
-    Reference,
     Process(usize, usize), // (process_id, function_index)
 }
