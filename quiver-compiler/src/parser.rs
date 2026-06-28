@@ -457,9 +457,11 @@ fn string_term(input: Span) -> IResult<Span, Term> {
                 fields: vec![TupleField {
                     name: None,
                     name_span: Spanned::default(),
+                    span: Spanned::default(),
                     value: FieldValue::Chain(Chain {
                         match_pattern: None,
                         bind_span: Spanned::default(),
+                        span: Spanned::default(),
                         terms: vec![Term::Literal(Literal::Binary(bytes))],
                     }),
                 }],
@@ -485,9 +487,11 @@ fn rational_field(value: BigInt) -> TupleField {
     TupleField {
         name: None,
         name_span: Spanned::default(),
+        span: Spanned::default(),
         value: FieldValue::Chain(Chain {
             match_pattern: None,
             bind_span: Spanned::default(),
+            span: Spanned::default(),
             terms: vec![Term::Literal(Literal::Integer(value))],
         }),
     }
@@ -1272,6 +1276,7 @@ fn make_source_chain(term: Term) -> Chain {
     Chain {
         match_pattern: None,
         bind_span: Spanned::default(),
+        span: Spanned::default(),
         terms: vec![term],
     }
 }
@@ -1380,13 +1385,15 @@ fn import(input: Span) -> IResult<Span, Vec<String>> {
 }
 
 fn tuple_field(input: Span) -> IResult<Span, TupleField> {
-    alt((
+    let start = input;
+    let (rest, mut field) = alt((
         // Named field with chain: name: chain
         map(
             separated_pair(spanned(identifier), tuple((char(':'), ws1)), chain),
             |((span, name), chain_value)| TupleField {
                 name: Some(name),
                 name_span: Spanned(Some(span)),
+                span: Spanned::default(),
                 value: FieldValue::Chain(chain_value),
             },
         ),
@@ -1394,21 +1401,27 @@ fn tuple_field(input: Span) -> IResult<Span, TupleField> {
         map(preceded(tag("..."), identifier), |id| TupleField {
             name: None,
             name_span: Spanned::default(),
+            span: Spanned::default(),
             value: FieldValue::Spread(Some(id)),
         }),
         // Spread chained value: ...
         map(tag("..."), |_| TupleField {
             name: None,
             name_span: Spanned::default(),
+            span: Spanned::default(),
             value: FieldValue::Spread(None),
         }),
         // Unnamed chain: chain
         map(chain, |chain_value| TupleField {
             name: None,
             name_span: Spanned::default(),
+            span: Spanned::default(),
             value: FieldValue::Chain(chain_value),
         }),
-    ))(input)
+    ))(input)?;
+    // Record the field's start offset, for attaching leading trivia during formatting.
+    field.span = Spanned(Some(span_between(start, rest)));
+    Ok((rest, field))
 }
 
 fn tuple_field_list(input: Span) -> IResult<Span, Vec<TupleField>> {
@@ -1935,7 +1948,8 @@ fn primary(input: Span) -> IResult<Span, Term> {
 }
 
 fn chain(input: Span) -> IResult<Span, Chain> {
-    alt((
+    let start = input;
+    let (rest, mut chain) = alt((
         // Match pattern: pattern = chain_inner
         map(
             pair(
@@ -1945,6 +1959,7 @@ fn chain(input: Span) -> IResult<Span, Chain> {
             |((bind_span, match_pattern), terms)| Chain {
                 match_pattern: Some(match_pattern),
                 bind_span: Spanned(Some(bind_span)),
+                span: Spanned::default(),
                 terms,
             },
         ),
@@ -1952,9 +1967,13 @@ fn chain(input: Span) -> IResult<Span, Chain> {
         map(chain_inner, |terms| Chain {
             match_pattern: None,
             bind_span: Spanned::default(),
+            span: Spanned::default(),
             terms,
         }),
-    ))(input)
+    ))(input)?;
+    // Record the chain's start offset, for attaching leading trivia during formatting.
+    chain.span = Spanned(Some(span_between(start, rest)));
+    Ok((rest, chain))
 }
 
 fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {

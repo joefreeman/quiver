@@ -524,6 +524,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .map(|max_index| max_index + 1)
             .unwrap_or(0);
 
+        // Drop blocks that carry no runtime meaning before codegen: a single branchless branch with
+        // no bindings needs no frame (whatever its step count) and acts only as a narrowing barrier,
+        // so removing it elides wasted Store/Load/Reset. `lift` also unwraps multi-step such blocks.
+        // The formatter strips/keeps the same blocks (it keeps multi-step ones as grouping braces,
+        // which compile identically here), so formatting never changes compiled output.
+        let ast_program = crate::simplify::normalize_blocks(
+            ast_program,
+            &crate::simplify::Options {
+                keep: &|_| false,
+                lift: true,
+                group_consequences: false,
+            },
+        );
+
         // Only allocate parameter slot if we have expressions
         // (CType definitions and imports don't need parameters)
         let has_expressions = ast_program

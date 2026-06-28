@@ -1,7 +1,7 @@
 //! The tower-lsp [`LanguageServer`] implementation: document lifecycle and request routing.
 
 use crate::analysis::{Analysis, analyze};
-use crate::convert::{position_to_offset, span_to_range};
+use crate::convert::{offset_to_position, position_to_offset, span_to_range};
 use crate::documents::{DocumentStore, LineIndex};
 use crate::loader::resolver_for;
 use dashmap::DashMap;
@@ -291,6 +291,7 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -593,6 +594,30 @@ impl LanguageServer for Backend {
         Ok(Some(DocumentSymbolResponse::Nested(
             analysis.symbols.clone(),
         )))
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let Some(doc) = self.documents.get(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        // Formatting is purely syntactic; if the document does not parse there is nothing to format,
+        // so leave it untouched (the parse error is already surfaced as a diagnostic).
+        let Ok(ast) = quiver_compiler::parse(&doc.text) else {
+            return Ok(None);
+        };
+        let formatted = quiver_compiler::format_program(&ast, &doc.text);
+        if formatted == doc.text {
+            return Ok(None);
+        }
+        // Replace the whole document with the formatted text.
+        let range = Range {
+            start: Position::default(),
+            end: offset_to_position(&doc.text, &doc.line_index, doc.text.len()),
+        };
+        Ok(Some(vec![TextEdit {
+            range,
+            new_text: formatted,
+        }]))
     }
 
     async fn shutdown(&self) -> Result<()> {

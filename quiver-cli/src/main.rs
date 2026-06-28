@@ -78,11 +78,18 @@ enum Commands {
         input: Option<String>,
     },
 
+    /// Format Quiver source. With file arguments, rewrites each in place; with none, reads stdin
+    /// and writes the result to stdout (as does `--eval`).
     Format {
-        input: Option<String>,
+        /// Files to format in place.
+        input: Vec<String>,
 
         #[arg(short, long)]
         eval: Option<String>,
+
+        /// Don't write anything; exit non-zero if any input is not already formatted (for CI).
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -102,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             profile,
         }) => run_command(input, eval, quiet, profile)?,
         Some(Commands::Inspect { input }) => inspect_command(input)?,
-        Some(Commands::Format { input, eval }) => format_command(input, eval)?,
+        Some(Commands::Format { input, eval, check }) => format_command(input, eval, check)?,
         None => run_repl()?,
     }
 
@@ -115,18 +122,23 @@ fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Handle parse error with visual formatting if in a TTY, otherwise plain text
-fn handle_parse_error(err: quiver_compiler::parser::Error, source: &str, source_id: &str) -> ! {
+/// Print a parse error with visual formatting if in a TTY, otherwise plain text.
+fn report_parse_error(err: &quiver_compiler::parser::Error, source: &str, source_id: &str) {
     // Check if stderr is a terminal and NO_COLOR is not set
     let use_color = std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err();
 
     if use_color {
         // Use ariadne for visual error display
-        diagnostics::eprint(&err, source_id, source);
+        diagnostics::eprint(err, source_id, source);
     } else {
         // Plain text fallback
         eprintln!("Error: {}", err);
     }
+}
+
+/// Report a parse error and exit.
+fn handle_parse_error(err: quiver_compiler::parser::Error, source: &str, source_id: &str) -> ! {
+    report_parse_error(&err, source, source_id);
     std::process::exit(1);
 }
 
@@ -274,27 +286,84 @@ fn compile_command(
 }
 
 /// Parse source and print it back as canonical argument-first Quiver source.
+/// Format `source`, reporting a parse error (and returning `None`) if it does not parse.
+fn format_source(source: &str, source_id: &str) -> Option<String> {
+    match parse(source) {
+        Ok(ast) => Some(quiver_compiler::format_program(&ast, source)),
+        Err(e) => {
+            report_parse_error(&e, source, source_id);
+            None
+        }
+    }
+}
+
 fn format_command(
-    input: Option<String>,
+    inputs: Vec<String>,
     eval: Option<String>,
+    check: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (source, source_id) = if let Some(code) = eval {
-        (code, "eval".to_string())
-    } else if let Some(path) = input {
-        (fs::read_to_string(&path)?, path)
-    } else {
+    // `--eval` and stdin have no file to write back to, so they print to stdout (or, with `--check`,
+    // just verify and signal via the exit code).
+    if let Some(code) = eval {
+        return format_stream(&code, "eval", check);
+    }
+    if inputs.is_empty() {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
-        (buffer, "stdin".to_string())
+        return format_stream(&buffer, "stdin", check);
+    }
+
+    // File arguments are formatted in place (or, with `--check`, checked).
+    let mut changed = false;
+    let mut failed = false;
+    for path in &inputs {
+        let source = match fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(e) => {
+                eprintln!("{}: {}", path, e);
+                failed = true;
+                continue;
+            }
+        };
+        let Some(formatted) = format_source(&source, path) else {
+            failed = true;
+            continue;
+        };
+        if formatted == source {
+            continue;
+        }
+        changed = true;
+        if check {
+            println!("would reformat: {}", path);
+        } else if let Err(e) = fs::write(path, formatted) {
+            eprintln!("{}: {}", path, e);
+            failed = true;
+        }
+    }
+
+    if failed || (check && changed) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Format a single source with no backing file: print it to stdout, or with `--check` exit non-zero
+/// if it is not already formatted.
+fn format_stream(
+    source: &str,
+    source_id: &str,
+    check: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(formatted) = format_source(source, source_id) else {
+        std::process::exit(1);
     };
-
-    let ast = match parse(&source) {
-        Ok(ast) => ast,
-        Err(e) => handle_parse_error(e, &source, &source_id),
-    };
-
-    println!("{}", quiver_compiler::format_program(&ast));
-
+    if check {
+        if formatted != source {
+            std::process::exit(1);
+        }
+    } else {
+        print!("{}", formatted);
+    }
     Ok(())
 }
 

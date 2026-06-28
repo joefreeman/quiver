@@ -84,6 +84,16 @@ impl ModuleCache {
             module: id.display(),
             error: Box::new(e),
         })?;
+        // Strip/lift no-op blocks so a module compiles identically whether or not it has been
+        // formatted (the formatter strips/keeps the same blocks). See `Compiler::compile`.
+        let parsed = crate::simplify::normalize_blocks(
+            parsed,
+            &crate::simplify::Options {
+                keep: &|_| false,
+                lift: true,
+                group_consequences: false,
+            },
+        );
 
         self.ast_cache.insert(id.clone(), parsed.clone());
 

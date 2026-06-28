@@ -71,6 +71,9 @@ pub struct Chain {
     /// Span of the binding pattern (the `x` in `x = ...`), for go-to-definition and symbols.
     /// `None` when the chain has no binding.
     pub bind_span: Spanned,
+    /// Span starting at the chain's first character, for attaching leading comments/blank lines
+    /// (trivia) to the chain during formatting. `None` for synthetic chains built by the parser.
+    pub span: Spanned,
     pub terms: Vec<Term>,
 }
 
@@ -151,6 +154,9 @@ pub struct Tuple {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// `Chain` is the common, load-bearing variant (every non-spread field is one); `Spread` is rare, so
+// boxing `Chain` just to even out the variant sizes would cost an allocation on the hot path.
+#[allow(clippy::large_enum_variant)]
 pub enum FieldValue {
     Chain(Chain),
     /// Spread: None for bare `...`, Some(name) for `...name`
@@ -163,6 +169,9 @@ pub struct TupleField {
     /// Span of the field label (the `triple` in `triple: ...`), for go-to-definition onto a
     /// module's exported members. Absent for unnamed fields and spreads.
     pub name_span: Spanned,
+    /// Span starting at the field's first character, for attaching leading comments/blank lines
+    /// (trivia) to the field during formatting. `None` for synthetic fields built by the parser.
+    pub span: Spanned,
     pub value: FieldValue,
 }
 
