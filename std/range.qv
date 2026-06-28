@@ -1,4 +1,4 @@
-' = Range['int, 'int | None, 'int]
+' = Range['int, ('int | None), 'int]
 
 [
   to: #'int { Range[0, ~, 1] },
@@ -7,21 +7,24 @@
 
   between: #['int, 'int] { Range[..., 1] },
 
-  new: #['int, 'int | None, 'int] { Range[...] },
+  new: #['int, ('int | None), 'int] { Range[...] },
 
   // A `Range` is entirely integer-valued, so this generator runs once per yielded element
   // over the integer builtins directly (`__integer_compare__`/`__integer_add__`) rather than the polymorphic
   // `%num` dispatch — the same internal fast path `%num` itself takes for integer operands.
   iter: #' {
-    [~, #' {
-      =Range[value, stop, step],
-      {
-        | stop =None
-        | [step, 0] __integer_compare__ =1, [value, stop] __integer_compare__ =-1
-        | [step, 0] __integer_compare__ =-1, [value, stop] __integer_compare__ =1
-        | step =0
+    [
+      ~,
+      #' {
+        =Range[value, stop, step]
+        {
+          | stop =None
+          | [step, 0] __integer_compare__ =1, [value, stop] __integer_compare__ =-1
+          | [step, 0] __integer_compare__ =-1, [value, stop] __integer_compare__ =1
+          | step =0
+        }
+        [value, Range[[value, step] __integer_add__, stop, step]]
       },
-      [value, Range[[value, step] __integer_add__, stop, step]]
-    }] %iter.unfold
-  }
+    ] %iter.unfold
+  },
 ]

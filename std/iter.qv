@@ -10,304 +10,192 @@
 // Build an iterator from a seed state and a step function that maps the state to
 // `[value, next_state]`, or to `[]` to terminate.
 unfold = #<'s, 't>[#^ -> 'thunk<'t>, 's, #'s -> (['t, 's] | [])] {
-  =[self, state, step],
-  #{
-    state step =[value, next_state],
-    [value, [&self, next_state, &step] self]
-  }
-},
+  =[self, state, step]
+  #{ state step =[value, next_state], [value, [&self, next_state, &step] self] }
+}
 
 map = #<'t, 'u>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> 'u] {
-  =[self, it, f],
-  #{
-    it =[value, next],
-    value f [~, [&self, &next, &f] self]
-  }
-},
+  =[self, it, f]
+  #{ it =[value, next], value f [~, [&self, &next, &f] self] }
+}
 
 filter = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
-  =[self, it, pred],
+  =[self, it, pred]
   #{
-    it =[value, next],
+    it =[value, next]
     {
       | value pred => [&self, &next, &pred] self [value, ~]
       | [&self, &next, &pred] self ^~
     }
   }
-},
+}
 
 take = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
-  =[self, it, n],
+  =[self, it, n]
   #{
     | n =0 => []
-    | {
-      it =[value, next],
-      n [~, 1] %num.sub [&self, &next, ~] self [value, ~]
-    }
+    | { it =[value, next], n [~, 1] %num.sub [&self, &next, ~] self [value, ~] }
   }
-},
+}
 
 drop = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
-  =[self, it, n],
+  =[self, it, n]
   #{
     | n =0 => it
-    | {
-      it =[_, next],
-      n [~, 1] %num.sub [&self, &next, ~] self ^~
-    }
+    | { it =[_, next], n [~, 1] %num.sub [&self, &next, ~] self ^~ }
   }
-},
+}
 
 take_while = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
-  =[self, it, pred],
-  #{
-    it =[value, next],
-    value pred,
-    [&self, &next, &pred] self [value, ~]
-  }
-},
+  =[self, it, pred]
+  #{ it =[value, next], value pred, [&self, &next, &pred] self [value, ~] }
+}
 
 drop_while = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
-  =[self, it, pred],
+  =[self, it, pred]
   #{
-    it =[value, next],
+    it =[value, next]
     {
       | value pred => [&self, &next, &pred] self ^~
       | [value, &next]
     }
   }
-},
+}
 
-flat_map = #<'t, 'u>[
-  #^ -> 'thunk<'u>,
-  'thunk<'t>,
-  #'t -> '<'u>,
-  'thunk<'u>
-] {
-  =[self, source, f, current],
+flat_map = #<'t, 'u>[#^ -> 'thunk<'u>, 'thunk<'t>, #'t -> '<'u>, 'thunk<'u>] {
+  =[self, source, f, current]
   #{
-    | {
-      current =[value, next],
-      [value, [&self, &source, &f, &next] self]
-    }
-    | {
-      source =[value, next],
-      value f =Iter[fc],
-      [&self, &next, &f, &fc] self ^~
-    }
+    | { current =[value, next], [value, [&self, &source, &f, &next] self] }
+    | { source =[value, next], value f =Iter[fc], [&self, &next, &f, &fc] self ^~ }
   }
-},
+}
 
 chain = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
-  =[self, first, second],
+  =[self, first, second]
   #{
     first {
       | =[value, next] => [value, [&self, &next, &second] self]
       | <> =Ok => second
     }
   }
-},
+}
 
 zip = #<'t, 'u>[#^ -> 'thunk<['t, 'u]>, 'thunk<'t>, 'thunk<'u>] {
-  =[self, it1, it2],
-  #{
-    it1 =[v1, next1],
-    it2 =[v2, next2],
-    [[v1, v2], [&self, &next1, &next2] self]
-  }
-},
+  =[self, it1, it2]
+  #{ it1 =[v1, next1], it2 =[v2, next2], [[v1, v2], [&self, &next1, &next2] self] }
+}
 
 enumerate = #<'t>[#^ -> 'thunk<['int, 't]>, 'thunk<'t>, 'int] {
-  =[self, it, index],
-  #{
-    it =[value, next],
-    index [~, 1] %num.add [&self, &next, ~] self [[index, value], ~]
-  }
-},
+  =[self, it, index]
+  #{ it =[value, next], index [~, 1] %num.add [&self, &next, ~] self [[index, value], ~] }
+}
 
 cycle = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
-  =[self, original, current],
+  =[self, original, current]
   #{
     current {
       | =[value, next] => [value, [&self, &original, &next] self]
       | [&self, &original, &original] self ^~
     }
   }
-},
+}
 
-repeat = #<'t>[#^ -> 'thunk<'t>, 't] {
-  =[self, value],
-  #{ [value, [&self, value] self] }
-},
+repeat = #<'t>[#^ -> 'thunk<'t>, 't] { =[self, value], #{ [value, [&self, value] self] } }
 
 fold = #<'t, 'acc>['thunk<'t>, 'acc, #['acc, 't] -> 'acc] {
-  =[it, acc, f],
+  =[it, acc, f]
   it {
     | =[value, next] => [acc, value] f [&next, ~, &f] ^
     | acc
   }
-},
+}
 
 find = #<'t>['thunk<'t>, #'t -> ('t | [])] {
-  =[it, pred],
-  it =[value, next],
-  {
-    | value pred => value
-    | [&next, &pred] ^
-  }
-},
+  =[it, pred], it =[value, next], { value pred => value | [&next, &pred] ^ }
+}
 
 find_index = #<'t>['thunk<'t>, #'t -> ('t | []), 'int] {
-  =[it, pred, index],
-  it =[value, next],
+  =[it, pred, index]
+  it =[value, next]
   {
     | value pred => index
     | index [~, 1] %num.add [&next, &pred, ~] ^
   }
-},
+}
 
 any = #<'t>['thunk<'t>, #'t -> ('t | [])] {
-  =[it, pred],
-  it =[value, next],
-  {
-    | value pred => Ok
-    | [&next, &pred] ^
-  }
-},
+  =[it, pred], it =[value, next], { value pred => Ok | [&next, &pred] ^ }
+}
 
 all = #<'t>['thunk<'t>, #'t -> ('t | [])] {
-  =[it, pred],
+  =[it, pred]
   it {
     | <> =Ok => Ok
     | =[value, next], value pred => [&next, &pred] ^
     | []
   }
-},
+}
 
 nth = #<'t>['thunk<'t>, 'int] {
-  | =[it, 0] => {
-    it =[value, _],
-    value
-  }
-  | =[it, n] => {
-    it =[_, next],
-    n [~, 1] %num.sub [&next, ~] ^
-  }
-},
+  | =[it, 0] => { it =[value, _], value }
+  | =[it, n] => { it =[_, next], n [~, 1] %num.sub [&next, ~] ^ }
+}
 
 intersperse = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 't] {
-  =[self, it, sep],
-  #{
-    it =[value, next],
-    [sep, #{ [value, [&self, &next, sep] self] }]
-  }
-},
+  =[self, it, sep]
+  #{ it =[value, next], [sep, #{ [value, [&self, &next, sep] self] }] }
+}
 
 [
   unfold: #<'s, 't>['s, #'s -> (['t, 's] | [])] {
-    =[state, step],
-    [&unfold, state, &step] unfold Iter[~]
+    =[state, step], [&unfold, state, &step] unfold Iter[~]
   },
 
-  map: #<'t, 'u>['<'t>, #'t -> 'u] {
-    =[Iter[r], f],
-    [&map, &r, &f] map Iter[~]
-  },
+  map: #<'t, 'u>['<'t>, #'t -> 'u] { =[Iter[r], f], [&map, &r, &f] map Iter[~] },
 
-  filter: #<'t>['<'t>, #'t -> ('t | [])] {
-    =[Iter[r], pred],
-    [&filter, &r, &pred] filter Iter[~]
-  },
+  filter: #<'t>['<'t>, #'t -> ('t | [])] { =[Iter[r], pred], [&filter, &r, &pred] filter Iter[~] },
 
-  take: #<'t>['<'t>, 'int] {
-    =[Iter[r], n],
-    [&take, &r, n] take Iter[~]
-  },
+  take: #<'t>['<'t>, 'int] { =[Iter[r], n], [&take, &r, n] take Iter[~] },
 
-  drop: #<'t>['<'t>, 'int] {
-    =[Iter[r], n],
-    [&drop, &r, n] drop Iter[~]
-  },
+  drop: #<'t>['<'t>, 'int] { =[Iter[r], n], [&drop, &r, n] drop Iter[~] },
 
   take_while: #<'t>['<'t>, #'t -> ('t | [])] {
-    =[Iter[r], pred],
-    [&take_while, &r, &pred] take_while Iter[~]
+    =[Iter[r], pred], [&take_while, &r, &pred] take_while Iter[~]
   },
 
   drop_while: #<'t>['<'t>, #'t -> ('t | [])] {
-    =[Iter[r], pred],
-    [&drop_while, &r, &pred] drop_while Iter[~]
+    =[Iter[r], pred], [&drop_while, &r, &pred] drop_while Iter[~]
   },
 
   flat_map: #<'t, 'u>['<'t>, #'t -> '<'u>] {
-    =[Iter[r], f],
-    [&flat_map, &r, &f, #{ [] }] flat_map Iter[~]
+    =[Iter[r], f], [&flat_map, &r, &f, #{ [] }] flat_map Iter[~]
   },
 
-  chain: #<'t>['<'t>, '<'t>] {
-    =[Iter[r1], Iter[r2]],
-    [&chain, &r1, &r2] chain Iter[~]
-  },
+  chain: #<'t>['<'t>, '<'t>] { =[Iter[r1], Iter[r2]], [&chain, &r1, &r2] chain Iter[~] },
 
-  zip: #<'t, 'u>['<'t>, '<'u>] {
-    =[Iter[r1], Iter[r2]],
-    [&zip, &r1, &r2] zip Iter[~]
-  },
+  zip: #<'t, 'u>['<'t>, '<'u>] { =[Iter[r1], Iter[r2]], [&zip, &r1, &r2] zip Iter[~] },
 
-  enumerate: #<'t>'<'t> {
-    =Iter[r],
-    [&enumerate, &r, 0] enumerate Iter[~]
-  },
+  enumerate: #<'t>'<'t> { =Iter[r], [&enumerate, &r, 0] enumerate Iter[~] },
 
-  cycle: #<'t>'<'t> {
-    =Iter[r],
-    [&cycle, &r, &r] cycle Iter[~]
-  },
+  cycle: #<'t>'<'t> { =Iter[r], [&cycle, &r, &r] cycle Iter[~] },
 
-  repeat: #<'t>'t {
-    [&repeat, ~] repeat Iter[~]
-  },
+  repeat: #<'t>'t { [&repeat, ~] repeat Iter[~] },
 
-  fold: #<'t, 'acc>['<'t>, 'acc, #['acc, 't] -> 'acc] {
-    =[Iter[r], acc, f],
-    [&r, acc, &f] fold
-  },
+  fold: #<'t, 'acc>['<'t>, 'acc, #['acc, 't] -> 'acc] { =[Iter[r], acc, f], [&r, acc, &f] fold },
 
-  find: #<'t>['<'t>, #'t -> ('t | [])] {
-    =[Iter[r], pred],
-    [&r, &pred] find
-  },
+  find: #<'t>['<'t>, #'t -> ('t | [])] { =[Iter[r], pred], [&r, &pred] find },
 
-  find_index: #<'t>['<'t>, #'t -> ('t | [])] {
-    =[Iter[r], pred],
-    [&r, &pred, 0] find_index
-  },
+  find_index: #<'t>['<'t>, #'t -> ('t | [])] { =[Iter[r], pred], [&r, &pred, 0] find_index },
 
-  any?: #<'t>['<'t>, #'t -> ('t | [])] {
-    =[Iter[r], pred],
-    [&r, &pred] any
-  },
+  any?: #<'t>['<'t>, #'t -> ('t | [])] { =[Iter[r], pred], [&r, &pred] any },
 
-  all?: #<'t>['<'t>, #'t -> ('t | [])] {
-    =[Iter[r], pred],
-    [&r, &pred] all
-  },
+  all?: #<'t>['<'t>, #'t -> ('t | [])] { =[Iter[r], pred], [&r, &pred] all },
 
-  count: #<'t>'<'t> {
-    =Iter[r],
-    [&r, 0, #['int, 'int] { [$0, 1] %num.add }] fold
-  },
+  count: #<'t>'<'t> { =Iter[r], [&r, 0, #['int, 'int] { [$0, 1] %num.add }] fold },
 
-  nth: #<'t>['<'t>, 'int] {
-    =[Iter[r], n],
-    [&r, n] nth
-  },
+  nth: #<'t>['<'t>, 'int] { =[Iter[r], n], [&r, n] nth },
 
   intersperse: #<'t>['<'t>, 't] {
-    =[Iter[r], sep],
-    #{
-      r =[first, rest],
-      [first, [&intersperse, &rest, sep] intersperse]
-    } Iter[~]
-  }
+    =[Iter[r], sep], #{ r =[first, rest], [first, [&intersperse, &rest, sep] intersperse] } Iter[~]
+  },
 ]

@@ -1,151 +1,198 @@
 ' = Str['bin]
 
-is_continuation = #['bin, 'int] {
-  $0 [~, $1] %bin.get_byte [~, 192] %int.and =128
-},
+is_continuation = #['bin, 'int] { $0 [~, $1] %bin.get_byte [~, 192] %int.and =128 }
 
 skip_continuation = #['bin, 'int, 'int] {
-  =[data, byte_pos, data_len],
+  =[data, byte_pos, data_len]
   {
     | byte_pos [~, data_len] %num.ge? => byte_pos
     | [data, byte_pos] is_continuation => byte_pos [~, 1] %num.add [data, ~, data_len] ^
     | byte_pos
   }
-},
+}
 
 find_index = #['bin, 'bin, 'int, 'int] {
-  =[haystack, needle, offset, end],
-  [offset, end] %num.le?,
+  =[haystack, needle, offset, end]
+  [offset, end] %num.le?
   {
-    | needle %bin.length [offset, ~] %num.add [haystack, offset, ~] %bin.slice =&needle
-      => offset
-    | offset [~, 1] %num.add [haystack, needle, ~, end] ^
+    | needle
+      ~> %bin.length
+      ~> [offset, ~] %num.add
+      ~> [haystack, offset, ~] %bin.slice
+      ~> =&needle => offset
+    | {
+      offset
+      ~> [~, 1] %num.add
+      ~> [haystack, needle, ~, end] ^
+    }
   }
-},
+}
 
 // Convert byte position to character index by counting non-continuation bytes from start
 byte_pos_to_char_idx = #['bin, 'int, 'int, 'int] {
-  =[data, current_pos, target_pos, char_idx],
+  =[data, current_pos, target_pos, char_idx]
   {
     | [current_pos, target_pos] %num.ge? => char_idx
-    | [data, current_pos] is_continuation =>
-      current_pos [~, 1] %num.add [data, ~, target_pos, char_idx] ^
+    | [data, current_pos] is_continuation => {
+      current_pos
+      ~> [~, 1] %num.add
+      ~> [data, ~, target_pos, char_idx] ^
+    }
     | {
       // Start of character - count it
-      new_char_idx = [char_idx, 1] %num.add,
-      current_pos [~, 1] %num.add [data, ~, target_pos, new_char_idx] ^
+      new_char_idx = [char_idx, 1] %num.add
+
+      current_pos
+      ~> [~, 1] %num.add
+      ~> [data, ~, target_pos, new_char_idx] ^
     }
   }
-},
+}
 
 // Iterator over the Unicode codepoints (as ints) of a binary. The state is the
 // byte position; each step skips any continuation bytes, then decodes the char.
 chars = #'bin {
-  =data,
-  data_len = data %bin.length,
-  [0, #'int {
-    =byte_pos,
-    byte_pos = [data, byte_pos, data_len] skip_continuation,
-    {
-      | [byte_pos, data_len] %num.ge? => []
-      | {
-        char_end =
-          byte_pos [~, 1] %num.add [data, ~, data_len] skip_continuation,
+  =data
+  data_len = data %bin.length
+  [
+    0,
+    #'int {
+      =byte_pos
+      byte_pos = [data, byte_pos, data_len] skip_continuation
+      {
+        | [byte_pos, data_len] %num.ge? => []
+        | {
+          char_end =
+            byte_pos
+            ~> [~, 1] %num.add
+            ~> [data, ~, data_len] skip_continuation
 
-        char =
-          char_end [~, byte_pos] %num.sub [~, 8] %num.mul [data, byte_pos, 0, ~] __binary_get__,
+          char =
+            char_end
+            ~> [~, byte_pos] %num.sub
+            ~> [~, 8] %num.mul
+            ~> [data, byte_pos, 0, ~] __binary_get__
 
-        [char, char_end]
+          [char, char_end]
+        }
       }
-    }
-  }] %iter.unfold
-},
+    },
+  ] %iter.unfold
+}
 
 // Reassemble a Str from an iterator of codepoints, encoding each as UTF-8.
 from_chars = #'%iter<'int> {
-  [~, 0x, #['bin, 'int] {
-    =[acc, char_int],
-    byte_count = char_int {
-      | [~, 127] %num.le? => 1
-      | [~, 57279] %num.le? => 2
-      | [~, 15712191] %num.le? => 3
-      | 4
+  [
+    ~,
+    0x,
+    #['bin, 'int] {
+      =[acc, char_int]
+      byte_count = char_int {
+        | [~, 127] %num.le? => 1
+        | [~, 57279] %num.le? => 2
+        | [~, 15712191] %num.le? => 3
+        | 4
+      }
+      [acc, char_int, byte_count] %bin.append
     },
-    [acc, char_int, byte_count] %bin.append
-  }] %iter.fold Str[~]
-},
+  ] %iter.fold
+  ~> Str[~]
+}
 
 [
   bytes: #' { .0 },
 
   empty?: #' { .0 %bin.length =0, Ok },
 
-  concat: #[', '] {
-    =[Str[a], Str[b]],
-    [a, b] %bin.concat Str[~]
-  },
+  concat: #[', '] { =[Str[a], Str[b]], [a, b] %bin.concat Str[~] },
 
   starts_with?: #[', '] {
-    =[Str[target], Str[prefix]],
-    prefix_len = prefix %bin.length,
-    target_len = target %bin.length,
-    [prefix_len, target_len] %num.le?,
-    target [~, 0, prefix_len] %bin.slice =&prefix,
+    =[Str[target], Str[prefix]]
+    prefix_len = prefix %bin.length
+    target_len = target %bin.length
+    [prefix_len, target_len] %num.le?
+    target [~, 0, prefix_len] %bin.slice =&prefix
     Ok
   },
 
   ends_with?: #[', '] {
-    =[Str[target], Str[suffix]],
-    suffix_len = suffix %bin.length,
-    target_len = target %bin.length,
-    [suffix_len, target_len] %num.le?,
-    target_len [~, suffix_len] %num.sub [target, ~, target_len] %bin.slice =&suffix,
+    =[Str[target], Str[suffix]]
+    suffix_len = suffix %bin.length
+    target_len = target %bin.length
+    [suffix_len, target_len] %num.le?
+
+    target_len
+    ~> [~, suffix_len] %num.sub
+    ~> [target, ~, target_len] %bin.slice
+    ~> =&suffix
+
     Ok
   },
 
   contains?: #[', '] {
-    =[Str[haystack], Str[needle]],
-    needle_len = needle %bin.length,
-    haystack_len = haystack %bin.length,
+    =[Str[haystack], Str[needle]]
+    needle_len = needle %bin.length
+    haystack_len = haystack %bin.length
     {
       | needle_len =0 => Ok
       | [needle_len, haystack_len] %num.gt? => []
-      | haystack_len [~, needle_len] %num.sub [haystack, needle, 0, ~] find_index => Ok
+      | haystack_len
+        ~> [~, needle_len] %num.sub
+        ~> [haystack, needle, 0, ~] find_index => Ok
     }
   },
 
   split: #[', '] {
-    =[Str[haystack], Str[delim]],
-    haystack_len = haystack %bin.length,
-    delim_len = delim %bin.length,
-    end = [haystack_len, delim_len] %num.sub,
-    [0, #'int {
-      =start,
-      {
-        | start [~, haystack_len] %num.gt? => []
-        | [haystack, delim, start, end] find_index =('int)index =>
-          [haystack [~, start, index] %bin.slice Str[~], [index, delim_len] %num.add]
-        | [haystack [~, start, haystack_len] %bin.slice Str[~], [haystack_len, 1] %num.add]
-      }
-    }] %iter.unfold
+    =[Str[haystack], Str[delim]]
+    haystack_len = haystack %bin.length
+    delim_len = delim %bin.length
+    end = [haystack_len, delim_len] %num.sub
+    [
+      0,
+      #'int {
+        =start
+        {
+          | start [~, haystack_len] %num.gt? => []
+          | [haystack, delim, start, end] find_index
+            ~> =('int)index => [
+              haystack [~, start, index] %bin.slice Str[~],
+              [index, delim_len] %num.add,
+            ]
+          | [haystack [~, start, haystack_len] %bin.slice Str[~], [haystack_len, 1] %num.add]
+        }
+      },
+    ] %iter.unfold
   },
 
   length: #' { .0 chars %iter.count },
 
   slice: #[', 'int, 'int] {
-    =[Str[data], start, end],
-    data chars [~, start] %iter.drop [~, [end, start] %num.sub] %iter.take from_chars
+    =[Str[data], start, end]
+
+    data
+    ~> chars
+    ~> [~, start] %iter.drop
+    ~> [~, [end, start] %num.sub] %iter.take
+    ~> from_chars
   },
 
   index_of: #[', '] {
-    =[Str[haystack], Str[needle]],
-    needle_len = needle %bin.length,
-    haystack_len = haystack %bin.length,
+    =[Str[haystack], Str[needle]]
+    needle_len = needle %bin.length
+    haystack_len = haystack %bin.length
     {
-      | needle_len =0 => 0  // Empty string is at index 0
-      | [needle_len, haystack_len] %num.gt? => []  // Needle longer than haystack
+      | needle_len =0 => {
+        0 // Empty string is at index 0
+      }
+      | [needle_len, haystack_len] %num.gt? => {
+        [] // Needle longer than haystack
+      }
       | {
-        haystack_len [~, needle_len] %num.sub [haystack, needle, 0, ~] find_index =('int)byte_pos,
+        haystack_len
+        ~> [~, needle_len] %num.sub
+        ~> [haystack, needle, 0, ~] find_index
+        ~> =('int)byte_pos
+
         [haystack, 0, byte_pos, 0] byte_pos_to_char_idx
       }
     }
@@ -153,12 +200,10 @@ from_chars = #'%iter<'int> {
 
   iter: #' { $0 chars },
 
-  collect: #'%iter<'int> {
-    from_chars
-  },
+  collect: #'%iter<'int> { from_chars },
 
   join: #['%iter<'>, '] {
-    =[it, Str[sep]],
+    =[it, Str[sep]]
     it [~, #' { .0 }] %iter.map [~, sep] %iter.intersperse [~, 0x, &%bin.concat] %iter.fold Str[~]
-  }
+  },
 ]

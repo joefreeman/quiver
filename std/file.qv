@@ -14,38 +14,42 @@
 serve = #\File {
   !#'command {
     | =Read[offset, length, reply, id] => {
-      [$, offset, length] __file_read__ Reply[id, ~] reply,
+      [$, offset, length] __file_read__
+      ~> Reply[id, ~] reply
+
       $ ^
     }
     | =Write[offset, data, reply, id] => {
-      [$, offset, data] __file_write__ Reply[id, ~] reply,
+      [$, offset, data] __file_write__
+      ~> Reply[id, ~] reply
+
       $ ^
     }
-    | =Flush[reply, id] => {
-      $ __file_flush__ Reply[id, ~] reply,
-      $ ^
-    }
+    | =Flush[reply, id] => { $ __file_flush__ Reply[id, ~] reply, $ ^ }
     | =Close => $ __file_close__
   }
-},
+}
 
 // Send a read request to a file process and wait for the correlated reply.
 do_read = #[', 'int, 'int] {
-  =[f, offset, length],
-  id = %ref,
-  Read[offset, length, &., id] f.0,
+  =[f, offset, length]
+  id = %ref
+  Read[offset, length, &., id] f.0
   ! [#Reply['ref, 'bin] { =Reply[&id, _], Ok }] { =Reply[_, data] => data }
-},
+}
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
 read_all = #[', 'int, 'bin] {
-  =[f, offset, acc],
-  chunk = [f, offset, 65536] do_read,
+  =[f, offset, acc]
+  chunk = [f, offset, 65536] do_read
   chunk %bin.length {
     | =0 => acc
-    | =n => [acc, chunk] %bin.concat [f, [offset, n] %num.add, ~] ^
+    | =n => {
+      [acc, chunk] %bin.concat
+      ~> [f, [offset, n] %num.add, ~] ^
+    }
   }
-},
+}
 
 // One step of the line iterator. The state is the file, the next read offset, a buffer of
 // bytes read but not yet emitted, and a cursor `pos` into that buffer. Each step scans from
@@ -54,13 +58,13 @@ read_all = #[', 'int, 'bin] {
 // read without completing a line it loops (via `^`) rather than emitting, so the buffer is
 // compacted once per chunk read, keeping the whole pass linear.
 lines_step = #[', 'int, 'bin, 'int] {
-  =[f, offset, buf, pos],
-  len = buf %bin.length,
+  =[f, offset, buf, pos]
+  len = buf %bin.length
   [buf, 10, pos] %bin.index {
     | =[] => {
       // No newline in the remaining buffer: keep the unconsumed tail and read more.
-      leftover = [buf, pos, len] %bin.slice,
-      chunk = [f, offset, 65536] do_read,
+      leftover = [buf, pos, len] %bin.slice
+      chunk = [f, offset, 65536] do_read
       chunk %bin.length {
         | =0 => {
           // EOF: emit the final unterminated line if there is one, otherwise stop.
@@ -68,25 +72,30 @@ lines_step = #[', 'int, 'bin, 'int] {
           | [Str[leftover], [f, offset, 0x, 0]]
         }
         | =n => {
-          n [offset, ~] %num.add [f, ~, [leftover, chunk] %bin.concat, 0] ^
+          n
+          ~> [offset, ~] %num.add
+          ~> [f, ~, [leftover, chunk] %bin.concat, 0] ^
         }
       }
     }
     | =index => {
-      line = [buf, pos, index] %bin.slice,
-      [Str[line], [f, offset, buf, [index, 1] %num.add]]
+      line = [buf, pos, index] %bin.slice, [Str[line], [f, offset, buf, [index, 1] %num.add]]
     }
   }
-},
+}
 
 [
   // Open a file. Defaults to read-only; pass `mode: W` to create/truncate for writing, or
   // `mode: A` to create/append (in append mode every write goes to the end of the file, so the
   // offset passed to `write` is ignored). Flags are the OS open(2) bits: W = 577
   // (O_WRONLY|O_CREAT|O_TRUNC), A = 1089 (O_WRONLY|O_CREAT|O_APPEND).
-  open: #(['%path] | ['%path, mode: R | W | A]) {
-    flags = { =(mode: W) => 577 | =(mode: A) => 1089 | 0 },
-    name = $0 %path.to_string .0,
+  open: #(['%path] | ['%path, mode: (R | W | A)]) {
+    flags = {
+      | =(mode: W) => 577
+      | =(mode: A) => 1089
+      | 0
+    }
+    name = $0 %path.to_string .0
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
     File[[name, flags, 420] __file_open__ @serve]
   },
@@ -102,23 +111,20 @@ lines_step = #[', 'int, 'bin, 'int] {
 
   // Write `data` starting at `offset`, returning the number of bytes written.
   write: #[', 'int, 'bin] {
-    =[f, offset, data],
-    id = %ref,
-    Write[offset, data, &., id] f.0,
+    =[f, offset, data]
+    id = %ref
+    Write[offset, data, &., id] f.0
     ! [#Reply['ref, 'int] { =Reply[&id, _], Ok }] { =Reply[_, written] => written }
   },
 
   // Flush buffered writes durably to disk (fsync), returning Ok once complete.
   flush: #' {
-    =f,
-    id = %ref,
-    Flush[&., id] f.0,
+    =f
+    id = %ref
+    Flush[&., id] f.0
     ! [#Reply['ref, Ok] { =Reply[&id, _], Ok }] { =Reply[_, ok] => ok }
   },
 
   // Close the file, releasing the descriptor and stopping its process.
-  close: #' {
-    Close $0,
-    Ok
-  }
+  close: #' { Close $0, Ok },
 ]

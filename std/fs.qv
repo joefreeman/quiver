@@ -18,7 +18,7 @@ stat = #Str['bin] {
     | <> => []
     | =s Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
   }
-},
+}
 
 [
   // List the entries of a directory, lazily. Yields an `Entry` (name + kind) per item, in the
@@ -26,12 +26,17 @@ stat = #Str['bin] {
   // directory handle is closed automatically once the iterator is exhausted.
   list: #Str['bin] {
     // Each step yields an `Entry` or nil at the end, with `kind` already a `'kind` tag.
-    .0 __directory_read__ [~, #\Dir {
-      $ __directory_next__ {
-        | <> => { $ __directory_close__, [] }
-        | =e [Entry[name: Str[e.0], kind: e.1], $]
-      }
-    }] %iter.unfold
+    .0
+    ~> __directory_read__
+    ~> [
+      ~,
+      #\Dir {
+        $ __directory_next__ {
+          | <> => { $ __directory_close__, [] }
+          | =e [Entry[name: Str[e.0], kind: e.1], $]
+        }
+      },
+    ] %iter.unfold
   },
 
   // Metadata for a path, following symlinks. Yields nil if the path does not exist.
@@ -44,5 +49,5 @@ stat = #Str['bin] {
   dir?: #Str['bin] { stat =(kind: Dir) => Ok },
 
   // Whether a path exists and is a regular file.
-  file?: #Str['bin] { stat =(kind: File) => Ok }
+  file?: #Str['bin] { stat =(kind: File) => Ok },
 ]
