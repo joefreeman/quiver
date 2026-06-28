@@ -182,6 +182,7 @@ module.exports = grammar({
     ),
 
     _primary: $ => choice(
+      $.multiline_string,
       $.string,
       $.integer,
       $.binary,
@@ -368,6 +369,7 @@ module.exports = grammar({
 
     _pattern: $ => choice(
       $.pattern_pin,
+      $.multiline_string,
       $.string,
       $.pattern_tuple,
       $.pattern_partial,
@@ -528,5 +530,24 @@ module.exports = grammar({
       '"',
     ),
     escape_sequence: _ => token.immediate(/\\["\\nrt]/),
+
+    // A triple-quoted, multi-line string. It must be a single token so the parser's
+    // whitespace `extras` don't fragment its newlines. The content is escape-aware: a
+    // backslash consumes the next character (so `\"""` doesn't close the string), and a
+    // run of one or two quotes is content while three unescaped quotes close it. Each unit
+    // is up to two quotes followed by an escape (`\` + any char, including a newline) or by
+    // an ordinary non-quote character.
+    multiline_string: _ => token(seq(
+      '"""',
+      repeat(choice(
+        /\\(.|\n)/,
+        /[^"\\]/,
+        /"\\(.|\n)/,
+        /"[^"\\]/,
+        /""\\(.|\n)/,
+        /""[^"\\]/,
+      )),
+      '"""',
+    )),
   },
 });

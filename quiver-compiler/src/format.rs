@@ -438,8 +438,8 @@ fn render_term_atom(term: &Term) -> String {
 
 fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
     // A `Str[<bytes>]` tuple is the desugared form of a string literal; render it back as `"…"`.
-    if let Some(string) = string_literal(tuple) {
-        return pretty::text(string);
+    if let Some(doc) = string_doc(tuple) {
+        return doc;
     }
     let name = match &tuple.name {
         TupleName::Anonymous => String::new(),
@@ -465,10 +465,11 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
 }
 
 /// If `tuple` is a string literal in desugared form — `Str` wrapping a single unnamed binary whose
-/// bytes are valid UTF-8 and contain only characters the lexer can round-trip — return the quoted
-/// string source. Bytes with a `"` or an unescapable control character keep the literal `Str[0x…]`
-/// form, since the string syntax could not reproduce them.
-fn string_literal(tuple: &Tuple) -> Option<String> {
+/// bytes are valid UTF-8 — render it back as a quoted string: the single-line `"…"` form, or the
+/// triple-quoted multi-line form when the content spans lines. Returns `None` (keeping the literal
+/// `Str[0x…]` form) only when the bytes can't be a string — non-UTF-8, or a control character with
+/// no escape (any control other than `\n`, `\r`, `\t`).
+fn string_doc(tuple: &Tuple) -> Option<Doc> {
     let TupleName::Named(name) = &tuple.name else {
         return None;
     };
@@ -488,21 +489,72 @@ fn string_literal(tuple: &Tuple) -> Option<String> {
         return None;
     };
     let text = std::str::from_utf8(bytes).ok()?;
+    if text
+        .chars()
+        .any(|c| (c as u32) < 0x20 && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return None;
+    }
+    // A newline reads best as a multi-line literal; everything else stays on one line.
+    if text.contains('\n') {
+        Some(multiline_string_doc(text))
+    } else {
+        Some(pretty::text(single_line_string_source(text)))
+    }
+}
+
+/// Render `text` (free of newlines) as a single-line `"…"` literal, escaping the characters the
+/// lexer decodes.
+fn single_line_string_source(text: &str) -> String {
     let mut out = String::from("\"");
     for ch in text.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            // The lexer stops a string at the first `"`, and has no escape for other controls.
-            '"' => return None,
-            c if (c as u32) < 0x20 => return None,
             c => out.push(c),
         }
     }
     out.push('"');
-    Some(out)
+    out
+}
+
+/// Render `text` as a triple-quoted multi-line literal. Each line is emitted as a `hardline` so the
+/// renderer indents it to the ambient column — that indentation becomes the closing delimiter's
+/// *margin*, which the parser strips back off, so the value round-trips at any nesting depth.
+fn multiline_string_doc(text: &str) -> Doc {
+    let mut docs = vec![pretty::text("\"\"\"")];
+    for line in text.split('\n') {
+        docs.push(pretty::hardline());
+        docs.push(pretty::text(encode_multiline_line(line)));
+    }
+    docs.push(pretty::hardline());
+    docs.push(pretty::text("\"\"\""));
+    pretty::concat(docs)
+}
+
+/// Encode one content line (free of newlines) of a multi-line string. Tabs and carriage returns are
+/// escaped (a literal `\r` would be normalised to `\n`, a trailing tab would be stripped), every `"`
+/// is escaped so a run can't form a closing `"""`, and trailing spaces become `\s` so they survive
+/// the trailing-whitespace stripping done by both the renderer and the parser.
+fn encode_multiline_line(line: &str) -> String {
+    let trailing_spaces = line.len() - line.trim_end_matches(' ').len();
+    let mut out = String::new();
+    for ch in line[..line.len() - trailing_spaces].chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    for _ in 0..trailing_spaces {
+        out.push_str("\\s");
+    }
+    out
 }
 
 fn field_doc(trivia: &Trivia, field: &TupleField) -> Doc {
@@ -1478,8 +1530,32 @@ mod tests {
             r#""tab\tend""#,
             r#""back\\slash""#,
             r#""cr\rlf""#,
+            // An embedded quote now round-trips as `\"` rather than falling back to `Str[0x…]`.
+            r#""say \"hi\"""#,
         ] {
             assert_idempotent(source, source);
+        }
+    }
+
+    #[test]
+    fn multiline_strings_round_trip() {
+        // Each multi-line source must format to an identical fixpoint that preserves the value. The
+        // cases exercise margin tracking at depth, leading/trailing whitespace, blank lines, an
+        // embedded triple-quote, and a value that is a single bare newline.
+        for source in [
+            "msg = \"\"\"\n    hello\n      indented\n    \"\"\"",
+            // Nested inside a tuple, so the margin is driven by the ambient indentation.
+            "r = [\n  a: \"\"\"\n    one\n    two\n    \"\"\",\n]",
+            // A trailing space (encoded as `\s`) and an interior blank line.
+            "msg = \"\"\"\n    keep \n\n    end\n    \"\"\"",
+            // A value containing `"""` (written `\"""`) must re-encode so it can't close early.
+            "msg = \"\"\"\n    a \\\"\"\" b\n    \"\"\"",
+            // A value that is exactly one newline.
+            "msg = \"\"\"\n\n    \"\"\"",
+        ] {
+            let ast = parse(source).unwrap_or_else(|e| panic!("source must parse: {e:?}"));
+            let printed = format_program(&ast, source);
+            assert_idempotent(&printed, &printed);
         }
     }
 

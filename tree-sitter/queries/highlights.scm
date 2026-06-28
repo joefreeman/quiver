@@ -11,6 +11,7 @@
 (index) @number
 (binary) @number
 (string) @string
+(multiline_string) @string
 (escape_sequence) @string.escape
 
 ; ---------------------------------------------------------------------- types

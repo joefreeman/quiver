@@ -441,34 +441,73 @@ fn binary_literal(input: Span) -> IResult<Span, Literal> {
     }
 }
 
-fn string_term(input: Span) -> IResult<Span, Term> {
-    map(
-        delimited(
-            char('"'),
-            map_res(take_while(|c| c != '"'), |s: Span| parse_string_content(s)),
-            char('"'),
-        ),
-        |s: String| {
-            // Convert string to binary bytes
-            let bytes = s.into_bytes();
-            // Create a Str tuple with the binary as its single field
-            Term::Tuple(Tuple {
-                name: TupleName::Named("Str".to_string()),
-                fields: vec![TupleField {
-                    name: None,
-                    name_span: Spanned::default(),
-                    span: Spanned::default(),
-                    value: FieldValue::Chain(Chain {
-                        match_pattern: None,
-                        bind_span: Spanned::default(),
-                        span: Spanned::default(),
-                        terms: vec![Term::Literal(Literal::Binary(bytes))],
-                    }),
-                }],
+/// Build the `Str[0x…]` tuple term that a string literal desugars to.
+fn str_term(bytes: Vec<u8>) -> Term {
+    Term::Tuple(Tuple {
+        name: TupleName::Named("Str".to_string()),
+        fields: vec![TupleField {
+            name: None,
+            name_span: Spanned::default(),
+            span: Spanned::default(),
+            value: FieldValue::Chain(Chain {
+                match_pattern: None,
+                bind_span: Spanned::default(),
                 span: Spanned::default(),
-            })
-        },
-    )(input)
+                terms: vec![Term::Literal(Literal::Binary(bytes))],
+            }),
+        }],
+        span: Spanned::default(),
+    })
+}
+
+/// Build the `Str[0x…]` tuple pattern that a string literal pattern desugars to.
+fn str_match(bytes: Vec<u8>) -> Match {
+    Match::Tuple(MatchTuple {
+        name: Some("Str".to_string()),
+        fields: vec![MatchField {
+            name: None,
+            pattern: Match::Literal(Literal::Binary(bytes)),
+        }],
+    })
+}
+
+/// Parse a single-line string body: the characters between `"` quotes, with escapes processed.
+/// The scan for the closing `"` is escape-aware (a backslash skips the next character), so an
+/// escaped quote `\"` does not terminate the string.
+fn single_line_string(input: Span) -> IResult<Span, String> {
+    let (body, _) = char('"')(input)?;
+    let frag = body.fragment();
+    let mut iter = frag.char_indices();
+    let mut close = None;
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\\' => {
+                iter.next(); // skip the escaped character
+            }
+            '"' => {
+                close = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    // Unterminated: surface as an EOF error so `detect_error_kind` reports it as an unterminated
+    // string (matching the multi-line scanner).
+    let idx = close.ok_or_else(|| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Eof))
+    })?;
+    let value = parse_string_content(body.slice(..idx)).map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes))
+    })?;
+    Ok((body.slice(idx + 1..), value))
+}
+
+fn string_term(input: Span) -> IResult<Span, Term> {
+    // Multi-line (`"""`) first, so its opening delimiter isn't read as an empty `""` string.
+    alt((
+        map(multiline_string, |s| str_term(s.into_bytes())),
+        map(single_line_string, |s| str_term(s.into_bytes())),
+    ))(input)
 }
 
 /// Reduce a numerator/denominator pair to lowest terms. The denominator is assumed
@@ -667,6 +706,138 @@ fn parse_string_content(span: Span) -> Result<String, Error> {
     }
 
     Ok(result)
+}
+
+/// Test whether `c` is horizontal whitespace (space or tab).
+fn is_hspace(c: char) -> bool {
+    c == ' ' || c == '\t'
+}
+
+/// Parse a triple-quoted (`"""`) multi-line string, returning the processed contents.
+///
+/// The scan for the closing `"""` is escape-aware, so `\"""` does not end the string. The
+/// raw text between the delimiters is then de-indented and its escapes processed (see
+/// [`process_multiline_string`]).
+fn multiline_string(input: Span) -> IResult<Span, String> {
+    let (rest, raw) = multiline_string_raw(input)?;
+    match process_multiline_string(raw.fragment()) {
+        Some(s) => Ok((rest, s)),
+        // Structural problems (bad indentation, invalid escape) abort the parse. The detail is
+        // reconstructed from source by `detect_error_kind`, matching single-line escape errors.
+        None => Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::MapRes,
+        ))),
+    }
+}
+
+/// Consume `"""…"""` and return the raw span between the delimiters. The scan is escape-aware:
+/// a backslash skips the following character, so an escaped quote can't close the string.
+fn multiline_string_raw(input: Span) -> IResult<Span, Span> {
+    let (body, _) = tag("\"\"\"")(input)?;
+    let frag = body.fragment();
+    let mut iter = frag.char_indices();
+    let mut close = None;
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\\' => {
+                iter.next(); // skip the escaped character
+            }
+            '"' if frag[idx..].starts_with("\"\"\"") => {
+                close = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    match close {
+        Some(idx) => Ok((body.slice(idx + 3..), body.slice(..idx))),
+        // Unterminated: surface as an EOF error so `detect_error_kind` reports it as an
+        // unterminated string (the unbalanced quotes give it away).
+        None => Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Eof,
+        ))),
+    }
+}
+
+/// Process the raw text between `"""` delimiters into the final string value, or `None` if the
+/// text is malformed. The opening delimiter must be followed by a newline; the closing delimiter
+/// sits on its own line, and its indentation (the *margin*) is stripped from every line. After
+/// de-indentation, escapes are processed — the single-line set plus `\s` (a strip-proof space)
+/// and `\<newline>` (line continuation, dropping the newline and the next line's leading
+/// whitespace). Trailing whitespace is stripped from each line; blank lines are emitted empty.
+fn process_multiline_string(raw: &str) -> Option<String> {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+
+    // The opening delimiter must be followed by a newline (only horizontal whitespace may
+    // precede it on the opening line).
+    let after_open = match normalized.split_once('\n') {
+        Some((first, rest)) if first.chars().all(is_hspace) => rest,
+        _ => return None,
+    };
+
+    // The text after the final newline is the closing delimiter's indentation — the margin —
+    // and must be whitespace-only (the delimiter is on its own line). With no further newline
+    // there are no content lines (an empty or whitespace-only string).
+    let (body, margin) = after_open.rsplit_once('\n').unwrap_or(("", after_open));
+    if !margin.chars().all(is_hspace) {
+        return None;
+    }
+
+    // De-indent each line by the margin; blank lines contribute an empty line regardless of
+    // their indentation. A non-blank line indented less than the margin is an error.
+    let mut dedented = String::new();
+    for (i, line) in body.split('\n').enumerate() {
+        if i > 0 {
+            dedented.push('\n');
+        }
+        if line.chars().all(is_hspace) {
+            continue;
+        }
+        dedented.push_str(line.strip_prefix(margin)?);
+    }
+
+    // Process escapes, strip trailing whitespace and apply line continuations in one pass.
+    // `pending` buffers horizontal whitespace, which is discarded if a newline or EOF follows
+    // (trailing) and flushed otherwise.
+    let mut result = String::new();
+    let mut pending = String::new();
+    let mut chars = dedented.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' => pending.push(ch),
+            '\n' => {
+                pending.clear();
+                result.push('\n');
+            }
+            '\\' => {
+                result.push_str(&pending);
+                pending.clear();
+                match chars.next()? {
+                    // Line continuation: drop the newline and the next line's leading whitespace.
+                    '\n' => {
+                        while chars.peek().is_some_and(|c| is_hspace(*c)) {
+                            chars.next();
+                        }
+                    }
+                    '"' => result.push('"'),
+                    '\\' => result.push('\\'),
+                    'n' => result.push('\n'),
+                    'r' => result.push('\r'),
+                    't' => result.push('\t'),
+                    's' => result.push(' '),
+                    _ => return None,
+                }
+            }
+            _ => {
+                result.push_str(&pending);
+                pending.clear();
+                result.push(ch);
+            }
+        }
+    }
+    Some(result)
 }
 
 fn literal(input: Span) -> IResult<Span, Literal> {
@@ -1726,23 +1897,11 @@ fn match_field(input: Span) -> IResult<Span, MatchField> {
 }
 
 fn match_string(input: Span) -> IResult<Span, Match> {
-    map(
-        delimited(
-            char('"'),
-            map_res(take_while(|c| c != '"'), |s: Span| parse_string_content(s)),
-            char('"'),
-        ),
-        |s: String| {
-            // Create Str[binary] tuple pattern
-            Match::Tuple(MatchTuple {
-                name: Some("Str".to_string()),
-                fields: vec![MatchField {
-                    name: None,
-                    pattern: Match::Literal(Literal::Binary(s.into_bytes())),
-                }],
-            })
-        },
-    )(input)
+    // Multi-line (`"""`) first, so its opening delimiter isn't read as an empty `""` string.
+    alt((
+        map(multiline_string, |s| str_match(s.into_bytes())),
+        map(single_line_string, |s| str_match(s.into_bytes())),
+    ))(input)
 }
 
 // Parse an inline type expression in a pattern: a parenthesized type expression,
@@ -2266,5 +2425,84 @@ mod tests {
         let source = "#{ @99999999999999999999 }";
         let result = parse(source);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn multiline_dedents_by_closing_margin() {
+        // The closing delimiter's indentation sets the margin; extra indent is preserved,
+        // and the newline before the closing delimiter is not part of the value.
+        let raw = "\n    hello\n      indented\n    ";
+        assert_eq!(
+            process_multiline_string(raw),
+            Some("hello\n  indented".to_string())
+        );
+    }
+
+    #[test]
+    fn multiline_empty_and_blank_lines() {
+        // No content lines yields the empty string.
+        assert_eq!(process_multiline_string("\n    "), Some(String::new()));
+        // A blank line is emitted empty regardless of its own indentation.
+        let raw = "\n    a\n\n    b\n    ";
+        assert_eq!(process_multiline_string(raw), Some("a\n\nb".to_string()));
+    }
+
+    #[test]
+    fn multiline_processes_escapes() {
+        let raw = "\n    a\\tb\\n\\\"c\n    ";
+        assert_eq!(process_multiline_string(raw), Some("a\tb\n\"c".to_string()));
+    }
+
+    #[test]
+    fn multiline_strips_trailing_whitespace_but_s_protects() {
+        // Literal trailing whitespace is stripped; `\s` survives as a space.
+        let raw = "\n    keep:\\s   \n    gone:   \n    ";
+        assert_eq!(
+            process_multiline_string(raw),
+            Some("keep: \ngone:".to_string())
+        );
+    }
+
+    #[test]
+    fn multiline_line_continuation() {
+        // `\` at end of line drops the newline and the next line's leading whitespace;
+        // a space before the `\` is kept as the join separator.
+        let raw = "\n    one \\\n    two\n    three\n    ";
+        assert_eq!(
+            process_multiline_string(raw),
+            Some("one two\nthree".to_string())
+        );
+    }
+
+    #[test]
+    fn multiline_rejects_bad_structure() {
+        // Text after the opening delimiter.
+        assert_eq!(process_multiline_string("oops\n    "), None);
+        // A line indented less than the closing margin.
+        assert_eq!(process_multiline_string("\n  under\n    "), None);
+        // The closing delimiter not alone on its line.
+        assert_eq!(process_multiline_string("\n    x"), None);
+        // An invalid escape.
+        assert_eq!(process_multiline_string("\n    \\q\n    "), None);
+    }
+
+    #[test]
+    fn multiline_normalizes_crlf() {
+        let raw = "\r\n    a\r\n    b\r\n    ";
+        assert_eq!(process_multiline_string(raw), Some("a\nb".to_string()));
+    }
+
+    #[test]
+    fn multiline_escaped_quote_does_not_close() {
+        // `\"""` is an escaped quote followed by the closing delimiter, so the value is `"`.
+        let source = "#{ \"\"\"\n    \\\"\"\"\n    \"\"\" }";
+        assert!(parse(source).is_ok());
+    }
+
+    #[test]
+    fn multiline_unterminated_reports_string_error() {
+        let source = "#{ \"\"\"\n    hello\n }";
+        let err = parse(source).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnterminatedString));
     }
 }

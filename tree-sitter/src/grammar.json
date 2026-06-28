@@ -487,6 +487,10 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "multiline_string"
+        },
+        {
+          "type": "SYMBOL",
           "name": "string"
         },
         {
@@ -1869,6 +1873,10 @@
         {
           "type": "SYMBOL",
           "name": "pattern_pin"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "multiline_string"
         },
         {
           "type": "SYMBOL",
@@ -4047,6 +4055,54 @@
       "content": {
         "type": "PATTERN",
         "value": "\\\\[\"\\\\nrt]"
+      }
+    },
+    "multiline_string": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "\"\"\""
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\(.|\\n)"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "[^\"\\\\]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\"\\\\(.|\\n)"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\"[^\"\\\\]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\"\"\\\\(.|\\n)"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\"\"[^\"\\\\]"
+                }
+              ]
+            }
+          },
+          {
+            "type": "STRING",
+            "value": "\"\"\""
+          }
+        ]
       }
     }
   },

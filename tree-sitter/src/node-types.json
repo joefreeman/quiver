@@ -74,6 +74,10 @@
           "named": true
         },
         {
+          "type": "multiline_string",
+          "named": true
+        },
+        {
           "type": "partial_type",
           "named": true
         },
@@ -238,6 +242,10 @@
         },
         {
           "type": "integer",
+          "named": true
+        },
+        {
+          "type": "multiline_string",
           "named": true
         },
         {
@@ -766,6 +774,10 @@
           "named": true
         },
         {
+          "type": "multiline_string",
+          "named": true
+        },
+        {
           "type": "partial_type",
           "named": true
         },
@@ -869,6 +881,10 @@
         },
         {
           "type": "module_type",
+          "named": true
+        },
+        {
+          "type": "multiline_string",
           "named": true
         },
         {
@@ -990,6 +1006,10 @@
         },
         {
           "type": "module_type",
+          "named": true
+        },
+        {
+          "type": "multiline_string",
           "named": true
         },
         {
@@ -2006,6 +2026,10 @@
   },
   {
     "type": "integer",
+    "named": true
+  },
+  {
+    "type": "multiline_string",
     "named": true
   },
   {

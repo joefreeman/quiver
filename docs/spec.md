@@ -166,6 +166,29 @@ When spreading a union type, the spread is distributed across all variants:
 
 The compiler converts UTF-8 strings, defined with `"..."` into binaries, wrapped in a `Str` tuple (`Str[0x...]`).
 
+The escape sequences `\n`, `\r`, `\t`, `\\` and `\"` are recognised.
+
+#### Multi-line strings
+
+A string delimited by triple quotes (`"""`) may span multiple lines. The opening `"""` must be followed by a newline and the closing `"""` must sit on its own line; the indentation of that closing line sets a **margin** stripped from every line (a line indented less is an error):
+
+```quiver
+msg = """
+    hello
+      indented
+    """          // "hello\n  indented"
+```
+
+The newline before the closing `"""` is not included (end with a blank line for a trailing newline); blank lines are emitted empty and trailing whitespace is stripped per line. The same escapes apply, plus `\s` (a space that survives trailing-whitespace stripping) and a trailing `\` (line continuation: drops the newline and the next line's leading whitespace; a space before the `\` is kept). Embed a literal `"""` as `\"""`.
+
+```quiver
+"""
+    one \
+    two
+    three
+    """          // "one two\nthree"
+```
+
 ## Expressions
 
 A whole program is a single **sequence**: a series of **steps** separated by a comma or a newline (the two are synonyms). Type-alias declarations may be interspersed between steps and are transparent to the flow. Each step is a [chain](#chains).

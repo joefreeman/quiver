@@ -149,3 +149,50 @@ builtin and access
         (chain
           (integer)))
       (builtin))))
+
+==================
+multi-line string
+==================
+
+"""
+    hello
+    """
+
+---
+
+(source_file
+  (expression
+    (chain
+      (multiline_string))))
+
+==================
+multi-line string with line continuation
+==================
+
+"""
+    one \
+    two
+    """
+
+---
+
+(source_file
+  (expression
+    (chain
+      (multiline_string))))
+
+==================
+multi-line string with escaped triple quote
+==================
+
+"""
+    before \"""
+    after
+    """
+
+---
+
+(source_file
+  (expression
+    (chain
+      (multiline_string))))
