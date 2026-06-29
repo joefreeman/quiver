@@ -92,7 +92,6 @@ pub enum Term {
     Block(Expression),
     Function(Function),
     Access(Access),
-    Equality,
     /// Spawn a process from a function (`@f`, `@~`, `@{ … }`). The init argument comes from the
     /// chained value (`x ~> @f`), or is nil. For `@~` the chained value *is* the function, which
     /// is therefore spawned with a nil argument (so `@~` requires a nilary function).

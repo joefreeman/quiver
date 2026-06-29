@@ -1922,10 +1922,6 @@ fn builtin_name(input: Span) -> IResult<Span, String> {
     Ok((input, trimmed.to_string()))
 }
 
-fn equality(input: Span) -> IResult<Span, Term> {
-    nom_value(Term::Equality, tag("=="))(input)
-}
-
 // Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
 // argument, if any, comes from the chained value (`x ~> @{ … }`).
 fn spawn_of_function(parameter_type: Option<Type>, body: Expression) -> Term {
@@ -2240,7 +2236,6 @@ fn primary(input: Span) -> IResult<Span, Term> {
         // Access (field/positional access, bare identifiers, and imports)
         map(access, Term::Access),
         // Operations
-        equality,
         select_term,
         tail_call,
     ))(input)

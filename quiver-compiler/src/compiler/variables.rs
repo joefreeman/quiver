@@ -98,7 +98,6 @@ impl<'a> FreeVariableCollector<'a> {
                 // imports, builtins, and ripples don't.
                 self.visit_access_capture(access);
             }
-            ast::Term::Equality => {}
             ast::Term::Spawn(function, _) => {
                 self.visit_term(function);
             }

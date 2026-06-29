@@ -51,8 +51,8 @@ fn test_multiline_interpolation() {
         .expect("\"hi ada\\nbye\"");
     // A multi-line interpolated string equals the single-line string with the same value.
     quiver()
-        .evaluate("x = \"v\", [\"\"\"\n  a {x}\n  \"\"\", \"a v\"] ==")
-        .expect("\"a v\"");
+        .evaluate("x = \"v\", s = \"a v\", \"\"\"\n  a {x}\n  \"\"\" =&s")
+        .expect("Ok");
     // A literal brace via `\{`, and a hole containing an expression.
     quiver()
         .evaluate("\"\"\"\n  \\{ {[\"p\", \"q\"] %str.concat}\n  \"\"\"")
@@ -74,8 +74,8 @@ fn test_string_pattern_matches() {
 fn test_single_and_multi_line_values_are_equal() {
     // The two delimiter styles are only a surface form: they produce identical values.
     quiver()
-        .evaluate("[\"a\\nb\", \"\"\"\na\nb\n\"\"\"] ==")
-        .expect("\"a\\nb\"");
+        .evaluate("s = \"a\\nb\", \"\"\"\na\nb\n\"\"\" =&s")
+        .expect("Ok");
 }
 
 #[test]

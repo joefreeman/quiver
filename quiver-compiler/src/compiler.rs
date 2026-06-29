@@ -3857,13 +3857,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     true,
                 )
             }
-            ast::Term::Equality => {
-                let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Equality operator requires a value".to_string())
-                })?;
-                let ty = self.compile_equality(val_type)?;
-                Ok((ty, Provenance::Unknown))
-            }
             ast::Term::Match(pattern) => {
                 // Match patterns can create new bindings or check against existing values/types
                 let val_type = value_type.ok_or_else(|| {
@@ -4542,36 +4535,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result: result_type_id,
             receive: never_id,
         }))
-    }
-
-    fn compile_equality(&mut self, value_type: usize) -> Result<usize, Error> {
-        // The == operator works with a tuple on the stack
-        // We need to extract the tuple elements and call Equal(count)
-
-        // Get field count and first field types (handles both tuples and partials)
-        let (field_count, first_field_types) =
-            type_queries::get_field_count_and_first_types(&*self.program, value_type)?;
-
-        // Extract tuple fields and push them individually to the stack
-        // Following the established pattern from compile_operator
-        for i in 0..field_count {
-            if i < field_count - 1 {
-                self.codegen.add_instruction(Instruction::Duplicate);
-            }
-            self.codegen.add_instruction(Instruction::Get(i));
-            if i < field_count - 1 {
-                self.codegen.add_instruction(Instruction::Rotate(2));
-            }
-        }
-
-        // Now compare the field_count individual values on the stack
-        self.codegen
-            .add_instruction(Instruction::Equal(field_count));
-
-        // Return type is union of field types and NIL
-        let mut result_types = first_field_types;
-        result_types.push(self.program.register_type(Type::nil()));
-        Ok(typing::union_type_ids(self.program, result_types))
     }
 
     /// Compiles accessor chain and tracks field provenance.

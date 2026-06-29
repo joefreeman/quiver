@@ -1,40 +1,36 @@
 mod common;
 use common::*;
 
+// Value equality is tested by matching against a pinned reference (`x =&y`), which compiles to the
+// same structural equality check the language uses everywhere. A successful match yields Ok; a
+// failed one yields nil ([]).
+
 #[test]
 fn test_equal_integers() {
-    quiver().evaluate("[42] ==").expect("42");
-    quiver().evaluate("[42, 42, 42] ==").expect("42");
+    quiver().evaluate("a = 42, 42 =&a").expect("Ok");
 }
 
 #[test]
 fn test_unequal_integers() {
-    quiver().evaluate("[1, 1, 1, 2] ==").expect("[]");
+    quiver().evaluate("a = 1, 2 =&a").expect("[]");
 }
 
 #[test]
 fn test_binary_equality_content() {
-    // Test that binaries with same content are equal even if different references
-    quiver()
-        .evaluate("[0x68656c6c6f, 0x68656c6c6f] ==")
-        .expect("0x68656c6c6f");
-    quiver().evaluate("[0xabcd, 0xabcd] ==").expect("0xabcd");
+    // Binaries with the same content are equal even if built as different values.
+    quiver().evaluate("a = 0x68656c6c6f, 0x68656c6c6f =&a").expect("Ok");
+    quiver().evaluate("a = 0xabcd, 0xabcd =&a").expect("Ok");
 }
 
 #[test]
 fn test_binary_inequality_content() {
-    // Test that binaries with different content are not equal
-    quiver()
-        .evaluate("[0x68656c6c6f, 0x776f726c64] ==")
-        .expect("[]");
-    quiver()
-        .evaluate("[0x61626364, 0x65666768] ==")
-        .expect("[]");
+    quiver().evaluate("a = 0x68656c6c6f, 0x776f726c64 =&a").expect("[]");
+    quiver().evaluate("a = 0x61626364, 0x65666768 =&a").expect("[]");
 }
 
 #[test]
 fn test_equal_strings() {
-    quiver().evaluate("[\"abc\", \"abc\"] ==").expect("\"abc\"");
+    quiver().evaluate("a = \"abc\", \"abc\" =&a").expect("Ok");
 }
 
 #[test]
@@ -45,15 +41,15 @@ fn test_structural_equality_across_construction() {
     quiver()
         .evaluate(
             "mk = #<'t>['t, 't] { =[x, y], Cons[x, Cons[y, Nil]] }, \
-             [Cons[1, Cons[2, Nil]], [1, 2] mk] ==",
+             a = Cons[1, Cons[2, Nil]], [1, 2] mk =&a",
         )
-        .expect("Cons[1, Cons[2, Nil]]");
+        .expect("Ok");
 }
 
 #[test]
 fn test_structural_equality_distinct_shapes_differ() {
     // Same arity/elements but different field labels are NOT equal...
-    quiver().evaluate("[[x: 1], [y: 1]] ==").expect("[]");
+    quiver().evaluate("a = [x: 1], [y: 1] =&a").expect("[]");
     // ...nor are different tuple names.
-    quiver().evaluate("[A[1], B[1]] ==").expect("[]");
+    quiver().evaluate("a = A[1], B[1] =&a").expect("[]");
 }

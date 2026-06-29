@@ -339,6 +339,7 @@ Point[x: 0, y] = Point[1, 10]    // Fails (evaluates to [])
 5 =5                             // Literal match (Ok)
 5 =6                             // Fails ([])
 role ="admin"                    // String matching
+[] =[]                           // Nil test (Ok when the value is nil, [] otherwise)
 ```
 
 ### References
@@ -461,25 +462,7 @@ name = data .name        // Extract field in pipeline
 x = coords .0            // Positional access in pipeline
 ```
 
-## Operators
-
-### Equality
-
-```quiver
-[5, 5] ==            // Returns 5 (all equal)
-[5, 6, 5] ==         // Returns [] (not equal)
-```
-
-To test for nil — the negation of a value — match against the nil pattern, `=[]`, which
-evaluates to `Ok` when the value is nil and `[]` otherwise (see [Pattern matching](#pattern-matching)):
-
-```quiver
-[] =[]               // Ok (the value is nil)
-5 =[]                // [] (the value is non-nil)
-[5, 6] == =[]        // Ok (not all equal: == yields [], which matches =[])
-```
-
-### Ref creation
+## Ref creation
 
 The `%ref` module is a single nilary function that mints a unique, opaque identifier (of type `'ref`). Unlike other standard-library modules — which import a record of functions — `%ref` *is* the function, so each evaluation yields a fresh ref. Refs support equality and pattern matching.
 
@@ -493,7 +476,8 @@ To name the minting function, bind it by reference (`&`, like any function value
 
 ```quiver
 ref = &%ref,
-[ref, ref] ==   // [] — two distinct refs are not equal
+a = ref, b = ref,
+a =&b           // [] — two distinct refs are not equal
 ```
 
 ## Functions

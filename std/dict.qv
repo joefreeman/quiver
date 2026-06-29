@@ -217,7 +217,7 @@ split_node = #<'v>[#^ -> '<'v>, '<'v>, 'int, 'int, 'key, 'v, 'int] {
   fc = [chash, shift] fragment
   fh = [hash, shift] fragment
   {
-    | [fc, fh] == => Node[
+    | fc =&fh => Node[
       [1, fc] %int.shift,
       Cons[
         [&self, cnode, chash, hash, key, value, [shift, 5] %num.add] self,
@@ -237,13 +237,13 @@ put = #<'v>[#^ -> '<'v>, '<'v>, 'key, 'v, 'int, 'int] {
   node {
     | =Empty => Leaf[hash, key, value]
     | =Leaf[lhash, lkey, lvalue] => {
-      | [lkey, key] == => Leaf[hash, key, value]
+      | lkey =&key => Leaf[hash, key, value]
       | {
         [&split_pair, lhash, lkey, lvalue, hash, key, value, shift] split_pair
       }
     }
     | =Collision[chash, entries] => {
-      | [chash, hash] == => Collision[chash, [entries, key, value, Nil] bucket_put]
+      | chash =&hash => Collision[chash, [entries, key, value, Nil] bucket_put]
       | {
         [&split_node, node, chash, hash, key, value, shift] split_node
       }
@@ -296,10 +296,7 @@ remove = #<'v>[#^ -> '<'v>, '<'v>, 'key, 'int, 'int] {
   =[self, node, key, hash, shift]
   node {
     | =Empty => Empty
-    | =Leaf[lhash, k, v] => {
-      | [k, key] == => Empty
-      | Leaf[lhash, k, v]
-    }
+    | =Leaf[lhash, k, v] => { k =&key => Empty | Leaf[lhash, k, v] }
     | =Collision[chash, entries] => {
       kept = [entries, key, Nil] bucket_remove
       {

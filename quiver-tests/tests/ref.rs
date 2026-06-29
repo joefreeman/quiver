@@ -11,26 +11,26 @@ fn test_ref_creation() {
 fn test_ref_uniqueness() {
     // Multiple refs are unique
     quiver()
-        .evaluate("[%ref, %ref, %ref] =[a, b, c], [[a, b] ==, [b, c] ==, [a, c] ==]")
+        .evaluate("[%ref, %ref, %ref] =[a, b, c], [a =&b, b =&c, a =&c]")
         .expect("[[], [], []]");
 }
 
 #[test]
 fn test_ref_via_reference_binding() {
     // Binding the function with `&%ref` mints a fresh ref on each call
-    quiver().evaluate("ref = &%ref, [ref, ref] ==").expect("[]");
+    quiver().evaluate("ref = &%ref, a = ref, b = ref, a =&b").expect("[]");
 }
 
 #[test]
 fn test_ref_equality_same() {
-    // Same ref compared to itself is equal (returns the ref, not nil)
-    quiver().evaluate("r = %ref, [r, r] == =[]").expect("[]"); // Negation of non-nil is nil
+    // Same ref compared to itself is equal
+    quiver().evaluate("r = %ref, r =&r").expect("Ok");
 }
 
 #[test]
 fn test_ref_equality_different() {
     // Different refs are not equal
-    quiver().evaluate("[%ref, %ref] ==").expect("[]");
+    quiver().evaluate("a = %ref, b = %ref, a =&b").expect("[]");
 }
 
 #[test]
