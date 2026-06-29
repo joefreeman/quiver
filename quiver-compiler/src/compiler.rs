@@ -3864,19 +3864,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let ty = self.compile_equality(val_type)?;
                 Ok((ty, Provenance::Unknown))
             }
-            ast::Term::Not => {
-                let val_type = value_type.ok_or_else(|| {
-                    Error::FeatureUnsupported("Not operator requires a value".to_string())
-                })?;
-                // The not operator narrows the type to [] (nil) when it succeeds
-                // Record this narrowing so subsequent branches can use the complement
-                if let Some(n) = narrowing.as_deref_mut() {
-                    let nil_type_id = self.program.register_type(Type::nil());
-                    n.record(&value_provenance, val_type, nil_type_id, self.program);
-                }
-                let ty = self.compile_not(val_type)?;
-                Ok((ty, Provenance::Unknown))
-            }
             ast::Term::Match(pattern) => {
                 // Match patterns can create new bindings or check against existing values/types
                 let val_type = value_type.ok_or_else(|| {
@@ -4585,18 +4572,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut result_types = first_field_types;
         result_types.push(self.program.register_type(Type::nil()));
         Ok(typing::union_type_ids(self.program, result_types))
-    }
-
-    fn compile_not(&mut self, _value_type: usize) -> Result<usize, Error> {
-        // The ! operator works with any value on the stack
-        // It converts [] to Ok and everything else to []
-        self.codegen.add_instruction(Instruction::Not);
-
-        // The Not instruction returns either Ok or NIL
-        let ok_type = self.program.register_type(Type::ok());
-        let nil_type = self.program.register_type(Type::nil());
-        let result_type = typing::union_type_ids(self.program, vec![ok_type, nil_type]);
-        Ok(result_type)
     }
 
     /// Compiles accessor chain and tracks field provenance.

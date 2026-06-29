@@ -52,7 +52,7 @@ fn test_take_while() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] %list.iter [~, #'int { =3 <> }] %iter.take_while %list.collect
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] %list.iter [~, #'int { =3 =[] }] %iter.take_while %list.collect
             "#,
         )
         .expect("Cons[1, Cons[2, Nil]]");
@@ -63,7 +63,7 @@ fn test_drop_while() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] %list.iter [~, #'int { =2 <> }] %iter.drop_while %list.collect
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] %list.iter [~, #'int { =2 =[] }] %iter.drop_while %list.collect
             "#,
         )
         .expect("Cons[2, Cons[3, Cons[4, Nil]]]");

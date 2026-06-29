@@ -8,7 +8,7 @@ join = #[#^ -> (' | []), ', '] {
     | =[Root, Relative[_]] => []
     | =[Relative[m], Relative[n]] => [m, n] %num.add Relative[~]
     | =[Path[_, p], Relative[n]] => [&self, p, Relative[[n, 1] %num.sub]] self
-    | =[_, Path[s, parent]] => [&self, p1, parent] self { <> => [] | Path[s, ~] }
+    | =[_, Path[s, parent]] => [&self, p1, parent] self { =[] => [] | Path[s, ~] }
   }
 }
 

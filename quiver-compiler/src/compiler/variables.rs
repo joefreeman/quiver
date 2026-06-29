@@ -99,7 +99,6 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_access_capture(access);
             }
             ast::Term::Equality => {}
-            ast::Term::Not => {}
             ast::Term::Spawn(function, _) => {
                 self.visit_term(function);
             }

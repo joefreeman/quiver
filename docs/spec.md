@@ -463,13 +463,20 @@ x = coords .0            // Positional access in pipeline
 
 ## Operators
 
-### Equality and negation
+### Equality
 
 ```quiver
 [5, 5] ==            // Returns 5 (all equal)
 [5, 6, 5] ==         // Returns [] (not equal)
-[] <>                // Returns Ok (negation of nil)
-5 <>                 // Returns [] (negation of non-nil)
+```
+
+To test for nil — the negation of a value — match against the nil pattern, `=[]`, which
+evaluates to `Ok` when the value is nil and `[]` otherwise (see [Pattern matching](#pattern-matching)):
+
+```quiver
+[] =[]               // Ok (the value is nil)
+5 =[]                // [] (the value is non-nil)
+[5, 6] == =[]        // Ok (not all equal: == yields [], which matches =[])
 ```
 
 ### Ref creation

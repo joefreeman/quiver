@@ -1926,10 +1926,6 @@ fn equality(input: Span) -> IResult<Span, Term> {
     nom_value(Term::Equality, tag("=="))(input)
 }
 
-fn not_term(input: Span) -> IResult<Span, Term> {
-    nom_value(Term::Not, tag("<>"))(input)
-}
-
 // Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
 // argument, if any, comes from the chained value (`x ~> @{ … }`).
 fn spawn_of_function(parameter_type: Option<Type>, body: Expression) -> Term {
@@ -2245,7 +2241,6 @@ fn primary(input: Span) -> IResult<Span, Term> {
         map(access, Term::Access),
         // Operations
         equality,
-        not_term,
         select_term,
         tail_call,
     ))(input)

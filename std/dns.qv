@@ -8,7 +8,7 @@
       ~,
       #\DnsResolver {
         $ __dns_next__ {
-          | <> => { $ __dns_close__, [] }
+          | =[] => { $ __dns_close__, [] }
           | =b, b __binary_length__ { =4 => IPv4[b] | =16 => IPv6[b] } [~, $]
         }
       },

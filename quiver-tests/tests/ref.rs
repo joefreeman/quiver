@@ -24,7 +24,7 @@ fn test_ref_via_reference_binding() {
 #[test]
 fn test_ref_equality_same() {
     // Same ref compared to itself is equal (returns the ref, not nil)
-    quiver().evaluate("r = %ref, [r, r] == <>").expect("[]"); // Negation of non-nil is nil
+    quiver().evaluate("r = %ref, [r, r] == =[]").expect("[]"); // Negation of non-nil is nil
 }
 
 #[test]

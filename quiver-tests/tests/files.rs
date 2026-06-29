@@ -655,7 +655,7 @@ fn test_stat_missing_is_nil() {
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" %fs.stat {{ <> => Absent | Present }}"#,
+            r#""{}" %fs.stat {{ =[] => Absent | Present }}"#,
             path
         ))
         .expect("Absent");
@@ -682,8 +682,8 @@ fn test_stat_result_has_its_real_declared_type() {
             p = "{path}" .0,
             s = p __filesystem_stat__,
             [
-              s =[File, 'int, 'int, 'int] {{ <> => No | Yes }},
-              s =['int, 'int, 'int, 'int] {{ <> => No | Yes }}
+              s =[File, 'int, 'int, 'int] {{ =[] => No | Yes }},
+              s =['int, 'int, 'int, 'int] {{ =[] => No | Yes }}
             ]
             "#
         ))
@@ -712,8 +712,8 @@ fn test_directory_entry_has_its_real_declared_type() {
             d = "{dir_str}" .0 __directory_read__,
             e = d __directory_next__,
             [
-              e =['bin, File] {{ <> => No | Yes }},
-              e =['int, 'int] {{ <> => No | Yes }}
+              e =['bin, File] {{ =[] => No | Yes }},
+              e =['int, 'int] {{ =[] => No | Yes }}
             ]
             "#
         ))
@@ -734,11 +734,11 @@ fn test_fs_predicates() {
         .evaluate(&format!(
             r#"
             [
-              "{d}/f.txt" %fs.exists? {{ <> => No | Yes }},
-              "{d}/nope"  %fs.exists? {{ <> => No | Yes }},
-              "{d}/sub"   %fs.dir?    {{ <> => No | Yes }},
-              "{d}/f.txt" %fs.dir?    {{ <> => No | Yes }},
-              "{d}/f.txt" %fs.file?   {{ <> => No | Yes }}
+              "{d}/f.txt" %fs.exists? {{ =[] => No | Yes }},
+              "{d}/nope"  %fs.exists? {{ =[] => No | Yes }},
+              "{d}/sub"   %fs.dir?    {{ =[] => No | Yes }},
+              "{d}/f.txt" %fs.dir?    {{ =[] => No | Yes }},
+              "{d}/f.txt" %fs.file?   {{ =[] => No | Yes }}
             ]
             "#
         ))

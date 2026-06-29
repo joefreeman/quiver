@@ -376,7 +376,7 @@ fn chain_terms_doc(trivia: &Trivia, terms: &[Term]) -> Doc {
 fn is_call_ender(term: &Term) -> bool {
     matches!(
         term,
-        Term::Access(_) | Term::Equality | Term::Not | Term::Self_
+        Term::Access(_) | Term::Equality | Term::Self_
     )
 }
 
@@ -425,7 +425,6 @@ fn render_term_atom(term: &Term) -> String {
         Term::Match(pattern) => format!("={}", render_match(pattern)),
         Term::Access(access) => render_access(access),
         Term::Equality => "==".to_string(),
-        Term::Not => "<>".to_string(),
         Term::Self_ => ".".to_string(),
         Term::Process(index) => format!("@{}", index),
         Term::Reference(access) => format!("&{}", render_access(access)),
@@ -1755,7 +1754,7 @@ mod tests {
             "point.x .name",
             "$ $.x $.0",
             "5 ==",
-            "[] <>",
+            "[] =[]",
             "42 .",
             // --- match forms ---
             "=Point[x, y]",

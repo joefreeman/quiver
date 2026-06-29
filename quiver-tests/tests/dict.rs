@@ -102,7 +102,7 @@ fn test_canonical_insertion_order_independent() {
             r#"
             d1 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "charlie", 3] %dict.put,
             d2 = %dict.new [~, "charlie", 3] %dict.put [~, "bravo", 2] %dict.put [~, "alpha", 1] %dict.put,
-            [d1, d2] == <> <>
+            [d1, d2] == =[] =[]
         "#,
         )
         .expect("Ok");
@@ -116,7 +116,7 @@ fn test_canonical_remove_matches_direct_build() {
             r#"
             d1 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "charlie", 3] %dict.put [~, "delta", 4] %dict.put [~, "charlie"] %dict.remove,
             d2 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "delta", 4] %dict.put,
-            [d1, d2] == <> <>
+            [d1, d2] == =[] =[]
         "#,
         )
         .expect("Ok");
@@ -127,7 +127,7 @@ fn test_canonical_collision_remove_matches_direct_build() {
     // a collision that loses one entry equals directly building the single-key dict
     quiver()
         .evaluate(&format!(
-            "[{DA} [~, {KA}] %dict.remove, %dict.new [~, {KB}, 2] %dict.put] == <> <>"
+            "[{DA} [~, {KA}] %dict.remove, %dict.new [~, {KB}, 2] %dict.put] == =[] =[]"
         ))
         .expect("Ok");
 }

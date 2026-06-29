@@ -15,7 +15,7 @@
 // `[kind, size, modified, mode]` tuple read by index, with `kind` already a `'kind` tag.
 stat = #Str['bin] {
   .0 __filesystem_stat__ {
-    | <> => []
+    | =[] => []
     | =s Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
   }
 }
@@ -32,7 +32,7 @@ stat = #Str['bin] {
       ~,
       #\Dir {
         $ __directory_next__ {
-          | <> => { $ __directory_close__, [] }
+          | =[] => { $ __directory_close__, [] }
           | =e [Entry[name: Str[e.0], kind: e.1], $]
         }
       },
