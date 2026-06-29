@@ -166,7 +166,23 @@ When spreading a union type, the spread is distributed across all variants:
 
 The compiler converts UTF-8 strings, defined with `"..."` into binaries, wrapped in a `Str` tuple (`Str[0x...]`).
 
-The escape sequences `\n`, `\r`, `\t`, `\\` and `\"` are recognised.
+The escape sequences `\n`, `\r`, `\t`, `\\`, `\"` and `\{` are recognised.
+
+#### Interpolation
+
+A string literal — single- or multi-line — may embed `{ … }` holes; the value is its literal text
+concatenated with the holes' values. Each hole is parsed like a block body and must evaluate to a
+`Str` — a non-`Str` hole is a compile-time error. Like a tuple field, a hole receives the flowing
+value, so `~` refers to it; it can also draw on variables in scope. A literal brace is written `\{`.
+(In a *pattern*, `{` is literal; patterns don't interpolate.)
+
+```quiver
+name = "world",
+"hello {name}"               // "hello world"
+"world" "hello, {~}"         // "hello, world" — the chained value flows into the hole
+"sum: {[a, b] %str.concat}"  // any expression that yields a Str
+"a \{ b"                     // a literal brace
+```
 
 #### Multi-line strings
 

@@ -1256,6 +1256,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.collect_receive_types(block, receive_types)?;
                 Ok(None)
             }
+            ast::Term::String(_, segments) => {
+                // A hole is a block-like expression that may contain a select.
+                for segment in segments {
+                    if let ast::StrSegment::Hole(expression) = segment {
+                        self.collect_receive_types(expression, receive_types)?;
+                    }
+                }
+                Ok(None)
+            }
             ast::Term::Function(_) => {
                 // Don't recurse into nested function definitions - they have their own receive types
                 Ok(None)
@@ -3633,7 +3642,95 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(typing::union_type_ids(self.program, result_types))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Lower a string literal to a `Str` wrapping the concatenation of each segment's bytes. Text
+    /// segments contribute a binary constant; each interpolation hole is evaluated and must produce a
+    /// `Str`, whose binary is extracted. Like a tuple's fields, a hole receives a copy of the flowing
+    /// value as its input (so `~` inside it refers to the chained value); the original is kept beneath
+    /// the accumulator and discarded at the end. With no flowing value, a hole's input is nil. Leaves
+    /// a single `Str` on the stack — a plain, hole-free string is one text segment, so it compiles to
+    /// just a binary constant wrapped in `Str`.
+    fn compile_string(
+        &mut self,
+        segments: Vec<ast::StrSegment>,
+        value_type: Option<usize>,
+        value_provenance: Provenance,
+    ) -> Result<(usize, Provenance), Error> {
+        let binary_type = self.program.register_type(Type::Binary);
+        // The `Str['bin]` type: both the assertion target for holes and the result wrapper.
+        let str_tuple = self
+            .program
+            .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
+        let str_type = self.program.register_type(Type::Tuple(str_tuple));
+        // The `['bin, 'bin]` argument tuple for each concatenation step.
+        let pair_tuple = self
+            .program
+            .register_tuple(None, vec![(None, binary_type), (None, binary_type)]);
+
+        if segments.is_empty() {
+            // The empty string `""`: an empty binary, with nothing to concatenate.
+            let empty = self.program.register_constant(Constant::Binary(Vec::new()));
+            self.codegen.add_instruction(Instruction::Constant(empty));
+        }
+        for (i, segment) in segments.into_iter().enumerate() {
+            match segment {
+                ast::StrSegment::Text(bytes) => {
+                    let index = self.program.register_constant(Constant::Binary(bytes));
+                    self.codegen.add_instruction(Instruction::Constant(index));
+                }
+                ast::StrSegment::Hole(expression) => {
+                    let (param_type, param_provenance) = match value_type {
+                        // Duplicate the flowing value as the hole's input. It sits beneath the
+                        // accumulated binary — nothing before the first segment, one value after —
+                        // so its offset from the top is 0 for the first segment and 1 thereafter.
+                        Some(vt) => {
+                            self.codegen
+                                .add_instruction(Instruction::Pick(usize::from(i > 0)));
+                            (vt, value_provenance.clone())
+                        }
+                        None => {
+                            self.codegen.add_instruction(Instruction::Tuple(NIL));
+                            (self.program.register_type(Type::nil()), Provenance::Unknown)
+                        }
+                    };
+                    let hole_type = self.compile_scoped_expression(
+                        expression,
+                        param_type,
+                        param_provenance,
+                        None,
+                        ScopeKind::Block,
+                        false,
+                    )?;
+                    if !quiver_core::types::is_compatible(hole_type, str_type, &*self.program) {
+                        return Err(Error::TypeMismatch {
+                            expected: "Str".to_string(),
+                            found: quiver_core::format::format_type_by_id(
+                                &*self.program,
+                                hole_type,
+                            ),
+                        });
+                    }
+                    // Unwrap `Str[<bin>]` to its binary for concatenation.
+                    self.codegen.add_instruction(Instruction::Get(0));
+                }
+            }
+            // Fold left: once a second binary is on the stack, concatenate it onto the accumulator.
+            if i > 0 {
+                self.codegen.add_instruction(Instruction::Tuple(pair_tuple));
+                // Push and apply the concat builtin, exactly as a `[a, b] __binary_concat__` call.
+                self.compile_builtin("binary_concat")?;
+                self.codegen.add_instruction(Instruction::Call);
+            }
+        }
+        // Wrap the accumulated binary as `Str`.
+        self.codegen.add_instruction(Instruction::Tuple(str_tuple));
+        // Discard the flowing value kept beneath the result for `~` holes.
+        if value_type.is_some() {
+            self.codegen.add_instruction(Instruction::Rotate(2));
+            self.codegen.add_instruction(Instruction::Pop);
+        }
+        Ok((str_type, Provenance::Unknown))
+    }
+
     fn compile_term(
         &mut self,
         term: ast::Term,
@@ -3711,6 +3808,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
                 // Block results have unknown provenance
                 Ok((ty, Provenance::Unknown))
+            }
+            ast::Term::String(_, segments) => {
+                // A string literal produces a `Str`, replacing the flowing value — but, like a tuple,
+                // each interpolation hole receives a copy of that value (so `~` works inside a hole).
+                // The delimiter style is irrelevant to the compiled value.
+                self.compile_string(segments, value_type, value_provenance)
             }
             ast::Term::Function(func) => {
                 // Function literals always produce functions - they don't auto-call.

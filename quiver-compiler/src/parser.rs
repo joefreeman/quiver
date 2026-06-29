@@ -442,35 +442,6 @@ fn binary_literal(input: Span) -> IResult<Span, Literal> {
 }
 
 /// Build the `Str[0x…]` tuple term that a string literal desugars to.
-fn str_term(bytes: Vec<u8>) -> Term {
-    Term::Tuple(Tuple {
-        name: TupleName::Named("Str".to_string()),
-        fields: vec![TupleField {
-            name: None,
-            name_span: Spanned::default(),
-            span: Spanned::default(),
-            value: FieldValue::Chain(Chain {
-                match_pattern: None,
-                bind_span: Spanned::default(),
-                span: Spanned::default(),
-                terms: vec![Term::Literal(Literal::Binary(bytes))],
-            }),
-        }],
-        span: Spanned::default(),
-    })
-}
-
-/// Build the `Str[0x…]` tuple pattern that a string literal pattern desugars to.
-fn str_match(bytes: Vec<u8>) -> Match {
-    Match::Tuple(MatchTuple {
-        name: Some("Str".to_string()),
-        fields: vec![MatchField {
-            name: None,
-            pattern: Match::Literal(Literal::Binary(bytes)),
-        }],
-    })
-}
-
 /// Parse a single-line string body: the characters between `"` quotes, with escapes processed.
 /// The scan for the closing `"` is escape-aware (a backslash skips the next character), so an
 /// escaped quote `\"` does not terminate the string.
@@ -505,9 +476,78 @@ fn single_line_string(input: Span) -> IResult<Span, String> {
 fn string_term(input: Span) -> IResult<Span, Term> {
     // Multi-line (`"""`) first, so its opening delimiter isn't read as an empty `""` string.
     alt((
-        map(multiline_string, |s| str_term(s.into_bytes())),
-        map(single_line_string, |s| str_term(s.into_bytes())),
+        map(multiline_string_segments, |segments| {
+            Term::String(StringStyle::Multi, segments)
+        }),
+        map(single_line_segments, |segments| {
+            Term::String(StringStyle::Single, segments)
+        }),
     ))(input)
+}
+
+/// Parse a single-line string at term position into its segments, where `{ … }` introduces an
+/// interpolation hole.
+fn single_line_segments(input: Span) -> IResult<Span, Vec<StrSegment>> {
+    let (rest, _) = char('"')(input)?;
+    string_segments(input, rest)
+}
+
+/// Split the body of a single-line string (after the opening `"`) into literal-text and hole
+/// segments, stopping at the closing `"`. Escapes are decoded into the text; an unescaped `{` opens
+/// a hole, which is parsed exactly like a block body (`{ … }`). `open` is the opening quote, used
+/// only to locate errors.
+fn string_segments<'a>(open: Span<'a>, input: Span<'a>) -> IResult<Span<'a>, Vec<StrSegment>> {
+    let unterminated =
+        || nom::Err::Failure(nom::error::Error::new(open, nom::error::ErrorKind::Eof));
+    let frag = *input.fragment();
+    let mut segments = Vec::new();
+    let mut text: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4];
+    let mut pos = 0;
+    loop {
+        let Some(ch) = frag[pos..].chars().next() else {
+            return Err(unterminated());
+        };
+        match ch {
+            '"' => {
+                if !text.is_empty() {
+                    segments.push(StrSegment::Text(std::mem::take(&mut text)));
+                }
+                return Ok((input.slice(pos + 1..), segments));
+            }
+            '{' => {
+                if !text.is_empty() {
+                    segments.push(StrSegment::Text(std::mem::take(&mut text)));
+                }
+                let (after, expression) = block(input.slice(pos..))?;
+                segments.push(StrSegment::Hole(expression));
+                pos = after.location_offset() - input.location_offset();
+            }
+            '\\' => {
+                let esc = frag[pos + 1..].chars().next().ok_or_else(unterminated)?;
+                let decoded = match esc {
+                    '"' => '"',
+                    '\\' => '\\',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '{' => '{',
+                    _ => {
+                        return Err(nom::Err::Failure(nom::error::Error::new(
+                            open,
+                            nom::error::ErrorKind::MapRes,
+                        )));
+                    }
+                };
+                text.extend_from_slice(decoded.encode_utf8(&mut buf).as_bytes());
+                pos += '\\'.len_utf8() + esc.len_utf8();
+            }
+            c => {
+                text.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                pos += c.len_utf8();
+            }
+        }
+    }
 }
 
 /// Reduce a numerator/denominator pair to lowest terms. The denominator is assumed
@@ -674,6 +714,11 @@ fn parse_string_content(span: Span) -> Result<String, Error> {
                     result.push('\t');
                     offset += 1;
                 }
+                // A literal brace; `{` alone opens an interpolation hole in a string term.
+                Some('{') => {
+                    result.push('{');
+                    offset += 1;
+                }
                 Some(c) => {
                     let error_span = SourceSpan {
                         offset: span.location_offset() + escape_offset,
@@ -731,6 +776,19 @@ fn multiline_string(input: Span) -> IResult<Span, String> {
     }
 }
 
+/// Parse a multi-line string at term position into its segments, so `{ … }` interpolation holes are
+/// recognised (unlike [`multiline_string`], the pattern-position form).
+fn multiline_string_segments(input: Span) -> IResult<Span, Vec<StrSegment>> {
+    let (rest, raw) = multiline_string_raw(input)?;
+    match process_multiline_segments(raw.fragment()) {
+        Some(segments) => Ok((rest, segments)),
+        None => Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::MapRes,
+        ))),
+    }
+}
+
 /// Consume `"""…"""` and return the raw span between the delimiters. The scan is escape-aware:
 /// a backslash skips the following character, so an escaped quote can't close the string.
 fn multiline_string_raw(input: Span) -> IResult<Span, Span> {
@@ -761,13 +819,11 @@ fn multiline_string_raw(input: Span) -> IResult<Span, Span> {
     }
 }
 
-/// Process the raw text between `"""` delimiters into the final string value, or `None` if the
-/// text is malformed. The opening delimiter must be followed by a newline; the closing delimiter
-/// sits on its own line, and its indentation (the *margin*) is stripped from every line. After
-/// de-indentation, escapes are processed — the single-line set plus `\s` (a strip-proof space)
-/// and `\<newline>` (line continuation, dropping the newline and the next line's leading
-/// whitespace). Trailing whitespace is stripped from each line; blank lines are emitted empty.
-fn process_multiline_string(raw: &str) -> Option<String> {
+/// De-indent the raw text between `"""` delimiters, returning it with newlines normalised and the
+/// closing delimiter's indentation (the *margin*) stripped from every line — or `None` if malformed
+/// (the opening `"""` not followed by a newline, a non-whitespace margin, or a non-blank line
+/// indented less than the margin). Escapes are *not* yet processed.
+fn multiline_dedent(raw: &str) -> Option<String> {
     let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
 
     // The opening delimiter must be followed by a newline (only horizontal whitespace may
@@ -797,6 +853,16 @@ fn process_multiline_string(raw: &str) -> Option<String> {
         }
         dedented.push_str(line.strip_prefix(margin)?);
     }
+    Some(dedented)
+}
+
+/// Process the raw text between `"""` delimiters into the final string value, or `None` if the text
+/// is malformed. After de-indentation, escapes are processed — the single-line set plus `\s` (a
+/// strip-proof space) and `\<newline>` (line continuation, dropping the newline and the next line's
+/// leading whitespace). Trailing whitespace is stripped from each line; blank lines are emitted
+/// empty. This is the pattern-position form — `{` is literal (no interpolation).
+fn process_multiline_string(raw: &str) -> Option<String> {
+    let dedented = multiline_dedent(raw)?;
 
     // Process escapes, strip trailing whitespace and apply line continuations in one pass.
     // `pending` buffers horizontal whitespace, which is discarded if a newline or EOF follows
@@ -827,6 +893,7 @@ fn process_multiline_string(raw: &str) -> Option<String> {
                     'r' => result.push('\r'),
                     't' => result.push('\t'),
                     's' => result.push(' '),
+                    '{' => result.push('{'),
                     _ => return None,
                 }
             }
@@ -838,6 +905,79 @@ fn process_multiline_string(raw: &str) -> Option<String> {
         }
     }
     Some(result)
+}
+
+/// Like [`process_multiline_string`], but for term position: an unescaped `{` opens an interpolation
+/// hole (parsed like a block body), splitting the result into text and hole segments. The same
+/// escape/strip/continuation rules apply to the text between holes; `\{` is a literal brace.
+/// Returns `None` if malformed (bad de-indentation/escape, or an unparseable hole).
+fn process_multiline_segments(raw: &str) -> Option<Vec<StrSegment>> {
+    let dedented = multiline_dedent(raw)?;
+
+    let mut segments: Vec<StrSegment> = Vec::new();
+    let mut result = String::new(); // the current text run (decoded)
+    let mut pending = String::new(); // buffered horizontal whitespace, dropped at a line end
+    let mut pos = 0;
+    while pos < dedented.len() {
+        let rest = &dedented[pos..];
+        let ch = rest.chars().next().unwrap();
+        match ch {
+            ' ' | '\t' => {
+                pending.push(ch);
+                pos += 1;
+            }
+            '\n' => {
+                pending.clear();
+                result.push('\n');
+                pos += 1;
+            }
+            '{' => {
+                // A hole boundary: whitespace before a hole is content, so keep it, then finalise
+                // the text run and parse the hole from the (de-indented) source.
+                result.push_str(&pending);
+                pending.clear();
+                if !result.is_empty() {
+                    segments.push(StrSegment::Text(std::mem::take(&mut result).into_bytes()));
+                }
+                let (after, expression) = block(LocatedSpan::new(rest)).ok()?;
+                segments.push(StrSegment::Hole(expression));
+                pos += after.location_offset();
+            }
+            '\\' => {
+                result.push_str(&pending);
+                pending.clear();
+                let esc = rest[1..].chars().next()?;
+                pos += 1 + esc.len_utf8();
+                match esc {
+                    // Line continuation: drop the newline and the next line's leading whitespace.
+                    '\n' => {
+                        while dedented[pos..].chars().next().is_some_and(is_hspace) {
+                            pos += 1;
+                        }
+                    }
+                    '"' => result.push('"'),
+                    '\\' => result.push('\\'),
+                    'n' => result.push('\n'),
+                    'r' => result.push('\r'),
+                    't' => result.push('\t'),
+                    's' => result.push(' '),
+                    '{' => result.push('{'),
+                    _ => return None,
+                }
+            }
+            _ => {
+                result.push_str(&pending);
+                pending.clear();
+                result.push(ch);
+                pos += ch.len_utf8();
+            }
+        }
+    }
+    // Keep the final text run if non-empty, or if it is the only segment (an empty/text-only string).
+    if !result.is_empty() || segments.is_empty() {
+        segments.push(StrSegment::Text(result.into_bytes()));
+    }
+    Some(segments)
 }
 
 fn literal(input: Span) -> IResult<Span, Literal> {
@@ -1898,9 +2038,14 @@ fn match_field(input: Span) -> IResult<Span, MatchField> {
 
 fn match_string(input: Span) -> IResult<Span, Match> {
     // Multi-line (`"""`) first, so its opening delimiter isn't read as an empty `""` string.
+    // Patterns are text-only (no interpolation), so the bytes are matched directly.
     alt((
-        map(multiline_string, |s| str_match(s.into_bytes())),
-        map(single_line_string, |s| str_match(s.into_bytes())),
+        map(multiline_string, |s| {
+            Match::String(StringStyle::Multi, s.into_bytes())
+        }),
+        map(single_line_string, |s| {
+            Match::String(StringStyle::Single, s.into_bytes())
+        }),
     ))(input)
 }
 

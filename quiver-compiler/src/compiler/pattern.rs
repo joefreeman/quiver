@@ -306,6 +306,27 @@ fn analyze_match_pattern(
         ast::Match::Literal(literal) => {
             analyze_literal_pattern(literal.clone(), path, value_type_id, program)
         }
+        ast::Match::String(_, bytes) => {
+            // A string pattern matches the desugared `Str[<bin>]` value; the delimiter style is
+            // irrelevant to matching. Reuse the tuple-pattern machinery.
+            let tuple = ast::MatchTuple {
+                name: Some("Str".to_string()),
+                fields: vec![ast::MatchField {
+                    name: None,
+                    pattern: ast::Match::Literal(ast::Literal::Binary(bytes.clone())),
+                }],
+            };
+            analyze_match_tuple_pattern(
+                env,
+                program,
+                &tuple,
+                value_type_id,
+                path,
+                identifiers,
+                scopes,
+                value_provenance,
+            )
+        }
         ast::Match::Tuple(tuple) => analyze_match_tuple_pattern(
             env,
             program,

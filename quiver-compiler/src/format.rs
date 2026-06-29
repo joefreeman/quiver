@@ -408,6 +408,7 @@ fn is_breakable_container(term: &Term) -> bool {
 fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
     match term {
         Term::Tuple(tuple) => tuple_doc(trivia, tuple),
+        Term::String(style, segments) => string_term_doc(trivia, *style, segments),
         Term::Block(expression) => block_doc(trivia, expression),
         Term::Function(function) => function_doc(trivia, function),
         Term::Spawn(inner, _) => spawn_doc(trivia, inner),
@@ -429,6 +430,7 @@ fn render_term_atom(term: &Term) -> String {
         Term::Process(index) => format!("@{}", index),
         Term::Reference(access) => format!("&{}", render_access(access)),
         Term::Tuple(_)
+        | Term::String(..)
         | Term::Block(_)
         | Term::Function(_)
         | Term::Spawn(..)
@@ -436,11 +438,63 @@ fn render_term_atom(term: &Term) -> String {
     }
 }
 
-fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
-    // A `Str[<bytes>]` tuple is the desugared form of a string literal; render it back as `"…"`.
-    if let Some(doc) = string_doc(tuple) {
-        return doc;
+/// Render a string-literal term in its original delimiter style: a single-line `"…"` (with
+/// interpolation holes), or a multi-line `"""…"""` block (text only).
+fn string_term_doc(trivia: &Trivia, style: StringStyle, segments: &[StrSegment]) -> Doc {
+    match style {
+        StringStyle::Single => single_line_string_doc(trivia, segments),
+        StringStyle::Multi => multiline_string_doc(trivia, segments),
     }
+}
+
+/// Render a single-line string `"…"`: literal-text segments are re-escaped, and each interpolation
+/// hole is rendered flat (single-line strings stay on one line) as a tightly-braced expression.
+fn single_line_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
+    let mut out = String::from("\"");
+    for segment in segments {
+        match segment {
+            StrSegment::Text(bytes) => {
+                let text = std::str::from_utf8(bytes).expect("string text is UTF-8");
+                out.push_str(&escape_single_line_text(text));
+            }
+            // A hole parses like a block body. Render its branches flat (single-line strings stay
+            // on one line) and wrap them tightly in braces — `{name}`, not `{ name }`.
+            StrSegment::Hole(expression) => {
+                let body = expression
+                    .branches
+                    .iter()
+                    .map(|branch| pretty::flatten(&branch_doc(trivia, branch, false)))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                out.push('{');
+                out.push_str(&body);
+                out.push('}');
+            }
+        }
+    }
+    out.push('"');
+    pretty::text(out)
+}
+
+/// Escape literal text of a single-line string. As well as the basic escapes, `{` is escaped (a bare
+/// `{` would open an interpolation hole); `}` needs no escape.
+fn escape_single_line_text(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '{' => out.push_str("\\{"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
     let name = match &tuple.name {
         TupleName::Anonymous => String::new(),
         TupleName::Named(name) if tuple.fields.is_empty() => return pretty::text(name.clone()),
@@ -464,97 +518,82 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
     )
 }
 
-/// If `tuple` is a string literal in desugared form — `Str` wrapping a single unnamed binary whose
-/// bytes are valid UTF-8 — render it back as a quoted string: the single-line `"…"` form, or the
-/// triple-quoted multi-line form when the content spans lines. Returns `None` (keeping the literal
-/// `Str[0x…]` form) only when the bytes can't be a string — non-UTF-8, or a control character with
-/// no escape (any control other than `\n`, `\r`, `\t`).
-fn string_doc(tuple: &Tuple) -> Option<Doc> {
-    let TupleName::Named(name) = &tuple.name else {
-        return None;
-    };
-    if name != "Str" {
-        return None;
-    }
-    let [field] = tuple.fields.as_slice() else {
-        return None;
-    };
-    if field.name.is_some() {
-        return None;
-    }
-    let FieldValue::Chain(chain) = &field.value else {
-        return None;
-    };
-    let [Term::Literal(Literal::Binary(bytes))] = chain.terms.as_slice() else {
-        return None;
-    };
-    let text = std::str::from_utf8(bytes).ok()?;
-    if text
-        .chars()
-        .any(|c| (c as u32) < 0x20 && !matches!(c, '\n' | '\r' | '\t'))
-    {
-        return None;
-    }
-    // A newline reads best as a multi-line literal; everything else stays on one line.
-    if text.contains('\n') {
-        Some(multiline_string_doc(text))
-    } else {
-        Some(pretty::text(single_line_string_source(text)))
-    }
-}
-
-/// Render `text` (free of newlines) as a single-line `"…"` literal, escaping the characters the
-/// lexer decodes.
-fn single_line_string_source(text: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Render `text` as a triple-quoted multi-line literal. Each line is emitted as a `hardline` so the
+/// Render a multi-line string as a triple-quoted block. Each line is emitted as a `hardline` so the
 /// renderer indents it to the ambient column — that indentation becomes the closing delimiter's
 /// *margin*, which the parser strips back off, so the value round-trips at any nesting depth.
-fn multiline_string_doc(text: &str) -> Doc {
+/// Interpolation holes sit inline on their line as `{…}`; a newline inside a text segment starts a
+/// new line.
+fn multiline_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
+    // Build the content line by line, escaping text and rendering holes inline.
+    let mut lines = vec![String::new()];
+    for segment in segments {
+        match segment {
+            StrSegment::Text(bytes) => {
+                let text = std::str::from_utf8(bytes).expect("string text is UTF-8");
+                let mut parts = text.split('\n');
+                if let Some(first) = parts.next() {
+                    lines
+                        .last_mut()
+                        .unwrap()
+                        .push_str(&escape_multiline_text(first));
+                }
+                for part in parts {
+                    lines.push(escape_multiline_text(part));
+                }
+            }
+            StrSegment::Hole(expression) => {
+                let body = expression
+                    .branches
+                    .iter()
+                    .map(|branch| pretty::flatten(&branch_doc(trivia, branch, false)))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let line = lines.last_mut().unwrap();
+                line.push('{');
+                line.push_str(&body);
+                line.push('}');
+            }
+        }
+    }
+
     let mut docs = vec![pretty::text("\"\"\"")];
-    for line in text.split('\n') {
+    for line in lines {
         docs.push(pretty::hardline());
-        docs.push(pretty::text(encode_multiline_line(line)));
+        docs.push(pretty::text(protect_trailing_spaces(line)));
     }
     docs.push(pretty::hardline());
     docs.push(pretty::text("\"\"\""));
     pretty::concat(docs)
 }
 
-/// Encode one content line (free of newlines) of a multi-line string. Tabs and carriage returns are
-/// escaped (a literal `\r` would be normalised to `\n`, a trailing tab would be stripped), every `"`
-/// is escaped so a run can't form a closing `"""`, and trailing spaces become `\s` so they survive
-/// the trailing-whitespace stripping done by both the renderer and the parser.
-fn encode_multiline_line(line: &str) -> String {
-    let trailing_spaces = line.len() - line.trim_end_matches(' ').len();
+/// Escape one text fragment of a multi-line string (no trailing-space handling — that is applied per
+/// line). Tabs and carriage returns are escaped (a literal `\r` would be normalised to `\n`, a
+/// trailing tab would be stripped), every `"` is escaped so a run can't form a closing `"""`, and a
+/// literal `{` becomes `\{` (a bare `{` opens an interpolation hole).
+fn escape_multiline_text(text: &str) -> String {
     let mut out = String::new();
-    for ch in line[..line.len() - trailing_spaces].chars() {
+    for ch in text.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
+            '{' => out.push_str("\\{"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c => out.push(c),
         }
     }
-    for _ in 0..trailing_spaces {
-        out.push_str("\\s");
-    }
     out
+}
+
+/// Convert a rendered line's trailing spaces to `\s` so they survive the trailing-whitespace
+/// stripping done by both the renderer and the parser.
+fn protect_trailing_spaces(line: String) -> String {
+    let trimmed_len = line.trim_end_matches(' ').len();
+    let trailing = line.len() - trimmed_len;
+    if trailing == 0 {
+        return line;
+    }
+    format!("{}{}", &line[..trimmed_len], "\\s".repeat(trailing))
 }
 
 fn field_doc(trivia: &Trivia, field: &TupleField) -> Doc {
@@ -1057,6 +1096,13 @@ fn render_match(pattern: &Match) -> String {
     match pattern {
         Match::Identifier(name, _) => name.clone(),
         Match::Literal(literal) => render_literal(literal),
+        // A string pattern renders as a single-line `"…"` regardless of how it was written: the
+        // match formatter is string-based and can't lay out a multi-line block, so a `"""…"""`
+        // pattern (rare) collapses to single-line, with newlines escaped.
+        Match::String(_, bytes) => {
+            let text = std::str::from_utf8(bytes).expect("string pattern text is UTF-8");
+            format!("\"{}\"", escape_single_line_text(text))
+        }
         Match::Tuple(tuple) => render_match_tuple(tuple),
         Match::Partial(partial) => render_partial_pattern(partial),
         Match::Star(None) => "*".to_string(),
@@ -1538,6 +1584,48 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_round_trips() {
+        // Holes render tightly (`{name}`), literal braces escape as `\{`, and nested strings,
+        // adjacent holes, and multi-branch holes all survive a format round-trip unchanged.
+        for source in [
+            "x = \"hello {name}!\"",
+            "x = \"{a}{b}\"",
+            "x = \"a \\{ b\"",
+            "x = \"pair: {[p, q] %str.concat}\"",
+            "x = \"v: {flag { =Ok => \"yes\" | \"no\" }}\"",
+        ] {
+            assert_idempotent(source, source);
+        }
+    }
+
+    #[test]
+    fn interpolation_formats_tightly() {
+        // A simple hole renders with no inner padding.
+        assert_formats("x = \"hi {name}\"", "x = \"hi {name}\"\n");
+    }
+
+    #[test]
+    fn string_style_is_preserved() {
+        // A single-line string keeps its style even when its value contains a newline (escaped as
+        // `\n`), rather than being rewritten as a `"""` block.
+        assert_formats("x = \"a\\nb\"", "x = \"a\\nb\"\n");
+        // A multi-line string keeps its style even when its value has no newline.
+        assert_formats("x = \"\"\"\n  hi\n  \"\"\"", "x = \"\"\"\nhi\n\"\"\"\n");
+    }
+
+    #[test]
+    fn string_pattern_renders_as_string() {
+        // A string pattern reconstructs as `"…"`, not the desugared `Str[0x…]`.
+        assert_formats("f = #{ role =\"admin\" }", "f = #{ role =\"admin\" }\n");
+    }
+
+    #[test]
+    fn literal_str_tuple_is_not_canonicalised() {
+        // A hand-written `Str[0x…]` tuple stays a tuple — only string *literals* render as `"…"`.
+        assert_formats("x = Str[0x68]", "x = Str[0x68]\n");
+    }
+
+    #[test]
     fn multiline_strings_round_trip() {
         // Each multi-line source must format to an identical fixpoint that preserves the value. The
         // cases exercise margin tracking at depth, leading/trailing whitespace, blank lines, an
@@ -1552,6 +1640,22 @@ mod tests {
             "msg = \"\"\"\n    a \\\"\"\" b\n    \"\"\"",
             // A value that is exactly one newline.
             "msg = \"\"\"\n\n    \"\"\"",
+        ] {
+            let ast = parse(source).unwrap_or_else(|e| panic!("source must parse: {e:?}"));
+            let printed = format_program(&ast, source);
+            assert_idempotent(&printed, &printed);
+        }
+    }
+
+    #[test]
+    fn multiline_interpolation_round_trips() {
+        // Holes in a multi-line string: inline on a line, the whole of a line, with surrounding
+        // text/spaces, a nested-string hole, an escaped literal brace, and a hole that itself spans
+        // lines. Each must format to a value-preserving fixpoint.
+        for source in [
+            "s = \"\"\"\n    hi {name}\n    {x}\n    a \\{ b {[p, q] %str.concat} c\n    \"\"\"",
+            // A hole whose expression spans multiple lines stays a single hole.
+            "s = \"\"\"\n    pick {flag {\n      =Ok => \"y\"\n      | \"n\"\n    }} done\n    \"\"\"",
         ] {
             let ast = parse(source).unwrap_or_else(|e| panic!("source must parse: {e:?}"));
             let printed = format_program(&ast, source);

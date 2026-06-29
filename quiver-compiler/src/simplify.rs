@@ -129,6 +129,18 @@ fn strip_term(term: Term, options: &Options) -> Term {
             Term::Tuple(tuple)
         }
         Term::Block(expression) => Term::Block(strip_expression(expression, options)),
+        Term::String(style, segments) => Term::String(
+            style,
+            segments
+                .into_iter()
+                .map(|segment| match segment {
+                    StrSegment::Hole(expression) => {
+                        StrSegment::Hole(strip_expression(expression, options))
+                    }
+                    text => text,
+                })
+                .collect(),
+        ),
         Term::Function(mut function) => {
             function.body = function.body.map(|body| strip_expression(body, options));
             Term::Function(function)

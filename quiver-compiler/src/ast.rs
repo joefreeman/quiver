@@ -81,6 +81,12 @@ pub struct Chain {
 pub enum Term {
     Literal(Literal),
     Tuple(Tuple),
+    /// A string literal — single- or multi-line — as a sequence of literal-text and (single-line
+    /// only) interpolation-hole segments. Lowered during compilation to a `Str` wrapping the
+    /// concatenation of each segment's bytes; every hole must evaluate to a `Str`. Kept as a
+    /// distinct term (rather than desugared to `Str[<bin>]` at parse time) so the formatter can
+    /// round-trip the source form — including which delimiter style was written.
+    String(StringStyle, Vec<StrSegment>),
     Match(Match),
     /// A braced expression `{ … }`: a new scope whose branches each start from the flowing value.
     Block(Expression),
@@ -131,6 +137,26 @@ impl Term {
 pub enum Literal {
     Integer(num_bigint::BigInt),
     Binary(Vec<u8>),
+}
+
+/// One piece of a string literal ([`Term::String`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrSegment {
+    /// Literal text, with escapes already decoded (UTF-8 bytes).
+    Text(Vec<u8>),
+    /// An interpolation hole `{ … }`, parsed like a block body. Must evaluate to a `Str`.
+    Hole(Expression),
+}
+
+/// Which delimiter style a string literal was written with. Preserved so the formatter renders it
+/// back in the same form rather than choosing by content (e.g. a single-line string containing a
+/// newline stays single-line, with the newline escaped, rather than becoming a `"""` block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringStyle {
+    /// A `"…"` string.
+    Single,
+    /// A `"""…"""` string.
+    Multi,
 }
 
 /// How a tuple literal's name is determined.
@@ -253,6 +279,10 @@ pub enum Match {
     /// identifier itself, for go-to-definition and hover on pattern bindings.
     Identifier(String, Spanned),
     Literal(Literal),
+    /// A string-literal pattern (`="admin"`, or a `"""…"""` block). Matches the desugared
+    /// `Str[<bin>]` value; kept distinct (rather than desugared to a `Tuple` pattern at parse time)
+    /// so the formatter renders it back as a string. No interpolation — patterns are text-only.
+    String(StringStyle, Vec<u8>),
     Tuple(MatchTuple),
     Partial(PartialPattern),
     /// Bind all named fields (`*`). An optional tuple name (`Config*`) additionally

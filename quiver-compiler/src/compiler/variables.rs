@@ -72,6 +72,14 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             }
+            ast::Term::String(_, segments) => {
+                // Each hole is an expression that may reference (and so must capture) variables.
+                for segment in segments {
+                    if let ast::StrSegment::Hole(expression) = segment {
+                        self.visit_expression(expression);
+                    }
+                }
+            }
             ast::Term::Match(pattern) => {
                 // Match patterns can define variables or reference them (via &)
                 // We need to traverse the pattern to find Match::Reference nodes
@@ -168,6 +176,7 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Match::As(_, _, _)
             | ast::Match::Identifier(_, _)
             | ast::Match::Literal(_)
+            | ast::Match::String(_, _)
             | ast::Match::Star(_)
             | ast::Match::Placeholder
             | ast::Match::Type(_) => {}

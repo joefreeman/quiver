@@ -2,6 +2,94 @@ mod common;
 use common::*;
 
 #[test]
+fn test_interpolation() {
+    // A single hole, substituted from a bound variable.
+    quiver()
+        .evaluate(r#"name = "world", "hello {name}""#)
+        .expect("\"hello world\"");
+    // Leading, middle, and trailing text around multiple holes.
+    quiver()
+        .evaluate(r#"a = "X", b = "Y", "[{a}-{b}]""#)
+        .expect("\"[X-Y]\"");
+    // Adjacent holes with no text between them.
+    quiver()
+        .evaluate(r#"a = "X", b = "Y", "{a}{b}""#)
+        .expect("\"XY\"");
+    // A hole containing an arbitrary expression that evaluates to a `Str`.
+    quiver()
+        .evaluate(r#""got: {["a", "b"] %str.concat}""#)
+        .expect("\"got: ab\"");
+    // A `\{` escape is a literal brace, not a hole.
+    quiver().evaluate(r#""a \{ b""#).expect("\"a { b\"");
+    // A string with no holes is an ordinary literal.
+    quiver().evaluate(r#""plain""#).expect("\"plain\"");
+}
+
+#[test]
+fn test_interpolation_hole_receives_chained_value() {
+    // Like a tuple field, a hole receives the flowing value, so `~` is the chained value.
+    quiver()
+        .evaluate(r#""world" "hello, {~}""#)
+        .expect("\"hello, world\"");
+    // The value is copied into each hole, so it can be used more than once.
+    quiver().evaluate(r#""x" "{~}-{~}""#).expect("\"x-x\"");
+    // `~` can drive an expression, and a field of the flowing value can be reached.
+    quiver()
+        .evaluate(r#"Person[name: "Bo"] "hi {~.name}""#)
+        .expect("\"hi Bo\"");
+    // A multi-line hole sees the chained value too.
+    quiver()
+        .evaluate("\"ada\" \"\"\"\n  hi {~}\n  \"\"\"")
+        .expect("\"hi ada\"");
+}
+
+#[test]
+fn test_multiline_interpolation() {
+    // Holes are substituted, the line structure is preserved, and `\{` is a literal brace.
+    quiver()
+        .evaluate("name = \"ada\", \"\"\"\n  hi {name}\n  bye\n  \"\"\"")
+        .expect("\"hi ada\\nbye\"");
+    // A multi-line interpolated string equals the single-line string with the same value.
+    quiver()
+        .evaluate("x = \"v\", [\"\"\"\n  a {x}\n  \"\"\", \"a v\"] ==")
+        .expect("\"a v\"");
+    // A literal brace via `\{`, and a hole containing an expression.
+    quiver()
+        .evaluate("\"\"\"\n  \\{ {[\"p\", \"q\"] %str.concat}\n  \"\"\"")
+        .expect("\"{ pq\"");
+}
+
+#[test]
+fn test_string_pattern_matches() {
+    // A string-literal pattern matches the equal string and fails on a different one.
+    quiver()
+        .evaluate(r#"role = "admin", role ="admin""#)
+        .expect("Ok");
+    quiver()
+        .evaluate(r#"role = "guest", role ="admin""#)
+        .expect("[]");
+}
+
+#[test]
+fn test_single_and_multi_line_values_are_equal() {
+    // The two delimiter styles are only a surface form: they produce identical values.
+    quiver()
+        .evaluate("[\"a\\nb\", \"\"\"\na\nb\n\"\"\"] ==")
+        .expect("\"a\\nb\"");
+}
+
+#[test]
+fn test_interpolation_requires_str_hole() {
+    // A hole that is not a `Str` (here an `'int`) is a compile-time type error.
+    quiver()
+        .evaluate(r#"n = 5, "count {n}""#)
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "Str".to_string(),
+            found: "'int".to_string(),
+        });
+}
+
+#[test]
 fn test_bytes() {
     quiver()
         .evaluate(r#""hello" %str.bytes"#)
