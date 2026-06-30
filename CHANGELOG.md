@@ -2,18 +2,21 @@
 
 ## [Unreleased]
 
-### Added
+A large release centred on a syntax overhaul; most 0.3.0 programs need updating.
 
-- Added initial support for I/O (sockets and files).
-- Re-added support for `$` to access the function parameter.
-- Added support for optionally specifying return type on functions (e.g., `#int -> bin { ... }`).
-- Added space-separated function application with a bare argument (e.g. `double 5`).
-
-### Changed
-
-- Function application now requires a space before the argument (`f [1, 2]`, `f x`); `f[1]` is now a syntax error.
-- A chain's value flows into constructed tuple fields and call arguments, so a callable there is called; use `&` to pass one by value (e.g. `map [xs, &double]`).
-- Statements must be separated by a newline or semicolon (so `f a b` is an error).
+- Application is now argument-first: a function consumes the value to its left (`5 double`, `[3, 4] num.add`); `~>` is an optional synonym for the space.
+- Calling is now explicit: a bare callable is always called, and `&` references one without calling it (`[xs, &double] map`); tail calls and recursion use `^`.
+- Types take a leading apostrophe (`'int`, `'point`), and aliases use `=` (`'point = Point[x: 'int, y: 'int]`).
+- Expressions now thread the result through each step; a step that yields nil short-circuits the rest.
+- A match or binding now evaluates to `Ok`/nil rather than the matched value, so `=...` acts as a guard; matching also gained alternatives, type-ascribed bindings (`(T)x`), and intersections (`'a & 'b`).
+- Added a numeric tower of arbitrary-precision integers, rationals, and surds; `num` operations return nil instead of erroring (e.g. divide by zero).
+- Added effect-based I/O for files, sockets, and DNS.
+- Expanded the standard library (`num`, `int`, `binary`, `string`, `list`, `iter`, `range`, `file`, `path`, `dict`, `ref`).
+- Added tooling: a tree-sitter grammar, an LSP server, and a `quiv format` formatter (checked in CI).
+- Added multi-line strings and string interpolation (`"hello {name}"`).
+- Added module loading via a manifest, inline imports, and per-module default types (`'%mod`).
+- Changed process syntax: spawning takes an explicit init argument, and `select` takes a tuple of sources.
+- Removed the equality and `not` operators.
 
 ## [0.3.0] - 2025-10-31
 

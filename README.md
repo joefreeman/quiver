@@ -1,6 +1,6 @@
 <div align="center">
     <img src="logo.svg" alt="Quiver" width="300" />
-    <p><em>A statically-typed functional programming language with structural typing, pattern matching, lightweight processes, typed message passing, and postfix-based syntax.</em></p>
+    <p><em>A statically-typed functional programming language with structural typing, pattern matching, lightweight processes, typed message passing, and an argument-first syntax.</em></p>
     <a href="https://quiver.run">Try Quiver in the online REPL</a>
     <br />
     <br />
@@ -10,20 +10,18 @@
 
 ```quiver
 // Define a recursive list type
-list<t> : Nil | Cons[t, ^];
+'list<'t> = Nil | Cons['t, ^]
 
 // Compute the sum of a list using tail recursion
-sum' = #[list<int>, int] {
+sum_ = #['list<'int>, 'int] {
   | =[Nil, acc] => acc
-  | =[Cons[head, tail], acc] => {
-     %num.add [head, acc] ~> ^ [tail, ~]
-  }
-},
+  | =[Cons[head, tail], acc] => [head, acc] %num.add [tail, ~] ^
+}
 
-sum = #list<int> { sum' [~, 0] },
+sum = #'list<'int> { [~, 0] sum_ }
 
 // Build and sum a list
-Cons[1, Cons[2, Cons[3, Nil]]] ~> sum  // 6
+Cons[1, Cons[2, Cons[3, Nil]]] sum  // 6
 ```
 
 > Run the example above in the REPL (`quiv repl`, or at [quiver.run](https://quiver.run)), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
@@ -32,7 +30,7 @@ Cons[1, Cons[2, Cons[3, Nil]]] ~> sum  // 6
 
 ## Language features
 
-- **Postfix syntax**: Data flows left-to-right through transformations
+- **Argument-first syntax**: Data flows left-to-right through transformations
 - **Structural typing**: Types are defined by their structure, not their names
 - **Pattern matching**: Destructure and branch on values with expressive pattern syntax
 - **Union types**: Model complex data with algebraic types

@@ -1297,7 +1297,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
         // A source can be:
-        // 1. A function literal: #int { ... } -> extract int
+        // 1. A function literal: #'int { ... } -> extract int
         // 2. A variable reference: r1 -> look up and extract parameter type
         // 3. A ripple: ~ -> use the chained type
         // 4. Something else (process, timeout) -> ignore
@@ -3839,7 +3839,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             ast::Term::Function(func) => {
                 // Function literals always produce functions - they don't auto-call.
-                // To call an inline function, bind it first: f = #int {...}, 5 ~> f
+                // To call an inline function, bind it first: f = #'int {...}, 5 f
                 if value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }

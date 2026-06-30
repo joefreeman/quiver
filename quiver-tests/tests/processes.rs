@@ -91,7 +91,7 @@ fn test_spawn_with_argument_type_mismatch() {
 
 #[test]
 fn test_spawn_without_argument_requires_nil_parameter() {
-    // With implicit continuation, spawning @#int { $ } without an explicit argument
+    // With implicit continuation, spawning @#'int { $ } without an explicit argument
     // passes [] (nil) from the implicit continuation, which doesn't match int
     quiver().evaluate("@#'int { $ }").expect_compile_error(
         quiver_compiler::compiler::Error::TypeMismatch {
@@ -719,7 +719,7 @@ fn test_receive_type_in_tail_call_argument() {
 
 #[test]
 fn test_sugar_bare_primitive_type() {
-    // Test !int instead of !#int
+    // Test !'int instead of !#'int
     quiver().evaluate("p = @#{ !'int }, 42 p, !p").expect("42");
 }
 
@@ -741,7 +741,7 @@ fn test_sugar_type_alias() {
 
 #[test]
 fn test_sugar_union_type() {
-    // Test !(int | bin) instead of !#(int | bin)
+    // Test !('int | 'bin) instead of !#('int | 'bin)
     quiver()
         .evaluate(
             r#"
@@ -754,7 +754,7 @@ fn test_sugar_union_type() {
 
 #[test]
 fn test_sugar_receive_function_with_identifier_type() {
-    // Test !int { ... } instead of !#int { ... }
+    // Test !'int { ... } instead of !#'int { ... }
     quiver()
         .evaluate(
             r#"
@@ -768,7 +768,7 @@ fn test_sugar_receive_function_with_identifier_type() {
 
 #[test]
 fn test_sugar_receive_function_with_union_type() {
-    // Test !(int | bin) { ... } instead of !#(int | bin) { ... }
+    // Test !('int | 'bin) { ... } instead of !#('int | 'bin) { ... }
     quiver()
         .evaluate(
             r#"
@@ -814,7 +814,7 @@ fn test_sugar_mixed_with_comma_separation() {
 
 #[test]
 fn test_sugar_tuple_type() {
-    // Test !#[int, int] for identity receive on tuple type
+    // Test !#['int, 'int] for identity receive on tuple type
     // Note: ! [...] is now sources syntax, so we need explicit #
     quiver()
         .evaluate(
