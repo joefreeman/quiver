@@ -291,6 +291,14 @@ struct RippleContext {
     provenance: Provenance,
 }
 
+/// The value flowing into a term: its type (absent when no value is on the stack) paired with the
+/// provenance used for type narrowing. Bundled so `compile_term` takes the incoming value as one
+/// argument.
+struct FlowingValue {
+    ty: Option<usize>,
+    provenance: Provenance,
+}
+
 /// Per-branch dispatch data collected while compiling a function body that is a pure pattern
 /// dispatch on its parameter. `branches` pairs each branch's parameter *guard type* (the
 /// parameter values that reach it) with that branch's inferred result type. `valid` is cleared
@@ -2560,8 +2568,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let term_expected = self.expected_for_term(&terms, i, last_index, expected);
             let (term_type, term_prov) = self.compile_term(
                 term.clone(),
-                current_type,
-                current_prov,
+                FlowingValue {
+                    ty: current_type,
+                    provenance: current_prov,
+                },
                 on_no_match,
                 ripple_context,
                 narrowing.as_deref_mut(),
@@ -3070,8 +3080,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // The chained value (if any) is the init argument. A nilary process function ignores this
         // implicit flow and is spawned with nil — the value is discarded, like a call.
-        let (fn_type, _prov) =
-            self.compile_term(function, None, Provenance::Unknown, None, None, None, None)?;
+        let (fn_type, _prov) = self.compile_term(
+            function,
+            FlowingValue {
+                ty: None,
+                provenance: Provenance::Unknown,
+            },
+            None,
+            None,
+            None,
+            None,
+        )?;
 
         let param_is_nil = matches!(
             self.program.lookup_type(fn_type),
@@ -3734,8 +3753,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_term(
         &mut self,
         term: ast::Term,
-        value_type: Option<usize>,
-        value_provenance: Provenance,
+        value: FlowingValue,
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
         mut narrowing: Option<&mut Narrowing>,
@@ -3743,6 +3761,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // infer un-annotated function-literal parameters; ignored by every other term.
         expected: Option<usize>,
     ) -> Result<(usize, Provenance), Error> {
+        let FlowingValue {
+            ty: value_type,
+            provenance: value_provenance,
+        } = value;
         // Track the span of the term being compiled so a compile error can be located.
         if let Some(span) = term.span() {
             self.current_span = Some(span);

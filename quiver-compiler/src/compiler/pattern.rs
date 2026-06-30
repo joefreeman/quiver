@@ -14,6 +14,13 @@ use super::{
 // Type aliases for complex pattern matching types (using type IDs)
 type PatternAnalysisResult = (Vec<(String, usize)>, Vec<BindingSet>, usize);
 type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
+// Field info plus how to rebuild a variant's narrowed type: the variant's fields, the matched
+// field indices, and the optional tuple name (`None` for a partial match, which keeps the input type).
+type VariantFieldInfo<'a> = (
+    Vec<(Option<String>, usize)>,
+    &'a Vec<usize>,
+    Option<Option<String>>,
+);
 
 /// Helper for managing identifiers across variants
 /// Clones identifiers when processing multiple variants to avoid cross-contamination
@@ -908,11 +915,7 @@ fn analyze_partial_pattern(
         // Field info plus how to rebuild this variant's narrowed type once its fields are refined:
         // a concrete tuple match reconstructs `Type::Tuple` with the narrowed fields; a partial
         // match (`Some` name vs `None`) keeps the input type.
-        let (mut fields, field_indices, narrowed_tuple_name): (
-            Vec<(Option<String>, usize)>,
-            &Vec<usize>,
-            Option<Option<String>>,
-        ) = match field_match {
+        let (mut fields, field_indices, narrowed_tuple_name): VariantFieldInfo = match field_match {
             FieldMatch::Tuple {
                 tuple_id,
                 field_indices,

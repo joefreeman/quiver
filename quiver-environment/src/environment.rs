@@ -1821,101 +1821,6 @@ impl<E: Effect> Environment<E> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use quiver_core::bytecode::Bytecode;
-    use quiver_core::types::TupleTypeInfo;
-
-    // Minimal effect for constructing an Environment in tests; no effects are exercised.
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    enum TestEffect {}
-
-    impl Effect for TestEffect {
-        fn resource_id(&self) -> Option<ResourceId> {
-            None
-        }
-    }
-
-    /// A bytecode whose single tuple `[a, b]` has both fields typed as the type at
-    /// `int_index`. Leading `Type::Reference` filler entries shift that index so the tuple's
-    /// field references only resolve correctly if they are remapped during the merge.
-    fn pair_of_ints_bytecode(int_index: usize) -> Bytecode {
-        let mut types = vec![Type::Reference; int_index];
-        types.push(Type::Integer);
-        Bytecode {
-            constants: vec![],
-            functions: vec![],
-            builtins: vec![],
-            entry: None,
-            tuples: vec![TupleTypeInfo {
-                name: None,
-                fields: vec![(None, int_index), (None, int_index)],
-            }],
-            types,
-            resources: vec![],
-        }
-    }
-
-    /// Merging a second, independently-compiled program must not corrupt the field type
-    /// references of its tuples. Before the fix, tuple fields were remapped against an
-    /// empty type table (tuples were merged before types), so the second program's `[a, b]`
-    /// tuple resolved its int fields to whatever happened to sit at the stale index.
-    #[test]
-    fn merged_tuple_fields_keep_their_int_type() {
-        let mut env: Environment<TestEffect> = Environment::new(vec![]);
-
-        // First program: `'int` at index 0, tuple fields point at 0.
-        let first = env.merge_tuples_for_test(pair_of_ints_bytecode(0));
-        // Second program: `'int` at index 1 (with filler at 0), tuple fields point at 1.
-        let second = env.merge_tuples_for_test(pair_of_ints_bytecode(1));
-
-        for tuple_id in [first, second] {
-            let info = env.program.get_tuples()[tuple_id].clone();
-            for (_, field_type_id) in &info.fields {
-                assert_eq!(
-                    env.program.get_types()[*field_type_id],
-                    Type::Integer,
-                    "merged tuple {tuple_id} field should resolve to 'int"
-                );
-            }
-        }
-    }
-
-    /// Process types (for `@N` references) are built in the environment's id space, but are
-    /// injected into a REPL's own, independent program. `import_type_into` must deep-copy them
-    /// so their child ids land in the target program — otherwise the REPL program would carry
-    /// references dangling into the environment's table (the cause of an out-of-bounds panic
-    /// when its bytecode was later merged back).
-    #[test]
-    fn process_type_children_are_deep_imported() {
-        let mut env: Environment<TestEffect> = Environment::new(vec![]);
-
-        // Give the environment program an `'int` at a non-trivial index, then describe a
-        // process that sends and receives it — exactly the shape `enrich_process_types` builds.
-        let int_id = env.program.register_type(Type::Integer);
-        let process_type = Type::Process {
-            send: Some(int_id),
-            receive: Some(int_id),
-        };
-
-        // A REPL's fresh program where that environment id is not yet meaningful.
-        let mut repl_program = Program::new();
-        let imported = env.import_type_into(&mut repl_program, process_type);
-
-        let Type::Process {
-            send: Some(send),
-            receive: Some(receive),
-        } = imported
-        else {
-            panic!("expected a process type with send and receive");
-        };
-        // The child ids now index the REPL program and resolve back to `'int`.
-        assert_eq!(repl_program.get_types()[send], Type::Integer);
-        assert_eq!(repl_program.get_types()[receive], Type::Integer);
-    }
-}
-
-#[cfg(test)]
 impl<E: Effect> Environment<E> {
     /// Test helper: merge a bytecode's types/tuples and return the merged index of its first
     /// tuple. Mirrors the type/tuple half of `merge_bytecode` without requiring workers.
@@ -2025,5 +1930,100 @@ fn collect_named_variants(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quiver_core::bytecode::Bytecode;
+    use quiver_core::types::TupleTypeInfo;
+
+    // Minimal effect for constructing an Environment in tests; no effects are exercised.
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    enum TestEffect {}
+
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    /// A bytecode whose single tuple `[a, b]` has both fields typed as the type at
+    /// `int_index`. Leading `Type::Reference` filler entries shift that index so the tuple's
+    /// field references only resolve correctly if they are remapped during the merge.
+    fn pair_of_ints_bytecode(int_index: usize) -> Bytecode {
+        let mut types = vec![Type::Reference; int_index];
+        types.push(Type::Integer);
+        Bytecode {
+            constants: vec![],
+            functions: vec![],
+            builtins: vec![],
+            entry: None,
+            tuples: vec![TupleTypeInfo {
+                name: None,
+                fields: vec![(None, int_index), (None, int_index)],
+            }],
+            types,
+            resources: vec![],
+        }
+    }
+
+    /// Merging a second, independently-compiled program must not corrupt the field type
+    /// references of its tuples. Before the fix, tuple fields were remapped against an
+    /// empty type table (tuples were merged before types), so the second program's `[a, b]`
+    /// tuple resolved its int fields to whatever happened to sit at the stale index.
+    #[test]
+    fn merged_tuple_fields_keep_their_int_type() {
+        let mut env: Environment<TestEffect> = Environment::new(vec![]);
+
+        // First program: `'int` at index 0, tuple fields point at 0.
+        let first = env.merge_tuples_for_test(pair_of_ints_bytecode(0));
+        // Second program: `'int` at index 1 (with filler at 0), tuple fields point at 1.
+        let second = env.merge_tuples_for_test(pair_of_ints_bytecode(1));
+
+        for tuple_id in [first, second] {
+            let info = env.program.get_tuples()[tuple_id].clone();
+            for (_, field_type_id) in &info.fields {
+                assert_eq!(
+                    env.program.get_types()[*field_type_id],
+                    Type::Integer,
+                    "merged tuple {tuple_id} field should resolve to 'int"
+                );
+            }
+        }
+    }
+
+    /// Process types (for `@N` references) are built in the environment's id space, but are
+    /// injected into a REPL's own, independent program. `import_type_into` must deep-copy them
+    /// so their child ids land in the target program — otherwise the REPL program would carry
+    /// references dangling into the environment's table (the cause of an out-of-bounds panic
+    /// when its bytecode was later merged back).
+    #[test]
+    fn process_type_children_are_deep_imported() {
+        let mut env: Environment<TestEffect> = Environment::new(vec![]);
+
+        // Give the environment program an `'int` at a non-trivial index, then describe a
+        // process that sends and receives it — exactly the shape `enrich_process_types` builds.
+        let int_id = env.program.register_type(Type::Integer);
+        let process_type = Type::Process {
+            send: Some(int_id),
+            receive: Some(int_id),
+        };
+
+        // A REPL's fresh program where that environment id is not yet meaningful.
+        let mut repl_program = Program::new();
+        let imported = env.import_type_into(&mut repl_program, process_type);
+
+        let Type::Process {
+            send: Some(send),
+            receive: Some(receive),
+        } = imported
+        else {
+            panic!("expected a process type with send and receive");
+        };
+        // The child ids now index the REPL program and resolve back to `'int`.
+        assert_eq!(repl_program.get_types()[send], Type::Integer);
+        assert_eq!(repl_program.get_types()[receive], Type::Integer);
     }
 }
