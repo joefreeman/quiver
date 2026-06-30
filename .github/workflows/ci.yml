@@ -48,6 +48,16 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # build.sh bundles the tree-sitter grammar via `npx tree-sitter`, which needs the
+      # tree-sitter-cli devDependency installed in tree-sitter/.
+      - name: Install tree-sitter dependencies
+        run: cd tree-sitter && npm install
+
       - name: Build WASM
         run: cd quiver-web && ./build.sh
 
