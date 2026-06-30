@@ -18,14 +18,20 @@ fn test_unequal_integers() {
 #[test]
 fn test_binary_equality_content() {
     // Binaries with the same content are equal even if built as different values.
-    quiver().evaluate("a = 0x68656c6c6f, 0x68656c6c6f =&a").expect("Ok");
+    quiver()
+        .evaluate("a = 0x68656c6c6f, 0x68656c6c6f =&a")
+        .expect("Ok");
     quiver().evaluate("a = 0xabcd, 0xabcd =&a").expect("Ok");
 }
 
 #[test]
 fn test_binary_inequality_content() {
-    quiver().evaluate("a = 0x68656c6c6f, 0x776f726c64 =&a").expect("[]");
-    quiver().evaluate("a = 0x61626364, 0x65666768 =&a").expect("[]");
+    quiver()
+        .evaluate("a = 0x68656c6c6f, 0x776f726c64 =&a")
+        .expect("[]");
+    quiver()
+        .evaluate("a = 0x61626364, 0x65666768 =&a")
+        .expect("[]");
 }
 
 #[test]

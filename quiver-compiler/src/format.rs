@@ -374,10 +374,7 @@ fn chain_terms_doc(trivia: &Trivia, terms: &[Term]) -> Doc {
 /// Whether a term completes a call unit: the flowing value is consumed here (a callable applied, a
 /// field access, or an operator), so a breaking chain breaks *after* it.
 fn is_call_ender(term: &Term) -> bool {
-    matches!(
-        term,
-        Term::Access(_) | Term::Self_
-    )
+    matches!(term, Term::Access(_) | Term::Self_)
 }
 
 /// Force `inner` to break when its single-line form exceeds `threshold` columns (or already contains
