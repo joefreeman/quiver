@@ -129,7 +129,8 @@ pub fn extract_binary_data<E: Effect>(
                 extract_binary_data(capture, executor, binary_data);
             }
         }
-        Value::Integer(_)
+        Value::Int(_)
+        | Value::BigInt(_)
         | Value::Builtin(_)
         | Value::Process(..)
         | Value::Resource(..)

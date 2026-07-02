@@ -2871,10 +2871,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         binary_data: &HashMap<usize, Vec<u8>>,
     ) -> Result<(Vec<Instruction>, usize), Error> {
         match value {
-            Value::Integer(int_value) => {
+            Value::Int(int_value) => {
                 let index = self
                     .program
-                    .register_constant(Constant::Integer(int_value.clone()));
+                    .register_constant(Constant::Integer((*int_value).into()));
+                Ok((
+                    vec![Instruction::Constant(index)],
+                    self.program.register_type(Type::Integer),
+                ))
+            }
+            Value::BigInt(int_value) => {
+                let index = self
+                    .program
+                    .register_constant(Constant::Integer((**int_value).clone()));
                 Ok((
                     vec![Instruction::Constant(index)],
                     self.program.register_type(Type::Integer),

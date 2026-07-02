@@ -1,6 +1,6 @@
 use crate::effects::NativeEffect;
 use crate::util::expect_resource;
-use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult, bigint_to_i64};
+use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult, value_to_i64};
 use quiver_core::error::Error;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId};
@@ -116,13 +116,7 @@ pub fn builtin_tcp_connect(
     };
 
     // Get port
-    let Value::Integer(port) = &fields[1] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[1].type_name().to_string(),
-        });
-    };
-    let port = bigint_to_i64(port)?;
+    let port = value_to_i64(&fields[1])?;
 
     if !(0..=65535).contains(&port) {
         return Err(Error::InvalidArgument(format!(
@@ -194,22 +188,10 @@ pub fn builtin_tcp_listen(
     };
 
     // Get port
-    let Value::Integer(port) = &fields[0] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[0].type_name().to_string(),
-        });
-    };
-    let port = bigint_to_i64(port)?;
+    let port = value_to_i64(&fields[0])?;
 
     // Get backlog
-    let Value::Integer(backlog) = &fields[1] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[1].type_name().to_string(),
-        });
-    };
-    let backlog = bigint_to_i64(backlog)? as i32;
+    let backlog = value_to_i64(&fields[1])? as i32;
 
     if !(0..=65535).contains(&port) {
         return Err(Error::InvalidArgument(format!(
@@ -260,13 +242,7 @@ pub fn builtin_tcp_socket_read(
         }
     };
 
-    let Value::Integer(length) = &fields[1] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[1].type_name().to_string(),
-        });
-    };
-    let length = bigint_to_i64(length)?;
+    let length = value_to_i64(&fields[1])?;
 
     if length <= 0 {
         return Err(Error::InvalidArgument(format!(

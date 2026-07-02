@@ -1,6 +1,6 @@
 use crate::effects::NativeEffect;
 use crate::util::expect_resource;
-use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult, bigint_to_i64};
+use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult, value_to_i64};
 use quiver_core::error::Error;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, ProcessId};
@@ -40,22 +40,10 @@ pub fn builtin_file_open(
     };
 
     // Get flags
-    let Value::Integer(flags) = &fields[1] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[1].type_name().to_string(),
-        });
-    };
-    let flags = bigint_to_i64(flags)? as i32;
+    let flags = value_to_i64(&fields[1])? as i32;
 
     // Get mode (permissions)
-    let Value::Integer(mode) = &fields[2] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[2].type_name().to_string(),
-        });
-    };
-    let mode = bigint_to_i64(mode)? as u32;
+    let mode = value_to_i64(&fields[2])? as u32;
 
     // Get path bytes from binary
     let path_bytes = match &path_binary {
@@ -122,21 +110,9 @@ pub fn builtin_file_read(
         }
     };
 
-    let Value::Integer(offset) = &fields[1] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[1].type_name().to_string(),
-        });
-    };
-    let offset = bigint_to_i64(offset)?;
+    let offset = value_to_i64(&fields[1])?;
 
-    let Value::Integer(length) = &fields[2] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[2].type_name().to_string(),
-        });
-    };
-    let length = bigint_to_i64(length)?;
+    let length = value_to_i64(&fields[2])?;
 
     if offset < 0 {
         return Err(Error::InvalidArgument(format!(
@@ -195,13 +171,7 @@ pub fn builtin_file_write(
         }
     };
 
-    let Value::Integer(offset) = &fields[1] else {
-        return Err(Error::TypeMismatch {
-            expected: "integer".to_string(),
-            found: fields[1].type_name().to_string(),
-        });
-    };
-    let offset = bigint_to_i64(offset)?;
+    let offset = value_to_i64(&fields[1])?;
 
     // Get data binary
     let data_binary = match &fields[2] {

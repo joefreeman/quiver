@@ -9,24 +9,41 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
-/// Convert a `BigInt` to `i64`, erroring if it doesn't fit. Used by the bounded
-/// (bitwise/binary) builtins, whose semantics operate on machine integers.
-pub fn bigint_to_i64(n: &BigInt) -> Result<i64, Error> {
+/// View a value as an integer, erroring with a type mismatch if it isn't one.
+pub fn value_as_int(value: &Value) -> Result<crate::value::IntRef<'_>, Error> {
+    value.as_int().ok_or_else(|| Error::TypeMismatch {
+        expected: "integer".to_string(),
+        found: value.type_name().to_string(),
+    })
+}
+
+/// Extract an `i64` from an integer value, erroring on non-integers and on values
+/// outside the i64 range. Used by the bounded (bitwise/binary) builtins, whose
+/// semantics operate on machine integers.
+pub fn value_to_i64(value: &Value) -> Result<i64, Error> {
+    let n = value_as_int(value)?;
     n.to_i64().ok_or_else(|| {
         Error::InvalidArgument(format!("Integer {n} does not fit in a 64-bit value"))
     })
 }
 
-/// Convert a `BigInt` to `usize`, erroring if it's negative or too large.
-pub fn bigint_to_usize(n: &BigInt) -> Result<usize, Error> {
-    n.to_usize().ok_or_else(|| {
+/// Extract a `usize` from an integer value, erroring if it's negative or too large.
+pub fn value_to_usize(value: &Value) -> Result<usize, Error> {
+    let n = value_as_int(value)?;
+    let index = match n {
+        crate::value::IntRef::Small(small) => small.to_usize(),
+        crate::value::IntRef::Big(_) => None, // out of i64 range, never a valid index
+    };
+    index.ok_or_else(|| {
         Error::InvalidArgument(format!("Integer {n} does not fit in an unsigned index"))
     })
 }
 
-/// Convert a `BigInt` to `u8`, erroring if it's out of the `0..=255` byte range.
-pub fn bigint_to_u8(n: &BigInt) -> Result<u8, Error> {
-    n.to_u8()
+/// Extract a `u8` from an integer value, erroring if it's out of the `0..=255` byte range.
+pub fn value_to_u8(value: &Value) -> Result<u8, Error> {
+    let n = value_as_int(value)?;
+    n.to_i64()
+        .and_then(|small| small.to_u8())
         .ok_or_else(|| Error::InvalidArgument(format!("Integer {n} is not a byte (0..=255)")))
 }
 

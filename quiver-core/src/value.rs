@@ -1,6 +1,7 @@
 use crate::process::ProcessId;
 use crate::types::{NIL, OK};
 use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -69,9 +70,88 @@ impl<'a> IntoIterator for &'a Fields {
     }
 }
 
+/// A boxed arbitrary-precision integer that does **not** fit in an i64 — the canonical
+/// big form of `Value::BigInt`. The private field forces construction through
+/// [`Big::new`] (or `From<BigInt>`, which serde's `from` attribute also routes through),
+/// which asserts the canonical invariant in debug builds. Small integers must use
+/// `Value::Int`; build integer values via [`Value::integer`] to get the split right.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "BigInt", into = "BigInt")]
+pub struct Big(Box<BigInt>);
+
+impl Big {
+    pub fn new(n: BigInt) -> Self {
+        debug_assert!(
+            n.to_i64().is_none(),
+            "non-canonical Big: {n} fits in i64 and must be Value::Int"
+        );
+        Big(Box::new(n))
+    }
+}
+
+impl From<BigInt> for Big {
+    fn from(n: BigInt) -> Self {
+        Big::new(n)
+    }
+}
+
+impl From<Big> for BigInt {
+    fn from(n: Big) -> Self {
+        *n.0
+    }
+}
+
+impl std::ops::Deref for Big {
+    type Target = BigInt;
+
+    fn deref(&self) -> &BigInt {
+        &self.0
+    }
+}
+
+/// A borrowed, allocation-free view of an integer value, letting consumers take the
+/// machine-word fast path and fall back to arbitrary precision only when needed.
+#[derive(Debug, Clone, Copy)]
+pub enum IntRef<'a> {
+    Small(i64),
+    Big(&'a BigInt),
+}
+
+impl IntRef<'_> {
+    /// Widen to an owned `BigInt` (allocates for the small case, clones for the big).
+    pub fn to_bigint(self) -> BigInt {
+        match self {
+            IntRef::Small(n) => BigInt::from(n),
+            IntRef::Big(n) => n.clone(),
+        }
+    }
+
+    /// The value as an i64, or `None` if out of range. By the canonical invariant the
+    /// big form is always out of range, so this never inspects the digits.
+    pub fn to_i64(self) -> Option<i64> {
+        match self {
+            IntRef::Small(n) => Some(n),
+            IntRef::Big(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for IntRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntRef::Small(n) => n.fmt(f),
+            IntRef::Big(n) => n.fmt(f),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
-    Integer(BigInt),
+    // Integers are canonical: `Int` for anything that fits an i64, `BigInt` strictly for
+    // values outside that range (enforced by `Big`). The invariant is what keeps derived
+    // equality, literal pattern matching and hashing representation-blind.
+    Int(i64),
+    BigInt(Big),
     Binary(Binary),
     Reference(u64), // Unique ref: (worker_id << 48) | counter
     // Tuple/Function payloads are reference-counted so cloning a value is O(1) (refcount bump)
@@ -124,9 +204,32 @@ impl Value {
         matches!(self, Value::Tuple(id, fields) if *id == OK && fields.is_empty())
     }
 
+    /// Construct an integer value from a machine integer.
+    pub fn int(n: i64) -> Self {
+        Value::Int(n)
+    }
+
+    /// Construct an integer value in canonical form: `Int` when the value fits an i64,
+    /// `BigInt` otherwise. All integer construction from `BigInt`s must go through here.
+    pub fn integer(n: BigInt) -> Self {
+        match n.to_i64() {
+            Some(small) => Value::Int(small),
+            None => Value::BigInt(Big::new(n)),
+        }
+    }
+
+    /// View this value as an integer without allocating, or `None` if it isn't one.
+    pub fn as_int(&self) -> Option<IntRef<'_>> {
+        match self {
+            Value::Int(n) => Some(IntRef::Small(*n)),
+            Value::BigInt(n) => Some(IntRef::Big(n)),
+            _ => None,
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Integer(_) => "integer",
+            Value::Int(_) | Value::BigInt(_) => "integer",
             Value::Binary(_) => "binary",
             Value::Reference(_) => "ref",
             Value::Tuple(_, _) => "tuple",
@@ -135,5 +238,17 @@ impl Value {
             Value::Process(_, _) => "process",
             Value::Resource(_, _) => "resource",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Boxing the big-integer variant is what keeps `Value` at two words + discriminant;
+    // an inline `BigInt` would push every stack slot, local and tuple field to 40 bytes.
+    #[test]
+    fn value_stays_small() {
+        assert!(std::mem::size_of::<Value>() <= 24);
     }
 }

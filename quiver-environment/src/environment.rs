@@ -1629,7 +1629,7 @@ impl<E: Effect> Environment<E> {
     /// Convert a runtime Value to its Type representation
     pub fn value_to_type(&mut self, value: &Value) -> Type {
         match value {
-            Value::Integer(_) => Type::Integer,
+            Value::Int(_) | Value::BigInt(_) => Type::Integer,
             Value::Binary(_) => Type::Binary,
             Value::Reference(_) => Type::Reference,
             Value::Tuple(type_id, _) => Type::Tuple(*type_id),

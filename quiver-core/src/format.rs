@@ -275,7 +275,8 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
     match value {
         Value::Function(function, _) => format!("#{}", function),
         Value::Builtin(name) => format!("__{}__", name),
-        Value::Integer(i) => i.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::BigInt(n) => n.to_string(),
         Value::Binary(binary) => {
             if let Some(bytes) = binary_lookup.get_bytes(binary) {
                 format_binary(bytes)
@@ -304,7 +305,8 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                 // Check for Rational type and format as an `X/Y` literal (the form the
                 // compiler desugars into a `Rational` tuple).
                 if tuple_info.name.as_deref() == Some("Rational")
-                    && let [Value::Integer(numer), Value::Integer(denom)] = &elements[..]
+                    && let [numer, denom] = &elements[..]
+                    && let (Some(numer), Some(denom)) = (numer.as_int(), denom.as_int())
                 {
                     return format!("{}/{}", numer, denom);
                 }
@@ -312,11 +314,12 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                 // Check for a single-radical surd `Surd[a, b, n]` (`a + b√n`) and render it in
                 // mathematical notation rather than as a raw tuple.
                 if tuple_info.name.as_deref() == Some("Surd")
-                    && let [a_val, b_val, Value::Integer(radicand)] = &elements[..]
+                    && let [a_val, b_val, radicand] = &elements[..]
+                    && let Some(radicand) = radicand.as_int()
                     && let Some((an, ad)) = coeff_ratio(a_val, type_lookup)
                     && let Some((bn, bd)) = coeff_ratio(b_val, type_lookup)
                 {
-                    return format_surd(&an, &ad, &bn, &bd, radicand);
+                    return format_surd(&an, &ad, &bn, &bd, &radicand.to_bigint());
                 }
 
                 let name = tuple_info.name.as_deref();
@@ -360,14 +363,17 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
 
 /// Interpret a surd coefficient — a bare integer or a `Rational[n, d]` tuple — as `(n, d)`.
 fn coeff_ratio<T: TypeLookup>(value: &Value, lookup: &T) -> Option<(BigInt, BigInt)> {
+    if let Some(n) = value.as_int() {
+        return Some((n.to_bigint(), BigInt::one()));
+    }
     match value {
-        Value::Integer(n) => Some((n.clone(), BigInt::one())),
         Value::Tuple(tuple_id, elements) => {
             let info = lookup.lookup_tuple(*tuple_id)?;
             if info.name.as_deref() == Some("Rational")
-                && let [Value::Integer(n), Value::Integer(d)] = &elements[..]
+                && let [n, d] = &elements[..]
+                && let (Some(n), Some(d)) = (n.as_int(), d.as_int())
             {
-                return Some((n.clone(), d.clone()));
+                return Some((n.to_bigint(), d.to_bigint()));
             }
             None
         }

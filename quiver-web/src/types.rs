@@ -65,7 +65,7 @@ impl Value {
 
     fn to_core_recursive(&self, heap: &mut Vec<Vec<u8>>) -> quiver_core::value::Value {
         match self {
-            Value::Integer { value } => quiver_core::value::Value::Integer(
+            Value::Integer { value } => quiver_core::value::Value::integer(
                 // The string is produced by `from_core_value` (always a valid decimal); fall
                 // back to 0 only if a malformed value somehow reaches this formatting path.
                 bigint_from_str(value).unwrap_or_else(|_| bigint_from_i64(0)),
@@ -115,10 +115,13 @@ impl Value {
         program: &Program,
     ) -> Self {
         match value {
-            quiver_core::value::Value::Integer(i) => Value::Integer {
+            quiver_core::value::Value::Int(n) => Value::Integer {
+                value: n.to_string(),
+            },
+            quiver_core::value::Value::BigInt(n) => Value::Integer {
                 // Decimal string keeps arbitrary-precision integers exact across the bridge,
                 // instead of the old `i64` field that coerced out-of-range values to 0.
-                value: i.to_string(),
+                value: n.to_string(),
             },
             quiver_core::value::Value::Binary(binary) => {
                 // Resolve binary reference to actual bytes
@@ -184,7 +187,7 @@ impl Value {
         executor: &mut Executor<WebEffect>,
     ) -> std::result::Result<quiver_core::value::Value, String> {
         match self {
-            Value::Integer { value } => Ok(quiver_core::value::Value::Integer(
+            Value::Integer { value } => Ok(quiver_core::value::Value::integer(
                 bigint_from_str(&value).map_err(|e| format!("{:?}", e))?,
             )),
             Value::Binary { hex } => {
@@ -406,7 +409,7 @@ mod tests {
     fn integer_round_trips_beyond_i64() {
         // i64::MAX * 1000 — far outside i64 range, which the old `i64` bridge coerced to 0.
         let s = "9223372036854775807000";
-        let core = quiver_core::value::Value::Integer(bigint_from_str(s).unwrap());
+        let core = quiver_core::value::Value::integer(bigint_from_str(s).unwrap());
 
         // core -> web: preserved exactly as a decimal string (not 0).
         let program = Program::new();
@@ -418,8 +421,8 @@ mod tests {
 
         // web -> core: parses back to the same arbitrary-precision integer.
         let mut heap: Vec<Vec<u8>> = Vec::new();
-        let quiver_core::value::Value::Integer(back) = web.to_core_recursive(&mut heap) else {
-            panic!("expected an Integer core value");
+        let quiver_core::value::Value::BigInt(back) = web.to_core_recursive(&mut heap) else {
+            panic!("expected a big-integer core value");
         };
         assert_eq!(back.to_string(), s);
     }

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Constant {
+    // One form for all integers: the small/big split is a runtime-representation
+    // concern, applied where a constant becomes a `Value` (`handle_constant`).
     #[serde(rename = "int")]
     Integer(BigInt),
     #[serde(rename = "bin")]

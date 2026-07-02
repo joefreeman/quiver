@@ -1448,15 +1448,20 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         index: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        // Resolve integers directly; binaries go through the constant cache. Determine which
-        // up front so the constants borrow ends before the (mutable) cache call.
+        // Resolve integers directly, normalizing to the canonical small/big runtime form
+        // (no clone or allocation for i64-sized constants); binaries go through the constant
+        // cache. Determine which up front so the constants borrow ends before the (mutable)
+        // cache call.
         let integer = match self.get_constant(index) {
-            Some(Constant::Integer(integer)) => Some(integer.clone()),
+            Some(Constant::Integer(integer)) => Some(match integer.to_i64() {
+                Some(small) => Value::int(small),
+                None => Value::integer(integer.clone()),
+            }),
             Some(Constant::Binary(_)) => None,
             None => return Err(Error::ConstantUndefined(index)),
         };
         let value = match integer {
-            Some(integer) => Value::Integer(integer),
+            Some(value) => value,
             None => Value::Binary(self.cached_constant_binary(index)?),
         };
 
@@ -1638,7 +1643,7 @@ impl<E: Effect> Executor<E> {
     /// Get the concrete type for a runtime value using O(1) lookup
     fn get_concrete_type(&self, value: &Value) -> ConcreteType {
         match value {
-            Value::Integer(_) => ConcreteType::Integer,
+            Value::Int(_) | Value::BigInt(_) => ConcreteType::Integer,
             Value::Binary(_) => ConcreteType::Binary,
             Value::Reference(_) => ConcreteType::Reference,
             Value::Tuple(tuple_id, _) => ConcreteType::Tuple(*tuple_id),
@@ -2274,9 +2279,12 @@ impl<E: Effect> Executor<E> {
 
         for (src_idx, source) in select_state.sources.iter().enumerate() {
             match source {
-                Value::Integer(timeout_ms) => {
-                    // A timeout beyond i64 range is effectively unbounded.
-                    let timeout_ms = timeout_ms.to_i64().unwrap_or(i64::MAX);
+                Value::Int(_) | Value::BigInt(_) => {
+                    // A timeout beyond i64 range (a canonical big) is effectively unbounded.
+                    let timeout_ms = match source {
+                        Value::Int(ms) => *ms,
+                        _ => i64::MAX,
+                    };
                     if let Some(value) =
                         self.handle_select_timeout(timeout_ms, start_time, current_time_ms)?
                     {
@@ -2660,7 +2668,8 @@ impl<E: Effect> Executor<E> {
                     .sources
                     .iter()
                     .filter_map(|source| match source {
-                        Value::Integer(ms) => Some(ms.to_i64().unwrap_or(i64::MAX).max(0) as u64),
+                        Value::Int(ms) => Some((*ms).max(0) as u64),
+                        Value::BigInt(_) => Some(i64::MAX as u64),
                         _ => None,
                     })
                     .min()?;
@@ -2681,12 +2690,10 @@ impl<E: Effect> Executor<E> {
                 {
                     // Check if any timeout sources have expired
                     let elapsed = current_time_ms.saturating_sub(start_time);
-                    return select_state.sources.iter().any(|source| {
-                        if let Value::Integer(timeout_ms) = source {
-                            elapsed >= timeout_ms.to_i64().unwrap_or(i64::MAX).max(0) as u64
-                        } else {
-                            false
-                        }
+                    return select_state.sources.iter().any(|source| match source {
+                        Value::Int(ms) => elapsed >= (*ms).max(0) as u64,
+                        Value::BigInt(_) => elapsed >= i64::MAX as u64,
+                        _ => false,
                     });
                 }
                 false
@@ -2711,7 +2718,9 @@ impl<E: Effect> Executor<E> {
 
     fn values_equal(&self, a: &Value, b: &Value) -> bool {
         match (a, b) {
-            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            // Mixed small/big pairs are unequal by the canonical-form invariant.
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
             (Value::Binary(a), Value::Binary(b)) => {
                 // Compare binary data content
                 match (a, b) {
@@ -2868,7 +2877,8 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .collect();
             Ok(Value::function(*func_idx, remapped_captures?))
         }
-        Value::Integer(i) => Ok(Value::Integer(i.clone())),
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::BigInt(n) => Ok(Value::BigInt(n.clone())),
         Value::Builtin(name) => Ok(Value::Builtin(*name)),
         Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
         Value::Resource(id, type_name) => Ok(Value::Resource(*id, *type_name)),

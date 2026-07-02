@@ -372,9 +372,9 @@ impl NativeEffectBackend {
                 info.tuple_id,
                 vec![
                     kind,
-                    Value::Integer(size.into()),
-                    Value::Integer(modified_nanos.into()),
-                    Value::Integer(mode.into()),
+                    Value::int(size as i64),
+                    Value::int(modified_nanos as i64),
+                    Value::int(mode as i64),
                 ],
             ),
             vec![],
@@ -981,7 +981,7 @@ impl NativeEffectBackend {
 
         // Return bytes actually written (may be less than requested)
         let bytes_written = result_code as i64;
-        Ok((Value::Integer(bytes_written.into()), vec![]))
+        Ok((Value::int(bytes_written), vec![]))
     }
 
     fn handle_flush_completion(&self, result_code: i32) -> EffectResult {

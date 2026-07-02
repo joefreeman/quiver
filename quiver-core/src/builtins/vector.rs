@@ -7,7 +7,7 @@
 //! **checked**, returning nil (`[]`) rather than wrapping, matching the language's
 //! nil-propagation convention. Reductions accumulate into `BigInt`, so they never overflow.
 use crate::binary::BinaryData;
-use crate::builtins::{BuiltinResult, bigint_to_i64};
+use crate::builtins::{BuiltinResult, value_to_i64};
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::executor::Executor;
@@ -47,8 +47,8 @@ fn push_lane(out: &mut Vec<u8>, width: usize, value: i64) {
 }
 
 /// Validate a lane width argument (only 4- and 8-byte lanes are supported for now).
-fn checked_width(width: &BigInt) -> Result<usize, Error> {
-    let width = bigint_to_i64(width)?;
+fn checked_width(width: &Value) -> Result<usize, Error> {
+    let width = value_to_i64(width)?;
     if width == 4 || width == 8 {
         Ok(width as usize)
     } else {
@@ -72,7 +72,7 @@ fn elementwise<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b, width) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
-            (Value::Binary(a), Value::Binary(b), Value::Integer(w)) => (a, b, w),
+            (Value::Binary(a), Value::Binary(b), w) => (a, b, w),
             _ => return Err(arity_error()),
         },
         _ => return Err(arity_error()),
@@ -135,7 +135,7 @@ fn compare<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b, width) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
-            (Value::Binary(a), Value::Binary(b), Value::Integer(w)) => (a, b, w),
+            (Value::Binary(a), Value::Binary(b), w) => (a, b, w),
             _ => return Err(arity_error()),
         },
         _ => return Err(arity_error()),
@@ -195,7 +195,7 @@ pub fn builtin_vector_take<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (data, width, mask) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
-            (Value::Binary(d), Value::Integer(w), Value::Binary(m)) => (d, w, m),
+            (Value::Binary(d), w, Value::Binary(m)) => (d, w, m),
             _ => return Err(arity_error()),
         },
         _ => return Err(arity_error()),
@@ -228,7 +228,7 @@ pub fn builtin_vector_get<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (binary, width, index) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
-            (Value::Binary(b), Value::Integer(w), Value::Integer(i)) => (b, w, i),
+            (Value::Binary(b), w, i) => (b, w, i),
             _ => return Err(arity_error()),
         },
         _ => return Err(arity_error()),
@@ -236,14 +236,15 @@ pub fn builtin_vector_get<E: Effect>(
     let width = checked_width(width)?;
     let bytes = executor.materialize(binary)?;
 
-    let Some(index) = index.try_into().ok().filter(|i: &usize| {
-        bytes.len() % width == 0 && (*i + 1).saturating_mul(width) <= bytes.len()
-    }) else {
+    let index = index.as_int().ok_or_else(arity_error)?;
+    let Some(index) = index
+        .to_i64()
+        .and_then(|i| usize::try_from(i).ok())
+        .filter(|i| bytes.len() % width == 0 && (*i + 1).saturating_mul(width) <= bytes.len())
+    else {
         return Ok(nil());
     };
-    Ok(BuiltinResult::Value(Value::Integer(BigInt::from(lane(
-        &bytes, width, index,
-    )))))
+    Ok(BuiltinResult::Value(Value::int(lane(&bytes, width, index))))
 }
 
 /// Append one signed lane: `vector_push([bin, width, value]) -> bin | []`.
@@ -259,14 +260,15 @@ pub fn builtin_vector_push<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (binary, width, value) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
-            (Value::Binary(b), Value::Integer(w), Value::Integer(v)) => (b, w, v),
+            (Value::Binary(b), w, v) => (b, w, v),
             _ => return Err(arity_error()),
         },
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
 
-    let Some(value) = value.try_into().ok().filter(|v| fits(*v, width)) else {
+    let value = value.as_int().ok_or_else(arity_error)?;
+    let Some(value) = value.to_i64().filter(|v| fits(*v, width)) else {
         return Ok(nil());
     };
 
@@ -300,7 +302,7 @@ pub fn builtin_vector_sum<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (binary, width) = match arg {
         Value::Tuple(_, e) if e.len() == 2 => match (&e[0], &e[1]) {
-            (Value::Binary(b), Value::Integer(w)) => (b, w),
+            (Value::Binary(b), w) => (b, w),
             _ => return Err(arity_error()),
         },
         _ => return Err(arity_error()),
@@ -314,7 +316,7 @@ pub fn builtin_vector_sum<E: Effect>(
     for i in 0..bytes.len() / width {
         acc += lane(&bytes, width, i);
     }
-    Ok(BuiltinResult::Value(Value::Integer(acc)))
+    Ok(BuiltinResult::Value(Value::integer(acc)))
 }
 
 /// Dot product: `vector_dot([bin, bin, width]) -> int | []`. Exact (BigInt); nil on length
@@ -326,7 +328,7 @@ pub fn builtin_vector_dot<E: Effect>(
 ) -> Result<BuiltinResult<E>, Error> {
     let (a, b, width) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
-            (Value::Binary(a), Value::Binary(b), Value::Integer(w)) => (a, b, w),
+            (Value::Binary(a), Value::Binary(b), w) => (a, b, w),
             _ => return Err(arity_error()),
         },
         _ => return Err(arity_error()),
@@ -341,7 +343,7 @@ pub fn builtin_vector_dot<E: Effect>(
     for i in 0..a.len() / width {
         acc += BigInt::from(lane(&a, width, i)) * lane(&b, width, i);
     }
-    Ok(BuiltinResult::Value(Value::Integer(acc)))
+    Ok(BuiltinResult::Value(Value::integer(acc)))
 }
 
 fn arity_error() -> Error {

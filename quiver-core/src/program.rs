@@ -261,8 +261,12 @@ impl Program {
         executor: &Executor<E>,
     ) -> Vec<Instruction> {
         match value {
-            Value::Integer(n) => {
-                let const_idx = self.register_constant(Constant::Integer(n.clone()));
+            Value::Int(n) => {
+                let const_idx = self.register_constant(Constant::Integer((*n).into()));
+                vec![Instruction::Constant(const_idx)]
+            }
+            Value::BigInt(n) => {
+                let const_idx = self.register_constant(Constant::Integer((**n).clone()));
                 vec![Instruction::Constant(const_idx)]
             }
             Value::Binary(binary) => {
