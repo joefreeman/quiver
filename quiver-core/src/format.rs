@@ -294,7 +294,7 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
             if let Some(tuple_info) = type_lookup.lookup_tuple(*tuple_id) {
                 // Check for Str type and format as string if possible
                 if tuple_info.name.as_deref() == Some("Str")
-                    && let [Value::Binary(binary)] = elements.as_slice()
+                    && let [Value::Binary(binary)] = &elements[..]
                     && let Some(bytes) = binary_lookup.get_bytes(binary)
                     && let Some(s) = try_format_as_string(bytes)
                 {
@@ -304,7 +304,7 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                 // Check for Rational type and format as an `X/Y` literal (the form the
                 // compiler desugars into a `Rational` tuple).
                 if tuple_info.name.as_deref() == Some("Rational")
-                    && let [Value::Integer(numer), Value::Integer(denom)] = elements.as_slice()
+                    && let [Value::Integer(numer), Value::Integer(denom)] = &elements[..]
                 {
                     return format!("{}/{}", numer, denom);
                 }
@@ -312,7 +312,7 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                 // Check for a single-radical surd `Surd[a, b, n]` (`a + b√n`) and render it in
                 // mathematical notation rather than as a raw tuple.
                 if tuple_info.name.as_deref() == Some("Surd")
-                    && let [a_val, b_val, Value::Integer(radicand)] = elements.as_slice()
+                    && let [a_val, b_val, Value::Integer(radicand)] = &elements[..]
                     && let Some((an, ad)) = coeff_ratio(a_val, type_lookup)
                     && let Some((bn, bd)) = coeff_ratio(b_val, type_lookup)
                 {
@@ -365,7 +365,7 @@ fn coeff_ratio<T: TypeLookup>(value: &Value, lookup: &T) -> Option<(BigInt, BigI
         Value::Tuple(tuple_id, elements) => {
             let info = lookup.lookup_tuple(*tuple_id)?;
             if info.name.as_deref() == Some("Rational")
-                && let [Value::Integer(n), Value::Integer(d)] = elements.as_slice()
+                && let [Value::Integer(n), Value::Integer(d)] = &elements[..]
             {
                 return Some((n.clone(), d.clone()));
             }

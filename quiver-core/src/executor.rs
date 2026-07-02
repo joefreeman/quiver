@@ -10,7 +10,6 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// Bundled program update data for incremental compilation.
@@ -349,7 +348,11 @@ impl<E: Effect> Executor<E> {
                 );
                 self.refcounts[*idx] += 1;
             }
-            Value::Tuple(_, elements) | Value::Function(_, elements) => {
+            // The cached flag prunes the walk: a composite with no (transitive) heap
+            // references has nothing to account for, so data movement stays O(1).
+            Value::Tuple(_, elements) | Value::Function(_, elements)
+                if elements.has_heap_refs() =>
+            {
                 for element in elements.iter() {
                     self.retain(element);
                 }
@@ -378,7 +381,9 @@ impl<E: Effect> Executor<E> {
                     self.pending_free.push(*idx);
                 }
             }
-            Value::Tuple(_, elements) | Value::Function(_, elements) => {
+            Value::Tuple(_, elements) | Value::Function(_, elements)
+                if elements.has_heap_refs() =>
+            {
                 for element in elements.iter() {
                     self.release(element);
                 }
@@ -1875,7 +1880,7 @@ impl<E: Effect> Executor<E> {
         }
         captures.reverse();
 
-        let function_value = Value::Function(function_index, Arc::new(captures));
+        let function_value = Value::function(function_index, captures);
         self.push_value(proc, function_value);
 
         if let Some(frame) = proc.frames.last_mut() {
@@ -2013,7 +2018,7 @@ impl<E: Effect> Executor<E> {
         Ok(Some(Action::Spawn {
             caller: pid,
             function_index,
-            captures: (*captures).clone(),
+            captures: captures.to_vec(),
             argument,
         }))
     }
@@ -2168,7 +2173,7 @@ impl<E: Effect> Executor<E> {
 
         // Extract sources: if it's a tuple, use its elements; otherwise use the value itself
         let sources: Vec<Value> = match value {
-            Value::Tuple(_, elements) => (*elements).clone(),
+            Value::Tuple(_, elements) => elements.to_vec(),
             single => vec![single],
         };
 
@@ -2861,7 +2866,7 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .iter()
                 .map(|capture| remap_heap_indices(capture, index_map))
                 .collect();
-            Ok(Value::Function(*func_idx, Arc::new(remapped_captures?)))
+            Ok(Value::function(*func_idx, remapped_captures?))
         }
         Value::Integer(i) => Ok(Value::Integer(i.clone())),
         Value::Builtin(name) => Ok(Value::Builtin(*name)),

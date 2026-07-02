@@ -292,7 +292,7 @@ impl Program {
             }
             Value::Function(function, captures) => {
                 let func_index = if !captures.is_empty() {
-                    self.inject_function_captures(*function, (**captures).clone(), executor)
+                    self.inject_function_captures(*function, captures.to_vec(), executor)
                 } else {
                     *function
                 };

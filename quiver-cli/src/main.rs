@@ -210,7 +210,7 @@ fn compile_and_extract_entry(
         Value::Function(func_index, captures) => {
             if !captures.is_empty() {
                 // Inject captures into the program to create a new function
-                program.inject_function_captures(func_index, (*captures).clone(), &executor)
+                program.inject_function_captures(func_index, captures.to_vec(), &executor)
             } else {
                 func_index
             }
