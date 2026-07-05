@@ -165,6 +165,75 @@ fn test_pre_contract_attaches_and_is_callable() {
 }
 
 #[test]
+fn test_pre_contract_holds_is_transparent() {
+    // Debug builds enforce `:pre`; a satisfied precondition is invisible to the result.
+    quiver()
+        .debug()
+        .evaluate("f = #'int { :pre #{ [~, 0] __integer_compare__ =1 }, [~, 2] __integer_multiply__ }, 5 f")
+        .expect("10");
+}
+
+#[test]
+fn test_pre_contract_violation_aborts() {
+    // A violated precondition raises a contract-violation runtime error at the call site.
+    quiver()
+        .debug()
+        .evaluate("f = #'int { :pre #{ [~, 0] __integer_compare__ =1 }, [~, 2] __integer_multiply__ }, -5 f")
+        .expect_runtime_error(quiver_core::error::Error::Panic(
+            "Precondition violated at test:1:88".to_string(),
+        ));
+}
+
+#[test]
+fn test_post_contract_violation_aborts() {
+    // The post-contract receives `[in: arg, out: result]`; a broken result aborts.
+    quiver()
+        .debug()
+        .evaluate("f = #'int { :post #{ $ =[in: i, out: o], [o, i] __integer_compare__ =0 }, [~, 1] __integer_add__ }, 5 f")
+        .expect_runtime_error(quiver_core::error::Error::Panic(
+            "Postcondition violated at test:1:103".to_string(),
+        ));
+}
+
+#[test]
+fn test_post_contract_holds_is_transparent() {
+    // A satisfied postcondition leaves the result untouched.
+    quiver()
+        .debug()
+        .evaluate("f = #'int { :post #{ $ =[in: i, out: o], [o, i] __integer_compare__ =1 }, [~, 1] __integer_add__ }, 5 f")
+        .expect("6");
+}
+
+#[test]
+fn test_panic_builtin_aborts_with_message() {
+    // Contract checks compile to `__panic__`, which is a general abort primitive: it takes
+    // a `Str` message and raises a runtime error rather than flowing on as a (recoverable)
+    // nil. Usable directly, e.g. to back an `assert`/`unreachable` helper.
+    quiver()
+        .evaluate("\"boom\" __panic__")
+        .expect_runtime_error(quiver_core::error::Error::Panic("boom".to_string()));
+}
+
+#[test]
+fn test_contracts_not_enforced_in_release() {
+    // Release builds emit a plain call: the violated precondition is not checked.
+    quiver()
+        .evaluate("f = #'int { :pre #{ [~, 0] __integer_compare__ =1 }, [~, 2] __integer_multiply__ }, -5 f")
+        .expect("-10");
+}
+
+#[test]
+fn test_contract_erased_through_parameter_is_not_enforced() {
+    // Passing the function through a declared parameter erases its annotation row, so the
+    // contract is no longer statically visible and the call is not wrapped — consistent
+    // with annotation visibility. The precondition would fail, but it is never checked.
+    quiver()
+        .debug()
+        .evaluate("f = #'int { :pre #{ [~, 0] __integer_compare__ =1 }, [~, 2] __integer_multiply__ }, call = #[g: (#'int -> 'int), x: 'int] { $x $g }, [g: &f, x: -5] call")
+        .expect("-10");
+}
+
+#[test]
 fn test_absent_post_on_exact_row_is_rejected() {
     // The literal's row is exact (:pre only), so :post is provably absent — an
     // always-nil retrieval, rejected by rule 5.

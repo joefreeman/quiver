@@ -442,6 +442,45 @@ pub fn register_reference_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>)
     register_builtin!(registry, "reference", reference::builtin_reference, nil => TypeSpec::Reference);
 }
 
+/// Abort the current process with a runtime panic carrying the given `Str` message. It
+/// never returns a value (its result type is the empty union), so a chain step after it is
+/// unreachable. This is the language's assertion/trap primitive — debug-mode contract
+/// checks compile to it, and it backs any `assert`/`unreachable`-style helper. It is
+/// deliberately *not* a nil: a panic is an unrecoverable bug, not a short-circuiting
+/// failure, so it propagates as a runtime error rather than flowing on as data.
+pub fn builtin_panic<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    let message = match arg {
+        Value::Tuple(_, fields) if fields.len() == 1 => match &fields[0] {
+            Value::Binary(binary) => {
+                String::from_utf8_lossy(&executor.get_binary_data(binary)?.to_vec()).into_owned()
+            }
+            other => {
+                return Err(Error::TypeMismatch {
+                    expected: "Str[binary]".to_string(),
+                    found: other.type_name().to_string(),
+                });
+            }
+        },
+        other => {
+            return Err(Error::TypeMismatch {
+                expected: "Str[binary]".to_string(),
+                found: other.type_name().to_string(),
+            });
+        }
+    };
+    Err(Error::Panic(message))
+}
+
+pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let str = TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]);
+    // `__panic__` never returns: its result is the empty union (`never`).
+    register_builtin!(registry, "panic", builtin_panic, str => TypeSpec::Union(vec![]));
+}
+
 /// Get all core builtin modules. This establishes the full builtin *contract* every host shares:
 /// the pure builtins (integer/binary/vector) with their universal implementations, and the IO
 /// builtins' signatures (with placeholder implementations that executing hosts replace via
@@ -452,6 +491,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_integer_builtins,
         register_vector_builtins,
         register_reference_builtins,
+        register_control_builtins,
         io::register_io_signatures,
     ]
 }

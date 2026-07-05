@@ -29,6 +29,10 @@ pub enum Error {
     // Operation restrictions
     OperationNotAllowed { operation: String, context: String },
 
+    // An explicit, unrecoverable abort (`__panic__`) — e.g. a debug-mode `:pre`/`:post`
+    // contract whose verdict was nil, or an `assert`/`unreachable` helper.
+    Panic(String),
+
     // Scope management errors
     ScopeCountInvalid { expected: usize, found: usize },
     ScopeUnderflow,

@@ -37,6 +37,10 @@
 
 // Reduce a rational to canonical form: denominator positive, gcd 1 (denominator non-zero).
 reduce = #'rational {
+  // The caller must supply a non-zero denominator; the result is always canonical form,
+  // whose denominator is positive.
+  :pre #{ $ =Rational[_, ('int)d], [d, 0] __integer_compare__ { =0 => [] | Ok } }
+  :post #{ $ =(out: Rational[_, ('int)d]), [d, 0] __integer_compare__ =1 }
   =Rational[n, d]
   {
     | [d, 0] __integer_compare__ =-1 => {
@@ -302,6 +306,17 @@ max = #['opt, 'opt] {
 // Clamp x to the range [lo, hi] (nil if any operand is nil).
 clamp = #['opt, 'opt, 'opt] {
   :doc "Clamps a number to the range from lo to hi; nil when any operand is nil."
+  // The caller must give a non-empty range (`lo ≤ hi`); the result then lies within it.
+  // Comparisons that are nil (a nil operand, or incompatible surds) can't witness a
+  // breach, so they pass — the checks only fire on a definite ordering violation.
+  :pre #{ $ =[_, lo, hi], [lo, hi] compare { =1 => [] | Ok } }
+  :post #{
+    $ =[in: [_, lo, hi], out: o]
+    o {
+      | =[] => Ok
+      | =v => { [lo, v] compare { =1 => [] | Ok }, [v, hi] compare { =1 => [] | Ok } }
+    }
+  }
   | =([[], _, _] | [_, [], _] | [_, _, []]) => []
   | =[x, lo, hi] => {
     | [x, lo] compare =-1 => lo
@@ -440,6 +455,8 @@ round = #'opt {
   // Absolute value, preserving kind.
   abs: #'opt {
     :doc "The absolute value of a number, preserving its kind; nil for a nil operand."
+    // The result is never negative (nil passes through).
+    :post #{ $ =(out: o), o { =[] => Ok | sign { =-1 => [] | Ok } } }
     | =Surd[a, b, n] => {
       ar = a to_rational
       br = b to_rational

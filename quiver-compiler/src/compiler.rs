@@ -2684,6 +2684,136 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.add_instruction(Instruction::Stamp(site));
     }
 
+    /// Whether the callee's static type carries definite `:pre`/`:post` contract entries.
+    /// Contracts flow with the value's row through inferred boundaries; a declared
+    /// boundary (a function parameter) erases the row, so a contract is enforced only
+    /// where it is statically visible — consistent with annotation retrieval.
+    fn contract_presence(&self, type_id: usize, pre_key: usize, post_key: usize) -> (bool, bool) {
+        match self.program.lookup_type(type_id) {
+            Some(Type::Annotated { entries, .. }) => {
+                let has = |key| entries.binary_search_by_key(&key, |(k, _)| *k).is_ok();
+                (has(pre_key), has(post_key))
+            }
+            Some(Type::Union(members)) if members.len() == 1 => {
+                self.contract_presence(members[0], pre_key, post_key)
+            }
+            _ => (false, false),
+        }
+    }
+
+    /// Emit a function call (`Instruction::Call`), wrapping it with debug-mode `:pre`/
+    /// `:post` contract enforcement when the callee's static type carries those keys. The
+    /// contract functions are fetched from the closure value itself, applied, and a nil
+    /// verdict aborts via `__panic__`. Release builds — and callees with no visible
+    /// contract — emit a plain call.
+    ///
+    /// The pre-contract `#P -> ok?` is applied to a copy of the argument; the post-contract
+    /// `#[in: P, out: R] -> ok?` to a copy of `[in: argument, out: result]`. Stack on
+    /// entry is `[argument, callable]` and on exit `[result]`, matching a plain call.
+    fn emit_call_with_contracts(
+        &mut self,
+        target_type_id: usize,
+        parameter: usize,
+        result: usize,
+    ) -> Result<(), Error> {
+        let (has_pre, has_post) = if self.debug {
+            let pre_key = annotations::intern_key(self.program, annotations::PRE);
+            let post_key = annotations::intern_key(self.program, annotations::POST);
+            self.contract_presence(target_type_id, pre_key, post_key)
+        } else {
+            (false, false)
+        };
+        if !has_pre && !has_post {
+            self.codegen.add_instruction(Instruction::Call);
+            return Ok(());
+        }
+        let pre_key = annotations::intern_key(self.program, annotations::PRE);
+        let post_key = annotations::intern_key(self.program, annotations::POST);
+        // The `[in: P, out: R]` argument the post-contract receives. Field types are
+        // irrelevant at runtime, but describe the contract's parameter honestly.
+        let in_out_tuple = self.program.register_tuple(
+            None,
+            vec![
+                (Some("in".to_string()), parameter),
+                (Some("out".to_string()), result),
+            ],
+        );
+
+        // Stash a copy of the argument and the post-contract *beneath* `[arg, callable]`
+        // so they survive the call (which consumes both). Two `Rotate(4)`s slide the two
+        // fresh copies under the pair: `[arg, callable, arg_c, post_fn]` -> `[arg_c,
+        // post_fn, arg, callable]`.
+        if has_post {
+            self.codegen.add_instruction(Instruction::Pick(1));
+            self.codegen.add_instruction(Instruction::Pick(1));
+            self.codegen
+                .add_instruction(Instruction::GetAnnotation(post_key, None));
+            self.codegen.add_instruction(Instruction::Rotate(4));
+            self.codegen.add_instruction(Instruction::Rotate(4));
+        }
+
+        // Pre-check: apply the pre-contract to a copy of the argument, leaving the
+        // `[arg, callable]` pair (on top) untouched for the real call.
+        if has_pre {
+            self.codegen.add_instruction(Instruction::Pick(1));
+            self.codegen.add_instruction(Instruction::Pick(1));
+            self.codegen
+                .add_instruction(Instruction::GetAnnotation(pre_key, None));
+            self.codegen.add_instruction(Instruction::Call);
+            self.emit_contract_verdict("Precondition")?;
+        }
+
+        // The real call: `[.., arg, callable]` -> `[.., result]`.
+        self.codegen.add_instruction(Instruction::Call);
+
+        // Post-check: build `[in: arg_c, out: result]` from the stashed argument and the
+        // result, apply the post-contract, then drop the two stashed values, leaving
+        // `[result]`.
+        if has_post {
+            self.codegen.add_instruction(Instruction::Pick(2)); // arg_c
+            self.codegen.add_instruction(Instruction::Pick(1)); // result
+            self.codegen
+                .add_instruction(Instruction::Tuple(in_out_tuple));
+            self.codegen.add_instruction(Instruction::Pick(2)); // post_fn
+            self.codegen.add_instruction(Instruction::Call);
+            self.emit_contract_verdict("Postcondition")?;
+            self.codegen.emit_rotate_pop(3); // drop arg_c
+            self.codegen.emit_rotate_pop(2); // drop post_fn
+        }
+        Ok(())
+    }
+
+    /// Emit the verdict check for a contract: the verdict is on top of the stack; a non-nil
+    /// verdict (the contract holds) is popped and execution continues, while a nil verdict
+    /// falls through to a `__panic__` naming the call site.
+    fn emit_contract_verdict(&mut self, label: &str) -> Result<(), Error> {
+        let ok = self.codegen.emit_jump_if_placeholder();
+        let location = self
+            .current_span
+            .map(|span| format!(" at {}:{}:{}", self.current_module, span.line, span.column))
+            .unwrap_or_default();
+        self.emit_panic(&format!("{label} violated{location}"))?;
+        self.codegen.patch_jump_to_here(ok);
+        Ok(())
+    }
+
+    /// Emit an unconditional abort: push `message` as a `Str['bin]` and apply `__panic__`,
+    /// which never returns (so the surrounding stack state past this point is unreachable).
+    fn emit_panic(&mut self, message: &str) -> Result<(), Error> {
+        let index = self
+            .program
+            .register_constant(Constant::Binary(message.as_bytes().to_vec()));
+        self.codegen.add_instruction(Instruction::Constant(index));
+        let binary_type = self.program.register_type(Type::Binary);
+        let str_tuple = self
+            .program
+            .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
+        self.codegen.add_instruction(Instruction::Tuple(str_tuple));
+        self.compile_builtin("panic")?;
+        self.codegen.add_instruction(Instruction::Call);
+        Ok(())
+    }
+
     /// Compile a sequence of `,`-separated chains, short-circuiting to nil if any yields nil.
     fn compile_sequence(
         &mut self,
@@ -4828,8 +4958,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.codegen.add_instruction(Instruction::Rotate(2));
             }
 
-            // Execute the call
-            self.codegen.add_instruction(Instruction::Call);
+            // Execute the call, wrapping it with debug-mode `:pre`/`:post` contract
+            // enforcement when the callee's static type carries those contracts.
+            self.emit_call_with_contracts(target_type_id, param_id, result_id)?;
             Ok(result_type)
         } else if let Type::Process {
             send: send_type, ..

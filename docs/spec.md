@@ -471,8 +471,9 @@ equality ignore them, and they never survive construction.
 
 Each annotation's value type is inferred at its attach site and tracked in the value's
 type as it flows. Three builtin keys are checked at attach: `:doc` (a `Str['bin]`) and
-the passive contract keys `:pre`/`:post`, which for `#P -> R` expect `#P -> ok?` and
-`#[in: P, out: R] -> ok?`.
+the contract keys `:pre`/`:post`, which for `#P -> R` expect `#P -> ok?` and
+`#[in: P, out: R] -> ok?`. The contracts are inert in release builds but enforced in
+debug builds (see [Contract enforcement](#contract-enforcement-debug-builds)).
 
 ### Attaching
 
@@ -530,6 +531,25 @@ and positional (nil as data — an argument, a field — is never stamped). Stam
 invisible to the type system, so types are identical across build modes: read them with a
 checked retrieval (`x:((line: 'int))origin`, nil in a release build) — bare `x:origin` is
 always an error. `origin` is otherwise ordinary; stamps never overwrite a program's own.
+
+### Contract enforcement (debug builds)
+
+Debug builds enforce a function's `:pre`/`:post` contracts as assertions. A call to a
+function whose **statically visible** type carries a contract is wrapped: `:pre` is applied
+to the argument before the call, `:post` to `[in: argument, out: result]` after, and a nil
+verdict aborts (via `__panic__`) with an error naming the call site. The contract functions
+are read from the callee value itself, so the check follows the value through variables and
+module members — but a contract erased by a declared boundary (a function parameter) is no
+longer visible and is not enforced, exactly as annotation retrieval is only visible there.
+Release builds emit a plain call, so a correct program behaves identically in both modes.
+
+```quiver
+half = #'int {
+  :pre #{ [~, 0] num.gt? }              // the argument must be positive
+  :post #{ $ =[in: i, out: o], [i, o] num.gt? }   // the result is smaller
+  [~, 2] int.div
+}
+```
 
 ## Ref creation
 

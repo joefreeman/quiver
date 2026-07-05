@@ -119,5 +119,5 @@ fn test_module_sites_name_the_module() {
     quiver()
         .debug()
         .evaluate("[5, 0] %int.div")
-        .expect_origin("nil result at int:7:18");
+        .expect_origin("nil result at int:26:18");
 }
