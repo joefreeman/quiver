@@ -886,6 +886,12 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
                 .iter()
                 .any(|(_, field_type_id)| contains_variables(*field_type_id, lookup))
         }
+        Type::Annotated { base, entries, .. } => {
+            contains_variables(*base, lookup)
+                || entries
+                    .iter()
+                    .any(|(_, value_type)| contains_variables(*value_type, lookup))
+        }
         Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Resource(_) => {
             false
         }
@@ -997,6 +1003,27 @@ pub fn substitute(
                 })
             }
         }
+        Type::Annotated {
+            base,
+            exact,
+            entries,
+        } => {
+            let new_base = substitute(base, bindings, program);
+            let mut any_changed = new_base != base;
+            let new_entries: Vec<(usize, usize)> = entries
+                .iter()
+                .map(|(key, value_type)| {
+                    let new_value = substitute(*value_type, bindings, program);
+                    any_changed = any_changed || new_value != *value_type;
+                    (*key, new_value)
+                })
+                .collect();
+            if any_changed {
+                program.annotate_type(new_base, exact, new_entries)
+            } else {
+                type_id
+            }
+        }
     }
 }
 
@@ -1046,6 +1073,13 @@ pub fn unify(
             }
             Ok(())
         }
+
+        // Annotation rows are transparent to structural unification: a `'t` pattern binds
+        // the whole annotated type (the Variable arm above fires first), but a structural
+        // pattern (tuple/callable/...) unifies against the row's base. A row in pattern
+        // position is likewise peeled.
+        (_, Type::Annotated { base, .. }) => unify(bindings, pattern_id, *base, program),
+        (Type::Annotated { base, .. }, _) => unify(bindings, *base, concrete_id, program),
 
         // When concrete is a variable, resolve it and try unifying with the resolved type
         (_, Type::Variable(name)) => {

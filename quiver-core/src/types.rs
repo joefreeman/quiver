@@ -13,6 +13,19 @@ pub const OK: usize = 1;
 pub trait TypeLookup {
     fn lookup_type(&self, type_id: usize) -> Option<&Type>;
     fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo>;
+    /// The display name of an annotation key (for rendering `Type::Annotated`).
+    fn lookup_annotation_key_name(&self, _key: usize) -> Option<&str> {
+        None
+    }
+    /// Look up a type, seeing through an annotation row to its base shape. Most
+    /// structural questions ("is this callable?", "which tuple?") want this — a bare
+    /// `lookup_type` on an annotated id sees `Type::Annotated` and fails shape matches.
+    fn lookup_base(&self, type_id: usize) -> Option<&Type>
+    where
+        Self: Sized,
+    {
+        self.lookup_type(Type::strip_annotations(type_id, self))
+    }
 }
 
 /// The unified type representation used throughout compiler, runtime, and bytecode.
@@ -42,6 +55,20 @@ pub enum Type {
     Cycle(usize),
     #[serde(rename = "union")]
     Union(Vec<usize>),
+    /// A carrier type (tuple/partial/callable/cycle — never union or annotated) with an
+    /// **annotation row**: the annotations the value is statically known to carry.
+    /// `exact` rows carry exactly these entries (freshly constructed or fully attached);
+    /// open rows (`exact: false`) carry *at least* these — the value may hold further,
+    /// erased annotations (it crossed a declared boundary). A plain, unwrapped type is
+    /// equivalent to an open-empty row; that form is never interned. There is no surface
+    /// syntax for rows — they are inferred, and print using the attach syntax.
+    #[serde(rename = "annotated")]
+    Annotated {
+        base: usize,
+        exact: bool,
+        /// `(key id, value type id)`, sorted by key id, unique.
+        entries: Vec<(usize, usize)>,
+    },
     #[serde(rename = "process")]
     Process {
         send: Option<usize>,
@@ -102,6 +129,25 @@ impl Type {
         matches!(self, Type::Tuple(id) if *id == OK)
     }
 
+    /// The base type once any annotation row is peeled: `T @ ρ` → `T`, anything else →
+    /// itself. Returns the type id.
+    pub fn strip_annotations<T: TypeLookup>(type_id: usize, lookup: &T) -> usize {
+        match lookup.lookup_type(type_id) {
+            Some(Type::Annotated { base, .. }) => *base,
+            _ => type_id,
+        }
+    }
+
+    /// Like [`Type::is_nil`], but sees through annotation rows (annotated nil is nil).
+    pub fn is_nil_deep<T: TypeLookup>(&self, lookup: &T) -> bool {
+        match self {
+            Type::Annotated { base, .. } => lookup
+                .lookup_type(*base)
+                .is_some_and(|base_type| base_type.is_nil()),
+            _ => self.is_nil(),
+        }
+    }
+
     /// Extract tuple IDs with type lookup
     pub fn extract_tuples_with_lookup<T: TypeLookup>(&self, lookup: &T) -> Vec<usize> {
         match self {
@@ -110,11 +156,19 @@ impl Type {
                 .filter_map(|&type_id| {
                     lookup.lookup_type(type_id).and_then(|t| match t {
                         Type::Tuple(id) => Some(*id),
+                        Type::Annotated { base, .. } => match lookup.lookup_type(*base) {
+                            Some(Type::Tuple(id)) => Some(*id),
+                            _ => None,
+                        },
                         _ => None,
                     })
                 })
                 .collect(),
             Type::Tuple(id) => vec![*id],
+            Type::Annotated { base, .. } => match lookup.lookup_type(*base) {
+                Some(Type::Tuple(id)) => vec![*id],
+                _ => vec![],
+            },
             _ => vec![],
         }
     }
@@ -128,33 +182,39 @@ impl Type {
         }
     }
 
-    /// Check if this type contains NIL (either is NIL or contains NIL in union)
+    /// Check if this type contains NIL (either is NIL or contains NIL in union).
+    /// Sees through annotation rows: annotated nil is nil for control flow.
     pub fn contains_nil<T: TypeLookup>(&self, lookup: &T) -> bool {
         match self {
             Type::Tuple(id) if *id == NIL => true,
-            Type::Union(type_ids) => type_ids
-                .iter()
-                .any(|&id| lookup.lookup_type(id).map(|t| t.is_nil()).unwrap_or(false)),
+            Type::Annotated { .. } => self.is_nil_deep(lookup),
+            Type::Union(type_ids) => type_ids.iter().any(|&id| {
+                lookup
+                    .lookup_type(id)
+                    .map(|t| t.is_nil_deep(lookup))
+                    .unwrap_or(false)
+            }),
             _ => false,
         }
     }
 
-    /// Return a type without NIL variants
+    /// Return a type without NIL variants (annotated nils count as nil).
     pub fn without_nil<T: TypeLookup>(&self, lookup: &T) -> Type {
         match self {
             Type::Tuple(id) if *id == NIL => Type::never(),
+            Type::Annotated { .. } if self.is_nil_deep(lookup) => Type::never(),
             Type::Union(type_ids) => {
                 let filtered: Vec<usize> = type_ids
                     .iter()
-                    .filter(|&&id| !lookup.lookup_type(id).map(|t| t.is_nil()).unwrap_or(false))
+                    .filter(|&&id| {
+                        !lookup
+                            .lookup_type(id)
+                            .map(|t| t.is_nil_deep(lookup))
+                            .unwrap_or(false)
+                    })
                     .copied()
                     .collect();
-                if filtered.len() == 1 {
-                    // Could unwrap to single type, but keep as union for now
-                    Type::Union(filtered)
-                } else {
-                    Type::Union(filtered)
-                }
+                Type::Union(filtered)
             }
             _ => self.clone(),
         }
@@ -231,6 +291,37 @@ pub fn types_overlap<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &
         &mut assumptions,
         &mut type_stack,
     )
+}
+
+/// Row compatibility for `Annotated <= Annotated` under assignability:
+/// - target open: every target entry must exist in the source, covariantly;
+/// - target exact: only an exact source with the same key set satisfies it, covariantly;
+/// - an open source never satisfies an exact target.
+fn rows_compatible<T: TypeLookup>(
+    (source_exact, source_entries): (bool, &[(usize, usize)]),
+    (target_exact, target_entries): (bool, &[(usize, usize)]),
+    lookup: &T,
+    mode: UnionMode,
+    assumptions: &mut HashSet<(usize, usize)>,
+    type_stack: &mut Vec<usize>,
+) -> bool {
+    if target_exact && (!source_exact || source_entries.len() != target_entries.len()) {
+        return false;
+    }
+    target_entries.iter().all(|(key, target_type)| {
+        source_entries
+            .binary_search_by_key(key, |(k, _)| *k)
+            .is_ok_and(|index| {
+                check_type_relation(
+                    source_entries[index].1,
+                    *target_type,
+                    lookup,
+                    mode,
+                    assumptions,
+                    type_stack,
+                )
+            })
+    })
 }
 
 /// Unified implementation of type relation checking.
@@ -313,6 +404,55 @@ fn check_type_relation<T: TypeLookup>(
                 check_type_relation(self_id, stack_id, lookup, mode, assumptions, type_stack)
             } else {
                 true
+            }
+        }
+
+        // Annotation rows. Overlap (`Any`) treats rows as transparent — pattern matching
+        // ignores annotations. Assignability (`All`) applies the row rules: a plain type
+        // is an open-empty row; forgetting on the left is free; an open row never
+        // satisfies an exactness claim.
+        (
+            Type::Annotated {
+                base: base1,
+                exact: exact1,
+                entries: entries1,
+            },
+            Type::Annotated {
+                base: base2,
+                exact: exact2,
+                entries: entries2,
+            },
+        ) => {
+            if !check_type_relation(*base1, *base2, lookup, mode, assumptions, type_stack) {
+                return false;
+            }
+            if mode == UnionMode::Any {
+                return true;
+            }
+            rows_compatible(
+                (*exact1, entries1),
+                (*exact2, entries2),
+                lookup,
+                mode,
+                assumptions,
+                type_stack,
+            )
+        }
+        // Annotated on the left vs a non-union pattern: forget the row (any row `<=`
+        // open-empty). Unions/cycles on the right are handled by their own arms so the
+        // row can still match an annotated member inside them.
+        (Type::Annotated { base, .. }, pattern) if !matches!(pattern, Type::Union(_)) => {
+            check_type_relation(*base, pattern_id, lookup, mode, assumptions, type_stack)
+        }
+        // Plain (open-empty) on the left vs an annotated pattern: sound only when the
+        // pattern demands nothing — but such rows are normalised away, so under `All`
+        // this fails. Overlap stays row-transparent.
+        (self_type, Type::Annotated { base, .. }) if !matches!(self_type, Type::Union(_)) => {
+            match mode {
+                UnionMode::Any => {
+                    check_type_relation(self_id, *base, lookup, mode, assumptions, type_stack)
+                }
+                UnionMode::All => false,
             }
         }
 
@@ -543,5 +683,110 @@ fn check_type_relation<T: TypeLookup>(
         }
 
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod annotation_row_tests {
+    use super::*;
+    use crate::program::Program;
+
+    fn setup() -> (Program, usize, usize, usize, usize) {
+        let mut p = Program::new();
+        let nil = p.register_type(Type::nil());
+        let int = p.register_type(Type::Integer);
+        let bin = p.register_type(Type::Binary);
+        let tuple_a = {
+            let id = p.register_tuple(Some("A".to_string()), vec![(None, int)]);
+            p.register_type(Type::Tuple(id))
+        };
+        (p, nil, int, bin, tuple_a)
+    }
+
+    #[test]
+    fn open_empty_rows_are_never_interned() {
+        let (mut p, nil, ..) = setup();
+        assert_eq!(p.annotate_type(nil, false, vec![]), nil);
+    }
+
+    #[test]
+    fn annotating_distributes_over_unions_and_folds_nested_rows() {
+        let (mut p, nil, int, ..) = setup();
+        let union = p.register_type(Type::Union(vec![nil, int]));
+        let annotated = p.annotate_type(union, true, vec![(0, int)]);
+        let Some(Type::Union(members)) = p.lookup_type(annotated).cloned() else {
+            panic!("expected union");
+        };
+        assert!(members.iter().all(|&m| matches!(
+            p.lookup_type(m),
+            // Non-carrier members (int) keep no row only if annotate wraps them too —
+            // distribution wraps each member; carrier-ness is the caller's check.
+            Some(Type::Annotated { .. })
+        )));
+
+        // Re-annotating replaces the entry rather than nesting.
+        let wrapped = p.annotate_type(nil, true, vec![(0, int)]);
+        let replaced = p.annotate_type(wrapped, true, vec![(0, nil)]);
+        let Some(Type::Annotated { base, entries, .. }) = p.lookup_type(replaced) else {
+            panic!("expected annotated");
+        };
+        assert_eq!(*base, nil);
+        assert_eq!(entries, &vec![(0, nil)]);
+    }
+
+    #[test]
+    fn row_subtyping_rules() {
+        let (mut p, nil, int, bin, tuple_a) = setup();
+        let exact_x = p.annotate_type(nil, true, vec![(0, int)]);
+        let exact_wider = p.annotate_type(nil, true, vec![(0, bin)]);
+        let exact_two = p.annotate_type(nil, true, vec![(0, int), (1, int)]);
+        let open_x = p.annotate_type(nil, false, vec![(0, int)]);
+        let closed_empty = p.annotate_type(nil, true, vec![]);
+
+        // Forgetting on the left: any row <= plain (open-empty).
+        assert!(is_compatible(exact_x, nil, &p));
+        assert!(is_compatible(open_x, nil, &p));
+        assert!(is_compatible(closed_empty, nil, &p));
+        // Plain (open) never satisfies a row demand under All.
+        assert!(!is_compatible(nil, exact_x, &p));
+        assert!(!is_compatible(nil, closed_empty, &p));
+        // exact <= open with the entries present.
+        assert!(is_compatible(exact_x, open_x, &p));
+        // open <= exact never.
+        assert!(!is_compatible(open_x, exact_x, &p));
+        // exact <= exact: same key set, entrywise covariant.
+        assert!(is_compatible(exact_x, exact_x, &p));
+        assert!(!is_compatible(exact_x, exact_wider, &p)); // int vs bin entry
+        assert!(!is_compatible(exact_two, exact_x, &p)); // extra key breaks exactness
+        assert!(!is_compatible(exact_x, exact_two, &p));
+        // Base mismatch fails regardless of rows.
+        let exact_on_a = p.annotate_type(tuple_a, true, vec![(0, int)]);
+        assert!(!is_compatible(exact_on_a, exact_x, &p));
+
+        // Annotated member matches inside a union on the right.
+        let union = p.register_type(Type::Union(vec![int, exact_x]));
+        assert!(is_compatible(exact_x, union, &p));
+    }
+
+    #[test]
+    fn overlap_is_row_transparent() {
+        let (mut p, nil, int, ..) = setup();
+        let exact_x = p.annotate_type(nil, true, vec![(0, int)]);
+        // Pattern matching ignores rows: annotated nil overlaps plain nil both ways.
+        assert!(types_overlap(exact_x, nil, &p));
+        assert!(types_overlap(nil, exact_x, &p));
+        assert!(!types_overlap(exact_x, int, &p));
+    }
+
+    #[test]
+    fn nil_helpers_see_through_rows() {
+        let (mut p, nil, int, ..) = setup();
+        let annotated_nil = p.annotate_type(nil, true, vec![(0, int)]);
+        let t = p.lookup_type(annotated_nil).unwrap().clone();
+        assert!(t.is_nil_deep(&p));
+        assert!(t.contains_nil(&p));
+        assert!(t.without_nil(&p).is_never());
+        let union = Type::Union(vec![int, annotated_nil]);
+        assert!(union.contains_nil(&p));
     }
 }

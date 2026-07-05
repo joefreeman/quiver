@@ -69,8 +69,11 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
 
     for function in input.functions {
         for instruction in &function.instructions {
-            if let Instruction::IsType(type_id) = instruction {
-                pattern_type_ids.insert(*type_id);
+            match instruction {
+                Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) => {
+                    pattern_type_ids.insert(*type_id);
+                }
+                _ => {}
             }
         }
     }
@@ -232,6 +235,10 @@ fn compute_compatible_concrete_types(
     index: &TypeIndex,
 ) -> HashSet<ConcreteType> {
     let mut compat_set = HashSet::new();
+
+    // Annotation rows are invisible to pattern matching, so a runtime type check
+    // against `T @ row` must behave exactly as against `T`.
+    let pattern_id = Type::strip_annotations(pattern_id, lookup);
 
     // We need to register primitive types to check compatibility
     // For Integer and Binary, we check by constructing their type IDs on-the-fly

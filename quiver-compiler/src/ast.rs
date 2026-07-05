@@ -44,11 +44,28 @@ pub enum Statement {
     Expression(Sequence),
 }
 
+/// One annotation in a block prefix (`:doc "..."`): a declared key name and the chain
+/// producing its value. Annotations attach to the value the enclosing braces denote — the
+/// closure for a function literal's body, the block's result for a chain block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Annotation {
+    pub name: String,
+    /// Span of the key name (`:doc`), for hover and go-to-definition.
+    pub name_span: Spanned,
+    /// Span starting at the annotation's `:`, for attaching leading trivia when formatting.
+    pub span: Spanned,
+    pub value: Chain,
+}
+
 /// An expression: one or more `|`-separated [`Branch`]es. A branchless expression is just a
 /// single branch with no consequence. This is the grammar shared by statement bodies, function
 /// bodies, and block contents; a [`Term::Block`] is simply a braced expression that adds a scope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expression {
+    /// Annotation prefix (`:key value` steps before the first branch). Only populated for
+    /// braced forms (blocks and function bodies); an annotation-only block has annotations
+    /// and no branches, and acts as identity-plus-attach.
+    pub annotations: Vec<Annotation>,
     pub branches: Vec<Branch>,
 }
 
@@ -248,10 +265,15 @@ pub struct Access {
     pub span: Spanned,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AccessPath {
     Field(String),
     Index(usize),
+    /// Annotation retrieval (`x:key`, glued): yields the annotation value or nil. An
+    /// optional expected shape (`x:('t)key`, the checked form) makes the retrieval
+    /// total: legal on any carrier, guarded by a runtime structural test — an entry
+    /// outside the shape answers nil, exactly as a `=('t)v` ascription fails to nil.
+    Annotation(String, Option<Type>),
 }
 
 /// Partial pattern field. `pattern` is `None` to bind the field by name (`(x)`), or `Some` to

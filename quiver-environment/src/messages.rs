@@ -33,7 +33,7 @@ pub enum SubscriptionPayload {
 #[serde(bound(serialize = "", deserialize = ""))]
 pub enum Command<E: Effect> {
     /// Update program data (additive only)
-    UpdateProgram(ProgramUpdate),
+    UpdateProgram(Box<ProgramUpdate>),
 
     /// Start a new persistent process (e.g., from REPL)
     /// If function_index is None, the process starts in a sleeping state ready for resume

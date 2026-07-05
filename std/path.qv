@@ -53,6 +53,7 @@ parse = #['%list<'%str>, '] {
 
 [
   parse: #'%str {
+    :doc "Parses a slash-separated string into a path, normalising . and .. segments."
     [~, "/"] %str.split %list.collect {
       | =Nil => Relative[0]
       | =Cons[first, rest], first %str.empty? => [rest, Root] parse
@@ -60,9 +61,13 @@ parse = #['%list<'%str>, '] {
     }
   },
 
-  basename: #' { =Path[s, _] => s },
+  basename: #' {
+    :doc "The final segment of a path, or nil when it has none (a root or dots-only path)."
+    =Path[s, _] => s
+  },
 
   parent: #' {
+    :doc "The parent of a path; the root is its own parent."
     | =Path[_, p] => p
     | =Root => Root
     | =Relative[n] => [n, 1] %num.add Relative[~]
@@ -71,11 +76,25 @@ parse = #['%list<'%str>, '] {
   // Accepts a nil path (e.g. the result of an invalid `join`) and propagates it, so a nil flows
   // through a `... join to_string` pipeline rather than being a type error. Matching the
   // module's default type (`='`, a non-nil path) leaves nil to fall through to nil.
-  to_string: #(' | []) { =' => [~, ""] to_string },
+  to_string: #(' | []) {
+    :doc "Formats a path as a slash-separated string, propagating nil for a nil path."
+    =' => [~, ""] to_string
+  },
 
-  absolute?: #' { =Root => Ok | =Path[_, p] => p ^ },
+  absolute?: #' {
+    :doc "Whether a path descends from the root."
+    | =Root => Ok
+    | =Path[_, p] => p ^
+  },
 
-  relative?: #' { =Relative[_] => Ok | =Path[_, p] => p ^ },
+  relative?: #' {
+    :doc "Whether a path is relative to the current directory."
+    | =Relative[_] => Ok
+    | =Path[_, p] => p ^
+  },
 
-  join: #[', '] { [&join, ...] join },
+  join: #[', '] {
+    :doc "Joins the second path onto the first; nil when the second is absolute or escapes the root."
+    [&join, ...] join
+  },
 ]

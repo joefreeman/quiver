@@ -119,19 +119,21 @@ pub fn extract_binary_data<E: Effect>(
         Value::Binary(Binary::Constant(_)) => {
             // Constant binaries reference Program.constants which persists - no extraction needed
         }
-        Value::Tuple(_, fields) => {
-            for field in fields.iter() {
+        Value::Tuple(_, fields) | Value::Function(_, fields) => {
+            // `all_values` includes annotation values, so e.g. a `:doc` string on a
+            // module member survives into the cache.
+            for field in fields.all_values() {
                 extract_binary_data(field, executor, binary_data);
             }
         }
-        Value::Function(_, captures) => {
-            for capture in captures.iter() {
-                extract_binary_data(capture, executor, binary_data);
+        Value::Builtin(_, Some(payload)) => {
+            for field in payload.all_values() {
+                extract_binary_data(field, executor, binary_data);
             }
         }
         Value::Int(_)
         | Value::BigInt(_)
-        | Value::Builtin(_)
+        | Value::Builtin(_, None)
         | Value::Process(..)
         | Value::Resource(..)
         | Value::Reference(_) => {}

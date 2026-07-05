@@ -74,6 +74,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         function_param_compatibility,
         builtin_param_compatibility,
         canonical_tuples,
+        debug: bytecode.debug,
     };
 
     executor.update_program(program_update);

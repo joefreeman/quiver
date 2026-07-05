@@ -89,6 +89,7 @@ fn evaluate(
 pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
     with_io: bool,
+    debug: bool,
 }
 
 #[allow(dead_code)]
@@ -104,6 +105,12 @@ impl TestBuilder {
 
     pub fn with_io(mut self) -> Self {
         self.with_io = true;
+        self
+    }
+
+    /// Compile in debug mode: nil results carry failure-provenance `origin` stamps.
+    pub fn debug(mut self) -> Self {
+        self.debug = true;
         self
     }
 
@@ -157,7 +164,14 @@ impl TestBuilder {
             environment.set_effect_backend(backend);
         }
         let resolver = Box::new(PackageResolver::memory(self.modules));
-        let repl = Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
+        let mut repl =
+            Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
+        if self.debug {
+            repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
+                debug: true,
+                source_name: "test".to_string(),
+            });
+        }
 
         evaluate(environment, repl, virtual_time_ms, source)
     }
@@ -200,6 +214,37 @@ impl TestResult {
                     expected, e, self.source
                 );
             }
+        }
+        self
+    }
+
+    /// Expect the result to carry a failure-provenance origin rendering as `expected`
+    /// (e.g. `"match failed at test:1:8"`). Debug builds only.
+    pub fn expect_origin(self, expected: &str) -> Self {
+        match self.result {
+            Ok(Some((ref value, ref heap_data))) => {
+                let actual = self.environment.describe_origin(value, heap_data);
+                assert_eq!(
+                    actual.as_deref(),
+                    Some(expected),
+                    "for source: {}",
+                    self.source
+                );
+            }
+            ref other => panic!(
+                "Expected origin '{}', got {:?} for source: {}",
+                expected, other, self.source
+            ),
+        }
+        self
+    }
+
+    /// Expect the result to carry no failure-provenance origin (release builds, or nil
+    /// in a non-result position).
+    pub fn expect_no_origin(self) -> Self {
+        if let Ok(Some((ref value, ref heap_data))) = self.result {
+            let actual = self.environment.describe_origin(value, heap_data);
+            assert_eq!(actual, None, "for source: {}", self.source);
         }
         self
     }

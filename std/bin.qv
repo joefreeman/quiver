@@ -3,23 +3,61 @@ byte_bit = #'int {
 }
 
 [
-  new: &__binary_new__,
-  length: &__binary_length__,
-  concat: &__binary_concat__,
-  append: &__binary_append__,
-  and: &__binary_and__,
-  or: &__binary_or__,
-  xor: &__binary_xor__,
-  not: &__binary_not__,
-  shift: &__binary_shift__,
-  slice: &__binary_slice__,
-  index: &__binary_index__,
+  new: &__binary_new__ {
+    :doc "A zero-filled binary of the given length in bytes."
+  },
 
-  get_byte: #['bin, 'int] { [..., 0, 8] __binary_get__ },
+  length: &__binary_length__ { :doc "The length of a binary in bytes." },
 
-  get_bit: #['bin, 'int] { $1 byte_bit [$0, ..., 1] __binary_get__ },
+  concat: &__binary_concat__ { :doc "The concatenation of two binaries." },
 
-  set_byte: #['bin, 'int, 'int] { [$0, $1, 0, $2, 8] __binary_set__ },
+  append: &__binary_append__ {
+    :doc "The binary with a non-negative integer appended as the given number of big-endian bytes (1 to 8)."
+  },
 
-  set_bit: #['bin, 'int, 'int] { $1 byte_bit [$0, ..., $2, 1] __binary_set__ },
+  and: &__binary_and__ {
+    :doc "The bytewise AND of two binaries, truncated to the shorter length."
+  },
+
+  or: &__binary_or__ {
+    :doc "The bytewise OR of two binaries, truncated to the shorter length."
+  },
+
+  xor: &__binary_xor__ {
+    :doc "The bytewise XOR of two binaries, truncated to the shorter length."
+  },
+
+  not: &__binary_not__ { :doc "The bitwise complement of a binary." },
+
+  shift: &__binary_shift__ {
+    :doc "The binary shifted by a number of bits — left when positive, right when negative — with zeros shifted in; the length is preserved."
+  },
+
+  slice: &__binary_slice__ {
+    :doc "The bytes from a start index (inclusive) to an end index (exclusive)."
+  },
+
+  index: &__binary_index__ {
+    :doc "The index of the first occurrence of a byte at or after the given offset, or nil when absent."
+  },
+
+  get_byte: #['bin, 'int] {
+    :doc "The byte at the given index, as an integer 0 to 255."
+    [..., 0, 8] __binary_get__
+  },
+
+  get_bit: #['bin, 'int] {
+    :doc "The bit at the given index (most significant first), as 0 or 1."
+    $1 byte_bit [$0, ..., 1] __binary_get__
+  },
+
+  set_byte: #['bin, 'int, 'int] {
+    :doc "The binary with the byte at the given index replaced by an integer 0 to 255."
+    [$0, $1, 0, $2, 8] __binary_set__
+  },
+
+  set_bit: #['bin, 'int, 'int] {
+    :doc "The binary with the bit at the given index (most significant first) set to 0 or 1."
+    $1 byte_bit [$0, ..., $2, 1] __binary_set__
+  },
 ]

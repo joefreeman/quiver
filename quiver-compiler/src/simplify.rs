@@ -161,6 +161,14 @@ fn strip_term(term: Term, options: &Options) -> Term {
 
 fn strip_expression(expression: Expression, options: &Options) -> Expression {
     Expression {
+        annotations: expression
+            .annotations
+            .into_iter()
+            .map(|annotation| Annotation {
+                value: strip_chain(annotation.value, options),
+                ..annotation
+            })
+            .collect(),
         branches: expression
             .branches
             .into_iter()
@@ -185,6 +193,7 @@ fn strip_expression(expression: Expression, options: &Options) -> Expression {
 fn group_consequence(consequence: Sequence) -> Sequence {
     if consequence.chains.len() > 1 && consequence.chains.iter().all(is_frame_free_chain) {
         let block = Term::Block(Expression {
+            annotations: vec![],
             branches: vec![Branch {
                 condition: consequence,
                 consequence: None,
@@ -208,7 +217,8 @@ fn group_consequence(consequence: Sequence) -> Sequence {
 /// safe given its surrounding position (tail call as the last term) is checked by `strip_chain`.
 pub fn is_redundant_block(term: &Term) -> bool {
     matches!(term, Term::Block(expression)
-    if expression.branches.len() == 1
+    if expression.annotations.is_empty()
+        && expression.branches.len() == 1
         && expression.branches[0].consequence.is_none()
         && expression.branches[0].condition.chains.len() == 1
         && is_inlinable_chain(&expression.branches[0].condition.chains[0]))

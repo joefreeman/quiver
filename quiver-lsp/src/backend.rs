@@ -5,8 +5,7 @@ use crate::convert::{offset_to_position, position_to_offset, span_to_range};
 use crate::documents::{DocumentStore, LineIndex};
 use crate::loader::resolver_for;
 use dashmap::DashMap;
-use quiver_compiler::{Overlay, PackageResolver, find_project_root};
-use quiver_core::format::format_type_by_id;
+use quiver_compiler::{ModuleResolver, Overlay, PackageResolver, find_project_root};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tower_lsp::jsonrpc::Result;
@@ -386,15 +385,47 @@ impl LanguageServer for Backend {
         let Some(info) = semantics.at_offset(offset) else {
             return Ok(None);
         };
-        let type_text = format_type_by_id(program, info.type_id);
+        // A `:doc` docstring, from the local definition's AST or the imported member's
+        // module file. Shown as prose under the signature; the `:doc` row entry is
+        // dropped from the rendered type (its type is always `Str['bin]` — noise).
+        let doc_text = info
+            .definition
+            .and_then(|definition| {
+                let ast = analysis.ast.as_ref()?;
+                crate::symbols::doc_at_definition(ast, definition)
+            })
+            .or_else(|| {
+                let module = info.definition_module.as_ref()?;
+                let member = info.import_member.as_ref()?;
+                let module_uri = Url::from_file_path(module).ok()?;
+                let text = self.file_text(&module_uri, module)?;
+                let ast = quiver_compiler::parse(&text).ok()?;
+                crate::symbols::member_doc(&ast, member)
+            })
+            .or_else(|| {
+                // Virtual modules (the embedded standard library) have no file on disk:
+                // re-resolve the module's source through the same resolver the analysis
+                // used, which reads the embedded package.
+                let name = info.import_module_name.as_ref()?;
+                let member = info.import_member.as_ref()?;
+                let resolver = resolver_for(&uri, self.overlay.clone());
+                let resolved = resolver.resolve(&resolver.entry_package(), name).ok()?;
+                let ast = quiver_compiler::parse(&resolved.source).ok()?;
+                crate::symbols::member_doc(&ast, member)
+            });
+        let type_text = crate::analysis::hover_type_text(program, info.type_id);
         let body = match &info.label {
             Some(label) => format!("{label}: {type_text}"),
             None => type_text,
         };
+        let value = match doc_text {
+            Some(doc) => format!("```quiver\n{body}\n```\n\n{doc}"),
+            None => format!("```quiver\n{body}\n```"),
+        };
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```quiver\n{body}\n```"),
+                value,
             }),
             range: None,
         }))

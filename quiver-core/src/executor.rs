@@ -3,13 +3,14 @@ use crate::bytecode::{ConcreteType, Constant, Function, Instruction};
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
-use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
-use crate::value::{Binary, MAX_BINARY_SIZE, Value};
+use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
+use crate::value::{Binary, MAX_BINARY_SIZE, Payload, Value};
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Bundled program update data for incremental compilation.
@@ -31,6 +32,9 @@ pub struct ProgramUpdate {
     pub function_param_compatibility: Vec<HashSet<ConcreteType>>,
     /// For each builtin_id, the set of concrete types compatible with its parameter
     pub builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
+    /// Failure-provenance sites (debug builds): the full table, from which the executor
+    /// prebuilds each site's annotated-nil value. `None` leaves any existing table as is.
+    pub debug: Option<crate::bytecode::SiteTable>,
     /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
     /// treat structurally-identical tuples built via different paths as equal.
     pub canonical_tuples: Vec<usize>,
@@ -58,6 +62,9 @@ pub enum InstructionType {
     Builtin,
     Equal,
     Not,
+    Annotate,
+    GetAnnotation,
+    Stamp,
     Spawn,
     Send,
     Self_,
@@ -87,6 +94,9 @@ impl InstructionType {
             Instruction::Builtin(_) => InstructionType::Builtin,
             Instruction::Equal(_) => InstructionType::Equal,
             Instruction::Not => InstructionType::Not,
+            Instruction::Annotate(_) => InstructionType::Annotate,
+            Instruction::GetAnnotation(..) => InstructionType::GetAnnotation,
+            Instruction::Stamp(_) => InstructionType::Stamp,
             Instruction::Spawn => InstructionType::Spawn,
             Instruction::Send => InstructionType::Send,
             Instruction::Self_ => InstructionType::Self_,
@@ -239,6 +249,13 @@ pub struct Executor<E: Effect> {
     // Cache of constant binaries already materialised on the heap, keyed by constant index,
     // so a binary literal in a loop is allocated once rather than on every load.
     constant_binaries: Vec<Option<Binary>>,
+    // Failure provenance (debug builds): per-site prebuilt values. `site_nils[i]` is a nil
+    // already carrying site i's `origin` annotation — `Stamp` clones it (an Arc refcount
+    // bump, no allocation) onto fresh bare nils. `site_origins[i]` is the bare `Site[...]`
+    // tuple, attached copy-on-write when the nil already carries other annotations.
+    site_nils: Vec<Value>,
+    site_origins: Vec<Value>,
+    origin_key: Option<usize>,
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
     // Profiling
@@ -353,7 +370,12 @@ impl<E: Effect> Executor<E> {
             Value::Tuple(_, elements) | Value::Function(_, elements)
                 if elements.has_heap_refs() =>
             {
-                for element in elements.iter() {
+                for element in elements.all_values() {
+                    self.retain(element);
+                }
+            }
+            Value::Builtin(_, Some(payload)) if payload.has_heap_refs() => {
+                for element in payload.all_values() {
                     self.retain(element);
                 }
             }
@@ -384,7 +406,12 @@ impl<E: Effect> Executor<E> {
             Value::Tuple(_, elements) | Value::Function(_, elements)
                 if elements.has_heap_refs() =>
             {
-                for element in elements.iter() {
+                for element in elements.all_values() {
+                    self.release(element);
+                }
+            }
+            Value::Builtin(_, Some(payload)) if payload.has_heap_refs() => {
+                for element in payload.all_values() {
                     self.release(element);
                 }
             }
@@ -627,6 +654,9 @@ impl<E: Effect> Executor<E> {
             freed: vec![],
             reclaimed: 0,
             constant_binaries: vec![],
+            site_nils: vec![],
+            site_origins: vec![],
+            origin_key: None,
             builtins_registry,
             stats: ExecutionStats::new(),
             profile,
@@ -1088,6 +1118,49 @@ impl<E: Effect> Executor<E> {
         self.type_compatibility = update.type_compatibility;
         self.function_param_compatibility = update.function_param_compatibility;
         self.builtin_param_compatibility = update.builtin_param_compatibility;
+        if let Some(table) = update.debug {
+            self.install_sites(&table);
+        }
+    }
+
+    /// Prebuild the per-site provenance values a debug build's `Stamp` instructions use.
+    /// Everything in them references the constants table (no heap binaries), so cloning a
+    /// prebuilt nil on a failure path is pure refcount traffic with no accounting.
+    fn install_sites(&mut self, table: &crate::bytecode::SiteTable) {
+        self.origin_key = Some(table.origin_key);
+        self.site_origins = table
+            .sites
+            .iter()
+            .map(|site| {
+                let module = Value::tuple(
+                    table.str_tuple,
+                    vec![Value::Binary(Binary::Constant(site.module_constant))],
+                );
+                let kind_tuple = table.kind_tuples[site.kind.index()];
+                Value::tuple(
+                    table.site_tuple,
+                    vec![
+                        module,
+                        Value::int(site.line as i64),
+                        Value::int(site.column as i64),
+                        Value::tuple(kind_tuple, vec![]),
+                    ],
+                )
+            })
+            .collect();
+        self.site_nils = self
+            .site_origins
+            .iter()
+            .map(|origin| {
+                Value::Tuple(
+                    NIL,
+                    Arc::new(Payload::with_annotations(
+                        vec![],
+                        vec![(table.origin_key, origin.clone())],
+                    )),
+                )
+            })
+            .collect();
     }
 
     /// Execute up to max_units instruction units for a single process.
@@ -1355,6 +1428,9 @@ impl<E: Effect> Executor<E> {
             Instruction::Builtin(index) => self.handle_builtin(proc, index),
             Instruction::Equal(count) => self.handle_equal(proc, count),
             Instruction::Not => self.handle_not(proc),
+            Instruction::Annotate(key) => self.handle_annotate(proc, key),
+            Instruction::GetAnnotation(key, check) => self.handle_get_annotation(proc, key, check),
+            Instruction::Stamp(site) => self.handle_stamp(proc, site),
             _ => unreachable!("cold instruction routed to execute_hot"),
         };
 
@@ -1613,6 +1689,95 @@ impl<E: Effect> Executor<E> {
         }
     }
 
+    fn handle_annotate(
+        &mut self,
+        proc: &mut Process,
+        key: usize,
+    ) -> Result<Option<Action<E>>, Error> {
+        // Pop-then-push nets the refcounts: releasing the carrier and annotation drops their
+        // counts, and pushing the annotated copy (whose payload references both) re-counts them.
+        let annotation = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+        let carrier = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+
+        let annotated = carrier
+            .annotated(key, annotation)
+            .ok_or_else(|| Error::TypeMismatch {
+                expected: "tuple, function or builtin".to_string(),
+                found: carrier.type_name().to_string(),
+            })?;
+        self.push_value(proc, annotated);
+
+        if let Some(frame) = proc.frames.last_mut() {
+            frame.counter += 1;
+        }
+        Ok(None)
+    }
+
+    fn handle_get_annotation(
+        &mut self,
+        proc: &mut Process,
+        key: usize,
+        check: Option<usize>,
+    ) -> Result<Option<Action<E>>, Error> {
+        let carrier = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+
+        // Total: a value that cannot carry annotations (or doesn't carry this key) yields
+        // nil, so retrieval composes with union carriers like `'int | []`. The checked
+        // form additionally gates the entry on its expected shape — an incompatible entry
+        // answers nil too, exactly as an ascription pattern fails to nil.
+        let annotation = carrier
+            .get_annotation(key)
+            .filter(|value| match check {
+                Some(type_id) => self.check_type_compatible(value, type_id),
+                None => true,
+            })
+            .cloned()
+            .unwrap_or_else(Value::nil);
+        self.push_value(proc, annotation);
+
+        if let Some(frame) = proc.frames.last_mut() {
+            frame.counter += 1;
+        }
+        Ok(None)
+    }
+
+    /// Debug builds: stamp a fresh nil result with its failure site. Fresh-only — a nil
+    /// already carrying an `origin` keeps it (the propagating failure's original site),
+    /// and non-nil values pass through untouched. A bare nil is *replaced* by the site's
+    /// prebuilt annotated nil (refcount bump only); a nil carrying other annotations
+    /// (e.g. a user `:error`) gains the origin copy-on-write.
+    fn handle_stamp(
+        &mut self,
+        proc: &mut Process,
+        site: usize,
+    ) -> Result<Option<Action<E>>, Error> {
+        let origin_key = self.origin_key.ok_or_else(|| {
+            Error::InvalidArgument("Stamp instruction without a site table".to_string())
+        })?;
+        let stamped = match proc.stack.last() {
+            Some(value) if value.is_nil() && value.get_annotation(origin_key).is_none() => {
+                match value {
+                    Value::Tuple(_, payload) if payload.annotations().is_empty() => {
+                        Some(self.site_nils[site].clone())
+                    }
+                    other => other.annotated(origin_key, self.site_origins[site].clone()),
+                }
+            }
+            _ => None,
+        };
+        if let Some(stamped) = stamped {
+            // Pop-then-push nets the refcounts, exactly as in `handle_annotate`.
+            let old = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+            drop(old);
+            self.push_value(proc, stamped);
+        }
+
+        if let Some(frame) = proc.frames.last_mut() {
+            frame.counter += 1;
+        }
+        Ok(None)
+    }
+
     fn handle_is_type(
         &mut self,
         proc: &mut Process,
@@ -1648,7 +1813,7 @@ impl<E: Effect> Executor<E> {
             Value::Reference(_) => ConcreteType::Reference,
             Value::Tuple(tuple_id, _) => ConcreteType::Tuple(*tuple_id),
             Value::Function(func_id, _) => ConcreteType::Function(*func_id),
-            Value::Builtin(builtin_id) => ConcreteType::Builtin(*builtin_id),
+            Value::Builtin(builtin_id, _) => ConcreteType::Builtin(*builtin_id),
             Value::Process(_, func_id) => ConcreteType::Process(*func_id),
             Value::Resource(_, resource_type_id) => ConcreteType::Resource(*resource_type_id),
         }
@@ -1663,7 +1828,7 @@ impl<E: Effect> Executor<E> {
                 .get(*func_id)
                 .map(|set| set.contains(&concrete))
                 .unwrap_or(true),
-            Value::Builtin(builtin_id) => self
+            Value::Builtin(builtin_id, _) => self
                 .builtin_param_compatibility
                 .get(*builtin_id)
                 .map(|set| set.contains(&concrete))
@@ -1744,7 +1909,7 @@ impl<E: Effect> Executor<E> {
                 // Don't increment counter - new frame starts at 0
                 Ok(None)
             }
-            Value::Builtin(builtin_id) => {
+            Value::Builtin(builtin_id, _) => {
                 // Pop function (discarded) and parameter (consumed by the builtin).
                 self.pop_value(proc); // function
                 let parameter = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
@@ -1921,7 +2086,7 @@ impl<E: Effect> Executor<E> {
             return Err(Error::BuiltinUndefined(index));
         }
         // Push builtin by index (no heap references).
-        self.push_value(proc, Value::Builtin(index));
+        self.push_value(proc, Value::builtin(index));
 
         if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
@@ -2185,7 +2350,7 @@ impl<E: Effect> Executor<E> {
         // Count receive sources to initialize cursors
         let receive_count = sources
             .iter()
-            .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
+            .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(..)))
             .count();
 
         // Scan for process sources to determine if we need to await
@@ -2296,7 +2461,7 @@ impl<E: Effect> Executor<E> {
                         return self.complete_select(pid, value);
                     }
                 }
-                Value::Function(_, _) | Value::Builtin(_) => {
+                Value::Function(_, _) | Value::Builtin(..) => {
                     // Receive sources may complete, call a function, or continue to next source
                     match self.handle_select_receive(
                         pid,
@@ -2386,7 +2551,7 @@ impl<E: Effect> Executor<E> {
         // Calculate receive function index (count of receive sources before this one)
         let receive_idx = select_state.sources[..src_idx]
             .iter()
-            .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(_)))
+            .filter(|s| matches!(s, Value::Function(_, _) | Value::Builtin(..)))
             .count();
 
         // Check if we just finished executing this receive function
@@ -2503,7 +2668,7 @@ impl<E: Effect> Executor<E> {
                         .get(*func_id)
                         .map(|f| f.instructions.is_empty())
                         .unwrap_or(false),
-                    Value::Builtin(_) => true,
+                    Value::Builtin(..) => true,
                     _ => unreachable!(),
                 };
 
@@ -2781,7 +2946,7 @@ impl<E: Effect> Executor<E> {
                         .zip(caps_b.iter())
                         .all(|(a, b)| self.values_equal(a, b))
             }
-            (Value::Builtin(a), Value::Builtin(b)) => a == b,
+            (Value::Builtin(a, _), Value::Builtin(b, _)) => a == b,
             (Value::Process(a, func_a), Value::Process(b, func_b)) => a == b && func_a == func_b,
             (Value::Reference(a), Value::Reference(b)) => a == b,
             _ => false,
@@ -2831,18 +2996,30 @@ fn collect_heap_indices(value: &Value, indices: &mut HashSet<usize>) {
         Value::Binary(Binary::Heap(idx)) => {
             indices.insert(*idx);
         }
-        Value::Tuple(_, elements) => {
-            for elem in elements.iter() {
+        Value::Tuple(_, elements) | Value::Function(_, elements) => {
+            for elem in elements.all_values() {
                 collect_heap_indices(elem, indices);
             }
         }
-        Value::Function(_, captures) => {
-            for capture in captures.iter() {
-                collect_heap_indices(capture, indices);
+        Value::Builtin(_, Some(payload)) => {
+            for elem in payload.all_values() {
+                collect_heap_indices(elem, indices);
             }
         }
         _ => {}
     }
+}
+
+/// Remap the heap indices in a payload's annotations (helper for `remap_heap_indices`).
+fn remap_annotations(
+    payload: &Payload,
+    index_map: &HashMap<usize, usize>,
+) -> Result<Vec<(usize, Value)>, Error> {
+    payload
+        .annotations()
+        .iter()
+        .map(|(key, value)| Ok((*key, remap_heap_indices(value, index_map)?)))
+        .collect()
 }
 
 /// Remap heap indices in a value according to the provided mapping
@@ -2868,18 +3045,41 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .iter()
                 .map(|elem| remap_heap_indices(elem, index_map))
                 .collect();
-            Ok(Value::tuple(*type_id, remapped_elements?))
+            Ok(Value::Tuple(
+                *type_id,
+                Arc::new(Payload::with_annotations(
+                    remapped_elements?,
+                    remap_annotations(elements, index_map)?,
+                )),
+            ))
         }
         Value::Function(func_idx, captures) => {
             let remapped_captures: Result<Vec<_>, _> = captures
                 .iter()
                 .map(|capture| remap_heap_indices(capture, index_map))
                 .collect();
-            Ok(Value::function(*func_idx, remapped_captures?))
+            Ok(Value::Function(
+                *func_idx,
+                Arc::new(Payload::with_annotations(
+                    remapped_captures?,
+                    remap_annotations(captures, index_map)?,
+                )),
+            ))
         }
         Value::Int(n) => Ok(Value::Int(*n)),
         Value::BigInt(n) => Ok(Value::BigInt(n.clone())),
-        Value::Builtin(name) => Ok(Value::Builtin(*name)),
+        Value::Builtin(builtin_id, payload) => {
+            let payload = payload
+                .as_ref()
+                .map(|payload| {
+                    Ok::<_, Error>(Arc::new(Payload::with_annotations(
+                        vec![],
+                        remap_annotations(payload, index_map)?,
+                    )))
+                })
+                .transpose()?;
+            Ok(Value::Builtin(*builtin_id, payload))
+        }
         Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
         Value::Resource(id, type_name) => Ok(Value::Resource(*id, *type_name)),
         Value::Reference(r) => Ok(Value::Reference(*r)),
@@ -3157,5 +3357,147 @@ mod heap_stats_tests {
         ex.process_pending_free();
         assert!(!ex.freed[i], "a re-retained slot must not be reclaimed");
         assert!(ex.free.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use super::*;
+    use crate::builtins::BuiltinRegistry;
+    use crate::value::ResourceId;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestEffect;
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    fn executor() -> Executor<TestEffect> {
+        Executor::new(BuiltinRegistry::new(), false, 0)
+    }
+
+    #[test]
+    fn annotate_and_retrieve_round_trip() {
+        let tuple = Value::tuple(3, vec![Value::int(1)]);
+        let annotated = tuple.annotated(0, Value::int(42)).unwrap();
+        assert_eq!(annotated.get_annotation(0), Some(&Value::int(42)));
+        assert_eq!(annotated.get_annotation(1), None);
+        // Replacing an existing key keeps one entry.
+        let replaced = annotated.annotated(0, Value::int(7)).unwrap();
+        assert_eq!(replaced.get_annotation(0), Some(&Value::int(7)));
+        // The original is untouched (copy-on-annotate).
+        assert_eq!(tuple.get_annotation(0), None);
+        // Non-composites cannot carry annotations.
+        assert_eq!(Value::int(5).annotated(0, Value::int(1)), None);
+    }
+
+    #[test]
+    fn annotations_invisible_to_equality_nil_and_matching() {
+        let ex = executor();
+        let plain = Value::nil();
+        let annotated = plain.annotated(0, Value::int(1)).unwrap();
+        assert!(annotated.is_nil(), "annotated nil must still be nil");
+        assert_eq!(plain, annotated, "derived equality ignores annotations");
+        assert!(
+            ex.values_equal(&plain, &annotated),
+            "VM equality ignores annotations"
+        );
+        assert_eq!(
+            ex.get_concrete_type(&plain),
+            ex.get_concrete_type(&annotated),
+            "type checks see the same concrete type"
+        );
+    }
+
+    #[test]
+    fn retain_release_walk_annotation_values() {
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![1, 2, 3]).unwrap();
+        let Binary::Heap(idx) = b else { unreachable!() };
+
+        let carrier = Value::tuple(3, vec![Value::int(1)]);
+        let annotated = carrier.annotated(0, Value::Binary(b)).unwrap();
+        assert!(
+            annotated.has_heap_refs(),
+            "heap ref inside an annotation must set the cached flag"
+        );
+
+        ex.retain(&annotated);
+        assert_eq!(ex.refcounts[idx], 1);
+        ex.release(&annotated);
+        assert_eq!(ex.refcounts[idx], 0);
+    }
+
+    #[test]
+    fn annotated_builtin_walks_and_stays_equal() {
+        let mut ex = executor();
+        let b = ex.allocate_binary(vec![4, 5]).unwrap();
+        let Binary::Heap(idx) = b else { unreachable!() };
+
+        let bare = Value::builtin(7);
+        let annotated = bare.annotated(0, Value::Binary(b)).unwrap();
+        assert!(
+            annotated.has_heap_refs(),
+            "heap ref inside a builtin annotation must be visible to accounting"
+        );
+        assert_eq!(bare, annotated, "derived equality ignores annotations");
+        assert!(
+            ex.values_equal(&bare, &annotated),
+            "VM equality ignores annotations"
+        );
+        assert_eq!(
+            ex.get_concrete_type(&bare),
+            ex.get_concrete_type(&annotated),
+            "type checks see the same concrete type"
+        );
+
+        ex.retain(&annotated);
+        assert_eq!(ex.refcounts[idx], 1);
+        ex.release(&annotated);
+        assert_eq!(ex.refcounts[idx], 0);
+    }
+
+    #[test]
+    fn transfer_round_trip_preserves_builtin_annotations() {
+        let mut source = executor();
+        let b = source.allocate_binary(vec![6, 6, 6]).unwrap();
+        let annotated = Value::builtin(7).annotated(2, Value::Binary(b)).unwrap();
+
+        let (wire_value, heap_data) = source.extract_heap_data(&annotated).unwrap();
+        assert_eq!(heap_data, vec![vec![6, 6, 6]]);
+
+        let mut target = executor();
+        let received = target.inject_heap_data(wire_value, &heap_data).unwrap();
+        let Some(Value::Binary(Binary::Heap(new_idx))) = received.get_annotation(2).cloned() else {
+            panic!("annotation lost or not a heap binary after transfer");
+        };
+        assert_eq!(
+            target.get_heap_binary(new_idx).unwrap().to_vec(),
+            vec![6, 6, 6]
+        );
+    }
+
+    #[test]
+    fn transfer_round_trip_preserves_annotations() {
+        let mut source = executor();
+        let b = source.allocate_binary(vec![9, 8, 7]).unwrap();
+        let carrier = Value::tuple(3, vec![Value::int(1)]);
+        let annotated = carrier.annotated(2, Value::Binary(b)).unwrap();
+
+        let (wire_value, heap_data) = source.extract_heap_data(&annotated).unwrap();
+        assert_eq!(heap_data, vec![vec![9, 8, 7]]);
+
+        let mut target = executor();
+        let received = target.inject_heap_data(wire_value, &heap_data).unwrap();
+        let Some(Value::Binary(Binary::Heap(new_idx))) = received.get_annotation(2).cloned() else {
+            panic!("annotation lost or not a heap binary after transfer");
+        };
+        assert_eq!(
+            target.get_heap_binary(new_idx).unwrap().to_vec(),
+            vec![9, 8, 7]
+        );
     }
 }

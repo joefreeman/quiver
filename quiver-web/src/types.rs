@@ -88,7 +88,7 @@ impl Value {
             Value::Builtin { name: _ } => {
                 // Web Value uses name, but core Value uses builtin_id
                 // Use 0 as placeholder - this is only for formatting purposes
-                quiver_core::value::Value::Builtin(0)
+                quiver_core::value::Value::builtin(0)
             }
             Value::Process {
                 pid,
@@ -157,7 +157,7 @@ impl Value {
                     .map(|v| Value::from_core_value(v, heap_data, program))
                     .collect(),
             },
-            quiver_core::value::Value::Builtin(builtin_id) => {
+            quiver_core::value::Value::Builtin(builtin_id, _) => {
                 // Look up builtin name from program
                 let name = program
                     .get_builtins()
@@ -215,7 +215,7 @@ impl Value {
             Value::Builtin { name: _ } => {
                 // Web Value stores name, but core Value needs builtin_id
                 // We can't look up the ID without program context, use 0 as placeholder
-                Ok(quiver_core::value::Value::Builtin(0))
+                Ok(quiver_core::value::Value::builtin(0))
             }
             Value::Process {
                 pid,

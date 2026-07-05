@@ -1504,6 +1504,27 @@ fn accessor(input: Span) -> IResult<Span, (AccessPath, Spanned)> {
     Ok((rest, (path, Spanned(Some(span_between(start, rest))))))
 }
 
+/// An annotation-retrieval accessor, glued to what precedes it: `:key`, or the checked
+/// form `:('t)key` — a parenthesised expected shape between the `:` and the key, exactly
+/// the `=('t)v` ascription syntax transplanted to retrieval. Everything is glued; a field
+/// label (`x: v`) is distinguished by the space after its `:`.
+fn annotation_accessor(input: Span) -> IResult<Span, (AccessPath, Spanned)> {
+    let start = input;
+    let (after_colon, _) = char(':')(input)?;
+    // Like `as_pattern`, the shape must be parenthesised — `peek('(')` keeps a bare type
+    // name from gluing onto the key (`:'intkey`) and admits `('t)`-style and `(x: 't)`
+    // partial gates only.
+    let (rest, expected) = opt(preceded(peek(char('(')), inline_type_expression))(after_colon)?;
+    let (rest, name) = identifier(rest)?;
+    Ok((
+        rest,
+        (
+            AccessPath::Annotation(name, expected),
+            Spanned(Some(span_between(start, rest))),
+        ),
+    ))
+}
+
 // Parse access patterns: identifier, $, ~, %import, with optional .field accessors and [args]
 fn access(input: Span) -> IResult<Span, Access> {
     let start = input;
@@ -1529,8 +1550,10 @@ fn access(input: Span) -> IResult<Span, Access> {
     };
 
     // Each accessor carries its own span (`.triple` → the `triple`), so the language server can
-    // hover/navigate components separately.
-    let (after_ref, dotted) = many0(preceded(char('.'), accessor))(after_source)?;
+    // hover/navigate components separately. `:key` (glued) retrieves an annotation; the glue
+    // distinguishes it from a field label, which requires a space after its `:`.
+    let (after_ref, dotted) =
+        many0(alt((preceded(char('.'), accessor), annotation_accessor)))(after_source)?;
     let (accessors, accessor_spans): (Vec<_>, Vec<_>) = leading.into_iter().chain(dotted).unzip();
 
     // The span covers just the reference (`%num.add`, `foo`, `$.x`), not a trailing call
@@ -1811,13 +1834,52 @@ fn expression(input: Span) -> IResult<Span, Expression> {
             opt(pair(char('|'), wsc)),
             separated_list1(tuple((wsc, char('|'), wsc)), branch),
         ),
-        |branches| Expression { branches },
+        |branches| Expression {
+            annotations: vec![],
+            branches,
+        },
     )(input)
 }
 
-/// A block `{ … }`: a braced expression that introduces a new scope.
+/// One annotation in a block prefix: `:key value`, where `value` is a chain. The `:` must be
+/// glued to the key name; the value is terminated like any step (comma/newline).
+fn annotation(input: Span) -> IResult<Span, Annotation> {
+    let start = input;
+    let (rest, ((name_span, name), value)) =
+        separated_pair(spanned(preceded(char(':'), identifier)), hspace1, chain)(input)?;
+    Ok((
+        rest,
+        Annotation {
+            name,
+            name_span: Spanned(Some(name_span)),
+            span: Spanned(Some(span_between(start, rest))),
+            value,
+        },
+    ))
+}
+
+/// A block `{ … }`: a braced expression that introduces a new scope. May begin with an
+/// annotation prefix (`:key value` steps); the annotations attach to the value the braces
+/// denote. A block with annotations and no body is identity-plus-attach.
 fn block(input: Span) -> IResult<Span, Expression> {
-    delimited(pair(char('{'), wsc), expression, pair(wsc, char('}')))(input)
+    delimited(
+        pair(char('{'), wsc),
+        alt((
+            // Annotation prefix (one or more), then an optional body.
+            map(
+                pair(
+                    terminated(separated_list1(seq_sep, annotation), opt(seq_sep)),
+                    opt(expression),
+                ),
+                |(annotations, body)| Expression {
+                    annotations,
+                    branches: body.map(|e| e.branches).unwrap_or_default(),
+                },
+            ),
+            expression,
+        )),
+        pair(wsc, char('}')),
+    )(input)
 }
 
 fn function(input: Span) -> IResult<Span, Function> {
@@ -2344,8 +2406,8 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
     )(input)
 }
 
-/// A top-level item: a type alias or a value-producing sequence. A statement-level expression is a
-/// branchless sequence (branches `|`/`=>` require a block).
+/// A top-level item: a type alias or a value-producing sequence. A statement-level
+/// expression is a branchless sequence (branches `|`/`=>` require a block).
 fn top_level_item(input: Span) -> IResult<Span, Statement> {
     alt((type_alias, map(sequence, Statement::Expression)))(input)
 }

@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
+mod annotations;
 mod codegen;
 mod helpers;
 mod modules;
 mod narrowing;
 use narrowing::{
     Narrowing, analyze_tuple_pattern_for_complement, apply_narrowing, compute_complement,
-    get_field_narrowing, get_field_type, get_type_for_provenance, narrow_nil_from_new_bindings,
+    get_field_narrowing, get_field_type, get_type_for_provenance,
 };
 mod pattern;
 mod provenance;
@@ -278,6 +279,26 @@ pub struct Compiled {
     pub bindings: HashMap<String, Binding>,
 }
 
+/// Compilation mode options.
+#[derive(Debug, Clone)]
+pub struct CompileOptions {
+    /// Debug build: emit failure-provenance stamps, so nil results carry an `origin`
+    /// annotation naming the source position that produced them. Zero cost when off.
+    pub debug: bool,
+    /// The display name provenance sites use for top-level code (the source file name,
+    /// `"repl"`, ...); imported modules use their own module ids.
+    pub source_name: String,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        CompileOptions {
+            debug: false,
+            source_name: "main".to_string(),
+        }
+    }
+}
+
 /// Context for ripple operator (~) usage
 /// Tracks the value being rippled and where it is on the stack
 struct RippleContext {
@@ -394,6 +415,14 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Only set when a recorder is interested (LSP); harmless otherwise.
     current_span: Option<SourceSpan>,
 
+    // Debug builds: emit failure-provenance stamps (`Stamp` instructions + the site
+    // table) so nil results carry their origin. Zero cost when false.
+    debug: bool,
+    // The display name provenance sites carry for the current compilation unit: the
+    // caller-supplied source name at top level, the module id inside imported modules
+    // (swapped in `import_and_cache_module`, like `current_package`).
+    current_module: String,
+
     // Opt-in symbol recorder for the language server (hover/definition). `None` for
     // ordinary compilation, so there is no cost. Caller-owned, so the recorded data
     // survives a failed compile.
@@ -419,6 +448,10 @@ fn accessors_label(base: &str, accessors: &[ast::AccessPath]) -> String {
             ast::AccessPath::Index(index) => {
                 label.push('.');
                 label.push_str(&index.to_string());
+            }
+            ast::AccessPath::Annotation(name, _) => {
+                label.push(':');
+                label.push_str(name);
             }
         }
     }
@@ -476,6 +509,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// returned [`LocatedError`] carries the source span; the partial index lives in the
     /// caller's `recorder`, which still points into the caller's `program`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn compile(
         ast_program: ast::Program,
         existing_bindings: &HashMap<String, Binding>,
@@ -486,6 +520,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         process_types: &'a HashMap<usize, (usize, usize)>,
         builtins: &'a quiver_core::builtins::BuiltinRegistry<E>,
         recorder: Option<&'a mut Recorder>,
+        options: CompileOptions,
     ) -> Result<Compiled, LocatedError> {
         let never_id = program.never();
         let current_package = resolver.entry_package();
@@ -506,6 +541,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             fn_case_tables: HashMap::new(),
             case_tables: HashMap::new(),
             current_span: None,
+            debug: options.debug,
+            current_module: options.source_name,
             recorder,
             _phantom: std::marker::PhantomData,
         };
@@ -647,6 +684,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         type_id: usize,
         label: Option<String>,
         origin: ModuleOrigin,
+        module_name: &[String],
         accessors: &[ast::AccessPath],
     ) {
         if let (Some(recorder), Some(span)) = (self.recorder.as_deref_mut(), span) {
@@ -658,7 +696,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Some(ast::AccessPath::Field(name)) => Some(name.clone()),
                 _ => None,
             };
-            recorder.record_import(span, type_id, label, definition_module, member);
+            recorder.record_import(
+                span,
+                type_id,
+                label,
+                definition_module,
+                module_name.to_vec(),
+                member,
+            );
         }
     }
 
@@ -774,6 +819,90 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
+    /// Compile an annotation prefix onto the carrier value currently on top of the stack.
+    /// Each annotation value is an ordinary chain with nil input, evaluated in the current
+    /// (enclosing) scope; `Annotate` then copies the carrier with the annotation attached.
+    ///
+    /// Returns the carrier's type with the row recorded: entry types are the *inferred*
+    /// value types. `exact_carrier` is set when the carrier is known freshly built with
+    /// exactly this prefix (a function literal); a block's result keeps its own members'
+    /// exactness (plain members stay open — their annotation state is unknown).
+    fn compile_annotation_attach(
+        &mut self,
+        annotation_list: Vec<ast::Annotation>,
+        carrier_type: usize,
+        exact_carrier: bool,
+    ) -> Result<usize, Error> {
+        let mut seen = std::collections::HashSet::new();
+        for annotation in &annotation_list {
+            if !seen.insert(annotation.name.clone()) {
+                return Err(Error::TypeUnresolved(format!(
+                    "Duplicate annotation :{}",
+                    annotation.name
+                )));
+            }
+        }
+        if !annotations::is_annotatable(self.program, carrier_type) {
+            return Err(Error::TypeUnresolved(format!(
+                "Annotations require a tuple or function carrier, but the annotated value has type {}",
+                quiver_core::format::format_type_by_id(&*self.program, carrier_type)
+            )));
+        }
+        let mut entries: Vec<(usize, usize)> = Vec::new();
+        for annotation in annotation_list {
+            let key_id = annotations::intern_key(self.program, &annotation.name);
+            // The builtin keys keep an expected type — `doc` for sanity, `pre`/`post` so
+            // a bare `#{ ... }` contract can infer its parameter from the carrier.
+            let expected = match annotation.name.as_str() {
+                "doc" => Some(annotations::str_type(self.program)),
+                annotations::PRE | annotations::POST => {
+                    let (parameter, result) =
+                        annotations::single_callable(self.program, carrier_type).ok_or_else(
+                            || {
+                                Error::TypeUnresolved(format!(
+                                    "Annotation :{} can only be attached to a function",
+                                    annotation.name
+                                ))
+                            },
+                        )?;
+                    Some(annotations::contract_type(
+                        self.program,
+                        &annotation.name,
+                        parameter,
+                        result,
+                    ))
+                }
+                _ => None,
+            };
+            // The annotation value is a chain with nil input (it may draw on lexical scope,
+            // but there is no meaningful flowing value at attach time).
+            self.codegen.add_instruction(Instruction::Tuple(NIL));
+            let closed_nil = annotations::closed_nil(self.program);
+            let (value_type, _) = self.compile_chain_with_input(
+                annotation.value,
+                None,
+                None,
+                Some((closed_nil, Provenance::Unknown)),
+                None,
+                false,
+                expected,
+            )?;
+            if let Some(expected) = expected
+                && !quiver_core::types::is_compatible(value_type, expected, &*self.program)
+            {
+                return Err(Error::TypeMismatch {
+                    expected: quiver_core::format::format_type_by_id(&*self.program, expected),
+                    found: quiver_core::format::format_type_by_id(&*self.program, value_type),
+                });
+            }
+            self.codegen.add_instruction(Instruction::Annotate(key_id));
+            entries.push((key_id, value_type));
+        }
+        Ok(self
+            .program
+            .annotate_type(carrier_type, exact_carrier, entries))
+    }
+
     fn validate_type_ast(ast_type: &ast::Type) -> Result<(), Error> {
         match ast_type {
             ast::Type::Tuple(tuple) => {
@@ -849,11 +978,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .unwrap_or(false)
     }
 
-    /// Check if a type ID represents the nil type
+    /// Check if a type ID represents the nil type (seeing through annotation rows —
+    /// annotated nil is nil for control flow).
     fn is_nil(&self, type_id: usize) -> bool {
         self.program
             .lookup_type(type_id)
-            .map(|t| t.is_nil())
+            .map(|t| t.is_nil_deep(&*self.program))
             .unwrap_or(false)
     }
 
@@ -907,6 +1037,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(var) => scopes::lookup_variable(&self.scopes, var, &[]).map(|(ty, _)| ty)?,
             None => ripple_context?.value_type_id,
         };
+        let source_type = Type::strip_annotations(source_type, &*self.program);
         match self.program.lookup_type(source_type) {
             Some(Type::Tuple(tuple_id)) => self
                 .program
@@ -1024,10 +1155,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.add_instruction(Instruction::Pop);
         }
 
-        Ok((
-            self.program.register_type(Type::Tuple(tuple_id)),
-            Provenance::Tuple(field_provenances),
-        ))
+        // A tuple literal is freshly built, provably annotation-free: an exact-empty
+        // row, so retrieval on it (or on unions containing it) types absent keys as
+        // provably absent rather than rejecting them as possibly-erased.
+        let result_type = self.program.register_type(Type::Tuple(tuple_id));
+        let result_type = annotations::exact_empty(self.program, result_type);
+
+        Ok((result_type, Provenance::Tuple(field_provenances)))
     }
 
     /// The positional field types of `expected` if it is a tuple type with exactly `arity`
@@ -1084,10 +1218,35 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             _ => return None,
         };
+        let callable = Type::strip_annotations(callable, &*self.program);
         match self.program.lookup_type(callable)? {
             Type::Callable { parameter, .. } => Some(*parameter),
             _ => None,
         }
+    }
+
+    /// Resolve the type after an accessor path, for type-only inspection (look-ahead
+    /// peeks, receive-type collection). Builds the type environment a checked
+    /// annotation accessor (`:('t)key`) needs to resolve its expected shape.
+    fn peek_accessor_type(
+        &mut self,
+        base: usize,
+        accessors: &[ast::AccessPath],
+        target_name: &str,
+    ) -> Result<usize, Error> {
+        let mut env = typing::TypeEnv {
+            resolver: self.resolver,
+            module_cache: &mut *self.module_cache,
+            package: &self.current_package,
+        };
+        type_queries::resolve_accessor_type(
+            &mut env,
+            &self.scopes,
+            self.program,
+            base,
+            accessors,
+            target_name,
+        )
     }
 
     /// Resolve a chain of field/index accessors against a type, for type-only inspection.
@@ -1096,7 +1255,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if accessors.is_empty() {
             return Some(base);
         }
-        type_queries::resolve_accessor_type(self.program, base, accessors, "callee").ok()
+        self.peek_accessor_type(base, accessors, "callee").ok()
     }
 
     /// Unify multiple receive types into a single type.
@@ -1207,7 +1366,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     None => {
                         if let Some(chained) = chained_type
                             && let Some(Type::Callable { parameter, .. }) =
-                                self.program.lookup_type(chained)
+                                self.program.lookup_base(chained)
                         {
                             select_sources.push(*parameter);
                         }
@@ -1247,13 +1406,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             .or_else(|| {
                                 let (base_type, _) =
                                     scopes::lookup_variable(&self.scopes, identifier, &[])?;
-                                type_queries::resolve_accessor_type(
-                                    self.program,
-                                    base_type,
-                                    &access.accessors,
-                                    identifier,
-                                )
-                                .ok()
+                                self.peek_accessor_type(base_type, &access.accessors, identifier)
+                                    .ok()
                             });
                     Ok(var_type)
                 } else {
@@ -1308,7 +1462,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Ripple refers to the chained value - extract its receive type
                     if let Some(chained_type_id) = chained_type
                         && let Some(Type::Callable { parameter, .. }) =
-                            self.program.lookup_type(*chained_type_id)
+                            self.program.lookup_base(*chained_type_id)
                     {
                         receive_types.push(*parameter);
                     }
@@ -1343,8 +1497,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 .or_else(|| {
                                     let (base_type, _) =
                                         scopes::lookup_variable(&self.scopes, identifier, &[])?;
-                                    type_queries::resolve_accessor_type(
-                                        self.program,
+                                    self.peek_accessor_type(
                                         base_type,
                                         &access.accessors,
                                         identifier,
@@ -1364,7 +1517,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                     if let Some(type_id) = receiver_type
                         && let Some(Type::Callable { parameter, .. }) =
-                            self.program.lookup_type(type_id)
+                            self.program.lookup_base(type_id)
                     {
                         receive_types.push(*parameter);
                     }
@@ -1383,9 +1536,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// literal (`#{ $0 }`); it is ignored when the literal declares its own parameter type.
     fn compile_function(
         &mut self,
-        function: ast::Function,
+        mut function: ast::Function,
         expected_parameter: Option<usize>,
     ) -> Result<usize, Error> {
+        // A function body's annotation prefix attaches to the *closure*, not the body's
+        // result: extract it before capture collection (the annotation chains evaluate in
+        // the enclosing scope at literal-evaluation time, so they contribute no captures)
+        // and compile it after the Function instruction below.
+        let function_annotations = match &mut function.body {
+            Some(body) => std::mem::take(&mut body.annotations),
+            None => vec![],
+        };
+
         let mut function_params: HashSet<String> = HashSet::new();
 
         if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
@@ -1514,6 +1676,40 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                     _ => continue,
                                 }
                             }
+                            ast::AccessPath::Annotation(name, expected) => match expected {
+                                None => {
+                                    match annotations::retrieval_type(self.program, last_type, name)
+                                    {
+                                        Ok((_, result_type)) => vec![result_type],
+                                        _ => continue,
+                                    }
+                                }
+                                Some(ast_type) => {
+                                    let mut env = typing::TypeEnv {
+                                        resolver: self.resolver,
+                                        module_cache: &mut *self.module_cache,
+                                        package: &self.current_package,
+                                    };
+                                    match typing::resolve_ast_type(
+                                        &mut env,
+                                        &self.scopes,
+                                        ast_type.clone(),
+                                        self.program,
+                                    ) {
+                                        Ok(asked) => {
+                                            let (_, result_type, _) =
+                                                annotations::checked_retrieval_type(
+                                                    self.program,
+                                                    last_type,
+                                                    name,
+                                                    asked,
+                                                );
+                                            vec![result_type]
+                                        }
+                                        _ => continue,
+                                    }
+                                }
+                            },
                         };
                         last_type = typing::union_type_ids(self.program, field_types);
                     }
@@ -1722,7 +1918,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen
             .add_instruction(Instruction::Function(function_index));
 
-        Ok(callable_type_id)
+        // Attach the literal's annotations to the freshly built closure. Evaluated here —
+        // in the enclosing scope, once per literal evaluation — so `pre`/`post` contract
+        // types are derived from this function's own parameter/result types. The closure
+        // is freshly built either way, so its row is exact: absent keys are provably
+        // absent (the bare literal gets an exact-empty row).
+        if !function_annotations.is_empty() {
+            return self.compile_annotation_attach(function_annotations, callable_type_id, true);
+        }
+
+        Ok(annotations::exact_empty(self.program, callable_type_id))
     }
 
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
@@ -1928,15 +2133,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // the term is statically dead (nil) — emitting `Ok | []` here would wrongly keep a dead
         // branch alive. (If the value can be nil the pattern matches that nil value, so it stays a
         // real success.)
+        // Match verdicts are freshly minted Ok/nil values, so their rows are exact-empty:
+        // provably annotation-free (a failed match's nil never carries an error payload).
         let final_type = if return_ok {
             if self.is_nil(result_type) && !self.contains_nil(value_type) {
                 result_type
             } else if self.contains_nil(result_type) {
-                let ok_type_id = self.program.register_type(Type::ok());
-                let nil_type_id = self.program.register_type(Type::nil());
-                typing::union_type_ids(self.program, vec![ok_type_id, nil_type_id])
+                let closed_ok = annotations::closed_ok(self.program);
+                let closed_nil = annotations::closed_nil(self.program);
+                typing::union_type_ids(self.program, vec![closed_ok, closed_nil])
             } else {
-                self.program.register_type(Type::ok())
+                annotations::closed_ok(self.program)
             }
         } else {
             result_type
@@ -1950,13 +2157,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// braced blocks, function bodies, and multi-branch statement expressions.
     fn compile_scoped_expression(
         &mut self,
-        expression: ast::Expression,
+        mut expression: ast::Expression,
         parameter_type: usize,
         parameter_provenance: Provenance,
         on_no_match: Option<usize>,
         scope_kind: ScopeKind,
         is_function_body: bool,
     ) -> Result<usize, Error> {
+        // A block's annotation prefix attaches to the block's *result*; it is compiled at the
+        // convergence point below. (A function body's annotations attach to the closure and
+        // are extracted by `compile_function` before it gets here.)
+        let block_annotations = std::mem::take(&mut expression.annotations);
+
+        // Debug builds: the site a block-exhaustion stamp points at — the first branch's
+        // start, standing in for the block itself (blocks carry no span of their own).
+        let block_site_span = expression
+            .branches
+            .first()
+            .and_then(|branch| branch.condition.chains.first())
+            .and_then(|chain| chain.span.get());
+
         // Take ownership of the dispatch collection for the duration of this (outermost
         // function-body) block, so nested blocks — compiled via recursive calls with
         // `is_function_body == false` — do not collect into it.
@@ -1970,6 +2190,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut end_jumps = Vec::new();
         let mut branch_types = Vec::new();
         let mut branch_starts = Vec::new();
+        // The nil-shaped members (rows preserved) of the last branch's condition type:
+        // when no branch matches, the block's runtime result is the last failing
+        // condition's nil value, so these type the fall-through precisely.
+        let mut last_condition_nils: Vec<usize> = Vec::new();
 
         // Record locals count before block
         let locals_before = self.local_count;
@@ -2053,13 +2277,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // Create a narrowing instance for this branch's condition
             let mut narrowing = Narrowing::new();
 
-            // Record existing bindings before compiling condition - we'll narrow new ones later
-            let bindings_before_condition: std::collections::HashSet<String> = self
-                .scopes
-                .last()
-                .map(|s| s.bindings.keys().cloned().collect())
-                .unwrap_or_default();
-
             // Compile the condition expression - it can use ~> to access the parameter
             // We need both the type and provenance for forward narrowing
             let (condition_type, condition_prov) = self.compile_sequence(
@@ -2068,6 +2285,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 None,
                 Some(&mut narrowing),
             )?;
+
+            if is_last_branch {
+                last_condition_nils = annotations::nil_members(self.program, condition_type);
+            }
 
             // Capture this branch's parameter guard (now that the condition's pattern has
             // narrowed it) and the branch_types length, so we can pair the guard with the
@@ -2157,14 +2378,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             );
                         }
                     }
-                    // Narrow all bindings created during the condition that contain nil.
-                    // This handles cases like { 0 ~> f ~> =x => ... } where x has Unknown
-                    // provenance but should still be narrowed when the condition succeeds.
-                    narrow_nil_from_new_bindings(
-                        &mut self.scopes,
-                        &bindings_before_condition,
-                        self.program,
-                    );
+                    // Note: bindings made during the condition are deliberately NOT
+                    // blanket-narrowed here. Reaching the consequence proves the
+                    // condition's *result* was non-nil, which says nothing about a
+                    // bare-binder binding (`=x` succeeds even on nil — the verdict is Ok
+                    // either way). The pattern analysis already types each binding for
+                    // the success path, and the provenance-based narrowing above covers
+                    // the case where the condition result *is* a variable.
                 }
 
                 // Pop the condition result - consequence starts fresh with block parameter
@@ -2260,20 +2480,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
+        // An annotation-only block (`{ :error X }`) has no branches: it is identity — yield
+        // the parameter unchanged — plus the attach compiled at the convergence below.
+        if expression.branches.is_empty() {
+            self.codegen.add_instruction(Instruction::Load(param_local));
+            branch_types.push(parameter_type);
+            is_exhaustive = true;
+        }
+
         // Reset to clear the parameter (branches have already reset their specific locals)
         // Save address for end_jumps patching
         let param_clear_addr = self.codegen.instructions.len();
         self.codegen
             .add_instruction(Instruction::Reset(locals_before));
 
-        // Emit cleanup blocks for branches that need to reset locals before jumping
-        // Track jumps that need to be patched to the final end address
-        let mut final_end_jumps = Vec::new();
-
-        // Check if we need cleanup blocks (any branch needs cleanup)
+        // Emit cleanup blocks for branches that need to reset locals before jumping.
+        // A cleanup is only needed when the target is a next branch or an on_no_match
+        // handler; a fall-through to the param clear is truncated by its own Reset.
         let has_cleanup_blocks = next_branch_jumps
             .iter()
-            .any(|(_, _, needs_cleanup)| *needs_cleanup);
+            .any(|(_, next_idx, needs_cleanup)| {
+                *needs_cleanup && (*next_idx < branch_starts.len() || on_no_match.is_some())
+            });
 
         // If there are cleanup blocks, emit a jump to skip them on the success path
         let skip_cleanup_jump = if has_cleanup_blocks {
@@ -2284,45 +2512,39 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Process each branch jump
         for (jump_addr, next_branch_idx, needs_cleanup) in next_branch_jumps {
-            // Determine target: next branch start, on_no_match handler, or final end
+            // Target: the next branch, the on_no_match handler, or — with no handler —
+            // the param-clear Reset. Routing the fall-through-to-nil through the Reset
+            // truncates the block's locals exactly like the success paths do; it used to
+            // land *after* the Reset, leaving the parameter's slot live and every later
+            // local index skewed against compile-time numbering (so a subsequent Store
+            // landed one slot high, and later Loads read stale values).
             let target_addr = if next_branch_idx < branch_starts.len() {
-                Some(branch_starts[next_branch_idx])
+                branch_starts[next_branch_idx]
+            } else if let Some(addr) = on_no_match {
+                addr
             } else {
-                on_no_match
+                param_clear_addr
             };
 
-            if needs_cleanup {
+            // The param clear's `Reset(locals_before)` subsumes a branch cleanup's
+            // `Reset(param_local + 1)`, so fall-through jumps go direct.
+            if needs_cleanup && target_addr != param_clear_addr {
                 // Emit cleanup block: Reset locals to branch start, then jump to target
                 let cleanup_addr = self.codegen.instructions.len();
                 self.codegen
                     .add_instruction(Instruction::Reset(param_local + 1));
-
-                if let Some(addr) = target_addr {
-                    self.codegen.emit_jump_to_addr(addr);
-                } else {
-                    // Target is final end - will patch later
-                    final_end_jumps.push(self.codegen.emit_jump_placeholder());
-                }
+                self.codegen.emit_jump_to_addr(target_addr);
 
                 // Patch original jump to point to cleanup block
                 self.codegen.patch_jump_to_addr(jump_addr, cleanup_addr);
             } else {
-                // No cleanup needed - patch directly to target
-                if let Some(addr) = target_addr {
-                    self.codegen.patch_jump_to_addr(jump_addr, addr);
-                } else {
-                    // Target is final end - will patch later
-                    final_end_jumps.push(jump_addr);
-                }
+                self.codegen.patch_jump_to_addr(jump_addr, target_addr);
             }
         }
 
-        // Patch the skip-cleanup jump and all final-end jumps to current position
+        // Patch the skip-cleanup jump to the convergence (past the cleanup blocks)
         if let Some(skip_jump) = skip_cleanup_jump {
             self.codegen.patch_jump_to_here(skip_jump);
-        }
-        for jump_addr in final_end_jumps {
-            self.codegen.patch_jump_to_here(jump_addr);
         }
 
         // Patch end_jumps to go to param clear
@@ -2330,8 +2552,47 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.patch_jump_to_addr(jump_addr, param_clear_addr);
         }
 
-        // Reset local count so future variables reuse these indexes
+        // Debug builds: a non-exhaustive block's fall-through nil is a failure result —
+        // stamp it here at the convergence. A nil already stamped at a finer site (a
+        // failing condition step) keeps its origin; exhaustive blocks whose branch
+        // *bodies* yield nil are covered by the step stamps inside those bodies.
+        if !is_exhaustive {
+            self.emit_stamp(
+                block_site_span,
+                quiver_core::bytecode::SiteKind::BlockExhausted,
+            );
+        }
+
+        // All paths have converged with the block's result on the stack: attach the
+        // annotation prefix to it (still inside the block's compile-time scope). The
+        // fall-through nil (when not exhaustive) reaches the convergence too, so it is
+        // part of the carrier. The carrier's members keep their own exactness.
+        //
+        // The convergence sits *after* the runtime `Reset(locals_before)`, so the
+        // compile-time count must be wound back first — an annotation chain's own locals
+        // (bindings, interpolation holes) number from `locals_before` to match the
+        // truncated frame — and any locals the chains allocate are cleared again after.
         self.local_count = locals_before;
+        let annotated_result = if block_annotations.is_empty() {
+            None
+        } else {
+            let mut carrier_members = branch_types.clone();
+            if !is_exhaustive {
+                carrier_members.extend(last_condition_nils.clone());
+                if last_condition_nils.is_empty() {
+                    carrier_members.push(self.program.register_type(Type::nil()));
+                }
+            }
+            let carrier_type = typing::union_type_ids(self.program, carrier_members);
+            let annotated =
+                self.compile_annotation_attach(block_annotations, carrier_type, false)?;
+            if self.local_count > locals_before {
+                self.codegen
+                    .add_instruction(Instruction::Reset(locals_before));
+                self.local_count = locals_before;
+            }
+            Some(annotated)
+        };
 
         // Pop scope
         self.scopes.pop();
@@ -2342,11 +2603,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // clean parameter-dispatch enumeration.
         let mut uncovered_region: Option<usize> = None;
 
-        // If the block is not exhaustive, add nil to the result type
-        // (since some inputs might not match any branch)
+        // If the block is not exhaustive, add nil to the result type (some inputs might
+        // not match any branch). The fall-through value is the last failing condition's
+        // nil, so its typed nil members (rows preserved) are used when available; the
+        // bare nil remains for dispatch bookkeeping and as the fallback.
         if !is_exhaustive {
             let nil_type = self.program.register_type(Type::nil());
-            branch_types.push(nil_type);
+            if last_condition_nils.is_empty() {
+                branch_types.push(nil_type);
+            } else {
+                branch_types.extend(last_condition_nils.iter().copied());
+            }
             // Inputs matching no explicit branch fall through to nil. For a non-exhaustive
             // *enumeration* (every branch is a pure parameter dispatch) we model that
             // fall-through as a synthetic `uncovered -> nil` dispatch branch rather than
@@ -2384,7 +2651,37 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.collected_dispatch = dispatch;
         }
 
+        // An annotation prefix replaces the result type with its annotated form (the
+        // attach was compiled at the convergence point above).
+        if let Some(annotated) = annotated_result {
+            return Ok(annotated);
+        }
         Ok(typing::union_type_ids(self.program, branch_types))
+    }
+
+    /// Debug builds: emit a failure-provenance stamp. Registers a site at `span` and a
+    /// `Stamp` instruction that marks a fresh nil result with it at runtime (fresh-only,
+    /// so a propagating failure keeps its original site). No-op in release builds or
+    /// without a span.
+    fn emit_stamp(&mut self, span: Option<SourceSpan>, kind: quiver_core::bytecode::SiteKind) {
+        if !self.debug {
+            return;
+        }
+        let Some(span) = span else {
+            return;
+        };
+        let module_constant = self
+            .program
+            .register_constant(Constant::Binary(self.current_module.clone().into_bytes()));
+        let site = self
+            .program
+            .register_debug_site(quiver_core::bytecode::Site {
+                module_constant,
+                line: span.line as u32,
+                column: span.column as u32,
+                kind,
+            });
+        self.codegen.add_instruction(Instruction::Stamp(site));
     }
 
     /// Compile a sequence of `,`-separated chains, short-circuiting to nil if any yields nil.
@@ -2407,13 +2704,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut end_jumps = Vec::new();
 
         for (i, chain) in sequence.chains.iter().enumerate() {
-            // Track bindings before this chain for inter-chain narrowing
-            let bindings_before_chain: std::collections::HashSet<String> = self
-                .scopes
-                .last()
-                .map(|s| s.bindings.keys().cloned().collect())
-                .unwrap_or_default();
-
             // A chain after the first threads from the previous chain's result (on the stack). That
             // value is non-nil — a nil result short-circuits to the end — so strip nil from its
             // type. The first chain has no threaded value and loads the block parameter instead.
@@ -2429,12 +2719,35 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 None,
             )?;
 
-            // If a prior chain could short-circuit to nil, the sequence's result includes nil.
+            // Debug builds: a nil step result is a failure — stamp it with this step's
+            // provenance (a no-op for non-nil results and already-stamped nils). Steps
+            // whose type excludes nil skip the instruction entirely.
+            if self.debug && self.contains_nil(chain_type) {
+                let kind = if chain.match_pattern.is_some()
+                    || chain.terms.iter().any(|t| matches!(t, ast::Term::Match(_)))
+                {
+                    quiver_core::bytecode::SiteKind::NoMatch
+                } else {
+                    quiver_core::bytecode::SiteKind::NilResult
+                };
+                self.emit_stamp(chain.span.get(), kind);
+            }
+
+            // If a prior chain could short-circuit to nil, the sequence's result includes
+            // that nil — the *same* value, so its typed nil members (annotation rows
+            // preserved) carry over rather than a fresh bare nil.
             let should_propagate_nil =
                 i > 0 && last_type.as_ref().is_some_and(|&t| self.contains_nil(t));
             last_type = Some(if should_propagate_nil {
-                let nil_type_id = self.program.register_type(Type::nil());
-                typing::union_type_ids(self.program, vec![chain_type, nil_type_id])
+                let mut members = annotations::nil_members(
+                    self.program,
+                    last_type.expect("checked by should_propagate_nil"),
+                );
+                if members.is_empty() {
+                    members.push(self.program.register_type(Type::nil()));
+                }
+                members.insert(0, chain_type);
+                typing::union_type_ids(self.program, members)
             } else {
                 chain_type
             });
@@ -2456,15 +2769,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let end_jump = self.codegen.emit_duplicate_jump_if_nil();
                 end_jumps.push(end_jump);
 
-                // After the jump, if chain could be nil, narrow bindings created in this chain.
-                // This handles cases like `a ~> =x, [x, 1] ~> %num.add` where x needs to be
-                // narrowed before the next chain uses it.
-                if self.contains_nil(chain_type) {
-                    narrow_nil_from_new_bindings(
-                        &mut self.scopes,
-                        &bindings_before_chain,
-                        self.program,
-                    );
+                // Passing the short-circuit proves this chain's *result* was non-nil, so
+                // narrow whatever the result's provenance tracks — the `=x, x, ...`
+                // idiom, where a step re-emits a binding precisely to test it. This is
+                // sound only when the chain's result IS the tracked value: a chain
+                // containing a match yields the *verdict* while its provenance still
+                // points at the matched value's source, and a bare binder's verdict is
+                // Ok even when it bound nil (`e =x` binds any value, including `[]`) —
+                // narrowing the source off the verdict typed nil-holding values non-nil
+                // (a stale leftover from the pre-`=PAT` semantics, where a failing
+                // chain-match itself short-circuited). To bind-and-guarantee non-nil in
+                // one step, ascribe: `e =('int)x`.
+                let result_is_tracked_value = chain.match_pattern.is_none()
+                    && !chain
+                        .terms
+                        .iter()
+                        .any(|term| matches!(term, ast::Term::Match(_)));
+                if result_is_tracked_value
+                    && self.contains_nil(chain_type)
+                    && !matches!(last_prov, Provenance::Unknown)
+                {
+                    let current = get_type_for_provenance(&self.scopes, &last_prov, self.program);
+                    let truthy_type = self.without_nil(current);
+                    if !self.is_never(truthy_type) {
+                        apply_narrowing(&mut self.scopes, &last_prov, truthy_type, self.program);
+                    }
                 }
             }
         }
@@ -2697,8 +3026,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Resolve accessor chain on the cached value
         let module_type_id = self.program.register_type(cached.module_type.clone());
-        let (resolved_value, resolved_type) =
-            self.resolve_accessors(&cached.value, &module_type_id, accessors, &module_name)?;
+        let (resolved_value, resolved_type) = self.resolve_accessors(
+            &cached.value,
+            &module_type_id,
+            accessors,
+            &module_name,
+            &cached.binary_data,
+        )?;
 
         Ok((cached, resolved_value, resolved_type, origin))
     }
@@ -2744,6 +3078,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_local_count = self.local_count;
         // Resolve this module's own imports against its package, not the importer's.
         let saved_package = std::mem::replace(&mut self.current_package, resolved.package.clone());
+        // Provenance sites inside the module name it, not the importing unit.
+        let saved_module = std::mem::replace(&mut self.current_module, module_name.clone());
         // Suppress semantic recording while compiling an imported module: its spans are
         // offsets into the module's own source, which would otherwise collide with the
         // document being indexed. (A module that fails to compile aborts the whole
@@ -2798,6 +3134,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.local_count = saved_local_count;
         self.recorder = saved_recorder;
         self.current_package = saved_package;
+        self.current_module = saved_module;
 
         // Register the callable type for this module wrapper function
         // (modules take no arguments and return the module value)
@@ -2863,6 +3200,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(cached)
     }
 
+    /// Append instructions reconstructing a payload's annotations onto the value the
+    /// preceding instructions left on the stack (cache-flavoured counterpart of
+    /// `Program::annotations_to_instructions`).
+    fn annotations_to_instructions_from_cache(
+        &mut self,
+        instructions: &mut Vec<Instruction>,
+        payload: &quiver_core::value::Payload,
+        binary_data: &HashMap<usize, Vec<u8>>,
+    ) -> Result<(), Error> {
+        for (key, value) in payload.annotations() {
+            let (value_instructions, _) =
+                self.value_to_instructions_from_cache(value, binary_data)?;
+            instructions.extend(value_instructions);
+            instructions.push(Instruction::Annotate(*key));
+        }
+        Ok(())
+    }
+
     /// Convert a cached runtime value back to instructions that reconstruct it.
     /// Uses pre-extracted binary data instead of an executor.
     fn value_to_instructions_from_cache(
@@ -2924,6 +3279,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     instructions.extend(field_instructions);
                 }
                 instructions.push(Instruction::Tuple(*tuple_id));
+                self.annotations_to_instructions_from_cache(
+                    &mut instructions,
+                    fields,
+                    binary_data,
+                )?;
                 Ok((
                     instructions,
                     self.program.register_type(Type::Tuple(*tuple_id)),
@@ -2948,10 +3308,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Reuse the same function index - no re-registration needed!
                 instructions.push(Instruction::Function(*function));
+                self.annotations_to_instructions_from_cache(
+                    &mut instructions,
+                    captures,
+                    binary_data,
+                )?;
 
                 Ok((instructions, callable_type_id))
             }
-            Value::Builtin(builtin_id) => {
+            Value::Builtin(builtin_id, payload) => {
                 // Get the builtin info to retrieve its type signature
                 let builtin_info = self
                     .program
@@ -2968,7 +3333,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     receive: never_id,
                 });
 
-                Ok((vec![Instruction::Builtin(*builtin_id)], callable_type_id))
+                let mut instructions = vec![Instruction::Builtin(*builtin_id)];
+                if let Some(payload) = payload {
+                    self.annotations_to_instructions_from_cache(
+                        &mut instructions,
+                        payload,
+                        binary_data,
+                    )?;
+                }
+
+                Ok((instructions, callable_type_id))
             }
             Value::Process(_, _) => Err(Error::FeatureUnsupported(
                 "Cannot use process in constant context".to_string(),
@@ -2990,11 +3364,59 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: &usize,
         accessors: &[ast::AccessPath],
         module_name: &str,
+        binary_data: &HashMap<usize, Vec<u8>>,
     ) -> Result<(Value, usize), Error> {
         let mut current_value = value.clone();
         let mut current_type = *value_type;
 
         for accessor in accessors {
+            // Annotation retrieval on a compile-time value resolves right here: the value
+            // either carries the annotation or the result is nil. The checked form's gate
+            // is decided statically too, against the entry value's own reconstructed type.
+            if let ast::AccessPath::Annotation(name, expected) = accessor {
+                let (key_id, result_type) = match expected {
+                    None => annotations::retrieval_type(self.program, current_type, name)?,
+                    Some(ast_type) => {
+                        let mut env = typing::TypeEnv {
+                            resolver: self.resolver,
+                            module_cache: &mut *self.module_cache,
+                            package: &self.current_package,
+                        };
+                        let asked = typing::resolve_ast_type(
+                            &mut env,
+                            &self.scopes,
+                            ast_type.clone(),
+                            self.program,
+                        )?;
+                        let (key_id, result_type, _) = annotations::checked_retrieval_type(
+                            self.program,
+                            current_type,
+                            name,
+                            asked,
+                        );
+                        // Apply the gate now: the entry is a compile-time value, so its
+                        // precise type is reconstructible and the shape test is static.
+                        if let Some(entry) = current_value.get_annotation(key_id).cloned() {
+                            let (_, entry_type) =
+                                self.value_to_instructions_from_cache(&entry, binary_data)?;
+                            if !quiver_core::types::is_compatible(entry_type, asked, &*self.program)
+                            {
+                                current_value = Value::nil();
+                                current_type = result_type;
+                                continue;
+                            }
+                        }
+                        (key_id, result_type)
+                    }
+                };
+                current_value = current_value
+                    .get_annotation(key_id)
+                    .cloned()
+                    .unwrap_or_else(Value::nil);
+                current_type = result_type;
+                continue;
+            }
+
             let Value::Tuple(_, fields) = &current_value else {
                 return Err(Error::MemberAccessOnNonTuple {
                     target: module_name.to_string(),
@@ -3020,6 +3442,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     )?;
                     (*index, typing::union_type_ids(self.program, field_types))
                 }
+                ast::AccessPath::Annotation(..) => unreachable!("handled above"),
             };
 
             current_value =
@@ -3102,7 +3525,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         )?;
 
         let param_is_nil = matches!(
-            self.program.lookup_type(fn_type),
+            self.program
+                .lookup_base(fn_type),
             Some(Type::Callable { parameter, .. }) if self.is_nil(*parameter)
         );
 
@@ -3127,7 +3551,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter,
             result,
             receive,
-        }) = self.program.lookup_type(fn_type_id)
+        }) = self.program.lookup_base(fn_type_id)
         else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
@@ -3164,7 +3588,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter,
             result,
             receive,
-        }) = self.program.lookup_type(fn_type_id)
+        }) = self.program.lookup_base(fn_type_id)
         else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
@@ -3246,6 +3670,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Record the base, and capture its type for resolving accessor types below.
         let mut import_origin = None;
+        let mut import_module: Option<Vec<String>> = None;
         let (base_type, base_name) = match source {
             Some(ast::AccessSource::Identifier(name)) => {
                 let Some((ty, _)) = scopes::lookup_variable(&self.scopes, name, &[]) else {
@@ -3267,8 +3692,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
                 let label = format!("%{}", module.join("/"));
                 // Base = the module itself: hover its type, go-to-def to its file, refs module-level.
-                self.record_import(base_span, ty, Some(label.clone()), origin.clone(), &[]);
+                self.record_import(
+                    base_span,
+                    ty,
+                    Some(label.clone()),
+                    origin.clone(),
+                    module,
+                    &[],
+                );
                 import_origin = Some(origin);
+                import_module = Some(module.clone());
                 (ty, label)
             }
             Some(ast::AccessSource::Builtin(name)) => {
@@ -3327,21 +3760,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let Some(span) = accessor_spans.get(i).copied().flatten() else {
                 continue;
             };
-            let Ok(ty) = type_queries::resolve_accessor_type(
-                self.program,
-                base_type,
-                &accessors[..=i],
-                &base_name,
-            ) else {
+            let Ok(ty) = self.peek_accessor_type(base_type, &accessors[..=i], &base_name) else {
                 continue;
             };
             let label = match accessor {
                 ast::AccessPath::Field(name) => name.clone(),
                 ast::AccessPath::Index(index) => index.to_string(),
+                ast::AccessPath::Annotation(name, _) => format!(":{name}"),
             };
             // The first accessor of an import is the module member: keep its go-to-def/refs.
             if let (Some(origin), 0) = (&import_origin, i) {
-                self.record_import(Some(span), ty, Some(label), origin.clone(), accessors);
+                self.record_import(
+                    Some(span),
+                    ty,
+                    Some(label),
+                    origin.clone(),
+                    import_module.as_deref().unwrap_or(&[]),
+                    accessors,
+                );
             } else {
                 self.record_typed(Some(span), ty, SymbolKind::Field, Some(label));
             }
@@ -3377,15 +3813,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
 
                 // Peek at the accessed type to determine if callable (without emitting code).
-                let peeked_type = type_queries::resolve_accessor_type(
-                    self.program,
-                    param_type,
-                    &access.accessors,
-                    "$",
-                );
+                let peeked_type = self.peek_accessor_type(param_type, &access.accessors, "$");
                 let is_callable = peeked_type.is_ok_and(|ty| {
                     matches!(
-                        self.program.lookup_type(ty),
+                        self.program.lookup_base(ty),
                         Some(Type::Callable { .. }) | Some(Type::Process { .. })
                     )
                 });
@@ -3417,17 +3848,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     .map(|(ty, _)| ty)
                     .or_else(|| {
                         let (base_type, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
-                        type_queries::resolve_accessor_type(
-                            self.program,
-                            base_type,
-                            &access.accessors,
-                            &name,
-                        )
-                        .ok()
+                        self.peek_accessor_type(base_type, &access.accessors, &name)
+                            .ok()
                     });
                 let is_callable = peeked_type.is_some_and(|ty| {
                     matches!(
-                        self.program.lookup_type(ty),
+                        self.program.lookup_base(ty),
                         Some(Type::Callable { .. }) | Some(Type::Process { .. })
                     )
                 });
@@ -3483,7 +3909,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.resolve_import(&module, &access.accessors)?;
 
                 let is_callable = matches!(
-                    self.program.lookup_type(accessed_type),
+                    self.program.lookup_base(accessed_type),
                     Some(Type::Callable { .. }) | Some(Type::Process { .. })
                 );
 
@@ -3622,7 +4048,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         for &source_type_id in source_types {
             let source_type =
                 self.program
-                    .lookup_type(source_type_id)
+                    .lookup_base(source_type_id)
                     .ok_or_else(|| Error::InternalError {
                         message: format!("Type ID {} not found", source_type_id),
                     })?;
@@ -3689,6 +4115,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .program
             .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
         let str_type = self.program.register_type(Type::Tuple(str_tuple));
+        let str_type = annotations::exact_empty(self.program, str_type);
         // The `['bin, 'bin]` argument tuple for each concatenation step.
         let pair_tuple = self
             .program
@@ -4002,7 +4429,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         let label =
                             accessors_label(&format!("%{}", module.join("/")), &access.accessors);
                         let (ty, origin) = self.compile_import(module, &access.accessors)?;
-                        self.record_import(ref_span, ty, Some(label), origin, &access.accessors);
+                        self.record_import(
+                            ref_span,
+                            ty,
+                            Some(label),
+                            origin,
+                            module,
+                            &access.accessors,
+                        );
                         Ok((ty, Provenance::Unknown))
                     }
                     Some(ast::AccessSource::Self_) => {
@@ -4275,6 +4709,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         callee_fn: Option<usize>,
         arg_type: usize,
     ) -> Option<usize> {
+        // Case tables are keyed by the bare callable type; an annotated function's
+        // exposed type is row-wrapped, so peel it before the lookup.
+        let callable_type_id = Type::strip_annotations(callable_type_id, &*self.program);
         let fn_index = callee_fn.or_else(|| self.case_tables.get(&callable_type_id).copied())?;
         let table = self.fn_case_tables.get(&fn_index)?.clone();
         let results: Vec<usize> = table
@@ -4300,7 +4737,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     ) -> Result<usize, Error> {
         let target_type =
             self.program
-                .lookup_type(target_type_id)
+                .lookup_base(target_type_id)
                 .ok_or_else(|| Error::InternalError {
                     message: format!("Type ID {} not found", target_type_id),
                 })?;
@@ -4493,7 +4930,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
 
             // Verify it's a function
-            match self.program.lookup_type(func_type) {
+            match self.program.lookup_base(func_type) {
                 Some(Type::Callable { result, .. }) => {
                     self.codegen.add_instruction(Instruction::TailCall(false));
                     Ok(*result)
@@ -4516,7 +4953,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         })?;
         let Some(Type::Callable {
             parameter, result, ..
-        }) = self.program.lookup_type(fn_type)
+        }) = self.program.lookup_base(fn_type)
         else {
             return Err(Error::TypeMismatch {
                 expected: "function".to_string(),
@@ -4579,6 +5016,46 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut current_prov = base_provenance;
 
         for accessor in accessors {
+            // Annotation retrieval: works on tuples and callables, yields value-or-nil.
+            // The bare form types by the visibility rules; the checked form `:('t)key`
+            // is total, gated by a runtime shape test where the rows can't vouch.
+            if let ast::AccessPath::Annotation(name, expected) = &accessor {
+                let (key_id, result_type, check) = match expected {
+                    None => {
+                        let (key_id, result_type) =
+                            annotations::retrieval_type(self.program, last_type, name)?;
+                        (key_id, result_type, None)
+                    }
+                    Some(ast_type) => {
+                        let mut env = typing::TypeEnv {
+                            resolver: self.resolver,
+                            module_cache: &mut *self.module_cache,
+                            package: &self.current_package,
+                        };
+                        let asked = typing::resolve_ast_type(
+                            &mut env,
+                            &self.scopes,
+                            ast_type.clone(),
+                            self.program,
+                        )?;
+                        let (key_id, result_type, needs_check) =
+                            annotations::checked_retrieval_type(
+                                self.program,
+                                last_type,
+                                name,
+                                asked,
+                            );
+                        (key_id, result_type, needs_check.then_some(asked))
+                    }
+                };
+                self.codegen
+                    .add_instruction(Instruction::GetAnnotation(key_id, check));
+                last_type = result_type;
+                // The retrieved value is detached from the carrier's fields.
+                current_prov = Provenance::Unknown;
+                continue;
+            }
+
             let (index, field_types) = match accessor {
                 ast::AccessPath::Field(field_name) => type_queries::get_field_by_name(
                     &*self.program,
@@ -4595,6 +5072,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     )?;
                     (index, field_types)
                 }
+                ast::AccessPath::Annotation(..) => unreachable!("handled above"),
             };
 
             self.codegen.add_instruction(Instruction::Get(index));

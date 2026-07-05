@@ -6,21 +6,43 @@ reverse = #<'t>['<'t>, '<'t>] {
 }
 
 [
-  new: #{ Nil },
+  new: #{
+    :doc "Creates an empty list."
+    Nil
+  },
 
-  head: #<'t>'<'t> { =Cons[head, _] => head },
+  head: #<'t>'<'t> {
+    :doc "The first element of a list, or nil when it is empty."
+    =Cons[head, _] => head
+  },
 
-  tail: #<'t>'<'t> { =Cons[_, tail] => tail },
+  tail: #<'t>'<'t> {
+    :doc "The list without its first element, or nil when it is empty."
+    =Cons[_, tail] => tail
+  },
 
-  empty?: #<'t>'<'t> { =Nil => Ok },
+  empty?: #<'t>'<'t> {
+    :doc "Whether the list is empty."
+    =Nil => Ok
+  },
 
-  prepend: #<'t>['<'t>, 't] { Cons[$1, $0] },
+  prepend: #<'t>['<'t>, 't] {
+    :doc "The list with an element added at the front."
+    Cons[$1, $0]
+  },
 
-  append: #<'t>['<'t>, 't] { [$0, Nil] reverse [Cons[$1, ~], Nil] reverse },
+  append: #<'t>['<'t>, 't] {
+    :doc "The list with an element added at the end."
+    [$0, Nil] reverse [Cons[$1, ~], Nil] reverse
+  },
 
-  reverse: #<'t>'<'t> { [~, Nil] reverse },
+  reverse: #<'t>'<'t> {
+    :doc "The list with its elements in reverse order."
+    [~, Nil] reverse
+  },
 
   iter: #<'t>'<'t> {
+    :doc "A lazy iterator over the elements of a list."
     [
       ~,
       #<'t>'<'t> {
@@ -31,6 +53,7 @@ reverse = #<'t>['<'t>, '<'t>] {
   },
 
   collect: #<'t>'%iter<'t> {
+    :doc "Collects the elements of an iterator into a list."
     [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] %iter.fold
     ~> [~, Nil] reverse
   },

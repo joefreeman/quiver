@@ -85,11 +85,11 @@ lines_step = #[', 'int, 'bin, 'int] {
 }
 
 [
-  // Open a file. Defaults to read-only; pass `mode: W` to create/truncate for writing, or
-  // `mode: A` to create/append (in append mode every write goes to the end of the file, so the
-  // offset passed to `write` is ignored). Flags are the OS open(2) bits: W = 577
-  // (O_WRONLY|O_CREAT|O_TRUNC), A = 1089 (O_WRONLY|O_CREAT|O_APPEND).
+  // In append mode every write goes to the end of the file, so the offset passed to `write` is
+  // ignored. Flags are the OS open(2) bits: W = 577 (O_WRONLY|O_CREAT|O_TRUNC), A = 1089
+  // (O_WRONLY|O_CREAT|O_APPEND).
   open: #(['%path] | ['%path, mode: (R | W | A)]) {
+    :doc "Opens a file, read-only unless mode W (create/truncate) or A (create/append) is given."
     flags = {
       | =(mode: W) => 577
       | =(mode: A) => 1089
@@ -100,31 +100,39 @@ lines_step = #[', 'int, 'bin, 'int] {
     File[[name, flags, 420] __file_open__ @serve]
   },
 
-  // Read `length` bytes starting at `offset`.
-  read: #[', 'int, 'int] { do_read },
+  read: #[', 'int, 'int] {
+    :doc "Reads from the file at the given offset, up to the given number of bytes."
+    do_read
+  },
 
-  // Read the entire file from the start, returning all its bytes.
-  read_all: #' { [~, 0, 0x] read_all },
+  read_all: #' {
+    :doc "Reads the entire file from the start, returning all its bytes."
+    [~, 0, 0x] read_all
+  },
 
-  // Iterate over the lines of the file (newline-separated, without the trailing newline).
-  lines: #' { [[~, 0, 0x, 0], &lines_step] %iter.unfold },
+  lines: #' {
+    :doc "Iterates over the lines of the file, without their trailing newlines."
+    [[~, 0, 0x, 0], &lines_step] %iter.unfold
+  },
 
-  // Write `data` starting at `offset`, returning the number of bytes written.
   write: #[', 'int, 'bin] {
+    :doc "Writes data at the given offset, returning the number of bytes written."
     =[f, offset, data]
     id = %ref
     Write[offset, data, &., id] f.0
     ! [#Reply['ref, 'int] { =Reply[&id, _], Ok }] { =Reply[_, written] => written }
   },
 
-  // Flush buffered writes durably to disk (fsync), returning Ok once complete.
   flush: #' {
+    :doc "Flushes buffered writes durably to disk (fsync), returning Ok once complete."
     =f
     id = %ref
     Flush[&., id] f.0
     ! [#Reply['ref, Ok] { =Reply[&id, _], Ok }] { =Reply[_, ok] => ok }
   },
 
-  // Close the file, releasing the descriptor and stopping its process.
-  close: #' { Close $0, Ok },
+  close: #' {
+    :doc "Closes the file, releasing the descriptor and stopping its process."
+    Close $0, Ok
+  },
 ]

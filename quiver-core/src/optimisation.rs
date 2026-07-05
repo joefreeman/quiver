@@ -1,4 +1,4 @@
-use crate::bytecode::{Bytecode, Function, Instruction};
+use crate::bytecode::{Bytecode, Function, Instruction, Site, SiteTable};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -25,6 +25,26 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         };
         match typ {
             Type::Integer | Type::Binary | Type::Reference | Type::Variable(_) | Type::Cycle(_) => {
+            }
+            Type::Annotated { base, entries, .. } => {
+                collect_type_refs(
+                    *base,
+                    types,
+                    tuples,
+                    used_types,
+                    used_tuples,
+                    used_resources,
+                );
+                for (_, value_type) in entries {
+                    collect_type_refs(
+                        *value_type,
+                        types,
+                        tuples,
+                        used_types,
+                        used_tuples,
+                        used_resources,
+                    );
+                }
             }
             Type::Tuple(tuple_id) => {
                 collect_tuple_refs(
@@ -154,6 +174,27 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         &mut used_resources,
     );
 
+    // The debug site table's values are built by the executor, not by instructions, so
+    // its module-name constants and value tuples must be kept (and later remapped) here.
+    if let Some(table) = &bytecode.debug {
+        for tuple_id in [table.site_tuple, table.str_tuple]
+            .into_iter()
+            .chain(table.kind_tuples.iter().copied())
+        {
+            collect_tuple_refs(
+                tuple_id,
+                &bytecode.types,
+                &bytecode.tuples,
+                &mut used_types,
+                &mut used_tuples,
+                &mut used_resources,
+            );
+        }
+        for site in &table.sites {
+            used_constants.insert(site.module_constant);
+        }
+    }
+
     // BFS through reachable functions
     let mut queue: VecDeque<usize> = VecDeque::new();
     queue.push_back(entry);
@@ -210,7 +251,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                         );
                     }
                 }
-                Instruction::IsType(id) => {
+                Instruction::IsType(id) | Instruction::GetAnnotation(_, Some(id)) => {
                     collect_type_refs(
                         *id,
                         &bytecode.types,
@@ -336,6 +377,20 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
             },
             Type::Resource(name) => Type::Resource(name.clone()),
             Type::Variable(name) => Type::Variable(name.clone()),
+            Type::Annotated {
+                base,
+                exact,
+                entries,
+            } => Type::Annotated {
+                base: *type_remap.get(base).unwrap_or(base),
+                exact: *exact,
+                entries: entries
+                    .iter()
+                    .map(|(key, value_type)| {
+                        (*key, *type_remap.get(value_type).unwrap_or(value_type))
+                    })
+                    .collect(),
+            },
         }
     };
 
@@ -356,6 +411,9 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     }
                     Instruction::Tuple(id) => Instruction::Tuple(*tuple_remap.get(id).unwrap()),
                     Instruction::IsType(id) => Instruction::IsType(*type_remap.get(id).unwrap()),
+                    Instruction::GetAnnotation(key, Some(id)) => {
+                        Instruction::GetAnnotation(*key, Some(*type_remap.get(id).unwrap()))
+                    }
                     Instruction::Builtin(id) => {
                         Instruction::Builtin(*builtin_remap.get(id).unwrap())
                     }
@@ -425,6 +483,27 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
     // Resources are now strings directly (no remapping needed)
     let new_resources: Vec<String> = sorted_resources;
 
+    // Remap the debug site table's ids (sites themselves are not shaken — `Stamp`
+    // instructions keep their indices).
+    let new_debug = bytecode.debug.as_ref().map(|table| SiteTable {
+        origin_key: table.origin_key,
+        site_tuple: *tuple_remap.get(&table.site_tuple).unwrap(),
+        str_tuple: *tuple_remap.get(&table.str_tuple).unwrap(),
+        kind_tuples: table
+            .kind_tuples
+            .iter()
+            .map(|id| *tuple_remap.get(id).unwrap())
+            .collect(),
+        sites: table
+            .sites
+            .iter()
+            .map(|site| Site {
+                module_constant: *constant_remap.get(&site.module_constant).unwrap(),
+                ..site.clone()
+            })
+            .collect(),
+    });
+
     Bytecode {
         constants: new_constants,
         functions: new_functions,
@@ -433,5 +512,9 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         tuples: new_tuples,
         types: new_types,
         resources: new_resources,
+        // Annotation keys are not tree-shaken: the table is tiny and key ids embedded in
+        // Annotate/GetAnnotation instructions stay valid without a remap.
+        annotation_keys: bytecode.annotation_keys.clone(),
+        debug: new_debug,
     }
 }

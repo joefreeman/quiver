@@ -100,3 +100,36 @@ fn grouping_braces_preserve_behavior() {
         .evaluate("0 { =0 => { Ok, Done } | Other }")
         .expect("Done");
 }
+
+/// Regression: a non-exhaustive block's fall-through-to-nil path must pass through the
+/// same locals Reset as the success paths. It used to land *after* the Reset, leaving
+/// the block parameter's slot live — every later local landed one slot high, so a
+/// subsequent binding read back a stale value (here, the old block parameter).
+#[test]
+fn fall_through_truncates_block_locals() {
+    quiver().evaluate("r = 2 { =1 => A }, [r]").expect("[[]]");
+    // Same skew, observed through an identity-plus-attach block at the convergence: the
+    // annotation chain's Load read the skewed slot and Annotate crashed on an integer.
+    quiver()
+        .evaluate("r = 2 { =1 => A } { :k 9 } :k, r")
+        .expect("9");
+}
+
+/// Regression: passing a step boundary proves the step's *result* non-nil — nothing
+/// more. A chain containing a match yields the verdict while its provenance points at
+/// the matched value's source, and a bare binder's verdict is Ok even on nil, so
+/// narrowing the source there compiled nil-handling branches away as dead.
+#[test]
+fn bare_binder_match_does_not_narrow_its_source() {
+    quiver()
+        .evaluate("f = #(('int | [])) { $ =y, $ { =[] => 1 | 2 } }, [] f")
+        .expect("1");
+    quiver()
+        .evaluate("f = #(('int | [])) { $ =y, y =[], 1 }, [] f")
+        .expect("1");
+    // The sound half stays: a bare access step's result IS the variable, so passing the
+    // short-circuit does narrow it (`=x, x, use-x`).
+    quiver()
+        .evaluate("g = #'int { =0 => 1 }, 0 g =x, x, [x, 1] __integer_add__")
+        .expect("2");
+}

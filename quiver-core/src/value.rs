@@ -26,47 +26,101 @@ pub enum Binary {
 /// O(1) instead of O(size of value). Computed once at construction from the elements'
 /// own cached flags, so it costs O(arity), not a deep walk.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Fields {
+pub struct Payload {
     has_heap_refs: bool,
-    values: Vec<Value>,
+    elements: Vec<Value>,
+    /// Annotations attached to the owning value: `(key id, value)` pairs, sorted by key id.
+    /// Invisible to equality and pattern matching — only `GetAnnotation` observes them.
+    /// Boxed (not `Option<Vec>`) so the common unannotated case costs one pointer-sized
+    /// `None` rather than an inline three-word `Vec`.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    annotations: Option<Box<Vec<(usize, Value)>>>,
 }
 
-impl Fields {
-    pub fn new(values: Vec<Value>) -> Self {
-        let has_heap_refs = values.iter().any(Value::has_heap_refs);
-        Fields {
+impl Payload {
+    pub fn new(elements: Vec<Value>) -> Self {
+        let has_heap_refs = elements.iter().any(Value::has_heap_refs);
+        Payload {
             has_heap_refs,
-            values,
+            elements,
+            annotations: None,
         }
     }
 
-    /// True if any element may (transitively) reference an executor-heap binary.
+    /// Construct a payload with annotations attached. Keys are sorted and must be unique.
+    pub fn with_annotations(elements: Vec<Value>, mut annotations: Vec<(usize, Value)>) -> Self {
+        if annotations.is_empty() {
+            return Payload::new(elements);
+        }
+        annotations.sort_by_key(|(key, _)| *key);
+        debug_assert!(
+            annotations.windows(2).all(|w| w[0].0 != w[1].0),
+            "duplicate annotation key"
+        );
+        let has_heap_refs = elements
+            .iter()
+            .chain(annotations.iter().map(|(_, value)| value))
+            .any(Value::has_heap_refs);
+        Payload {
+            has_heap_refs,
+            elements,
+            annotations: Some(Box::new(annotations)),
+        }
+    }
+
+    /// True if any element or annotation may (transitively) reference an executor-heap binary.
     pub fn has_heap_refs(&self) -> bool {
         self.has_heap_refs
     }
+
+    /// The annotations attached to the owning value (empty if none).
+    pub fn annotations(&self) -> &[(usize, Value)] {
+        self.annotations.as_deref().map_or(&[], |a| a.as_slice())
+    }
+
+    /// Look up an annotation by key id.
+    pub fn get_annotation(&self, key: usize) -> Option<&Value> {
+        let annotations = self.annotations();
+        annotations
+            .binary_search_by_key(&key, |(k, _)| *k)
+            .ok()
+            .map(|i| &annotations[i].1)
+    }
+
+    /// All values reachable from this payload: elements, then annotation values. This is the
+    /// iterator retain/release and the heap-transfer walks must use, so annotations are
+    /// accounted exactly like elements.
+    pub fn all_values(&self) -> impl Iterator<Item = &Value> {
+        self.elements
+            .iter()
+            .chain(self.annotations().iter().map(|(_, value)| value))
+    }
 }
 
-impl std::ops::Deref for Fields {
+impl std::ops::Deref for Payload {
     type Target = [Value];
 
     fn deref(&self) -> &[Value] {
-        &self.values
+        &self.elements
     }
 }
 
-// Equality is over the elements only; the cached flag is derived from them.
-impl PartialEq for Fields {
+// Equality is over the elements only: the cached flag is derived from them, and
+// annotations are deliberately invisible — values differing only in annotations are
+// equal, and annotated nil still matches `=[]`.
+impl PartialEq for Payload {
     fn eq(&self, other: &Self) -> bool {
-        self.values == other.values
+        self.elements == other.elements
     }
 }
 
-impl<'a> IntoIterator for &'a Fields {
+impl<'a> IntoIterator for &'a Payload {
     type Item = &'a Value;
     type IntoIter = std::slice::Iter<'a, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.values.iter()
+        self.elements.iter()
     }
 }
 
@@ -145,7 +199,7 @@ impl std::fmt::Display for IntRef<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     // Integers are canonical: `Int` for anything that fits an i64, `BigInt` strictly for
     // values outside that range (enforced by `Big`). The invariant is what keeps derived
@@ -156,32 +210,61 @@ pub enum Value {
     Reference(u64), // Unique ref: (worker_id << 48) | counter
     // Tuple/Function payloads are reference-counted so cloning a value is O(1) (refcount bump)
     // rather than a deep copy. Values are immutable, so sharing is safe.
-    Tuple(usize, Arc<Fields>),
-    Function(usize, Arc<Fields>),
-    Builtin(usize), // builtin_id (index into builtins table)
+    Tuple(usize, Arc<Payload>),
+    Function(usize, Arc<Payload>),
+    // builtin_id (index into builtins table), plus annotations when attached. The payload's
+    // elements are always empty — the slot exists only so builtins can carry annotations
+    // like any other callable; the bare, un-annotated form is `None` (no allocation). The
+    // `Option` fits the variant's existing padding, so `Value` stays at 24 bytes.
+    Builtin(usize, Option<Arc<Payload>>),
     Process(ProcessId, usize),
     Resource(ResourceId, usize), // resource_id, resource_type_id
+}
+
+// Manual because annotations must be invisible to equality: a builtin that has gained an
+// annotation payload still equals its bare form. Tuple/function payloads get the same
+// treatment inside `Payload`'s own `PartialEq` (elements only).
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
+            (Value::Binary(a), Value::Binary(b)) => a == b,
+            (Value::Reference(a), Value::Reference(b)) => a == b,
+            (Value::Tuple(a, p), Value::Tuple(b, q)) => a == b && p == q,
+            (Value::Function(a, p), Value::Function(b, q)) => a == b && p == q,
+            (Value::Builtin(a, _), Value::Builtin(b, _)) => a == b,
+            (Value::Process(a, x), Value::Process(b, y)) => a == b && x == y,
+            (Value::Resource(a, x), Value::Resource(b, y)) => a == b && x == y,
+            _ => false,
+        }
+    }
 }
 
 impl Value {
     /// Create a NIL tuple value
     pub fn nil() -> Self {
-        Value::Tuple(NIL, Arc::new(Fields::new(vec![])))
+        Value::Tuple(NIL, Arc::new(Payload::new(vec![])))
     }
 
     /// Create an OK tuple value
     pub fn ok() -> Self {
-        Value::Tuple(OK, Arc::new(Fields::new(vec![])))
+        Value::Tuple(OK, Arc::new(Payload::new(vec![])))
     }
 
     /// Construct a tuple value from owned fields.
     pub fn tuple(type_id: usize, fields: Vec<Value>) -> Self {
-        Value::Tuple(type_id, Arc::new(Fields::new(fields)))
+        Value::Tuple(type_id, Arc::new(Payload::new(fields)))
     }
 
     /// Construct a function value from owned captures.
     pub fn function(function_index: usize, captures: Vec<Value>) -> Self {
-        Value::Function(function_index, Arc::new(Fields::new(captures)))
+        Value::Function(function_index, Arc::new(Payload::new(captures)))
+    }
+
+    /// Construct a bare (un-annotated) builtin value.
+    pub fn builtin(builtin_id: usize) -> Self {
+        Value::Builtin(builtin_id, None)
     }
 
     /// True if this value may (transitively) reference an executor-heap binary and thus
@@ -190,7 +273,45 @@ impl Value {
         match self {
             Value::Binary(Binary::Heap(_)) => true,
             Value::Tuple(_, fields) | Value::Function(_, fields) => fields.has_heap_refs,
+            Value::Builtin(_, Some(payload)) => payload.has_heap_refs,
             _ => false,
+        }
+    }
+
+    /// Attach (or replace) an annotation on a tuple, function or builtin value,
+    /// copy-on-annotate: the payload elements are cloned into a fresh `Payload` carrying
+    /// the new annotation. Returns `None` for values that cannot carry annotations
+    /// (anything else).
+    pub fn annotated(&self, key: usize, annotation: Value) -> Option<Value> {
+        let payload = match self {
+            Value::Tuple(_, payload) | Value::Function(_, payload) => Some(payload.as_ref()),
+            Value::Builtin(_, payload) => payload.as_deref(),
+            _ => return None,
+        };
+        let mut annotations: Vec<(usize, Value)> = payload
+            .map(Payload::annotations)
+            .unwrap_or_default()
+            .iter()
+            .filter(|(existing, _)| *existing != key)
+            .cloned()
+            .collect();
+        annotations.push((key, annotation));
+        let elements = payload.map(|p| p.elements.clone()).unwrap_or_default();
+        let payload = Arc::new(Payload::with_annotations(elements, annotations));
+        Some(match self {
+            Value::Tuple(id, _) => Value::Tuple(*id, payload),
+            Value::Function(id, _) => Value::Function(*id, payload),
+            Value::Builtin(id, _) => Value::Builtin(*id, Some(payload)),
+            _ => unreachable!(),
+        })
+    }
+
+    /// Look up an annotation on a tuple, function or builtin value by key id.
+    pub fn get_annotation(&self, key: usize) -> Option<&Value> {
+        match self {
+            Value::Tuple(_, fields) | Value::Function(_, fields) => fields.get_annotation(key),
+            Value::Builtin(_, Some(payload)) => payload.get_annotation(key),
+            _ => None,
         }
     }
 
@@ -234,7 +355,7 @@ impl Value {
             Value::Reference(_) => "ref",
             Value::Tuple(_, _) => "tuple",
             Value::Function(_, _) => "function",
-            Value::Builtin(_) => "builtin",
+            Value::Builtin(..) => "builtin",
             Value::Process(_, _) => "process",
             Value::Resource(_, _) => "resource",
         }

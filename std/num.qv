@@ -253,6 +253,7 @@ compare = #['opt, 'opt] {
 // and floor-divide that bound by `D` — then reapply the sign. Exact, with one integer √. Lives
 // at the top level (rather than only in the record) so `floor`/`ceil`/`round` can reuse it.
 to_int = #'opt {
+  :doc "Truncates a number toward zero to an integer; nil for a nil operand."
   | =Surd[a, b, n] => {
     ar = a to_rational
     br = b to_rational
@@ -279,15 +280,20 @@ to_int = #'opt {
 }
 
 // Sign of a number: -1, 0, or 1 (nil for a nil operand).
-sign = #'opt { [$, 0] compare }
+sign = #'opt {
+  :doc "The sign of a number: -1, 0, or 1; nil for a nil operand."
+  [$, 0] compare
+}
 
 // Smaller / larger of two numbers (nil if either operand is nil).
 min = #['opt, 'opt] {
+  :doc "The smaller of two numbers; nil when either operand is nil."
   | =([[], _] | [_, []]) => []
   | compare =1 => $1
   | $0
 }
 max = #['opt, 'opt] {
+  :doc "The larger of two numbers; nil when either operand is nil."
   | =([[], _] | [_, []]) => []
   | compare =-1 => $1
   | $0
@@ -295,6 +301,7 @@ max = #['opt, 'opt] {
 
 // Clamp x to the range [lo, hi] (nil if any operand is nil).
 clamp = #['opt, 'opt, 'opt] {
+  :doc "Clamps a number to the range from lo to hi; nil when any operand is nil."
   | =([[], _, _] | [_, [], _] | [_, _, []]) => []
   | =[x, lo, hi] => {
     | [x, lo] compare =-1 => lo
@@ -307,6 +314,7 @@ clamp = #['opt, 'opt, 'opt] {
 // nudging by one when the truncation sits on the wrong side of x. The nudge is only reached
 // for a non-nil operand, so nil flows straight through.
 floor = #'opt {
+  :doc "The largest integer not greater than the number; nil for a nil operand."
   t = $ to_int
   {
     | [$, t] compare =-1 => [t, 1] __integer_subtract__
@@ -314,6 +322,7 @@ floor = #'opt {
   }
 }
 ceil = #'opt {
+  :doc "The smallest integer not less than the number; nil for a nil operand."
   t = $ to_int
   {
     | [$, t] compare =1 => [t, 1] __integer_add__
@@ -325,6 +334,7 @@ ceil = #'opt {
 // the midpoint `floor(x) + 1/2` (an exact rational), so no tower arithmetic is needed; a tie
 // (only possible for a rational x) breaks away from zero by the sign of the floor.
 round = #'opt {
+  :doc "Rounds to the nearest integer, halves away from zero; nil for a nil operand."
   | =[] => []
   | floor =f => {
     mid = f [~, 2] __integer_multiply__ [~, 1] __integer_add__ Rational[~, 2]
@@ -339,11 +349,13 @@ round = #'opt {
 
 [
   numer: #'opt {
+    :doc "The numerator of a rational, or the integer itself; nil for a surd or nil operand."
     | =Surd[a, b, n] => []
     | =Rational[n, _] => n
     | ='int => $
   },
   denom: #'opt {
+    :doc "The denominator of a rational, or 1 for an integer; nil for a surd or nil operand."
     | =Surd[a, b, n] => []
     | =Rational[_, d] => d
     | ='int => 1
@@ -352,6 +364,7 @@ round = #'opt {
   // Exact non-negative square root of an int/rational, producing a rational (perfect square)
   // or a surd. Negative input and surd input fail to nil (surd denesting is out of scope).
   sqrt: #'opt {
+    :doc "The exact square root, as a rational or surd; nil on negative or surd input."
     | =Surd[a, b, n] => []
     | ='coeff => {
       $ to_rational =Rational[p, q]
@@ -370,6 +383,7 @@ round = #'opt {
   // (`[int, int]` infers `'int`, a rational operand infers `Rational`); surd operands route
   // to the surd kernel and infer the full `'%num` union.
   add: #['opt, 'opt] {
+    :doc "Adds two numbers exactly; nil on a nil operand or mixed radicals."
     | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_add
     | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_add
@@ -378,6 +392,7 @@ round = #'opt {
     | =[a, b] => [a, b] __integer_add__
   },
   sub: #['opt, 'opt] {
+    :doc "Subtracts the second number from the first exactly; nil on a nil operand or mixed radicals."
     | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_sub
     | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_sub
@@ -386,6 +401,7 @@ round = #'opt {
     | =[a, b] => [a, b] __integer_subtract__
   },
   mul: #['opt, 'opt] {
+    :doc "Multiplies two numbers exactly; nil on a nil operand or mixed radicals."
     | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_mul
     | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_mul
@@ -397,6 +413,7 @@ round = #'opt {
   // Division. With surd operands, rationalize; otherwise exact rational division (always a
   // rational, nil on divide-by-zero).
   div: #['opt, 'opt] {
+    :doc "Divides exactly; nil on a zero divisor, nil operand, or mixed radicals."
     | =([[], _] | [_, []]) => []
     | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_div
     | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_div
@@ -414,6 +431,7 @@ round = #'opt {
 
   // Negation preserves kind: integer stays integer, rational stays rational, surd stays surd.
   neg: #'opt {
+    :doc "Negates a number, preserving its kind; nil for a nil operand."
     | =Surd[a, b, n] => [a to_rational rneg, b to_rational rneg, n] build
     | =Rational[m, d] => Rational[[m, -1] __integer_multiply__, d] reduce
     | ='int => [$, -1] __integer_multiply__
@@ -421,6 +439,7 @@ round = #'opt {
 
   // Absolute value, preserving kind.
   abs: #'opt {
+    :doc "The absolute value of a number, preserving its kind; nil for a nil operand."
     | =Surd[a, b, n] => {
       ar = a to_rational
       br = b to_rational
@@ -446,9 +465,24 @@ round = #'opt {
   max: &max,
   clamp: &clamp,
 
-  eq?: #['opt, 'opt] { compare =0, Ok },
-  lt?: #['opt, 'opt] { compare =-1, Ok },
-  le?: #['opt, 'opt] { compare { =-1 | =0 }, Ok },
-  gt?: #['opt, 'opt] { compare =1, Ok },
-  ge?: #['opt, 'opt] { compare { =0 | =1 }, Ok },
+  eq?: #['opt, 'opt] {
+    :doc "Whether two numbers are equal."
+    compare =0, Ok
+  },
+  lt?: #['opt, 'opt] {
+    :doc "Whether the first number is less than the second."
+    compare =-1, Ok
+  },
+  le?: #['opt, 'opt] {
+    :doc "Whether the first number is at most the second."
+    compare { =-1 | =0 }, Ok
+  },
+  gt?: #['opt, 'opt] {
+    :doc "Whether the first number is greater than the second."
+    compare =1, Ok
+  },
+  ge?: #['opt, 'opt] {
+    :doc "Whether the first number is at least the second."
+    compare { =0 | =1 }, Ok
+  },
 ]

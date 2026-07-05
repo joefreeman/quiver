@@ -1,0 +1,106 @@
+==================
+annotation-only block
+==================
+
+[] { :error DivisionByZero }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (tuple)
+      (block
+        (annotation
+          key: (annotation_name)
+          (chain
+            (tuple
+              name: (tuple_name))))))))
+
+==================
+block with annotation prefix and body
+==================
+
+#'int {
+  :doc "Doubles"
+  [~, 2] mul
+}
+
+---
+
+(source_file
+  (expression
+    (chain
+      (function
+        parameter: (type_identifier
+          name: (type_name))
+        (block
+          (annotation
+            key: (annotation_name)
+            (chain
+              (string)))
+          (branch
+            condition: (expression
+              (chain
+                (tuple
+                  (chain
+                    (access
+                      source: (ripple)))
+                  (chain
+                    (integer)))
+                (access
+                  source: (identifier))))))))))
+
+==================
+annotation retrieval
+==================
+
+f:doc
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier)
+        annotation: (annotation_name)))))
+
+==================
+annotation retrieval in a chain
+==================
+
+[4, 0] div :error
+
+---
+
+(source_file
+  (expression
+    (chain
+      (tuple
+        (chain
+          (integer))
+        (chain
+          (integer)))
+      (access
+        source: (identifier))
+      (access
+        annotation: (annotation_name)))))
+
+==================
+spaced colon is still a field label
+==================
+
+[a: foo]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (tuple
+        (named_field
+          name: (identifier)
+          (chain
+            (access
+              source: (identifier))))))))

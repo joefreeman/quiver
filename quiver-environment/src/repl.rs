@@ -38,6 +38,7 @@ pub struct Repl<E: Effect> {
     last_result_type: Type, // Type of the last evaluated result, for continuations
     resolver: Box<dyn ModuleResolver>,
     builtins: quiver_core::builtins::BuiltinRegistry<E>,
+    options: quiver_compiler::compiler::CompileOptions,
 }
 
 impl<E: Effect> Repl<E> {
@@ -57,7 +58,14 @@ impl<E: Effect> Repl<E> {
             last_result_type: Type::nil(),
             resolver,
             builtins,
+            options: quiver_compiler::compiler::CompileOptions::default(),
         })
+    }
+
+    /// Set the compilation mode for subsequent evaluations (debug builds stamp nil
+    /// results with failure provenance).
+    pub fn set_compile_options(&mut self, options: quiver_compiler::compiler::CompileOptions) {
+        self.options = options;
     }
 
     /// Get the REPL process ID
@@ -125,6 +133,7 @@ impl<E: Effect> Repl<E> {
             &process_type_ids,
             &self.builtins,
             None, // the REPL doesn't build a semantic index
+            self.options.clone(),
         )
         .map_err(|e| ReplError::Compiler(e.error))?;
 

@@ -130,7 +130,13 @@ impl ReplCli {
         let repl = {
             let mut env = self.environment.lock().unwrap();
             let builtins = crate::build_builtin_registry();
-            Repl::new(&mut env, repl_resolver(), builtins)?
+            let mut repl = Repl::new(&mut env, repl_resolver(), builtins)?;
+            // The REPL is a dev loop: compile debug, so nil results explain themselves.
+            repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
+                debug: true,
+                source_name: "repl".to_string(),
+            });
+            repl
         };
 
         if std::io::stdin().is_terminal() {
@@ -611,9 +617,10 @@ impl ReplCli {
             Some(EvaluationResult { value, heap }) => {
                 let formatted_value = self.environment.lock().unwrap().format_value(&value, &heap);
 
-                // Show type for functions, builtins, and processes
+                // Show type for functions, builtins, and processes; failure provenance
+                // for stamped nil results (debug builds).
                 let output = match &value {
-                    Value::Function(_, _) | Value::Builtin(_) | Value::Process(_, _) => {
+                    Value::Function(_, _) | Value::Builtin(..) | Value::Process(_, _) => {
                         let mut env = self.environment.lock().unwrap();
                         let value_type = env.value_to_type(&value);
                         let formatted_type = env.format_type(&value_type);
@@ -622,6 +629,17 @@ impl ReplCli {
                             formatted_value,
                             format!("({})", formatted_type).bright_black()
                         )
+                    }
+                    value if value.is_nil() => {
+                        let env = self.environment.lock().unwrap();
+                        match env.describe_origin(value, &heap) {
+                            Some(origin) => format!(
+                                "{} {}",
+                                formatted_value,
+                                format!("({})", origin).bright_black()
+                            ),
+                            None => formatted_value,
+                        }
                     }
                     _ => formatted_value,
                 };

@@ -52,6 +52,10 @@
 (access field: (identifier) @property)
 (tail_call field: (identifier) @property)
 
+; ---------------------------------------------------------------- annotations
+
+(annotation_name) @attribute    ; :doc, :error — declaration, attach, and retrieval
+
 ; ----------------------------------------------------------------- parameters
 
 (parameter) @variable.builtin   ; $

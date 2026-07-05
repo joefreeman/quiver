@@ -132,7 +132,7 @@ pub fn apply_narrowing(
             // If so, store field-specific narrowing for tuple pattern complement narrowing.
             let parent_type_id = get_type_for_provenance(scopes, parent, program);
             let is_single_tuple = program
-                .lookup_type(parent_type_id)
+                .lookup_base(parent_type_id)
                 .map(|t| matches!(t, Type::Tuple(_)))
                 .unwrap_or(false);
 
@@ -287,6 +287,9 @@ fn contains_cycle(type_id: usize, program: &Program, seen: &mut Vec<usize>) -> b
             None => return false,
         },
         Some(Type::Partial { fields, .. }) => fields.iter().map(|(_, t)| *t).collect(),
+        Some(Type::Annotated { base, entries, .. }) => std::iter::once(*base)
+            .chain(entries.iter().map(|(_, t)| *t))
+            .collect(),
         _ => return false,
     };
     children
@@ -490,7 +493,7 @@ pub fn get_field_type(type_id: usize, field_idx: usize, program: &mut Program) -
     let field_type_ids: Vec<usize> = variants
         .into_iter()
         .filter_map(|variant_id| {
-            let ty = program.lookup_type(variant_id)?;
+            let ty = program.lookup_base(variant_id)?;
             match ty {
                 Type::Tuple(tuple_id) => {
                     let tuple_info = program.lookup_tuple(*tuple_id)?;
@@ -658,12 +661,17 @@ fn extract_tuple_ids(type_id: usize, program: &Program) -> Vec<usize> {
         return vec![];
     };
     match ty {
+        Type::Annotated { base, .. } => extract_tuple_ids(*base, program),
         Type::Tuple(id) => vec![*id],
         Type::Union(type_ids) => type_ids
             .iter()
             .filter_map(|&tid| {
                 program.lookup_type(tid).and_then(|t| match t {
                     Type::Tuple(id) => Some(*id),
+                    Type::Annotated { base, .. } => match program.lookup_type(*base) {
+                        Some(Type::Tuple(id)) => Some(*id),
+                        _ => None,
+                    },
                     _ => None,
                 })
             })
@@ -759,42 +767,6 @@ pub fn set_field_narrowing(
                 .narrowings
                 .fields
                 .push((provenance.clone(), field_idx, narrowed_type_id));
-        }
-    }
-}
-
-/// Narrow nil from bindings created after a checkpoint.
-pub fn narrow_nil_from_new_bindings(
-    scopes: &mut [Scope],
-    bindings_before: &std::collections::HashSet<String>,
-    program: &mut Program,
-) {
-    if let Some(scope) = scopes.last_mut() {
-        let new_bindings_to_narrow: Vec<(String, usize)> = scope
-            .bindings
-            .iter()
-            .filter_map(|(name, binding)| {
-                if bindings_before.contains(name) {
-                    return None;
-                }
-                if let Binding::Variable { ty, .. } = binding {
-                    let ty_ref = program.lookup_type(*ty)?;
-                    if ty_ref.contains_nil(program) {
-                        let without_nil = ty_ref.without_nil(program);
-                        // A purely-nil binding can't be narrowed to non-nil — stripping nil would
-                        // leave `never`, which is wrong (the binding really is nil here). Leave it.
-                        if matches!(&without_nil, Type::Union(variants) if variants.is_empty()) {
-                            return None;
-                        }
-                        let new_id = program.register_type(without_nil);
-                        return Some((name.clone(), new_id));
-                    }
-                }
-                None
-            })
-            .collect();
-        for (name, narrowed) in new_bindings_to_narrow {
-            scope.narrowings.variables.insert(name, narrowed);
         }
     }
 }

@@ -10,8 +10,9 @@ use quiver_compiler::ModuleResolver;
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::recorder::Recorder;
 use quiver_core::builtins::{BuiltinRegistry, core_modules};
+use quiver_core::format::format_type_by_id;
 use quiver_core::program::Program;
-use quiver_core::types::NIL;
+use quiver_core::types::{NIL, Type, TypeLookup};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol};
@@ -80,6 +81,7 @@ pub fn analyze(text: &str, index: &LineIndex, resolver: &dyn ModuleResolver) -> 
         &process_types,
         builtins(),
         Some(&mut recorder),
+        quiver_compiler::compiler::CompileOptions::default(),
     );
 
     let diagnostics = match &result {
@@ -93,6 +95,38 @@ pub fn analyze(text: &str, index: &LineIndex, resolver: &dyn ModuleResolver) -> 
         ast: Some(retained_ast),
         symbols,
     }
+}
+
+/// The hover rendering of a type: like `format_type_by_id`, but with any `:doc` row
+/// entry hidden — its type is always `Str['bin]` (noise), and the docstring itself is
+/// shown as prose under the signature.
+pub fn hover_type_text(program: &quiver_core::program::Program, type_id: usize) -> String {
+    let doc_key = program
+        .get_annotation_keys()
+        .iter()
+        .position(|name| name == "doc");
+    if let (Some(doc_key), Some(Type::Annotated { base, entries, .. })) =
+        (doc_key, program.lookup_type(type_id))
+        && entries.iter().any(|(key, _)| *key == doc_key)
+    {
+        let base_text = format_type_by_id(program, *base);
+        let remaining: Vec<String> = entries
+            .iter()
+            .filter(|(key, _)| *key != doc_key)
+            .map(|(key, value_type)| {
+                let name = program
+                    .lookup_annotation_key_name(*key)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("key#{key}"));
+                format!(":{} {}", name, format_type_by_id(program, *value_type))
+            })
+            .collect();
+        if remaining.is_empty() {
+            return base_text;
+        }
+        return format!("{} {{ {} }}", base_text, remaining.join(", "));
+    }
+    format_type_by_id(program, type_id)
 }
 
 #[cfg(test)]
@@ -743,8 +777,9 @@ mod tests {
         let info = semantics.at_offset(offset).expect("import member recorded");
         assert_eq!(info.kind, SymbolKind::Import);
         assert_eq!(info.label.as_deref(), Some("add"));
-        // The recorded type is the member's signature, not the applied result.
-        let sig = quiver_core::format::format_type_by_id(&program, info.type_id);
+        // The recorded type is the member's signature, not the applied result. Viewed
+        // through the hover lens, which hides the member's `:doc` row entry.
+        let sig = hover_type_text(&program, info.type_id);
         assert!(sig.starts_with('#'), "expected a signature, got {sig:?}");
         assert!(sig.contains("->"), "expected a signature, got {sig:?}");
     }
@@ -794,5 +829,34 @@ mod tests {
             .find(|s| s.name == "double")
             .unwrap();
         assert_eq!(double.kind, SymbolKind::FUNCTION);
+    }
+
+    #[test]
+    fn std_import_records_module_name_and_doc_is_resolvable() {
+        use quiver_compiler::ModuleResolver;
+        // `%list` is a *virtual* module (embedded std): `definition_module` is None, but
+        // the recorded module name lets hover re-resolve its source and find the `:doc`.
+        let text = "%list.new";
+        let resolver = PackageResolver::inline();
+        let analysis = analyze(text, &LineIndex::new(text), &resolver);
+        let semantics = analysis.semantics.expect("semantics");
+        let member_offset = text.find("new").unwrap();
+        let info = semantics.at_offset(member_offset).expect("member recorded");
+        assert_eq!(info.definition_module, None);
+        assert_eq!(
+            info.import_module_name.as_deref(),
+            Some(&["list".to_string()][..])
+        );
+        assert_eq!(info.import_member.as_deref(), Some("new"));
+
+        // The hover fallback path: resolve the module source and extract the docstring.
+        let resolved = resolver
+            .resolve(&resolver.entry_package(), &["list".to_string()])
+            .expect("std list resolves");
+        let ast = quiver_compiler::parse(&resolved.source).expect("std list parses");
+        assert_eq!(
+            crate::symbols::member_doc(&ast, "new").as_deref(),
+            Some("Creates an empty list.")
+        );
     }
 }

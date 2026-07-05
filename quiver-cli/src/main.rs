@@ -59,6 +59,10 @@ enum Commands {
 
         #[arg(short, long)]
         eval: Option<String>,
+
+        /// Debug build: stamp nil results with failure provenance (`origin` annotations).
+        #[arg(long)]
+        debug: bool,
     },
 
     Run {
@@ -72,6 +76,10 @@ enum Commands {
 
         #[arg(long)]
         profile: bool,
+
+        /// Release build: skip failure-provenance stamps (`run` compiles debug by default).
+        #[arg(long)]
+        release: bool,
     },
 
     Inspect {
@@ -101,13 +109,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
             output,
             eval,
-        }) => compile_command(input, output, eval)?,
+            debug,
+        }) => compile_command(input, output, eval, debug)?,
         Some(Commands::Run {
             input,
             eval,
             quiet,
             profile,
-        }) => run_command(input, eval, quiet, profile)?,
+            release,
+        }) => run_command(input, eval, quiet, profile, release)?,
         Some(Commands::Inspect { input }) => inspect_command(input)?,
         Some(Commands::Format { input, eval, check }) => format_command(input, eval, check)?,
         None => run_repl()?,
@@ -158,6 +168,7 @@ fn compile_and_extract_entry(
     source: &str,
     resolver: &dyn ModuleResolver,
     builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
+    options: quiver_compiler::compiler::CompileOptions,
 ) -> Result<(Program, usize), Box<dyn std::error::Error>> {
     let ast = match parse(source) {
         Ok(ast) => ast,
@@ -176,8 +187,15 @@ fn compile_and_extract_entry(
         &HashMap::new(),
         builtins,
         None, // no semantic recorder for the CLI
+        options,
     )
-    .map_err(|e| format!("Compile error: {:?}", e.error))?;
+    .map_err(|e| match e.span {
+        Some(span) => format!(
+            "Compile error at {}:{}: {:?}",
+            span.line, span.column, e.error
+        ),
+        None => format!("Compile error: {:?}", e.error),
+    })?;
 
     let instructions = compilation_result.instructions;
     let receive_type = compilation_result.receive_type;
@@ -227,6 +245,7 @@ fn compile_command(
     input: Option<String>,
     output: Option<String>,
     eval: Option<String>,
+    debug: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (source, source_id, resolver_path) = if let Some(code) = eval {
         (code, "eval".to_string(), None)
@@ -237,6 +256,10 @@ fn compile_command(
         io::stdin().read_to_string(&mut buffer)?;
         (buffer, "stdin".to_string(), None)
     };
+    let options = quiver_compiler::compiler::CompileOptions {
+        debug,
+        source_name: source_id.clone(),
+    };
 
     // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
@@ -244,31 +267,33 @@ fn compile_command(
 
     // Compile and extract entry function
     // Note: compile_command allows programs that don't evaluate to a function
-    let (program, entry) = match compile_and_extract_entry(&source, &resolver, &builtins) {
-        Ok((program, entry)) => (program, Some(entry)),
-        Err(_) => {
-            // If it doesn't evaluate to a function, compile without an entry point
-            let ast = match parse(&source) {
-                Ok(ast) => ast,
-                Err(e) => handle_parse_error(e, &source, &source_id),
-            };
-            let mut program = Program::new();
-            let mut module_cache = ModuleCache::new();
-            Compiler::compile(
-                ast,
-                &HashMap::new(),
-                &mut module_cache,
-                &resolver,
-                &mut program,
-                quiver_core::types::NIL, // parameter_type_id
-                &HashMap::new(),
-                &builtins,
-                None, // no semantic recorder for the CLI
-            )
-            .map_err(|e| format!("Compile error: {:?}", e.error))?;
-            (program, None)
-        }
-    };
+    let (program, entry) =
+        match compile_and_extract_entry(&source, &resolver, &builtins, options.clone()) {
+            Ok((program, entry)) => (program, Some(entry)),
+            Err(_) => {
+                // If it doesn't evaluate to a function, compile without an entry point
+                let ast = match parse(&source) {
+                    Ok(ast) => ast,
+                    Err(e) => handle_parse_error(e, &source, &source_id),
+                };
+                let mut program = Program::new();
+                let mut module_cache = ModuleCache::new();
+                Compiler::compile(
+                    ast,
+                    &HashMap::new(),
+                    &mut module_cache,
+                    &resolver,
+                    &mut program,
+                    quiver_core::types::NIL, // parameter_type_id
+                    &HashMap::new(),
+                    &builtins,
+                    None, // no semantic recorder for the CLI
+                    options,
+                )
+                .map_err(|e| format!("Compile error: {:?}", e.error))?;
+                (program, None)
+            }
+        };
 
     let bytecode = match entry {
         Some(entry_fn) => program.to_bytecode_optimized(entry_fn),
@@ -372,14 +397,16 @@ fn run_command(
     eval: Option<String>,
     quiet: bool,
     profile: bool,
+    release: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let debug = !release;
     if let Some(code) = eval {
-        compile_execute(&code, None, quiet, profile)?;
+        compile_execute(&code, None, quiet, profile, debug)?;
     } else if let Some(path) = input {
         let content = fs::read_to_string(&path)?;
 
         if path.ends_with(".qv") {
-            compile_execute(&content, Some(&path), quiet, profile)?;
+            compile_execute(&content, Some(&path), quiet, profile, debug)?;
         } else if path.ends_with(".qx") {
             execute_bytecode(&content, quiet, profile)?;
         } else {
@@ -396,10 +423,10 @@ fn run_command(
         if buffer.trim_start().starts_with('{') {
             match serde_json::from_str::<bytecode::Bytecode>(&buffer) {
                 Ok(_) => execute_bytecode(&buffer, quiet, profile)?,
-                Err(_) => compile_execute(&buffer, None, quiet, profile)?,
+                Err(_) => compile_execute(&buffer, None, quiet, profile, debug)?,
             }
         } else {
-            compile_execute(&buffer, None, quiet, profile)?;
+            compile_execute(&buffer, None, quiet, profile, debug)?;
         }
     }
 
@@ -411,13 +438,25 @@ fn compile_execute(
     input_path: Option<&str>,
     quiet: bool,
     profile: bool,
+    debug: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
     let resolver = entry_resolver(input_path);
+    let options = quiver_compiler::compiler::CompileOptions {
+        debug,
+        source_name: input_path
+            .map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string())
+            })
+            .unwrap_or_else(|| "main".to_string()),
+    };
 
     // Compile and extract entry function (this will error if not a function)
-    let (program, entry) = compile_and_extract_entry(source, &resolver, &builtins)?;
+    let (program, entry) = compile_and_extract_entry(source, &resolver, &builtins, options)?;
 
     // Convert to bytecode
     let bytecode = program.to_bytecode_optimized(entry);
@@ -469,7 +508,6 @@ fn execute_bytecode_with_environment(
 
     // Extract data before consuming bytecode
     let builtin_names: Vec<String> = bytecode.builtins.iter().map(|b| b.name.clone()).collect();
-    let bytecode_for_format = bytecode.clone();
 
     // Start process from bytecode
     let start_time = std::time::Instant::now();
@@ -495,21 +533,20 @@ fn execute_bytecode_with_environment(
                     print_bytecode_profile_report(&stats, &builtin_names, wall_time);
                 }
 
-                // Check if result is NIL tuple (exit with error)
+                // Check if result is NIL tuple (exit with error). Debug builds stamp nil
+                // results with their failure site — surface it before exiting.
+                // Formatting uses the environment's merged program: the authoritative
+                // id space for the value (the loaded bytecode's ids were remapped).
                 if value.is_nil() {
+                    if !quiet && let Some(origin) = environment.describe_origin(&value, &heap) {
+                        eprintln!("[]  ({origin})");
+                    }
                     std::process::exit(1);
                 }
 
                 // Print result unless quiet or OK/NIL
                 if !quiet && !value.is_ok() && !value.is_nil() {
-                    let binary_lookup = format::BytecodeBinaryLookup {
-                        constants: &bytecode_for_format.constants,
-                        heap: &heap,
-                    };
-                    println!(
-                        "{}",
-                        format::format_value(&value, &bytecode_for_format, &binary_lookup)
-                    );
+                    println!("{}", environment.format_value(&value, &heap));
                 }
 
                 return Ok(());
@@ -677,6 +714,23 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
         println!("\nBuiltins:");
         for (index, builtin) in bytecode_data.builtins.iter().enumerate() {
             println!("  {}: {}", index, builtin.name);
+        }
+    }
+
+    // Print failure-provenance sites (debug builds): the targets of Stamp instructions.
+    if let Some(table) = &bytecode_data.debug {
+        println!("\nSites:");
+        for (index, site) in table.sites.iter().enumerate() {
+            let module = match bytecode_data.constants.get(site.module_constant) {
+                Some(bytecode::Constant::Binary(bytes)) => {
+                    String::from_utf8_lossy(bytes).into_owned()
+                }
+                _ => format!("constant#{}", site.module_constant),
+            };
+            println!(
+                "  {}: {}:{}:{} ({:?})",
+                index, module, site.line, site.column, site.kind
+            );
         }
     }
 

@@ -207,7 +207,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     fn handle_command(&mut self, command: Command<E>) -> Result<(), EnvironmentError> {
         match command {
             Command::UpdateProgram(update) => {
-                self.update_program(update)?;
+                self.update_program(*update)?;
             }
             Command::StartProcess { id, function_index } => {
                 self.start_process(id, function_index)?;

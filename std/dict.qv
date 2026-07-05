@@ -348,39 +348,54 @@ from = #<'v>[#^ -> '<'v>, '<'v>, 'list<['key, 'v]>] {
 }
 
 [
-  // An empty dict.
-  new: #{ Empty },
+  new: #{
+    :doc "Creates an empty dict."
+    Empty
+  },
 
-  // The value stored for `key`, or nil (`[]`) if absent.
-  get: #<'v>['<'v>, 'key] { [$0, $1, $1 hash, 0] get },
+  get: #<'v>['<'v>, 'key] {
+    :doc "The value stored for the key, or nil when the key is absent."
+    [$0, $1, $1 hash, 0] get
+  },
 
-  // A dict with `key` mapped to `value` (replacing any existing mapping).
-  put: #<'v>['<'v>, 'key, 'v] { [&put, $0, $1, $2, $1 hash, 0] put },
+  put: #<'v>['<'v>, 'key, 'v] {
+    :doc "A dict with the key mapped to the value, replacing any existing mapping."
+    [&put, $0, $1, $2, $1 hash, 0] put
+  },
 
-  // A dict with `key` removed (unchanged if absent).
-  remove: #<'v>['<'v>, 'key] { [&remove, $0, $1, $1 hash, 0] remove },
+  remove: #<'v>['<'v>, 'key] {
+    :doc "A dict with the key removed, or the dict unchanged when the key is absent."
+    [&remove, $0, $1, $1 hash, 0] remove
+  },
 
-  // Ok if `key` is present, else nil.
-  has?: #<'v>['<'v>, 'key] { [$0, $1, $1 hash, 0] get, Ok },
+  has?: #<'v>['<'v>, 'key] {
+    :doc "Whether the dict contains the key."
+    [$0, $1, $1 hash, 0] get, Ok
+  },
 
-  // Number of entries.
-  count: #<'v>'<'v> { Cons[~, Nil] [~, Nil] entries [~, 0] length },
+  count: #<'v>'<'v> {
+    :doc "The number of entries in the dict."
+    Cons[~, Nil] [~, Nil] entries [~, 0] length
+  },
 
-  // All entries as a list of [key, value] pairs (unspecified order).
-  entries: #<'v>'<'v> { Cons[~, Nil] [~, Nil] entries },
+  entries: #<'v>'<'v> {
+    :doc "All entries as a list of [key, value] pairs, in unspecified order."
+    Cons[~, Nil] [~, Nil] entries
+  },
 
-  // All keys / values as lists (unspecified order).
   keys: #<'v>'<'v> {
+    :doc "All keys in the dict as a list, in unspecified order."
     Cons[~, Nil] [~, Nil] entries
     ~> [~, #{ $0 }, Nil] map
   },
   values: #<'v>'<'v> {
+    :doc "All values in the dict as a list, in unspecified order."
     Cons[~, Nil] [~, Nil] entries
     ~> [~, #{ $1 }, Nil] map
   },
 
-  // An iterator over entries.
   iter: #<'v>'<'v> {
+    :doc "An iterator over the dict's [key, value] entries, in unspecified order."
     Cons[~, Nil] [~, Nil] entries
     ~> [
       ~,
@@ -388,9 +403,13 @@ from = #<'v>[#^ -> '<'v>, '<'v>, 'list<['key, 'v]>] {
     ] %iter.unfold
   },
 
-  // Build a dict from a list of [key, value] pairs (later pairs win).
-  from: #<'v>'list<['key, 'v]> { [&from, Empty, ~] from },
+  from: #<'v>'list<['key, 'v]> {
+    :doc "Builds a dict from a list of [key, value] pairs; later pairs win on duplicate keys."
+    [&from, Empty, ~] from
+  },
 
-  // All entries of `b` put into `a` (b's values win on conflict).
-  merge: #<'v>['<'v>, '<'v>] { Cons[$1, Nil] [~, Nil] entries [&from, $0, ~] from },
+  merge: #<'v>['<'v>, '<'v>] {
+    :doc "A dict with every entry of the second dict added; the second's values win on conflict."
+    Cons[$1, Nil] [~, Nil] entries [&from, $0, ~] from
+  },
 ]

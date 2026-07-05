@@ -208,8 +208,49 @@ fn is_tall_step(chain: &Chain, body: &Doc) -> bool {
 /// get a leading `|` when broken. The body indents two spaces from the line carrying the `{`.
 fn block_doc(trivia: &Trivia, expression: &Expression) -> Doc {
     let branches = &expression.branches;
+    // The annotation prefix (`:key value` steps). With a body following, each annotation ends
+    // in a hardline — the comma/newline separator is what ends an annotation's value chain, so
+    // a flat space-joined rendering would re-parse differently. An annotation-only block may
+    // stay flat (`{ :error X }`).
+    let annotation_parts: Vec<Doc> = expression
+        .annotations
+        .iter()
+        .enumerate()
+        .map(|(index, annotation)| {
+            pretty::concat(vec![
+                if !branches.is_empty() {
+                    pretty::hardline()
+                } else if index == 0 {
+                    pretty::line()
+                } else {
+                    // Annotations are steps: a flat layout needs the comma separator
+                    // (`{ :a X, :b Y }`) — space-joined, the second `:b` re-parses as
+                    // part of the first annotation's value chain. Like sequence steps,
+                    // a broken layout uses the bare newline.
+                    pretty::concat(vec![
+                        pretty::if_break(pretty::nil(), pretty::text(",")),
+                        pretty::line(),
+                    ])
+                },
+                trivia.leading_doc(annotation.span),
+                pretty::text(format!(":{} ", annotation.name)),
+                chain_doc(trivia, &annotation.value),
+                trivia.trailing_doc(annotation.span),
+            ])
+        })
+        .collect();
+    if branches.is_empty() {
+        return pretty::group(pretty::concat(vec![
+            pretty::text("{"),
+            pretty::nest(2, pretty::concat(annotation_parts)),
+            pretty::line(),
+            pretty::text("}"),
+        ]));
+    }
+    let annotations = pretty::concat(annotation_parts);
     let inner = if branches.len() == 1 {
         pretty::concat(vec![
+            annotations,
             pretty::line(),
             branch_doc(trivia, &branches[0], false),
         ])
@@ -231,7 +272,10 @@ fn block_doc(trivia: &Trivia, expression: &Expression) -> Doc {
             parts.push(branch_doc(trivia, branch, true));
         }
         // Lean a multi-branch block toward one-branch-per-line unless it is very short.
-        break_if_wider_than(pretty::concat(parts), SHORT_BLOCK_WIDTH)
+        pretty::concat(vec![
+            annotations,
+            break_if_wider_than(pretty::concat(parts), SHORT_BLOCK_WIDTH),
+        ])
     };
     pretty::group(pretty::concat(vec![
         pretty::text("{"),
@@ -1007,6 +1051,10 @@ fn visit_term(term: &Term, out: &mut Vec<Anchor>) {
 }
 
 fn visit_expression(expression: &Expression, out: &mut Vec<Anchor>) {
+    for annotation in &expression.annotations {
+        push_anchor(annotation.span, out);
+        visit_chain(&annotation.value, out);
+    }
     for branch in &expression.branches {
         visit_sequence(&branch.condition, out);
         if let Some(consequence) = &branch.consequence {
@@ -1072,12 +1120,41 @@ fn render_access(access: &Access) -> String {
     // parameter is written without its dot (`$0`, `$foo`); the rest keep their dots.
     let dotless_first = matches!(access.source, Some(AccessSource::Parameter));
     for (index, accessor) in access.accessors.iter().enumerate() {
-        if !(index == 0 && dotless_first) {
-            out.push('.');
-        }
+        // An annotation accessor carries its own `:` sigil; fields/indexes get their `.`
+        // (except a first accessor on `$`, which is written dotless: `$0`, `$foo`).
         match accessor {
-            AccessPath::Field(field) => out.push_str(field),
-            AccessPath::Index(value) => out.push_str(&value.to_string()),
+            AccessPath::Field(field) => {
+                if !(index == 0 && dotless_first) {
+                    out.push('.');
+                }
+                out.push_str(field);
+            }
+            AccessPath::Index(value) => {
+                if !(index == 0 && dotless_first) {
+                    out.push('.');
+                }
+                out.push_str(&value.to_string());
+            }
+            AccessPath::Annotation(name, expected) => {
+                out.push(':');
+                if let Some(ast_type) = expected {
+                    // The checked form's shape is parenthesised. Unions and unnamed
+                    // partials render fully wrapped in their own parens, so don't double
+                    // up — but decide by variant, not by rendered prefix: an intersection
+                    // like `(a: 't) & (b: 't)` *starts* with `(` without being enclosed.
+                    let self_parenthesised = matches!(ast_type, Type::Union(_))
+                        || matches!(ast_type, Type::Tuple(tuple) if tuple.is_partial && tuple.name.is_none());
+                    let rendered = render_type(ast_type);
+                    if self_parenthesised {
+                        out.push_str(&rendered);
+                    } else {
+                        out.push('(');
+                        out.push_str(&rendered);
+                        out.push(')');
+                    }
+                }
+                out.push_str(name);
+            }
         }
     }
     out

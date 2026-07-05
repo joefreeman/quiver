@@ -462,6 +462,75 @@ name = data .name        // Extract field in pipeline
 x = coords .0            // Positional access in pipeline
 ```
 
+## Annotations
+
+Annotations attach typed key/value metadata to **tuple and function values** (including
+builtins) — docstrings and contracts on functions, error payloads on nil, arbitrary keys
+on tuples. They are data *about* a value, invisible to the data plane: matching and
+equality ignore them, and they never survive construction.
+
+Each annotation's value type is inferred at its attach site and tracked in the value's
+type as it flows. Three builtin keys are checked at attach: `:doc` (a `Str['bin]`) and
+the passive contract keys `:pre`/`:post`, which for `#P -> R` expect `#P -> ok?` and
+`#[in: P, out: R] -> ok?`.
+
+### Attaching
+
+`:key value` steps at the start of a block (before the first branch) attach to **the
+value the braces denote** — a function literal's closure, or a chain block's result; an
+annotation-only block is identity-plus-attach. Each value is an ordinary chain with nil
+input, evaluated once when the closure is built (in the enclosing scope — no `$`) or when
+the block completes. Attaching is copy-on-write; re-attaching a key replaces it.
+
+```quiver
+div = #['int, 'int] {
+  :doc "Integer division. Fails with :error on a zero divisor."
+  | =[_, 0] => [] { :error DivisionByZero }
+  | __integer_divide__
+}
+```
+
+### Retrieving
+
+A glued `:key` accessor yields the annotation, or nil when absent (the glue distinguishes
+it from a spaced field label). Since a failing sequence short-circuits with the *same*
+nil value, an `:error` payload survives to the caller — through calls — while a
+recovering branch discards it with the nil it replaces.
+
+```quiver
+[4, 0] div :error              // DivisionByZero — likewise via a call: `10 half_inc :error`
+div:doc                        // an access, so div is not called
+```
+
+Bare retrieval compiles only where the annotation is **statically visible**. Inferred
+paths (bindings, chains, block parameters, function results, generics, awaits, module
+members) preserve that knowledge; explicitly *declared* types (function parameters,
+receive types, `(T)x` ascription) shed it, so retrieval there — or of a key no member of
+the carrier's type can carry — is a compile error rather than an unsound nil.
+
+The **checked form** `x:('t)key` states the entry's expected shape, as `=('t)v` does for
+a binding, and is exempt from both visibility rules: total on any carrier, typed
+`'t | []`, with a runtime structural test wherever the rows can't vouch — an absent key
+or an entry outside the shape answers nil, as a pattern fails to nil. A provably-fitting
+entry elides the test, the shape acting as a pure narrowing filter.
+
+```quiver
+f:('int)count                              // the entry, if it is an int — else []
+report = #[] { $:('division_error)err }    // total through a declared (row-erased) parameter
+```
+
+### Failure provenance (debug builds)
+
+A nil **result** (of a step, block, or function) is a failure. Debug builds (`quiv run`'s
+default; `--release` opts out) stamp each fresh one with an `origin` annotation — a
+`Site[module: Str['bin], line: 'int, column: 'int, kind: ...]` — which propagates with
+the short-circuiting nil and is shown wherever it surfaces (`[]  (match failed at
+shapes.qv:12:9)`). Stamping is fresh-only (a propagating failure keeps its original site)
+and positional (nil as data — an argument, a field — is never stamped). Stamps are
+invisible to the type system, so types are identical across build modes: read them with a
+checked retrieval (`x:((line: 'int))origin`, nil in a release build) — bare `x:origin` is
+always an error. `origin` is otherwise ordinary; stamps never overwrite a program's own.
+
 ## Ref creation
 
 The `%ref` module is a single nilary function that mints a unique, opaque identifier (of type `'ref`). Unlike other standard-library modules — which import a record of functions — `%ref` *is* the function, so each evaluation yields a fresh ref. Refs support equality and pattern matching.

@@ -93,6 +93,34 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             }
         }
         Type::Tuple(tuple_id) => format_tuple_type(lookup, *tuple_id),
+        // An annotated type prints its base followed by the attach syntax; openness is
+        // not rendered (it is explained in prose by the visibility diagnostics).
+        Type::Annotated { base, entries, .. } => {
+            // An empty row is invisible in display: render the base exactly as if it
+            // were unwrapped (same nesting). A non-empty row parenthesises the base,
+            // which is followed by the attach-syntax braces.
+            if entries.is_empty() {
+                return lookup
+                    .lookup_type(*base)
+                    .map(|t| format_type_impl(lookup, t, nested))
+                    .unwrap_or_else(|| format!("Type{}", base));
+            }
+            let base_str = lookup
+                .lookup_type(*base)
+                .map(|t| format_type_impl(lookup, t, true))
+                .unwrap_or_else(|| format!("Type{}", base));
+            let rendered: Vec<String> = entries
+                .iter()
+                .map(|(key, value_type)| {
+                    let key_name = lookup
+                        .lookup_annotation_key_name(*key)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("key#{}", key));
+                    format!(":{} {}", key_name, format_type_by_id(lookup, *value_type))
+                })
+                .collect();
+            format!("{} {{ {} }}", base_str, rendered.join(", "))
+        }
         Type::Partial { name, fields } => format_partial_type(lookup, name.as_ref(), fields),
         Type::Callable {
             parameter,
@@ -267,6 +295,49 @@ impl BinaryLookup for BytecodeBinaryLookup<'_> {
     }
 }
 
+/// Describe a nil result's failure provenance (debug builds): reads the `origin`
+/// annotation stamped on the value and renders it as e.g. `no branch matched at
+/// shapes:12:9`. `None` when the value carries no origin (release builds, or nil data).
+pub fn describe_origin<T: TypeLookup, B: BinaryLookup>(
+    value: &Value,
+    annotation_keys: &[String],
+    type_lookup: &T,
+    binary_lookup: &B,
+) -> Option<String> {
+    let origin_key = annotation_keys.iter().position(|name| name == "origin")?;
+    let site = value.get_annotation(origin_key)?;
+    let Value::Tuple(_, fields) = site else {
+        return None;
+    };
+    let [module, line, column, kind] = &fields[..] else {
+        return None;
+    };
+    let module = match module {
+        Value::Tuple(_, str_fields) => match str_fields.first() {
+            Some(Value::Binary(binary)) => binary_lookup
+                .get_bytes(binary)
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let (Value::Int(line), Value::Int(column)) = (line, column) else {
+        return None;
+    };
+    let describe_kind = match kind {
+        Value::Tuple(kind_tuple, _) => match type_lookup
+            .lookup_tuple(*kind_tuple)
+            .and_then(|info| info.name.as_deref())
+        {
+            Some("NoMatch") => "match failed",
+            Some("BlockExhausted") => "no branch matched",
+            _ => "nil result",
+        },
+        _ => "nil result",
+    };
+    Some(format!("{describe_kind} at {module}:{line}:{column}"))
+}
+
 pub fn format_value<T: TypeLookup, B: BinaryLookup>(
     value: &Value,
     type_lookup: &T,
@@ -274,7 +345,7 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
 ) -> String {
     match value {
         Value::Function(function, _) => format!("#{}", function),
-        Value::Builtin(name) => format!("__{}__", name),
+        Value::Builtin(name, _) => format!("__{}__", name),
         Value::Int(n) => n.to_string(),
         Value::BigInt(n) => n.to_string(),
         Value::Binary(binary) => {

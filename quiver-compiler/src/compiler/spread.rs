@@ -50,12 +50,17 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
         return vec![];
     };
     match ty {
+        Type::Annotated { base, .. } => extract_tuple_ids(program, *base),
         Type::Tuple(id) => vec![*id],
         Type::Union(type_ids) => type_ids
             .iter()
             .filter_map(|&tid| {
                 program.lookup_type(tid).and_then(|t| match t {
                     Type::Tuple(id) => Some(*id),
+                    Type::Annotated { base, .. } => match program.lookup_type(*base) {
+                        Some(Type::Tuple(id)) => Some(*id),
+                        _ => None,
+                    },
                     _ => None,
                 })
             })
@@ -458,7 +463,8 @@ fn emit_single_variant_tuple<E: quiver_core::effects::Effect>(
     emit_stack_cleanup_code(compiler, stack_size);
 
     // Return a type ID for this tuple type
-    Ok(compiler.program.register_type(Type::Tuple(tuple_id)))
+    let type_id = compiler.program.register_type(Type::Tuple(tuple_id));
+    Ok(super::annotations::exact_empty(compiler.program, type_id))
 }
 
 /// Emit bytecode for multiple variant tuples (with type checking and branching)
@@ -493,7 +499,7 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 // Pick the spread value and check its type
                 let depth = stack_size - 1 - spread_stack_idx;
                 compiler.codegen.add_instruction(Instruction::Pick(depth));
-                // Register the tuple type as a check type
+                // Register the tuple type as a check type (bare: IsType is row-transparent)
                 let type_id = compiler.program.register_type(Type::Tuple(spread_tuple_id));
                 compiler
                     .codegen
@@ -513,7 +519,11 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
             compiler
                 .codegen
                 .add_instruction(Instruction::Tuple(tuple_id));
-            variant_type_ids.push(compiler.program.register_type(Type::Tuple(tuple_id)));
+            {
+                let type_id = compiler.program.register_type(Type::Tuple(tuple_id));
+                let type_id = super::annotations::exact_empty(compiler.program, type_id);
+                variant_type_ids.push(type_id);
+            }
 
             end_jumps.push(compiler.codegen.emit_jump_placeholder());
 
@@ -531,7 +541,11 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
             compiler
                 .codegen
                 .add_instruction(Instruction::Tuple(tuple_id));
-            variant_type_ids.push(compiler.program.register_type(Type::Tuple(tuple_id)));
+            {
+                let type_id = compiler.program.register_type(Type::Tuple(tuple_id));
+                let type_id = super::annotations::exact_empty(compiler.program, type_id);
+                variant_type_ids.push(type_id);
+            }
         }
     }
 

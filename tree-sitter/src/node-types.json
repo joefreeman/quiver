@@ -3,6 +3,16 @@
     "type": "access",
     "named": true,
     "fields": {
+      "annotation": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "annotation_name",
+            "named": true
+          }
+        ]
+      },
       "field": {
         "multiple": true,
         "required": false,
@@ -39,6 +49,32 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "annotation",
+    "named": true,
+    "fields": {
+      "key": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "annotation_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "chain",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -144,6 +180,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "annotation",
+          "named": true
+        },
         {
           "type": "branch",
           "named": true
@@ -1510,6 +1550,16 @@
     "type": "tail_call",
     "named": true,
     "fields": {
+      "annotation": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "annotation_name",
+            "named": true
+          }
+        ]
+      },
       "field": {
         "multiple": true,
         "required": false,
@@ -1995,6 +2045,10 @@
   {
     "type": "^",
     "named": false
+  },
+  {
+    "type": "annotation_name",
+    "named": true
   },
   {
     "type": "binary",

@@ -39,6 +39,10 @@ pub struct SemanticInfo {
     /// so go-to-definition jumps there rather than to a span in the current file. `None` for
     /// local symbols and for imports with no openable origin (the embedded standard library).
     pub definition_module: Option<PathBuf>,
+    /// For an import access, the module's *name* path (`%mathx/vec` → `["mathx", "vec"]`).
+    /// Unlike `definition_module` this is set for virtual modules too (the embedded std),
+    /// letting tooling re-resolve the module's source through a resolver.
+    pub import_module_name: Option<Vec<String>>,
     /// For an import access, the first accessed member (`%util.double` → `"double"`); `None` for
     /// a bare module import (`%util`). With `definition_module`, this is the canonical identity
     /// used to find references to an imported symbol across the project.
@@ -87,6 +91,7 @@ impl Recorder {
                 type_id,
                 definition,
                 definition_module: None,
+                import_module_name: None,
                 import_member: None,
                 kind,
                 label,
@@ -109,6 +114,7 @@ impl Recorder {
                 type_id,
                 definition: None,
                 definition_module: None,
+                import_module_name: None,
                 import_member: None,
                 kind,
                 label,
@@ -125,6 +131,7 @@ impl Recorder {
         type_id: usize,
         label: Option<String>,
         definition_module: Option<PathBuf>,
+        module_name: Vec<String>,
         member: Option<String>,
     ) {
         self.entries.push((
@@ -133,6 +140,7 @@ impl Recorder {
                 type_id,
                 definition: None,
                 definition_module,
+                import_module_name: Some(module_name),
                 import_member: member,
                 kind: SymbolKind::Import,
                 label,

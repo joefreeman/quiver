@@ -16,6 +16,15 @@ pub struct Program {
     builtins: Vec<BuiltinInfo>,
     tuples: Vec<TupleTypeInfo>,
     types: Vec<Type>,
+    /// Annotation key names, interned by `register_annotation_key`; the index is the key
+    /// id carried by `Annotate`/`GetAnnotation`. Keys are just names — their value types
+    /// are inferred per attach site and tracked in annotation rows (`Type::Annotated`).
+    #[serde(default)]
+    annotation_keys: Vec<String>,
+    /// Failure-provenance table (debug builds only): sites indexed by `Stamp`
+    /// instructions, plus the tuple/key ids the executor needs to prebuild the values.
+    #[serde(default)]
+    debug: Option<crate::bytecode::SiteTable>,
 }
 
 impl TypeLookup for Program {
@@ -25,6 +34,10 @@ impl TypeLookup for Program {
 
     fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {
         self.tuples.get(tuple_id)
+    }
+
+    fn lookup_annotation_key_name(&self, key: usize) -> Option<&str> {
+        self.annotation_keys.get(key).map(|name| name.as_str())
     }
 }
 
@@ -46,6 +59,8 @@ impl Program {
             builtins: Vec::new(),
             tuples: Vec::new(),
             types: Vec::new(),
+            annotation_keys: Vec::new(),
+            debug: None,
         };
 
         // Register built-in tuple types
@@ -171,10 +186,72 @@ impl Program {
         type_id
     }
 
+    /// Intern an annotation key name, returning its key id.
+    pub fn register_annotation_key(&mut self, name: &str) -> usize {
+        if let Some(index) = self.annotation_keys.iter().position(|k| k == name) {
+            return index;
+        }
+        let key_id = self.annotation_keys.len();
+        self.annotation_keys.push(name.to_string());
+        key_id
+    }
+
+    pub fn get_annotation_keys(&self) -> &Vec<String> {
+        &self.annotation_keys
+    }
+
     /// Get the type ID for the NEVER type (empty union / bottom type).
     /// Registers it if not already present.
     pub fn never(&mut self) -> usize {
         self.register_type(Type::Union(vec![]))
+    }
+
+    /// Intern an annotated type, normalising: entries sorted and unique by key; an
+    /// open-empty row is the plain base and is never interned; annotating an already
+    /// annotated base folds into its row (later entries replace); annotating a union
+    /// distributes over its members.
+    pub fn annotate_type(
+        &mut self,
+        base: usize,
+        exact: bool,
+        entries: Vec<(usize, usize)>,
+    ) -> usize {
+        match self.types.get(base).cloned() {
+            Some(Type::Annotated {
+                base: inner,
+                exact: inner_exact,
+                entries: inner_entries,
+            }) => {
+                let mut merged: Vec<(usize, usize)> = inner_entries
+                    .into_iter()
+                    .filter(|(key, _)| !entries.iter().any(|(new_key, _)| new_key == key))
+                    .collect();
+                merged.extend(entries);
+                // Attaching preserves the base's exactness: entries are added/replaced,
+                // and what is (un)known about the rest of the row is unchanged.
+                self.annotate_type(inner, inner_exact, merged)
+            }
+            Some(Type::Union(members)) => {
+                let annotated: Vec<usize> = members
+                    .iter()
+                    .map(|&member| self.annotate_type(member, exact, entries.clone()))
+                    .collect();
+                self.register_type(Type::Union(annotated))
+            }
+            _ => {
+                if entries.is_empty() && !exact {
+                    return base;
+                }
+                let mut entries = entries;
+                entries.sort_by_key(|(key, _)| *key);
+                entries.dedup_by_key(|(key, _)| *key);
+                self.register_type(Type::Annotated {
+                    base,
+                    exact,
+                    entries,
+                })
+            }
+        }
     }
 
     pub fn get_tuples(&self) -> &Vec<TupleTypeInfo> {
@@ -213,7 +290,65 @@ impl Program {
             tuples: self.tuples.clone(),
             types: self.types.clone(),
             resources: resource_names,
+            annotation_keys: self.annotation_keys.clone(),
+            debug: self.debug.clone(),
         }
+    }
+
+    /// The failure-provenance table of a debug build, if any.
+    pub fn debug_sites(&self) -> Option<&crate::bytecode::SiteTable> {
+        self.debug.as_ref()
+    }
+
+    /// Register a failure-provenance site (debug builds), creating the table — its
+    /// `origin` key, `Site` tuple shape and kind markers — on first use. Returns the site
+    /// id a `Stamp` instruction carries.
+    pub fn register_debug_site(&mut self, site: crate::bytecode::Site) -> usize {
+        if self.debug.is_none() {
+            let origin_key = self.register_annotation_key("origin");
+            let binary_type = self.register_type(Type::Binary);
+            let str_tuple = self.register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
+            let str_type = self.register_type(Type::Tuple(str_tuple));
+            let integer_type = self.register_type(Type::Integer);
+            let kind_tuples: Vec<usize> = crate::bytecode::SiteKind::ALL
+                .iter()
+                .map(|kind| self.register_tuple(Some(kind.name().to_string()), vec![]))
+                .collect();
+            let kind_type_ids: Vec<usize> = kind_tuples
+                .iter()
+                .map(|&tuple_id| self.register_type(Type::Tuple(tuple_id)))
+                .collect();
+            let kind_type = self.register_type(Type::Union(kind_type_ids));
+            let site_tuple = self.register_tuple(
+                Some("Site".to_string()),
+                vec![
+                    (Some("module".to_string()), str_type),
+                    (Some("line".to_string()), integer_type),
+                    (Some("column".to_string()), integer_type),
+                    (Some("kind".to_string()), kind_type),
+                ],
+            );
+            // Give the Site tuple a type-table presence: checked retrievals
+            // (`x:((line: 'int))origin`) enumerate compatible concrete types from the
+            // types table, and imports walk it types-first.
+            self.register_type(Type::Tuple(site_tuple));
+            self.debug = Some(crate::bytecode::SiteTable {
+                origin_key,
+                site_tuple,
+                str_tuple,
+                kind_tuples,
+                sites: Vec::new(),
+            });
+        }
+        let table = self.debug.as_mut().expect("just initialised");
+        // Dedup, like the other register_* methods: re-registration (e.g. the REPL
+        // re-merging its accumulated program every line) must return stable ids, or the
+        // shifted `Stamp` operands defeat function dedup and snowball each merge.
+        if let Some(existing) = table.sites.iter().position(|s| *s == site) {
+            return existing;
+        }
+        table.sites.push(site);
+        table.sites.len() - 1
     }
 
     /// Convert this program to optimized bytecode format.
@@ -251,6 +386,20 @@ impl Program {
         };
 
         self.register_function(new_func)
+    }
+
+    /// Append instructions reconstructing a payload's annotations onto the value the
+    /// preceding instructions left on the stack (helper for `value_to_instructions`).
+    fn annotations_to_instructions<E: crate::effects::Effect>(
+        &mut self,
+        instrs: &mut Vec<Instruction>,
+        payload: &crate::value::Payload,
+        executor: &Executor<E>,
+    ) {
+        for (key, value) in payload.annotations() {
+            instrs.extend(self.value_to_instructions(value, executor));
+            instrs.push(Instruction::Annotate(*key));
+        }
     }
 
     /// Convert a runtime value to instructions that reconstruct it.
@@ -292,6 +441,7 @@ impl Program {
                     instrs.extend(self.value_to_instructions(elem, executor));
                 }
                 instrs.push(Instruction::Tuple(*tuple_id));
+                self.annotations_to_instructions(&mut instrs, elements, executor);
                 instrs
             }
             Value::Function(function, captures) => {
@@ -300,11 +450,16 @@ impl Program {
                 } else {
                     *function
                 };
-                vec![Instruction::Function(func_index)]
+                let mut instrs = vec![Instruction::Function(func_index)];
+                self.annotations_to_instructions(&mut instrs, captures, executor);
+                instrs
             }
-            Value::Builtin(builtin_id) => {
-                // Value::Builtin now contains the builtin_id directly
-                vec![Instruction::Builtin(*builtin_id)]
+            Value::Builtin(builtin_id, payload) => {
+                let mut instrs = vec![Instruction::Builtin(*builtin_id)];
+                if let Some(payload) = payload {
+                    self.annotations_to_instructions(&mut instrs, payload, executor);
+                }
+                instrs
             }
             Value::Process(_, _) => {
                 panic!("Cannot convert pid to instructions")

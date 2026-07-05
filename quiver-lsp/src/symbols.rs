@@ -4,7 +4,10 @@
 
 use crate::convert::span_to_range;
 use crate::documents::LineIndex;
-use quiver_compiler::ast::{Chain, Match, Program, Statement, Term};
+use quiver_compiler::ast::{
+    AccessSource, Chain, Expression, FieldValue, Function, Match, Program, Sequence, Statement,
+    StrSegment, Term,
+};
 use quiver_compiler::parser::SourceSpan;
 use tower_lsp::lsp_types::{DocumentSymbol, SymbolKind};
 
@@ -119,5 +122,234 @@ fn symbol(
         range,
         selection_range: range,
         children: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Docstrings (`:doc` annotations)
+// ---------------------------------------------------------------------------
+
+/// The `:doc` string of the binding defined at `definition` (its bind span), searching
+/// nested scopes. `None` unless the binding's value is a single function literal whose
+/// body carries a `:doc` annotation with a plain string value.
+pub fn doc_at_definition(program: &Program, definition: SourceSpan) -> Option<String> {
+    let mut found = None;
+    for statement in &program.statements {
+        if let Statement::Expression(sequence) = statement {
+            visit_sequence_for_doc(sequence, definition, &mut found);
+        }
+    }
+    found
+}
+
+/// The `:doc` string of module member `member`, when the module's value is a simple
+/// tuple literal and the member's field is a function literal with a `:doc` annotation.
+pub fn member_doc(program: &Program, member: &str) -> Option<String> {
+    let expression = program
+        .statements
+        .iter()
+        .rev()
+        .find_map(|statement| match statement {
+            Statement::Expression(expression) => Some(expression),
+            _ => None,
+        })?;
+    let chain = expression.chains.last()?;
+    let [Term::Tuple(tuple)] = chain.terms.as_slice() else {
+        return None;
+    };
+    tuple
+        .fields
+        .iter()
+        .find(|field| field.name.as_deref() == Some(member))
+        .and_then(|field| match &field.value {
+            FieldValue::Chain(chain) => {
+                doc_of_chain(chain).or_else(|| doc_behind_reference(program, chain))
+            }
+            FieldValue::Spread(_) => None,
+        })
+}
+
+/// The `:doc` of the top-level binding a `member: &local` field refers to — annotations
+/// ride the referenced closure into the module tuple, so the binding's doc is the
+/// member's doc.
+fn doc_behind_reference(program: &Program, chain: &Chain) -> Option<String> {
+    let [Term::Reference(access)] = chain.terms.as_slice() else {
+        return None;
+    };
+    let Some(AccessSource::Identifier(name)) = &access.source else {
+        return None;
+    };
+    if !access.accessors.is_empty() {
+        return None;
+    }
+    for statement in &program.statements {
+        if let Statement::Expression(sequence) = statement {
+            for chain in &sequence.chains {
+                if let Some(Match::Identifier(bound, _)) = &chain.match_pattern
+                    && bound == name
+                {
+                    return doc_of_chain(chain);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn visit_sequence_for_doc(sequence: &Sequence, definition: SourceSpan, found: &mut Option<String>) {
+    for chain in &sequence.chains {
+        if chain.bind_span.get() == Some(definition)
+            && let Some(doc) = doc_of_chain(chain)
+        {
+            *found = Some(doc);
+            return;
+        }
+        for term in &chain.terms {
+            visit_term_for_doc(term, definition, found);
+            if found.is_some() {
+                return;
+            }
+        }
+    }
+}
+
+fn visit_term_for_doc(term: &Term, definition: SourceSpan, found: &mut Option<String>) {
+    match term {
+        Term::Block(expression) => visit_expression_for_doc(expression, definition, found),
+        Term::Function(function) => {
+            if let Some(body) = &function.body {
+                visit_expression_for_doc(body, definition, found);
+            }
+        }
+        Term::Spawn(inner, _) => visit_term_for_doc(inner, definition, found),
+        Term::Tuple(tuple) => {
+            for field in &tuple.fields {
+                if let FieldValue::Chain(chain) = &field.value {
+                    if chain.bind_span.get() == Some(definition)
+                        && let Some(doc) = doc_of_chain(chain)
+                    {
+                        *found = Some(doc);
+                        return;
+                    }
+                    for term in &chain.terms {
+                        visit_term_for_doc(term, definition, found);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn visit_expression_for_doc(
+    expression: &Expression,
+    definition: SourceSpan,
+    found: &mut Option<String>,
+) {
+    for branch in &expression.branches {
+        visit_sequence_for_doc(&branch.condition, definition, found);
+        if found.is_some() {
+            return;
+        }
+        if let Some(consequence) = &branch.consequence {
+            visit_sequence_for_doc(consequence, definition, found);
+            if found.is_some() {
+                return;
+            }
+        }
+    }
+}
+
+/// The chain's `:doc` text: a single function literal with a doc prefix, or a chain
+/// ending in a block attach (`expr { :doc "..." }` — e.g. an annotated builtin export
+/// like `&__binary_and__ { :doc … }`). Plain-string docs only.
+fn doc_of_chain(chain: &Chain) -> Option<String> {
+    match chain.terms.as_slice() {
+        [Term::Function(function)] => doc_of_function(function),
+        [.., Term::Block(expression)] => doc_of_expression(expression),
+        _ => None,
+    }
+}
+
+fn doc_of_function(function: &Function) -> Option<String> {
+    doc_of_expression(function.body.as_ref()?)
+}
+
+fn doc_of_expression(body: &Expression) -> Option<String> {
+    let annotation = body
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name == "doc")?;
+    let [Term::String(_, segments)] = annotation.value.terms.as_slice() else {
+        return None;
+    };
+    let mut out = String::new();
+    for segment in segments {
+        match segment {
+            StrSegment::Text(bytes) => out.push_str(std::str::from_utf8(bytes).ok()?),
+            // An interpolated docstring has no static text; skip it.
+            StrSegment::Hole(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+
+    fn bind_span_of(program: &Program, name: &str) -> SourceSpan {
+        for statement in &program.statements {
+            if let Statement::Expression(sequence) = statement {
+                for chain in &sequence.chains {
+                    if let Some(Match::Identifier(bound, _)) = &chain.match_pattern
+                        && bound == name
+                    {
+                        return chain.bind_span.get().expect("bind span");
+                    }
+                }
+            }
+        }
+        panic!("binding {name} not found");
+    }
+
+    #[test]
+    fn doc_of_a_local_function_binding() {
+        let source = "double = #'int {\n  :doc \"Doubles an integer.\"\n  [~, 2] mul\n}\n";
+        let ast = quiver_compiler::parse(source).expect("parse");
+        let definition = bind_span_of(&ast, "double");
+        assert_eq!(
+            doc_at_definition(&ast, definition).as_deref(),
+            Some("Doubles an integer.")
+        );
+    }
+
+    #[test]
+    fn no_doc_yields_none() {
+        let source = "double = #'int { [~, 2] mul }\n";
+        let ast = quiver_compiler::parse(source).expect("parse");
+        let definition = bind_span_of(&ast, "double");
+        assert_eq!(doc_at_definition(&ast, definition), None);
+    }
+
+    #[test]
+    fn doc_of_a_module_member() {
+        let source = "[\n  greet: #'int {\n    :doc \"Greets.\"\n    [~, 1] add\n  },\n]\n";
+        let ast = quiver_compiler::parse(source).expect("parse");
+        assert_eq!(member_doc(&ast, "greet").as_deref(), Some("Greets."));
+        assert_eq!(member_doc(&ast, "missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod reference_doc_tests {
+    use super::*;
+
+    #[test]
+    fn member_doc_chases_a_local_reference() {
+        let source = "\
+floor = #'int {\n  :doc \"Rounds down.\"\n  $\n}\n\n[\n  floor: &floor,\n]\n";
+        let ast = quiver_compiler::parse(source).expect("parse");
+        assert_eq!(member_doc(&ast, "floor").as_deref(), Some("Rounds down."));
     }
 }

@@ -30,6 +30,7 @@ pub fn make_capture_name(base: &str, accessors: &[ast::AccessPath]) -> String {
             .map(|acc| match acc {
                 ast::AccessPath::Field(name) => name.clone(),
                 ast::AccessPath::Index(idx) => idx.to_string(),
+                ast::AccessPath::Annotation(name, _) => format!(":{name}"),
             })
             .collect::<Vec<_>>()
             .join(".");

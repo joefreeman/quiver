@@ -100,13 +100,23 @@ from_chars = #'%iter<'int> {
 }
 
 [
-  bytes: #' { .0 },
+  bytes: #' {
+    :doc "The underlying UTF-8 bytes of a string."
+    .0
+  },
 
-  empty?: #' { .0 %bin.length =0, Ok },
+  empty?: #' {
+    :doc "Whether a string is empty."
+    .0 %bin.length =0, Ok
+  },
 
-  concat: #[', '] { =[Str[a], Str[b]], [a, b] %bin.concat Str[~] },
+  concat: #[', '] {
+    :doc "Concatenates two strings."
+    =[Str[a], Str[b]], [a, b] %bin.concat Str[~]
+  },
 
   starts_with?: #[', '] {
+    :doc "Whether a string starts with a prefix."
     =[Str[target], Str[prefix]]
     prefix_len = prefix %bin.length
     target_len = target %bin.length
@@ -116,6 +126,7 @@ from_chars = #'%iter<'int> {
   },
 
   ends_with?: #[', '] {
+    :doc "Whether a string ends with a suffix."
     =[Str[target], Str[suffix]]
     suffix_len = suffix %bin.length
     target_len = target %bin.length
@@ -130,6 +141,7 @@ from_chars = #'%iter<'int> {
   },
 
   contains?: #[', '] {
+    :doc "Whether a string contains a substring."
     =[Str[haystack], Str[needle]]
     needle_len = needle %bin.length
     haystack_len = haystack %bin.length
@@ -143,6 +155,7 @@ from_chars = #'%iter<'int> {
   },
 
   split: #[', '] {
+    :doc "Splits a string on a delimiter, yielding an iterator of the pieces."
     =[Str[haystack], Str[delim]]
     haystack_len = haystack %bin.length
     delim_len = delim %bin.length
@@ -164,9 +177,13 @@ from_chars = #'%iter<'int> {
     ] %iter.unfold
   },
 
-  length: #' { .0 chars %iter.count },
+  length: #' {
+    :doc "The number of Unicode characters in a string."
+    .0 chars %iter.count
+  },
 
   slice: #[', 'int, 'int] {
+    :doc "The substring from start (inclusive) to end (exclusive), in character indices."
     =[Str[data], start, end]
 
     data
@@ -177,6 +194,7 @@ from_chars = #'%iter<'int> {
   },
 
   index_of: #[', '] {
+    :doc "The character index of the first occurrence of a substring, or nil when absent."
     =[Str[haystack], Str[needle]]
     needle_len = needle %bin.length
     haystack_len = haystack %bin.length
@@ -198,11 +216,18 @@ from_chars = #'%iter<'int> {
     }
   },
 
-  iter: #' { $0 chars },
+  iter: #' {
+    :doc "An iterator over the Unicode codepoints of a string, as integers."
+    $0 chars
+  },
 
-  collect: #'%iter<'int> { from_chars },
+  collect: #'%iter<'int> {
+    :doc "Builds a string from an iterator of Unicode codepoints."
+    from_chars
+  },
 
   join: #['%iter<'>, '] {
+    :doc "Joins an iterator of strings with a separator between each."
     =[it, Str[sep]]
     it [~, #' { .0 }] %iter.map [~, sep] %iter.intersperse [~, 0x, &%bin.concat] %iter.fold Str[~]
   },

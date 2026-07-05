@@ -47,6 +47,86 @@ pub struct Bytecode {
     pub types: Vec<Type>,
     /// Resource type names (index is resource_id, used for effect dispatch)
     pub resources: Vec<String>,
+    /// Annotation key names (index is the key id carried by Annotate/GetAnnotation)
+    #[serde(default)]
+    pub annotation_keys: Vec<String>,
+    /// Failure-provenance sites (debug builds only): `Stamp` instructions index into it.
+    #[serde(default)]
+    pub debug: Option<SiteTable>,
+}
+
+/// What kind of failure a provenance site marks — nil is a failure *positionally* (a nil
+/// result short-circuits), so sites sit where an expression's value becomes a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SiteKind {
+    /// A step whose chain matches (a binding or `=pattern` guard) yielded nil.
+    NoMatch,
+    /// A block's branches were exhausted (the fall-through nil).
+    BlockExhausted,
+    /// Any other nil result (a deliberate `[]`, a nil-returning call, ...).
+    NilResult,
+}
+
+/// One failure-provenance site: a source position a debug build stamps onto fresh nil
+/// results (under the `origin` annotation key, as a `Site[...]` tuple value).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Site {
+    /// Constants-table index of the module/source display name (a binary).
+    pub module_constant: usize,
+    pub line: u32,
+    pub column: u32,
+    pub kind: SiteKind,
+}
+
+/// The failure-provenance table of a debug build: the sites plus the ids the executor
+/// needs to prebuild each site's annotated-nil value at load time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SiteTable {
+    /// Annotation key id of `origin`.
+    pub origin_key: usize,
+    /// Tuple id of `Site[module: Str['bin], line: 'int, column: 'int, kind: ...]`.
+    pub site_tuple: usize,
+    /// Tuple id of `Str['bin]`.
+    pub str_tuple: usize,
+    /// Tuple id per `SiteKind` (empty named tuples: `NoMatch`, `BlockExhausted`, ...).
+    pub kind_tuples: Vec<usize>,
+    pub sites: Vec<Site>,
+}
+
+impl SiteKind {
+    /// Every kind, in discriminant order — `ALL[k.index()] == k` (asserted in tests), so
+    /// `kind_tuples` built by iterating `ALL` is indexed correctly by `index()`.
+    pub const ALL: [SiteKind; 3] = [
+        SiteKind::NoMatch,
+        SiteKind::BlockExhausted,
+        SiteKind::NilResult,
+    ];
+
+    /// The tuple name of this kind's marker value.
+    pub fn name(self) -> &'static str {
+        match self {
+            SiteKind::NoMatch => "NoMatch",
+            SiteKind::BlockExhausted => "BlockExhausted",
+            SiteKind::NilResult => "NilResult",
+        }
+    }
+
+    /// This kind's index into `kind_tuples` (its discriminant).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SiteKind;
+
+    #[test]
+    fn site_kind_all_matches_indices() {
+        for (position, kind) in SiteKind::ALL.iter().enumerate() {
+            assert_eq!(kind.index(), position);
+        }
+    }
 }
 
 impl TypeLookup for Bytecode {
@@ -56,6 +136,10 @@ impl TypeLookup for Bytecode {
 
     fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {
         self.tuples.get(tuple_id)
+    }
+
+    fn lookup_annotation_key_name(&self, key: usize) -> Option<&str> {
+        self.annotation_keys.get(key).map(|name| name.as_str())
     }
 }
 
@@ -80,6 +164,17 @@ pub enum Instruction {
     Builtin(usize),
     Equal(usize),
     Not,
+    /// Pop an annotation value, then a tuple/function carrier; push the carrier with the
+    /// annotation attached under the given key id (copy-on-annotate).
+    Annotate(usize),
+    /// Pop a carrier; push its annotation under the given key id, or nil. The optional
+    /// type id is the checked form's expected shape (`x:('t)key`): a carried entry
+    /// incompatible with it also answers nil, via the same table `IsType` consults.
+    GetAnnotation(usize, Option<usize>),
+    /// Debug builds only: if the top of the stack is a nil result not yet carrying an
+    /// `origin` annotation, stamp it with this site's provenance (see `SiteTable`).
+    /// Fresh-only, so a propagating failure keeps its original site. No-op otherwise.
+    Stamp(usize),
     Spawn,
     Send,
     Self_,

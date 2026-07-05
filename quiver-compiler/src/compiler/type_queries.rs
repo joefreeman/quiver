@@ -4,17 +4,40 @@ use quiver_core::{
     types::{Type, TypeLookup},
 };
 
+use super::scopes::Scope;
+use super::typing::TypeEnv;
 use super::{Error, typing::union_type_ids};
 
 /// Resolve the type ID of an accessor path applied to a given type
 /// Used to determine the resulting type after accessing nested fields
 pub fn resolve_accessor_type(
+    env: &mut TypeEnv,
+    scopes: &[Scope],
     program: &mut Program,
     mut current_type_id: usize,
     accessors: &[ast::AccessPath],
     target_name: &str,
 ) -> Result<usize, Error> {
     for accessor in accessors {
+        // Annotation retrieval works on tuples *and* callables and bypasses field lookup.
+        if let ast::AccessPath::Annotation(name, expected) = accessor {
+            current_type_id = match expected {
+                None => super::annotations::retrieval_type(program, current_type_id, name)?.1,
+                Some(ast_type) => {
+                    let asked =
+                        super::typing::resolve_ast_type(env, scopes, ast_type.clone(), program)?;
+                    super::annotations::checked_retrieval_type(
+                        program,
+                        current_type_id,
+                        name,
+                        asked,
+                    )
+                    .1
+                }
+            };
+            continue;
+        }
+
         // Get field sources from the current type (both tuples and partials)
         let sources = extract_field_sources(program, current_type_id);
 
@@ -55,6 +78,7 @@ pub fn resolve_accessor_type(
                 }
                 results
             }
+            ast::AccessPath::Annotation(..) => unreachable!("handled above"),
         };
 
         current_type_id = union_type_ids(program, field_type_ids);
@@ -78,6 +102,7 @@ fn extract_field_sources(program: &Program, type_id: usize) -> Vec<FieldSource> 
         return vec![];
     };
     match ty {
+        Type::Annotated { base, .. } => extract_field_sources(program, *base),
         Type::Tuple(id) => vec![FieldSource::Tuple(*id)],
         Type::Partial { fields, .. } => vec![FieldSource::Partial {
             fields: fields.clone(),

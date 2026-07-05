@@ -1330,6 +1330,7 @@ fn extract_field_sources(program: &Program, type_id: usize) -> Vec<FieldSource> 
         return vec![];
     };
     match ty {
+        Type::Annotated { base, .. } => extract_field_sources(program, *base),
         Type::Tuple(id) => vec![FieldSource::Tuple(*id)],
         Type::Partial { name, fields } => vec![FieldSource::Partial {
             name: name.clone(),
@@ -1349,12 +1350,17 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
         return vec![];
     };
     match ty {
+        Type::Annotated { base, .. } => extract_tuple_ids(program, *base),
         Type::Tuple(id) => vec![*id],
         Type::Union(type_ids) => type_ids
             .iter()
             .filter_map(|&tid| {
                 program.lookup_type(tid).and_then(|t| match t {
                     Type::Tuple(id) => Some(*id),
+                    Type::Annotated { base, .. } => match program.lookup_type(*base) {
+                        Some(Type::Tuple(id)) => Some(*id),
+                        _ => None,
+                    },
                     _ => None,
                 })
             })
@@ -1375,6 +1381,15 @@ fn is_never(type_id: usize, program: &Program) -> bool {
 
 /// Check if type a is compatible with type b (simplified version for pattern matching)
 fn is_compatible(a_id: usize, b_id: usize, program: &Program) -> bool {
+    if a_id == b_id {
+        return true;
+    }
+
+    // Pattern matching is row-transparent: peel annotation rows before comparing.
+    let (a_id, b_id) = (
+        Type::strip_annotations(a_id, program),
+        Type::strip_annotations(b_id, program),
+    );
     if a_id == b_id {
         return true;
     }
@@ -1406,6 +1421,7 @@ fn without_nil(type_id: usize, program: &mut Program) -> usize {
             let filtered: Vec<usize> = ids
                 .into_iter()
                 .filter(|&id| {
+                    let id = Type::strip_annotations(id, program);
                     if let Some(Type::Tuple(tuple_id)) = program.lookup_type(id) {
                         // Check if this is the nil tuple (empty tuple with no name)
                         if let Some(info) = program.lookup_tuple(*tuple_id) {
@@ -1420,6 +1436,7 @@ fn without_nil(type_id: usize, program: &mut Program) -> usize {
                 .collect();
             union_type_ids(program, filtered)
         }
+        Type::Annotated { .. } if ty.is_nil_deep(program) => program.never(),
         Type::Tuple(tuple_id) => {
             // Check if this is nil
             if let Some(info) = program.lookup_tuple(*tuple_id)

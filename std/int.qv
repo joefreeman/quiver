@@ -2,24 +2,31 @@
 // is the home for operations defined only over the integers: integer (truncating) quotient
 // and modulo, integer square root, and the bitwise primitives.
 [
-  // Integer quotient, truncating toward zero. Division by zero fails to nil.
-  div: #['int, 'int] { =[_, 0] => [] | __integer_divide__ },
+  div: #['int, 'int] {
+    :doc "The integer quotient, truncating toward zero, or nil when the divisor is zero."
+    | =[_, 0] => []
+    | __integer_divide__
+  },
 
-  // Integer modulo. A zero divisor fails to nil.
-  mod: #['int, 'int] { =[_, 0] => [] | __integer_modulo__ },
+  mod: #['int, 'int] {
+    :doc "The integer modulo, or nil when the divisor is zero."
+    | =[_, 0] => []
+    | __integer_modulo__
+  },
 
-  // Integer square root (floor). Negative input fails to nil.
   sqrt: #'int {
+    :doc "The integer square root, rounded down, or nil when the input is negative."
     | [$, 0] __integer_compare__ =-1 => []
     | __integer_sqrt__
   },
 
-  and: &__integer_and__,
-  or: &__integer_or__,
-  xor: &__integer_xor__,
-  not: &__integer_not__,
-  shift: &__integer_shift__,
+  and: &__integer_and__ { :doc "The bitwise AND of two integers." },
+  or: &__integer_or__ { :doc "The bitwise OR of two integers." },
+  xor: &__integer_xor__ { :doc "The bitwise XOR of two integers." },
+  not: &__integer_not__ { :doc "The bitwise complement of an integer." },
+  shift: &__integer_shift__ {
+    :doc "The integer shifted by a number of bits — left when positive, right when negative."
+  },
 
-  // Number of set bits (population count).
-  popcount: &__integer_popcount__,
+  popcount: &__integer_popcount__ { :doc "The number of set bits (population count)." },
 ]

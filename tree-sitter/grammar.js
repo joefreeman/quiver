@@ -101,6 +101,15 @@ module.exports = grammar({
     [$.pattern_tuple, $.tuple_type],
     [$._pattern, $._type_atom],
     [$.pattern_partial, $.partial_type],
+    // A `:key` token may open a block-prefix annotation (`:key value`) or be an
+    // annotation-retrieval accessor on the flowing value; what follows decides, via GLR.
+    [$.annotation, $._leading_accessor],
+    // After a block's annotation prefix, a separator may lead into the branches or be the
+    // trailing separator of an annotation-only block.
+    [$._block_branches],
+    // A newline after a block's last annotation may be the separator before the branches
+    // or the block's closing newline.
+    [$._sep, $._nl],
   ],
 
   rules: {
@@ -139,6 +148,18 @@ module.exports = grammar({
     ),
 
     default_type_name: _ => "'",
+
+    // ------------------------------------------------------------------ annotations
+
+    // The glued `:name` sigil form — used to attach (`:doc "..."` in a block prefix) and
+    // retrieve (`x:doc`). A single token, so `a:foo` (glued, retrieval) never splits into
+    // the `a: foo` (spaced) field-label form.
+    annotation_name: _ => token(seq(':', /[a-z][a-z0-9_]*[?!]?/)),
+
+    // One block-prefix annotation: `:key value`, the value an ordinary chain terminated by
+    // comma/newline. Dynamic precedence prefers this reading over a source-less
+    // annotation-retrieval access at the start of a block.
+    annotation: $ => prec.dynamic(1, seq(field('key', $.annotation_name), $.chain)),
 
     type_parameters: $ => immBracketed($, '<', $.type_name, '>'),
 
@@ -221,7 +242,16 @@ module.exports = grammar({
     // or a leading accessor with no source (`.name` as a chain step).
     access: $ => choice(
       seq(field('source', $._access_source), repeat($._accessor)),
-      repeat1($._accessor),
+      seq($._leading_accessor, repeat($._accessor)),
+    ),
+
+    // A source-less access reads off the flowing value (`.name`, `:key` as a chain step).
+    // The leading annotation sigil is an ordinary token; *trailing* annotation accessors
+    // must be glued (token.immediate), matching the real parser: `x:key` retrieves, while
+    // `x :key` is two terms.
+    _leading_accessor: $ => choice(
+      seq('.', field('field', choice($.identifier, $.index))),
+      field('annotation', $.annotation_name),
     ),
 
     _access_source: $ => choice(
@@ -234,7 +264,11 @@ module.exports = grammar({
     parameter: _ => '$',
     ripple: _ => '~',
 
-    _accessor: $ => seq('.', field('field', choice($.identifier, $.index))),
+    _accessor: $ => choice(
+      seq('.', field('field', choice($.identifier, $.index))),
+      field('annotation', alias($._annotation_name_immediate, $.annotation_name)),
+    ),
+    _annotation_name_immediate: _ => token.immediate(seq(':', /[a-z][a-z0-9_]*[?!]?/)),
     index: _ => /\d+/,
 
     // `%num`, `%mathx/vec`. The `/` path separator is immediate so a later `mod / x`
@@ -330,13 +364,27 @@ module.exports = grammar({
 
     // ----------------------------------------------------------------------- blocks
 
+    // A block may open with an annotation prefix (`:key value` steps, comma/newline
+    // separated), attaching to the value the braces denote; an annotation-only block
+    // (`{ :error X }`) is identity-plus-attach and has no branches.
     block: $ => seq(
       '{', optional($._nl),
+      choice(
+        seq(
+          $.annotation,
+          repeat(seq($._sep, $.annotation)),
+          optional(seq($._sep, $._block_branches)),
+        ),
+        $._block_branches,
+      ),
+      optional($._nl),
+      '}',
+    ),
+
+    _block_branches: $ => seq(
       optional(seq('|', optional($._nl))),
       $.branch,
       repeat(seq(optional($._nl), '|', optional($._nl), $.branch)),
-      optional($._nl),
-      '}',
     ),
 
     branch: $ => seq(

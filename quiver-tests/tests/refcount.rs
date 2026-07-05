@@ -42,6 +42,7 @@ fn run(source: &str) -> Executor<NativeEffect> {
         &HashMap::new(),
         &builtins,
         None,
+        quiver_compiler::compiler::CompileOptions::default(),
     )
     .expect("compile");
 

@@ -2,6 +2,7 @@
 
 [
   resolve: #Str['bin] {
+    :doc "Resolves a hostname, lazily yielding its addresses as IPv4 or IPv6 values."
     .0
     ~> __dns_resolve__
     ~> [

@@ -46,8 +46,7 @@ fn remap_type_id(id: usize, type_remap: &HashMap<usize, usize>) -> usize {
 /// in `type_remap` / `tuple_remap`.
 fn import_type_value(
     program: &mut Program,
-    src_types: &[Type],
-    src_tuples: &[quiver_core::types::TupleTypeInfo],
+    src: &TypeSource,
     type_remap: &mut HashMap<usize, usize>,
     tuple_remap: &mut HashMap<usize, usize>,
     ty: Type,
@@ -55,8 +54,7 @@ fn import_type_value(
     match ty {
         Type::Tuple(old_tuple_id) => Type::Tuple(import_tuple(
             program,
-            src_types,
-            src_tuples,
+            src,
             type_remap,
             tuple_remap,
             old_tuple_id,
@@ -68,14 +66,7 @@ fn import_type_value(
                 .map(|(fname, ftype)| {
                     (
                         fname,
-                        import_type(
-                            program,
-                            src_types,
-                            src_tuples,
-                            type_remap,
-                            tuple_remap,
-                            ftype,
-                        ),
+                        import_type(program, src, type_remap, tuple_remap, ftype),
                     )
                 })
                 .collect(),
@@ -83,7 +74,7 @@ fn import_type_value(
         Type::Union(type_ids) => Type::Union(
             type_ids
                 .into_iter()
-                .map(|t| import_type(program, src_types, src_tuples, type_remap, tuple_remap, t))
+                .map(|t| import_type(program, src, type_remap, tuple_remap, t))
                 .collect(),
         ),
         Type::Callable {
@@ -91,47 +82,59 @@ fn import_type_value(
             result,
             receive,
         } => Type::Callable {
-            parameter: import_type(
-                program,
-                src_types,
-                src_tuples,
-                type_remap,
-                tuple_remap,
-                parameter,
-            ),
-            result: import_type(
-                program,
-                src_types,
-                src_tuples,
-                type_remap,
-                tuple_remap,
-                result,
-            ),
-            receive: import_type(
-                program,
-                src_types,
-                src_tuples,
-                type_remap,
-                tuple_remap,
-                receive,
-            ),
+            parameter: import_type(program, src, type_remap, tuple_remap, parameter),
+            result: import_type(program, src, type_remap, tuple_remap, result),
+            receive: import_type(program, src, type_remap, tuple_remap, receive),
         },
         Type::Process { send, receive } => Type::Process {
-            send: send
-                .map(|t| import_type(program, src_types, src_tuples, type_remap, tuple_remap, t)),
-            receive: receive
-                .map(|t| import_type(program, src_types, src_tuples, type_remap, tuple_remap, t)),
+            send: send.map(|t| import_type(program, src, type_remap, tuple_remap, t)),
+            receive: receive.map(|t| import_type(program, src, type_remap, tuple_remap, t)),
         },
+        Type::Annotated {
+            base,
+            exact,
+            entries,
+        } => {
+            // Annotation rows carry a base type, per-entry value types, and key ids;
+            // keys remap by name (like the merge's instruction remap). Entries stay
+            // sorted by key id — the visibility walks binary-search them.
+            let base = import_type(program, src, type_remap, tuple_remap, base);
+            let mut entries: Vec<(usize, usize)> = entries
+                .into_iter()
+                .map(|(key, value_type)| {
+                    let name = src
+                        .annotation_keys
+                        .get(key)
+                        .expect("annotation key id without a name in the source id space");
+                    let new_key = program.register_annotation_key(name);
+                    let new_value = import_type(program, src, type_remap, tuple_remap, value_type);
+                    (new_key, new_value)
+                })
+                .collect();
+            entries.sort_by_key(|(key, _)| *key);
+            Type::Annotated {
+                base,
+                exact,
+                entries,
+            }
+        }
         other => other,
     }
 }
 
 /// Import the type at `old_id` in the source id space into `program`, returning its `program`
 /// id. See [`import_type_value`] for the deep-copy contract.
+/// A source id space to import types from: the tables `import_type_value` needs to
+/// deep-remap a type tree, including annotation-row keys (which remap by name).
+struct TypeSource<'a> {
+    types: &'a [Type],
+    tuples: &'a [quiver_core::types::TupleTypeInfo],
+    annotation_keys: &'a [String],
+}
+
 fn import_type(
     program: &mut Program,
-    src_types: &[Type],
-    src_tuples: &[quiver_core::types::TupleTypeInfo],
+    src: &TypeSource,
     type_remap: &mut HashMap<usize, usize>,
     tuple_remap: &mut HashMap<usize, usize>,
     old_id: usize,
@@ -142,11 +145,10 @@ fn import_type(
 
     let remapped = import_type_value(
         program,
-        src_types,
-        src_tuples,
+        src,
         type_remap,
         tuple_remap,
-        src_types[old_id].clone(),
+        src.types[old_id].clone(),
     );
 
     let new_id = program.register_type(remapped);
@@ -158,8 +160,7 @@ fn import_type(
 /// `program` id. See [`import_type_value`] for why dependencies are imported first.
 fn import_tuple(
     program: &mut Program,
-    src_types: &[Type],
-    src_tuples: &[quiver_core::types::TupleTypeInfo],
+    src: &TypeSource,
     type_remap: &mut HashMap<usize, usize>,
     tuple_remap: &mut HashMap<usize, usize>,
     old_id: usize,
@@ -168,21 +169,14 @@ fn import_tuple(
         return new_id;
     }
 
-    let info = src_tuples[old_id].clone();
+    let info = src.tuples[old_id].clone();
     let fields: Vec<_> = info
         .fields
         .into_iter()
         .map(|(name, ftype)| {
             (
                 name,
-                import_type(
-                    program,
-                    src_types,
-                    src_tuples,
-                    type_remap,
-                    tuple_remap,
-                    ftype,
-                ),
+                import_type(program, src, type_remap, tuple_remap, ftype),
             )
         })
         .collect();
@@ -193,32 +187,47 @@ fn import_tuple(
 }
 
 /// Remap a Function's indices according to the remap tables
-fn remap_function(
-    function: Function,
-    constant_remap: &HashMap<usize, usize>,
-    function_remap: &HashMap<usize, usize>,
-    tuple_remap: &HashMap<usize, usize>,
-    type_remap: &HashMap<usize, usize>,
-    builtin_remap: &HashMap<usize, usize>,
-) -> Function {
+/// The id remap tables built while merging one bytecode into the environment's program.
+#[derive(Default)]
+struct MergeRemaps {
+    constants: HashMap<usize, usize>,
+    functions: HashMap<usize, usize>,
+    tuples: HashMap<usize, usize>,
+    types: HashMap<usize, usize>,
+    builtins: HashMap<usize, usize>,
+    annotation_keys: HashMap<usize, usize>,
+    sites: HashMap<usize, usize>,
+}
+
+fn remap_function(function: Function, remaps: &MergeRemaps) -> Function {
     let remapped_instructions: Vec<Instruction> = function
         .instructions
         .into_iter()
         .map(|inst| match inst {
             Instruction::Constant(idx) => {
-                Instruction::Constant(*constant_remap.get(&idx).unwrap_or(&idx))
+                Instruction::Constant(*remaps.constants.get(&idx).unwrap_or(&idx))
             }
             Instruction::Function(idx) => {
-                Instruction::Function(*function_remap.get(&idx).unwrap_or(&idx))
+                Instruction::Function(*remaps.functions.get(&idx).unwrap_or(&idx))
             }
             Instruction::Builtin(idx) => {
-                Instruction::Builtin(*builtin_remap.get(&idx).unwrap_or(&idx))
+                Instruction::Builtin(*remaps.builtins.get(&idx).unwrap_or(&idx))
             }
             Instruction::Tuple(type_id) => {
-                Instruction::Tuple(*tuple_remap.get(&type_id).unwrap_or(&type_id))
+                Instruction::Tuple(*remaps.tuples.get(&type_id).unwrap_or(&type_id))
             }
             Instruction::IsType(type_id) => {
-                Instruction::IsType(*type_remap.get(&type_id).unwrap_or(&type_id))
+                Instruction::IsType(*remaps.types.get(&type_id).unwrap_or(&type_id))
+            }
+            Instruction::Annotate(key) => {
+                Instruction::Annotate(*remaps.annotation_keys.get(&key).unwrap_or(&key))
+            }
+            Instruction::GetAnnotation(key, check) => Instruction::GetAnnotation(
+                *remaps.annotation_keys.get(&key).unwrap_or(&key),
+                check.map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
+            ),
+            Instruction::Stamp(site) => {
+                Instruction::Stamp(*remaps.sites.get(&site).unwrap_or(&site))
             }
             other => other,
         })
@@ -227,7 +236,8 @@ fn remap_function(
     Function {
         instructions: remapped_instructions,
         captures: function.captures,
-        type_id: *type_remap
+        type_id: *remaps
+            .types
             .get(&function.type_id)
             .unwrap_or(&function.type_id),
     }
@@ -870,16 +880,19 @@ impl<E: Effect> Environment<E> {
         let old_types_len = self.program.get_types().len();
 
         // Build remapping tables using Program::register_* methods
-        let mut constant_remap: HashMap<usize, usize> = HashMap::new();
-        let mut tuple_remap: HashMap<usize, usize> = HashMap::new();
-        let mut type_remap: HashMap<usize, usize> = HashMap::new();
-        let mut builtin_remap: HashMap<usize, usize> = HashMap::new();
-        let mut function_remap: HashMap<usize, usize> = HashMap::new();
+        let mut remaps = MergeRemaps::default();
 
         // Merge constants using Program::register_constant
         for (old_idx, constant) in bytecode.constants.iter().enumerate() {
             let new_idx = self.program.register_constant(constant.clone());
-            constant_remap.insert(old_idx, new_idx);
+            remaps.constants.insert(old_idx, new_idx);
+        }
+
+        // Merge annotation keys by name, so Annotate/GetAnnotation key ids stay aligned
+        // when several independently-compiled programs share the environment.
+        for (old_idx, name) in bytecode.annotation_keys.iter().enumerate() {
+            let new_idx = self.program.register_annotation_key(name);
+            remaps.annotation_keys.insert(old_idx, new_idx);
         }
 
         // Merge types and tuples. They are mutually recursive (a type may reference tuples and
@@ -887,23 +900,26 @@ impl<E: Effect> Environment<E> {
         // each node's dependencies before registering it. Iterating over all indices guarantees
         // every source index ends up in the remap tables (including those reachable only through
         // function instructions), and memoisation keeps repeated visits cheap.
+        let src = TypeSource {
+            types: &bytecode.types,
+            tuples: &bytecode.tuples,
+            annotation_keys: &bytecode.annotation_keys,
+        };
         for old_idx in 0..bytecode.types.len() {
             import_type(
                 &mut self.program,
-                &bytecode.types,
-                &bytecode.tuples,
-                &mut type_remap,
-                &mut tuple_remap,
+                &src,
+                &mut remaps.types,
+                &mut remaps.tuples,
                 old_idx,
             );
         }
         for old_idx in 0..bytecode.tuples.len() {
             import_tuple(
                 &mut self.program,
-                &bytecode.types,
-                &bytecode.tuples,
-                &mut type_remap,
-                &mut tuple_remap,
+                &src,
+                &mut remaps.types,
+                &mut remaps.tuples,
                 old_idx,
             );
         }
@@ -913,26 +929,38 @@ impl<E: Effect> Environment<E> {
             // Remap type ID references within the builtin info
             let remapped_info = quiver_core::types::BuiltinInfo {
                 name: builtin_info.name.clone(),
-                param_type: remap_type_id(builtin_info.param_type, &type_remap),
-                result_type: remap_type_id(builtin_info.result_type, &type_remap),
+                param_type: remap_type_id(builtin_info.param_type, &remaps.types),
+                result_type: remap_type_id(builtin_info.result_type, &remaps.types),
             };
             let new_idx = self.program.register_builtin_info(remapped_info);
-            builtin_remap.insert(old_idx, new_idx);
+            remaps.builtins.insert(old_idx, new_idx);
+        }
+
+        // Merge the failure-provenance sites (debug builds): each site is re-registered
+        // with its module-name constant remapped, so `Stamp` ids can be remapped below.
+        // `register_debug_site` re-derives the table's key/tuple ids in this program,
+        // where the same names/shapes deduplicate to the ids imported above.
+        if let Some(table) = &bytecode.debug {
+            for (old_idx, site) in table.sites.iter().enumerate() {
+                let new_idx = self
+                    .program
+                    .register_debug_site(quiver_core::bytecode::Site {
+                        module_constant: *remaps
+                            .constants
+                            .get(&site.module_constant)
+                            .unwrap_or(&site.module_constant),
+                        ..site.clone()
+                    });
+                remaps.sites.insert(old_idx, new_idx);
+            }
         }
 
         // Merge functions (type_id is remapped by remap_function)
         for (old_idx, function) in bytecode.functions.iter().enumerate() {
-            let remapped_function = remap_function(
-                function.clone(),
-                &constant_remap,
-                &function_remap,
-                &tuple_remap,
-                &type_remap,
-                &builtin_remap,
-            );
+            let remapped_function = remap_function(function.clone(), &remaps);
 
             let new_idx = self.program.register_function(remapped_function);
-            function_remap.insert(old_idx, new_idx);
+            remaps.functions.insert(old_idx, new_idx);
         }
 
         // Compute deltas - only new items since before the merge
@@ -980,9 +1008,11 @@ impl<E: Effect> Environment<E> {
                 function_param_compatibility,
                 builtin_param_compatibility,
                 canonical_tuples,
+                // Full snapshot: the executor rebuilds its prebuilt site values from it.
+                debug: self.program.debug_sites().cloned(),
             };
 
-            let update_cmd = Command::UpdateProgram(update);
+            let update_cmd = Command::UpdateProgram(Box::new(update));
 
             for worker in &mut self.workers {
                 worker
@@ -996,7 +1026,8 @@ impl<E: Effect> Environment<E> {
         }
 
         // Return remapped entry function index
-        Ok(*function_remap
+        Ok(*remaps
+            .functions
             .get(&entry_fn)
             .expect("Entry function should be in remap table"))
     }
@@ -1570,6 +1601,21 @@ impl<E: Effect> Environment<E> {
         quiver_core::format::format_value(value, &self.program, &binary_lookup)
     }
 
+    /// Describe a nil result's failure provenance (debug builds): the `origin`
+    /// annotation's site, rendered as e.g. `no branch matched at shapes:12:9`.
+    pub fn describe_origin(&self, value: &Value, heap: &[Vec<u8>]) -> Option<String> {
+        let binary_lookup = quiver_core::format::HeapAndProgramLookup {
+            heap,
+            program: &self.program,
+        };
+        quiver_core::format::describe_origin(
+            value,
+            self.program.get_annotation_keys(),
+            &self.program,
+            &binary_lookup,
+        )
+    }
+
     /// Format a type for display
     pub fn format_type(&self, ty: &Type) -> String {
         quiver_core::format::format_type(&self.program, ty)
@@ -1595,14 +1641,12 @@ impl<E: Effect> Environment<E> {
     pub fn import_type_into(&self, target: &mut Program, ty: Type) -> Type {
         let mut type_remap = HashMap::new();
         let mut tuple_remap = HashMap::new();
-        import_type_value(
-            target,
-            self.program.get_types(),
-            self.program.get_tuples(),
-            &mut type_remap,
-            &mut tuple_remap,
-            ty,
-        )
+        let src = TypeSource {
+            types: self.program.get_types(),
+            tuples: self.program.get_tuples(),
+            annotation_keys: self.program.get_annotation_keys(),
+        };
+        import_type_value(target, &src, &mut type_remap, &mut tuple_remap, ty)
     }
 
     /// Get the formatted type for a process given its function index
@@ -1640,7 +1684,7 @@ impl<E: Effect> Environment<E> {
                     .and_then(|func| self.program.lookup_type(func.type_id).cloned())
                     .unwrap_or_else(|| Type::Union(vec![])) // Fallback for unknown functions
             }
-            Value::Builtin(builtin_id) => {
+            Value::Builtin(builtin_id, _) => {
                 // Get the builtin info by index
                 let builtin_info = self
                     .program
@@ -1827,11 +1871,15 @@ impl<E: Effect> Environment<E> {
     fn merge_tuples_for_test(&mut self, bytecode: Bytecode) -> usize {
         let mut type_remap: HashMap<usize, usize> = HashMap::new();
         let mut tuple_remap: HashMap<usize, usize> = HashMap::new();
+        let src = TypeSource {
+            types: &bytecode.types,
+            tuples: &bytecode.tuples,
+            annotation_keys: &bytecode.annotation_keys,
+        };
         for old_idx in 0..bytecode.types.len() {
             import_type(
                 &mut self.program,
-                &bytecode.types,
-                &bytecode.tuples,
+                &src,
                 &mut type_remap,
                 &mut tuple_remap,
                 old_idx,
@@ -1840,8 +1888,7 @@ impl<E: Effect> Environment<E> {
         for old_idx in 0..bytecode.tuples.len() {
             import_tuple(
                 &mut self.program,
-                &bytecode.types,
-                &bytecode.tuples,
+                &src,
                 &mut type_remap,
                 &mut tuple_remap,
                 old_idx,
@@ -1966,6 +2013,8 @@ mod tests {
             }],
             types,
             resources: vec![],
+            annotation_keys: vec![],
+            debug: None,
         }
     }
 
@@ -2025,5 +2074,55 @@ mod tests {
         // The child ids now index the REPL program and resolve back to `'int`.
         assert_eq!(repl_program.get_types()[send], Type::Integer);
         assert_eq!(repl_program.get_types()[receive], Type::Integer);
+    }
+
+    /// An annotated type crossing id spaces must remap its base id, entry value-type ids
+    /// AND entry key ids (by name). Before the `Type::Annotated` arm existed in
+    /// `import_type_value`, all three were copied verbatim — harmless only while the
+    /// merge happened to be an identity mapping.
+    #[test]
+    fn annotated_types_are_deep_imported() {
+        let mut env: Environment<TestEffect> = Environment::new(vec![]);
+
+        // Shift every id in the source space: types (filler at 0), and keys ("pad" at 0,
+        // "doc" at 1). The target program registers keys in a different order, so the
+        // key id must remap by name, not by index.
+        let src_types = vec![Type::Reference, Type::Integer, Type::Binary];
+        let annotated = Type::Annotated {
+            base: 1, // 'int in the source space
+            exact: true,
+            entries: vec![(1, 2)], // :doc (source key 1) at 'bin (source type 2)
+        };
+        let src = TypeSource {
+            types: &src_types,
+            tuples: &[],
+            annotation_keys: &["pad".to_string(), "doc".to_string()],
+        };
+
+        env.program.register_annotation_key("doc"); // target: "doc" is key 0 here
+        let mut type_remap = HashMap::new();
+        let mut tuple_remap = HashMap::new();
+        let imported = import_type_value(
+            &mut env.program,
+            &src,
+            &mut type_remap,
+            &mut tuple_remap,
+            annotated,
+        );
+
+        let Type::Annotated {
+            base,
+            exact: true,
+            entries,
+        } = imported
+        else {
+            panic!("expected an exact annotated type");
+        };
+        assert_eq!(env.program.get_types()[base], Type::Integer);
+        let [(key, value_type)] = entries.as_slice() else {
+            panic!("expected a single entry");
+        };
+        assert_eq!(env.program.lookup_annotation_key_name(*key), Some("doc"));
+        assert_eq!(env.program.get_types()[*value_type], Type::Binary);
     }
 }

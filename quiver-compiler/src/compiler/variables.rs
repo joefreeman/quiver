@@ -1,7 +1,7 @@
 use crate::ast;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Capture {
     pub base: String,
     pub accessors: Vec<ast::AccessPath>,
