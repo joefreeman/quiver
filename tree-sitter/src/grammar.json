@@ -1,7 +1,6 @@
 {
   "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
   "name": "quiver",
-  "word": "identifier",
   "rules": {
     "source_file": {
       "type": "SEQ",
@@ -2055,6 +2054,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "pattern_ascription"
+        },
+        {
+          "type": "SYMBOL",
           "name": "multiline_string"
         },
         {
@@ -2123,6 +2126,35 @@
           "name": "identifier"
         }
       ]
+    },
+    "pattern_ascription": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_paren_type"
+        },
+        {
+          "type": "FIELD",
+          "name": "binding",
+          "content": {
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_identifier_immediate"
+            },
+            "named": true,
+            "value": "identifier"
+          }
+        }
+      ]
+    },
+    "_identifier_immediate": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "[a-z][a-zA-Z0-9_]*\\??!?"
+      }
     },
     "star": {
       "type": "STRING",

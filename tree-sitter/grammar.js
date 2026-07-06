@@ -54,7 +54,9 @@ function immBracketed($, open, rule, close) {
 module.exports = grammar({
   name: 'quiver',
 
-  word: $ => $.identifier,
+  // No `word` rule: the grammar has no alphabetic keywords to extract, and a word rule
+  // breaks `_identifier_immediate` — keyword extraction re-lexes any identifier-shaped
+  // token via the word token, which skips whitespace first and so discards immediacy.
 
   extras: $ => [
     /[ \t\r\f]+/,
@@ -417,6 +419,7 @@ module.exports = grammar({
 
     _pattern: $ => choice(
       $.pattern_pin,
+      $.pattern_ascription,
       $.multiline_string,
       $.string,
       $.pattern_tuple,
@@ -434,6 +437,16 @@ module.exports = grammar({
     ),
 
     pattern_pin: $ => seq('&', $.identifier),
+
+    // A type-ascribed binding: a *parenthesised type* immediately followed by a binding
+    // identifier — `('int)x`, `('int | 'bin)v`. Asserts the value's type and binds the whole
+    // (narrowed) value. The identifier must be glued (token.immediate), matching the real
+    // parser: `('int) x` is a type pattern with `x` left for the next term.
+    pattern_ascription: $ => seq(
+      $._paren_type,
+      field('binding', alias($._identifier_immediate, $.identifier)),
+    ),
+    _identifier_immediate: _ => token.immediate(/[a-z][a-zA-Z0-9_]*\??!?/),
     star: _ => '*',
     placeholder: _ => '_',
 

@@ -118,6 +118,10 @@
           "named": true
         },
         {
+          "type": "pattern_ascription",
+          "named": true
+        },
+        {
           "type": "pattern_or",
           "named": true
         },
@@ -782,6 +786,68 @@
     }
   },
   {
+    "type": "pattern_ascription",
+    "named": true,
+    "fields": {
+      "binding": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "cycle_type",
+          "named": true
+        },
+        {
+          "type": "function_type",
+          "named": true
+        },
+        {
+          "type": "module_type",
+          "named": true
+        },
+        {
+          "type": "partial_type",
+          "named": true
+        },
+        {
+          "type": "process_type",
+          "named": true
+        },
+        {
+          "type": "resource_type",
+          "named": true
+        },
+        {
+          "type": "self_default_type",
+          "named": true
+        },
+        {
+          "type": "tuple_type",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        },
+        {
+          "type": "union_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "pattern_or",
     "named": true,
     "fields": {},
@@ -819,6 +885,10 @@
         },
         {
           "type": "partial_type",
+          "named": true
+        },
+        {
+          "type": "pattern_ascription",
           "named": true
         },
         {
@@ -929,6 +999,10 @@
         },
         {
           "type": "partial_type",
+          "named": true
+        },
+        {
+          "type": "pattern_ascription",
           "named": true
         },
         {
@@ -1054,6 +1128,10 @@
         },
         {
           "type": "partial_type",
+          "named": true
+        },
+        {
+          "type": "pattern_ascription",
           "named": true
         },
         {

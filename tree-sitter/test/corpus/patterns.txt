@@ -117,3 +117,85 @@ x ='
         source: (identifier))
       (bind_match
         (self_default_type)))))
+
+==================
+type-ascribed binding
+==================
+
+f =('int)n
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (bind_match
+        (pattern_ascription
+          (type_identifier
+            name: (type_name))
+          binding: (identifier))))))
+
+==================
+type-ascribed binding in tuple pattern
+==================
+
+p =Rational[_, ('int)d]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (bind_match
+        (pattern_tuple
+          name: (tuple_name)
+          (placeholder)
+          (pattern_ascription
+            (type_identifier
+              name: (type_name))
+            binding: (identifier)))))))
+
+==================
+type-ascribed binding with union type
+==================
+
+x =('int | 'bin)v
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (bind_match
+        (pattern_ascription
+          (union_type
+            (type_identifier
+              name: (type_name))
+            (type_identifier
+              name: (type_name)))
+          binding: (identifier))))))
+
+==================
+spaced paren type is not an ascription
+==================
+
+y =('int) x
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (bind_match
+        (type_identifier
+          name: (type_name)))
+      (access
+        source: (identifier)))))
