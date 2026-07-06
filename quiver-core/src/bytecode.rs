@@ -50,6 +50,10 @@ pub struct Bytecode {
     /// Annotation key names (index is the key id carried by Annotate/GetAnnotation)
     #[serde(default)]
     pub annotation_keys: Vec<String>,
+    /// Field names interned for `GetNamed` (index is the field-name id it carries). Used
+    /// only at load time to build the name→offset tables; never consulted per-instruction.
+    #[serde(default)]
+    pub field_names: Vec<String>,
     /// Failure-provenance sites (debug builds only): `Stamp` instructions index into it.
     #[serde(default)]
     pub debug: Option<SiteTable>,
@@ -154,7 +158,14 @@ pub enum Instruction {
     Load(usize),
     Store,
     Tuple(usize),
-    Get(usize),
+    /// Pop a tuple; push the field at the given position. Emitted where the static type
+    /// pins the field's position (a concrete tuple, or a union agreeing on one).
+    GetPositional(usize),
+    /// Pop a tuple; push the field whose *name* is the given field-name id, resolved
+    /// against the tuple's own type at runtime via the precomputed offset table. Emitted
+    /// where the static type doesn't pin a position — a partial type's field, or a union
+    /// whose members carry the field at different positions.
+    GetNamed(usize),
     IsType(usize),
     Jump(isize),
     JumpIf(isize),

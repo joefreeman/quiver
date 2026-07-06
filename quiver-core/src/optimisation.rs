@@ -515,6 +515,8 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         // Annotation keys are not tree-shaken: the table is tiny and key ids embedded in
         // Annotate/GetAnnotation instructions stay valid without a remap.
         annotation_keys: bytecode.annotation_keys.clone(),
+        // Field names likewise: GetNamed ids stay valid without a remap.
+        field_names: bytecode.field_names.clone(),
         debug: new_debug,
     }
 }

@@ -66,9 +66,26 @@ struct Requirement {
     check: RuntimeCheck,
 }
 
+/// One step of an access path: a fixed position, or an interned field name resolved
+/// against the value's own tuple id at runtime. Named steps arise from partial sources,
+/// whose declared field order says nothing about the runtime layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Access {
+    Position(usize),
+    Named(usize),
+}
+
 /// Represents a path to access a value within a data structure
-/// Empty vector means root, otherwise it's a sequence of field indices
-type AccessPath = Vec<usize>;
+/// Empty vector means root, otherwise it's a sequence of field accesses
+type AccessPath = Vec<Access>;
+
+/// Emit the instruction for one access-path step.
+fn emit_access(codegen: &mut InstructionBuilder, access: Access) {
+    codegen.add_instruction(match access {
+        Access::Position(index) => Instruction::GetPositional(index),
+        Access::Named(name) => Instruction::GetNamed(name),
+    });
+}
 
 /// Tracks information about identifiers encountered during pattern analysis
 #[derive(Debug, Clone)]
@@ -211,12 +228,12 @@ pub fn generate_pattern_code(
             match &requirement.check {
                 RuntimeCheck::Path(other_path) => {
                     codegen.add_instruction(Instruction::Duplicate);
-                    for &index in &requirement.path {
-                        codegen.add_instruction(Instruction::Get(index));
+                    for &access in &requirement.path {
+                        emit_access(codegen, access);
                     }
                     codegen.add_instruction(Instruction::Pick(1));
-                    for &index in other_path {
-                        codegen.add_instruction(Instruction::Get(index));
+                    for &access in other_path {
+                        emit_access(codegen, access);
                     }
                     codegen.add_instruction(Instruction::Equal(2));
                 }
@@ -290,8 +307,8 @@ pub fn generate_pattern_code(
 
 fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
     codegen.add_instruction(Instruction::Duplicate);
-    for &index in path {
-        codegen.add_instruction(Instruction::Get(index));
+    for &access in path {
+        emit_access(codegen, access);
     }
 }
 
@@ -656,7 +673,7 @@ fn analyze_match_tuple_pattern(
                 };
 
             let mut field_path = path.clone();
-            field_path.push(*actual_idx);
+            field_path.push(Access::Position(*actual_idx));
 
             // Check for narrowed field type from complement narrowing.
             // This enables patterns like `=[Cons[...], ys]` in the second branch to know
@@ -973,7 +990,12 @@ fn analyze_partial_pattern(
             let idx = field_indices[i];
             let field_type_id = fields[idx].1;
             let mut field_path = path.clone();
-            field_path.push(idx);
+            // A concrete variant pins the field's position (gated by its type check); a
+            // partial source's layout is unknown, so the field is fetched by name.
+            field_path.push(match narrowed_tuple_name {
+                Some(_) => Access::Position(idx),
+                None => Access::Named(program.register_field_name(field_name)),
+            });
 
             // If the field has a nested pattern, analyze it recursively and combine.
             if let Some(nested_pattern) = nested_pattern {
@@ -1162,7 +1184,14 @@ fn analyze_star_pattern(
         for (idx, (name, field_type_id)) in fields.iter().enumerate() {
             if let Some(field_name) = name {
                 let mut field_path = path.clone();
-                field_path.push(idx);
+                // As in analyze_partial_pattern: a partial source's fields are only
+                // addressable by name.
+                field_path.push(match source {
+                    FieldSource::Tuple(_) => Access::Position(idx),
+                    FieldSource::Partial { .. } => {
+                        Access::Named(program.register_field_name(field_name))
+                    }
+                });
 
                 // Check if we've seen this identifier before
                 if let Some(info) = variant_identifiers.get_mut(field_name.as_str()) {

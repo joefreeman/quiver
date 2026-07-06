@@ -21,6 +21,10 @@ pub struct Program {
     /// are inferred per attach site and tracked in annotation rows (`Type::Annotated`).
     #[serde(default)]
     annotation_keys: Vec<String>,
+    /// Field names interned by `register_field_name`; the index is the field-name id
+    /// carried by `GetNamed`. Only load-time table construction reads the names.
+    #[serde(default)]
+    field_names: Vec<String>,
     /// Failure-provenance table (debug builds only): sites indexed by `Stamp`
     /// instructions, plus the tuple/key ids the executor needs to prebuild the values.
     #[serde(default)]
@@ -60,6 +64,7 @@ impl Program {
             tuples: Vec::new(),
             types: Vec::new(),
             annotation_keys: Vec::new(),
+            field_names: Vec::new(),
             debug: None,
         };
 
@@ -200,6 +205,20 @@ impl Program {
         &self.annotation_keys
     }
 
+    /// Intern a field name for `GetNamed`, returning its field-name id.
+    pub fn register_field_name(&mut self, name: &str) -> usize {
+        if let Some(index) = self.field_names.iter().position(|n| n == name) {
+            return index;
+        }
+        let name_id = self.field_names.len();
+        self.field_names.push(name.to_string());
+        name_id
+    }
+
+    pub fn get_field_names(&self) -> &Vec<String> {
+        &self.field_names
+    }
+
     /// Get the type ID for the NEVER type (empty union / bottom type).
     /// Registers it if not already present.
     pub fn never(&mut self) -> usize {
@@ -291,6 +310,7 @@ impl Program {
             types: self.types.clone(),
             resources: resource_names,
             annotation_keys: self.annotation_keys.clone(),
+            field_names: self.field_names.clone(),
             debug: self.debug.clone(),
         }
     }

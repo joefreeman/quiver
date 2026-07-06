@@ -76,12 +76,6 @@ impl InstructionBuilder {
         self.emit_jump_if_placeholder()
     }
 
-    /// Emits Pick followed by Get - common pattern for accessing nested fields
-    pub fn emit_pick_and_get(&mut self, depth: usize, index: usize) {
-        self.add_instruction(Instruction::Pick(depth));
-        self.add_instruction(Instruction::Get(index));
-    }
-
     /// Emits Rotate followed by Pop - common pattern for cleaning up stack values
     pub fn emit_rotate_pop(&mut self, rotate_count: usize) {
         self.add_instruction(Instruction::Rotate(rotate_count));

@@ -6,8 +6,8 @@ use quiver_compiler::compiler::{
 };
 use quiver_core::bytecode::{Bytecode, Constant, Function, Instruction};
 use quiver_core::compatibility::{
-    CompatibilityInput, compute_canonical_tuples, compute_param_compatibility,
-    compute_type_compatibility,
+    CompatibilityInput, compute_canonical_tuples, compute_field_offsets,
+    compute_param_compatibility, compute_type_compatibility,
 };
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::ProgramUpdate;
@@ -196,6 +196,7 @@ struct MergeRemaps {
     types: HashMap<usize, usize>,
     builtins: HashMap<usize, usize>,
     annotation_keys: HashMap<usize, usize>,
+    field_names: HashMap<usize, usize>,
     sites: HashMap<usize, usize>,
 }
 
@@ -218,6 +219,9 @@ fn remap_function(function: Function, remaps: &MergeRemaps) -> Function {
             }
             Instruction::IsType(type_id) => {
                 Instruction::IsType(*remaps.types.get(&type_id).unwrap_or(&type_id))
+            }
+            Instruction::GetNamed(name_id) => {
+                Instruction::GetNamed(*remaps.field_names.get(&name_id).unwrap_or(&name_id))
             }
             Instruction::Annotate(key) => {
                 Instruction::Annotate(*remaps.annotation_keys.get(&key).unwrap_or(&key))
@@ -895,6 +899,12 @@ impl<E: Effect> Environment<E> {
             remaps.annotation_keys.insert(old_idx, new_idx);
         }
 
+        // Merge field names by name, so GetNamed ids stay aligned across merged programs.
+        for (old_idx, name) in bytecode.field_names.iter().enumerate() {
+            let new_idx = self.program.register_field_name(name);
+            remaps.field_names.insert(old_idx, new_idx);
+        }
+
         // Merge types and tuples. They are mutually recursive (a type may reference tuples and
         // vice versa), so we import every node via `import_type` / `import_tuple`, which import
         // each node's dependencies before registering it. Iterating over all indices guarantees
@@ -994,6 +1004,8 @@ impl<E: Effect> Environment<E> {
 
             let type_compatibility = compute_type_compatibility(&input);
             let canonical_tuples = compute_canonical_tuples(self.program.get_tuples());
+            let field_offsets =
+                compute_field_offsets(self.program.get_field_names(), self.program.get_tuples());
             let (function_param_compatibility, builtin_param_compatibility) =
                 compute_param_compatibility(&input);
 
@@ -1007,6 +1019,7 @@ impl<E: Effect> Environment<E> {
                 type_compatibility,
                 function_param_compatibility,
                 builtin_param_compatibility,
+                field_offsets,
                 canonical_tuples,
                 // Full snapshot: the executor rebuilds its prebuilt site values from it.
                 debug: self.program.debug_sites().cloned(),
@@ -2014,6 +2027,7 @@ mod tests {
             types,
             resources: vec![],
             annotation_keys: vec![],
+            field_names: vec![],
             debug: None,
         }
     }

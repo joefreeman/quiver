@@ -94,6 +94,30 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
     compatible_with
 }
 
+/// For each interned field name, each tuple type's offset for a field with that name (or
+/// `None` when it has no such field). `GetNamed(name_id)` resolves a field against the
+/// value's own tuple id via `offsets[name_id][tuple_id]` — two array lookups, no names at
+/// runtime. Emission sites guarantee compatibility statically, so a `None` hit at runtime
+/// is a compiler invariant violation.
+pub fn compute_field_offsets(
+    field_names: &[String],
+    tuples: &[TupleTypeInfo],
+) -> Vec<Vec<Option<usize>>> {
+    field_names
+        .iter()
+        .map(|name| {
+            tuples
+                .iter()
+                .map(|info| {
+                    info.fields
+                        .iter()
+                        .position(|(fname, _)| fname.as_deref() == Some(name))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Map each tuple type-id to a canonical *value-shape* id: the lowest tuple-id that shares its
 /// name and field labels (field *types* ignored). Two tuple values built via paths that inferred
 /// different field types — e.g. a list `Cons` cell from a literal vs. from a recursive helper —

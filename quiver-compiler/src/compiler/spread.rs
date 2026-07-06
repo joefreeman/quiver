@@ -366,7 +366,7 @@ fn emit_field_extraction_code<E: quiver_core::effects::Effect>(
                 compiler.codegen.add_instruction(Instruction::Pick(depth));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::Get(*field_idx));
+                    .add_instruction(Instruction::GetPositional(*field_idx));
                 values_added += 1;
             }
         }

@@ -66,6 +66,9 @@ pub fn resolve_accessor_type(
             ast::AccessPath::Index(index) => {
                 let mut results = Vec::new();
                 for source in &sources {
+                    if matches!(source, FieldSource::Partial { .. }) {
+                        return Err(Error::PositionalAccessOnPartial { index: *index });
+                    }
                     if let Some(ftype) = get_field_at_position_from_source(program, source, *index)
                     {
                         results.push(ftype);
@@ -143,7 +146,8 @@ fn get_field_from_source(
     }
 }
 
-/// Get field type ID at position from a field source
+/// Get field type ID at position from a field source. A partial has no positions — it
+/// constrains fields by name only, so the runtime layout (and any position) is unknown.
 fn get_field_at_position_from_source(
     program: &Program,
     source: &FieldSource,
@@ -154,20 +158,47 @@ fn get_field_at_position_from_source(
             let tuple_info = program.lookup_tuple(*tuple_id)?;
             tuple_info.fields.get(position).map(|(_, ftype)| *ftype)
         }
-        FieldSource::Partial { fields } => fields.get(position).map(|(_, ftype)| *ftype),
+        FieldSource::Partial { .. } => None,
+    }
+}
+
+/// How a compiled field access locates its field at runtime.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldAccess {
+    /// Every field source is a concrete tuple and they agree on the position: a direct
+    /// positional `Get`.
+    Position(usize),
+    /// The position isn't statically determined — a partial source (whose runtime layout
+    /// is unknown) or concrete sources that disagree — so a `GetNamed` resolves the
+    /// interned name against the value's tuple id at runtime. `static_index` is the
+    /// field's index in the static type's field list when the sources agree on one (the
+    /// key provenance/narrowing uses); it says nothing about the runtime layout.
+    Named {
+        name: usize,
+        static_index: Option<usize>,
+    },
+}
+
+impl FieldAccess {
+    /// The field's agreed index in the static type's field list, if any.
+    pub fn static_index(&self) -> Option<usize> {
+        match self {
+            FieldAccess::Position(index) => Some(*index),
+            FieldAccess::Named { static_index, .. } => *static_index,
+        }
     }
 }
 
 /// Get field info by name from a type (supports both tuples and partials)
-/// Returns (index, field_type_ids) where index is the field position and
-/// field_type_ids are the possible types from all sources
+/// Returns (access, field_type_ids) where access says how to locate the field at
+/// runtime and field_type_ids are the possible types from all sources
 /// For union types, ALL variants must have the field (not just some)
 pub fn get_field_by_name(
-    program: &Program,
+    program: &mut Program,
     type_id: usize,
     field_name: &str,
     target_name: &str,
-) -> Result<(usize, Vec<usize>), Error> {
+) -> Result<(FieldAccess, Vec<usize>), Error> {
     let sources = extract_field_sources(program, type_id);
 
     if sources.is_empty() {
@@ -177,7 +208,8 @@ pub fn get_field_by_name(
     }
 
     let mut results = Vec::new();
-    let mut common_index = None;
+    let mut indices = Vec::new();
+    let mut any_partial = false;
 
     for source in &sources {
         // ALL sources must have the field for a union type
@@ -188,28 +220,27 @@ pub fn get_field_by_name(
             }
         })?;
 
-        // Verify all sources have the field at the same index
-        if let Some(prev_index) = common_index {
-            if prev_index != idx {
-                return Err(Error::MemberFieldNotFound {
-                    field_name: field_name.to_string(),
-                    target: target_name.to_string(),
-                });
-            }
-        } else {
-            common_index = Some(idx);
-        }
+        any_partial |= matches!(source, FieldSource::Partial { .. });
+        indices.push(idx);
         results.push(ftype);
     }
 
-    if results.is_empty() {
-        return Err(Error::MemberFieldNotFound {
-            field_name: field_name.to_string(),
-            target: target_name.to_string(),
-        });
-    }
+    let static_index = indices
+        .iter()
+        .all(|&idx| idx == indices[0])
+        .then(|| indices[0]);
 
-    Ok((common_index.unwrap(), results))
+    // A partial source's declared order says nothing about the runtime layout, and
+    // concrete sources may disagree on the position: both resolve by name at runtime.
+    let access = match static_index {
+        Some(index) if !any_partial => FieldAccess::Position(index),
+        _ => FieldAccess::Named {
+            name: program.register_field_name(field_name),
+            static_index,
+        },
+    };
+
+    Ok((access, results))
 }
 
 /// Get field info at position from a type (supports both tuples and partials)
@@ -232,6 +263,9 @@ pub fn get_field_at_index(
     let mut results = Vec::new();
 
     for source in &sources {
+        if matches!(source, FieldSource::Partial { .. }) {
+            return Err(Error::PositionalAccessOnPartial { index: position });
+        }
         // ALL sources must have the field at this position for a union type
         let ftype = get_field_at_position_from_source(program, source, position)
             .ok_or(Error::PositionalIndexOutOfBounds { index: position })?;

@@ -98,6 +98,11 @@ pub enum Error {
     PositionalIndexOutOfBounds {
         index: usize,
     },
+    /// Positional access (`.0`) through a partial type: a partial constrains fields by
+    /// name only, so the value's layout — and hence any position — is unknown.
+    PositionalAccessOnPartial {
+        index: usize,
+    },
 
     // Operator errors
     OperatorTypeNotInRegistry {
@@ -195,6 +200,12 @@ impl std::fmt::Display for Error {
             }
             Error::PositionalIndexOutOfBounds { index } => {
                 write!(f, "Positional index {index} out of bounds")
+            }
+            Error::PositionalAccessOnPartial { index } => {
+                write!(
+                    f,
+                    "Cannot access position {index} through a partial type (its fields are only known by name)"
+                )
             }
             Error::OperatorTypeNotInRegistry { tuple_id } => {
                 write!(f, "Operator type {tuple_id} not in registry")
@@ -1656,7 +1667,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         let field_types = match accessor {
                             ast::AccessPath::Field(field_name) => {
                                 match type_queries::get_field_by_name(
-                                    &*self.program,
+                                    self.program,
                                     last_type,
                                     field_name,
                                     &capture.base,
@@ -3547,7 +3558,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 continue;
             }
 
-            let Value::Tuple(_, fields) = &current_value else {
+            let Value::Tuple(tuple_id, fields) = &current_value else {
                 return Err(Error::MemberAccessOnNonTuple {
                     target: module_name.to_string(),
                 });
@@ -3555,12 +3566,29 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             let (index, field_type) = match accessor {
                 ast::AccessPath::Field(name) => {
-                    let (index, field_types) = type_queries::get_field_by_name(
-                        &*self.program,
+                    let (access, field_types) = type_queries::get_field_by_name(
+                        self.program,
                         current_type,
                         name,
                         module_name,
                     )?;
+                    let index = match access {
+                        type_queries::FieldAccess::Position(index) => index,
+                        // A compile-time value is concrete: resolve the name against the
+                        // value's own tuple layout.
+                        type_queries::FieldAccess::Named { .. } => self
+                            .program
+                            .lookup_tuple(*tuple_id)
+                            .and_then(|info| {
+                                info.fields
+                                    .iter()
+                                    .position(|(fname, _)| fname.as_deref() == Some(name.as_str()))
+                            })
+                            .ok_or_else(|| Error::MemberFieldNotFound {
+                                field_name: name.clone(),
+                                target: module_name.to_string(),
+                            })?,
+                    };
                     (index, typing::union_type_ids(self.program, field_types))
                 }
                 ast::AccessPath::Index(index) => {
@@ -4295,7 +4323,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         });
                     }
                     // Unwrap `Str[<bin>]` to its binary for concatenation.
-                    self.codegen.add_instruction(Instruction::Get(0));
+                    self.codegen.add_instruction(Instruction::GetPositional(0));
                 }
             }
             // Fold left: once a second binary is on the stack, concatenate it onto the accumulator.
@@ -5187,9 +5215,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 continue;
             }
 
-            let (index, field_types) = match accessor {
+            let (access, field_types) = match accessor {
                 ast::AccessPath::Field(field_name) => type_queries::get_field_by_name(
-                    &*self.program,
+                    self.program,
                     last_type,
                     &field_name,
                     target_name,
@@ -5201,15 +5229,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         index,
                         target_name,
                     )?;
-                    (index, field_types)
+                    (type_queries::FieldAccess::Position(index), field_types)
                 }
                 ast::AccessPath::Annotation(..) => unreachable!("handled above"),
             };
 
-            self.codegen.add_instruction(Instruction::Get(index));
+            self.codegen.add_instruction(match access {
+                type_queries::FieldAccess::Position(index) => Instruction::GetPositional(index),
+                type_queries::FieldAccess::Named { name, .. } => Instruction::GetNamed(name),
+            });
             last_type = typing::union_type_ids(self.program, field_types);
-            // Update provenance to track the field access
-            current_prov = current_prov.field(index);
+            // Update provenance to track the field access (by the field's index in the
+            // static type's field list; without an agreed index the trail ends here).
+            current_prov = match access.static_index() {
+                Some(index) => current_prov.field(index),
+                None => Provenance::Unknown,
+            };
 
             // If the field provenance resolved to a Variable and that variable stores
             // a Tuple provenance, use the Tuple provenance for nested tuple tracking.

@@ -717,6 +717,14 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
         }
     }
 
+    // Print interned field names (the ids GetNamed instructions carry)
+    if !bytecode_data.field_names.is_empty() {
+        println!("\nField names:");
+        for (index, name) in bytecode_data.field_names.iter().enumerate() {
+            println!("  {}: {}", index, name);
+        }
+    }
+
     // Print failure-provenance sites (debug builds): the targets of Stamp instructions.
     if let Some(table) = &bytecode_data.debug {
         println!("\nSites:");

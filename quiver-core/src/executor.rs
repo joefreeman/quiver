@@ -32,6 +32,8 @@ pub struct ProgramUpdate {
     pub function_param_compatibility: Vec<HashSet<ConcreteType>>,
     /// For each builtin_id, the set of concrete types compatible with its parameter
     pub builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each field-name id, each tuple_id's offset for that field (for GetNamed)
+    pub field_offsets: Vec<Vec<Option<usize>>>,
     /// Failure-provenance sites (debug builds): the full table, from which the executor
     /// prebuilds each site's annotated-nil value. `None` leaves any existing table as is.
     pub debug: Option<crate::bytecode::SiteTable>,
@@ -52,7 +54,8 @@ pub enum InstructionType {
     Load,
     Store,
     Tuple,
-    Get,
+    GetPositional,
+    GetNamed,
     IsType,
     Jump,
     JumpIf,
@@ -84,7 +87,8 @@ impl InstructionType {
             Instruction::Load(_) => InstructionType::Load,
             Instruction::Store => InstructionType::Store,
             Instruction::Tuple(_) => InstructionType::Tuple,
-            Instruction::Get(_) => InstructionType::Get,
+            Instruction::GetPositional(_) => InstructionType::GetPositional,
+            Instruction::GetNamed(_) => InstructionType::GetNamed,
             Instruction::IsType(_) => InstructionType::IsType,
             Instruction::Jump(_) => InstructionType::Jump,
             Instruction::JumpIf(_) => InstructionType::JumpIf,
@@ -228,6 +232,8 @@ pub struct Executor<E: Effect> {
     function_param_compatibility: Vec<HashSet<ConcreteType>>,
     /// For each builtin_id, the set of concrete types compatible with its parameter
     builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each field-name id, each tuple_id's offset for that field — GetNamed's table.
+    field_offsets: Vec<Vec<Option<usize>>>,
     // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
     heap: Vec<BinaryData>,
     // Reference count per heap slot, parallel to `heap`. A freshly allocated slot starts at 0
@@ -647,6 +653,7 @@ impl<E: Effect> Executor<E> {
             type_compatibility: vec![],
             function_param_compatibility: vec![],
             builtin_param_compatibility: vec![],
+            field_offsets: vec![],
             heap: vec![],
             refcounts: vec![],
             free: vec![],
@@ -1118,6 +1125,7 @@ impl<E: Effect> Executor<E> {
         self.type_compatibility = update.type_compatibility;
         self.function_param_compatibility = update.function_param_compatibility;
         self.builtin_param_compatibility = update.builtin_param_compatibility;
+        self.field_offsets = update.field_offsets;
         if let Some(table) = update.debug {
             self.install_sites(&table);
         }
@@ -1417,7 +1425,8 @@ impl<E: Effect> Executor<E> {
             Instruction::Load(index) => self.handle_load(proc, index),
             Instruction::Store => self.handle_store(proc),
             Instruction::Tuple(type_id) => self.handle_tuple(proc, type_id),
-            Instruction::Get(index) => self.handle_get(proc, index),
+            Instruction::GetPositional(index) => self.handle_get_positional(proc, index),
+            Instruction::GetNamed(name_id) => self.handle_get_named(proc, name_id),
             Instruction::IsType(type_id) => self.handle_is_type(proc, type_id),
             Instruction::Jump(offset) => self.handle_jump(proc, offset),
             Instruction::JumpIf(offset) => self.handle_jump_if(proc, offset),
@@ -1664,13 +1673,57 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_get(&mut self, proc: &mut Process, index: usize) -> Result<Option<Action<E>>, Error> {
+    fn handle_get_positional(
+        &mut self,
+        proc: &mut Process,
+        index: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         // Releasing the tuple drops the counts of all its fields; pushing the extracted field
         // re-counts that one. The other fields are correctly released (no longer referenced).
         let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
         match value {
             Value::Tuple(_, elements) => {
+                let element = elements
+                    .get(index)
+                    .ok_or(Error::FieldAccessInvalid(index))?
+                    .clone();
+                self.push_value(proc, element);
+
+                if let Some(frame) = proc.frames.last_mut() {
+                    frame.counter += 1;
+                }
+                Ok(None)
+            }
+            _ => Err(Error::TypeMismatch {
+                expected: "tuple".to_string(),
+                found: value.type_name().to_string(),
+            }),
+        }
+    }
+
+    /// As `handle_get_positional`, but the field is identified by name id: the offset is resolved
+    /// against the value's own tuple id via the load-time table. The compiler only emits
+    /// `GetNamed` where the static type guarantees the field, so a missing entry is a
+    /// compiler invariant violation, not a program error.
+    fn handle_get_named(
+        &mut self,
+        proc: &mut Process,
+        name_id: usize,
+    ) -> Result<Option<Action<E>>, Error> {
+        let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+
+        match value {
+            Value::Tuple(tuple_id, elements) => {
+                let index = self
+                    .field_offsets
+                    .get(name_id)
+                    .and_then(|offsets| offsets.get(tuple_id).copied().flatten())
+                    .ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "GetNamed({name_id}) on tuple {tuple_id} with no such field (compiler invariant violation)"
+                        ))
+                    })?;
                 let element = elements
                     .get(index)
                     .ok_or(Error::FieldAccessInvalid(index))?
