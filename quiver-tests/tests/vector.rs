@@ -396,7 +396,9 @@ fn test_compare_respects_scale() {
 fn test_compare_length_mismatch_is_nil() {
     // Comparing vectors of different lengths yields nil (no mask).
     quiver()
-        .evaluate(&prog("('%vec.vec)b = [I32, 1, 2, 2] vec.fill, [a, b] vec.lt"))
+        .evaluate(&prog(
+            "('%vec.vec)b = [I32, 1, 2, 2] vec.fill, [a, b] vec.lt",
+        ))
         .expect("[]");
 }
 
@@ -404,6 +406,8 @@ fn test_compare_length_mismatch_is_nil() {
 fn test_compare_dtype_mismatch_is_nil() {
     // I32 vs I64 cannot be aligned → nil.
     quiver()
-        .evaluate(&prog("('%vec.vec)b = [I64, 1, 2, 3] vec.fill, [a, b] vec.lt"))
+        .evaluate(&prog(
+            "('%vec.vec)b = [I64, 1, 2, 3] vec.fill, [a, b] vec.lt",
+        ))
         .expect("[]");
 }

@@ -107,10 +107,7 @@ fn test_stamped_nil_is_still_nil() {
         .debug()
         .evaluate("f = #'int { =0 => Ok }, 5 f { =[] => StillNil | Huh }")
         .expect("StillNil");
-    quiver()
-        .debug()
-        .evaluate("5 =6, Unreachable")
-        .expect("[]");
+    quiver().debug().evaluate("5 =6, Unreachable").expect("[]");
 }
 
 #[test]

@@ -471,7 +471,9 @@ fn test_checked_retrieval_wrong_shape_is_nil() {
 fn test_checked_retrieval_absent_key_is_nil() {
     // No typo firewall on the checked form: the explicit shape is the programmer's
     // declaration that this is beyond static tracking.
-    quiver().evaluate("a = A[b: 1], a:('int)foo =[]").expect("Ok");
+    quiver()
+        .evaluate("a = A[b: 1], a:('int)foo =[]")
+        .expect("Ok");
 }
 
 #[test]
@@ -512,9 +514,7 @@ fn test_checked_retrieval_on_module_member() {
     quiver()
         .evaluate("%list.head:(Str['bin])doc")
         .expect("\"The first element of a list, or nil when it is empty.\"");
-    quiver()
-        .evaluate("%list.head:('int)doc =[]")
-        .expect("Ok");
+    quiver().evaluate("%list.head:('int)doc =[]").expect("Ok");
 }
 
 #[test]
