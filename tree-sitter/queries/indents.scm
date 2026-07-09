@@ -12,6 +12,7 @@
   (pattern_tuple)
   (pattern_partial)
   (pattern_or)
+  (dialect)
 ] @indent
 
 [

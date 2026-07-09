@@ -45,6 +45,22 @@
 ; which would otherwise reclaim those bytes under shortest-span overlap resolution.
 ((import) @module (#set! "priority" 110))
 
+; ------------------------------------------------------------------- dialects
+
+; The raw text of a dialect invocation (`%json{ … }`). The module path is an ordinary
+; (import) node, captured above; the content is opaque embedded text, coloured as a
+; special string. As for imports, the raised priority keeps the span intact against
+; narrower captures nested inside it.
+((dialect_content) @string.special (#set! "priority" 110))
+
+; Balanced brace groups inside the content are parsed only to find the dialect's
+; matching close brace — their `{`/`}` tokens are content, not punctuation, so
+; recapture them against the bracket rule below. (The dialect's own outer braces
+; keep their @punctuation.bracket.)
+(dialect_content
+  ["{" "}"] @string.special
+  (#set! "priority" 110))
+
 ; ------------------------------------------------------------------- bindings
 
 (chain binding: (identifier) @variable)

@@ -1246,3 +1246,82 @@ fn test_empty_partial_type_without_parens() {
     quiver().evaluate("[1, 2, 3] =()").expect("Ok");
     quiver().evaluate("42 =()").expect("[]");
 }
+
+#[test]
+fn test_type_alias_after_expression_statement() {
+    // A type alias may be interspersed after an expression statement; the statement
+    // parser must leave the separator for the program parser to consume.
+    quiver()
+        .evaluate("x = 1, 'n = 'int, 42 ='n, Ok")
+        .expect("Ok");
+}
+
+#[test]
+fn test_generic_type_parameters_do_not_collide_across_definitions() {
+    // `pick`'s 't/'u share source names with `apply`'s; each definition's parameters
+    // must be distinct variables or the inferred `#{ $0 }` silently fails to project.
+    quiver()
+        .evaluate(
+            r#"
+            apply = #<'t, 'u>['t, #'t -> 'u] { =[v, f], v f }
+            pick = #<'t, 'u>['t, 'u] { =[a, b], [[a, b], #{ $0 }] apply }
+            [1, "x"] pick
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_enclosing_generic_variable_in_callee_argument() {
+    // The closure captures a `#^`-typed self whose type mentions the enclosing
+    // function's 't; applying it must treat that variable as rigid, not unbound.
+    quiver()
+        .evaluate(
+            r#"
+            f = #<'t>[#^ -> ('t | []), 't] {
+              =[self, n]
+              me = #'int { [&self, $] self }
+              n
+            }
+            [&f, 3] f
+            "#,
+        )
+        .expect("3");
+}
+
+#[test]
+fn test_bare_binder_match_is_irrefutable_on_nil_input() {
+    // A bare binder matches anything, including nil: the block's type must not widen
+    // with `[]` just because the bound value can be nil.
+    quiver().evaluate("{ =x, 42 }").expect_type("'int");
+}
+
+#[test]
+fn test_function_type_alias_after_expression_statement() {
+    // An alias whose RHS is a function type also parses as a chain (an identity literal
+    // with a declared return type), so the statement sequence must yield to the alias
+    // rather than greedily consuming the line.
+    quiver()
+        .evaluate("x = 1, 'q<'t> = #['t, 't] -> ('t | []), 42")
+        .expect("42");
+}
+
+#[test]
+fn test_union_folds_members_differing_only_by_annotation_row() {
+    // A freshly built literal `Nil` (exact-empty annotation row) widened into a union
+    // with an alias-typed `Nil` (open row) must fold to one member, not display as
+    // `Nil | Nil` (likewise the bare `[]` next to a rowed one).
+    quiver()
+        .evaluate(
+            r#"
+            comma = [44, "','"] %parse.byte
+            elems = [&%parse.int, &comma] %parse.sep_by
+            a1 = [[91, "'['"] %parse.byte, &elems] %parse.right
+            a3 = [&a1, [93, "']'"] %parse.byte] %parse.left
+            [&a3, #{ $ }] %parse.map
+            "#,
+        )
+        .expect_type(
+            "#P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])] -> ([(Cons['int, μ1] | Nil), P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])]] | [])",
+        );
+}

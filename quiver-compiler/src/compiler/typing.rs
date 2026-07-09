@@ -45,6 +45,20 @@ pub fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
         .filter(|id| seen.insert(*id))
         .collect();
 
+    // Fold members that differ only by an annotation row: when both `T` and
+    // `Annotated { base: T }` are present (e.g. an alias-typed `Nil` alongside a freshly
+    // built literal `Nil` carrying an exact-empty row), keep the open `T` — retrieval on
+    // a union is already governed by its weakest member, so dropping the rowed twin loses
+    // nothing, while keeping it bloats unions and displays as duplicates (`Nil | Nil`).
+    let unique: Vec<usize> = unique
+        .iter()
+        .copied()
+        .filter(|id| match program.lookup_type(*id) {
+            Some(Type::Annotated { base, .. }) => !unique.contains(base),
+            _ => true,
+        })
+        .collect();
+
     match unique.len() {
         0 => program.never(),
         1 => unique[0],
@@ -216,12 +230,19 @@ pub fn resolve_function_parameter_type(
     scopes_ref: &[Scope],
     ast_type: ast::Type,
     type_parameters: &[String],
+    unique_suffix: usize,
     program: &mut Program,
 ) -> Result<usize, Error> {
-    // Create bindings for declared type parameters, mapping each to a Type::Variable
+    // Create bindings for declared type parameters, mapping each to a Type::Variable.
+    // The variable's *name* is uniquified per definition (`t#42`): variables are
+    // name-keyed, so two generic functions both declaring `'t` would otherwise share one
+    // variable, and a call from one's body into the other would unify "a variable with
+    // itself" and silently fail to pin it. The binding key stays the source name, so the
+    // annotation's `'t` references resolve to the uniquified variable. Display strips
+    // the suffix (see quiver-core's format).
     let mut bindings = HashMap::new();
     for param in type_parameters {
-        let var_type_id = program.register_type(Type::Variable(param.clone()));
+        let var_type_id = program.register_type(Type::Variable(format!("{param}#{unique_suffix}")));
         bindings.insert(param.clone(), var_type_id);
     }
 
@@ -1087,10 +1108,25 @@ pub fn unify(
                 // Concrete variable is bound - unify with its binding
                 unify(bindings, pattern_id, resolved_id, program)
             } else {
-                // Concrete variable is unbound - this shouldn't happen in normal unification
-                Err(Error::TypeUnresolved(
-                    "Cannot unify with unbound type variable in concrete position".to_string(),
-                ))
+                // An unbound concrete-side variable is a *rigid* variable from an
+                // enclosing generic context (e.g. a captured value whose type mentions
+                // the enclosing function's parameter). Treat it as an opaque type: it
+                // can only satisfy a variable member of a union pattern (bound against
+                // it); any structural requirement is an error — generic bodies are
+                // checked once, so accepting here would let ill-typed calls through
+                // generics compile and fail at runtime.
+                if let Type::Union(members) = &pattern {
+                    for member in members.clone() {
+                        if let Some(Type::Variable(_)) = program.lookup_type(member) {
+                            return unify(bindings, member, concrete_id, program);
+                        }
+                    }
+                }
+                Err(Error::TypeUnresolved(format!(
+                    "Cannot unify rigid type variable {} with expected type {}",
+                    quiver_core::format::format_type_by_id(&*program, concrete_id),
+                    quiver_core::format::format_type_by_id(&*program, pattern_id),
+                )))
             }
         }
 

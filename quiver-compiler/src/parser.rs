@@ -1718,6 +1718,57 @@ fn import(input: Span) -> IResult<Span, Vec<String>> {
     preceded(char('%'), separated_list1(char('/'), identifier))(input)
 }
 
+/// A dialect invocation `%mod{ raw }`: an import path glued (no whitespace) to a braced
+/// raw-text region. The content is *not* parsed as Quiver — this scanner only finds the
+/// matching close brace: braces must balance, except inside `"…"` string literals (where a
+/// `\` escapes the next byte, so `\"` doesn't close the string) or when escaped as
+/// `\{`/`\}`. Outside strings `\"` is an escaped literal quote (so an unpaired `"` is
+/// writable without opening string mode). The text is kept verbatim (escapes included) so
+/// the formatter round-trips it; the compiler unescapes the braces and quotes when
+/// expanding.
+fn dialect_term(input: Span) -> IResult<Span, Term> {
+    let start = input;
+    let (input, path) = import(input)?;
+    let (input, _) = char('{')(input)?;
+    let content_start = input;
+    let bytes = input.fragment().as_bytes();
+    let mut pos = 0;
+    let mut depth = 1usize;
+    let mut in_string = false;
+    while pos < bytes.len() && depth > 0 {
+        match (in_string, bytes[pos]) {
+            (true, b'\\') => pos += 1,
+            (true, b'"') => in_string = false,
+            (false, b'\\') if matches!(bytes.get(pos + 1).copied(), Some(b'{' | b'}' | b'"')) => {
+                pos += 1
+            }
+            (false, b'"') => in_string = true,
+            (false, b'{') => depth += 1,
+            (false, b'}') => depth -= 1,
+            _ => {}
+        }
+        pos += 1;
+    }
+    if depth > 0 {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeUntil,
+        )));
+    }
+    let content_length = pos - 1; // exclude the closing `}`
+    let raw = input.fragment()[..content_length].to_string();
+    let rest = input.slice(pos..);
+    Ok((
+        rest,
+        Term::Dialect(Dialect {
+            path,
+            raw,
+            span: Spanned(Some(span_between(start, rest))),
+            content_span: Spanned(Some(token_span(content_start, content_length))),
+        }),
+    ))
+}
+
 fn tuple_field(input: Span) -> IResult<Span, TupleField> {
     let start = input;
     let (rest, mut field) = alt((
@@ -2295,6 +2346,9 @@ fn primary(input: Span) -> IResult<Span, Term> {
         // Name-preserving spread-update (`~[..., y]`, `a[..., y]`) — before access, which would
         // otherwise consume the `~`/identifier as a bare reference.
         spread_update,
+        // Dialect invocation `%mod{ … }` (glued `{`) — before access, which would otherwise
+        // consume the import and leave `{ … }` to parse as a separate block term.
+        dialect_term,
         // Access (field/positional access, bare identifiers, and imports)
         map(access, Term::Access),
         // Operations
@@ -2408,8 +2462,23 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
 
 /// A top-level item: a type alias or a value-producing sequence. A statement-level
 /// expression is a branchless sequence (branches `|`/`=>` require a block).
+///
+/// The sequence variant must NOT consume a trailing separator (unlike [`sequence`],
+/// whose trailing `opt(seq_sep)` suits block/branch bodies): the program's own
+/// separator handling needs to see the separator between an expression statement and
+/// a following type alias, or interspersed aliases fail to parse.
 fn top_level_item(input: Span) -> IResult<Span, Statement> {
-    alt((type_alias, map(sequence, Statement::Expression)))(input)
+    alt((
+        type_alias,
+        map(
+            // A chain must not swallow an interspersed type alias: an alias whose RHS is
+            // a function type also parses as a chain (`'q<'t> = #['int] -> ('t | [])`
+            // reads as a binding of an identity literal with a declared return type), so
+            // the sequence would consume it and the alias's parameters would never bind.
+            separated_list1(seq_sep, preceded(not(peek(type_alias)), chain)),
+            |chains| Statement::Expression(Sequence { chains }),
+        ),
+    ))(input)
 }
 
 /// A program is a single threaded sequence of chains with type-alias declarations interspersed —

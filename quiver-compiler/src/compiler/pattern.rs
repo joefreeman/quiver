@@ -147,6 +147,12 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
 }
 
 /// Analyze pattern without generating code
+/// Whether some binding set matches unconditionally (no runtime requirements) — an
+/// irrefutable pattern, e.g. a bare binder.
+pub fn is_irrefutable(binding_sets: &[BindingSet]) -> bool {
+    binding_sets.iter().any(|set| set.requirements.is_empty())
+}
+
 pub fn analyze_pattern(
     env: &mut super::typing::TypeEnv,
     program: &mut Program,

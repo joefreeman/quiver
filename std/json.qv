@@ -1,0 +1,101 @@
+// A JSON dialect: `%json{ { "a": 1, "b": [2, x], "c": ~ } }` parses the brace content at
+// compile time into a `'%json` value. Bare lowercase identifiers in value position are
+// caller-scope variables (`x` above), and `~` is the value flowing into the dialect term;
+// both must themselves be `'%json`-shaped values.
+//
+// The grammar is built from `%parse` combinators, tying the value↔array/object recursion
+// with the concrete-knot idiom from `%parse`'s header; expression trees are built with
+// the `%meta` constructors.
+//
+// Notes:
+//   - Numbers are integers only (no float type yet).
+//   - String escapes: `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\t`, `\r` (no `\u`).
+//   - A trailing comma before `]`/`}` is tolerated.
+
+' =
+  | Null
+  | True
+  | False
+  | 'int
+  | Str['bin]
+  | Array[(Nil | Cons[^, ^1])]
+  | Object[(Nil | Cons[[Str['bin], ^], ^1])]
+
+'expr = '%meta.expr
+
+// A byte token with leading whitespace skipped.
+tok = #['int, Str['bin]] { [&%parse.ws, [$0, $1] %parse.byte] %parse.right }
+
+ripple_p = [[126, "'~'"] %parse.byte, #{ Ripple }] %parse.map
+
+// An identifier: the `null`/`true`/`false` keywords, or a caller-scope variable.
+word_p =
+  [
+    &%parse.ident,
+    #{
+      | ="null" => Tup[name: "Null", fields: Nil]
+      | ="true" => Tup[name: "True", fields: Nil]
+      | ="false" => Tup[name: "False", fields: Nil]
+      | =w => Var[w]
+    },
+  ] %parse.map
+
+// The value grammar, self-passed to tie the value↔array/object recursion.
+value_step = #[#^ -> (['expr, '%parse] | []), '%parse] {
+  =[self, st]
+  value = #'%parse { [&self, $] self }
+
+  comma = [44, "','"] tok
+  maybe_comma = &comma %parse.opt
+
+  elems = [&value, &comma] %parse.sep_by
+  a1 = [[91, "'['"] %parse.byte, &elems] %parse.right
+  a2 = [&a1, &maybe_comma] %parse.left
+  a3 = [&a2, [93, "']'"] tok] %parse.left
+
+  array =
+    [
+      &a3,
+      #{
+        Tup[name: "Array", fields: Cons[$ %meta.list_expr, Nil]]
+      },
+    ] %parse.map
+
+  key = [&%parse.ws, &%parse.quoted] %parse.right
+  k1 = [&key, [58, "':'"] tok] %parse.left
+
+  pair =
+    [[&k1, &value] %parse.then, #{ [$0, $1] %meta.pair2 }] %parse.map
+
+  pairs = [&pair, &comma] %parse.sep_by
+  o1 = [[123, "'\{'"] %parse.byte, &pairs] %parse.right
+  o2 = [&o1, &maybe_comma] %parse.left
+  o3 = [&o2, [125, "'}'"] tok] %parse.left
+
+  object =
+    [
+      &o3,
+      #{
+        Tup[name: "Object", fields: Cons[$ %meta.list_expr, Nil]]
+      },
+    ] %parse.map
+
+  composite =
+    [&array, &object, &%parse.quoted, &%parse.int] %parse.alt4
+
+  leaf = [&ripple_p, &word_p] %parse.alt2
+  core = [&composite, &leaf] %parse.alt2
+  core_ws = [&%parse.ws, &core] %parse.right
+
+  st core_ws
+}
+
+value = #'%parse { [&value_step, $] value_step }
+
+// The dialect entry point: the compiler calls this with the raw brace content.
+json = #Str['bin] { full = [&value, &%parse.ws] %parse.left, [$, &full] %parse.run }
+
+{
+  :dialect &json
+  Ok
+}

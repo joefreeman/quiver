@@ -1,0 +1,186 @@
+==================
+simple dialect
+==================
+
+%m{abc}
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content)))))
+
+==================
+dialect with namespaced module path
+==================
+
+%ns/m{x}
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier)
+          (identifier))
+        content: (dialect_content)))))
+
+==================
+dialect with empty content
+==================
+
+%m{}
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))))))
+
+==================
+dialect with nested braces
+==================
+
+%json{ { "a": [1, 2] } }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content)))))
+
+==================
+dialect string content with brace
+==================
+
+%m{ "a{b" }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content)))))
+
+==================
+dialect with escaped braces
+==================
+
+%m{ \{ \} }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content)))))
+
+==================
+dialect with lone backslash before escaped brace
+==================
+
+%re{a\\{2\\}b}
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content)))))
+
+==================
+multi-line dialect content
+==================
+
+%sql{
+  select name
+  from users // not a comment
+  where id = "{"
+}
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content)))))
+
+==================
+spaced brace is not a dialect
+==================
+
+%m { .val }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (import
+          (identifier)))
+      (block
+        (branch
+          condition: (expression
+            (chain
+              (access
+                field: (identifier)))))))))
+
+==================
+dialect in a chain
+==================
+
+%json{ {"a": 1} } .a
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content))
+      (access
+        field: (identifier)))))
+
+==================
+escaped quote in dialect content
+==================
+
+%m{ 5\" tall }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (dialect
+        module: (import
+          (identifier))
+        content: (dialect_content)))))

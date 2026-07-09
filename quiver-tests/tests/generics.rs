@@ -259,3 +259,21 @@ fn test_generic_type_with_multiple_fields() {
         )
         .expect("[1, \"a\", 0x00]");
 }
+
+#[test]
+fn test_rigid_type_variable_rejects_concrete_requirement() {
+    // A rigid type variable (an enclosing generic's parameter) must not satisfy a
+    // concrete requirement: `f`'s 'u is not known to be 'int, so passing it to `g`
+    // is a compile error, not a latent runtime TypeMismatch.
+    quiver()
+        .evaluate(
+            r#"
+            g = #<'t>['int, 't] { =[a, b], [a, 1] __integer_add__ },
+            f = #<'u>'u { [$, 5] g },
+            #{ "x" f }
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Cannot unify rigid type variable 'u with expected type 'int".to_string(),
+        ));
+}

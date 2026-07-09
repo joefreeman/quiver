@@ -87,6 +87,13 @@ impl Program {
         }
     }
 
+    /// The number of registered types. Monotonically increasing, so it doubles as a
+    /// persistent uniquifier seed (e.g. for type-parameter names) that survives across
+    /// compiler instances sharing this program.
+    pub fn type_count(&self) -> usize {
+        self.types.len()
+    }
+
     pub fn get_constants(&self) -> &Vec<Constant> {
         &self.constants
     }

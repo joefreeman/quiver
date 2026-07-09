@@ -238,12 +238,14 @@ fn is_frame_free_chain(chain: &Chain) -> bool {
 }
 
 /// Whether `term` is a multi-step block whose runtime frame is unnecessary, so its chains may be
-/// lifted into the enclosing sequence: one branch, no `=>`, and every chain frame-free. (A single
-/// branch with no bindings needs no frame regardless of step count; a tail call is fine, since
-/// lifting into a sequence keeps it in tail position rather than mid-chain.)
+/// lifted into the enclosing sequence: no annotations (they attach to the block's result, so the
+/// braces are load-bearing), one branch, no `=>`, and every chain frame-free. (A single branch
+/// with no bindings needs no frame regardless of step count; a tail call is fine, since lifting
+/// into a sequence keeps it in tail position rather than mid-chain.)
 fn is_liftable_block(term: &Term) -> bool {
     matches!(term, Term::Block(expression)
-        if expression.branches.len() == 1
+        if expression.annotations.is_empty()
+            && expression.branches.len() == 1
             && expression.branches[0].consequence.is_none()
             && !expression.branches[0].condition.chains.is_empty()
             && expression.branches[0].condition.chains.iter().all(is_frame_free_chain))

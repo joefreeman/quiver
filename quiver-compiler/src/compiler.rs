@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 mod annotations;
 mod codegen;
+mod dialect;
 mod helpers;
 mod modules;
 mod narrowing;
@@ -130,6 +131,19 @@ pub enum Error {
     },
     ModuleTypeCycle(String),
 
+    // Dialect errors
+    /// A dialect invocation (`%mod{…}`) on a module whose value carries no `:dialect`
+    /// annotation.
+    DialectMissing {
+        module: String,
+    },
+    /// A dialect function failed (nil, with any `:error` payload folded into the message)
+    /// or returned a value that isn't a well-formed `'%meta.expr`.
+    DialectFailed {
+        module: String,
+        message: String,
+    },
+
     // Language feature errors
     FeatureUnsupported(String),
 
@@ -228,6 +242,15 @@ impl std::fmt::Display for Error {
                     f,
                     "Cyclic module type reference involving module '{module}'"
                 )
+            }
+            Error::DialectMissing { module } => {
+                write!(
+                    f,
+                    "Module '{module}' does not define a dialect (no :dialect annotation)"
+                )
+            }
+            Error::DialectFailed { module, message } => {
+                write!(f, "Dialect {module} {message}")
             }
             Error::FeatureUnsupported(what) => write!(f, "Unsupported: {what}"),
             Error::DestructuringOnNonTuple(ty) => {
@@ -425,6 +448,14 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Span of the term currently being compiled, so an error can be located in source.
     // Only set when a recorder is interested (LSP); harmless otherwise.
     current_span: Option<SourceSpan>,
+    /// The type-parameter uniquifying suffix of the top-level function definition being
+    /// compiled, inherited by nested literals (see `compile_function`).
+    type_param_suffix: Option<usize>,
+    /// How many function-literal bodies the compiler is currently inside. The dialect
+    /// pre-expansion walk runs only at depth 0 — the outermost `compile_function` expands
+    /// every nested body in one pass, so re-walking per nested literal would be
+    /// O(depth × AST) on every compile (reset per module in `import_and_cache_module`).
+    function_depth: usize,
 
     // Debug builds: emit failure-provenance stamps (`Stamp` instructions + the site
     // table) so nil results carry their origin. Zero cost when false.
@@ -552,6 +583,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             fn_case_tables: HashMap::new(),
             case_tables: HashMap::new(),
             current_span: None,
+            type_param_suffix: None,
+            function_depth: 0,
             debug: options.debug,
             current_module: options.source_name,
             recorder,
@@ -1550,6 +1583,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         mut function: ast::Function,
         expected_parameter: Option<usize>,
     ) -> Result<usize, Error> {
+        // Dialect invocations expand to ordinary AST that may reference enclosing
+        // variables (`EVar`), so expand them before captures are collected — the capture
+        // collector cannot see through an unexpanded `%mod{…}`. Only the outermost
+        // literal walks: it expands every nested body in the same pass (the lazy path in
+        // `compile_term` covers non-function contexts).
+        if self.function_depth == 0
+            && let Some(body) = &mut function.body
+        {
+            self.expand_dialects_in_expression(body)?;
+        }
+
         // A function body's annotation prefix attaches to the *closure*, not the body's
         // result: extract it before capture collection (the annotation chains evaluate in
         // the enclosing scope at literal-evaluation time, so they contribute no captures)
@@ -1583,7 +1627,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             },
         );
 
-        // Resolve parameter type with declared type parameters
+        // Resolve parameter type with declared type parameters, uniquifying their names.
+        // Distinct top-level definitions get distinct suffixes — `Type::Variable` is
+        // name-keyed, so `map`'s `'t` called from `left`'s body would otherwise unify "a
+        // variable with itself" and silently fail to pin — while literals nested in one
+        // definition inherit its suffix, preserving the convention that a nested
+        // literal's re-declared `<'t>` names the enclosing function's `'t` (a nested
+        // signature cannot otherwise reach the enclosing parameters; see e.g. the list
+        // module's `iter`). The seed is the program's type count: persistent across
+        // compiler instances, so a fresh REPL evaluation can't mint suffixes colliding
+        // with cached module types (registering the renamed variable advances it).
+        let inherited_suffix = self.type_param_suffix;
+        let type_param_suffix = inherited_suffix.unwrap_or_else(|| self.program.type_count());
+        self.type_param_suffix = Some(type_param_suffix);
         let parameter_type = match &function.parameter_type {
             Some(t) => {
                 let mut env = typing::TypeEnv {
@@ -1596,6 +1652,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     &self.scopes,
                     t.clone(),
                     &function.type_parameters,
+                    type_param_suffix,
                     self.program,
                 )?
             }
@@ -1772,14 +1829,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let body_type = match function.body {
             Some(body) => {
                 // Function parameters have Provenance::Parameter since they come from callers
-                self.compile_scoped_expression(
+                self.function_depth += 1;
+                let body_type = self.compile_scoped_expression(
                     body,
                     parameter_type,
                     Provenance::Parameter,
                     None,
                     ScopeKind::Function,
                     true,
-                )?
+                );
+                self.function_depth -= 1;
+                body_type?
             }
             None => {
                 // Identity function: just return the parameter
@@ -1802,6 +1862,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 &self.scopes,
                 return_type_ast.clone(),
                 &function.type_parameters,
+                type_param_suffix,
                 self.program,
             )?;
 
@@ -1934,6 +1995,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // types are derived from this function's own parameter/result types. The closure
         // is freshly built either way, so its row is exact: absent keys are provably
         // absent (the bare literal gets an exact-empty row).
+        self.type_param_suffix = inherited_suffix;
+
         if !function_annotations.is_empty() {
             return self.compile_annotation_attach(function_annotations, callable_type_id, true);
         }
@@ -2146,10 +2209,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // real success.)
         // Match verdicts are freshly minted Ok/nil values, so their rows are exact-empty:
         // provably annotation-free (a failed match's nil never carries an error payload).
+        //
+        // Nil in `result_type` is not by itself fallibility: a bare binder (`=x`) on a
+        // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
+        // some binding set has no runtime requirements — it types as plain `Ok`.
+        let irrefutable = pattern::is_irrefutable(&binding_sets);
         let final_type = if return_ok {
             if self.is_nil(result_type) && !self.contains_nil(value_type) {
                 result_type
-            } else if self.contains_nil(result_type) {
+            } else if self.contains_nil(result_type) && !irrefutable {
                 let closed_ok = annotations::closed_ok(self.program);
                 let closed_nil = annotations::closed_nil(self.program);
                 typing::union_type_ids(self.program, vec![closed_ok, closed_nil])
@@ -3221,6 +3289,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_package = std::mem::replace(&mut self.current_package, resolved.package.clone());
         // Provenance sites inside the module name it, not the importing unit.
         let saved_module = std::mem::replace(&mut self.current_module, module_name.clone());
+        // NOTE: `type_param_suffix` is deliberately *not* cleared here, although that means a
+        // module first imported from inside a function body compiles all its generics under
+        // the importer's suffix (import-order-dependent sharing). Clearing it — so each of the
+        // module's top-level definitions gets its own suffix, as a top-level import does — is
+        // the principled fix, but it currently trips a latent bug in cross-definition generic
+        // unification. Repro: `"." %fs.list [~, #'%fs.entry { .name }] %iter.map [~, " | "]
+        // %str.join` fails to compile with a leaked `'u | Entry | Entry` element type when
+        // %iter is first imported from inside fs.qv's `list` body. Fix that unification bug
+        // before clearing the suffix here.
+        //
+        // The module's own top-level functions need the dialect pre-expansion walk even when
+        // the import was triggered from inside a function body.
+        let saved_function_depth = std::mem::take(&mut self.function_depth);
         // Suppress semantic recording while compiling an imported module: its spans are
         // offsets into the module's own source, which would otherwise collide with the
         // document being indexed. (A module that fails to compile aborts the whole
@@ -3276,6 +3357,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.recorder = saved_recorder;
         self.current_package = saved_package;
         self.current_module = saved_module;
+        self.function_depth = saved_function_depth;
 
         // Register the callable type for this module wrapper function
         // (modules take no arguments and return the module value)
@@ -3339,6 +3421,290 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .cache_module(resolved.id.clone(), cached.clone());
 
         Ok(cached)
+    }
+
+    /// Expand a dialect invocation `%mod{ … }`: resolve the module, fetch the function its
+    /// `:dialect` annotation carries, execute it at compile time with the unescaped brace
+    /// content, and convert the returned `'%meta.expr` tree into an AST term — a block
+    /// binding the flowing value (for `Ripple`) around the spliced expansion.
+    ///
+    /// TODO: run dialect evaluation under a restricted (IO-free) builtin registry with an
+    /// instruction budget, and cache expansions keyed by (module, content).
+    fn expand_dialect(&mut self, dialect: &ast::Dialect) -> Result<ast::Term, Error> {
+        let module_name = format!("%{}", dialect.path.join("/"));
+        let (content, escapes) = dialect::unescape_content(&dialect.raw);
+
+        let (cached, module_value, _module_type, _origin) =
+            self.resolve_import(&dialect.path, &[])?;
+        // Compiling the module (on a cache miss) leaves `current_span` pointing into the
+        // module's source; point it back at the invocation for expansion errors.
+        self.current_span = dialect.span.get();
+
+        let dialect_key = self.program.register_annotation_key("dialect");
+        let Some(function) = module_value.get_annotation(dialect_key).cloned() else {
+            return Err(Error::DialectMissing {
+                module: module_name,
+            });
+        };
+
+        // Load the dialect function and check that it takes a Str (the brace content).
+        let (function_instructions, function_type) =
+            self.value_to_instructions_from_cache(&function, &cached.binary_data)?;
+        let Some((parameter, result)) = self.callable_signature(function_type) else {
+            return Err(Error::DialectFailed {
+                module: module_name,
+                message: format!(
+                    "must carry a function in its :dialect annotation, found {}",
+                    quiver_core::format::format_type_by_id(&*self.program, function_type)
+                ),
+            });
+        };
+        let str_type = annotations::str_type(self.program);
+        if !quiver_core::types::is_compatible(str_type, parameter, &*self.program) {
+            return Err(Error::DialectFailed {
+                module: module_name,
+                message: format!(
+                    "must take Str['bin] in its :dialect function, found {}",
+                    quiver_core::format::format_type_by_id(&*self.program, parameter)
+                ),
+            });
+        }
+
+        // Assemble a nilary entry applying the dialect function to the content, and run it.
+        let binary_type = self.program.register_type(Type::Binary);
+        let str_tuple = self
+            .program
+            .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
+        let nil_type_id = self.program.register_type(Type::nil());
+        let never_id = self.program.never();
+        let entry_type = self.program.register_type(Type::Callable {
+            parameter: nil_type_id,
+            result,
+            receive: never_id,
+        });
+        let mut bytecode = self.program.to_bytecode(None);
+        // The content constant goes into the *temporary* bytecode only: registering it on the
+        // program would permanently ship every invocation's brace content as dead data.
+        let constant = bytecode.constants.len();
+        bytecode
+            .constants
+            .push(Constant::Binary(content.clone().into_bytes()));
+        let mut instructions = vec![
+            Instruction::Constant(constant),
+            Instruction::Tuple(str_tuple),
+        ];
+        instructions.extend(function_instructions);
+        instructions.push(Instruction::Call);
+        bytecode.functions.push(quiver_core::bytecode::Function {
+            instructions,
+            captures: 0,
+            type_id: entry_type,
+        });
+        bytecode.entry = Some(bytecode.functions.len() - 1);
+
+        let (expr_value, executor) =
+            quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false)
+                .map_err(|e| Error::ModuleExecution {
+                    module: module_name.clone(),
+                    error: Box::new(e),
+                })?;
+
+        let error_key = self.program.register_annotation_key("error");
+        if expr_value.is_nil() {
+            let message = self.describe_dialect_failure(
+                &expr_value,
+                error_key,
+                dialect,
+                &escapes,
+                &executor,
+                (constant, &content),
+            );
+            return Err(Error::DialectFailed {
+                module: module_name,
+                message,
+            });
+        }
+
+        let program = &*self.program;
+        let read_binary = |binary: &Binary| -> Option<Vec<u8>> {
+            match binary {
+                Binary::Constant(index) => match program.get_constant(*index) {
+                    Some(Constant::Binary(bytes)) => Some(bytes.clone()),
+                    // The content constant lives only in the expansion's temporary
+                    // bytecode; the returned IR may reference the input string's bytes.
+                    None if *index == constant => Some(content.clone().into_bytes()),
+                    _ => None,
+                },
+                Binary::Heap(index) => executor.get_heap_binary(*index).map(|data| data.to_vec()),
+            }
+        };
+        let splicer = dialect::Splicer {
+            program,
+            read_binary,
+            module: module_name,
+            path: dialect.path.clone(),
+            span: dialect.span,
+        };
+        let expansion = splicer.value_to_chain(&expr_value)?;
+        Ok(dialect::wrap_expansion(expansion))
+    }
+
+    /// Recursively expand every dialect invocation in an expression, in place. Run on a
+    /// function body before its captures are collected; elsewhere dialects expand lazily
+    /// in [`Self::compile_term`].
+    fn expand_dialects_in_expression(
+        &mut self,
+        expression: &mut ast::Expression,
+    ) -> Result<(), Error> {
+        for annotation in &mut expression.annotations {
+            self.expand_dialects_in_chain(&mut annotation.value)?;
+        }
+        for branch in &mut expression.branches {
+            self.expand_dialects_in_sequence(&mut branch.condition)?;
+            if let Some(consequence) = &mut branch.consequence {
+                self.expand_dialects_in_sequence(consequence)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn expand_dialects_in_sequence(&mut self, sequence: &mut ast::Sequence) -> Result<(), Error> {
+        for chain in &mut sequence.chains {
+            self.expand_dialects_in_chain(chain)?;
+        }
+        Ok(())
+    }
+
+    fn expand_dialects_in_chain(&mut self, chain: &mut ast::Chain) -> Result<(), Error> {
+        for term in &mut chain.terms {
+            self.expand_dialects_in_term(term)?;
+        }
+        Ok(())
+    }
+
+    fn expand_dialects_in_term(&mut self, term: &mut ast::Term) -> Result<(), Error> {
+        match term {
+            ast::Term::Dialect(dialect) => {
+                *term = self.expand_dialect(dialect)?;
+            }
+            ast::Term::Tuple(tuple) => {
+                for field in &mut tuple.fields {
+                    if let ast::FieldValue::Chain(chain) = &mut field.value {
+                        self.expand_dialects_in_chain(chain)?;
+                    }
+                }
+            }
+            ast::Term::String(_, segments) => {
+                for segment in segments {
+                    if let ast::StrSegment::Hole(expression) = segment {
+                        self.expand_dialects_in_expression(expression)?;
+                    }
+                }
+            }
+            ast::Term::Block(expression) => self.expand_dialects_in_expression(expression)?,
+            ast::Term::Function(function) => {
+                if let Some(body) = &mut function.body {
+                    self.expand_dialects_in_expression(body)?;
+                }
+            }
+            ast::Term::Spawn(inner, _) => self.expand_dialects_in_term(inner)?,
+            ast::Term::Select(sources, _) => {
+                if let Some(sources) = sources {
+                    for source in sources {
+                        self.expand_dialects_in_chain(source)?;
+                    }
+                }
+            }
+            ast::Term::Literal(_)
+            | ast::Term::Match(_)
+            | ast::Term::Access(_)
+            | ast::Term::Self_
+            | ast::Term::Process(_)
+            | ast::Term::Reference(_) => {}
+        }
+        Ok(())
+    }
+
+    /// The parameter and result of a callable type, looking through annotation rows and
+    /// single-member unions.
+    fn callable_signature(&self, type_id: usize) -> Option<(usize, usize)> {
+        match self.program.lookup_type(type_id)? {
+            Type::Callable {
+                parameter, result, ..
+            } => Some((*parameter, *result)),
+            Type::Annotated { base, .. } => self.callable_signature(*base),
+            Type::Union(members) if members.len() == 1 => self.callable_signature(members[0]),
+            _ => None,
+        }
+    }
+
+    /// Describe a dialect function's nil result: fold an `Expected[offset: 'int,
+    /// message: Str['bin]]`-shaped `:error` payload into a message, mapping the content
+    /// offset to a source position via the invocation's content span. `content_constant`
+    /// is the brace content's temporary constant (index, text), which lives only in the
+    /// expansion's bytecode — a message referencing it can't be read off the program.
+    fn describe_dialect_failure(
+        &self,
+        value: &Value,
+        error_key: usize,
+        dialect: &ast::Dialect,
+        escapes: &[usize],
+        executor: &quiver_core::executor::Executor<E>,
+        content_constant: (usize, &str),
+    ) -> String {
+        let Some(payload) = value.get_annotation(error_key) else {
+            return "failed".to_string();
+        };
+        let mut offset = None;
+        let mut message = None;
+        if let Value::Tuple(tuple_id, fields) = payload {
+            // Locate each field by label when the tuple carries one, else by position — the
+            // same fallback as `Splicer::field`, so a positionally built `Expected[2, "…"]`
+            // keeps its offset→source-position mapping.
+            let info = self.program.lookup_tuple(*tuple_id);
+            let position_of = |label: &str, index: usize| {
+                info.and_then(|info| {
+                    info.fields
+                        .iter()
+                        .position(|(l, _)| l.as_deref() == Some(label))
+                })
+                .unwrap_or(index)
+            };
+            if let Some(Value::Int(o)) = fields.get(position_of("offset", 0)) {
+                offset = usize::try_from(*o).ok();
+            }
+            if let Some(Value::Tuple(str_id, str_fields)) = fields.get(position_of("message", 1))
+                && self
+                    .program
+                    .lookup_tuple(*str_id)
+                    .is_some_and(|info| info.name.as_deref() == Some("Str"))
+                && let Some(Value::Binary(binary)) = str_fields.first()
+            {
+                let bytes = match binary {
+                    Binary::Constant(index) => match self.program.get_constant(*index) {
+                        Some(Constant::Binary(bytes)) => Some(bytes.clone()),
+                        None if *index == content_constant.0 => {
+                            Some(content_constant.1.as_bytes().to_vec())
+                        }
+                        _ => None,
+                    },
+                    Binary::Heap(index) => {
+                        executor.get_heap_binary(*index).map(|data| data.to_vec())
+                    }
+                };
+                message = bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
+            }
+        }
+        let text = message.unwrap_or_else(|| format!("failed with {payload:?}"));
+        match offset.and_then(|o| dialect::content_position(dialect, escapes, o)) {
+            Some((line, column)) => {
+                format!(
+                    "failed: {text} (at {}:{line}:{column})",
+                    self.current_module
+                )
+            }
+            None => format!("failed: {text}"),
+        }
     }
 
     /// Append instructions reconstructing a payload's annotations onto the value the
@@ -4544,6 +4910,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     process_type
                 };
                 Ok((result_type, Provenance::Unknown))
+            }
+            ast::Term::Dialect(dialect) => {
+                // Expand at compile time to an ordinary block term (which receives the
+                // flowing value, so `Ripple` works like a block parameter), then compile
+                // the expansion in place — splices are type-checked like handwritten code.
+                let expansion = self.expand_dialect(&dialect)?;
+                self.compile_term(
+                    expansion,
+                    FlowingValue {
+                        ty: value_type,
+                        provenance: value_provenance,
+                    },
+                    on_no_match,
+                    ripple_context,
+                    narrowing,
+                    expected,
+                )
             }
             ast::Term::Reference(access) => {
                 // Explicit reference: drop incoming value and load the referenced value without calling

@@ -277,6 +277,10 @@
           "named": true
         },
         {
+          "type": "dialect",
+          "named": true
+        },
+        {
           "type": "equality",
           "named": true
         },
@@ -352,6 +356,37 @@
   },
   {
     "type": "default_type_name",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "dialect",
+    "named": true,
+    "fields": {
+      "content": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "dialect_content",
+            "named": true
+          }
+        ]
+      },
+      "module": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "import",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "dialect_content",
     "named": true,
     "fields": {}
   },
@@ -2114,6 +2149,10 @@
   },
   {
     "type": "[",
+    "named": false
+  },
+  {
+    "type": "\\",
     "named": false
   },
   {

@@ -23,6 +23,9 @@ pub enum Doc {
     SoftLine,
     /// Always a newline+indent. Forces every enclosing group to break.
     HardLine,
+    /// Always a newline *without* indentation, for verbatim multi-line content (dialect bodies)
+    /// whose bytes must not be re-indented. Forces every enclosing group to break.
+    LiteralLine,
     Concat(Vec<Doc>),
     /// Indent the contained breaks by `0` extra spaces (relative).
     Nest(usize, Box<Doc>),
@@ -58,6 +61,10 @@ pub fn softline() -> Doc {
 
 pub fn hardline() -> Doc {
     Doc::HardLine
+}
+
+pub fn literalline() -> Doc {
+    Doc::LiteralLine
 }
 
 pub fn concat(docs: Vec<Doc>) -> Doc {
@@ -104,7 +111,7 @@ pub fn join(separator: Doc, docs: Vec<Doc>) -> Doc {
 /// (anything carrying a comment forces a break, and flattening it would corrupt the source).
 pub fn forces_break(doc: &Doc) -> bool {
     match doc {
-        Doc::HardLine | Doc::BreakParent => true,
+        Doc::HardLine | Doc::LiteralLine | Doc::BreakParent => true,
         Doc::Concat(docs) => docs.iter().any(forces_break),
         Doc::Nest(_, inner) => forces_break(inner),
         Doc::Group(_, should_break) => *should_break,
@@ -152,11 +159,19 @@ pub fn print(doc: &Doc, width: usize) -> String {
                 col += 1;
             }
             Doc::SoftLine if mode == Mode::Flat => {}
-            // A real line break (`Line`/`SoftLine` in break mode, or any `HardLine`): flush any
-            // buffered trailing comments onto this line first, then emit the break.
-            Doc::Line | Doc::SoftLine | Doc::HardLine => {
+            // A real line break (`Line`/`SoftLine` in break mode, or any `HardLine`/
+            // `LiteralLine`): flush any buffered trailing comments onto this line first, then
+            // emit the break. A literal line takes no indentation — the next text is verbatim.
+            Doc::Line | Doc::SoftLine | Doc::HardLine | Doc::LiteralLine => {
                 if suffixes.is_empty() {
-                    col = newline(&mut out, indent);
+                    col = newline(
+                        &mut out,
+                        if matches!(doc, Doc::LiteralLine) {
+                            0
+                        } else {
+                            indent
+                        },
+                    );
                 } else {
                     stack.push((indent, mode, doc));
                     stack.extend(suffixes.drain(..).rev());
@@ -196,7 +211,7 @@ pub fn flatten(doc: &Doc) -> String {
             Doc::Nil | Doc::SoftLine | Doc::BreakParent => {}
             Doc::Text(s) => out.push_str(s),
             Doc::Line => out.push(' '),
-            Doc::HardLine => out.push('\n'),
+            Doc::HardLine | Doc::LiteralLine => out.push('\n'),
             Doc::Concat(docs) => stack.extend(docs.iter().rev()),
             Doc::Nest(_, inner) | Doc::Group(inner, _) | Doc::LineSuffix(inner) => {
                 stack.push(inner)
@@ -218,7 +233,7 @@ pub fn flat_width(doc: &Doc, max: usize) -> Option<usize> {
             Doc::Nil | Doc::SoftLine | Doc::LineSuffix(_) => {}
             Doc::Text(s) => width += s.chars().count(),
             Doc::Line => width += 1,
-            Doc::HardLine | Doc::BreakParent => return None,
+            Doc::HardLine | Doc::LiteralLine | Doc::BreakParent => return None,
             Doc::Concat(docs) => stack.extend(docs.iter().rev()),
             Doc::Nest(_, inner) | Doc::Group(inner, _) => stack.push(inner),
             Doc::IfBreak(_, flat) => stack.push(flat),
@@ -271,7 +286,7 @@ fn fits(remaining: usize, indent: usize, group_inner: &Doc, rest: &[Frame]) -> b
                 Mode::Flat => {}
                 Mode::Break => return true,
             },
-            Doc::HardLine => return true,
+            Doc::HardLine | Doc::LiteralLine => return true,
             // A trailing comment is deferred (zero width here); a break-parent renders nothing.
             Doc::LineSuffix(_) | Doc::BreakParent => {}
             Doc::IfBreak(broken, flat) => {

@@ -5,6 +5,49 @@ reverse = #<'t>['<'t>, '<'t>] {
   | =[Cons[head, tail], xs] => Cons[head, xs] [tail, ~] ^
 }
 
+// --- the `%list{ … }` dialect --------------------------------------------------------
+// `%list{ 1, "two", x, ~, [3, 4] }` builds a list at compile time: elements are
+// integers, strings, caller-scope variables, `~` (the flowing value), or nested
+// bracketed lists. Built from `%parse` combinators and the `%meta` constructors.
+
+'dexpr = '%meta.expr
+
+d_ripple = [[126, "'~'"] %parse.byte, #{ Ripple }] %parse.map
+d_var = [&%parse.ident, #{ Var[$] }] %parse.map
+d_comma = [&%parse.ws, [44, "','"] %parse.byte] %parse.right
+
+// The element grammar, self-passed to tie the element↔nested-list recursion.
+d_value_step = #[#^ -> (['dexpr, '%parse] | []), '%parse] {
+  =[self, st]
+  value = #'%parse { [&self, $] self }
+
+  elems = [&value, &d_comma] %parse.sep_by
+  n1 = [[91, "'['"] %parse.byte, &elems] %parse.right
+  n2 = [&n1, &d_comma %parse.opt] %parse.left
+  close = [&%parse.ws, [93, "']'"] %parse.byte] %parse.right
+  n3 = [&n2, &close] %parse.left
+  nested = [&n3, #{ $ %meta.list_expr }] %parse.map
+
+  core =
+    [
+      [&nested, &%parse.quoted, &%parse.int] %parse.alt3,
+      [&d_ripple, &d_var] %parse.alt2,
+    ] %parse.alt2
+
+  core_ws = [&%parse.ws, &core] %parse.right
+  st core_ws
+}
+
+d_value = #'%parse { [&d_value_step, $] d_value_step }
+
+list_dialect = #Str['bin] {
+  elems = [&d_value, &d_comma] %parse.sep_by
+  e2 = [&elems, &d_comma %parse.opt] %parse.left
+  e3 = [&e2, &%parse.ws] %parse.left
+  full = [&e3, #{ $ %meta.list_expr }] %parse.map
+  [$, &full] %parse.run
+}
+
 [
   new: #{
     :doc "Creates an empty list."
@@ -57,4 +100,4 @@ reverse = #<'t>['<'t>, '<'t>] {
     [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] %iter.fold
     ~> [~, Nil] reverse
   },
-]
+] { :dialect &list_dialect }

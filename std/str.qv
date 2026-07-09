@@ -99,10 +99,62 @@ from_chars = #'%iter<'int> {
   ~> Str[~]
 }
 
+// Decimal digits from byte pos, accumulating onto acc: [value, end-pos]. Zero or more.
+int_digits = #['bin, 'int, 'int, 'int] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] %num.lt?, [data, pos] %bin.get_byte =('int)b, [b, 48] %num.ge?, [b, 57] %num.le? => {
+      [[acc, 10] %num.mul, [b, 48] %num.sub] %num.add
+      ~> [data, [pos, 1] %num.add, len, ~] ^
+    }
+    | [acc, pos]
+  }
+}
+
+// The decimal digit bytes of a positive integer, prepended (lowest digit first) onto acc.
+int_bytes = #['int, 'bin] {
+  =[n, acc]
+  {
+    | n =0 => acc
+    | {
+      [n, 10] %int.mod =('int)d
+      [n, 10] %int.div =('int)q
+      digit = [0x, [d, 48] %num.add, 1] %bin.append
+      [q, [digit, acc] %bin.concat] ^
+    }
+  }
+}
+
 [
   bytes: #' {
     :doc "The underlying UTF-8 bytes of a string."
     .0
+  },
+
+  parse_int: #' {
+    :doc "Parses a string as an optionally signed decimal integer; nil unless the whole string is one."
+    =Str[data]
+    len = data %bin.length
+    start = {
+      | [len, 0] %num.gt?, [data, 0] %bin.get_byte =45, 1
+      | 0
+    }
+    [start, len] %num.lt?
+    [data, start, len, 0] int_digits
+    =[n, end]
+    end =&len
+    { start =1 => [0, n] %num.sub | n }
+  },
+
+  from_int: #'int {
+    :doc "The decimal representation of an integer."
+    {
+      | $ =0 => "0"
+      | [$, 0] %num.lt? => {
+        [0, $] %num.sub [~, 0x] int_bytes =('bin)b, [0x2d, b] %bin.concat Str[~]
+      }
+      | [$, 0x] int_bytes =('bin)b, Str[b]
+    }
   },
 
   empty?: #' {

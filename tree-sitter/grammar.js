@@ -223,6 +223,7 @@ module.exports = grammar({
       $.function,
       $.block,
       $.spread_update,
+      $.dialect,
       $.access,
     ),
 
@@ -276,6 +277,51 @@ module.exports = grammar({
     // `%num`, `%mathx/vec`. The `/` path separator is immediate so a later `mod / x`
     // (with surrounding spaces) is not mistaken for part of the module path.
     import: $ => seq('%', $.identifier, repeat(seq(token.immediate('/'), $.identifier))),
+
+    // -------------------------------------------------------------------- dialects
+
+    // A dialect invocation `%mod{ raw }`: an import path glued (no whitespace) to a
+    // braced raw-text region. The `{` is immediate, so the spaced `%mod { ... }` is
+    // *not* a dialect (it stays an import followed by a block). The content is not
+    // parsed as Quiver — the grammar only finds the matching close brace, mirroring
+    // `dialect_term` in quiver-compiler/src/parser.rs: braces must balance, except
+    // inside `"…"` string literals (where a `\` escapes the next byte, so `\"`
+    // doesn't close the string) or when escaped as `\{`/`\}`; outside strings `\"`
+    // is an escaped literal quote (so an unpaired `"` is writable).
+    dialect: $ => seq(
+      field('module', $.import),
+      token.immediate('{'),
+      optional(field('content', $.dialect_content)),
+      '}',
+    ),
+
+    // The raw content: plain text, escaped braces, strings (in which braces don't
+    // count) and balanced nested brace groups. The text token's lexical precedence
+    // keeps it ahead of the whitespace/comment `extras`, which would otherwise eat
+    // content (a comment token could even swallow a closing `}`).
+    dialect_content: $ => repeat1($._dialect_chunk),
+
+    _dialect_chunk: $ => choice(
+      $._dialect_text,
+      $._dialect_escape,
+      $._dialect_backslash,
+      $._dialect_string,
+      $._dialect_braces,
+    ),
+
+    _dialect_text: _ => token(prec(1, /[^{}"\\]+/)),
+    // `\{` / `\}` / `\"`: escaped literal braces/quotes — no depth change, and an
+    // escaped quote does not open string mode (it lets content carry an unpaired `"`).
+    _dialect_escape: _ => token(/\\[{}"]/),
+    // A lone `\` (not before a brace or quote) is one ordinary character; matching it
+    // alone keeps the *next* character in play, so `\\{` reads as a literal `\` followed
+    // by the escaped brace `\{` (no depth change) — exactly as the reference scanner does.
+    _dialect_backslash: _ => '\\',
+    // A `"…"` string: braces inside don't count, `\` escapes the next byte (newlines
+    // included, hence the explicit `(.|\n)` — a bare `.` doesn't match newline).
+    _dialect_string: _ => token(seq('"', repeat(choice(/\\(.|\n)/, /[^"\\]/)), '"')),
+    // A nested balanced brace group, counted toward depth.
+    _dialect_braces: $ => seq('{', repeat($._dialect_chunk), '}'),
 
     // ------------------------------------------------------------------- operations
 

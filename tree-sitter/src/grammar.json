@@ -595,6 +595,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "dialect"
+        },
+        {
+          "type": "SYMBOL",
           "name": "access"
         }
       ]
@@ -931,6 +935,152 @@
               }
             ]
           }
+        }
+      ]
+    },
+    "dialect": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "module",
+          "content": {
+            "type": "SYMBOL",
+            "name": "import"
+          }
+        },
+        {
+          "type": "IMMEDIATE_TOKEN",
+          "content": {
+            "type": "STRING",
+            "value": "{"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "content",
+              "content": {
+                "type": "SYMBOL",
+                "name": "dialect_content"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "}"
+        }
+      ]
+    },
+    "dialect_content": {
+      "type": "REPEAT1",
+      "content": {
+        "type": "SYMBOL",
+        "name": "_dialect_chunk"
+      }
+    },
+    "_dialect_chunk": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_dialect_text"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_dialect_escape"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_dialect_backslash"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_dialect_string"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_dialect_braces"
+        }
+      ]
+    },
+    "_dialect_text": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 1,
+        "content": {
+          "type": "PATTERN",
+          "value": "[^{}\"\\\\]+"
+        }
+      }
+    },
+    "_dialect_escape": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "\\\\[{}\"]"
+      }
+    },
+    "_dialect_backslash": {
+      "type": "STRING",
+      "value": "\\"
+    },
+    "_dialect_string": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "\""
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\(.|\\n)"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "[^\"\\\\]"
+                }
+              ]
+            }
+          },
+          {
+            "type": "STRING",
+            "value": "\""
+          }
+        ]
+      }
+    },
+    "_dialect_braces": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "{"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_dialect_chunk"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "}"
         }
       ]
     },

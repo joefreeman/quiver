@@ -454,8 +454,22 @@ fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
         Term::Function(function) => function_doc(trivia, function),
         Term::Spawn(inner, _) => spawn_doc(trivia, inner),
         Term::Select(sources, _) => select_doc(trivia, sources),
+        Term::Dialect(dialect) => dialect_doc(dialect),
         atom => pretty::text(render_term_atom(atom)),
     }
+}
+
+/// Render a dialect term. The content is preserved verbatim — re-indenting it would change what
+/// the dialect function receives — so multi-line content becomes text segments joined by literal
+/// lines (newlines without indentation), which the width engine counts as breaks, forcing the
+/// enclosing groups open instead of comma-joining around the embedded newlines.
+fn dialect_doc(dialect: &Dialect) -> Doc {
+    let rendered = format!("%{}{{{}}}", dialect.path.join("/"), dialect.raw);
+    if !rendered.contains('\n') {
+        return pretty::text(rendered);
+    }
+    let segments = rendered.split('\n').map(pretty::text).collect();
+    pretty::join(pretty::literalline(), segments)
 }
 
 /// Render an atomic (never-breaking) term to a string. Container terms are handled by [`term_doc`]
@@ -468,6 +482,9 @@ fn render_term_atom(term: &Term) -> String {
         Term::Self_ => ".".to_string(),
         Term::Process(index) => format!("@{}", index),
         Term::Reference(access) => format!("&{}", render_access(access)),
+        // Dialect content is opaque raw text and is preserved verbatim (including newlines):
+        // re-indenting it would change what the dialect function receives.
+        Term::Dialect(dialect) => format!("%{}{{{}}}", dialect.path.join("/"), dialect.raw),
         Term::Tuple(_)
         | Term::String(..)
         | Term::Block(_)
@@ -821,8 +838,13 @@ impl Trivia {
     /// Recover trivia from `source` and attach each item to an AST node: a leading comment/blank to
     /// the nearest following node, a trailing comment to the node whose text it follows.
     fn collect(program: &Program, source: &str) -> Trivia {
-        let mut anchors = Vec::new();
-        collect_anchors(program, &mut anchors);
+        let mut collected = Collected::default();
+        collect_anchors(program, &mut collected);
+        let Collected {
+            mut anchors,
+            mut dialect_content,
+        } = collected;
+        dialect_content.sort_unstable();
         // Index the anchors for O(log n) lookups per trivium: by start (to find the nearest node
         // *after* a leading comment) and by end (the nearest node *before* a trailing comment).
         anchors.sort_unstable_by_key(|anchor| anchor.start);
@@ -842,7 +864,7 @@ impl Trivia {
             let index = by_end.partition_point(|&(end, _)| end <= offset);
             index.checked_sub(1).map(|i| by_end[i].1)
         };
-        for item in scan_trivia(source) {
+        for item in scan_trivia(source, &dialect_content) {
             match item {
                 Scanned::Blank(offset) => match following(offset) {
                     Some(anchor) => leading.entry(anchor).or_default().push(TriviaItem::Blank),
@@ -929,15 +951,31 @@ fn trivia_doc(items: &[TriviaItem]) -> Doc {
 
 /// Scan `source` for line comments and blank lines in source order, marking a comment as `trailing`
 /// when code precedes it on its line. String-aware so a `//` or blank line inside a `"…"` literal is
-/// not mistaken for trivia.
-fn scan_trivia(source: &str) -> Vec<Scanned> {
+/// not mistaken for trivia; `skip` holds the (sorted, disjoint) byte ranges of dialect content,
+/// which is raw text the scanner must likewise not read trivia out of.
+fn scan_trivia(source: &str, skip: &[(usize, usize)]) -> Vec<Scanned> {
     let mut out = Vec::new();
     let mut chars = source.char_indices().peekable();
     let mut in_string = false;
     let mut escaped = false;
     let mut line_start = 0usize;
     let mut line_blank = true;
+    let mut skip = skip.iter().copied().peekable();
     while let Some((index, c)) = chars.next() {
+        while skip.peek().is_some_and(|&(_, end)| end <= index) {
+            skip.next();
+        }
+        if skip.peek().is_some_and(|&(start, _)| start <= index) {
+            // Dialect content: nothing in it is trivia, and (as inside a string) its newlines
+            // reset line tracking without producing `Blank` entries.
+            if c == '\n' {
+                line_start = index + 1;
+                line_blank = true;
+            } else {
+                line_blank = false;
+            }
+            continue;
+        }
         if in_string {
             match c {
                 _ if escaped => escaped = false,
@@ -988,10 +1026,19 @@ fn scan_trivia(source: &str) -> Vec<Scanned> {
     out
 }
 
+/// Everything the trivia pass reads off the AST: the anchors trivia can attach to, and the byte
+/// ranges of dialect content (raw text [`scan_trivia`] must not read trivia out of).
+#[derive(Default)]
+struct Collected {
+    anchors: Vec<Anchor>,
+    dialect_content: Vec<(usize, usize)>,
+}
+
 /// Collect every node trivia can attach to: type-alias statements, the chains of a sequence, and
 /// tuple fields. Mirrors where [`sequence_doc`]/[`field_doc`]/[`statement_doc`] emit trivia, so
-/// every attached item has exactly one emission site.
-fn collect_anchors(program: &Program, out: &mut Vec<Anchor>) {
+/// every attached item has exactly one emission site. Also records each dialect term's content
+/// range along the way.
+fn collect_anchors(program: &Program, out: &mut Collected) {
     for statement in &program.statements {
         match statement {
             Statement::TypeAlias { name_span, .. } => push_anchor(*name_span, out),
@@ -1000,16 +1047,16 @@ fn collect_anchors(program: &Program, out: &mut Vec<Anchor>) {
     }
 }
 
-fn push_anchor(span: Spanned, out: &mut Vec<Anchor>) {
+fn push_anchor(span: Spanned, out: &mut Collected) {
     if let Some(span) = span.get() {
-        out.push(Anchor {
+        out.anchors.push(Anchor {
             start: span.offset,
             end: span.offset + span.length,
         });
     }
 }
 
-fn visit_sequence(sequence: &Sequence, out: &mut Vec<Anchor>) {
+fn visit_sequence(sequence: &Sequence, out: &mut Collected) {
     for chain in &sequence.chains {
         push_anchor(chain.span, out);
         visit_chain(chain, out);
@@ -1018,13 +1065,13 @@ fn visit_sequence(sequence: &Sequence, out: &mut Vec<Anchor>) {
 
 /// Recurse into a chain's terms without making the chain itself an anchor (used for select sources
 /// and tuple-field chains, which are not emitted by `sequence_doc`).
-fn visit_chain(chain: &Chain, out: &mut Vec<Anchor>) {
+fn visit_chain(chain: &Chain, out: &mut Collected) {
     for term in &chain.terms {
         visit_term(term, out);
     }
 }
 
-fn visit_term(term: &Term, out: &mut Vec<Anchor>) {
+fn visit_term(term: &Term, out: &mut Collected) {
     match term {
         Term::Tuple(tuple) => {
             for field in &tuple.fields {
@@ -1046,11 +1093,17 @@ fn visit_term(term: &Term, out: &mut Vec<Anchor>) {
                 visit_chain(chain, out);
             }
         }
+        Term::Dialect(dialect) => {
+            if let Some(span) = dialect.content_span.get() {
+                out.dialect_content
+                    .push((span.offset, span.offset + span.length));
+            }
+        }
         _ => {}
     }
 }
 
-fn visit_expression(expression: &Expression, out: &mut Vec<Anchor>) {
+fn visit_expression(expression: &Expression, out: &mut Collected) {
     for annotation in &expression.annotations {
         push_anchor(annotation.span, out);
         visit_chain(&annotation.value, out);
@@ -1481,6 +1534,31 @@ mod tests {
     fn comment_markers_inside_strings_are_not_trivia() {
         // The `//` lives inside a string literal: it round-trips as string content, not a comment.
         assert_formats("f = #{ \"x // y\" }", "f = #{ \"x // y\" }\n");
+    }
+
+    #[test]
+    fn dialect_content_is_not_trivia() {
+        // `//` text and blank lines inside `%mod{…}` raw content are content, not trivia: nothing
+        // is harvested and re-emitted outside the dialect, and the content bytes stay verbatim.
+        let source = "x = %json{ [1,\n  2] // not a comment\n}\nx";
+        assert_formats(source, "x = %json{ [1,\n  2] // not a comment\n}\nx\n");
+        assert_idempotent(source, "dialect comment");
+        // A blank line inside the content doesn't leak a leading blank onto the next statement.
+        let source = "x = %json{ [1,\n\n  2] }\nx";
+        assert_formats(source, "x = %json{ [1,\n\n  2] }\nx\n");
+        assert_idempotent(source, "dialect blank line");
+    }
+
+    #[test]
+    fn multiline_dialect_breaks_enclosing_layout() {
+        // The embedded newlines count as breaks (literal lines): the enclosing block must not be
+        // comma-joined around them, and the content is not re-indented.
+        let source = "f = #{\n  d = %dict{ \"a\" => 1,\n    \"b\" => 2 }\n  d\n}\nf";
+        assert_formats(
+            source,
+            "f = #{\n  d = %dict{ \"a\" => 1,\n    \"b\" => 2 }\n  d\n}\nf\n",
+        );
+        assert_idempotent(source, "multiline dialect");
     }
 
     #[test]

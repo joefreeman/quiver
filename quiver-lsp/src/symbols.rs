@@ -154,8 +154,12 @@ pub fn member_doc(program: &Program, member: &str) -> Option<String> {
             _ => None,
         })?;
     let chain = expression.chains.last()?;
-    let [Term::Tuple(tuple)] = chain.terms.as_slice() else {
-        return None;
+    // The module record itself, or the record flowing into an identity-plus-attach
+    // annotation block (`[…] { :dialect &f }`) — the block leaves the value unchanged.
+    let tuple = match chain.terms.as_slice() {
+        [Term::Tuple(tuple)] => tuple,
+        [Term::Tuple(tuple), Term::Block(block)] if block.branches.is_empty() => tuple,
+        _ => return None,
     };
     tuple
         .fields

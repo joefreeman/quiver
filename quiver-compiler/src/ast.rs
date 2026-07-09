@@ -122,6 +122,26 @@ pub enum Term {
     /// Reference operator (`&`): references a value without calling it — a variable, import
     /// member, builtin, or self (`&x`, `&m.f`, `&__integer_add__`, `&.`).
     Reference(Access),
+    /// A dialect invocation `%mod{ … }` (glued `{`): the raw brace content is handed at
+    /// compile time to the function the module's `:dialect` annotation carries, and the
+    /// expression tree it returns is spliced in place of this term. The flowing value is
+    /// the expansion's input (like a block), referenced from the tree via `EFlow`.
+    Dialect(Dialect),
+}
+
+/// A dialect invocation (see [`Term::Dialect`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dialect {
+    /// Module path segments (`%ns/mod` → `["ns", "mod"]`).
+    pub path: Vec<String>,
+    /// The source text between the braces, verbatim (escapes unprocessed), so the formatter
+    /// round-trips it exactly. The compiler unescapes `\{`/`\}` when expanding.
+    pub raw: String,
+    /// Span of the whole term (`%mod{…}`), for locating errors at the call site.
+    pub span: Spanned,
+    /// Span of the first content byte (just after the `{`), for mapping a dialect error's
+    /// content offset back to a source position.
+    pub content_span: Spanned,
 }
 
 impl Term {
@@ -131,6 +151,7 @@ impl Term {
     pub fn span(&self) -> Option<SourceSpan> {
         match self {
             Term::Access(access) => access.span.get(),
+            Term::Dialect(dialect) => dialect.span.get(),
             _ => None,
         }
     }
