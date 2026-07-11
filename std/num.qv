@@ -330,7 +330,7 @@ clamp = #['opt, 'opt, 'opt] {
 // for a non-nil operand, so nil flows straight through.
 floor = #'opt {
   :doc "The largest integer not greater than the number; nil for a nil operand."
-  t = $ to_int
+  $ to_int =('int)t
   {
     | [$, t] compare =-1 => [t, 1] __integer_subtract__
     | t
@@ -338,7 +338,7 @@ floor = #'opt {
 }
 ceil = #'opt {
   :doc "The smallest integer not less than the number; nil for a nil operand."
-  t = $ to_int
+  $ to_int =('int)t
   {
     | [$, t] compare =1 => [t, 1] __integer_add__
     | t
@@ -351,7 +351,7 @@ ceil = #'opt {
 round = #'opt {
   :doc "Rounds to the nearest integer, halves away from zero; nil for a nil operand."
   | =[] => []
-  | floor =f => {
+  | floor =('int)f => {
     mid = f [~, 2] __integer_multiply__ [~, 1] __integer_add__ Rational[~, 2]
     {
       | [$, mid] compare =1 => [f, 1] __integer_add__

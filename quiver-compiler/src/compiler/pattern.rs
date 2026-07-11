@@ -12,7 +12,13 @@ use super::{
 };
 
 // Type aliases for complex pattern matching types (using type IDs)
-type PatternAnalysisResult = (Vec<(String, usize)>, Vec<BindingSet>, usize);
+/// (bindings, binding sets, result type, success-narrowed type). The result type is the
+/// narrowed type widened with nil when the match can fail — the match *term's* value domain.
+/// The success-narrowed type is what the scrutinee is known to be when the pattern matched;
+/// success-path narrowing and complement recording must use it, not the widened result — a
+/// fallible `='int` covers `'int`, not `'int | []`, and recording the widened type would
+/// subtract nil from subsequent branches when the branch fails.
+type PatternAnalysisResult = (Vec<(String, usize)>, Vec<BindingSet>, usize, usize);
 type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
 // Field info plus how to rebuild a variant's narrowed type: the variant's fields, the matched
 // field indices, and the optional tuple name (`None` for a partial match, which keeps the input type).
@@ -175,7 +181,8 @@ pub fn analyze_pattern(
 
     if binding_sets.is_empty() {
         // Won't match - return never type (empty union)
-        return Ok((Vec::new(), Vec::new(), program.never()));
+        let never = program.never();
+        return Ok((Vec::new(), Vec::new(), never, never));
     }
 
     // Check if all binding sets have requirements (might match) or some have none (will match)
@@ -207,7 +214,7 @@ pub fn analyze_pattern(
         union_type_ids(program, vec![nil_id, narrowed_type_id])
     };
 
-    Ok((all_bindings, binding_sets, result_type_id))
+    Ok((all_bindings, binding_sets, result_type_id, narrowed_type_id))
 }
 
 /// Generate bytecode for pattern matching

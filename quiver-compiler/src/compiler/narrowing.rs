@@ -691,11 +691,27 @@ pub fn analyze_tuple_pattern_for_complement(
         _ => return None,
     };
 
-    let field_type_ids = get_tuple_field_types(value_type_id, program)?;
-
-    if tuple_pattern.fields.len() != field_type_ids.len() {
+    // Field-specific complement narrowing asserts "the failed branch rules these field values
+    // out" — sound only when the tuple check itself (name/arity/field names) cannot be the
+    // reason the branch failed. That requires the scrutinee to *be* that single tuple shape
+    // statically; on a union, a failure may just mean "a different variant", and narrowing a
+    // field from it would wrongly prune sibling variants' branches.
+    let tuple_id = match program.lookup_base(value_type_id)? {
+        Type::Tuple(id) => *id,
+        _ => return None,
+    };
+    let tuple_info = program.lookup_tuple(tuple_id)?;
+    if tuple_pattern.name.as_ref() != tuple_info.name.as_ref()
+        || tuple_pattern.fields.len() != tuple_info.fields.len()
+        || tuple_pattern
+            .fields
+            .iter()
+            .zip(tuple_info.fields.iter())
+            .any(|(pf, (fname, _))| pf.name.as_ref() != fname.as_ref())
+    {
         return None;
     }
+    let field_type_ids: Vec<usize> = tuple_info.fields.iter().map(|(_, t)| *t).collect();
 
     let mut constraining: Option<(usize, usize)> = None;
 
@@ -715,20 +731,6 @@ pub fn analyze_tuple_pattern_for_complement(
     }
 
     constraining
-}
-
-/// Get field type IDs from a tuple value type.
-fn get_tuple_field_types(value_type_id: usize, program: &Program) -> Option<Vec<usize>> {
-    let tuples = extract_tuple_ids(value_type_id, program);
-    let first_tuple = tuples.first()?;
-    let tuple_info = program.lookup_tuple(*first_tuple)?;
-    Some(
-        tuple_info
-            .fields
-            .iter()
-            .map(|(_, type_id)| *type_id)
-            .collect(),
-    )
 }
 
 /// Get the narrowed type ID for a field of a provenance, if any.

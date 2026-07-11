@@ -297,6 +297,25 @@ impl TestResult {
         }
     }
 
+    /// Assert that compilation fails with a `TypeMismatch`, without pinning the rendered
+    /// type strings (useful when they include large inferred unions).
+    #[allow(dead_code)]
+    pub fn expect_type_mismatch(self) {
+        match self.result {
+            Err(ReplError::Compiler(quiver_compiler::compiler::Error::TypeMismatch {
+                ..
+            })) => {}
+            Ok(result) => panic!(
+                "Expected a type mismatch, but evaluation succeeded with: {:?} for source: {}",
+                result, self.source
+            ),
+            Err(e) => panic!(
+                "Expected a type mismatch, but got {:?} for source: {}",
+                e, self.source
+            ),
+        }
+    }
+
     /// Assert that the source fails to parse (any parse error), without pinning the
     /// exact error value.
     pub fn expect_parse_failure(self) {

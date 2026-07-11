@@ -2025,7 +2025,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             module_cache: &mut *self.module_cache,
             package: &self.current_package,
         };
-        let (bindings, binding_sets, result_type) = pattern::analyze_pattern(
+        let (bindings, binding_sets, result_type, narrowed_type) = pattern::analyze_pattern(
             &mut env,
             self.program,
             &pattern,
@@ -2117,18 +2117,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Apply narrowing to the matched value's provenance if the pattern narrows the type.
         // This is done here on the success path - the type has been narrowed by the pattern.
-        // Note: result_type is the narrowed type from analyze_pattern.
-        if !self.is_never(result_type) && !self.is_nil(result_type) {
+        // Note: narrowed_type is the success-narrowed type from analyze_pattern — without the
+        // failure nil that widens result_type for fallible patterns.
+        if !self.is_never(narrowed_type) && !self.is_nil(narrowed_type) {
             apply_narrowing(
                 &mut self.scopes,
                 &value_provenance,
-                result_type,
+                narrowed_type,
                 self.program,
             );
         }
 
         // Record the narrowing for complement narrowing in blocks.
-        // This must happen even when result_type is nil, so that subsequent branches
+        // This must happen even when narrowed_type is nil, so that subsequent branches
         // know the value is NOT nil (complement narrowing).
         if !self.is_never(result_type)
             && let Some(n) = narrowing
@@ -2168,7 +2169,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 );
             } else {
                 // Standard whole-value narrowing
-                n.record(&value_provenance, value_type, result_type, self.program);
+                n.record(&value_provenance, value_type, narrowed_type, self.program);
             }
         }
 
@@ -3340,7 +3341,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes = vec![Scope::new(HashMap::new(), scope_parameter, ScopeKind::Root)];
 
         // Compile the module body as one threaded sequence; the final value is the module value.
-        let result_type_id = self.compile_top_level(parsed.statements)?;
+        // On failure, restore the saved compiler state before propagating. This is not just
+        // hygiene: module imports are also triggered by *speculative* probes (the argument-first
+        // look-ahead in `expected_for_term`), whose callers swallow errors and continue — leaving
+        // the module's scopes/instructions in place would have the enclosing program compile
+        // against the failed module's scope chain (cascading `VariableUndefined`s), and a zeroed
+        // `function_depth` panics with a usize underflow in the enclosing `compile_function`,
+        // masking the real error.
+        let result_type_id = match self.compile_top_level(parsed.statements) {
+            Ok(t) => t,
+            Err(e) => {
+                self.codegen.instructions = saved_instructions;
+                self.scopes = saved_scopes;
+                self.local_count = saved_local_count;
+                self.recorder = saved_recorder;
+                self.current_package = saved_package;
+                self.current_module = saved_module;
+                self.function_depth = saved_function_depth;
+                return Err(e);
+            }
+        };
         let module_type = self
             .program
             .lookup_type(result_type_id)

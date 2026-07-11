@@ -922,3 +922,105 @@ fn test_type_intersection_binds_tighter_than_union() {
     // `'a & 'b | 'c` parses as `('a & 'b) | 'c`: A matches via the `| A` arm.
     quiver().evaluate("A =('int & 'int | A)").expect("Ok");
 }
+
+#[test]
+fn test_complement_keeps_nil_for_later_branches() {
+    // A failed `='int` branch covers exactly `'int` — not `'int | []`. The complement must
+    // keep nil, so a later name-checked branch still tests at runtime and a nil value falls
+    // through to its own arm. (Previously the fallibility nil widened the recorded coverage,
+    // nil was subtracted, and `=Ok` compiled uncheck­ed — matching nil.)
+    quiver()
+        .evaluate(
+            r#"
+            f = #('int | Ok | []) {
+              | ='int => Yep
+              | =Ok => Okay
+              | =[] => Nada
+            },
+            x = [], x f
+            "#,
+        )
+        .expect("Nada");
+    // Same shape through a type-ascribed binding and a nested tuple pattern.
+    quiver()
+        .evaluate(
+            r#"
+            f = #('int | Ok | []) { | =('int)i => Yep | =Ok => Okay | =[] => Nada },
+            x = [], x f
+            "#,
+        )
+        .expect("Nada");
+    quiver()
+        .evaluate(
+            r#"
+            f = #(Str['bin] | Ok | []) { | =Str[b] => Stri | =Ok => Okay | =[] => Nada },
+            x = [], x f
+            "#,
+        )
+        .expect("Nada");
+}
+
+#[test]
+fn test_block_over_nilable_value_is_not_exhaustive_without_nil_arm() {
+    // Corollary of the coverage fix: branches matching only the non-nil variants of a
+    // nil-able value no longer type the block as exhaustive — its result keeps `| []`.
+    quiver()
+        .evaluate(
+            r#"
+            f = #('int | []) { ='int => Ok },
+            x = [], x f
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_field_complement_only_for_single_tuple_scrutinees() {
+    // Field-specific complement narrowing asserts "the failed branch rules these field
+    // values out" — sound only when the scrutinee *is* that single tuple shape. On a
+    // multi-variant union, a branch may fail on the tuple's NAME, so narrowing a field
+    // from it would wrongly prune sibling variants' branches. (Previously `=B[Str[b]]`
+    // below was pruned at compile time after `=A[Str[b]]` failed, and C[_] — compiled
+    // as by-elimination — swallowed everything.)
+    quiver()
+        .evaluate(
+            r#"
+            'n = A[Str['bin]] | B[Str['bin]] | C[(X | Y)],
+            f = #'n {
+              | =A[Str[b]] => 1
+              | =B[Str[b]] => 2
+              | =C[_] => 3
+            },
+            [A["x"] f, B["x"] f, C[X] f]
+            "#,
+        )
+        .expect("[1, 2, 3]");
+    // The recursive-list shape from std/html.qv's node type, where the bug surfaced.
+    quiver()
+        .evaluate(
+            r#"
+            'node = Raw[Str['bin]] | Text[Str['bin]] | Fragment[(Nil | Cons[^, ^1])],
+            f = #'node {
+              | =Raw[Str[b]] => 1
+              | =Text[Str[b]] => 2
+              | =Fragment[_] => 3
+            },
+            [Raw["x"] f, Text["x"] f, Fragment[Nil] f]
+            "#,
+        )
+        .expect("[1, 2, 3]");
+    // The single-tuple case keeps field-specific complement narrowing: after `=[Nil, ys]`
+    // fails, the second branch knows field 0 is Cons.
+    quiver()
+        .evaluate(
+            r#"
+            'l = Nil | Cons['int, ^],
+            f = #['l, 'l] {
+              | =[Nil, ys] => ys
+              | =[Cons[h, _], _] => Cons[h, Nil]
+            },
+            [Cons[7, Nil], Nil] f
+            "#,
+        )
+        .expect("Cons[7, Nil]");
+}
