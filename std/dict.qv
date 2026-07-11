@@ -349,21 +349,12 @@ from = #<'v>[#^ -> '<'v>, '<'v>, 'list<['key, 'v]>] {
 
 // --- the `%dict{ … }` dialect --------------------------------------------------------
 // `%dict{ "a" => 1, "b" => x }` builds a dict at compile time from `key => value`
-// entries: keys are strings; values are integers, strings, caller-scope variables, or
-// `~` (the flowing value). Expands to a `from` call over the entry list. Built from
-// `%parse` combinators and the `%meta` constructors.
-
-'dexpr = '%meta.expr
-
-d_ripple = [[126, "'~'"] %parse.byte, #{ Ripple }] %parse.map
-d_var = [&%parse.ident, #{ Var[$] }] %parse.map
-
-d_value = {
-  scalars = [&%parse.quoted, &%parse.int] %parse.alt2
-  leaves = [&d_ripple, &d_var] %parse.alt2
-  core = [&scalars, &leaves] %parse.alt2
-  [&%parse.ws, &core] %parse.right
-}
+// entries: keys are quoted strings; each value is an ordinary host expression (one
+// chain), located by the host's `chain` prefix-parser and spliced as an `Unquote` —
+// evaluated in the caller's scope with the dialect term's flowing value as input, so
+// variables, `~`, `&f`, tuples, and full call chains all work. Chain parsing stops
+// before `,`, so the dialect keeps the commas (and `=>`). Expands to a `from` call over
+// the entry list. Built from `%parse` combinators and the `%meta` constructors.
 
 d_key = [&%parse.ws, &%parse.quoted] %parse.right
 
@@ -372,20 +363,39 @@ d_arrow =
 
 d_comma = [&%parse.ws, [44, "','"] %parse.byte] %parse.right
 
-d_entry = {
-  k = [&d_key, &d_arrow] %parse.left
-  [[&k, &d_value] %parse.then, #{ [$0, $1] %meta.pair2 }] %parse.map
+// One value: skip whitespace, then hand the host prefix-parser the exact start of the
+// expression and splice the span it reports.
+d_value = #'%meta.cb {
+  =cb
+  #'%parse {
+    =st
+    [st.data, st.pos] cb {
+      | =('int)end => [
+        Unquote[offset: st.pos, length: [end, st.pos] __integer_subtract__],
+        st ~[..., pos: end],
+      ]
+      | [st.pos, "an expression"] %parse.fail
+    }
+  }
 }
 
-dict_dialect = #Str['bin] {
-  entries = [&d_entry, &d_comma] %parse.sep_by
+dict_dialect = #(content: Str['bin], chain: '%meta.cb) {
+  $ =(content, chain: cb)
+  value = &cb d_value
+  value_ws = [&%parse.ws, &value] %parse.right
+  k = [&d_key, &d_arrow] %parse.left
+
+  entry =
+    [[&k, &value_ws] %parse.then, #{ [$0, $1] %meta.pair2 }] %parse.map
+
+  entries = [&entry, &d_comma] %parse.sep_by
   e2 = [&entries, &d_comma %parse.opt] %parse.left
   e3 = [&e2, &%parse.ws] %parse.left
 
   full =
     [&e3, #{ Call[member: "from", arg: $ %meta.list_expr] }] %parse.map
 
-  [$, &full] %parse.run
+  [content, &full] %parse.run
 }
 
 [

@@ -1,40 +1,50 @@
-// The expression IR a dialect function returns: `%mod{ …content… }` hands the raw brace
-// content (a `Str['bin]`) to the function the module's `:dialect` annotation carries, at
-// compile time, and splices the `'expr` tree it returns in place of the invocation —
+// The expression IR a dialect function returns: `%mod{ …content… }` hands the dialect
+// context (see `'ctx` below) to the function the module's `:dialect` annotation carries,
+// at compile time, and splices the `'expr` tree it returns in place of the invocation —
 // type-checked there like handwritten code.
 //
 // Plain data splices as itself: an integer, a binary, a `Str`, or `Nil` in expression
-// position is the corresponding literal. `Var` is a variable resolved in the *caller's*
-// scope; `Ripple` is the value flowing into the dialect term (the invocation site's `~`); `Call` applies a
-// dialect-module export to an argument; `Tup` constructs a tuple — the only way to build
-// one, so the wrapper names stay unambiguous (a data tuple named `Var` is spliced as
-// `Tup["Var", …]`), and it covers names and labels that come from parsed text. Its
-// fields are bare expressions (positional) unless wrapped in `Labeled`, which is only
-// meaningful directly inside `fields`. A true nil literal, if ever needed, is
-// `Tup[name: Nil, fields: Nil]`.
+// position is the corresponding literal. `Unquote[offset, length]` names a span of the
+// content, parsed as ONE host chain and spliced in the *caller's* scope — evaluated once
+// (bind-once, deduplicated by span), with the dialect term's flowing value as its chain
+// input, so `~` inside a span is the dialect input, a bare callable is called with it,
+// and `&f` passes by value, exactly as inline host code. `Call` applies a dialect-module
+// export to an argument; `Tuple` constructs a tuple — the only way to build one, so the
+// wrapper names stay unambiguous (a data tuple named `Call` is spliced as
+// `Tuple["Call", …]`), and it covers names and labels that come from parsed text. Its
+// fields are bare expressions (positional) unless wrapped in `Labeled`, which exists
+// only inside `fields`. A true nil literal, if ever needed, is
+// `Tuple[name: Nil, fields: Nil]`.
 //
-// Hygiene is by construction: the tree has no bare identifiers except `Var` (the
-// intentional escape hatch), and `Call` resolves only against the dialect module's own
-// exports. `Var`/`Ripple` splice as references (`&x` semantics): an expansion never
-// implicitly calls a caller value; application is expressed via `Call`.
+// Hygiene is by construction: the tree has no identifiers at all — the only caller-scope
+// escape is `Unquote`, which can point solely at text the user wrote between the braces
+// — and `Call` resolves only against the dialect module's own exports. A dialect cannot
+// capture, shadow, bind, or synthesize anything in the caller.
 //
 // A dialect signals a parse failure with nil carrying an `:error` payload; an
 // `Expected[offset: 'int, message: Str['bin]]`-shaped payload has its offset mapped back
 // to a source position in the compile error.
 //
 // The compiler recognizes this shape structurally (by tuple names); this module is its
-// canonical definition, for dialect return types: `#Str['bin] -> '%meta.expr`.
+// canonical definition, for dialect signatures: `#'%meta.ctx -> '%meta.expr` (or a
+// partial parameter naming only the context fields the dialect uses).
 
 'expr =
   | 'int
   | 'bin
   | Str['bin]
   | Nil
-  | Var[Str['bin]]
-  | Ripple
+  | Unquote[offset: 'int, length: 'int]
   | Call[member: Str['bin], arg: ^]
-  | Labeled[label: Str['bin], value: ^]
-  | Tup[name: (Nil | Str['bin]), fields: (Nil | Cons[^, ^1])]
+  | Tuple[name: (Nil | Str['bin]), fields: (Nil | Cons[(^ | Labeled[label: Str['bin], value: ^]), ^1])]
+
+// The context record a dialect function receives: the unescaped brace content, and the
+// host prefix-parsers — each takes the content bytes and a byte offset positioned
+// exactly at an expression's first byte, and answers the exclusive end offset of one
+// term/chain there, or nil. `Unquote[offset, length]` splices such a span as host code,
+// evaluated once in the caller's scope with the dialect term's flowing value as input.
+'cb = #['bin, 'int] -> ('int | [])
+'ctx = [content: Str['bin], term: 'cb, chain: 'cb]
 
 'elist = Nil | Cons['expr, ^]
 
@@ -51,19 +61,22 @@ build_rev = #['elist, 'expr] {
   items {
     | =Nil => acc
     | =Cons[h, t] => {
-      [t, Tup[name: "Cons", fields: Cons[h, Cons[acc, Nil]]]] ^
+      [
+        t,
+        Tuple[name: "Cons", fields: Cons[h, Cons[acc, Nil]]],
+      ] ^
     }
   }
 }
 
 pair2 = #['expr, 'expr] {
   :doc "An unnamed 2-tuple expression: `[a, b]`."
-  Tup[name: Nil, fields: Cons[$0, Cons[$1, Nil]]]
+  Tuple[name: Nil, fields: Cons[$0, Cons[$1, Nil]]]
 }
 
 call2 = #[Str['bin], 'expr, 'expr] {
   :doc "A dialect-module member applied to a 2-tuple: `[a, b] member`."
-  Call[member: $0, arg: Tup[name: Nil, fields: Cons[$1, Cons[$2, Nil]]]]
+  Call[member: $0, arg: Tuple[name: Nil, fields: Cons[$1, Cons[$2, Nil]]]]
 }
 
 list_expr = #'elist {

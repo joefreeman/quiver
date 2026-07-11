@@ -403,6 +403,13 @@ opt = #<'t>'p<'t> {
   }
 }
 
+// Zero or more of `p` separated by `sep`, tolerating a single optional trailing `sep`, as
+// a list of `p`'s values. `sep_by` leaves a trailing separator unconsumed; this consumes it.
+sep_end_by = #<'t, 's>['p<'t>, 'p<'s>] {
+  :doc "Zero or more of a parser separated by another, tolerating an optional trailing separator, as a list of values."
+  =[p, sep], body = [&p, &sep] sep_by, [&body, &sep opt] left
+}
+
 // Replace `p`'s failure with `msg` at the position where `p` started.
 label = #<'t>['p<'t>, Str['bin]] {
   :doc "Replaces the parser's failure with a message at the position where it started."
@@ -486,6 +493,7 @@ run = #<'t>[Str['bin], 'p<'t>] {
   alt4: &alt4,
   many0: &many0,
   sep_by: &sep_by,
+  sep_end_by: &sep_end_by,
   opt: &opt,
   label: &label,
   chainl: &chainl,

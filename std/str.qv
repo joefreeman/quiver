@@ -112,13 +112,15 @@ int_digits = #['bin, 'int, 'int, 'int] {
 }
 
 // The decimal digit bytes of a positive integer, prepended (lowest digit first) onto acc.
+// The raw division builtins (rather than `%int.div`/`%int.mod`) keep this total: the divisor
+// is the constant 10, so the zero-divisor nil the stdlib wrappers add can never arise.
 int_bytes = #['int, 'bin] {
   =[n, acc]
   {
     | n =0 => acc
     | {
-      [n, 10] %int.mod =('int)d
-      [n, 10] %int.div =('int)q
+      d = [n, 10] __integer_modulo__
+      q = [n, 10] __integer_divide__
       digit = [0x, [d, 48] %num.add, 1] %bin.append
       [q, [digit, acc] %bin.concat] ^
     }
@@ -150,10 +152,8 @@ int_bytes = #['int, 'bin] {
     :doc "The decimal representation of an integer."
     {
       | $ =0 => "0"
-      | [$, 0] %num.lt? => {
-        [0, $] %num.sub [~, 0x] int_bytes =('bin)b, [0x2d, b] %bin.concat Str[~]
-      }
-      | [$, 0x] int_bytes =('bin)b, Str[b]
+      | [$, 0] %num.lt? => [0, $] %num.sub [~, 0x] int_bytes [0x2d, ~] %bin.concat Str[~]
+      | [$, 0x] int_bytes Str[~]
     }
   },
 

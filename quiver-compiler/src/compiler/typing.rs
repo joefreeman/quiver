@@ -153,35 +153,142 @@ fn instantiate_alias_def(
     Ok(substitute(type_def.type_id, &new_bindings, program))
 }
 
-/// Check if an AST type contains any cycle references
-fn ast_contains_cycle(typ: &ast::Type) -> bool {
-    match typ {
-        ast::Type::Cycle(_) => true,
-        ast::Type::Union(union) => union.types.iter().any(ast_contains_cycle),
-        ast::Type::Intersection(members) => members.iter().any(ast_contains_cycle),
-        ast::Type::Tuple(tuple) => tuple.fields.iter().any(|f| match f {
-            ast::FieldType::Field { type_def, .. } => ast_contains_cycle(type_def),
-            ast::FieldType::Spread { .. } => false,
-        }),
-        ast::Type::Identifier { arguments, .. } => arguments.iter().any(ast_contains_cycle),
-        ast::Type::ModuleType { arguments, .. } => arguments.iter().any(ast_contains_cycle),
-        ast::Type::SelfDefault { arguments } => arguments.iter().any(ast_contains_cycle),
-        // Function and process types are boundaries - cycles inside them don't count
-        // as structural recursion
-        ast::Type::Function(_) | ast::Type::Process(_) => false,
-        ast::Type::Primitive(_) | ast::Type::Resource(_) => false,
+/// Validate that every union reachable from `root` is *productive* — a finite value can
+/// be constructed for it. This is the semantic version of "recursion needs a base case":
+/// a union whose variants all mention `^` is still fine when the cycle's target has base
+/// cases of its own, e.g. the field-element union in
+/// `Tuple[fields: (Nil | Cons[(^ | Labeled[label: Str['bin], value: ^]), ^1])]`.
+///
+/// Productivity is a least fixpoint: unions start unproductive, and the reachable graph
+/// is re-evaluated until no verdict changes. A union is productive if any variant is; a
+/// tuple or partial requires all fields; callables and processes are guarded (a closure
+/// is a finite value however recursive its type — matching resolution, which lets `^`
+/// cross function boundaries freely); a `Cycle` is productive iff the union it targets
+/// is. A `Cycle` reaching above the walked fragment targets an enclosing function
+/// boundary (parameter self-types start at depth 1) and is guarded, mirroring
+/// `check_type_relation`'s optimistic underflow. An *empty* union (`never`, e.g. from
+/// `'int & 'bin`) is unproductive but deliberate, so it propagates without being flagged.
+///
+/// Verdicts are keyed by type id. An interned union id shared between contexts that
+/// resolve its cycles differently could in principle be over-approved — accepted, since
+/// this check is a diagnostic against unconstructible definitions, not a soundness gate,
+/// and erring towards acceptance is the safe direction. The walk skips memoization (a
+/// shared node's verdict is context-dependent); definitions are small, and each pass
+/// visits the whole reachable graph so every union gets a verdict.
+fn validate_productive(root: usize, program: &Program) -> Result<(), Error> {
+    let mut productive = std::collections::HashSet::new();
+    loop {
+        let mut changed = false;
+        let mut all_productive = true;
+        productivity_pass(
+            root,
+            program,
+            &mut Vec::new(),
+            &mut productive,
+            &mut changed,
+            &mut all_productive,
+        );
+        if !changed {
+            // Fixpoint reached: this pass's verdicts are final.
+            return if all_productive {
+                Ok(())
+            } else {
+                Err(Error::TypeUnresolved(
+                    "Union must have a constructible base case".to_string(),
+                ))
+            };
+        }
     }
 }
 
-/// Validate that a union has at least one non-recursive variant (base case)
-fn validate_union_has_base_case(variants: &[ast::Type]) -> Result<(), Error> {
-    let has_base_case = variants.iter().any(|v| !ast_contains_cycle(v));
-    if !has_base_case {
-        return Err(Error::TypeUnresolved(
-            "Union must have a base case with a non-recursive variant".to_string(),
-        ));
+/// One evaluation pass for [`validate_productive`]: returns whether `type_id` is
+/// productive under the current `productive` assumptions, growing them (setting
+/// `changed`) as unions are proven, and clearing `all_productive` for any non-empty
+/// union that remains unproven. Deliberately avoids short-circuiting so the whole
+/// reachable graph is visited every pass.
+fn productivity_pass(
+    type_id: usize,
+    program: &Program,
+    stack: &mut Vec<usize>,
+    productive: &mut std::collections::HashSet<usize>,
+    changed: &mut bool,
+    all_productive: &mut bool,
+) -> bool {
+    match program.lookup_type(type_id) {
+        // Unresolvable ids are not this check's concern.
+        None => true,
+        Some(
+            Type::Integer | Type::Binary | Type::Reference | Type::Resource(_) | Type::Variable(_),
+        ) => true,
+        // Guarded: closures and process ids are finite values however recursive their types.
+        Some(Type::Callable { .. } | Type::Process { .. }) => true,
+        Some(Type::Annotated { base, .. }) => {
+            productivity_pass(*base, program, stack, productive, changed, all_productive)
+        }
+        Some(Type::Tuple(tuple_id)) => match program.lookup_tuple(*tuple_id) {
+            None => true,
+            Some(info) => info.fields.iter().fold(true, |acc, (_, field_id)| {
+                productivity_pass(
+                    *field_id,
+                    program,
+                    stack,
+                    productive,
+                    changed,
+                    all_productive,
+                ) && acc
+            }),
+        },
+        Some(Type::Partial { fields, .. }) => fields.iter().fold(true, |acc, (_, field_id)| {
+            productivity_pass(
+                *field_id,
+                program,
+                stack,
+                productive,
+                changed,
+                all_productive,
+            ) && acc
+        }),
+        // Empty union: `never` — unproductive by nature, but deliberate; don't flag it.
+        Some(Type::Union(variants)) if variants.is_empty() => false,
+        Some(Type::Union(variants)) => {
+            if stack.contains(&type_id) {
+                // In progress: answer with the current assumption (least fixpoint).
+                return productive.contains(&type_id);
+            }
+            stack.push(type_id);
+            let mut any = false;
+            for &variant_id in variants {
+                if productivity_pass(
+                    variant_id,
+                    program,
+                    stack,
+                    productive,
+                    changed,
+                    all_productive,
+                ) {
+                    any = true;
+                }
+            }
+            stack.pop();
+            if any {
+                if productive.insert(type_id) {
+                    *changed = true;
+                }
+            } else if !productive.contains(&type_id) {
+                *all_productive = false;
+            }
+            any || productive.contains(&type_id)
+        }
+        Some(Type::Cycle(depth)) => {
+            if *depth > stack.len() {
+                // Targets a boundary above the walked fragment — an enclosing function
+                // (parameter types start at depth 1) — which is guarded.
+                true
+            } else {
+                productive.contains(&stack[stack.len() - depth])
+            }
+        }
     }
-    Ok(())
 }
 
 pub fn resolve_ast_type(
@@ -192,14 +299,16 @@ pub fn resolve_ast_type(
 ) -> Result<usize, Error> {
     let bindings = HashMap::new();
     let mut recursion_depth = 0;
-    resolve_ast_type_impl(
+    let type_id = resolve_ast_type_impl(
         &mut recursion_depth,
         env,
         scopes_ref,
         ast_type,
         program,
         &bindings,
-    )
+    )?;
+    validate_productive(type_id, program)?;
+    Ok(type_id)
 }
 
 /// Resolve an AST type with pre-defined type variable bindings.
@@ -213,14 +322,16 @@ pub fn resolve_ast_type_with_bindings(
     bindings: &HashMap<String, usize>,
 ) -> Result<usize, Error> {
     let mut recursion_depth = 0;
-    resolve_ast_type_impl(
+    let type_id = resolve_ast_type_impl(
         &mut recursion_depth,
         env,
         scopes_ref,
         ast_type,
         program,
         bindings,
-    )
+    )?;
+    validate_productive(type_id, program)?;
+    Ok(type_id)
 }
 
 /// Resolve a function parameter type with explicitly declared type parameters.
@@ -249,14 +360,16 @@ pub fn resolve_function_parameter_type(
     // Start at depth 1 since this is a function parameter (the function creates a recursion boundary)
     // This allows the parameter type to use & to refer to the enclosing function
     let mut recursion_depth = 1;
-    resolve_ast_type_impl(
+    let type_id = resolve_ast_type_impl(
         &mut recursion_depth,
         env,
         scopes_ref,
         ast_type,
         program,
         &bindings,
-    )
+    )?;
+    validate_productive(type_id, program)?;
+    Ok(type_id)
 }
 
 /// Resolve a type alias for display purposes (e.g., in tests or REPL).
@@ -657,11 +770,11 @@ fn resolve_ast_type_impl(
             }))
         }
         ast::Type::Union(union) => {
-            // Validate that union has at least one base case before resolution
             if union.types.is_empty() {
                 return Err(Error::TypeUnresolved("Empty union type".to_string()));
             }
-            validate_union_has_base_case(&union.types)?;
+            // Productivity (base-case) validation happens on the resolved type, at the
+            // top-level resolve entry points — see `validate_productive`.
 
             // Increment recursion depth for union boundary
             *recursion_depth += 1;

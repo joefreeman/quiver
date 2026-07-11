@@ -5,21 +5,30 @@
 //! definition). Plain data splices as itself — integers, binaries, `Str`s, and a bare
 //! `Nil` become the corresponding literals — and the named-tuple wrappers cover the rest:
 //!
-//! - `Var[Str['bin]]` — a variable, resolved in the *caller's* scope (the only way an
-//!   expansion can reach the caller — hygiene by construction)
-//! - `Ripple` — the value flowing into the dialect term (the invocation site's `~`)
+//! - `Unquote[offset: 'int, length: 'int]` — a span of the content, parsed as one host
+//!   chain and spliced in the *caller's* scope (the only way an expansion can reach the
+//!   caller — and it can point solely at user-written text, so hygiene is by
+//!   construction). Bind-once: every hole evaluates exactly once, in content order,
+//!   with the dialect term's flowing value as its chain input; provably pure
+//!   single-term holes splice inline instead.
 //! - `Call[member: Str['bin], arg: ^]` — a call to a top-level export of the *dialect
 //!   module itself*
-//! - `Tup[name: (Nil | Str['bin]), fields: 'list<^ | Labeled[label: Str['bin], value: ^]>]`
+//! - `Tuple[name: (Nil | Str['bin]), fields: 'list<^ | Labeled[label: Str['bin], value: ^]>]`
 //!   — tuple construction (fields are bare expressions, positionally, unless wrapped in
-//!   `Labeled`)
-//!
-//! `Var`/`Ripple` compile to references (`&x` semantics): an expansion never implicitly
-//! calls a caller value; application is expressed with `Call`.
+//!   `Labeled`, which exists only inside `fields`)
+
+use std::cell::RefCell;
 
 use crate::ast;
 use crate::compiler::Error;
+use crate::parser::SourceSpan;
 use quiver_core::{
+    builtins::{BuiltinRegistry, BuiltinResult, TypeSpec},
+    bytecode::Constant,
+    effects::Effect,
+    error::Error as CoreError,
+    executor::Executor,
+    process::ProcessId,
     program::Program,
     types::TypeLookup,
     value::{Binary, Value},
@@ -29,6 +38,17 @@ use quiver_core::{
 /// (identifiers can't start with `~`), so it can never collide with or capture a user
 /// binding.
 pub const RIPPLE_BINDING: &str = "~dialect-ripple";
+
+/// Prefix of the scope bindings holding evaluated `Unquote` holes (`~dialect-hole-0`,
+/// …). Unspellable, like [`RIPPLE_BINDING`].
+pub const HOLE_BINDING_PREFIX: &str = "~dialect-hole-";
+
+/// Names of the prefix-parse callbacks passed to dialect functions in the context
+/// record. Registered only in the expansion executor's registry (see
+/// [`register_callbacks`]) — at runtime a dialect function receives whatever callables
+/// the caller passes (e.g. stubs in tests).
+pub const TERM_CALLBACK: &str = "__dialect_term__";
+pub const CHAIN_CALLBACK: &str = "__dialect_chain__";
 
 /// Unescape dialect content: `\{`, `\}`, and `\"` outside string literals become literal
 /// braces/quotes (`\"` lets content carry an unpaired quote without opening string mode).
@@ -91,12 +111,24 @@ pub fn content_position(
     }
 }
 
+/// An `Unquote` hole collected during splicing: its content span (the dedupe key — the
+/// same span spliced twice shares one binding, so it evaluates once) and the chain that
+/// evaluates it into its `~dialect-hole-N` binding.
+pub struct Hole {
+    /// `(offset, length)` into the unescaped content.
+    key: (usize, usize),
+    terms: Vec<ast::Term>,
+}
+
 /// Wrap an expansion chain as a single term: a block binding the flowing value to
-/// [`RIPPLE_BINDING`] — `{ =~dialect-ripple, <expansion> }`. The block receives the dialect
-/// term's flowing value as its parameter, so `Ripple` references resolve to it. (The
-/// binder is a bare binding, which the type checker knows is irrefutable, so it doesn't
-/// widen the block's type even on a nil-typed input.)
-pub fn wrap_expansion(expansion: ast::Chain) -> ast::Term {
+/// [`RIPPLE_BINDING`], then evaluating each collected hole **once**, in content order,
+/// into its `~dialect-hole-N` binding, then running the expansion —
+/// `{ =~dialect-ripple, &~dialect-ripple {hole} =~dialect-hole-0, …, <expansion> }`.
+/// The block receives the dialect term's flowing value as its parameter, so `Ripple`
+/// references and hole inputs resolve to it. (The binders are bare bindings, which the
+/// type checker knows are irrefutable, so a nil-valued hole binds without widening the
+/// block's type or short-circuiting.)
+pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term {
     let binder = ast::Chain {
         match_pattern: None,
         bind_span: ast::Spanned::default(),
@@ -106,12 +138,19 @@ pub fn wrap_expansion(expansion: ast::Chain) -> ast::Term {
             ast::Spanned::default(),
         ))],
     };
+    let mut chains = vec![binder];
+    holes.sort_by_key(|hole| hole.key);
+    chains.extend(holes.into_iter().map(|hole| ast::Chain {
+        match_pattern: None,
+        bind_span: ast::Spanned::default(),
+        span: ast::Spanned::default(),
+        terms: hole.terms,
+    }));
+    chains.push(expansion);
     ast::Term::Block(ast::Expression {
         annotations: vec![],
         branches: vec![ast::Branch {
-            condition: ast::Sequence {
-                chains: vec![binder, expansion],
-            },
+            condition: ast::Sequence { chains },
             consequence: None,
         }],
     })
@@ -125,9 +164,18 @@ pub struct Splicer<'a, F: Fn(&Binary) -> Option<Vec<u8>>> {
     /// The dialect module, for the error messages and `ECall` member resolution.
     pub module: String,
     pub path: Vec<String>,
-    /// The invocation's span, stamped onto synthesized references so unresolved-`Var` and
-    /// ill-typed-`ECall` errors point at the call site.
-    pub span: ast::Spanned,
+    /// The invocation, for the call-site span stamped onto synthesized references (so
+    /// unresolved-`Var` and ill-typed-`Call` errors point at it) and for mapping
+    /// `Unquote` span offsets to file positions.
+    pub dialect: &'a ast::Dialect,
+    /// The unescaped brace content `Unquote` spans index into, with the escape positions
+    /// recorded by [`unescape_content`].
+    pub content: &'a str,
+    pub escapes: &'a [usize],
+    /// The invoking module's name, for positions in `Unquote` error messages.
+    pub current_module: String,
+    /// `Unquote` holes collected while walking the returned IR (bind-once).
+    pub holes: RefCell<Vec<Hole>>,
 }
 
 impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
@@ -156,7 +204,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         let (name, fields) = self.expect_tuple(value)?;
         match name {
             // A `Str` value is a string literal, and a bare `Nil` the named empty tuple —
-            // both splice as themselves (identical to spelling them out with `ETup`).
+            // both splice as themselves (identical to spelling them out with `Tuple`).
             "Str" => {
                 let bytes = self.str_bytes(value, "Str")?;
                 Ok(term_chain(ast::Term::String(
@@ -167,13 +215,13 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
             "Nil" if fields.is_empty() => Ok(term_chain(ast::Term::Tuple(ast::Tuple {
                 name: ast::TupleName::Named("Nil".to_string()),
                 fields: vec![],
-                span: self.span,
+                span: self.dialect.span,
             }))),
-            "Var" => {
-                let variable = self.str_field(value, "Var", &[], 0)?;
-                Ok(term_chain(self.reference(variable)))
+            "Unquote" => {
+                let offset = self.int_field(value, "Unquote", &["offset"], 0)?;
+                let length = self.int_field(value, "Unquote", &["length"], 1)?;
+                self.unquote(offset, length)
             }
-            "Ripple" => Ok(term_chain(self.reference(RIPPLE_BINDING.to_string()))),
             "Call" => {
                 let member = self.str_field(value, "Call", &["member"], 0)?;
                 let arg = self.field(value, "Call", &["arg"], 1)?;
@@ -182,23 +230,23 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                     source: Some(ast::AccessSource::Import(self.path.clone())),
                     accessors: vec![ast::AccessPath::Field(member)],
                     accessor_spans: vec![ast::Spanned::default()],
-                    base_span: self.span,
-                    span: self.span,
+                    base_span: self.dialect.span,
+                    span: self.dialect.span,
                 }));
                 Ok(chain)
             }
-            "Tup" => {
-                let name = self.tuple_name(self.field(value, "Tup", &["name"], 0)?)?;
-                let fields = self.tuple_fields(self.field(value, "Tup", &["fields"], 1)?)?;
+            "Tuple" => {
+                let name = self.tuple_name(self.field(value, "Tuple", &["name"], 0)?)?;
+                let fields = self.tuple_fields(self.field(value, "Tuple", &["fields"], 1)?)?;
                 Ok(term_chain(ast::Term::Tuple(ast::Tuple {
                     name,
                     fields,
-                    span: self.span,
+                    span: self.dialect.span,
                 })))
             }
             "Labeled" => {
                 Err(self
-                    .error("returned Labeled outside a Tup's fields (it wraps a labeled field)"))
+                    .error("returned Labeled outside a Tuple's fields (it wraps a labeled field)"))
             }
             "" if fields.is_empty() => {
                 Err(self.error("returned nil where a '%meta.expr was expected"))
@@ -207,11 +255,123 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         }
     }
 
+    /// Splice an `Unquote[offset, length]` — a span of the content parsed as one host
+    /// chain, evaluated in the caller's scope with the dialect term's flowing value as
+    /// its input. Semantics is bind-once: every hole evaluates exactly once, in content
+    /// order, before the expansion's own structure. Provably pure single-term holes —
+    /// a literal, a text-only string, a `&`-reference, or a bare `~` — splice in place
+    /// instead; anything else (including a bare identifier, whose callability is
+    /// type-dependent) becomes a `~dialect-hole-N` binding, deduplicated by span.
+    fn unquote(&self, offset: usize, length: usize) -> Result<ast::Chain, Error> {
+        let text = (length > 0)
+            .then(|| self.content.get(offset..offset + length))
+            .flatten()
+            .ok_or_else(|| {
+                self.error(&format!(
+                    "returned an Unquote span [{offset}, {length}] outside its content"
+                ))
+            })?;
+        let mut chain = crate::parser::parse_chain_exact(text).map_err(|parse_error| {
+            let content_offset = offset + parse_error.span.map_or(0, |s| s.offset);
+            let position = content_position(self.dialect, self.escapes, content_offset)
+                .map(|(line, column)| format!(" (at {}:{line}:{column})", self.current_module))
+                .unwrap_or_default();
+            self.error(&format!(
+                "returned an Unquote span that is not a single expression: {}{position}",
+                parse_error.kind
+            ))
+        })?;
+        self.remap_chain_spans(&mut chain, offset);
+
+        if chain.match_pattern.is_none() && chain.terms.len() == 1 {
+            let term = &chain.terms[0];
+            if term.is_bare_ripple() {
+                return Ok(term_chain(self.reference(RIPPLE_BINDING.to_string())));
+            }
+            let pure = matches!(term, ast::Term::Literal(_) | ast::Term::Reference(_))
+                || matches!(term, ast::Term::String(_, segments)
+                    if segments.iter().all(|s| matches!(s, ast::StrSegment::Text(_))));
+            if pure {
+                return Ok(chain);
+            }
+        }
+
+        let mut holes = self.holes.borrow_mut();
+        let index = match holes.iter().position(|hole| hole.key == (offset, length)) {
+            Some(index) => index,
+            None => {
+                // The hole runs as a block applied to the ripple binding, so its chain
+                // input — and hence `~` — is the dialect term's flowing value, and any
+                // bindings it makes stay local to it.
+                let terms = vec![
+                    self.reference(RIPPLE_BINDING.to_string()),
+                    ast::Term::Block(ast::Expression {
+                        annotations: vec![],
+                        branches: vec![ast::Branch {
+                            condition: ast::Sequence {
+                                chains: vec![chain],
+                            },
+                            consequence: None,
+                        }],
+                    }),
+                    ast::Term::Match(ast::Match::Identifier(
+                        format!("{HOLE_BINDING_PREFIX}{}", holes.len()),
+                        ast::Spanned::default(),
+                    )),
+                ];
+                holes.push(Hole {
+                    key: (offset, length),
+                    terms,
+                });
+                holes.len() - 1
+            }
+        };
+        Ok(term_chain(
+            self.reference(format!("{HOLE_BINDING_PREFIX}{index}")),
+        ))
+    }
+
+    /// Shift the spans of a parsed hole (relative to its slice) into invocation-file
+    /// positions, via the hole's content offset and the escape positions. Without a
+    /// content span (synthetic input), spans are cleared rather than left pointing into
+    /// the wrong file.
+    fn remap_chain_spans(&self, chain: &mut ast::Chain, hole_offset: usize) {
+        let base = self.dialect.content_span.get();
+        walk_chain_spans(chain, &mut |spanned: &mut ast::Spanned| {
+            spanned.0 = match (base, spanned.0) {
+                (Some(base), Some(span)) => Some(self.remap_span(span, hole_offset, base)),
+                _ => None,
+            };
+        });
+    }
+
+    fn remap_span(&self, span: SourceSpan, hole_offset: usize, base: SourceSpan) -> SourceSpan {
+        let to_raw = |content_offset: usize| {
+            content_offset + self.escapes.iter().filter(|&&e| e < content_offset).count()
+        };
+        let start = hole_offset + span.offset;
+        let raw_start = to_raw(start);
+        let raw_end = to_raw(start + span.length);
+        let (line, column) =
+            content_position(self.dialect, self.escapes, start).unwrap_or((base.line, base.column));
+        SourceSpan {
+            offset: base.offset + raw_start,
+            line,
+            column,
+            length: raw_end - raw_start,
+        }
+    }
+
+    /// The holes collected while splicing, for [`wrap_expansion`].
+    pub fn take_holes(&self) -> Vec<Hole> {
+        self.holes.take()
+    }
+
     fn tuple_name(&self, value: &Value) -> Result<ast::TupleName, Error> {
         match self.expect_tuple(value)? {
             ("Nil", []) => Ok(ast::TupleName::Anonymous),
             ("Str", _) => Ok(ast::TupleName::Named(
-                self.str_bytes_to_string(self.str_bytes(value, "Tup name")?)?,
+                self.str_bytes_to_string(self.str_bytes(value, "Tuple name")?)?,
             )),
             (other, _) => Err(self.error(&format!(
                 "returned {other} where a tuple name (Nil | Str['bin]) was expected"
@@ -233,7 +393,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                     let entry = self.field(list, "Cons", &[], 0)?;
                     // A field is a bare expression (positional), or a `Labeled[label,
                     // value]` wrapper. Unambiguous: no expression node is named Labeled
-                    // (a data tuple by that name is spliced via `Tup["Labeled", …]`).
+                    // (a data tuple by that name is spliced via `Tuple["Labeled", …]`).
                     let (label, value) = match entry {
                         Value::Tuple(tuple_id, _)
                             if self
@@ -268,8 +428,8 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
             source: Some(ast::AccessSource::Identifier(name)),
             accessors: vec![],
             accessor_spans: vec![],
-            base_span: self.span,
-            span: self.span,
+            base_span: self.dialect.span,
+            span: self.dialect.span,
         })
     }
 
@@ -326,6 +486,19 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         self.str_bytes_to_string(self.str_bytes(field, node)?)
     }
 
+    fn int_field(
+        &self,
+        value: &Value,
+        node: &str,
+        labels: &[&str],
+        index: usize,
+    ) -> Result<usize, Error> {
+        match self.field(value, node, labels, index)? {
+            Value::Int(n) if *n >= 0 => Ok(*n as usize),
+            other => Err(self.unexpected(&format!("a non-negative integer (in {node})"), other)),
+        }
+    }
+
     /// The bytes of a `Str['bin]` value.
     fn str_bytes(&self, value: &Value, node: &str) -> Result<Vec<u8>, Error> {
         let bytes = match value {
@@ -369,5 +542,206 @@ fn term_chain(term: ast::Term) -> ast::Chain {
         bind_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
         terms: vec![term],
+    }
+}
+
+/// Register the prefix-parse callbacks in an expansion executor's registry. The values
+/// handed to the dialect function in its context record dispatch to these by name.
+pub fn register_callbacks<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let param = TypeSpec::Tuple(
+        None,
+        vec![(None, TypeSpec::Binary), (None, TypeSpec::Integer)],
+    );
+    let result = TypeSpec::Union(vec![TypeSpec::Integer, TypeSpec::Tuple(None, vec![])]);
+    registry.register(
+        TERM_CALLBACK.to_string(),
+        term_callback::<E>,
+        param.clone(),
+        result.clone(),
+    );
+    registry.register(
+        CHAIN_CALLBACK.to_string(),
+        chain_callback::<E>,
+        param,
+        result,
+    );
+}
+
+fn term_callback<E: Effect>(
+    _: ProcessId,
+    arg: &Value,
+    executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, CoreError> {
+    prefix_callback(arg, executor, crate::parser::term_prefix_end)
+}
+
+fn chain_callback<E: Effect>(
+    _: ProcessId,
+    arg: &Value,
+    executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, CoreError> {
+    prefix_callback(arg, executor, crate::parser::chain_prefix_end)
+}
+
+/// Shared body of the two callbacks: takes `['bin, 'int]` (content bytes and a byte
+/// offset positioned exactly at an expression's first byte), answers the exclusive end
+/// offset of one term/chain, or nil when none parses there.
+fn prefix_callback<E: Effect>(
+    arg: &Value,
+    executor: &mut Executor<E>,
+    prefix_end: fn(&str, usize) -> Option<usize>,
+) -> Result<BuiltinResult<E>, CoreError> {
+    let Value::Tuple(_, fields) = arg else {
+        return Err(CoreError::TypeMismatch {
+            expected: "['bin, 'int]".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    let (Some(Value::Binary(binary)), Some(offset_value)) = (fields.first(), fields.get(1)) else {
+        return Err(CoreError::TypeMismatch {
+            expected: "['bin, 'int]".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    let bytes = match binary {
+        Binary::Constant(index) => match executor.get_constant(*index) {
+            Some(Constant::Binary(bytes)) => bytes.clone(),
+            _ => {
+                return Err(CoreError::InvalidArgument(format!(
+                    "constant {index} is not a binary"
+                )));
+            }
+        },
+        Binary::Heap(_) => executor.get_binary_data(binary)?.to_vec(),
+    };
+    let offset = quiver_core::builtins::value_to_usize(offset_value)?;
+    let end = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|source| prefix_end(source, offset));
+    Ok(BuiltinResult::Value(match end {
+        Some(end) => Value::int(end as i64),
+        None => Value::nil(),
+    }))
+}
+
+/// Visit every [`ast::Spanned`] reachable from a chain — used to remap a parsed hole's
+/// slice-relative spans into invocation-file positions. Exhaustive over the AST so new
+/// span fields can't be missed silently ([`ast::Type`] carries no spans, so type
+/// positions stop at the type boundary).
+fn walk_chain_spans(chain: &mut ast::Chain, f: &mut impl FnMut(&mut ast::Spanned)) {
+    f(&mut chain.bind_span);
+    f(&mut chain.span);
+    if let Some(pattern) = &mut chain.match_pattern {
+        walk_match_spans(pattern, f);
+    }
+    for term in &mut chain.terms {
+        walk_term_spans(term, f);
+    }
+}
+
+fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) {
+    match term {
+        ast::Term::Literal(_) | ast::Term::Self_ | ast::Term::Process(_) => {}
+        ast::Term::String(_, segments) => {
+            for segment in segments {
+                match segment {
+                    ast::StrSegment::Text(_) => {}
+                    ast::StrSegment::Hole(expression) => walk_expression_spans(expression, f),
+                }
+            }
+        }
+        ast::Term::Tuple(tuple) => {
+            f(&mut tuple.span);
+            for field in &mut tuple.fields {
+                f(&mut field.name_span);
+                f(&mut field.span);
+                match &mut field.value {
+                    ast::FieldValue::Chain(chain) => walk_chain_spans(chain, f),
+                    ast::FieldValue::Spread(_) => {}
+                }
+            }
+        }
+        ast::Term::Match(pattern) => walk_match_spans(pattern, f),
+        ast::Term::Block(expression) => walk_expression_spans(expression, f),
+        ast::Term::Function(function) => {
+            f(&mut function.span);
+            if let Some(body) = &mut function.body {
+                walk_expression_spans(body, f);
+            }
+        }
+        ast::Term::Access(access) | ast::Term::Reference(access) => walk_access_spans(access, f),
+        ast::Term::Spawn(inner, span) => {
+            f(span);
+            walk_term_spans(inner, f);
+        }
+        ast::Term::Select(sources, span) => {
+            f(span);
+            if let Some(sources) = sources {
+                for chain in sources {
+                    walk_chain_spans(chain, f);
+                }
+            }
+        }
+        ast::Term::Dialect(dialect) => {
+            f(&mut dialect.span);
+            f(&mut dialect.content_span);
+        }
+    }
+}
+
+fn walk_expression_spans(expression: &mut ast::Expression, f: &mut impl FnMut(&mut ast::Spanned)) {
+    for annotation in &mut expression.annotations {
+        f(&mut annotation.name_span);
+        f(&mut annotation.span);
+        walk_chain_spans(&mut annotation.value, f);
+    }
+    for branch in &mut expression.branches {
+        for chain in &mut branch.condition.chains {
+            walk_chain_spans(chain, f);
+        }
+        if let Some(consequence) = &mut branch.consequence {
+            for chain in &mut consequence.chains {
+                walk_chain_spans(chain, f);
+            }
+        }
+    }
+}
+
+fn walk_access_spans(access: &mut ast::Access, f: &mut impl FnMut(&mut ast::Spanned)) {
+    for span in &mut access.accessor_spans {
+        f(span);
+    }
+    f(&mut access.base_span);
+    f(&mut access.span);
+}
+
+fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spanned)) {
+    match pattern {
+        ast::Match::Identifier(_, span)
+        | ast::Match::Reference(_, span)
+        | ast::Match::As(_, _, span) => f(span),
+        ast::Match::Literal(_)
+        | ast::Match::String(_, _)
+        | ast::Match::Star(_)
+        | ast::Match::Placeholder
+        | ast::Match::Type(_) => {}
+        ast::Match::Tuple(tuple) => {
+            for field in &mut tuple.fields {
+                walk_match_spans(&mut field.pattern, f);
+            }
+        }
+        ast::Match::Partial(partial) => {
+            for field in &mut partial.fields {
+                f(&mut field.name_span);
+                if let Some(pattern) = &mut field.pattern {
+                    walk_match_spans(pattern, f);
+                }
+            }
+        }
+        ast::Match::Or(alternatives) => {
+            for alternative in alternatives {
+                walk_match_spans(alternative, f);
+            }
+        }
     }
 }

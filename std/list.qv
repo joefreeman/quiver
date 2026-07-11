@@ -6,46 +6,39 @@ reverse = #<'t>['<'t>, '<'t>] {
 }
 
 // --- the `%list{ … }` dialect --------------------------------------------------------
-// `%list{ 1, "two", x, ~, [3, 4] }` builds a list at compile time: elements are
-// integers, strings, caller-scope variables, `~` (the flowing value), or nested
-// bracketed lists. Built from `%parse` combinators and the `%meta` constructors.
+// `%list{ 1, "two", x, ~, [3, 4] }` builds a list at compile time. Each element is an
+// ordinary host expression (one chain), located by the host's `chain` prefix-parser and
+// spliced as an `Unquote` — so variables, `~`, `&f`, tuples, and full call chains all
+// mean exactly what they'd mean inline, evaluated with the dialect's flowing value as
+// input. The dialect owns only the commas.
 
-'dexpr = '%meta.expr
-
-d_ripple = [[126, "'~'"] %parse.byte, #{ Ripple }] %parse.map
-d_var = [&%parse.ident, #{ Var[$] }] %parse.map
 d_comma = [&%parse.ws, [44, "','"] %parse.byte] %parse.right
 
-// The element grammar, self-passed to tie the element↔nested-list recursion.
-d_value_step = #[#^ -> (['dexpr, '%parse] | []), '%parse] {
-  =[self, st]
-  value = #'%parse { [&self, $] self }
-
-  elems = [&value, &d_comma] %parse.sep_by
-  n1 = [[91, "'['"] %parse.byte, &elems] %parse.right
-  n2 = [&n1, &d_comma %parse.opt] %parse.left
-  close = [&%parse.ws, [93, "']'"] %parse.byte] %parse.right
-  n3 = [&n2, &close] %parse.left
-  nested = [&n3, #{ $ %meta.list_expr }] %parse.map
-
-  core =
-    [
-      [&nested, &%parse.quoted, &%parse.int] %parse.alt3,
-      [&d_ripple, &d_var] %parse.alt2,
-    ] %parse.alt2
-
-  core_ws = [&%parse.ws, &core] %parse.right
-  st core_ws
+// One element: skip whitespace, then hand the host prefix-parser the exact start of the
+// expression and splice the span it reports.
+d_elem = #'%meta.cb {
+  =cb
+  #'%parse {
+    =st
+    [st.data, st.pos] cb {
+      | =('int)end => [
+        Unquote[offset: st.pos, length: [end, st.pos] __integer_subtract__],
+        st ~[..., pos: end],
+      ]
+      | [st.pos, "an expression"] %parse.fail
+    }
+  }
 }
 
-d_value = #'%parse { [&d_value_step, $] d_value_step }
-
-list_dialect = #Str['bin] {
-  elems = [&d_value, &d_comma] %parse.sep_by
+list_dialect = #(content: Str['bin], chain: '%meta.cb) {
+  $ =(content, chain: cb)
+  elem = &cb d_elem
+  elem_ws = [&%parse.ws, &elem] %parse.right
+  elems = [&elem_ws, &d_comma] %parse.sep_by
   e2 = [&elems, &d_comma %parse.opt] %parse.left
   e3 = [&e2, &%parse.ws] %parse.left
   full = [&e3, #{ $ %meta.list_expr }] %parse.map
-  [$, &full] %parse.run
+  [content, &full] %parse.run
 }
 
 [

@@ -268,6 +268,62 @@ pub fn parse(source: &str) -> Result<Program, Error> {
     }
 }
 
+/// Parse exactly one chain from `source`, requiring the whole input to be consumed.
+/// Used to splice a dialect `Unquote` span; the result's spans are relative to `source`
+/// (the splicer remaps them into the invocation file).
+pub fn parse_chain_exact(source: &str) -> Result<Chain, Error> {
+    let span = Span::new(source);
+    match chain(span) {
+        Ok((remaining, chain)) if remaining.fragment().is_empty() => Ok(chain),
+        Ok((remaining, _)) => {
+            let found = remaining.fragment().chars().take(10).collect::<String>();
+            Err(Error::new(
+                ErrorKind::UnexpectedToken {
+                    expected: "end of unquoted expression".to_string(),
+                    found,
+                },
+                Some(SourceSpan::from_span(remaining)),
+            ))
+        }
+        Err(e) => {
+            let (span, kind) = match &e {
+                nom::Err::Error(e) | nom::Err::Failure(e) => {
+                    let found = e.input.fragment().chars().take(10).collect::<String>();
+                    (
+                        Some(SourceSpan::from_span(e.input)),
+                        ErrorKind::UnexpectedToken {
+                            expected: "an expression".to_string(),
+                            found,
+                        },
+                    )
+                }
+                nom::Err::Incomplete(_) => {
+                    (None, ErrorKind::ParseError("incomplete input".to_string()))
+                }
+            };
+            Err(Error::new(kind, span))
+        }
+    }
+}
+
+/// Byte offset just past one term starting at `offset` — which must sit exactly at the
+/// term's first byte; no leading whitespace is skipped — or `None` when no term parses
+/// there. Backs the `term` callback handed to dialect functions.
+pub fn term_prefix_end(source: &str, offset: usize) -> Option<usize> {
+    let rest = source.get(offset..)?;
+    let (remaining, _) = primary(Span::new(rest)).ok()?;
+    Some(offset + (rest.len() - remaining.fragment().len()))
+}
+
+/// Byte offset just past one chain starting at `offset` (same contract as
+/// [`term_prefix_end`]). A chain ends where the host grammar says it does — before a
+/// `,`, a newline, or any token that cannot start a term. Backs the `chain` callback.
+pub fn chain_prefix_end(source: &str, offset: usize) -> Option<usize> {
+    let rest = source.get(offset..)?;
+    let (remaining, _) = chain(Span::new(rest)).ok()?;
+    Some(offset + (rest.len() - remaining.fragment().len()))
+}
+
 // Utility parsers
 
 /// The [`SourceSpan`] covering the input consumed between `start` and `end` (where `end` is

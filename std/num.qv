@@ -364,9 +364,13 @@ round = #'opt {
 
 // --- the `%num{ … }` dialect -------------------------------------------------------
 // Infix arithmetic over this module's own exports: `%num{ x + (y / 2) * ~ }`. Operands
-// are integers, caller-scope variables, and `~` (the flowing value); `+ - * /` map to
-// `add`/`sub`/`mul`/`div` and unary `-` to `neg`, with the usual precedence. Built from
-// `%parse` combinators (`chainl` per precedence level) and the `%meta` constructors.
+// are integers, parenthesized groups, and host *terms* — a variable, `~`, a field
+// access… — located by the host's `term` prefix-parser and spliced as an `Unquote`,
+// evaluated in the caller's scope with the dialect term's flowing value as input. A
+// term rather than a chain, so ` - 1` after an operand stays an operator, not a further
+// term. `+ - * /` map to `add`/`sub`/`mul`/`div` and unary `-` to `neg`, with the usual
+// precedence. Built from `%parse` combinators (`chainl` per precedence level) and the
+// `%meta` constructors.
 
 'dexpr = '%meta.expr
 
@@ -390,18 +394,33 @@ d_mul_op = {
   [&%parse.ws, &ops] %parse.right
 }
 
-d_var = [&%parse.ident, #{ Var[$] }] %parse.map
-d_ripple = [[126, "'~'"] %parse.byte, #{ Ripple }] %parse.map
+// One host term as an operand: the host prefix-parser answers the exclusive end offset
+// of the term starting exactly at the state's position, and its span is spliced.
+d_term = #'%meta.cb {
+  =cb
+  #'%parse {
+    =st
+    [st.data, st.pos] cb {
+      | =('int)end => [
+        Unquote[offset: st.pos, length: [end, st.pos] __integer_subtract__],
+        st ~[..., pos: end],
+      ]
+      | [st.pos, "an expression"] %parse.fail
+    }
+  }
+}
 
 // The two precedence levels over a factor parser.
 d_expr_of = #'%parse.p<'dexpr> {
   =factor, term = [&factor, &d_mul_op] %parse.chainl, [&term, &d_add_op] %parse.chainl
 }
 
-// The factor grammar, self-passed to tie the factor↔parenthesized-expression recursion.
-d_factor_step = #[#^ -> (['dexpr, '%parse] | []), '%parse] {
-  =[self, st]
-  factor = #'%parse { [&self, $] self }
+// The factor grammar, self-passed (together with the host-term operand parser) to tie
+// the factor↔parenthesized-expression recursion. Alternative order matters: the
+// dialect's own parens and number literals first, the host term last.
+d_factor_step = #[#^ -> (['dexpr, '%parse] | []), '%parse.p<'dexpr>, '%parse] {
+  =[self, term, st]
+  factor = #'%parse { [&self, &term, $] self }
   expr = &factor d_expr_of
 
   n1 = [[45, "'-'"] %parse.byte, &factor] %parse.right
@@ -412,20 +431,19 @@ d_factor_step = #[#^ -> (['dexpr, '%parse] | []), '%parse] {
   p1 = [[40, "'('"] %parse.byte, &expr] %parse.right
   paren = [&p1, &close] %parse.left
 
-  core =
-    [
-      [&%parse.int, &d_var, &d_ripple, &paren] %parse.alt4,
-      &neg,
-    ] %parse.alt2
+  core = [&paren, &%parse.int, &neg, &term] %parse.alt4
 
   core_ws = [&%parse.ws, &core] %parse.right
   st core_ws
 }
 
-d_factor = #'%parse { [&d_factor_step, $] d_factor_step }
-
-num_dialect = #Str['bin] {
-  expr = &d_factor d_expr_of, full = [&expr, &%parse.ws] %parse.left, [$, &full] %parse.run
+num_dialect = #(content: Str['bin], term: '%meta.cb) {
+  $ =(content, term: cb)
+  host_term = &cb d_term
+  factor = #'%parse { [&d_factor_step, &host_term, $] d_factor_step }
+  expr = &factor d_expr_of
+  full = [&expr, &%parse.ws] %parse.left
+  [content, &full] %parse.run
 }
 
 [

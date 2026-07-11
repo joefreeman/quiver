@@ -3447,7 +3447,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             });
         };
 
-        // Load the dialect function and check that it takes a Str (the brace content).
+        // The prefix-parse callbacks go into a clone of the host registry, so dialect
+        // evaluation — and only dialect evaluation — can reach the compiler's parser.
+        let mut registry = self.builtins.clone();
+        dialect::register_callbacks(&mut registry);
+
+        // Load the dialect function and check that it takes the context record
+        // `[content: Str['bin], term: <fn>, chain: <fn>]` (a partial parameter type
+        // naming only the fields the dialect uses also works).
         let (function_instructions, function_type) =
             self.value_to_instructions_from_cache(&function, &cached.binary_data)?;
         let Some((parameter, result)) = self.callable_signature(function_type) else {
@@ -3460,23 +3467,52 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             });
         };
         let str_type = annotations::str_type(self.program);
-        if !quiver_core::types::is_compatible(str_type, parameter, &*self.program) {
+        let binary_type = self.program.register_type(Type::Binary);
+        let integer_type = self.program.register_type(Type::Integer);
+        let nil_type_id = self.program.register_type(Type::nil());
+        let never_id = self.program.never();
+        let callback_argument = self
+            .program
+            .register_tuple(None, vec![(None, binary_type), (None, integer_type)]);
+        let callback_argument_type = self.program.register_type(Type::Tuple(callback_argument));
+        let callback_result_type = self
+            .program
+            .register_type(Type::Union(vec![integer_type, nil_type_id]));
+        let callback_type = self.program.register_type(Type::Callable {
+            parameter: callback_argument_type,
+            result: callback_result_type,
+            receive: never_id,
+        });
+        let context_tuple = self.program.register_tuple(
+            None,
+            vec![
+                (Some("content".to_string()), str_type),
+                (Some("term".to_string()), callback_type),
+                (Some("chain".to_string()), callback_type),
+            ],
+        );
+        let context_type = self.program.register_type(Type::Tuple(context_tuple));
+        if !quiver_core::types::is_compatible(context_type, parameter, &*self.program) {
             return Err(Error::DialectFailed {
                 module: module_name,
                 message: format!(
-                    "must take Str['bin] in its :dialect function, found {}",
+                    "must take the dialect context (content: Str['bin], term: …, chain: …) \
+                     in its :dialect function, found {}",
                     quiver_core::format::format_type_by_id(&*self.program, parameter)
                 ),
             });
         }
 
-        // Assemble a nilary entry applying the dialect function to the content, and run it.
-        let binary_type = self.program.register_type(Type::Binary);
+        // Assemble a nilary entry applying the dialect function to the context, and run it.
         let str_tuple = self
             .program
             .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
-        let nil_type_id = self.program.register_type(Type::nil());
-        let never_id = self.program.never();
+        let term_builtin = self
+            .program
+            .register_builtin(dialect::TERM_CALLBACK.to_string(), &registry);
+        let chain_builtin = self
+            .program
+            .register_builtin(dialect::CHAIN_CALLBACK.to_string(), &registry);
         let entry_type = self.program.register_type(Type::Callable {
             parameter: nil_type_id,
             result,
@@ -3492,6 +3528,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut instructions = vec![
             Instruction::Constant(constant),
             Instruction::Tuple(str_tuple),
+            Instruction::Builtin(term_builtin),
+            Instruction::Builtin(chain_builtin),
+            Instruction::Tuple(context_tuple),
         ];
         instructions.extend(function_instructions);
         instructions.push(Instruction::Call);
@@ -3502,12 +3541,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         });
         bytecode.entry = Some(bytecode.functions.len() - 1);
 
-        let (expr_value, executor) =
-            quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false)
-                .map_err(|e| Error::ModuleExecution {
-                    module: module_name.clone(),
-                    error: Box::new(e),
-                })?;
+        let (expr_value, executor) = quiver_core::execute_bytecode_sync_with(
+            bytecode, &registry, false, false,
+        )
+        .map_err(|e| Error::ModuleExecution {
+            module: module_name.clone(),
+            error: Box::new(e),
+        })?;
 
         let error_key = self.program.register_annotation_key("error");
         if expr_value.is_nil() {
@@ -3543,10 +3583,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             read_binary,
             module: module_name,
             path: dialect.path.clone(),
-            span: dialect.span,
+            dialect,
+            content: &content,
+            escapes: &escapes,
+            current_module: self.current_module.clone(),
+            holes: std::cell::RefCell::new(Vec::new()),
         };
         let expansion = splicer.value_to_chain(&expr_value)?;
-        Ok(dialect::wrap_expansion(expansion))
+        let holes = splicer.take_holes();
+        Ok(dialect::wrap_expansion(holes, expansion))
     }
 
     /// Recursively expand every dialect invocation in an expression, in place. Run on a
@@ -3586,6 +3631,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         match term {
             ast::Term::Dialect(dialect) => {
                 *term = self.expand_dialect(dialect)?;
+                // A hole may itself contain a dialect invocation; recurse into the
+                // replacement. Depth is bounded by the literal content (an `Unquote`
+                // span points at user-written text), so no budget is needed.
+                self.expand_dialects_in_term(term)?;
             }
             ast::Term::Tuple(tuple) => {
                 for field in &mut tuple.fields {

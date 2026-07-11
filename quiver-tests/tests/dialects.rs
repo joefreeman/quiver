@@ -3,13 +3,15 @@ use common::*;
 use quiver_compiler::compiler::Error;
 use std::collections::HashMap;
 
-/// A module whose `:dialect` function is `body` (a `#Str['bin]` function body over the
-/// content), and whose module value is `exports`.
+/// A module whose `:dialect` function applies `body` (a function body whose `$` is the
+/// content `Str['bin]`) to the context's content, and whose module value is `exports`.
 fn dialect_module(body: &str, exports: &str) -> HashMap<Vec<String>, String> {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["m".to_string()],
-        format!("d = #Str['bin] {{ {body} }}\n{{ :dialect &d, {exports} }}"),
+        format!(
+            "d0 = #Str['bin] {{ {body} }}\nd = #(content: Str['bin]) {{ $content d0 }}\n{{ :dialect &d, {exports} }}"
+        ),
     );
     modules
 }
@@ -58,26 +60,26 @@ fn test_nested_balanced_braces() {
 }
 
 #[test]
-fn test_var_resolves_in_caller_scope() {
+fn test_unquote_resolves_in_caller_scope() {
     quiver()
-        .with_modules(dialect_module("Var[\"x\"]", "Ok"))
-        .evaluate("x = 7, %m{}")
+        .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
+        .evaluate("x = 7, %m{x}")
         .expect("7");
 }
 
 #[test]
-fn test_var_undefined_is_a_compile_error() {
+fn test_unquote_undefined_variable_is_a_compile_error() {
     quiver()
-        .with_modules(dialect_module("Var[\"missing\"]", "Ok"))
-        .evaluate("%m{}")
+        .with_modules(dialect_module("Unquote[offset: 0, length: 7]", "Ok"))
+        .evaluate("%m{missing}")
         .expect_compile_error(Error::VariableUndefined("missing".to_string()));
 }
 
 #[test]
 fn test_flow_receives_the_flowing_value() {
     quiver()
-        .with_modules(dialect_module("Ripple", "Ok"))
-        .evaluate("5 %m{}")
+        .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
+        .evaluate("5 %m{~}")
         .expect("5");
 }
 
@@ -85,10 +87,10 @@ fn test_flow_receives_the_flowing_value() {
 fn test_call_applies_a_module_export() {
     quiver()
         .with_modules(dialect_module(
-            "Call[member: \"double\", arg: Ripple]",
+            "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
             "[double: #'int { [~, 2] __integer_multiply__ }]",
         ))
-        .evaluate("5 %m{}")
+        .evaluate("5 %m{~}")
         .expect("10");
 }
 
@@ -96,10 +98,10 @@ fn test_call_applies_a_module_export() {
 fn test_expansions_chain() {
     quiver()
         .with_modules(dialect_module(
-            "Call[member: \"double\", arg: Ripple]",
+            "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
             "[double: #'int { [~, 2] __integer_multiply__ }]",
         ))
-        .evaluate("5 %m{} %m{}")
+        .evaluate("5 %m{~} %m{~}")
         .expect("20");
 }
 
@@ -107,20 +109,20 @@ fn test_expansions_chain() {
 fn test_tuple_construction() {
     quiver()
         .with_modules(dialect_module(
-            r#"Tup[
+            r#"Tuple[
                 name: "Point",
-                fields: Cons[Labeled[label: "x", value: 1], Cons[Var["y"], Nil]],
+                fields: Cons[Labeled[label: "x", value: 1], Cons[Unquote[offset: 0, length: 1], Nil]],
             ]"#,
             "Ok",
         ))
-        .evaluate("y = 2, %m{}")
+        .evaluate("y = 2, %m{y}")
         .expect("Point[x: 1, 2]");
 }
 
 #[test]
 fn test_nil_expansion_short_circuits() {
     quiver()
-        .with_modules(dialect_module("Tup[name: Nil, fields: Nil]", "Ok"))
+        .with_modules(dialect_module("Tuple[name: Nil, fields: Nil]", "Ok"))
         .evaluate("%m{}, 5")
         .expect("[]");
 }
@@ -129,8 +131,8 @@ fn test_nil_expansion_short_circuits() {
 fn test_expansion_inside_a_function_captures_variables() {
     // The dialect expands before capture collection, so the closure captures `x`.
     quiver()
-        .with_modules(dialect_module("Var[\"x\"]", "Ok"))
-        .evaluate("x = 7, f = #[] { %m{} }, [] f")
+        .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
+        .evaluate("x = 7, f = #[] { %m{x} }, [] f")
         .expect("7");
 }
 
@@ -146,7 +148,7 @@ fn dialect_module_with_return_type() -> HashMap<Vec<String>, String> {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["m".to_string()],
-        "d = #Str['bin] -> '%meta.expr { 42 }\n{ :dialect &d, Ok }".to_string(),
+        "d = #(content: Str['bin]) -> '%meta.expr { 42 }\n{ :dialect &d, Ok }".to_string(),
     );
     modules
 }
@@ -267,10 +269,27 @@ fn test_list_dialect() {
 }
 
 #[test]
-fn test_list_dialect_nested_and_flow() {
+fn test_list_dialect_tuples_and_flow() {
+    // Elements are host expressions: `[1, 2]` is a tuple, exactly as it would be inline.
     quiver()
         .evaluate("5 %list{ ~, [1, 2] }")
+        .expect("Cons[5, Cons[[1, 2], Nil]]");
+}
+
+#[test]
+fn test_list_dialect_nested_dialect() {
+    // Nested lists are written as nested dialect invocations — a hole may itself
+    // contain a dialect term, expanded recursively.
+    quiver()
+        .evaluate("%list{ 5, %list{ 1, 2 } }")
         .expect("Cons[5, Cons[Cons[1, Cons[2, Nil]], Nil]]");
+}
+
+#[test]
+fn test_list_dialect_expression_elements() {
+    quiver()
+        .evaluate("inc = #'int { [~, 1] __integer_add__ }, x = 2, %list{ x inc, &inc }")
+        .expect_type("Cons['int, Cons[(#'int -> 'int), Nil]]");
 }
 
 #[test]
@@ -307,7 +326,7 @@ fn test_malformed_field_list_tail_is_an_error() {
     // splice `Cons[1, Nil[2]]` as `[1]`).
     quiver()
         .with_modules(dialect_module(
-            "Tup[name: Nil, fields: Cons[1, Nil[2]]]",
+            "Tuple[name: Nil, fields: Cons[1, Nil[2]]]",
             "Ok",
         ))
         .evaluate("%m{}")
@@ -367,4 +386,94 @@ fn test_escaped_quote_allows_unpaired_quote_in_content() {
         .with_modules(dialect_module("$", "Ok"))
         .evaluate(r#"%m{5\" tall}"#)
         .expect("\"5\\\" tall\"");
+}
+
+// --- Unquote: spans of the content parsed as host code, spliced in caller scope ------
+
+#[test]
+fn test_unquote_variable() {
+    quiver()
+        .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
+        .evaluate("x = 5, %m{x}")
+        .expect("5");
+}
+
+#[test]
+fn test_unquote_callable_is_called_with_the_flowing_value() {
+    // Host semantics: a bare callable in a hole is *called* with the dialect input.
+    quiver()
+        .with_modules(dialect_module("Unquote[offset: 0, length: 3]", "Ok"))
+        .evaluate("inc = #'int { [~, 1] __integer_add__ }, 5 %m{inc}")
+        .expect("6");
+}
+
+#[test]
+fn test_unquote_reference_passes_by_value() {
+    // `&f` in a hole references without calling — and elides its binding (pure term).
+    quiver()
+        .with_modules(dialect_module("Unquote[offset: 0, length: 4]", "Ok"))
+        .evaluate("inc = #'int { [~, 1] __integer_add__ }, f = %m{&inc}, 5 f")
+        .expect("6");
+}
+
+#[test]
+fn test_unquote_ripple_is_the_dialect_input() {
+    quiver()
+        .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
+        .evaluate("5 %m{~}")
+        .expect("5");
+}
+
+#[test]
+fn test_unquote_hole_receives_the_flowing_value() {
+    // Inside a larger hole, `~` at chain start is the value flowing into the dialect term.
+    quiver()
+        .with_modules(dialect_module("Unquote[offset: 0, length: 6]", "Ok"))
+        .evaluate("5 %m{[~, 1]}")
+        .expect("[5, 1]");
+}
+
+#[test]
+fn test_unquote_duplicated_span_evaluates_once() {
+    // Bind-once: the same span spliced twice shares one binding, so a nilary callable
+    // hole runs once — both elements are the *same* ref.
+    quiver()
+        .with_modules(dialect_module(
+            "Tuple[name: Nil, fields: Cons[Unquote[offset: 0, length: 3], Cons[Unquote[offset: 0, length: 3], Nil]]]",
+            "Ok",
+        ))
+        .evaluate("ref = &%ref, %m{ref} =[a, b], a =&b")
+        .expect("Ok");
+}
+
+#[test]
+fn test_unquote_expression_chain() {
+    // A multi-term chain hole, evaluated in the caller's scope.
+    quiver()
+        .with_modules(dialect_module("Unquote[offset: 0, length: 28]", "Ok"))
+        .evaluate("xs = [1, 2], %m{[xs.0, xs.1] __integer_add__}")
+        .expect("3");
+}
+
+#[test]
+fn test_context_record_chain_callback() {
+    // A dialect taking the context record (via a partial parameter naming what it uses)
+    // and asking the host, through the `chain` callback, how far the first expression
+    // extends — the `, junk` tail is beyond the returned end.
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["m".to_string()],
+        r#"'cb = #['bin, 'int] -> ('int | [])
+d = #(content: Str['bin], chain: 'cb) {
+  $.content =Str[data]
+  [data, 0] $.chain =('int)end
+  Unquote[offset: 0, length: end]
+}
+{ :dialect &d, Ok }"#
+            .to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate("x = 5, %m{x, junk}")
+        .expect("5");
 }
