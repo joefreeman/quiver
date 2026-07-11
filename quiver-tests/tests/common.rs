@@ -127,6 +127,7 @@ impl TestBuilder {
         if self.with_io {
             quiver_io::attach_network_builtins(&mut builtins);
             quiver_io::attach_file_builtins(&mut builtins);
+            quiver_io::attach_system_builtins(&mut builtins);
         }
 
         // Create workers with virtual time function

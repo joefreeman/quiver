@@ -1,0 +1,106 @@
+// Randomness over the host's cryptographically secure entropy source (the
+// `__random_bytes__` builtin — see docs/random-time.md). Everything here is
+// crypto-quality: suitable for session ids and CSRF tokens, not just dice. A seeded,
+// reproducible PRNG (games, property tests) would be a separate, pure module.
+
+// A big-endian binary read as an unsigned integer.
+int_loop = #['bin, 'int, 'int, 'int] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | {
+      b = [data, pos] %bin.get_byte
+      [
+        data,
+        [pos, 1] __integer_add__,
+        len,
+        [[acc, 256] __integer_multiply__, b] __integer_add__,
+      ] ^
+    }
+  }
+}
+
+bin_int = #'bin { [$, 0, $ %bin.length, 0] int_loop }
+
+// The smallest `k` (and `256^k`) such that `256^k >= n`, starting from k = 1.
+klen_loop = #['int, 'int, 'int] {
+  =[n, k, p]
+  {
+    | [p, n] __integer_compare__ =(0 | 1) => [k, p]
+    | {
+      [n, [k, 1] __integer_add__, [p, 256] __integer_multiply__] ^
+    }
+  }
+}
+
+// Draw k bytes as an integer until it falls below `limit` (a multiple of n), then take
+// the remainder — uniform in [0, n) with no modulo bias.
+draw_loop = #['int, 'int, 'int] {
+  =[n, k, limit]
+  v = k __random_bytes__ bin_int
+  {
+    | [v, limit] __integer_compare__ =-1 => [v, n] __integer_modulo__
+    | [n, k, limit] ^
+  }
+}
+
+below = #'int {
+  :doc "A uniform random integer in [0, n) — cryptographically sourced, unbiased (rejection sampling); nil when n < 1."
+  =n
+  [n, 0] __integer_compare__ =1
+  [n, 1, 256] klen_loop
+  =[k, p]
+
+  limit =
+    [p, [p, n] __integer_modulo__] __integer_subtract__
+
+  [n, k, limit] draw_loop
+}
+
+between = #['int, 'int] {
+  :doc "A uniform random integer from lo to hi inclusive; nil when lo > hi."
+  =[lo, hi]
+  [lo, hi] __integer_compare__ =(-1 | 0)
+
+  [[hi, lo] __integer_subtract__, 1] __integer_add__
+  ~> below
+  ~> =('int)r
+
+  [lo, r] __integer_add__
+}
+
+// A nibble as a lowercase hex character code.
+hex_digit = #'int {
+  | [$, 10] __integer_compare__ =-1 => [$, 48] __integer_add__
+  | [$, 87] __integer_add__
+}
+
+hex_loop = #['bin, 'int, 'int, 'bin] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | {
+      b = [data, pos] %bin.get_byte
+
+      acc2 =
+        [acc, [b, 16] __integer_divide__ hex_digit, 1] %bin.append
+        ~> [~, [b, 16] __integer_modulo__ hex_digit, 1] %bin.append
+
+      [data, [pos, 1] __integer_add__, len, acc2] ^
+    }
+  }
+}
+
+hex = #'int {
+  :doc "A random token: n cryptographically secure bytes as 2n lowercase hex characters."
+  b = $ __random_bytes__, [b, 0, b %bin.length, 0x] hex_loop Str[~]
+}
+
+[
+  bytes: &__random_bytes__ {
+    :doc "The given number of cryptographically secure random bytes from the host's entropy source."
+  },
+  below: &below,
+  between: &between,
+  hex: &hex,
+]

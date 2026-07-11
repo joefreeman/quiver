@@ -1,0 +1,160 @@
+// Clocks and calendar arithmetic (docs/random-time.md). Two host clocks: `now` — wall
+// time as milliseconds since the Unix epoch (UTC) — and `monotonic` — milliseconds
+// from an arbitrary per-run origin, steady, for measuring durations. Everything else
+// is pure: `parts` breaks an epoch timestamp into UTC calendar components (proleptic
+// Gregorian, exact for negative timestamps too), and the formatters render HTTP and
+// ISO 8601 date strings. No timezones: UTC only.
+
+'weekday = Mon | Tue | Wed | Thu | Fri | Sat | Sun
+
+' = [year: 'int, month: 'int, day: 'int, hour: 'int, minute: 'int, second: 'int, millisecond: 'int, weekday: 'weekday]
+
+// Floored division and modulo (the builtins truncate, which misplaces negative
+// timestamps by a day/second).
+fmod = #['int, 'int] {
+  =[a, b]
+  [[[a, b] __integer_modulo__, b] __integer_add__, b] __integer_modulo__
+}
+
+fdiv = #['int, 'int] {
+  =[a, b]
+  [[a, [a, b] fmod] __integer_subtract__, b] __integer_divide__
+}
+
+parts = #'int {
+  :doc "The UTC calendar components of an epoch-milliseconds timestamp: [year, month, day, hour, minute, second, millisecond, weekday]."
+  =total
+  millisecond = [total, 1000] fmod
+  secs = [total, 1000] fdiv
+  sod = [secs, 86400] fmod
+  days = [secs, 86400] fdiv
+
+  hour = [sod, 3600] __integer_divide__
+
+  minute =
+    [[sod, 3600] __integer_modulo__, 60] __integer_divide__
+
+  second = [sod, 60] __integer_modulo__
+
+  weekday = [[days, 4] __integer_add__, 7] fmod {
+    | =0 => Sun
+    | =1 => Mon
+    | =2 => Tue
+    | =3 => Wed
+    | =4 => Thu
+    | =5 => Fri
+    | Sat
+  }
+
+  // Civil-from-days (Howard Hinnant's algorithm), proleptic Gregorian.
+  z = [days, 719468] __integer_add__
+  era = [z, 146097] fdiv
+
+  doe =
+    [z, [era, 146097] __integer_multiply__] __integer_subtract__
+
+  yoe =
+    [doe, [doe, 1460] __integer_divide__] __integer_subtract__
+    ~> [~, [doe, 36524] __integer_divide__] __integer_add__
+    ~> [~, [doe, 146096] __integer_divide__] __integer_subtract__
+    ~> [~, 365] __integer_divide__
+
+  y =
+    [yoe, [era, 400] __integer_multiply__] __integer_add__
+
+  doy =
+    [[365, yoe] __integer_multiply__, [yoe, 4] __integer_divide__] __integer_add__
+    ~> [~, [yoe, 100] __integer_divide__] __integer_subtract__
+    ~> [doe, ~] __integer_subtract__
+
+  mp =
+    [[[5, doy] __integer_multiply__, 2] __integer_add__, 153] __integer_divide__
+
+  day =
+    [
+      [[153, mp] __integer_multiply__, 2] __integer_add__,
+      5,
+    ] __integer_divide__
+    ~> [doy, ~] __integer_subtract__
+    ~> [~, 1] __integer_add__
+
+  month = {
+    | [mp, 10] __integer_compare__ =-1 => [mp, 3] __integer_add__
+    | [mp, 9] __integer_subtract__
+  }
+  year = {
+    | [month, 2] __integer_compare__ =(-1 | 0) => [y, 1] __integer_add__
+    | y
+  }
+
+  [
+    year: year,
+    month: month,
+    day: day,
+    hour: hour,
+    minute: minute,
+    second: second,
+    millisecond: millisecond,
+    weekday: weekday,
+  ]
+}
+
+pad2 = #'int {
+  | [$, 10] __integer_compare__ =-1 => "0{$ %str.from_int}"
+  | $ %str.from_int
+}
+
+pad3 = #'int {
+  | [$, 10] __integer_compare__ =-1 => "00{$ %str.from_int}"
+  | [$, 100] __integer_compare__ =-1 => "0{$ %str.from_int}"
+  | $ %str.from_int
+}
+
+day_name = #'weekday {
+  | =Mon => "Mon"
+  | =Tue => "Tue"
+  | =Wed => "Wed"
+  | =Thu => "Thu"
+  | =Fri => "Fri"
+  | =Sat => "Sat"
+  | "Sun"
+}
+
+month_name = #'int {
+  | =1 => "Jan"
+  | =2 => "Feb"
+  | =3 => "Mar"
+  | =4 => "Apr"
+  | =5 => "May"
+  | =6 => "Jun"
+  | =7 => "Jul"
+  | =8 => "Aug"
+  | =9 => "Sep"
+  | =10 => "Oct"
+  | =11 => "Nov"
+  | "Dec"
+}
+
+http_date = #'int {
+  :doc "An epoch-milliseconds timestamp as an HTTP date (IMF-fixdate), e.g. \"Sun, 06 Nov 1994 08:49:37 GMT\"."
+  p = $ parts
+  "{p.weekday day_name}, {p.day pad2} {p.month month_name} {p.year %str.from_int} {p.hour pad2}:{p.minute pad2}:{p.second pad2} GMT"
+}
+
+iso8601 = #'int {
+  :doc "An epoch-milliseconds timestamp as UTC ISO 8601, e.g. \"2024-01-01T00:00:00.123Z\"."
+  p = $ parts
+  "{p.year %str.from_int}-{p.month pad2}-{p.day pad2}T{p.hour pad2}:{p.minute pad2}:{p.second pad2}.{p.millisecond pad3}Z"
+}
+
+[
+  now: &__time_now__ {
+    :doc "The wall-clock time as milliseconds since the Unix epoch (UTC)."
+  },
+  monotonic: &__time_monotonic__ {
+    :doc "Milliseconds since an arbitrary per-run origin: steady, for measuring durations; unrelated to the wall clock."
+  },
+  parts: &parts,
+  http_date: &http_date,
+  iso8601: &iso8601,
+]

@@ -149,6 +149,22 @@ fn network_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     ]
 }
 
+/// The system builtins' contract: host-provided entropy and clocks.
+fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
+    let bin = TypeSpec::Binary;
+    let int = TypeSpec::Integer;
+    let nil = TypeSpec::Tuple(None, vec![]);
+    vec![
+        // random_bytes(n) -> bin: n cryptographically secure random bytes
+        ("random_bytes", int.clone(), bin),
+        // time_now([]) -> int: milliseconds since the Unix epoch (UTC)
+        ("time_now", nil.clone(), int.clone()),
+        // time_monotonic([]) -> int: monotonic milliseconds from an arbitrary origin —
+        // for measuring durations; unrelated to (and steadier than) the wall clock
+        ("time_monotonic", nil, int),
+    ]
+}
+
 /// Placeholder implementation for an IO builtin registered for its signature only (e.g. by the
 /// language server, which type-checks but never executes). It is never called — executing hosts
 /// register real implementations against these signatures instead.
@@ -163,7 +179,11 @@ fn unimplemented_builtin<E: Effect>(
 /// Register the IO builtins' type signatures (no implementations) — so code using `__file_read__`,
 /// `%file`, `%dns`, etc. type-checks in a host that doesn't run effects.
 pub fn register_io_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    for (name, param, result) in file_signatures().into_iter().chain(network_signatures()) {
+    for (name, param, result) in file_signatures()
+        .into_iter()
+        .chain(network_signatures())
+        .chain(system_signatures())
+    {
         let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
         registry.register(name.to_string(), placeholder, param, result);
     }
