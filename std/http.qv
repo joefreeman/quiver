@@ -1,0 +1,489 @@
+// The shared HTTP vocabulary: message types and codecs, pure data, no IO (see
+// docs/http.md). `%http/server` builds the connection pump on these; a client and
+// tests use the same records and parsers.
+//
+// The request parser is incremental — reads arrive in arbitrary chunks — answering
+// `Incomplete` (read more), `Bad[status, reason]` (answer that status and close), or
+// the parsed request plus the leftover bytes (the start of the next request on a
+// keep-alive connection). Hardening is size limits, not timeouts: callers pass head
+// and body caps and the parser fails fast.
+//
+// Headers, query parameters, and form fields all share one shape — an ordered list of
+// `[name, value]` string pairs, duplicates preserved (`Set-Cookie` twice is two
+// cookies; a repeated form field is a list). `header` looks up case-insensitively,
+// `get` exactly.
+
+'method = GET | HEAD | POST | PUT | DELETE | PATCH | OPTIONS | Other[Str['bin]]
+
+'pairs = Nil | Cons[[Str['bin], Str['bin]], ^]
+'segments = Nil | Cons[Str['bin], ^]
+
+' = Request[method: 'method, target: Str['bin], path: 'segments, query: 'pairs, version: Str['bin], headers: 'pairs, body: 'bin]
+
+'response = Response[status: 'int, headers: 'pairs, body: 'bin]
+
+'parsed = Incomplete | Bad[status: 'int, reason: Str['bin]] | [', 'bin]
+
+'items<'t> = Nil | Cons['t, ^]
+
+rev = #<'t>['items<'t>, 'items<'t>] {
+  =[items, acc]
+  items {
+    | =Nil => acc
+    | =Cons[h, t] => [t, Cons[h, acc]] ^
+  }
+}
+
+// ASCII-lowercased bytes (for case-insensitive names).
+lower_loop = #['bin, 'int, 'int, 'bin] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | {
+      b = [data, pos] %bin.get_byte
+      b2 = {
+        | [b, 65] __integer_compare__ =(0 | 1), [b, 90] __integer_compare__ =(-1 | 0) => [
+          b,
+          32,
+        ] __integer_add__
+        | b
+      }
+      [data, [pos, 1] __integer_add__, len, [acc, b2, 1] %bin.append] ^
+    }
+  }
+}
+
+lower = #Str['bin] {
+  :doc "The string with ASCII letters lowercased."
+  =Str[b], [b, 0, b %bin.length, 0x] lower_loop Str[~]
+}
+
+// The first value whose name matches case-insensitively, or nil.
+header_find = #['pairs, 'bin] {
+  =[pairs, target]
+  pairs {
+    | =Nil => []
+    | =Cons[[n, v], rest] => {
+      | n lower =Str[nb], nb =&target => v
+      | [rest, target] ^
+    }
+  }
+}
+
+header = #['pairs, Str['bin]] {
+  :doc "The first value of a header by case-insensitive name, or nil when absent."
+  =[pairs, name], name lower =Str[target], [pairs, target] header_find
+}
+
+get = #['pairs, Str['bin]] {
+  :doc "The first value for an exact name (query or form pairs), or nil when absent."
+  =[pairs, name]
+  pairs {
+    | =Nil => []
+    | =Cons[[n, v], rest] => { n =&name => v | [rest, name] ^ }
+  }
+}
+
+// The numeric value of an ASCII hex digit, or nil.
+hex_val = #'int {
+  | [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0) => [
+    $,
+    48,
+  ] __integer_subtract__
+  | [$, 97] __integer_compare__ =(0 | 1), [$, 102] __integer_compare__ =(-1 | 0) => [
+    [$, 97] __integer_subtract__,
+    10,
+  ] __integer_add__
+  | [$, 65] __integer_compare__ =(0 | 1), [$, 70] __integer_compare__ =(-1 | 0) => [
+    [$, 65] __integer_subtract__,
+    10,
+  ] __integer_add__
+}
+
+// Percent-decode; `plus?` = 1 also turns `+` into a space (the urlencoded rule).
+// An invalid escape passes through verbatim (lenient).
+pct_loop = #['bin, 'int, 'int, 'int, 'bin] {
+  =[data, pos, len, plus?, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | {
+      b = [data, pos] %bin.get_byte
+      {
+        | b =37
+
+          [[pos, 2] __integer_add__, len] __integer_compare__
+          ~> =-1
+
+          [data, [pos, 1] __integer_add__] %bin.get_byte
+          ~> hex_val
+          ~> =('int)h1
+
+          [data, [pos, 2] __integer_add__] %bin.get_byte
+          ~> hex_val
+          ~> =('int)h2 => {
+          decoded =
+            [[h1, 16] __integer_multiply__, h2] __integer_add__
+
+          [data, [pos, 3] __integer_add__, len, plus?, [acc, decoded, 1] %bin.append] ^
+        }
+        | b =43, plus? =1 => {
+          [data, [pos, 1] __integer_add__, len, plus?, [acc, 32, 1] %bin.append] ^
+        }
+        | {
+          [data, [pos, 1] __integer_add__, len, plus?, [acc, b, 1] %bin.append] ^
+        }
+      }
+    }
+  }
+}
+
+pct_decode = #['bin, 'int] { [$0, 0, $0 %bin.length, $1, 0x] pct_loop }
+
+// --- request-target decomposition -------------------------------------------------------
+
+// Path segments, in order: one leading `/` stripped, one empty trailing segment dropped
+// (`/posts/` ≡ `/posts`), interior empties preserved, each segment percent-decoded.
+segs_loop = #['bin, 'int, 'int, 'int, 'segments] {
+  =[data, start, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => Cons[
+      [[data, start, pos] %bin.slice, 0] pct_decode Str[~],
+      acc,
+    ]
+    | [data, pos] %bin.get_byte =47 => {
+      seg = [[data, start, pos] %bin.slice, 0] pct_decode Str[~]
+      [data, [pos, 1] __integer_add__, [pos, 1] __integer_add__, len, Cons[seg, acc]] ^
+    }
+    | {
+      [data, start, [pos, 1] __integer_add__, len, acc] ^
+    }
+  }
+}
+
+path_segments = #'bin {
+  =raw
+  data = {
+    | raw %bin.length =0 => 0x
+    | [raw, 0] %bin.get_byte =47 => [raw, 1, raw %bin.length] %bin.slice
+    | raw
+  }
+  {
+    | data %bin.length =0 => Nil
+    | {
+      revd = [data, 0, 0, data %bin.length, Nil] segs_loop
+      trimmed = {
+        | revd =Cons[Str[last], rest], last %bin.length =0 => rest
+        | revd
+      }
+      [trimmed, Nil] rev
+    }
+  }
+}
+
+// One `k=v` (or bare `k`) part of a query/form body, percent-decoded with `+` as space.
+part_pair = #'bin {
+  =part
+  ei = [part, 61, 0] %bin.index
+  {
+    | ei =('int)e => [
+      [[part, 0, e] %bin.slice, 1] pct_decode Str[~],
+      [
+        [part, [e, 1] __integer_add__, part %bin.length] %bin.slice,
+        1,
+      ] pct_decode
+      ~> Str[~],
+    ]
+    | [[part, 1] pct_decode Str[~], ""]
+  }
+}
+
+qp_loop = #['bin, 'int, 'int, 'int, 'pairs] {
+  =[data, start, pos, len, acc]
+  next = {
+    | [start, pos] __integer_compare__ =-1 => Cons[[data, start, pos] %bin.slice part_pair, acc]
+    | acc
+  }
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => [next, Nil] rev
+    | [data, pos] %bin.get_byte =38 => {
+      [data, [pos, 1] __integer_add__, [pos, 1] __integer_add__, len, next] ^
+    }
+    | {
+      [data, start, [pos, 1] __integer_add__, len, acc] ^
+    }
+  }
+}
+
+form_decode = #'bin {
+  :doc "Decodes an application/x-www-form-urlencoded body (or query string) into ordered [name, value] pairs."
+  [$, 0, 0, $ %bin.length, Nil] qp_loop
+}
+
+form = #' {
+  :doc "The request body decoded as an application/x-www-form-urlencoded form, as ordered [name, value] pairs."
+  $body form_decode
+}
+
+// --- the wire codec ----------------------------------------------------------------------
+
+// The index of the first `\r\n\r\n`, or nil.
+head_end = #['bin, 'int, 'int] {
+  =[data, pos, len]
+  {
+    | [[pos, 4] __integer_add__, len] __integer_compare__
+      ~> =1 => []
+    | [data, pos] %bin.get_byte =13, [data, [pos, 1] __integer_add__] %bin.get_byte =10, [data, [pos, 2] __integer_add__] %bin.get_byte =13, [data, [pos, 3] __integer_add__] %bin.get_byte =10 => pos
+    | [data, [pos, 1] __integer_add__, len] ^
+  }
+}
+
+// The index of the next `\r\n` before `end`, or `end` when the last line is unterminated.
+line_end = #['bin, 'int, 'int] {
+  =[data, pos, end]
+  {
+    | [[pos, 1] __integer_add__, end] __integer_compare__
+      ~> =(0 | 1) => end
+    | [data, pos] %bin.get_byte =13, [data, [pos, 1] __integer_add__] %bin.get_byte =10 => pos
+    | [data, [pos, 1] __integer_add__, end] ^
+  }
+}
+
+ows? = #'int { $ =(32 | 9), $ }
+
+trim_start = #['bin, 'int, 'int] {
+  =[data, pos, end]
+  {
+    | [pos, end] __integer_compare__ =(0 | 1) => pos
+    | [data, pos] %bin.get_byte ows? => [data, [pos, 1] __integer_add__, end] ^
+    | pos
+  }
+}
+
+trim_end = #['bin, 'int, 'int] {
+  =[data, pos, end]
+  {
+    | [end, pos] __integer_compare__ =(0 | -1) => end
+    | [data, [end, 1] __integer_subtract__] %bin.get_byte
+      ~> ows? => [data, pos, [end, 1] __integer_subtract__] ^
+    | end
+  }
+}
+
+// A `Name: value` header line as a pair (value trimmed of optional whitespace), or nil.
+parse_header_line = #'bin {
+  =line
+  [line, 58, 0] %bin.index =('int)c
+  { c =0 => [] | Ok }
+
+  vs =
+    [line, [c, 1] __integer_add__, line %bin.length] trim_start
+
+  ve = [line, vs, line %bin.length] trim_end
+  [Str[[line, 0, c] %bin.slice], Str[[line, vs, ve] %bin.slice]]
+}
+
+parse_headers = #['bin, 'int, 'int, 'pairs] {
+  =[data, pos, end, acc]
+  {
+    | [pos, end] __integer_compare__ =(0 | 1) => [acc, Nil] rev
+    | {
+      le = [data, pos, end] line_end
+      {
+        | [data, pos, le] %bin.slice
+          ~> parse_header_line
+          ~> =[n, v] => {
+            [data, [le, 2] __integer_add__, end, Cons[[n, v], acc]] ^
+          }
+        | Bad[status: 400, reason: "malformed header"]
+      }
+    }
+  }
+}
+
+method_of = #Str['bin] {
+  | ="GET" => GET
+  | ="HEAD" => HEAD
+  | ="POST" => POST
+  | ="PUT" => PUT
+  | ="DELETE" => DELETE
+  | ="PATCH" => PATCH
+  | ="OPTIONS" => OPTIONS
+  | =m => Other[m]
+}
+
+// `METHOD SP target SP version`, or nil.
+parse_request_line = #'bin {
+  =line
+  [line, 32, 0] %bin.index =('int)a
+  { a =0 => [] | Ok }
+
+  [line, 32, [a, 1] __integer_add__] %bin.index
+  ~> =('int)b
+
+  target = [line, [a, 1] __integer_add__, b] %bin.slice
+  { target %bin.length =0 => [] | Ok }
+  [
+    [line, 0, a] %bin.slice Str[~] method_of,
+    Str[target],
+    Str[
+      [line, [b, 1] __integer_add__, line %bin.length] %bin.slice,
+    ],
+  ]
+}
+
+// The request-target split into decoded path segments and query pairs.
+split_target = #Str['bin] {
+  =Str[t]
+  qi = [t, 63, 0] %bin.index
+  {
+    | qi =('int)q => [
+      [t, 0, q] %bin.slice path_segments,
+      [
+        [t, [q, 1] __integer_add__, t %bin.length] %bin.slice,
+        0,
+        0,
+        [t %bin.length, [q, 1] __integer_add__] __integer_subtract__,
+        Nil,
+      ] qp_loop,
+    ]
+    | [t path_segments, Nil]
+  }
+}
+
+// Content-Length as a non-negative int: absent → 0, present-but-invalid → nil.
+content_length = #'pairs {
+  =hs
+  {
+    | [hs, "content-length"] header =Str[v] => {
+      Str[v] %str.parse_int =('int)n, [n, 0] __integer_compare__ =(0 | 1), n
+    }
+    | 0
+  }
+}
+
+parse_request_with = #['bin, 'int, 'int] {
+  :doc "Parses one request from a byte buffer with explicit head/body size caps: Incomplete (read more), Bad[status, reason], or the request plus the leftover bytes."
+  =[data, max_head, max_body]
+  len = data %bin.length
+  he = [data, 0, len] head_end
+  {
+    | he =('int)h => {
+      | [h, max_head] __integer_compare__ =1 => Bad[status: 431, reason: "request head too large"]
+      | {
+        rle = [data, 0, h] line_end
+        {
+          | [data, 0, rle] %bin.slice
+            ~> parse_request_line
+            ~> =[m, target, version] => {
+              hstart = {
+                | [rle, h] __integer_compare__ =-1 => [rle, 2] __integer_add__
+                | h
+              }
+              [data, hstart, h, Nil] parse_headers {
+                | =Bad[status: bs, reason: br] => Bad[status: bs, reason: br]
+                | =hs => {
+                  | [hs, "transfer-encoding"] header =Str[_] => Bad[
+                    status: 501,
+                    reason: "transfer encodings are not supported",
+                  ]
+                  | hs content_length =('int)cl => {
+                    | [cl, max_body] __integer_compare__ =1 => Bad[
+                      status: 413,
+                      reason: "request body too large",
+                    ]
+                    | {
+                      bstart = [h, 4] __integer_add__
+                      bend = [bstart, cl] __integer_add__
+                      {
+                        | [bend, len] __integer_compare__ =(-1 | 0) => {
+                          target split_target
+                          =[path, query]
+                          [
+                            Request[
+                              method: m,
+                              target: target,
+                              path: path,
+                              query: query,
+                              version: version,
+                              headers: hs,
+                              body: [data, bstart, bend] %bin.slice,
+                            ],
+                            [data, bend, len] %bin.slice,
+                          ]
+                        }
+                        | Incomplete
+                      }
+                    }
+                  }
+                  | Bad[status: 400, reason: "invalid content-length"]
+                }
+              }
+            }
+          | Bad[status: 400, reason: "malformed request line"]
+        }
+      }
+    }
+    | {
+      | [len, max_head] __integer_compare__ =1 => Bad[status: 431, reason: "request head too large"]
+      | Incomplete
+    }
+  }
+}
+
+parse_request = #'bin {
+  :doc "Parses one request from a byte buffer with default size caps (8 KiB head, 1 MiB body): Incomplete, Bad[status, reason], or the request plus the leftover bytes."
+  [$, 8192, 1048576] parse_request_with
+}
+
+reason = #'int {
+  :doc "The conventional reason phrase for a status code (empty for unlisted codes)."
+  | =200 => "OK"
+  | =201 => "Created"
+  | =204 => "No Content"
+  | =301 => "Moved Permanently"
+  | =302 => "Found"
+  | =303 => "See Other"
+  | =304 => "Not Modified"
+  | =400 => "Bad Request"
+  | =403 => "Forbidden"
+  | =404 => "Not Found"
+  | =405 => "Method Not Allowed"
+  | =411 => "Length Required"
+  | =413 => "Content Too Large"
+  | =431 => "Request Header Fields Too Large"
+  | =500 => "Internal Server Error"
+  | =501 => "Not Implemented"
+  | ""
+}
+
+serialize_headers = #['pairs, Str['bin]] {
+  =[hs, acc]
+  hs {
+    | =Nil => acc
+    | =Cons[[n, v], rest] => [rest, "{acc}{n}: {v}\r\n"] ^
+  }
+}
+
+serialize_response = #'response {
+  :doc "The response as HTTP/1.1 bytes; a Content-Length header is added when absent."
+  =Response[status: s, headers: hs, body: b]
+  status_line = "HTTP/1.1 {s %str.from_int} {s reason}\r\n"
+  hs2 = {
+    | [hs, "content-length"] header =Str[_] => hs
+    | Cons[["content-length", b %bin.length %str.from_int], hs]
+  }
+  head = [hs2, status_line] serialize_headers
+  ["{head}\r\n" .0, b] %bin.concat
+}
+
+[
+  header: &header,
+  get: &get,
+  lower: &lower,
+  form: &form,
+  form_decode: &form_decode,
+  parse_request: &parse_request,
+  parse_request_with: &parse_request_with,
+  serialize_response: &serialize_response,
+  reason: &reason,
+]

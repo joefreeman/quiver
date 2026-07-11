@@ -4703,12 +4703,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_provenance: Provenance,
     ) -> Result<(usize, Provenance), Error> {
         let binary_type = self.program.register_type(Type::Binary);
-        // The `Str['bin]` type: both the assertion target for holes and the result wrapper.
+        // The `Str['bin]` type. The hole assertion target is the *plain* tuple — any `Str`
+        // qualifies regardless of its annotation row (an exact-empty target would reject
+        // open-rowed strings, e.g. ones typed by a declared parameter). The freshly built
+        // result, by contrast, is provably annotation-free, so it carries an exact-empty row.
         let str_tuple = self
             .program
             .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
-        let str_type = self.program.register_type(Type::Tuple(str_tuple));
-        let str_type = annotations::exact_empty(self.program, str_type);
+        let plain_str_type = self.program.register_type(Type::Tuple(str_tuple));
+        let str_type = annotations::exact_empty(self.program, plain_str_type);
         // The `['bin, 'bin]` argument tuple for each concatenation step.
         let pair_tuple = self
             .program
@@ -4748,7 +4751,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         ScopeKind::Block,
                         false,
                     )?;
-                    if !quiver_core::types::is_compatible(hole_type, str_type, &*self.program) {
+                    if !quiver_core::types::is_compatible(hole_type, plain_str_type, &*self.program)
+                    {
                         return Err(Error::TypeMismatch {
                             expected: "Str".to_string(),
                             found: quiver_core::format::format_type_by_id(

@@ -1,0 +1,142 @@
+// The HTTP server: a connection pump over the TCP builtins and a handler contract
+// (see docs/http.md). A handler is a pure function from a request to a response —
+// values in, values out, never the socket — so handlers are testable without a
+// server and middleware is ordinary function composition.
+//
+//   handler = #'%http { ... routes ... }
+//   [port: 4000, handler: &handler] %http/server.serve
+//
+// One process per connection: a crashed handler drops that connection, never the
+// server. A handler that *fails* (returns nil) gets a plain 500 — Quiver's
+// short-circuit semantics degrade to a well-formed response. Keep-alive is
+// HTTP/1.1's default (`Connection: close` honored); responses are always
+// Content-Length framed. `HEAD` answers like `GET` with the body bytes dropped.
+
+'request = '%http
+'response = '%http.response
+'handler = #'request -> ('response | [])
+
+// A plain-text response with the given status.
+plain = #['int, Str['bin]] {
+  =[s, Str[b]]
+  Response[
+    status: s,
+    headers: Cons[["content-type", "text/plain; charset=utf-8"], Nil],
+    body: b,
+  ]
+}
+
+// Whether the connection should be kept open after answering the request.
+keep_alive? = #'request {
+  | [$headers, "connection"] %http.header =Str[cb], Str[cb] %http.lower ="close" => []
+  | $version ="HTTP/1.1" => Ok
+  | []
+}
+
+// The connection pump: serve every complete request in the buffer, reading more only
+// when the parse is incomplete; close on end-of-input, a malformed request, or a
+// non-keep-alive exchange.
+conn_loop = #[\TcpSocket, 'handler, 'bin] {
+  =[sock, h, buf]
+  buf %http.parse_request {
+    | =Incomplete => {
+      chunk = [sock, 8192] __tcp_socket_read__
+      {
+        | chunk %bin.length =0 => sock __tcp_socket_close__
+        | [sock, &h, [buf, chunk] %bin.concat] ^
+      }
+    }
+    | =Bad[status: s, reason: r] => {
+      out = [s, r] plain %http.serialize_response
+      [sock, out] __tcp_socket_write__
+      sock __tcp_socket_close__
+    }
+    | =[req, rest] => {
+      r = req h
+      resp = {
+        | r =('%http.response)ok => ok
+        | [500, "Internal Server Error"] plain
+      }
+      // (Explicit construction, not `resp ~[..., …]`: ripple-spread currently types its
+      // result as an unnamed tuple even though the value keeps its name — TODO compiler.)
+      resp2 = {
+        | req.method =HEAD => Response[
+          status: resp.status,
+          headers: Cons[
+            ["content-length", resp.body %bin.length %str.from_int],
+            resp.headers,
+          ],
+          body: 0x,
+        ]
+        | resp
+      }
+      [sock, resp2 %http.serialize_response] __tcp_socket_write__
+      {
+        | req keep_alive? => [sock, &h, rest] ^
+        | sock __tcp_socket_close__
+      }
+    }
+  }
+}
+
+conn = #[\TcpSocket, 'handler] { =[sock, h], [sock, &h, 0x] conn_loop }
+
+accept_loop = #[\TcpListener, 'handler] {
+  =[l, h], l __tcp_listener_accept__ [~, &h] @conn, [l, &h] ^
+}
+
+serve = #[port: 'int, handler: 'handler] {
+  :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). Blocks forever."
+  =[port: p, handler: h], p [~, 128] __tcp_listen__ [~, &h] accept_loop
+}
+
+html = #'%html {
+  :doc "A 200 text/html response of the rendered tree (no doctype — see `page`)."
+  $ %html.render =Str[b]
+  Response[
+    status: 200,
+    headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],
+    body: b,
+  ]
+}
+
+page = #'%html {
+  :doc "A 200 text/html response of the doctype-prefixed rendered tree — a whole page."
+  $ %html.page =Str[b]
+  Response[
+    status: 200,
+    headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],
+    body: b,
+  ]
+}
+
+text = #Str['bin] {
+  :doc "A 200 text/plain response."
+  [200, $] plain
+}
+
+json = #'%json {
+  :doc "A 200 application/json response of the serialized value."
+  $ %json.stringify =Str[b]
+  Response[status: 200, headers: Cons[["content-type", "application/json"], Nil], body: b]
+}
+
+redirect = #Str['bin] {
+  :doc "A 303 See Other redirect to the location — the POST-then-redirect-to-GET idiom."
+  Response[status: 303, headers: Cons[["location", $], Nil], body: 0x]
+}
+
+not_found = #{
+  :doc "A plain 404 response."
+  [404, "Not Found"] plain
+}
+
+[
+  serve: &serve,
+  html: &html,
+  page: &page,
+  text: &text,
+  json: &json,
+  redirect: &redirect,
+  not_found: &not_found,
+]
