@@ -2,6 +2,82 @@ byte_bit = #'int {
   [[$, 8] __integer_divide__, [$, 8] __integer_modulo__]
 }
 
+// A nibble as a lowercase hex character code.
+hex_digit = #'int {
+  | [$, 10] __integer_compare__ =-1 => [$, 48] __integer_add__
+  | [$, 87] __integer_add__
+}
+
+// The numeric value of an ASCII hex digit, or nil.
+hex_val = #'int {
+  | [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0) => [
+    $,
+    48,
+  ] __integer_subtract__
+  | [$, 97] __integer_compare__ =(0 | 1), [$, 102] __integer_compare__ =(-1 | 0) => [
+    [$, 97] __integer_subtract__,
+    10,
+  ] __integer_add__
+  | [$, 65] __integer_compare__ =(0 | 1), [$, 70] __integer_compare__ =(-1 | 0) => [
+    [$, 65] __integer_subtract__,
+    10,
+  ] __integer_add__
+}
+
+to_hex_loop = #['bin, 'int, 'int, 'bin] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | {
+      b = [data, pos, 0, 8] __binary_get__
+
+      acc2 =
+        [acc, [b, 16] __integer_divide__ hex_digit, 1] __binary_append__
+        ~> [~, [b, 16] __integer_modulo__ hex_digit, 1] __binary_append__
+
+      [data, [pos, 1] __integer_add__, len, acc2] ^
+    }
+  }
+}
+
+to_hex = #'bin {
+  :doc "The binary as lowercase hex text, two characters per byte."
+  [$, 0, $ __binary_length__, 0x] to_hex_loop Str[~]
+}
+
+from_hex_loop = #['bin, 'int, 'int, 'bin] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | [data, pos, 0, 8] __binary_get__ hex_val =('int)hi
+
+      [data, [pos, 1] __integer_add__, 0, 8] __binary_get__
+      ~> hex_val
+      ~> =('int)lo => {
+      [
+        data,
+        [pos, 2] __integer_add__,
+        len,
+        [
+          acc,
+          [[hi, 16] __integer_multiply__, lo] __integer_add__,
+          1,
+        ] __binary_append__,
+      ] ^
+    }
+  }
+}
+
+from_hex = #Str['bin] {
+  :doc "The bytes of a hex string (case-insensitive), or nil when it is odd-length or has a non-hex character."
+  =Str[data]
+
+  [[data __binary_length__, 2] __integer_modulo__, 0] __integer_compare__
+  ~> =0
+
+  [data, 0, data __binary_length__, 0x] from_hex_loop
+}
+
 [
   new: &__binary_new__ {
     :doc "A zero-filled binary of the given length in bytes."
@@ -60,4 +136,7 @@ byte_bit = #'int {
     :doc "The binary with the bit at the given index (most significant first) set to 0 or 1."
     $1 byte_bit [$0, ..., $2, 1] __binary_set__
   },
+
+  to_hex: &to_hex,
+  from_hex: &from_hex,
 ]

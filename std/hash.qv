@@ -1,0 +1,205 @@
+// Cryptographic hashing, pure Quiver over the integer/binary builtins (no imports).
+// SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104) — the signing primitive for
+// `%http/session`'s cookies. SHA-1 joins this module when websockets need it.
+//
+// Representation notes: the round constants, initial state, and message schedule are
+// *binaries* — `__binary_get__` reads 32-bit big-endian words directly, so no array
+// type is needed. All word arithmetic is masked to 32 bits.
+
+// Masked 32-bit add.
+madd = #['int, 'int] {
+  [[$0, $1] __integer_add__, 4294967295] __integer_and__
+}
+
+// Rotate a 32-bit word right by n.
+rotr = #['int, 'int] {
+  =[x, n]
+
+  [
+    [x, [0, n] __integer_subtract__] __integer_shift__,
+    [x, [32, n] __integer_subtract__] __integer_shift__,
+  ] __integer_or__
+  ~> [~, 4294967295] __integer_and__
+}
+
+// Logical right shift.
+shr = #['int, 'int] {
+  [$0, [0, $1] __integer_subtract__] __integer_shift__
+}
+
+// The 32-bit word at index i of a binary of big-endian words.
+w_at = #['bin, 'int] {
+  [$0, [$1, 4] __integer_multiply__, 0, 32] __binary_get__
+}
+
+ssig0 = #'int {
+  [[[$, 7] rotr, [$, 18] rotr] __integer_xor__, [$, 3] shr] __integer_xor__
+}
+ssig1 = #'int {
+  [[[$, 17] rotr, [$, 19] rotr] __integer_xor__, [$, 10] shr] __integer_xor__
+}
+bsig0 = #'int {
+  [[[$, 2] rotr, [$, 13] rotr] __integer_xor__, [$, 22] rotr] __integer_xor__
+}
+bsig1 = #'int {
+  [[[$, 6] rotr, [$, 11] rotr] __integer_xor__, [$, 25] rotr] __integer_xor__
+}
+
+// The SHA-256 round constants (64 words) and initial state (8 words).
+k256 = 0x428a2f9871374491b5c0fbcfe9b5dba53956c25b59f111f1923f82a4ab1c5ed5d807aa9812835b01243185be550c7dc372be5d7480deb1fe9bdc06a7c19bf174e49b69c1efbe47860fc19dc6240ca1cc2de92c6f4a7484aa5cb0a9dc76f988da983e5152a831c66db00327c8bf597fc7c6e00bf3d5a7914706ca63511429296727b70a852e1b21384d2c6dfc53380d13650a7354766a0abb81c2c92e92722c85a2bfe8a1a81a664bc24b8b70c76c51a3d192e819d6990624f40e3585106aa07019a4c1161e376c082748774c34b0bcb5391c0cb34ed8aa4a5b9cca4f682e6ff3748f82ee78a5636f84c878148cc7020890befffaa4506cebbef9a3f7c67178f2
+h256 = 0x6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19
+
+// Extend a block's 16 words to the full 64-word schedule.
+extend = #['bin, 'int] {
+  =[w, t]
+  {
+    | t =64 => w
+    | {
+      wt =
+        [[w, [t, 2] __integer_subtract__] w_at ssig1, [w, [t, 7] __integer_subtract__] w_at] madd
+        ~> [~, [w, [t, 15] __integer_subtract__] w_at ssig0] madd
+        ~> [~, [w, [t, 16] __integer_subtract__] w_at] madd
+
+      [[w, wt, 4] __binary_append__, [t, 1] __integer_add__] ^
+    }
+  }
+}
+
+'state = ['int, 'int, 'int, 'int, 'int, 'int, 'int, 'int]
+
+// The 64 compression rounds over one schedule.
+rounds = #['bin, 'int, 'state] {
+  =[w, t, [a, b, c, d, e, f, g, h]]
+  {
+    | t =64 => [a, b, c, d, e, f, g, h]
+    | {
+      ch =
+        [
+          [e, f] __integer_and__,
+          [[e, 4294967295] __integer_xor__, g] __integer_and__,
+        ] __integer_xor__
+
+      temp1 =
+        [h, e bsig1] madd
+        ~> [~, ch] madd
+        ~> [~, [k256, t] w_at] madd
+        ~> [~, [w, t] w_at] madd
+
+      maj =
+        [
+          [[a, b] __integer_and__, [a, c] __integer_and__] __integer_xor__,
+          [b, c] __integer_and__,
+        ] __integer_xor__
+
+      temp2 = [a bsig0, maj] madd
+      [
+        w,
+        [t, 1] __integer_add__,
+        [[temp1, temp2] madd, a, b, c, [d, temp1] madd, e, f, g],
+      ] ^
+    }
+  }
+}
+
+// Fold each 64-byte block of the padded message into the state.
+blocks = #['bin, 'int, 'state] {
+  =[data, off, st]
+  {
+    | [off, data __binary_length__] __integer_compare__
+      ~> =(0 | 1) => st
+    | {
+      w =
+        [
+          [data, off, [off, 64] __integer_add__] __binary_slice__,
+          16,
+        ] extend
+
+      st =[a0, b0, c0, d0, e0, f0, g0, h0]
+      [w, 0, [a0, b0, c0, d0, e0, f0, g0, h0]] rounds
+      =[a, b, c, d, e, f, g, h]
+      st2 = [
+        [a0, a] madd,
+        [b0, b] madd,
+        [c0, c] madd,
+        [d0, d] madd,
+        [e0, e] madd,
+        [f0, f] madd,
+        [g0, g] madd,
+        [h0, h] madd,
+      ]
+      [data, [off, 64] __integer_add__, st2] ^
+    }
+  }
+}
+
+// The message padded to a whole number of blocks: 0x80, zeros, 8-byte bit length.
+pad = #'bin {
+  =msg
+  len = msg __binary_length__
+  after = [len, 1] __integer_add__
+
+  zeros =
+    [56, [after, 64] __integer_modulo__] __integer_subtract__
+    ~> [~, 64] __integer_add__
+    ~> [~, 64] __integer_modulo__
+
+  [msg, 128, 1] __binary_append__
+  ~> [~, zeros __binary_new__] __binary_concat__
+  ~> [~, [len, 8] __integer_multiply__, 8] __binary_append__
+}
+
+digest = #'state {
+  =[a, b, c, d, e, f, g, h]
+
+  [0x, a, 4] __binary_append__
+  ~> [~, b, 4] __binary_append__
+  ~> [~, c, 4] __binary_append__
+  ~> [~, d, 4] __binary_append__
+  ~> [~, e, 4] __binary_append__
+  ~> [~, f, 4] __binary_append__
+  ~> [~, g, 4] __binary_append__
+  ~> [~, h, 4] __binary_append__
+}
+
+sha256 = #'bin {
+  :doc "The SHA-256 digest of the bytes, as a 32-byte binary."
+  init = [
+    [h256, 0] w_at,
+    [h256, 1] w_at,
+    [h256, 2] w_at,
+    [h256, 3] w_at,
+    [h256, 4] w_at,
+    [h256, 5] w_at,
+    [h256, 6] w_at,
+    [h256, 7] w_at,
+  ]
+  [$ pad, 0, init] blocks digest
+}
+
+ipad = 0x36363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636
+opad = 0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c
+
+hmac_sha256 = #['bin, 'bin] {
+  :doc "The HMAC-SHA256 of the message under the key, as a 32-byte binary."
+  =[key, msg]
+  k1 = {
+    | [key __binary_length__, 64] __integer_compare__ =1 => key sha256
+    | key
+  }
+
+  kp =
+    [
+      k1,
+      [64, k1 __binary_length__] __integer_subtract__
+      ~> __binary_new__,
+    ] __binary_concat__
+
+  inner =
+    [[kp, ipad] __binary_xor__, msg] __binary_concat__
+    ~> sha256
+
+  [[kp, opad] __binary_xor__, inner] __binary_concat__
+  ~> sha256
+}
+
+[sha256: &sha256, hmac_sha256: &hmac_sha256]

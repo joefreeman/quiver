@@ -476,12 +476,142 @@ serialize_response = #'response {
   ["{head}\r\n" .0, b] %bin.concat
 }
 
+// --- cookies and form encoding ---------------------------------------------------------
+
+// Whether a byte is unreserved under percent-encoding (ALPHA / DIGIT / - . _ ~).
+enc_plain? = #'int {
+  | [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0) => $
+  | [$, 65] __integer_compare__ =(0 | 1), [$, 90] __integer_compare__ =(-1 | 0) => $
+  | [$, 97] __integer_compare__ =(0 | 1), [$, 122] __integer_compare__ =(-1 | 0) => $
+  | $ =(45 | 46 | 95 | 126) => $
+}
+
+// An uppercase hex digit.
+hex_upper = #'int {
+  | [$, 10] __integer_compare__ =-1 => [$, 48] __integer_add__
+  | [$, 55] __integer_add__
+}
+
+pct_enc_loop = #['bin, 'int, 'int, 'bin] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | {
+      b = [data, pos] %bin.get_byte
+      acc2 = {
+        | b enc_plain? => [acc, b, 1] %bin.append
+        | b =32 => [acc, 43, 1] %bin.append
+        | {
+          [acc, 37, 1] %bin.append
+          ~> [~, [b, 16] __integer_divide__ hex_upper, 1] %bin.append
+          ~> [~, [b, 16] __integer_modulo__ hex_upper, 1] %bin.append
+        }
+      }
+      [data, [pos, 1] __integer_add__, len, acc2] ^
+    }
+  }
+}
+
+pct_encode = #'bin { [$, 0, $ %bin.length, 0x] pct_enc_loop }
+
+form_encode_loop = #['pairs, 'bin, 'int] {
+  =[pairs, acc, first]
+  pairs {
+    | =Nil => acc
+    | =Cons[[Str[n], Str[v]], rest] => {
+      sep = {
+        | first =1 => acc
+        | [acc, 38, 1] %bin.append
+      }
+
+      acc2 =
+        [sep, n pct_encode] %bin.concat
+        ~> [~, 61, 1] %bin.append
+        ~> [~, v pct_encode] %bin.concat
+
+      [rest, acc2, 0] ^
+    }
+  }
+}
+
+form_encode = #'pairs {
+  :doc "Ordered [name, value] pairs as an application/x-www-form-urlencoded body — the inverse of form_decode."
+  [$, 0x, 1] form_encode_loop
+}
+
+// One `k=v` cookie segment (edges trimmed, value verbatim) prepended to the accumulator;
+// segments without an `=` or with an empty name are skipped.
+cookie_seg = #['bin, 'int, 'int, 'pairs] {
+  =[data, s0, e0, acc]
+  s = [data, s0, e0] trim_start
+  e = [data, s, e0] trim_end
+  {
+    | [data, 61, s] %bin.index =('int)eq, [eq, e] __integer_compare__ =-1, [eq, s] __integer_compare__ =1 => Cons[
+      [Str[[data, s, eq] %bin.slice], Str[[data, [eq, 1] __integer_add__, e] %bin.slice]],
+      acc,
+    ]
+    | acc
+  }
+}
+
+cookies_loop = #['bin, 'int, 'int, 'int, 'pairs] {
+  =[data, start, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => [data, start, pos, acc] cookie_seg
+    | [data, pos] %bin.get_byte =59 => {
+      acc2 = [data, start, pos, acc] cookie_seg
+      [data, [pos, 1] __integer_add__, [pos, 1] __integer_add__, len, acc2] ^
+    }
+    | {
+      [data, start, [pos, 1] __integer_add__, len, acc] ^
+    }
+  }
+}
+
+cookies_hdrs = #['pairs, 'pairs] {
+  =[hs, acc]
+  hs {
+    | =Nil => [acc, Nil] rev
+    | =Cons[[n, Str[vb]], rest] => {
+      acc2 = {
+        | n lower ="cookie" => [vb, 0, 0, vb %bin.length, acc] cookies_loop
+        | acc
+      }
+      [rest, acc2] ^
+    }
+  }
+}
+
+cookies = #' {
+  :doc "The cookies sent with the request (its Cookie headers), as ordered [name, value] pairs; values are verbatim bytes."
+  [$headers, Nil] cookies_hdrs
+}
+
+'attrs = Nil | Cons[Str['bin], ^]
+
+attrs_join = #['attrs, Str['bin]] {
+  =[attrs, acc]
+  attrs {
+    | =Nil => acc
+    | =Cons[a, rest] => [rest, "{acc}; {a}"] ^
+  }
+}
+
+set_cookie = #[Str['bin], Str['bin], 'attrs] {
+  :doc "A Set-Cookie header pair for the name and value, with the given attribute strings (e.g. \"Path=/\", \"HttpOnly\")."
+  =[name, value, attrs]
+  ["set-cookie", [attrs, "{name}={value}"] attrs_join]
+}
+
 [
   header: &header,
   get: &get,
   lower: &lower,
   form: &form,
   form_decode: &form_decode,
+  form_encode: &form_encode,
+  cookies: &cookies,
+  set_cookie: &set_cookie,
   parse_request: &parse_request,
   parse_request_with: &parse_request_with,
   serialize_response: &serialize_response,

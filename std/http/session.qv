@@ -1,0 +1,84 @@
+// Signed-cookie sessions (docs/http.md): the session — ordered [name, value] pairs —
+// rides in the cookie itself as `hex(payload).hex(hmac)`, HMAC-SHA256-verified on read
+// (constant-time compare), so a client can inspect but not forge or tamper. Stateless:
+// nothing server-side, sessions survive restarts if the key does; the trade is that
+// nothing is revocable and the payload is bounded by cookie size limits. The key is
+// any secret binary — `32 %random.bytes` at boot (sessions then reset per run), or a
+// fixed deployment secret.
+//
+//   key = 32 %random.bytes,
+//   sess = [req, key] %http/session.get,          // 'pairs, or nil
+//   resp2 = [resp, key, pairs] %http/session.put  // adds the Set-Cookie header
+
+'pairs = '%http.pairs
+
+or_loop = #['bin, 'int, 'int, 'int] {
+  =[data, pos, len, acc]
+  {
+    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | {
+      [data, [pos, 1] __integer_add__, len, [acc, [data, pos] %bin.get_byte] __integer_or__] ^
+    }
+  }
+}
+
+// Constant-time equality: same length, and the OR of all XORed bytes is zero.
+const_eq? = #['bin, 'bin] {
+  =[a, b]
+
+  [a %bin.length, b %bin.length] __integer_compare__
+  ~> =0
+
+  x = [a, b] %bin.xor
+  [x, 0, x %bin.length, 0] or_loop =0
+  Ok
+}
+
+get = #['%http, 'bin] {
+  :doc "The request's verified session pairs, or nil (no session cookie, malformed, or bad signature)."
+  =[req, key]
+
+  req
+  ~> %http.cookies
+  ~> [~, "session"] %http.get
+  ~> =Str[raw]
+
+  [raw, 46, 0] %bin.index =('int)dot
+
+  [raw, 0, dot] %bin.slice
+  ~> Str[~] %bin.from_hex
+  ~> =('bin)payload
+
+  [raw, [dot, 1] __integer_add__, raw %bin.length] %bin.slice
+  ~> Str[~] %bin.from_hex
+  ~> =('bin)mac
+
+  [[key, payload] %hash.hmac_sha256, mac] const_eq?
+  payload %http.form_decode
+}
+
+put = #['%http.response, 'bin, 'pairs] {
+  :doc "The response with a Set-Cookie header carrying the signed session (Path=/; HttpOnly; SameSite=Lax)."
+  =[resp, key, sess]
+  payload = sess %http.form_encode
+  value = "{payload %bin.to_hex}.{[key, payload] %hash.hmac_sha256 %bin.to_hex}"
+
+  h =
+    [
+      "session",
+      value,
+      Cons["Path=/", Cons["HttpOnly", Cons["SameSite=Lax", Nil]]],
+    ] %http.set_cookie
+
+  Response[status: resp.status, headers: Cons[h, resp.headers], body: resp.body]
+}
+
+clear = #'%http.response {
+  :doc "The response with a Set-Cookie header that expires the session cookie."
+  h =
+    ["session", "", Cons["Path=/", Cons["Max-Age=0", Nil]]] %http.set_cookie
+
+  Response[status: $status, headers: Cons[h, $headers], body: $body]
+}
+
+[get: &get, put: &put, clear: &clear]

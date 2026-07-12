@@ -174,3 +174,95 @@ fn test_served_connection_end_to_end() {
         )
         .expect(r#"["HTTP/1.1 200 OK\r\ncontent-length: 3\r\ncontent-type: text/plain; charset=utf-8\r\n\r\noneHTTP/1.1 200 OK\r\ncontent-length: 3\r\ncontent-type: text/plain; charset=utf-8\r\n\r\ntwo"]"#);
 }
+
+#[test]
+fn test_cookie_parsing() {
+    quiver()
+        .evaluate(
+            r#""GET / HTTP/1.1\r\nCookie: a=1; session=abc.def; b=x%20y\r\n\r\n" .0 %http.parse_request
+               =[r, _], r %http.cookies"#,
+        )
+        .expect(r#"Cons[["a", "1"], Cons[["session", "abc.def"], Cons[["b", "x%20y"], Nil]]]"#);
+    // No Cookie header → no cookies; malformed segments are skipped.
+    quiver()
+        .evaluate(r#""GET / HTTP/1.1\r\n\r\n" .0 %http.parse_request =[r, _], r %http.cookies"#)
+        .expect("Nil");
+}
+
+#[test]
+fn test_set_cookie_builder() {
+    quiver()
+        .evaluate(r#"["s", "v", Cons["Path=/", Cons["HttpOnly", Nil]]] %http.set_cookie"#)
+        .expect(r#"["set-cookie", "s=v; Path=/; HttpOnly"]"#);
+}
+
+#[test]
+fn test_form_encode_round_trip() {
+    // Escaping both ways: spaces, separators, and '=' inside values survive.
+    quiver()
+        .evaluate(r#"Cons[["a b", "c&d=e"], Cons[["k", "v"], Nil]] %http.form_encode Str[~]"#)
+        .expect(r#""a+b=c%26d%3De&k=v""#);
+    quiver()
+        .evaluate(r#"Cons[["a b", "c&d=e"], Nil] %http.form_encode %http.form_decode"#)
+        .expect(r#"Cons[["a b", "c&d=e"], Nil]"#);
+}
+
+#[test]
+fn test_session_round_trip() {
+    // put → Set-Cookie → send it back as Cookie → get verifies and decodes.
+    quiver()
+        .evaluate(
+            r#"
+            key = 0x000102030405060708090a0b0c0d0e0f,
+            resp = Response[status: 200, headers: Nil, body: 0x],
+            r2 = [resp, key, Cons[["count", "7"], Cons[["name", "Ada L"], Nil]]] %http/session.put,
+            [r2.headers, "set-cookie"] %http.header =Str[scb],
+            [scb, 59, 0] %bin.index =('int)semi,
+            cookie = [scb, 0, semi] %bin.slice Str[~],
+            req = "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" .0 %http.parse_request =[rq, _],
+            [rq, key] %http/session.get
+            "#,
+        )
+        .expect(r#"Cons[["count", "7"], Cons[["name", "Ada L"], Nil]]"#);
+}
+
+#[test]
+fn test_session_rejects_tampering() {
+    // A forged MAC, a wrong key, and a garbled payload all answer nil.
+    quiver()
+        .evaluate(
+            r#"
+            key = 0x000102030405060708090a0b0c0d0e0f,
+            req = "GET / HTTP/1.1\r\nCookie: session=ff.00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\r\n\r\n" .0 %http.parse_request =[rq, _],
+            r = [rq, key] %http/session.get,
+            { | r =('%http.pairs)p => Forged | Rejected }
+            "#,
+        )
+        .expect("Rejected");
+    quiver()
+        .evaluate(
+            r#"
+            key = 0x000102030405060708090a0b0c0d0e0f,
+            other = 0xff0102030405060708090a0b0c0d0e0f,
+            resp = Response[status: 200, headers: Nil, body: 0x],
+            r2 = [resp, key, Cons[["a", "1"], Nil]] %http/session.put,
+            [r2.headers, "set-cookie"] %http.header =Str[scb],
+            [scb, 59, 0] %bin.index =('int)semi,
+            cookie = [scb, 0, semi] %bin.slice Str[~],
+            req = "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" .0 %http.parse_request =[rq, _],
+            r = [rq, other] %http/session.get,
+            { | r =('%http.pairs)p => WrongKeyAccepted | Rejected }
+            "#,
+        )
+        .expect("Rejected");
+}
+
+#[test]
+fn test_session_clear() {
+    quiver()
+        .evaluate(
+            r#"Response[status: 200, headers: Nil, body: 0x] %http/session.clear
+               =Response(headers: hs), [hs, "set-cookie"] %http.header"#,
+        )
+        .expect(r#""session=; Path=/; Max-Age=0""#);
+}
