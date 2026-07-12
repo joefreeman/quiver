@@ -10,6 +10,10 @@
           {
             "type": "annotation_name",
             "named": true
+          },
+          {
+            "type": "checked_annotation",
+            "named": true
           }
         ]
       },
@@ -201,7 +205,7 @@
     "fields": {
       "condition": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "expression",
@@ -219,6 +223,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "expression",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -334,6 +348,82 @@
         },
         {
           "type": "tuple",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "checked_annotation",
+    "named": true,
+    "fields": {
+      "key": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "cycle_type",
+          "named": true
+        },
+        {
+          "type": "function_type",
+          "named": true
+        },
+        {
+          "type": "module_type",
+          "named": true
+        },
+        {
+          "type": "partial_type",
+          "named": true
+        },
+        {
+          "type": "process_type",
+          "named": true
+        },
+        {
+          "type": "resource_type",
+          "named": true
+        },
+        {
+          "type": "self_default_type",
+          "named": true
+        },
+        {
+          "type": "tuple_type",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        },
+        {
+          "type": "type_spread",
+          "named": true
+        },
+        {
+          "type": "union_type",
           "named": true
         }
       ]
@@ -689,6 +779,25 @@
     }
   },
   {
+    "type": "interpolation",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "annotation",
+          "named": true
+        },
+        {
+          "type": "branch",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "module_type",
     "named": true,
     "fields": {
@@ -719,6 +828,21 @@
       "types": [
         {
           "type": "type_arguments",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "multiline_string",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "interpolation",
           "named": true
         }
       ]
@@ -1655,6 +1779,10 @@
         {
           "type": "escape_sequence",
           "named": true
+        },
+        {
+          "type": "interpolation",
+          "named": true
         }
       ]
     }
@@ -1669,6 +1797,10 @@
         "types": [
           {
             "type": "annotation_name",
+            "named": true
+          },
+          {
+            "type": "checked_annotation",
             "named": true
           }
         ]
@@ -2080,6 +2212,10 @@
     "named": false
   },
   {
+    "type": "\"\"\"",
+    "named": false
+  },
+  {
     "type": "#",
     "named": false
   },
@@ -2125,6 +2261,10 @@
   },
   {
     "type": ":",
+    "named": false
+  },
+  {
+    "type": ":(",
     "named": false
   },
   {
@@ -2197,10 +2337,6 @@
   },
   {
     "type": "integer",
-    "named": true
-  },
-  {
-    "type": "multiline_string",
     "named": true
   },
   {

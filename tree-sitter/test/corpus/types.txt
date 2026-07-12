@@ -154,7 +154,7 @@ g = #' { 0 }
               name: (type_name))))
         (block
           (branch
-            condition: (expression
+            (expression
               (chain
                 (integer)))))))
     (chain
@@ -163,7 +163,7 @@ g = #' { 0 }
         parameter: (self_default_type)
         (block
           (branch
-            condition: (expression
+            (expression
               (chain
                 (integer)))))))))
 
@@ -183,4 +183,3 @@ function type alias
         name: (type_name))
       output: (type_identifier
         name: (type_name)))))
-

@@ -6,6 +6,7 @@
 
 [
   (block)
+  (interpolation)
   (tuple)
   (tuple_type)
   (partial_type)

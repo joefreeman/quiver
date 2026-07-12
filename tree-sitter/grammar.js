@@ -51,6 +51,18 @@ function immBracketed($, open, rule, close) {
   return seq(token.immediate(open), optional($._nl), optional(commaSep1($, rule)), optional($._nl), close);
 }
 
+/// The body of a checked annotation retrieval after its `:(` opener: the expected shape —
+/// a type (`('t)`) or a partial-field gate (`(line: 'int)`) — then the key glued to the `)`.
+function checkedAnnotationBody($) {
+  return seq(
+    optional($._nl),
+    optional(choice($._type, commaSep1($, $._partial_type_field))),
+    optional($._nl),
+    ')',
+    field('key', alias($._identifier_immediate, $.identifier)),
+  );
+}
+
 module.exports = grammar({
   name: 'quiver',
 
@@ -255,6 +267,7 @@ module.exports = grammar({
     _leading_accessor: $ => choice(
       seq('.', field('field', choice($.identifier, $.index))),
       field('annotation', $.annotation_name),
+      field('annotation', $.checked_annotation),
     ),
 
     _access_source: $ => choice(
@@ -270,8 +283,17 @@ module.exports = grammar({
     _accessor: $ => choice(
       seq('.', field('field', choice($.identifier, $.index))),
       field('annotation', alias($._annotation_name_immediate, $.annotation_name)),
+      field('annotation', alias($._checked_annotation_immediate, $.checked_annotation)),
     ),
     _annotation_name_immediate: _ => token.immediate(seq(':', /[a-z][a-z0-9_]*[?!]?/)),
+
+    // The checked retrieval form `x:('t)key` — a parenthesised expected shape between the
+    // `:` and the key, the `=('t)v` ascription syntax transplanted to retrieval
+    // (`annotation_accessor` in quiver-compiler/src/parser.rs). Everything is glued: `:(`
+    // is a single token (a field label's `:` is followed by a space), and the key sits
+    // immediately after the `)`.
+    checked_annotation: $ => seq(':(', checkedAnnotationBody($)),
+    _checked_annotation_immediate: $ => seq(token.immediate(':('), checkedAnnotationBody($)),
     index: _ => /\d+/,
 
     // `%num`, `%mathx/vec`. The `/` path separator is immediate so a later `mod / x`
@@ -435,9 +457,16 @@ module.exports = grammar({
       repeat(seq(optional($._nl), '|', optional($._nl), $.branch)),
     ),
 
-    branch: $ => seq(
-      field('condition', $.expression),
-      optional(seq(optional($._nl), '=>', optional($._nl), field('consequence', $.expression))),
+    // A branch is either condition-consequence (`… => …`) or a plain expression; the
+    // `condition`/`consequence` fields exist only on the former — a bare branch's body
+    // is not a condition.
+    branch: $ => choice(
+      seq(
+        field('condition', $.expression),
+        optional($._nl), '=>', optional($._nl),
+        field('consequence', $.expression),
+      ),
+      $.expression,
     ),
 
     // ----------------------------------------------------------------------- tuples
@@ -628,33 +657,46 @@ module.exports = grammar({
     integer: _ => /-?\d+/,
     binary: _ => /0x[0-9a-fA-F]*/,
 
+    // A single-line string. Content stops at `{`: an unescaped brace opens an
+    // interpolation hole, parsed exactly like a block body (`string_segments` in
+    // quiver-compiler/src/parser.rs) — a literal `{` is written `\{`, while a bare `}` is
+    // ordinary content. The content token's lexical precedence keeps it ahead of the
+    // whitespace/comment `extras` (as for dialect content). Pattern-position strings
+    // don't interpolate in the real language (`{` is literal there); the grammar
+    // nevertheless shares this rule for both positions — a separate flat-content token
+    // would fight this one in the lexer states where the tuple/pattern-tuple GLR overlap
+    // makes both readings live, and longest-match would swallow the holes. The cost is
+    // that an *unescaped* `{` in a pattern string over-parses as a hole, accepted for
+    // editor purposes (the conventional spelling is `\{` in both positions).
     string: $ => seq(
       '"',
       repeat(choice(
-        token.immediate(prec(1, /[^"\\]+/)),
+        token.immediate(prec(1, /[^"\\{]+/)),
         $.escape_sequence,
+        alias($.block, $.interpolation),
       )),
       '"',
     ),
-    escape_sequence: _ => token.immediate(/\\["\\nrt]/),
+    escape_sequence: _ => token.immediate(/\\["\\nrt{]/),
 
-    // A triple-quoted, multi-line string. It must be a single token so the parser's
-    // whitespace `extras` don't fragment its newlines. The content is escape-aware: a
-    // backslash consumes the next character (so `\"""` doesn't close the string), and a
-    // run of one or two quotes is content while three unescaped quotes close it. Each unit
-    // is up to two quotes followed by an escape (`\` + any char, including a newline) or by
-    // an ordinary non-quote character.
-    multiline_string: _ => token(seq(
+    // A triple-quoted, multi-line string, with the same interpolation holes. The content
+    // between holes is a few immediate tokens whose lexical precedence keeps them ahead
+    // of the whitespace/comment `extras`, which would otherwise eat content (a comment
+    // token could even swallow text after a hole). The main token is a run of
+    // escape-aware units — up to two quotes followed by an escape (`\` + any char,
+    // newlines included) or an ordinary non-quote, non-brace character — so `\"""` stays
+    // content and newlines live inside the token. A quote run that the main token can't
+    // extend (one or two quotes directly before a hole) is picked up by the bare-quotes
+    // token, which stays *below* the closing delimiter's length-3 match so three
+    // unescaped quotes always close the string.
+    multiline_string: $ => seq(
       '"""',
       repeat(choice(
-        /\\(.|\n)/,
-        /[^"\\]/,
-        /"\\(.|\n)/,
-        /"[^"\\]/,
-        /""\\(.|\n)/,
-        /""[^"\\]/,
+        token.immediate(prec(1, /([^"\\{]|\\(.|\n)|""?[^"\\{]|""?\\(.|\n))+/)),
+        token.immediate(/""?/),
+        alias($.block, $.interpolation),
       )),
       '"""',
-    )),
+    ),
   },
 });

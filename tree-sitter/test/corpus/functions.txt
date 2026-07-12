@@ -90,7 +90,7 @@ fact = #'int { [~, 1] ^f }
           name: (type_name))
         (block
           (branch
-            condition: (expression
+            (expression
               (chain
                 (tuple
                   (chain

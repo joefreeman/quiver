@@ -146,7 +146,7 @@ spaced brace is not a dialect
           (identifier)))
       (block
         (branch
-          condition: (expression
+          (expression
             (chain
               (access
                 field: (identifier)))))))))

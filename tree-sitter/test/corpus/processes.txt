@@ -13,7 +13,7 @@ p = @{ !'int { =0 => "done" | [] ^ } }
       (spawn
         (block
           (branch
-            condition: (expression
+            (expression
               (chain
                 (select
                   (receive_type
@@ -29,7 +29,7 @@ p = @{ !'int { =0 => "done" | [] ^ } }
                       (chain
                         (string))))
                   (branch
-                    condition: (expression
+                    (expression
                       (chain
                         (tuple)
                         (tail_call)))))))))))))
@@ -59,7 +59,7 @@ p = [42, 100] @['int, 'int] { $ }, !p
             name: (type_name)))
         (block
           (branch
-            condition: (expression
+            (expression
               (chain
                 (access
                   source: (parameter))))))))

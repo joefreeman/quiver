@@ -10,6 +10,5 @@ sum_ = #['list<'int>, 'int] {
 sum = #'list<'int> { [~, 0] sum_ }
 
 #{
-  // Build and sum a list
-  Cons[1, Cons[2, Cons[3, Nil]]] sum
+  %list{ 1, 2, 3 } sum
 }

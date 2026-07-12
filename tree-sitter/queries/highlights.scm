@@ -72,6 +72,11 @@
 
 (annotation_name) @attribute    ; :doc, :error — declaration, attach, and retrieval
 
+; The checked retrieval form `x:('t)key`: the key is the attribute; the `:(` opener
+; pairs with the closing `)`, which the general bracket rule below already captures.
+(checked_annotation ":(" @punctuation.bracket)
+(checked_annotation key: (identifier) @attribute)
+
 ; ----------------------------------------------------------------- parameters
 
 (parameter) @variable.builtin   ; $
@@ -119,6 +124,12 @@
   "|"
   "."
 ] @punctuation.delimiter
+
+; A string interpolation hole `{ … }` — a block body embedded in a string or multi-line
+; string. Its inner nodes carry their own captures, overriding the enclosing @string;
+; the delimiting braces are marked special so they read as code, not text. (Placed after
+; the general bracket rule so later-wins engines prefer this capture.)
+(interpolation ["{" "}"] @punctuation.special)
 
 (placeholder) @comment.unused
 

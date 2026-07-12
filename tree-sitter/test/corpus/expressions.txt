@@ -69,6 +69,20 @@ string with escape
         (escape_sequence)))))
 
 ==================
+string with escaped brace
+==================
+
+"body \{ margin: 0 }"
+
+---
+
+(source_file
+  (expression
+    (chain
+      (string
+        (escape_sequence)))))
+
+==================
 binary and integer
 ==================
 
@@ -196,3 +210,64 @@ multi-line string with escaped triple quote
   (expression
     (chain
       (multiline_string))))
+
+==================
+string with interpolation hole
+==================
+
+"a \{ b } {x}"
+
+---
+
+(source_file
+  (expression
+    (chain
+      (string
+        (escape_sequence)
+        (interpolation
+          (branch
+            (expression
+              (chain
+                (access
+                  source: (identifier))))))))))
+
+==================
+string hole containing a nested string
+==================
+
+"nested {"quoted" f} end"
+
+---
+
+(source_file
+  (expression
+    (chain
+      (string
+        (interpolation
+          (branch
+            (expression
+              (chain
+                (string)
+                (access
+                  source: (identifier))))))))))
+
+==================
+multi-line string with interpolation hole
+==================
+
+"""
+    hello {name} \{ literal }
+    """
+
+---
+
+(source_file
+  (expression
+    (chain
+      (multiline_string
+        (interpolation
+          (branch
+            (expression
+              (chain
+                (access
+                  source: (identifier))))))))))

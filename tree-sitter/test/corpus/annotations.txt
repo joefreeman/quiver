@@ -40,7 +40,7 @@ block with annotation prefix and body
             (chain
               (string)))
           (branch
-            condition: (expression
+            (expression
               (chain
                 (tuple
                   (chain
@@ -104,3 +104,41 @@ spaced colon is still a field label
           (chain
             (access
               source: (identifier))))))))
+
+==================
+checked annotation retrieval
+==================
+
+r:('perr)error
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier)
+        annotation: (checked_annotation
+          (type_identifier
+            name: (type_name))
+          key: (identifier))))))
+
+==================
+checked annotation retrieval with partial shape
+==================
+
+x:((line: 'int))origin
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier)
+        annotation: (checked_annotation
+          (partial_type
+            name: (identifier)
+            (type_identifier
+              name: (type_name)))
+          key: (identifier))))))
