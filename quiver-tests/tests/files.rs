@@ -234,7 +234,7 @@ fn test_resource_ownership_enforced_after_transfer() {
             r#"
             'holder = Hold[\File];
             h = @{{
-                !#'holder ~> {{ =Hold[_] => ^ }}
+                !#'holder ~> {{ =Hold[_] => [] ~> ^ }}
             }};
             file = ["{}" ~> .0, 0, 0] ~> __file_open__;
             Hold[file] ~> h;

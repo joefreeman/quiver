@@ -431,9 +431,9 @@ pub fn register_vector_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "vector_greater_than", vector::builtin_vector_greater_than, bin_bin_int.clone() => bin_or_nil.clone());
     register_builtin!(registry, "vector_dot", vector::builtin_vector_dot, bin_bin_int => int_or_nil.clone());
     register_builtin!(registry, "vector_take", vector::builtin_vector_take, bin_int_bin => bin_or_nil.clone());
-    register_builtin!(registry, "vector_get", vector::builtin_vector_get, bin_int_int.clone() => int_or_nil.clone());
+    register_builtin!(registry, "vector_get", vector::builtin_vector_get, bin_int_int.clone() => int_or_nil);
     register_builtin!(registry, "vector_push", vector::builtin_vector_push, bin_int_int => bin_or_nil);
-    register_builtin!(registry, "vector_sum", vector::builtin_vector_sum, bin_int => int_or_nil);
+    register_builtin!(registry, "vector_sum", vector::builtin_vector_sum, bin_int => TypeSpec::Integer);
 }
 
 /// Register the reference builtin (`%ref`): a nilary function minting a unique, opaque ref.

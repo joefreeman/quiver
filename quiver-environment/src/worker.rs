@@ -579,6 +579,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     process.result = Some(Err(error));
                     process.frames.clear(); // Complete the process
                 }
+                self.executor.tombstone(awaiter);
             }
         }
         Ok(())

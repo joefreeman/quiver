@@ -1983,11 +1983,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .filter(|d| d.valid && !d.branches.is_empty())
             .map(|d| d.branches);
 
-        // Create type information for the function.
+        // Create type information for the function. The receive type is the final
+        // `current_receive_type_id`: the body pre-pass seed (line above the save), widened
+        // during body compilation by every call/tail-call to a receiving function — a
+        // callee's receives execute in whichever process runs this function.
         let callable_type_id = self.program.register_type(Type::Callable {
             parameter: parameter_type,
             result: body_type,
-            receive: receive_type,
+            receive: self.current_receive_type_id,
         });
 
         let function_index = self.program.register_function(Function {
@@ -5620,28 +5623,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // Start at depth 0 since we haven't descended into any boundaries yet
             let result_type = self.resolve_function_cycles(result_type, target_type_id, 0);
 
-            // Check receive type compatibility
-            let called_receive_type = receive_id;
-
-            // Check if called function has receives (not NEVER)
-            if !self.is_never(called_receive_type) {
-                // Called function has receives - widen current context's receive type
-                if self.is_never(self.current_receive_type_id) {
-                    // Current context has no receive type yet - adopt the called function's receive type
-                    self.current_receive_type_id = called_receive_type;
-                } else if !quiver_core::types::is_compatible(
-                    called_receive_type,
-                    self.current_receive_type_id,
-                    &*self.program,
-                ) {
-                    // Current context has a receive type but it's incompatible - widen to union
-                    self.current_receive_type_id = self.unify_receive_types(vec![
-                        self.current_receive_type_id,
-                        called_receive_type,
-                    ]);
-                }
-                // If compatible, no change needed - current type already includes called type
-            }
+            // Calling a function executes its receives in this process, so its receive
+            // type widens the current context's.
+            self.widen_receive_type(receive_id);
 
             // A nilary callable ignoring a non-nil flow: replace the value on the stack with nil
             // before calling. Stack: [value, callable] -> [callable] -> [nil, callable].
@@ -5704,6 +5688,70 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Widen the current context's receive type by a callee's: calling (or
+    /// tail-calling) a function executes its receives in this process, so the
+    /// enclosing function's receive type must cover them.
+    fn widen_receive_type(&mut self, called_receive_type: usize) {
+        if self.is_never(called_receive_type) {
+            return;
+        }
+        if self.is_never(self.current_receive_type_id) {
+            self.current_receive_type_id = called_receive_type;
+        } else if !quiver_core::types::is_compatible(
+            called_receive_type,
+            self.current_receive_type_id,
+            &*self.program,
+        ) {
+            self.current_receive_type_id =
+                self.unify_receive_types(vec![self.current_receive_type_id, called_receive_type]);
+        }
+    }
+
+    /// Type-check a tail call against the target's callable type: the argument must fit
+    /// the parameter (unifying type variables when the target is generic), and the
+    /// target's receive type widens the current context's, exactly as a normal call
+    /// does. Returns the (substituted) result type.
+    fn check_tail_call_types(
+        &mut self,
+        callable_type_id: usize,
+        arg_type: usize,
+    ) -> Result<usize, Error> {
+        let Some(Type::Callable {
+            parameter,
+            result,
+            receive,
+        }) = self.program.lookup_base(callable_type_id)
+        else {
+            return Err(Error::TypeMismatch {
+                expected: "function".to_string(),
+                found: quiver_core::format::format_type_by_id(&*self.program, callable_type_id),
+            });
+        };
+        let (param_id, result_id, receive_id) = (*parameter, *result, *receive);
+
+        let has_vars = typing::contains_variables(param_id, &*self.program)
+            || typing::contains_variables(result_id, &*self.program);
+        let result_type = if has_vars {
+            let mut bindings = HashMap::new();
+            typing::unify(&mut bindings, param_id, arg_type, self.program)?;
+            typing::substitute(result_id, &bindings, self.program)
+        } else {
+            if !quiver_core::types::is_compatible(arg_type, param_id, &*self.program) {
+                return Err(Error::TypeMismatch {
+                    expected: format!(
+                        "function parameter compatible with {}",
+                        quiver_core::format::format_type_by_id(&*self.program, param_id)
+                    ),
+                    found: quiver_core::format::format_type_by_id(&*self.program, arg_type),
+                });
+            }
+            result_id
+        };
+
+        self.widen_receive_type(receive_id);
+        Ok(result_type)
+    }
+
     fn compile_tail_call(
         &mut self,
         identifier: Option<&str>,
@@ -5711,10 +5759,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         arg_type: Option<usize>,
     ) -> Result<usize, Error> {
         // Handle argument - if none provided, check if function parameter is nil and use that
-        let _arg_type = if let Some(arg_t) = arg_type {
+        let arg_type = if let Some(arg_t) = arg_type {
             arg_t
         } else {
-            let (func_param_type, _) = scopes::get_function_parameter(&self.scopes)?;
+            let (func_param_type, _) = scopes::get_function_parameter_declared(&self.scopes)?;
             if func_param_type == self.program.register_type(Type::nil()) {
                 // Push nil onto stack for tail call
                 let nil_tuple_id = self.program.register_tuple(None, vec![]);
@@ -5729,7 +5777,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         if identifier.is_none() && accessors.is_empty() {
-            // Tail call to parameter - argument is already on stack, just emit tail call
+            // Self tail call: the frame is re-entered with the argument, so it must fit
+            // the enclosing function's *declared* parameter type — not the current
+            // branch's narrowed view (its own receives are already in the receive
+            // seed — no widening needed).
+            let (func_param_type, _) = scopes::get_function_parameter_declared(&self.scopes)?;
+            if !quiver_core::types::is_compatible(arg_type, func_param_type, &*self.program) {
+                return Err(Error::TypeMismatch {
+                    expected: format!(
+                        "function parameter compatible with {}",
+                        quiver_core::format::format_type_by_id(&*self.program, func_param_type)
+                    ),
+                    found: quiver_core::format::format_type_by_id(&*self.program, arg_type),
+                });
+            }
             self.codegen.add_instruction(Instruction::TailCall(true));
             Ok(self.program.never())
         } else {
@@ -5754,17 +5815,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.compile_member_access(name, accessors.to_vec())?.0
             };
 
-            // Verify it's a function
-            match self.program.lookup_base(func_type) {
-                Some(Type::Callable { result, .. }) => {
-                    self.codegen.add_instruction(Instruction::TailCall(false));
-                    Ok(*result)
-                }
-                _ => Err(Error::TypeMismatch {
-                    expected: "function".to_string(),
-                    found: quiver_core::format::format_type_by_id(&*self.program, func_type),
-                }),
-            }
+            // Verify it's a function, check the argument fits its parameter, and widen
+            // the receive type (the callee's receives run in this process).
+            let result_type = self.check_tail_call_types(func_type, arg_type)?;
+            self.codegen.add_instruction(Instruction::TailCall(false));
+            Ok(result_type)
         }
     }
 
@@ -5781,7 +5836,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Error::FeatureUnsupported("`^~` tail call requires a piped function".to_string())
         })?;
         let Some(Type::Callable {
-            parameter, result, ..
+            parameter,
+            result,
+            receive,
         }) = self.program.lookup_base(fn_type)
         else {
             return Err(Error::TypeMismatch {
@@ -5789,7 +5846,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 found: quiver_core::format::format_type_by_id(&*self.program, fn_type),
             });
         };
-        let (parameter, result) = (*parameter, *result);
+        let (parameter, result, receive) = (*parameter, *result, *receive);
+        self.widen_receive_type(receive);
 
         match argument {
             Some(argument) => {

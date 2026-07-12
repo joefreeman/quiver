@@ -10,9 +10,17 @@
 // in a canonical form (`norm`: an integer-valued rational is lowered to a bare int) so that
 // structural scale-equality — used by add/sub — is sound, and so reductions over a unit-scale
 // vector come back as plain integers.
+//
+// Failure discipline (matching `%num`'s tower): every exported operation *accepts* nil in
+// place of any vector/number/mask/int argument and answers nil, so a fallible pipeline
+// (`push` can overflow, `dot` can mismatch, …) flows without per-step narrowing — check once
+// at the end, and read the nil's `origin` stamp (debug builds) to find the failing step.
+// Only `dtype` arguments stay strict: they are always literals, never computed.
 
 'dtype = I32 | I64
 'vec = Vec[dtype: 'dtype, scale: '%num, data: 'bin]
+// A vector, or the nil a failed step produced — every exported op accepts and propagates it.
+'opt = 'vec | []
 // A selection mask: one byte per lane (non-zero selects), as produced by the comparisons and
 // consumed by `filter`. Shares its byte-per-lane shape with a future validity/null mask.
 'mask = Mask['bin]
@@ -30,18 +38,21 @@ norm = #'%num {
   | =x => x
 }
 
-// Append one signed lane; nil if it doesn't fit the dtype.
-push = #['vec, 'int] {
-  :doc "Appends an integer to the end of a vector, preserving its dtype and scale."
-  =[Vec[dtype: d, scale: s, data: data], n]
+// Append one signed lane; nil if it doesn't fit the dtype, or on a nil operand. Like every
+// op here, the opening destructure doubles as the nil guard: a nil field fails the match,
+// which short-circuits to nil — no separate nil arm needed.
+push = #['opt, ('int | [])] {
+  :doc "Appends an integer to the end of a vector, preserving its dtype and scale; nil operands propagate."
+  =[Vec[dtype: d, scale: s, data: data], ('int)n]
 
   __vector_push__ [data, width d, n] ~> =('bin)packed
 
   Vec[dtype: d, scale: s, data: packed]
 }
 
-// Fold a list of stored integer lanes onto a vector (tail-recursive).
-of = #['vec, '%list<'int>] {
+// Fold a list of stored integer lanes onto a vector (tail-recursive). A push failure
+// (overflow) turns the accumulator nil, which propagates through the remaining lanes.
+of = #['opt, '%list<'int>] {
   | =[v, Nil] => v
   | =[v, Cons[x, rest]] => ^ [push [v, x], rest]
 }
@@ -60,11 +71,11 @@ lcm_denoms = #['int, '%list<'%num>] {
 }
 
 // Fold a list of *values* onto a vector, mapping each through `f` to its stored lane. The
-// accumulator carries the mapper by reference. Nil if any value maps to nil (overflow or not
-// representable). `[[vec, mapper], values] -> 'vec | []`.
-buildValues = #[['vec, 'mapper], '%list<'%num>] {
+// accumulator carries the mapper by reference. A value that maps to nil (overflow or not
+// representable) turns the accumulator nil, which propagates. `[[opt, mapper], values] -> 'opt`.
+buildValues = #[['opt, 'mapper], '%list<'%num>] {
   | =[[v, _], Nil] => v
-  | =[[v, f], Cons[x, rest]] => { f x ~> =stored; stored; ^ [[push [v, stored], &f], rest] }
+  | =[[v, f], Cons[x, rest]] => ^ [[push [v, f x], &f], rest]
 }
 
 // Multiply every lane of a buffer by an integer `factor` (used to rescale to a finer scale).
@@ -118,24 +129,24 @@ align = #['vec, 'vec] {
 
 [
   // An empty vector with the given dtype and (canonicalised) scale.
-  new: #['dtype, '%num] {
-    :doc "Creates an empty vector with the given dtype and scale."
-    =[d, scale]; Vec[dtype: d, scale: norm scale, data: 0x]
+  new: #['dtype, ('%num | [])] {
+    :doc "Creates an empty vector with the given dtype and scale; a nil scale propagates."
+    =[d, ('%num)scale]; Vec[dtype: d, scale: norm scale, data: 0x]
   },
 
   // Build from a dtype, scale, and a list of *stored* integer lanes. Each lane's logical
   // value is `stored × scale`. Nil if any value overflows the dtype.
-  of: #['dtype, '%num, '%list<'int>] {
-    :doc "A vector built from stored integer lanes, or nil when a lane overflows the dtype."
-    =[d, scale, xs]
+  of: #['dtype, ('%num | []), ('%list<'int> | [])] {
+    :doc "A vector built from stored integer lanes; nil when a lane overflows the dtype, or on a nil operand."
+    =[d, ('%num)scale, ('%list<'int>)xs]
     of [Vec[dtype: d, scale: norm scale, data: 0x], xs]
   },
 
   // Build from a dtype, scale, and a list of *values*: each lane is `value / scale`, which
   // must be an exact integer (nil otherwise, or on overflow).
-  of_exact: #['dtype, '%num, '%list<'%num>] {
+  of_exact: #['dtype, ('%num | []), ('%list<'%num> | [])] {
     :doc "A vector built from values; nil unless every value is an exact multiple of the scale."
-    =[d, scale, values]
+    =[d, ('%num)scale, ('%list<'%num>)values]
     norm scale ~> =s
     m = #'%num { %num.div [~, s] ~> =Rational[n, 1]; n }
     buildValues [[Vec[dtype: d, scale: s, data: 0x], &m], values]
@@ -143,9 +154,9 @@ align = #['vec, 'vec] {
 
   // Like `of_exact`, but each lane is `value / scale` rounded to the nearest integer (halves
   // away from zero) — lossy, never nil for representable magnitudes.
-  of_round: #['dtype, '%num, '%list<'%num>] {
+  of_round: #['dtype, ('%num | []), ('%list<'%num> | [])] {
     :doc "A vector built from values, rounding each to the nearest multiple of the scale."
-    =[d, scale, values]
+    =[d, ('%num)scale, ('%list<'%num>)values]
     norm scale ~> =s
     m = #'%num { %num.div [~, s] ~> %num.round }
     buildValues [[Vec[dtype: d, scale: s, data: 0x], &m], values]
@@ -154,9 +165,9 @@ align = #['vec, 'vec] {
   // Build from a list of values alone, inferring the finest scale (`1/lcm` of all
   // denominators) that represents every value exactly. Nil on overflow (a very fine inferred
   // scale can make a lane exceed the dtype).
-  of_values: #['dtype, '%list<'%num>] {
+  of_values: #['dtype, ('%list<'%num> | [])] {
     :doc "A vector built from values, inferring the finest exact scale; nil on overflow."
-    =[d, values]
+    =[d, ('%list<'%num>)values]
     lcm_denoms [1, values] ~> =('int)cap
     norm Rational[1, cap] ~> =s
     m = #'%num { %num.mul [~, cap] ~> %num.numer }
@@ -167,31 +178,31 @@ align = #['vec, 'vec] {
   push: &push,
 
   // Number of lanes.
-  len: #'vec {
-    :doc "The number of lanes in a vector."
+  len: #'opt {
+    :doc "The number of lanes in a vector; a nil vector propagates."
     =Vec[dtype: d, scale: _, data: data]
     __integer_divide__ [__binary_length__ data, width d]
   },
 
   // The vector's scale.
-  scale: #'vec {
-    :doc "The vector's scale."
+  scale: #'opt {
+    :doc "The vector's scale; a nil vector propagates."
     =Vec[dtype: _, scale: s, data: _] => s
   },
 
   // Multiply the whole vector by a number — pure metadata (scale ← scale × q), exact, no
   // buffer touched and no overflow possible.
-  scale_by: #['vec, '%num] {
+  scale_by: #['opt, ('%num | [])] {
     :doc "Multiplies a vector by a number exactly, by adjusting its scale; lanes are untouched."
-    =[Vec[dtype: d, scale: s, data: data], q]
+    =[Vec[dtype: d, scale: s, data: data], ('%num)q]
     %num.mul [s, q] ~> =('%num)scaled
     Vec[dtype: d, scale: norm scaled, data: data]
   },
 
   // Read lane `i` as an exact value (`stored × scale`); nil if out of bounds.
-  get: #['vec, 'int] {
+  get: #['opt, ('int | [])] {
     :doc "The exact value of the lane at the given index, or nil when out of bounds."
-    =[Vec[dtype: d, scale: s, data: data], i]
+    =[Vec[dtype: d, scale: s, data: data], ('int)i]
 
     __vector_get__ [data, width d, i] ~> =('int)raw
 
@@ -202,15 +213,17 @@ align = #['vec, 'vec] {
   // add/sub require a shared dtype (nil otherwise). Unequal scales are reconciled to their
   // coarsest common scale (`align`), exactly; a lane overflow during rescaling or combining
   // is nil.
-  add: #['vec, 'vec] {
+  add: #['opt, 'opt] {
     :doc "Adds two vectors lane-wise, reconciling scales; nil on dtype mismatch or overflow."
-    align ~> =[d, w, s, da, db]
+    =[('vec)a, ('vec)b]
+    align [a, b] ~> =[d, w, s, da, db]
     __vector_add__ [da, db, w] ~> =('bin)packed
     Vec[dtype: d, scale: s, data: packed]
   },
-  sub: #['vec, 'vec] {
+  sub: #['opt, 'opt] {
     :doc "Subtracts one vector from another lane-wise; nil on dtype mismatch or overflow."
-    align ~> =[d, w, s, da, db]
+    =[('vec)a, ('vec)b]
+    align [a, b] ~> =[d, w, s, da, db]
 
     __vector_subtract__ [da, db, w] ~> =('bin)packed
 
@@ -219,7 +232,7 @@ align = #['vec, 'vec] {
 
   // mul combines scales exactly (result scale = sₐ × s_b); the lanes just multiply. Dtypes
   // must match; a lane overflow is nil.
-  mul: #['vec, 'vec] {
+  mul: #['opt, 'opt] {
     :doc "Multiplies two vectors lane-wise, combining scales; nil on dtype mismatch or overflow."
     =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]]
 
@@ -231,16 +244,15 @@ align = #['vec, 'vec] {
 
   // Exact reductions: sum = (Σ stored) × scale, dot = (Σ aᵢbᵢ) × sₐs_b. A unit scale yields a
   // plain integer; a fractional scale yields a rational.
-  sum: #'vec {
-    :doc "The exact sum of all lanes, as an integer or rational."
+  sum: #'opt {
+    :doc "The exact sum of all lanes, as an integer or rational; a nil vector propagates."
     =Vec[dtype: d, scale: s, data: data]
 
-    __vector_sum__ [data, width d] ~> =('int)total
-
+    __vector_sum__ [data, width d] ~> =total
     %num.mul [total, s] ~> =('%num)scaled
     norm scaled
   },
-  dot: #['vec, 'vec] {
+  dot: #['opt, 'opt] {
     :doc "The exact dot product of two vectors; nil on dtype or length mismatch."
     =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]]
 
@@ -255,22 +267,31 @@ align = #['vec, 'vec] {
   // the comparison is between *logical* values rather than raw lanes; the result is a `Mask`
   // with one byte per lane (1 where the predicate holds). Nil on dtype/length mismatch or a
   // rescale overflow.
-  lt: #['vec, 'vec] {
+  lt: #['opt, 'opt] {
     :doc "A mask selecting lanes where the first vector is less than the second; nil on mismatch."
-    align ~> =[_, w, _, da, db]; __vector_less_than__ [da, db, w] ~> =('bin)m; Mask[m]
+    =[('vec)a, ('vec)b]
+    align [a, b] ~> =[_, w, _, da, db]
+    __vector_less_than__ [da, db, w] ~> =('bin)m
+    Mask[m]
   },
-  eq: #['vec, 'vec] {
+  eq: #['opt, 'opt] {
     :doc "A mask selecting lanes where the two vectors are equal; nil on mismatch."
-    align ~> =[_, w, _, da, db]; __vector_equal__ [da, db, w] ~> =('bin)m; Mask[m]
+    =[('vec)a, ('vec)b]
+    align [a, b] ~> =[_, w, _, da, db]
+    __vector_equal__ [da, db, w] ~> =('bin)m
+    Mask[m]
   },
-  gt: #['vec, 'vec] {
+  gt: #['opt, 'opt] {
     :doc "A mask selecting lanes where the first vector exceeds the second; nil on mismatch."
-    align ~> =[_, w, _, da, db]; __vector_greater_than__ [da, db, w] ~> =('bin)m; Mask[m]
+    =[('vec)a, ('vec)b]
+    align [a, b] ~> =[_, w, _, da, db]
+    __vector_greater_than__ [da, db, w] ~> =('bin)m
+    Mask[m]
   },
 
   // Keep only the lanes the mask selects (non-zero byte), preserving dtype and scale. The mask
   // must have one byte per lane (as produced by the comparisons); a length mismatch is nil.
-  filter: #['vec, 'mask] {
+  filter: #['opt, ('mask | [])] {
     :doc "Keeps only the lanes selected by the mask; nil when the mask length does not match."
     =[Vec[dtype: d, scale: s, data: data], Mask[m]]
 
@@ -281,9 +302,9 @@ align = #['vec, 'vec] {
 
   // A `count`-lane vector with every lane's stored value `value` (logical `value × scale`),
   // stored compactly (tiled) until an operation realises it.
-  fill: #['dtype, '%num, 'int, 'int] {
+  fill: #['dtype, ('%num | []), ('int | []), ('int | [])] {
     :doc "A vector of the given lane count with every lane set to the given stored value."
-    =[d, scale, value, count]
+    =[d, ('%num)scale, ('int)value, ('int)count]
     norm scale ~> =s
 
     Vec[dtype: d, scale: s, data: 0x] ~> push [~, value] ~> =('vec)unit

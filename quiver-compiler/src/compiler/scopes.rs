@@ -228,3 +228,20 @@ pub fn get_function_parameter(scopes: &[Scope]) -> Result<(usize, usize), Error>
         message: "No function parameter available ($ used outside function)".to_string(),
     })
 }
+
+/// Get the enclosing function's *declared* parameter type, ignoring any narrowing
+/// applied by the current branch's patterns. A self tail call (`^`) re-enters the whole
+/// function — every branch re-dispatches — so its argument is checked against the
+/// declared parameter, not the branch's narrowed view of it.
+pub fn get_function_parameter_declared(scopes: &[Scope]) -> Result<(usize, usize), Error> {
+    for scope in scopes.iter().rev() {
+        if scope.kind == ScopeKind::Function
+            && let Some(param) = &scope.parameter
+        {
+            return Ok((param.ty, param.index));
+        }
+    }
+    Err(Error::InternalError {
+        message: "No function parameter available (^ used outside function)".to_string(),
+    })
+}

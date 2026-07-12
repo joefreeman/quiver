@@ -491,6 +491,10 @@ render_list = #[#^ -> 'bin, 'nodes, 'bin] {
               }
             }
           }
+        // Unreachable: the arms above cover every node variant, but exhaustiveness
+        // can't see through the inner recursive union, so a catch-all keeps the
+        // dispatch infallible (and the accumulator typed 'bin).
+        | acc
       }
       ^ [&self, rest, acc2]
     }

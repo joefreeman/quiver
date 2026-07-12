@@ -6,6 +6,11 @@
 //! that bookkeeping lives in `std/vec.qv`. Anything that could overflow the lane width is
 //! **checked**, returning nil (`[]`) rather than wrapping, matching the language's
 //! nil-propagation convention. Reductions accumulate into `BigInt`, so they never overflow.
+//!
+//! Failure discipline: nil is reserved for **value-dependent** conditions (overflow, a
+//! length mismatch between two vectors, an out-of-bounds index). A **ragged** buffer —
+//! one whose length isn't a whole number of lanes — is a violated invariant (only
+//! reachable by hand-forging a `Vec[...]` value), so it is a runtime error, not nil.
 use crate::binary::BinaryData;
 use crate::builtins::{BuiltinResult, value_to_i64};
 use crate::effects::Effect;
@@ -62,9 +67,21 @@ fn nil<E: Effect>() -> BuiltinResult<E> {
     BuiltinResult::Value(Value::nil())
 }
 
+/// Reject a ragged buffer: a length that isn't a whole number of lanes is a violated
+/// invariant (a hand-forged `Vec` value, not a data condition) — an error, not nil.
+fn check_lanes(len: usize, width: usize) -> Result<(), Error> {
+    if len.is_multiple_of(width) {
+        Ok(())
+    } else {
+        Err(Error::InvalidArgument(format!(
+            "Ragged vector buffer: {len} bytes is not a whole number of {width}-byte lanes"
+        )))
+    }
+}
+
 /// Shared core for the elementwise binary kernels (`add`/`sub`/`mul`). Reconciling scales
 /// or dtypes is the Quiver layer's job; here both buffers must already share a width and
-/// length. Returns nil on length mismatch, ragged buffers, or a lane that overflows `width`.
+/// length. Returns nil on length mismatch or a lane that overflows `width`.
 fn elementwise<E: Effect>(
     arg: &Value,
     executor: &mut Executor<E>,
@@ -80,8 +97,10 @@ fn elementwise<E: Effect>(
     let width = checked_width(width)?;
     let a = executor.materialize(a)?;
     let b = executor.materialize(b)?;
+    check_lanes(a.len(), width)?;
+    check_lanes(b.len(), width)?;
 
-    if a.len() != b.len() || a.len() % width != 0 {
+    if a.len() != b.len() {
         return Ok(nil());
     }
 
@@ -127,7 +146,7 @@ pub fn builtin_vector_multiply<E: Effect>(
 /// Shared core for the comparison kernels (`lt`/`eq`/`gt`). Both buffers must already share a
 /// width, length, and scale — aligning scales is the Quiver layer's job, so a comparison is
 /// between logical values, not raw lanes. Produces a **mask**: one byte per lane, `1` where the
-/// predicate holds and `0` otherwise. Returns nil on length mismatch or a ragged buffer.
+/// predicate holds and `0` otherwise. Returns nil on length mismatch.
 fn compare<E: Effect>(
     arg: &Value,
     executor: &mut Executor<E>,
@@ -143,8 +162,10 @@ fn compare<E: Effect>(
     let width = checked_width(width)?;
     let a = executor.materialize(a)?;
     let b = executor.materialize(b)?;
+    check_lanes(a.len(), width)?;
+    check_lanes(b.len(), width)?;
 
-    if a.len() != b.len() || a.len() % width != 0 {
+    if a.len() != b.len() {
         return Ok(nil());
     }
 
@@ -187,7 +208,7 @@ pub fn builtin_vector_greater_than<E: Effect>(
 
 /// Gather the lanes selected by a mask: `vector_take([data, width, mask]) -> bin | []`. `mask` is
 /// one byte per lane (non-zero selects); the kept lanes are packed, in order, into a fresh
-/// buffer. Nil if the mask length doesn't match the lane count, or the data buffer is ragged.
+/// buffer. Nil if the mask length doesn't match the lane count.
 pub fn builtin_vector_take<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
@@ -203,8 +224,9 @@ pub fn builtin_vector_take<E: Effect>(
     let width = checked_width(width)?;
     let data = executor.materialize(data)?;
     let mask = executor.materialize(mask)?;
+    check_lanes(data.len(), width)?;
 
-    if data.len() % width != 0 || mask.len() != data.len() / width {
+    if mask.len() != data.len() / width {
         return Ok(nil());
     }
 
@@ -220,7 +242,7 @@ pub fn builtin_vector_take<E: Effect>(
 }
 
 /// Read one lane as a signed integer: `vector_get([bin, width, index]) -> int | []`.
-/// Nil for a negative or out-of-bounds index, or a ragged buffer.
+/// Nil for a negative or out-of-bounds index.
 pub fn builtin_vector_get<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
@@ -236,11 +258,12 @@ pub fn builtin_vector_get<E: Effect>(
     let width = checked_width(width)?;
     let bytes = executor.materialize(binary)?;
 
+    check_lanes(bytes.len(), width)?;
     let index = index.as_int().ok_or_else(arity_error)?;
     let Some(index) = index
         .to_i64()
         .and_then(|i| usize::try_from(i).ok())
-        .filter(|i| bytes.len() % width == 0 && (*i + 1).saturating_mul(width) <= bytes.len())
+        .filter(|i| (*i + 1).saturating_mul(width) <= bytes.len())
     else {
         return Ok(nil());
     };
@@ -248,7 +271,7 @@ pub fn builtin_vector_get<E: Effect>(
 }
 
 /// Append one signed lane: `vector_push([bin, width, value]) -> bin | []`.
-/// Nil if `value` doesn't fit the lane width, or the buffer is ragged.
+/// Nil if `value` doesn't fit the lane width.
 ///
 /// Appends via an O(1) `Concat`: cloning the existing buffer is a refcount bump (`Owned` is
 /// `Rc`-backed), so folding this to build a vector is O(n), not O(n²). The result is a rope
@@ -274,9 +297,7 @@ pub fn builtin_vector_push<E: Effect>(
 
     let old = executor.get_binary_data(binary)?;
     let old_len = old.len();
-    if old_len % width != 0 {
-        return Ok(nil());
-    }
+    check_lanes(old_len, width)?;
 
     let mut lane_bytes = Vec::with_capacity(width);
     push_lane(&mut lane_bytes, width, value);
@@ -294,7 +315,8 @@ pub fn builtin_vector_push<E: Effect>(
     )))
 }
 
-/// Sum of all lanes: `vector_sum([bin, width]) -> int | []`. Exact (BigInt), so never overflows.
+/// Sum of all lanes: `vector_sum([bin, width]) -> int`. Exact (BigInt), so never overflows
+/// and never nil.
 pub fn builtin_vector_sum<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
@@ -309,9 +331,7 @@ pub fn builtin_vector_sum<E: Effect>(
     };
     let width = checked_width(width)?;
     let bytes = executor.materialize(binary)?;
-    if bytes.len() % width != 0 {
-        return Ok(nil());
-    }
+    check_lanes(bytes.len(), width)?;
     let mut acc = BigInt::zero();
     for i in 0..bytes.len() / width {
         acc += lane(&bytes, width, i);
@@ -320,7 +340,7 @@ pub fn builtin_vector_sum<E: Effect>(
 }
 
 /// Dot product: `vector_dot([bin, bin, width]) -> int | []`. Exact (BigInt); nil on length
-/// mismatch or a ragged buffer.
+/// mismatch.
 pub fn builtin_vector_dot<E: Effect>(
     _process_id: ProcessId,
     arg: &Value,
@@ -336,7 +356,9 @@ pub fn builtin_vector_dot<E: Effect>(
     let width = checked_width(width)?;
     let a = executor.materialize(a)?;
     let b = executor.materialize(b)?;
-    if a.len() != b.len() || a.len() % width != 0 {
+    check_lanes(a.len(), width)?;
+    check_lanes(b.len(), width)?;
+    if a.len() != b.len() {
         return Ok(nil());
     }
     let mut acc = BigInt::zero();

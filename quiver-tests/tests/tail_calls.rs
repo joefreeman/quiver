@@ -108,3 +108,47 @@ fn test_ripple_tail_call_requires_function() {
             found: "'int".to_string(),
         });
 }
+
+#[test]
+fn test_self_tail_call_argument_is_type_checked() {
+    // Bare `^` re-enters the function, so its argument must fit the declared
+    // parameter (regression: this used to compile unchecked and fail at runtime
+    // as a field access).
+    quiver()
+        .evaluate("f = #'int { ^ [1, 2] }; 1 ~> f")
+        .expect_error_containing("function parameter compatible with");
+}
+
+#[test]
+fn test_named_tail_call_argument_is_type_checked() {
+    // `^f` is checked against f's parameter type, like a normal call.
+    quiver()
+        .evaluate(
+            r#"
+            g = #'int { $ };
+            f = #'int { ^g [1, 2] };
+            1 ~> f
+            "#,
+        )
+        .expect_error_containing("function parameter compatible with");
+}
+
+#[test]
+fn test_self_tail_call_checks_declared_parameter_not_narrowed() {
+    // Inside a branch the pattern narrows the parameter's type; `^` re-enters the
+    // whole function (every branch re-dispatches), so the recursion argument is
+    // checked against the *declared* parameter — here the full list union, not the
+    // branch's Cons narrowing.
+    quiver()
+        .evaluate(
+            r#"
+            'ints = Nil | Cons['int, ^];
+            sum = #['int, 'ints] {
+              | =[acc, Nil] => acc
+              | =[acc, Cons[x, rest]] => ^ [__integer_add__ [acc, x], rest]
+            };
+            [0, Cons[1, Cons[2, Cons[3, Nil]]]] ~> sum
+            "#,
+        )
+        .expect("6");
+}

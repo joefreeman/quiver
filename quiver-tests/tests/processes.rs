@@ -233,6 +233,91 @@ fn test_receive_function_cannot_send() {
 }
 
 #[test]
+fn test_receive_function_cannot_select() {
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ ![#'int { !#'int; Ok }] };
+            10 ~> p;
+            !p
+            "#,
+        )
+        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
+            operation: "select".to_string(),
+            context: "receive function".to_string(),
+        });
+}
+
+#[test]
+fn test_receive_function_cannot_await() {
+    quiver()
+        .evaluate(
+            r#"
+            q = @#{ 42 };
+            p = @#{ ![#'int { !q; Ok }] };
+            10 ~> p;
+            !p
+            "#,
+        )
+        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
+            operation: "select".to_string(),
+            context: "receive function".to_string(),
+        });
+}
+
+#[test]
+fn test_receive_function_cannot_perform_effect() {
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"
+            p = @#{ ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__; Ok }] };
+            10 ~> p;
+            !p
+            "#,
+        )
+        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
+            operation: "effect".to_string(),
+            context: "receive function".to_string(),
+        });
+}
+
+#[test]
+fn test_await_same_process_twice() {
+    // Re-awaiting a process re-registers the await, displacing the previously stored
+    // result in the awaiting map — which must be released, not leaked (regression:
+    // the insert used to clobber the retained value; caught by the debug refcount
+    // invariant at completion).
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ "hello" };
+            !p;
+            !p
+            "#,
+        )
+        .expect("\"hello\"");
+}
+
+#[test]
+fn test_send_to_completed_process_is_dropped() {
+    // Messages to a dead process are dropped (not queued on the tombstone); the stored
+    // result stays awaitable afterwards, and heap-carrying messages must not leak
+    // (validated by the debug refcount invariant at completion).
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ !#Str['bin] };
+            "first" ~> p;
+            !p;
+            "second" ~> p;
+            !p
+            "#,
+        )
+        .expect("\"first\"");
+}
+
+#[test]
 fn test_multiple_receives_same_type() {
     quiver().evaluate("@#{ !#'int; !#'int }").expect("@1");
 }
@@ -885,4 +970,38 @@ fn test_general_select_is_glued() {
     quiver()
         .evaluate("p = @#{ 42 }; ! [p, 1000]")
         .expect_parse_failure();
+}
+
+#[test]
+fn test_receive_type_propagates_through_call() {
+    // Calling a receiver executes its receives in this process, so the spawned
+    // function's receive type includes the callee's (regression: the widening was
+    // computed but discarded when the callable's type was registered).
+    quiver()
+        .evaluate(
+            r#"
+            f = #[] { !#'int };
+            g = #[] { f };
+            p = @g;
+            5 ~> p;
+            !p
+            "#,
+        )
+        .expect("5");
+}
+
+#[test]
+fn test_receive_type_propagates_through_tail_call() {
+    // Same as above through `^f` (regression: tail calls never widened at all).
+    quiver()
+        .evaluate(
+            r#"
+            f = #[] { !#'int };
+            g = #[] { ^f };
+            p = @g;
+            5 ~> p;
+            !p
+            "#,
+        )
+        .expect("5");
 }

@@ -518,6 +518,44 @@ impl<E: Effect> Executor<E> {
         true
     }
 
+    /// Drop a completed process's execution state — stack, locals, mailbox, awaited results,
+    /// and any select state — releasing the heap references they held. Only the stored
+    /// `result` survives, so late awaits (`!p`) keep working. The entry itself (the tombstone)
+    /// stays in the process map: reclaiming it needs pid-liveness tracking, which doesn't
+    /// exist yet (see docs/process-state.md). Persistent (REPL) processes are exempt — they
+    /// resume across submissions and keep their locals and mailbox. Idempotent.
+    pub fn tombstone(&mut self, pid: ProcessId) {
+        let taken = self.get_process_mut(pid).and_then(|process| {
+            if process.persistent {
+                return None;
+            }
+            Some((
+                std::mem::take(&mut process.stack),
+                std::mem::take(&mut process.mailbox),
+                std::mem::take(&mut process.awaiting),
+                process.select_state.take(),
+            ))
+        });
+        let Some((stack, mailbox, awaiting, select_state)) = taken else {
+            return;
+        };
+        for value in stack.iter().chain(mailbox.iter()) {
+            self.release(value);
+        }
+        for value in awaiting.values().flatten() {
+            self.release(value);
+        }
+        if let Some(state) = select_state {
+            for source in &state.sources {
+                self.release(source);
+            }
+            if let Some((_, message)) = &state.receiving {
+                self.release(message);
+            }
+        }
+        self.truncate_locals_pid(pid, 0);
+    }
+
     /// Validate the reference-count invariant against the tracing oracle: every heap slot must
     /// have a positive count exactly when it is reachable from a root ([`reachable_heap_indices`]).
     /// Returns the first violating slot, so it doubles as a debug assertion (the wiring is
@@ -799,13 +837,18 @@ impl<E: Effect> Executor<E> {
         // Inject heap data into the result value
         let injected_result = self.inject_heap_data(result, &heap)?;
 
-        // Store the result in the process's awaiting map (retaining as it enters storage).
+        // Store the result in the process's awaiting map (retaining as it enters storage,
+        // releasing any stale result the insert displaces).
         if self.get_process(awaiter).is_some() {
             self.retain(&injected_result);
-            self.get_process_mut(awaiter)
+            let displaced = self
+                .get_process_mut(awaiter)
                 .unwrap()
                 .awaiting
                 .insert(awaited, Some(injected_result));
+            if let Some(Some(old)) = displaced {
+                self.release(&old);
+            }
         }
 
         // Re-queue awaiter to retry its Select instruction
@@ -844,6 +887,7 @@ impl<E: Effect> Executor<E> {
             .get_process_mut(process_id)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
+        let mut killed = false;
         match value_result {
             Ok(value) => {
                 // Success: push value and increment counter
@@ -856,7 +900,11 @@ impl<E: Effect> Executor<E> {
                 // Error: set error and terminate the process
                 process.result = Some(Err(error));
                 process.frames.clear();
+                killed = true;
             }
+        }
+        if killed {
+            self.tombstone(process_id);
         }
 
         // Re-queue if it was effecting
@@ -873,10 +921,16 @@ impl<E: Effect> Executor<E> {
         message: Value,
         heap: Vec<Vec<u8>>,
     ) -> Result<(), Error> {
-        // Inject heap data into the message value
-        let injected_message = self.inject_heap_data(message, &heap)?;
+        // A completed process can never receive again — drop the message (rather than
+        // queueing it forever on the tombstone). Persistent (REPL) processes complete
+        // between submissions but stay addressable, so they still queue. Skipping the
+        // heap injection entirely means there is nothing to account for.
+        let deliverable = self
+            .get_process(id)
+            .is_some_and(|p| p.persistent || p.result.is_none());
 
-        if self.get_process(id).is_some() {
+        if deliverable {
+            let injected_message = self.inject_heap_data(message, &heap)?;
             self.retain(&injected_message);
             self.get_process_mut(id)
                 .unwrap()
@@ -1349,6 +1403,7 @@ impl<E: Effect> Executor<E> {
                             awaiter_process.result = Some(Err(error.clone()));
                             awaiter_process.frames.clear();
                         }
+                        self.tombstone(awaiter);
                     }
                     None => {
                         // No result yet (shouldn't happen at this point)
@@ -1357,6 +1412,9 @@ impl<E: Effect> Executor<E> {
                     }
                 }
             }
+
+            // The process can never run again: drop its execution state, keeping the result.
+            self.tombstone(current_pid);
 
             // Validate the refcount invariant at this quiescent point (debug only) — the
             // worker/concurrency-path counterpart of the check in `execute_bytecode_sync`. This
@@ -2012,6 +2070,21 @@ impl<E: Effect> Executor<E> {
                         Ok(None)
                     }
                     crate::builtins::BuiltinResult::Action(action) => {
+                        // A receive function (select filter) may be re-evaluated, so builtins
+                        // that need routing (effects and friends) are rejected there.
+                        if proc.is_receiving() {
+                            return Err(Error::OperationNotAllowed {
+                                operation: match &action {
+                                    Action::RequestEffect { .. } => "effect",
+                                    Action::Spawn { .. } => "spawn",
+                                    Action::Deliver { .. } => "send",
+                                    Action::Await { .. } => "await",
+                                }
+                                .to_string(),
+                                context: "receive function".to_string(),
+                            });
+                        }
+
                         // Check if this is an effect request and mark process as effecting
                         if let Action::RequestEffect { process_id, .. } = &action {
                             self.mark_effecting(*process_id);
@@ -2195,20 +2268,20 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        // Check if we're inside a receive function
-        let is_receiving = self
-            .get_process(pid)
-            .and_then(|p| p.select_state.as_ref())
-            .and_then(|s| s.receiving.as_ref())
-            .is_some();
-
-        if is_receiving {
+    /// Reject `operation` if `pid` is executing a receive function (select filter) — a
+    /// restricted context that may be re-evaluated and must stay pure.
+    fn check_not_receiving(&self, pid: ProcessId, operation: &str) -> Result<(), Error> {
+        if self.get_process(pid).is_some_and(Process::is_receiving) {
             return Err(Error::OperationNotAllowed {
-                operation: "spawn".to_string(),
+                operation: operation.to_string(),
                 context: "receive function".to_string(),
             });
         }
+        Ok(())
+    }
+
+    fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
+        self.check_not_receiving(pid, "spawn")?;
 
         let (function_value, argument) = {
             let process = self
@@ -2247,19 +2320,7 @@ impl<E: Effect> Executor<E> {
     }
 
     fn handle_send(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        // Check if we're inside a receive function
-        let is_receiving = self
-            .get_process(pid)
-            .and_then(|p| p.select_state.as_ref())
-            .and_then(|s| s.receiving.as_ref())
-            .is_some();
-
-        if is_receiving {
-            return Err(Error::OperationNotAllowed {
-                operation: "send".to_string(),
-                context: "receive function".to_string(),
-            });
-        }
+        self.check_not_receiving(pid, "send")?;
 
         let (target_value, message) = {
             let process = self
@@ -2360,9 +2421,12 @@ impl<E: Effect> Executor<E> {
         let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
 
         if select_state.frame != current_frame || select_state.instruction != current_instruction {
-            return Err(Error::InvalidArgument(
-                "Cannot nest select instructions (select in receive handler)".to_string(),
-            ));
+            // A select at a different position while select state exists is a select (or
+            // await) inside a receive function — a restricted context (see `is_receiving`).
+            return Err(Error::OperationNotAllowed {
+                operation: "select".to_string(),
+                context: "receive function".to_string(),
+            });
         }
 
         // If we just finished executing a receive function, pop the verdict. It is only inspected
@@ -2437,10 +2501,18 @@ impl<E: Effect> Executor<E> {
             receiving: None,
         });
 
-        // If we found PIDs, register awaits before processing sources
+        // If we found PIDs, register awaits before processing sources. Re-awaiting a
+        // target displaces the previously stored result — release it (it was retained
+        // when it entered the map).
         if !pid_targets.is_empty() {
+            let mut displaced = Vec::new();
             for target in &pid_targets {
-                process.awaiting.insert(*target, None);
+                if let Some(Some(old)) = process.awaiting.insert(*target, None) {
+                    displaced.push(old);
+                }
+            }
+            for old in &displaced {
+                self.release(old);
             }
 
             self.mark_selecting(pid);

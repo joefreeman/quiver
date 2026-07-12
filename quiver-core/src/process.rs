@@ -136,6 +136,15 @@ pub struct Process {
 }
 
 impl Process {
+    /// Whether this process is currently executing a receive function (select filter).
+    /// A filter may be evaluated repeatedly, so it must stay pure: spawns, sends,
+    /// selects, and effects are rejected while this is true.
+    pub fn is_receiving(&self) -> bool {
+        self.select_state
+            .as_ref()
+            .is_some_and(|s| s.receiving.is_some())
+    }
+
     pub fn new(persistent: bool) -> Self {
         Self {
             stack: Vec::new(),

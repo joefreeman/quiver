@@ -419,3 +419,37 @@ fn test_compare_dtype_mismatch_is_nil() {
         ))
         .expect("[]");
 }
+
+#[test]
+fn test_nil_propagates_through_pipeline() {
+    // Every %vec op accepts and propagates nil (the %num 'opt convention), so a
+    // fallible pipeline needs no per-step narrowing: an I32 overflow inside `of`
+    // surfaces as nil from the far end of the chain.
+    quiver()
+        .evaluate(
+            r#"
+            vec = %vec
+            (prepend, new) = %list
+            xs = new ~> [~, 5000000000] ~> prepend
+            [I32, 1, xs] ~> vec.of ~> vec.len
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_ragged_buffer_is_a_runtime_error() {
+    // A ragged buffer (a length that isn't a whole number of lanes) is a violated
+    // invariant — only reachable by hand-forging a Vec value — so the kernels treat
+    // it as a runtime error rather than answering nil.
+    quiver()
+        .evaluate(
+            r#"
+            vec = %vec
+            Vec[dtype: I32, scale: 1, data: 0x0102] ~> vec.sum
+            "#,
+        )
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "Ragged vector buffer: 2 bytes is not a whole number of 4-byte lanes".to_string(),
+        ));
+}
