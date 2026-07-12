@@ -193,6 +193,9 @@ fn term_references_parameter(term: &ast::Term) -> bool {
         ast::Term::Access(access) | ast::Term::Reference(access) => {
             matches!(access.source, Some(ast::AccessSource::Parameter))
         }
+        ast::Term::State(_, access, _) => {
+            matches!(access.source, Some(ast::AccessSource::Parameter))
+        }
         ast::Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
             ast::FieldValue::Chain(c) => chain(c),
             ast::FieldValue::Spread(_) => false,
@@ -3746,7 +3749,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             | ast::Term::Access(_)
             | ast::Term::Self_
             | ast::Term::Process(_)
-            | ast::Term::Reference(_) => {}
+            | ast::Term::Reference(_)
+            | ast::Term::State(..) => {}
         }
         Ok(())
     }
@@ -5213,6 +5217,61 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     narrowing,
                     expected,
                 )
+            }
+            ast::Term::State(check, access, span) => {
+                // `?('t)p` — sample a process's state (docs/process-state.md). The expected
+                // shape is applied by the instruction at runtime (exactly as checked
+                // annotation retrieval gates an entry), so the static result is `'t | []`.
+                // The flowing value is unused: the target names the process explicitly.
+                if value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+
+                let Some(ast_type) = check else {
+                    return Err(Error::FeatureUnsupported(
+                        "a bare `?p` needs an inferred state type, which doesn't exist yet \
+                         — state the expected shape with the checked form: `?('t)p`"
+                            .to_string(),
+                    ));
+                };
+
+                // Load the target without calling it (exactly as `&p` compiles).
+                let (target_type, _) = self.compile_term(
+                    ast::Term::Reference(access),
+                    FlowingValue {
+                        ty: None,
+                        provenance: Provenance::Unknown,
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+                if !matches!(
+                    self.program.lookup_base(target_type),
+                    Some(Type::Process { .. })
+                ) {
+                    return Err(Error::TypeMismatch {
+                        expected: "process".to_string(),
+                        found: quiver_core::format::format_type_by_id(&*self.program, target_type),
+                    });
+                }
+
+                let mut env = typing::TypeEnv {
+                    resolver: self.resolver,
+                    module_cache: &mut *self.module_cache,
+                    package: &self.current_package,
+                };
+                let asked =
+                    typing::resolve_ast_type(&mut env, &self.scopes, ast_type, self.program)?;
+
+                self.codegen
+                    .add_instruction(Instruction::State(Some(asked)));
+
+                let nil_id = self.program.register_type(Type::nil());
+                let result = typing::union_type_ids(self.program, vec![asked, nil_id]);
+                self.record_typed(span.get(), result, SymbolKind::Expression, None);
+                Ok((result, Provenance::Unknown))
             }
             ast::Term::Reference(access) => {
                 // Explicit reference: drop incoming value and load the referenced value without calling

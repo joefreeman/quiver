@@ -70,7 +70,9 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
     for function in input.functions {
         for instruction in &function.instructions {
             match instruction {
-                Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) => {
+                Instruction::IsType(type_id)
+                | Instruction::GetAnnotation(_, Some(type_id))
+                | Instruction::State(Some(type_id)) => {
                     pattern_type_ids.insert(*type_id);
                 }
                 _ => {}

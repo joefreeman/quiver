@@ -122,6 +122,10 @@ impl<'a> FreeVariableCollector<'a> {
                 // Reference to a value - same variable capture as Access
                 self.visit_access_capture(access);
             }
+            ast::Term::State(_, access, _) => {
+                // `?('t)p` references its target without calling it — same capture as `&p`.
+                self.visit_access_capture(access);
+            }
             // Dialects are expanded before capture collection (`compile_function`), so an
             // unexpanded invocation here has no variable references to collect yet.
             ast::Term::Dialect(_) => {}

@@ -125,6 +125,12 @@ pub enum Term {
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
     /// The `Spanned` is the `!`, for hover (shows the received/awaited result type).
     Select(Option<Vec<Chain>>, Spanned),
+    /// Sample a process's current state (`?` — docs/process-state.md): `?('t)p` is the
+    /// checked form (yields `'t | []`, runtime-tested like checked annotation retrieval);
+    /// the bare form `?p` parses but is rejected in typing until inferred state types
+    /// land. The access names the target (a variable or import member holding a pid);
+    /// the `Spanned` is the `?`, for hover.
+    State(Option<Type>, Access, Spanned),
     Process(usize),
     /// Reference operator (`&`): references a value without calling it — a variable, import
     /// member, builtin, or self (`&x`, `&m.f`, `&__integer_add__`, `&.`).

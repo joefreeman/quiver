@@ -147,6 +147,20 @@ pub enum Command<E: Effect> {
         heap: Vec<Vec<u8>>,
     },
 
+    /// Read a process's current state on behalf of a remote `?` sample (a snapshot —
+    /// the target is not disturbed and resource ownership does not transfer)
+    ReadState {
+        caller: ProcessId,
+        target: ProcessId,
+    },
+
+    /// Deliver a remote `?` sample to the caller that requested it
+    NotifyState {
+        process_id: ProcessId,
+        state: Value,
+        heap: Vec<Vec<u8>>,
+    },
+
     // Phantom data to maintain generic parameter
     #[serde(skip)]
     _Phantom(std::marker::PhantomData<E>),
@@ -244,6 +258,19 @@ pub enum Event<E: Effect> {
 
     /// Request effect operation from Environment
     EffectRequest { process_id: ProcessId, effect: E },
+
+    /// Action: read a remote process's state (`?` sample)
+    ReadStateAction {
+        caller: ProcessId,
+        target: ProcessId,
+    },
+
+    /// A `?` sample read on the target's worker, headed back to the caller
+    StateRead {
+        caller: ProcessId,
+        state: Value,
+        heap: Vec<Vec<u8>>,
+    },
 
     // Phantom data to maintain generic parameter
     #[serde(skip)]

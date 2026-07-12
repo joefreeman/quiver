@@ -495,6 +495,10 @@ fn render_term_atom(term: &Term) -> String {
         Term::Self_ => ".".to_string(),
         Term::Process(index) => format!("@{}", index),
         Term::Reference(access) => format!("&{}", render_access(access)),
+        Term::State(check, access, _) => match check {
+            Some(check) => format!("?({}){}", render_type(check), render_access(access)),
+            None => format!("?{}", render_access(access)),
+        },
         // Dialect content is opaque raw text and is preserved verbatim (including newlines):
         // re-indenting it would change what the dialect function receives.
         Term::Dialect(dialect) => format!("%{}{{{}}}", dialect.path.join("/"), dialect.raw),

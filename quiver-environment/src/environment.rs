@@ -1097,6 +1097,36 @@ impl<E: Effect> Environment<E> {
             Event::EffectRequest { process_id, effect } => {
                 self.handle_effect_request(process_id, effect)
             }
+            Event::ReadStateAction { caller, target } => {
+                // Route the read to the target's worker. Unlike delivery, no resource
+                // ownership transfer: a sample is a read, not a message.
+                let worker_id = self
+                    .process_router
+                    .get(&target)
+                    .ok_or(EnvironmentError::ProcessNotFound(target))?;
+                self.workers[*worker_id]
+                    .send(Command::ReadState { caller, target })
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+                Ok(())
+            }
+            Event::StateRead {
+                caller,
+                state,
+                heap,
+            } => {
+                let worker_id = self
+                    .process_router
+                    .get(&caller)
+                    .ok_or(EnvironmentError::ProcessNotFound(caller))?;
+                self.workers[*worker_id]
+                    .send(Command::NotifyState {
+                        process_id: caller,
+                        state,
+                        heap,
+                    })
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+                Ok(())
+            }
             Event::_Phantom(_) => {
                 // This variant is never actually used, only for maintaining generics
                 unreachable!("_Phantom variant should never be constructed")

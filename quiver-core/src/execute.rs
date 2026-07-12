@@ -122,6 +122,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
                 Action::Deliver { .. } => "sending a message",
                 Action::Await { .. } => "awaiting a process",
                 Action::RequestEffect { .. } => "performing an effect",
+                Action::ReadState { .. } => "reading a process's state",
             };
             return Err(Error::OperationNotAllowed {
                 operation: operation.to_string(),

@@ -311,6 +311,34 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .notify_effect_completion(process_id, result, heap)
                     .map_err(EnvironmentError::Executor)?;
             }
+            Command::ReadState { caller, target } => {
+                // Snapshot the target's state cell (nil if the process is unknown here —
+                // defensive; routing follows the spawn, so it should exist) and send it
+                // back toward the caller. A read, not a message: no ownership transfer.
+                let state = self
+                    .executor
+                    .get_process(target)
+                    .map(|p| p.state.clone())
+                    .unwrap_or_else(Value::nil);
+                let (state, heap) = self
+                    .executor
+                    .extract_heap_data(&state)
+                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
+                self.sender.send(Event::StateRead {
+                    caller,
+                    state,
+                    heap,
+                })?;
+            }
+            Command::NotifyState {
+                process_id,
+                state,
+                heap,
+            } => {
+                self.executor
+                    .notify_state(process_id, state, heap)
+                    .map_err(EnvironmentError::Executor)?;
+            }
             Command::_Phantom(_) => {
                 // This variant is never actually used, only for maintaining generics
                 unreachable!("_Phantom variant should never be constructed")
@@ -380,6 +408,11 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 // Send effect request to Environment
                 self.sender
                     .send(Event::EffectRequest { process_id, effect })?;
+            }
+            Action::ReadState { caller, target } => {
+                // The caller is already parked (mark_sampling in handle_state)
+                self.sender
+                    .send(Event::ReadStateAction { caller, target })?;
             }
         }
         Ok(())

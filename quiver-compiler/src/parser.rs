@@ -2467,8 +2467,34 @@ fn primary(input: Span) -> IResult<Span, Term> {
         map(access, Term::Access),
         // Operations
         select_term,
+        state_term,
         tail_call,
     ))(input)
+}
+
+// Parse the state-sample operator (`?` — docs/process-state.md). Glued like every select
+// form: `?('t)p` (checked — the expected shape, then the target, adjacent like the
+// `(T)x` ascription), or bare `?p` (parsed here, rejected in typing until inferred state
+// types land). The target is an access: a variable or import member holding a pid.
+// Ordering: `access` runs first in `primary`, so a trailing `?` on an identifier
+// (`empty?`) is consumed there and never reaches this parser.
+fn state_term(input: Span) -> IResult<Span, Term> {
+    let start = input;
+    let (rest, (check, target)) = preceded(
+        char('?'),
+        pair(
+            opt(delimited(
+                pair(char('('), wsc),
+                type_definition,
+                pair(wsc, char(')')),
+            )),
+            access,
+        ),
+    )(input)?;
+    Ok((
+        rest,
+        Term::State(check, target, Spanned(Some(token_span(start, 1)))),
+    ))
 }
 
 fn chain(input: Span) -> IResult<Span, Chain> {

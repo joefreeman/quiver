@@ -73,6 +73,7 @@ pub enum InstructionType {
     Self_,
     Select,
     Process,
+    State,
 }
 
 impl InstructionType {
@@ -106,6 +107,7 @@ impl InstructionType {
             Instruction::Self_ => InstructionType::Self_,
             Instruction::Select => InstructionType::Select,
             Instruction::Process(_, _) => InstructionType::Process,
+            Instruction::State(_) => InstructionType::State,
         }
     }
 }
@@ -214,6 +216,10 @@ pub struct Executor<E: Effect> {
     spawning: HashSet<ProcessId>,
     selecting: HashSet<ProcessId>,
     effecting: HashSet<ProcessId>,
+    /// Parked on a remote `?` state read; the pending entry carries the checked form's
+    /// expected type id, applied when the sample arrives (`notify_state`).
+    sampling: HashSet<ProcessId>,
+    pending_state_checks: HashMap<ProcessId, Option<usize>>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
@@ -629,6 +635,7 @@ impl<E: Effect> Executor<E> {
             if let Some(Ok(value)) = &process.result {
                 collect_heap_indices(value, &mut indices);
             }
+            collect_heap_indices(&process.state, &mut indices);
             if let Some(state) = &process.select_state {
                 for value in &state.sources {
                     collect_heap_indices(value, &mut indices);
@@ -680,6 +687,8 @@ impl<E: Effect> Executor<E> {
             spawning: HashSet::new(),
             selecting: HashSet::new(),
             effecting: HashSet::new(),
+            sampling: HashSet::new(),
+            pending_state_checks: HashMap::new(),
             constants: vec![],
             functions: vec![],
             builtins: vec![],
@@ -753,12 +762,15 @@ impl<E: Effect> Executor<E> {
             process.locals.push(injected);
         }
 
-        // Push argument onto stack
+        // Push argument onto stack; it is also the process's initial observable state
+        // (one retain per storage location).
         let injected_arg = self.inject_heap_data(argument, &heap_data)?;
+        self.retain(&injected_arg);
         self.retain(&injected_arg);
         let process = self
             .get_process_mut(id)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+        process.state = injected_arg.clone();
         process.stack.push(injected_arg);
 
         // Push initial frame with function index
@@ -824,6 +836,44 @@ impl<E: Effect> Executor<E> {
                 self.queue.push_back(id);
             }
         }
+    }
+
+    /// Deliver a remote `?` state sample to the process that requested it: apply the
+    /// pending checked-form gate (mismatch → nil, exactly as the local path and checked
+    /// annotation retrieval do), push the sample, and wake the caller.
+    pub fn notify_state(
+        &mut self,
+        id: ProcessId,
+        state: Value,
+        heap: Vec<Vec<u8>>,
+    ) -> Result<(), Error> {
+        let injected = self.inject_heap_data(state, &heap)?;
+        self.retain(&injected);
+        let check = self.pending_state_checks.remove(&id).flatten();
+        let sample = if let Some(type_id) = check
+            && !self.check_type_compatible(&injected, type_id)
+        {
+            // Discarded: the release frees the freshly injected heap slots.
+            self.release(&injected);
+            Value::nil()
+        } else {
+            injected
+        };
+
+        match self.get_process_mut(id) {
+            Some(process) => {
+                // Already retained above (or nil); push raw.
+                process.stack.push(sample);
+                if let Some(frame) = process.frames.last_mut() {
+                    frame.counter += 1;
+                }
+                if self.sampling.remove(&id) {
+                    self.queue.push_back(id);
+                }
+            }
+            None => self.release(&sample),
+        }
+        Ok(())
     }
 
     /// Notify a process that was waiting for a result with the result value
@@ -961,6 +1011,11 @@ impl<E: Effect> Executor<E> {
         self.queue.retain(|&pid| pid != id);
     }
 
+    pub fn mark_sampling(&mut self, id: ProcessId) {
+        self.sampling.insert(id);
+        self.queue.retain(|&pid| pid != id);
+    }
+
     pub fn mark_active(&mut self, id: ProcessId) {
         let was_spawning = self.spawning.remove(&id);
         let was_selecting = self.selecting.remove(&id);
@@ -979,6 +1034,7 @@ impl<E: Effect> Executor<E> {
         } else if self.spawning.contains(&id)
             || self.selecting.contains(&id)
             || self.effecting.contains(&id)
+            || self.sampling.contains(&id)
         {
             ProcessStatus::Waiting
         } else if matches!(&process.result, Some(Err(_))) {
@@ -1287,6 +1343,7 @@ impl<E: Effect> Executor<E> {
             if self.spawning.contains(&current_pid)
                 || self.selecting.contains(&current_pid)
                 || self.effecting.contains(&current_pid)
+                || self.sampling.contains(&current_pid)
                 || pending_request.is_some()
             {
                 break;
@@ -1424,8 +1481,9 @@ impl<E: Effect> Executor<E> {
                 panic!("refcount invariant violated at process {current_pid} completion: {e}");
             }
         } else {
-            let should_requeue =
-                !self.spawning.contains(&current_pid) && !self.selecting.contains(&current_pid);
+            let should_requeue = !self.spawning.contains(&current_pid)
+                && !self.selecting.contains(&current_pid)
+                && !self.sampling.contains(&current_pid);
 
             if should_requeue {
                 // Process not finished - re-queue it so it can continue
@@ -1448,6 +1506,7 @@ impl<E: Effect> Executor<E> {
                 | Instruction::Self_
                 | Instruction::Select
                 | Instruction::Process(_, _)
+                | Instruction::State(_)
         )
     }
 
@@ -1541,6 +1600,7 @@ impl<E: Effect> Executor<E> {
             Instruction::Process(process_id, function_index) => {
                 self.handle_process_ref(pid, process_id, function_index)
             }
+            Instruction::State(check) => self.handle_state(pid, check),
             _ => unreachable!("hot instruction routed to execute_cold"),
         };
 
@@ -2079,6 +2139,7 @@ impl<E: Effect> Executor<E> {
                                     Action::Spawn { .. } => "spawn",
                                     Action::Deliver { .. } => "send",
                                     Action::Await { .. } => "await",
+                                    Action::ReadState { .. } => "state read",
                                 }
                                 .to_string(),
                                 context: "receive function".to_string(),
@@ -2103,6 +2164,18 @@ impl<E: Effect> Executor<E> {
         }
     }
 
+    /// Record a root-frame (re-)entry argument as the process's observable state (sampled
+    /// by `?` — see docs/process-state.md). Tail calls in helper frames (depth > 1) are
+    /// internal and don't touch it.
+    fn record_state(&mut self, proc: &mut Process, argument: &Value) {
+        if proc.frames.len() != 1 {
+            return;
+        }
+        self.retain(argument);
+        let old = std::mem::replace(&mut proc.state, argument.clone());
+        self.release(&old);
+    }
+
     fn handle_tail_call(
         &mut self,
         proc: &mut Process,
@@ -2110,6 +2183,7 @@ impl<E: Effect> Executor<E> {
     ) -> Result<Option<Action<E>>, Error> {
         if recurse {
             let argument = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+            self.record_state(proc, &argument);
             let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
             let locals_base = frame.locals_base;
             let captures_count = frame.captures_count;
@@ -2134,6 +2208,7 @@ impl<E: Effect> Executor<E> {
                     self.get_function(function_index)
                         .ok_or(Error::FunctionUndefined(function_index))?;
 
+                    self.record_state(proc, &argument);
                     let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
                     let locals_base = frame.locals_base;
 
@@ -2404,6 +2479,58 @@ impl<E: Effect> Executor<E> {
             frame.counter += 1;
         }
         Ok(None)
+    }
+
+    /// Sample a process's current state (`?` — a snapshot, never a wait). A local target
+    /// answers synchronously; a remote one parks the caller and routes like an await,
+    /// with the checked-form gate applied when the sample arrives (`notify_state`).
+    fn handle_state(
+        &mut self,
+        pid: ProcessId,
+        check: Option<usize>,
+    ) -> Result<Option<Action<E>>, Error> {
+        let target_value = {
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            process.stack.pop().ok_or(Error::StackUnderflow)?
+        };
+        self.release(&target_value);
+
+        let Value::Process(target, _) = target_value else {
+            return Err(Error::TypeMismatch {
+                expected: "process".to_string(),
+                found: target_value.type_name().to_string(),
+            });
+        };
+
+        if let Some(target_process) = self.get_process(target) {
+            // Local: snapshot the state cell, gated on the expected shape exactly as
+            // checked annotation retrieval gates an entry — a mismatch answers nil.
+            let state = target_process.state.clone();
+            let sample = match check {
+                Some(type_id) if !self.check_type_compatible(&state, type_id) => Value::nil(),
+                _ => state,
+            };
+            self.retain(&sample);
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            process.stack.push(sample);
+            if let Some(frame) = process.frames.last_mut() {
+                frame.counter += 1;
+            }
+            return Ok(None);
+        }
+
+        // Remote: park and route through the environment. Ownership of any resource
+        // handles in the state does NOT transfer (a sample is a read, not a message).
+        self.pending_state_checks.insert(pid, check);
+        self.mark_sampling(pid);
+        Ok(Some(Action::ReadState {
+            caller: pid,
+            target,
+        }))
     }
 
     /// Check if we're continuing from a receive function call and pop result if needed

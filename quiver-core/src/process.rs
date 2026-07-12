@@ -86,6 +86,11 @@ pub enum Action<E: Effect> {
     },
     /// Request a platform-specific effect
     RequestEffect { process_id: ProcessId, effect: E },
+    /// Read the current state of a process on another worker (`?` — a snapshot, not a wait)
+    ReadState {
+        caller: ProcessId,
+        target: ProcessId,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +138,10 @@ pub struct Process {
     pub result: Option<Result<Value, crate::error::Error>>,
     pub select_state: Option<SelectState>,
     pub awaiting: HashMap<ProcessId, Option<Value>>,
+    /// The observable state: the argument the root function was most recently
+    /// (tail-)entered with — the spawn init, then each root-frame tail call. Sampled
+    /// by `?` (see docs/process-state.md); persists after termination, like `result`.
+    pub state: Value,
 }
 
 impl Process {
@@ -155,6 +164,7 @@ impl Process {
             result: None,
             select_state: None,
             awaiting: HashMap::new(),
+            state: Value::nil(),
         }
     }
 }
