@@ -7,6 +7,7 @@ use crate::effects::Effect;
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::executor::ProgramUpdate;
+use crate::process::Action;
 use crate::value::Value;
 
 /// Execute bytecode synchronously, returning the result value and executor.
@@ -88,11 +89,11 @@ pub fn execute_bytecode_sync_with<E: Effect>(
 
     // Execute until completion
     loop {
-        let (_did_work, _action) = executor.step(1000, 0);
+        let (did_work, action) = executor.step(1000, 0);
 
         let process = executor
             .get_process(process_id)
-            .ok_or(Error::InvalidArgument("Process disappeared".to_string()))?;
+            .ok_or_else(|| Error::InvalidArgument("Process disappeared".to_string()))?;
 
         if let Some(result) = &process.result {
             match result {
@@ -110,6 +111,38 @@ pub fn execute_bytecode_sync_with<E: Effect>(
                 }
                 Err(e) => return Err(e.clone()),
             }
+        }
+
+        // This driver has no action router, so a routing request can never be serviced.
+        // Reject the operation precisely at its source instead of stalling (the runtime
+        // environment services these; compile-time execution is single-process by design).
+        if let Some(action) = action {
+            let operation = match action {
+                Action::Spawn { .. } => "spawning a process",
+                Action::Deliver { .. } => "sending a message",
+                Action::Await { .. } => "awaiting a process",
+                Action::RequestEffect { .. } => "performing an effect",
+            };
+            return Err(Error::OperationNotAllowed {
+                operation: operation.to_string(),
+                context: "compile-time execution (a program's top level and module bodies run \
+                          at compile time — move process and effect work inside the entry \
+                          function)"
+                    .to_string(),
+            });
+        }
+
+        // Backstop: a fully idle step with no result means execution can never progress —
+        // with every routing request rejected above, the only way here is a receive/select
+        // waiting on a message that cannot arrive (no sender can exist, and time is frozen
+        // so timeouts never expire).
+        if !did_work {
+            return Err(Error::OperationNotAllowed {
+                operation: "waiting to receive a message that can never arrive".to_string(),
+                context: "compile-time execution (a program's top level and module bodies run \
+                          at compile time — receive inside the entry function instead)"
+                    .to_string(),
+            });
         }
     }
 }
