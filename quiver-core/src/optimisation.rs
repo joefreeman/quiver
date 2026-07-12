@@ -73,6 +73,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 parameter,
                 result,
                 receive,
+                states,
             } => {
                 collect_type_refs(
                     *parameter,
@@ -98,14 +99,31 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     used_tuples,
                     used_resources,
                 );
+                if let Some(states) = states {
+                    collect_type_refs(
+                        *states,
+                        types,
+                        tuples,
+                        used_types,
+                        used_tuples,
+                        used_resources,
+                    );
+                }
             }
             Type::Union(type_ids) => {
                 for &tid in type_ids {
                     collect_type_refs(tid, types, tuples, used_types, used_tuples, used_resources);
                 }
             }
-            Type::Process { send, receive } => {
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => {
                 if let Some(tid) = send {
+                    collect_type_refs(*tid, types, tuples, used_types, used_tuples, used_resources);
+                }
+                if let Some(tid) = state {
                     collect_type_refs(*tid, types, tuples, used_types, used_tuples, used_resources);
                 }
                 if let Some(tid) = receive {
@@ -359,10 +377,12 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 parameter,
                 result,
                 receive,
+                states,
             } => Type::Callable {
                 parameter: *type_remap.get(parameter).unwrap_or(parameter),
                 result: *type_remap.get(result).unwrap_or(result),
                 receive: *type_remap.get(receive).unwrap_or(receive),
+                states: states.map(|id| *type_remap.get(&id).unwrap_or(&id)),
             },
             Type::Cycle(depth) => Type::Cycle(*depth),
             Type::Union(type_ids) => Type::Union(
@@ -371,9 +391,14 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     .map(|id| *type_remap.get(id).unwrap_or(id))
                     .collect(),
             ),
-            Type::Process { send, receive } => Type::Process {
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => Type::Process {
                 send: send.map(|id| *type_remap.get(&id).unwrap_or(&id)),
                 receive: receive.map(|id| *type_remap.get(&id).unwrap_or(&id)),
+                state: state.map(|id| *type_remap.get(&id).unwrap_or(&id)),
             },
             Type::Resource(name) => Type::Resource(name.clone()),
             Type::Variable(name) => Type::Variable(name.clone()),

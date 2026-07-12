@@ -51,6 +51,7 @@ fn run(source: &str) -> Executor<NativeEffect> {
         parameter: nil_type,
         result: compiled.result_type,
         receive: compiled.receive_type,
+        states: None,
     });
     let entry = program.register_function(Function {
         instructions: compiled.instructions,

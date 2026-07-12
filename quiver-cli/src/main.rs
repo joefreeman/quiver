@@ -208,6 +208,8 @@ fn compile_and_extract_entry(
         parameter: nil_type_id,
         result: compilation_result.result_type,
         receive: receive_type,
+        // The top-level wrapper is never spawned; grant nothing.
+        states: None,
     });
 
     // Register the instructions as a temporary function

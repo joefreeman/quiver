@@ -50,6 +50,11 @@ pub enum Type {
         parameter: usize,
         result: usize,
         receive: usize,
+        /// The states a spawn of this function moves through: the union of parameter
+        /// types over its root tail-call closure (`docs/process-state.md`). `None` means
+        /// unknown — a declared type without a `?` clause grants no sampling; inferred
+        /// literals always carry `Some` unless poisoned by a `^~` on an unknown callee.
+        states: Option<usize>,
     },
     #[serde(rename = "cycle")]
     Cycle(usize),
@@ -73,6 +78,11 @@ pub enum Type {
     Process {
         send: Option<usize>,
         receive: Option<usize>,
+        /// What `?p` samples (the process's observable state type). `None` = not granted:
+        /// unlike `send`/`receive`, compatibility is strict in one direction (a state-less
+        /// process type never satisfies a stated one) because bare `?p` has no runtime
+        /// test — its soundness rests entirely on this component.
+        state: Option<usize>,
     },
     #[serde(rename = "resource")]
     Resource(String),
@@ -615,10 +625,12 @@ fn check_type_relation<T: TypeLookup>(
             Type::Process {
                 send: send1,
                 receive: receive1,
+                state: state1,
             },
             Type::Process {
                 send: send2,
                 receive: receive2,
+                state: state2,
             },
         ) => {
             let send_ok = match (send1, send2) {
@@ -635,7 +647,18 @@ fn check_type_relation<T: TypeLookup>(
                 (None, _) | (_, None) => true,
             };
 
-            send_ok && receive_ok
+            // State is covariant and strict against a stated expectation: `?p` has no
+            // runtime test, so a state-less process value must never satisfy a process
+            // type that grants sampling. Dropping the grant (Some → None) is fine.
+            let state_ok = match (state1, state2) {
+                (Some(s1), Some(s2)) => {
+                    check_type_relation(*s1, *s2, lookup, mode, assumptions, type_stack)
+                }
+                (_, None) => true,
+                (None, Some(_)) => false,
+            };
+
+            send_ok && receive_ok && state_ok
         }
 
         // Callable types
@@ -644,11 +667,13 @@ fn check_type_relation<T: TypeLookup>(
                 parameter: param1,
                 result: result1,
                 receive: receive1,
+                states: states1,
             },
             Type::Callable {
                 parameter: param2,
                 result: result2,
                 receive: receive2,
+                states: states2,
             },
         ) => {
             let already_on_stack = type_stack.contains(&pattern_id);
@@ -656,25 +681,21 @@ fn check_type_relation<T: TypeLookup>(
                 type_stack.push(pattern_id);
             }
 
+            // States are covariant and strict against a stated expectation, exactly as a
+            // process type's state component (a spawn of this function inherits it).
+            let states_ok = match (states1, states2) {
+                (Some(s1), Some(s2)) => {
+                    check_type_relation(*s1, *s2, lookup, mode, assumptions, type_stack)
+                }
+                (_, None) => true,
+                (None, Some(_)) => false,
+            };
+
             // Parameters are contravariant, results are covariant, receive is contravariant
-            let result =
-                check_type_relation(*param2, *param1, lookup, mode, assumptions, type_stack)
-                    && check_type_relation(
-                        *result1,
-                        *result2,
-                        lookup,
-                        mode,
-                        assumptions,
-                        type_stack,
-                    )
-                    && check_type_relation(
-                        *receive2,
-                        *receive1,
-                        lookup,
-                        mode,
-                        assumptions,
-                        type_stack,
-                    );
+            let result = states_ok
+                && check_type_relation(*param2, *param1, lookup, mode, assumptions, type_stack)
+                && check_type_relation(*result1, *result2, lookup, mode, assumptions, type_stack)
+                && check_type_relation(*receive2, *receive1, lookup, mode, assumptions, type_stack);
 
             if !already_on_stack {
                 type_stack.pop();

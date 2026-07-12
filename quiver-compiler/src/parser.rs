@@ -1435,57 +1435,69 @@ fn type_cycle(input: Span) -> IResult<Span, Type> {
     )(input)
 }
 
+// A process type: bare `@'msg`, or the parenthesized clause forms
+// `(@['msg] [-> 'r] [?'s])` — e.g. `(@'msg -> 'r)`, `(@'evt ?'status)`, `(@-> 'r ?'s)`,
+// `(@?'s)`. The `?` clause sigil needs preceding whitespace after a type (type names may
+// end in `?`), but glues directly to `@` in the state-only form.
 fn process_type(input: Span) -> IResult<Span, Type> {
     map(
         alt((
-            // (@...) - parenthesized arrow forms (@ is inside parens)
+            // (@...) - parenthesized clause forms (@ is inside parens)
             delimited(
                 char('('),
-                alt((
-                    // (@-> type) - return only
-                    map(
-                        preceded(tuple((char('@'), ws0, tag("->"), ws1)), base_type),
-                        |return_type| (None, Some(return_type)),
-                    ),
-                    // (@type -> type) - both receive and return
-                    map(
-                        preceded(
-                            char('@'),
-                            separated_pair(base_type, tuple((ws1, tag("->"), ws1)), base_type),
-                        ),
-                        |(receive_type, return_type)| (Some(receive_type), Some(return_type)),
-                    ),
-                )),
+                preceded(
+                    char('@'),
+                    alt((
+                        // (@?'s) - state only, glued to the @
+                        map(preceded(char('?'), base_type), |state| {
+                            (None, None, Some(state))
+                        }),
+                        // (@['msg] [-> 'r] [ ?'s])
+                        tuple((
+                            opt(base_type),
+                            opt(preceded(tuple((ws0, tag("->"), ws1)), base_type)),
+                            opt(preceded(pair(ws1, char('?')), base_type)),
+                        )),
+                    )),
+                ),
                 char(')'),
             ),
-            // @ with optional type - no arrow (@ is outside)
+            // @ with optional type - no clauses (@ is outside)
             map(preceded(char('@'), opt(base_type)), |receive_type| {
-                (receive_type, None)
+                (receive_type, None, None)
             }),
         )),
-        |(receive_type, return_type)| {
+        |(receive_type, return_type, state_type)| {
             Type::Process(ProcessType {
                 receive_type: receive_type.map(Box::new),
                 return_type: return_type.map(Box::new),
+                state_type: state_type.map(Box::new),
             })
         },
     )(input)
 }
 
+// A callable type: `#'a -> 'b`, with optional clauses ` !'c` (receive) and ` ?'d`
+// (states beyond the parameter), in that order. The clause sigil must be preceded by
+// whitespace (type names may themselves end in `?`/`!`, so `'b!'c` would tokenize as
+// the name `'b!`) and glued to its clause type, mirroring the select sugar `!'int`.
 fn function_type(input: Span) -> IResult<Span, Type> {
     map(
         preceded(
             char('#'),
-            separated_pair(
+            tuple((
                 function_input_type,
-                tuple((ws1, tag("->"), ws1)),
-                function_output_type,
-            ),
+                preceded(tuple((ws1, tag("->"), ws1)), function_output_type),
+                opt(preceded(pair(ws1, char('!')), base_type)),
+                opt(preceded(pair(ws1, char('?')), base_type)),
+            )),
         ),
-        |(input, output)| {
+        |(input, output, receive, states)| {
             Type::Function(FunctionType {
                 input: Box::new(input),
                 output: Box::new(output),
+                receive: receive.map(Box::new),
+                states: states.map(Box::new),
             })
         },
     )(input)
@@ -2472,28 +2484,16 @@ fn primary(input: Span) -> IResult<Span, Term> {
     ))(input)
 }
 
-// Parse the state-sample operator (`?` — docs/process-state.md). Glued like every select
-// form: `?('t)p` (checked — the expected shape, then the target, adjacent like the
-// `(T)x` ascription), or bare `?p` (parsed here, rejected in typing until inferred state
-// types land). The target is an access: a variable or import member holding a pid.
+// Parse the state-sample operator (`?p` — docs/process-state.md), glued like every
+// select form. The target is an access: a variable or import member holding a pid.
 // Ordering: `access` runs first in `primary`, so a trailing `?` on an identifier
 // (`empty?`) is consumed there and never reaches this parser.
 fn state_term(input: Span) -> IResult<Span, Term> {
     let start = input;
-    let (rest, (check, target)) = preceded(
-        char('?'),
-        pair(
-            opt(delimited(
-                pair(char('('), wsc),
-                type_definition,
-                pair(wsc, char(')')),
-            )),
-            access,
-        ),
-    )(input)?;
+    let (rest, target) = preceded(char('?'), access)(input)?;
     Ok((
         rest,
-        Term::State(check, target, Spanned(Some(token_span(start, 1)))),
+        Term::State(target, Spanned(Some(token_span(start, 1)))),
     ))
 }
 

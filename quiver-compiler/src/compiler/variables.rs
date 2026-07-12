@@ -122,7 +122,7 @@ impl<'a> FreeVariableCollector<'a> {
                 // Reference to a value - same variable capture as Access
                 self.visit_access_capture(access);
             }
-            ast::Term::State(_, access, _) => {
+            ast::Term::State(access, _) => {
                 // `?('t)p` references its target without calling it — same capture as `&p`.
                 self.visit_access_capture(access);
             }

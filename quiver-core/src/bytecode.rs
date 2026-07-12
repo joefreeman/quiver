@@ -191,9 +191,8 @@ pub enum Instruction {
     Self_,
     Select,
     Process(usize, usize), // (process_id, function_index)
-    /// Sample a process's current state (`?` — docs/process-state.md): pop a process
-    /// value, push its state. The optional type id is the checked form's expected shape
-    /// (`?('t)p`), gating the sample exactly as `GetAnnotation`'s check does — an
-    /// incompatible state answers nil.
-    State(Option<usize>),
+    /// Sample a process's current state (`?p` — docs/process-state.md): pop a process
+    /// value, push its state. No runtime test — the state type is statically known
+    /// (inferred at spawns; enforced by strict state subtyping at declared boundaries).
+    State,
 }

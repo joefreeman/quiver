@@ -193,10 +193,11 @@ fn test_receive_filter_returns_original_message() {
 #[test]
 fn test_receive_filter_type_is_parameter_not_result() {
     // The type of a receive with a filter should be the parameter type (the message type),
-    // not the filter's result type (Ok or [])
+    // not the filter's result type (Ok or []). The `!'int` clause is the function's own
+    // receive type, rendered in the written clause syntax.
     quiver()
         .evaluate("#{ ![#'int { Ok }] }")
-        .expect_type("#[] -> 'int");
+        .expect_type("#[] -> 'int !'int");
 }
 
 #[test]

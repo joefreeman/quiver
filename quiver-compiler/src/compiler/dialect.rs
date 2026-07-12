@@ -670,7 +670,7 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
             }
         }
         ast::Term::Access(access) | ast::Term::Reference(access) => walk_access_spans(access, f),
-        ast::Term::State(_, access, span) => {
+        ast::Term::State(access, span) => {
             f(span);
             walk_access_spans(access, f);
         }

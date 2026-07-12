@@ -193,7 +193,7 @@ fn term_references_parameter(term: &ast::Term) -> bool {
         ast::Term::Access(access) | ast::Term::Reference(access) => {
             matches!(access.source, Some(ast::AccessSource::Parameter))
         }
-        ast::Term::State(_, access, _) => {
+        ast::Term::State(access, _) => {
             matches!(access.source, Some(ast::AccessSource::Parameter))
         }
         ast::Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
@@ -483,6 +483,12 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Track the receive type ID of the function currently being compiled
     current_receive_type_id: usize,
 
+    /// The states a spawn of the function being compiled moves through: seeded with its
+    /// parameter type, widened at each tail call by the target's states (see
+    /// docs/process-state.md). `None` = unknown (poisoned by a `^~` on an unknown-states
+    /// callee); baked into the registered `Callable` like `current_receive_type_id`.
+    current_states: Option<usize>,
+
     // While compiling a function body, collects per-branch (guard, result) types for the
     // call-site return-type dispatch. `None` outside a function body.
     collected_dispatch: Option<DispatchCollection>,
@@ -639,6 +645,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             builtins,
             process_types,
             current_receive_type_id: never_id,
+            current_states: None,
             collected_dispatch: None,
             last_uncovered: None,
             fn_case_tables: HashMap::new(),
@@ -1743,6 +1750,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_local_count = self.local_count;
         let saved_receive_type = self.current_receive_type_id;
+        let saved_states = self.current_states;
 
         // Extract type aliases from parent scopes to preserve in function scope
         let mut function_scope_bindings = HashMap::new();
@@ -1758,6 +1766,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
         self.current_receive_type_id = receive_type;
+        // Seed the states union with the parameter (the spawn init / bare-`^` argument);
+        // tail calls widen it during body compilation.
+        self.current_states = Some(parameter_type);
 
         // Define captures as first locals in function body scope
         for capture in &unique_captures {
@@ -1994,6 +2005,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter: parameter_type,
             result: body_type,
             receive: self.current_receive_type_id,
+            states: self.current_states,
         });
 
         let function_index = self.program.register_function(Function {
@@ -2028,6 +2040,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes = saved_scopes;
         self.local_count = saved_local_count;
         self.current_receive_type_id = saved_receive_type;
+        self.current_states = saved_states;
 
         // Emit instructions to push capture values onto the stack
         // These will be popped by the Function instruction
@@ -3441,6 +3454,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter: nil_type_id,
             result: result_type_id,
             receive: never_id,
+            states: Some(nil_type_id),
         });
 
         // Generate bytecode, then add the module function
@@ -3556,6 +3570,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter: callback_argument_type,
             result: callback_result_type,
             receive: never_id,
+            states: Some(callback_argument_type),
         });
         let context_tuple = self.program.register_tuple(
             None,
@@ -3591,6 +3606,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter: nil_type_id,
             result,
             receive: never_id,
+            states: Some(nil_type_id),
         });
         let mut bytecode = self.program.to_bytecode(None);
         // The content constant goes into the *temporary* bytecode only: registering it on the
@@ -3968,6 +3984,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     parameter: param_type,
                     result: result_type,
                     receive: never_id,
+                    // Builtins never tail-call: their states are their parameter.
+                    states: Some(param_type),
                 });
 
                 let mut instructions = vec![Instruction::Builtin(*builtin_id)];
@@ -4218,13 +4236,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter,
             result,
             receive,
+            states,
         }) = self.program.lookup_base(fn_type_id)
         else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
             ));
         };
-        let (parameter, result, receive) = (*parameter, *result, *receive);
+        let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
 
         let nil_type_id = self.program.register_type(Type::nil());
         if parameter != nil_type_id {
@@ -4245,6 +4264,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(self.program.register_type(Type::Process {
             send: Some(receive),
             receive: Some(result),
+            state: states,
         }))
     }
 
@@ -4255,13 +4275,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter,
             result,
             receive,
+            states,
         }) = self.program.lookup_base(fn_type_id)
         else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
             ));
         };
-        let (parameter, result, receive) = (*parameter, *result, *receive);
+        let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
 
         if !quiver_core::types::is_compatible(arg_type, parameter, &*self.program) {
             return Err(Error::TypeMismatch {
@@ -4275,6 +4296,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(self.program.register_type(Type::Process {
             send: Some(receive),
             receive: Some(result),
+            state: states,
         }))
     }
 
@@ -4384,6 +4406,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     parameter,
                     result,
                     receive,
+                    states: Some(parameter),
                 });
                 self.record_typed(
                     base_span,
@@ -5164,11 +5187,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             ast::Term::Self_ => {
                 self.codegen.add_instruction(Instruction::Self_);
-                // Return a process type with the current function's receive type
-                // Return type is None since a process can't know its own return type
+                // Return a process type with the current function's receive type.
+                // Return type is None since a process can't know its own return type;
+                // state is None too — the enclosing *function's* states union is not the
+                // spawned process's (the pid may outlive this frame in a helper), so
+                // granting it here would be unsound.
                 let self_type = self.program.register_type(Type::Process {
                     send: Some(self.current_receive_type_id),
                     receive: None,
+                    state: None,
                 });
 
                 // Apply value if present (for message sends like `10 ~> .`)
@@ -5218,22 +5245,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     expected,
                 )
             }
-            ast::Term::State(check, access, span) => {
-                // `?('t)p` — sample a process's state (docs/process-state.md). The expected
-                // shape is applied by the instruction at runtime (exactly as checked
-                // annotation retrieval gates an entry), so the static result is `'t | []`.
-                // The flowing value is unused: the target names the process explicitly.
+            ast::Term::State(access, span) => {
+                // `?p` — sample a process's state (docs/process-state.md). The result is
+                // the target process type's state component: inferred at spawn sites, or
+                // stated with a `?'s` clause on a declared process type. No runtime test —
+                // soundness rests on every state write being compile-checked, plus the
+                // strict state subtyping at declared boundaries. The flowing value is
+                // unused: the target names the process explicitly.
                 if value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
-
-                let Some(ast_type) = check else {
-                    return Err(Error::FeatureUnsupported(
-                        "a bare `?p` needs an inferred state type, which doesn't exist yet \
-                         — state the expected shape with the checked form: `?('t)p`"
-                            .to_string(),
-                    ));
-                };
 
                 // Load the target without calling it (exactly as `&p` compiles).
                 let (target_type, _) = self.compile_term(
@@ -5247,29 +5268,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     None,
                     None,
                 )?;
-                if !matches!(
-                    self.program.lookup_base(target_type),
-                    Some(Type::Process { .. })
-                ) {
+                let Some(Type::Process { state, .. }) = self.program.lookup_base(target_type)
+                else {
                     return Err(Error::TypeMismatch {
                         expected: "process".to_string(),
                         found: quiver_core::format::format_type_by_id(&*self.program, target_type),
                     });
-                }
-
-                let mut env = typing::TypeEnv {
-                    resolver: self.resolver,
-                    module_cache: &mut *self.module_cache,
-                    package: &self.current_package,
                 };
-                let asked =
-                    typing::resolve_ast_type(&mut env, &self.scopes, ast_type, self.program)?;
+                let Some(result) = *state else {
+                    return Err(Error::TypeMismatch {
+                        expected: "process with a state type (inferred from its spawn, or \
+                                   granted by a `?'s` clause on the declared process type)"
+                            .to_string(),
+                        found: quiver_core::format::format_type_by_id(&*self.program, target_type),
+                    });
+                };
 
-                self.codegen
-                    .add_instruction(Instruction::State(Some(asked)));
+                self.codegen.add_instruction(Instruction::State);
 
-                let nil_id = self.program.register_type(Type::nil());
-                let result = typing::union_type_ids(self.program, vec![asked, nil_id]);
                 self.record_typed(span.get(), result, SymbolKind::Expression, None);
                 Ok((result, Provenance::Unknown))
             }
@@ -5326,11 +5342,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         Ok((ty, Provenance::Unknown))
                     }
                     Some(ast::AccessSource::Self_) => {
-                        // &. - reference to self (current process)
+                        // &. - reference to self (current process); state ungranted, as
+                        // for bare `.` (see the Self_ term arm).
                         self.codegen.add_instruction(Instruction::Self_);
                         let self_type = self.program.register_type(Type::Process {
                             send: Some(self.current_receive_type_id),
                             receive: None,
+                            state: None,
                         });
                         Ok((self_type, Provenance::Unknown))
                     }
@@ -5413,11 +5431,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 parameter,
                 result,
                 receive,
+                states,
             } => {
                 // Nested function is a boundary - increment depth
                 let param_id = *parameter;
                 let result_id = *result;
                 let receive_id = *receive;
+                let states_id = *states;
                 let resolved_param = self.resolve_function_cycles(
                     param_id,
                     function_type_id,
@@ -5433,10 +5453,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     function_type_id,
                     depth_from_function + 1,
                 );
+                let resolved_states = states_id.map(|s| {
+                    self.resolve_function_cycles(s, function_type_id, depth_from_function + 1)
+                });
                 self.program.register_type(Type::Callable {
                     parameter: resolved_param,
                     result: resolved_result,
                     receive: resolved_receive,
+                    states: resolved_states,
                 })
             }
             Type::Tuple(tuple_id) => {
@@ -5481,18 +5505,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     fields: new_fields,
                 })
             }
-            Type::Process { send, receive } => {
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => {
                 // Process types don't create boundaries but may contain types with cycles
                 let send_id = *send;
                 let receive_id = *receive;
+                let state_id = *state;
                 let resolved_send = send_id.map(|t| {
                     self.resolve_function_cycles(t, function_type_id, depth_from_function)
                 });
                 let resolved_receive = receive_id.map(|t| {
                     self.resolve_function_cycles(t, function_type_id, depth_from_function)
                 });
+                let resolved_state = state_id.map(|t| {
+                    self.resolve_function_cycles(t, function_type_id, depth_from_function)
+                });
                 self.program.register_type(Type::Process {
                     send: resolved_send,
+                    state: resolved_state,
                     receive: resolved_receive,
                 })
             }
@@ -5632,9 +5665,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter,
             result,
             receive,
+            states: _,
         } = target_type
         {
-            // Function call
+            // Function call (a normal call is not a state transition — only tail calls
+            // widen the states union)
             let param_id = *parameter;
             let result_id = *result;
             let receive_id = *receive;
@@ -5766,6 +5801,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Widen the current function's states union by a tail-call target's: entering the
+    /// target re-enters the root frame with its argument, so its states become
+    /// observable. An unknown-states target (`None`) poisons the whole union — the
+    /// compiled function's spawn then grants no sampling.
+    fn widen_states(&mut self, target_states: Option<usize>) {
+        self.current_states = match (self.current_states, target_states) {
+            (Some(current), Some(target)) if current == target => Some(current),
+            (Some(current), Some(target)) => {
+                Some(typing::union_type_ids(self.program, vec![current, target]))
+            }
+            _ => None,
+        };
+    }
+
     /// Type-check a tail call against the target's callable type: the argument must fit
     /// the parameter (unifying type variables when the target is generic), and the
     /// target's receive type widens the current context's, exactly as a normal call
@@ -5779,6 +5828,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter,
             result,
             receive,
+            states,
         }) = self.program.lookup_base(callable_type_id)
         else {
             return Err(Error::TypeMismatch {
@@ -5786,7 +5836,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 found: quiver_core::format::format_type_by_id(&*self.program, callable_type_id),
             });
         };
-        let (param_id, result_id, receive_id) = (*parameter, *result, *receive);
+        let (param_id, result_id, receive_id, states_id) = (*parameter, *result, *receive, *states);
 
         let has_vars = typing::contains_variables(param_id, &*self.program)
             || typing::contains_variables(result_id, &*self.program);
@@ -5808,6 +5858,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         self.widen_receive_type(receive_id);
+        self.widen_states(states_id);
         Ok(result_type)
     }
 
@@ -5898,6 +5949,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter,
             result,
             receive,
+            states,
         }) = self.program.lookup_base(fn_type)
         else {
             return Err(Error::TypeMismatch {
@@ -5905,8 +5957,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 found: quiver_core::format::format_type_by_id(&*self.program, fn_type),
             });
         };
-        let (parameter, result, receive) = (*parameter, *result, *receive);
+        let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
         self.widen_receive_type(receive);
+        self.widen_states(states);
 
         match argument {
             Some(argument) => {
@@ -5973,6 +6026,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             parameter: param_type_id,
             result: result_type_id,
             receive: never_id,
+            // Builtins never tail-call: their states are their parameter.
+            states: Some(param_type_id),
         }))
     }
 

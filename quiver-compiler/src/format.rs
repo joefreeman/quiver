@@ -495,10 +495,7 @@ fn render_term_atom(term: &Term) -> String {
         Term::Self_ => ".".to_string(),
         Term::Process(index) => format!("@{}", index),
         Term::Reference(access) => format!("&{}", render_access(access)),
-        Term::State(check, access, _) => match check {
-            Some(check) => format!("?({}){}", render_type(check), render_access(access)),
-            None => format!("?{}", render_access(access)),
-        },
+        Term::State(access, _) => format!("?{}", render_access(access)),
         // Dialect content is opaque raw text and is preserved verbatim (including newlines):
         // re-indenting it would change what the dialect function receives.
         Term::Dialect(dialect) => format!("%{}{{{}}}", dialect.path.join("/"), dialect.raw),
@@ -1360,11 +1357,22 @@ fn render_type(type_def: &Type) -> String {
             format!("'{}{}", name, render_type_arguments(arguments))
         }
         Type::Tuple(tuple_type) => render_tuple_type(tuple_type),
-        Type::Function(function_type) => format!(
-            "#{} -> {}",
-            render_type_atom(&function_type.input),
-            render_type_atom(&function_type.output)
-        ),
+        Type::Function(function_type) => {
+            let mut out = format!(
+                "#{} -> {}",
+                render_type_atom(&function_type.input),
+                render_type_atom(&function_type.output)
+            );
+            if let Some(receive) = &function_type.receive {
+                out.push_str(" !");
+                out.push_str(&render_type_atom(receive));
+            }
+            if let Some(states) = &function_type.states {
+                out.push_str(" ?");
+                out.push_str(&render_type_atom(states));
+            }
+            out
+        }
         // A union is parenthesised everywhere it is rendered inline; only a top-level type-alias
         // right-hand side (handled by `union_alias_doc`) is left bare.
         Type::Union(union_type) => format!(
@@ -1487,17 +1495,29 @@ fn render_field_type(field_type: &FieldType) -> String {
 }
 
 fn render_process_type(process_type: &ProcessType) -> String {
-    match (&process_type.receive_type, &process_type.return_type) {
-        (Some(receive), None) => format!("@{}", render_type_atom(receive)),
-        (None, None) => "@".to_string(),
-        (None, Some(ret)) => format!("(@-> {})", render_type_atom(ret)),
-        (Some(receive), Some(ret)) => {
-            format!(
-                "(@{} -> {})",
-                render_type_atom(receive),
-                render_type_atom(ret)
-            )
+    let mut body = "@".to_string();
+    if let Some(receive) = &process_type.receive_type {
+        body.push_str(&render_type_atom(receive));
+    }
+    if let Some(ret) = &process_type.return_type {
+        if process_type.receive_type.is_some() {
+            body.push(' ');
         }
+        body.push_str("-> ");
+        body.push_str(&render_type_atom(ret));
+    }
+    if let Some(state) = &process_type.state_type {
+        if process_type.receive_type.is_some() || process_type.return_type.is_some() {
+            body.push(' ');
+        }
+        body.push('?');
+        body.push_str(&render_type_atom(state));
+    }
+    // The bare forms (`@`, `@'msg`) need no parens; any arrow/state clause does.
+    if process_type.return_type.is_some() || process_type.state_type.is_some() {
+        format!("({})", body)
+    } else {
+        body
     }
 }
 

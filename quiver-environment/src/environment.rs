@@ -81,14 +81,21 @@ fn import_type_value(
             parameter,
             result,
             receive,
+            states,
         } => Type::Callable {
             parameter: import_type(program, src, type_remap, tuple_remap, parameter),
             result: import_type(program, src, type_remap, tuple_remap, result),
             receive: import_type(program, src, type_remap, tuple_remap, receive),
+            states: states.map(|t| import_type(program, src, type_remap, tuple_remap, t)),
         },
-        Type::Process { send, receive } => Type::Process {
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => Type::Process {
             send: send.map(|t| import_type(program, src, type_remap, tuple_remap, t)),
             receive: receive.map(|t| import_type(program, src, type_remap, tuple_remap, t)),
+            state: state.map(|t| import_type(program, src, type_remap, tuple_remap, t)),
         },
         Type::Annotated {
             base,
@@ -1561,19 +1568,25 @@ impl<E: Effect> Environment<E> {
                     .and_then(|func| self.program.lookup_type(func.type_id))
                     .map(|callable| match callable {
                         Type::Callable {
-                            result, receive, ..
+                            result,
+                            receive,
+                            states,
+                            ..
                         } => Type::Process {
                             send: Some(*receive),
                             receive: Some(*result),
+                            state: *states,
                         },
                         _ => Type::Process {
                             send: None,
                             receive: None,
+                            state: None,
                         },
                     })
                     .unwrap_or(Type::Process {
                         send: None,
                         receive: None,
+                        state: None,
                     });
                 (pid, (process_type, function_index))
             })
@@ -1704,10 +1717,14 @@ impl<E: Effect> Environment<E> {
         let callable = self.program.lookup_type(func.type_id)?;
         match callable {
             Type::Callable {
-                result, receive, ..
+                result,
+                receive,
+                states,
+                ..
             } => Some(Type::Process {
                 send: Some(*receive),
                 receive: Some(*result),
+                state: *states,
             }),
             _ => None,
         }
@@ -1740,6 +1757,7 @@ impl<E: Effect> Environment<E> {
                     parameter: param_type,
                     result: result_type,
                     receive: self.program.never(), // Builtins don't receive values
+                    states: Some(param_type),      // ... and never tail-call
                 }
             }
             Value::Process(_, function_idx) => {
@@ -2102,6 +2120,7 @@ mod tests {
         let process_type = Type::Process {
             send: Some(int_id),
             receive: Some(int_id),
+            state: None,
         };
 
         // A REPL's fresh program where that environment id is not yet meaningful.
@@ -2111,6 +2130,7 @@ mod tests {
         let Type::Process {
             send: Some(send),
             receive: Some(receive),
+            state: None,
         } = imported
         else {
             panic!("expected a process type with send and receive");

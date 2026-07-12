@@ -757,16 +757,45 @@ fn resolve_ast_type_impl(
                 program,
                 type_bindings,
             )?;
+            // The `!'c` clause: what running the function receives. Omitted = receives
+            // nothing (never), per "a declared type grants what it spells".
+            let receive_type_id = match function.receive {
+                Some(receive) => resolve_ast_type_impl(
+                    recursion_depth,
+                    env,
+                    scopes_ref,
+                    *receive,
+                    program,
+                    type_bindings,
+                )?,
+                None => program.never(),
+            };
+            // The `?'d` clause: states beyond the parameter (which is included
+            // implicitly: states = input | d). Omitted = sampling not granted (None).
+            let states_id = match function.states {
+                Some(states) => {
+                    let extension = resolve_ast_type_impl(
+                        recursion_depth,
+                        env,
+                        scopes_ref,
+                        *states,
+                        program,
+                        type_bindings,
+                    )?;
+                    Some(union_type_ids(program, vec![input_type_id, extension]))
+                }
+                None => None,
+            };
 
             // Decrement recursion depth
             *recursion_depth -= 1;
 
             // Create function type without distributing unions
-            let never_id = program.never();
             Ok(program.register_type(Type::Callable {
                 parameter: input_type_id,
                 result: output_type_id,
-                receive: never_id,
+                receive: receive_type_id,
+                states: states_id,
             }))
         }
         ast::Type::Union(union) => {
@@ -879,9 +908,23 @@ fn resolve_ast_type_impl(
                     )
                 })
                 .transpose()?;
+            let state_id = process
+                .state_type
+                .map(|state_type| {
+                    resolve_ast_type_impl(
+                        recursion_depth,
+                        env,
+                        scopes_ref,
+                        *state_type,
+                        program,
+                        type_bindings,
+                    )
+                })
+                .transpose()?;
             Ok(program.register_type(Type::Process {
                 send: receive_id,
                 receive: returns_id,
+                state: state_id,
             }))
         }
         ast::Type::Identifier { name, arguments } => {
@@ -993,14 +1036,21 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
             parameter,
             result,
             receive,
+            states,
         } => {
             contains_variables(*parameter, lookup)
                 || contains_variables(*result, lookup)
                 || contains_variables(*receive, lookup)
+                || states.is_some_and(|s| contains_variables(s, lookup))
         }
-        Type::Process { send, receive } => {
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => {
             send.is_some_and(|s| contains_variables(s, lookup))
                 || receive.is_some_and(|r| contains_variables(r, lookup))
+                || state.is_some_and(|s| contains_variables(s, lookup))
         }
         Type::Tuple(tuple_id) => {
             // Check if any field contains variables
@@ -1111,29 +1161,42 @@ pub fn substitute(
             parameter,
             result,
             receive,
+            states,
         } => {
             let new_param = substitute(parameter, bindings, program);
             let new_result = substitute(result, bindings, program);
             let new_receive = substitute(receive, bindings, program);
-            if new_param == parameter && new_result == result && new_receive == receive {
+            let new_states = states.map(|s| substitute(s, bindings, program));
+            if new_param == parameter
+                && new_result == result
+                && new_receive == receive
+                && new_states == states
+            {
                 type_id
             } else {
                 program.register_type(Type::Callable {
                     parameter: new_param,
                     result: new_result,
                     receive: new_receive,
+                    states: new_states,
                 })
             }
         }
-        Type::Process { send, receive } => {
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => {
             let new_send = send.map(|s| substitute(s, bindings, program));
             let new_receive = receive.map(|r| substitute(r, bindings, program));
-            if new_send == send && new_receive == receive {
+            let new_state = state.map(|s| substitute(s, bindings, program));
+            if new_send == send && new_receive == receive && new_state == state {
                 type_id
             } else {
                 program.register_type(Type::Process {
                     send: new_send,
                     receive: new_receive,
+                    state: new_state,
                 })
             }
         }
@@ -1252,12 +1315,19 @@ pub fn unify(
             Type::Process {
                 send: send1,
                 receive: receive1,
+                state: state1,
             },
             Type::Process {
                 send: send2,
                 receive: receive2,
+                state: state2,
             },
         ) => {
+            // Unify state types when both are stated; a missing side imposes no
+            // constraint here (the strict direction is subtyping's job, not unification's)
+            if let (Some(st1), Some(st2)) = (state1, state2) {
+                unify(bindings, *st1, *st2, program)?;
+            }
             // Unify send types (what can be sent TO the process)
             match (send1, send2) {
                 (Some(s1), Some(s2)) => unify(bindings, *s1, *s2, program)?,
@@ -1418,11 +1488,13 @@ pub fn unify(
                 parameter: param1,
                 result: result1,
                 receive: receive1,
+                states: states1,
             },
             Type::Callable {
                 parameter: param2,
                 result: result2,
                 receive: receive2,
+                states: states2,
             },
         ) => {
             // Unify parameters (contravariant - swap order)
@@ -1431,6 +1503,11 @@ pub fn unify(
             unify(bindings, *result1, *result2, program)?;
             // Unify receive types (contravariant - swap order)
             unify(bindings, *receive1, *receive2, program)?;
+            // States unify only when both are known: a `#'t -> 'u` parameter (states
+            // unknown) accepts any literal without constraining its states.
+            if let (Some(st1), Some(st2)) = (states1, states2) {
+                unify(bindings, *st1, *st2, program)?;
+            }
             Ok(())
         }
 

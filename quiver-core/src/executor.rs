@@ -107,7 +107,7 @@ impl InstructionType {
             Instruction::Self_ => InstructionType::Self_,
             Instruction::Select => InstructionType::Select,
             Instruction::Process(_, _) => InstructionType::Process,
-            Instruction::State(_) => InstructionType::State,
+            Instruction::State => InstructionType::State,
         }
     }
 }
@@ -216,10 +216,8 @@ pub struct Executor<E: Effect> {
     spawning: HashSet<ProcessId>,
     selecting: HashSet<ProcessId>,
     effecting: HashSet<ProcessId>,
-    /// Parked on a remote `?` state read; the pending entry carries the checked form's
-    /// expected type id, applied when the sample arrives (`notify_state`).
+    /// Parked on a remote `?` state read, woken by `notify_state`.
     sampling: HashSet<ProcessId>,
-    pending_state_checks: HashMap<ProcessId, Option<usize>>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
@@ -688,7 +686,6 @@ impl<E: Effect> Executor<E> {
             selecting: HashSet::new(),
             effecting: HashSet::new(),
             sampling: HashSet::new(),
-            pending_state_checks: HashMap::new(),
             constants: vec![],
             functions: vec![],
             builtins: vec![],
@@ -838,31 +835,20 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    /// Deliver a remote `?` state sample to the process that requested it: apply the
-    /// pending checked-form gate (mismatch → nil, exactly as the local path and checked
-    /// annotation retrieval do), push the sample, and wake the caller.
+    /// Deliver a remote `?` state sample to the process that requested it: push the
+    /// sample and wake the caller. No gate — the state type is statically known.
     pub fn notify_state(
         &mut self,
         id: ProcessId,
         state: Value,
         heap: Vec<Vec<u8>>,
     ) -> Result<(), Error> {
-        let injected = self.inject_heap_data(state, &heap)?;
-        self.retain(&injected);
-        let check = self.pending_state_checks.remove(&id).flatten();
-        let sample = if let Some(type_id) = check
-            && !self.check_type_compatible(&injected, type_id)
-        {
-            // Discarded: the release frees the freshly injected heap slots.
-            self.release(&injected);
-            Value::nil()
-        } else {
-            injected
-        };
+        let sample = self.inject_heap_data(state, &heap)?;
+        self.retain(&sample);
 
         match self.get_process_mut(id) {
             Some(process) => {
-                // Already retained above (or nil); push raw.
+                // Already retained above; push raw.
                 process.stack.push(sample);
                 if let Some(frame) = process.frames.last_mut() {
                     frame.counter += 1;
@@ -1506,7 +1492,7 @@ impl<E: Effect> Executor<E> {
                 | Instruction::Self_
                 | Instruction::Select
                 | Instruction::Process(_, _)
-                | Instruction::State(_)
+                | Instruction::State
         )
     }
 
@@ -1600,7 +1586,7 @@ impl<E: Effect> Executor<E> {
             Instruction::Process(process_id, function_index) => {
                 self.handle_process_ref(pid, process_id, function_index)
             }
-            Instruction::State(check) => self.handle_state(pid, check),
+            Instruction::State => self.handle_state(pid),
             _ => unreachable!("hot instruction routed to execute_cold"),
         };
 
@@ -2482,13 +2468,8 @@ impl<E: Effect> Executor<E> {
     }
 
     /// Sample a process's current state (`?` — a snapshot, never a wait). A local target
-    /// answers synchronously; a remote one parks the caller and routes like an await,
-    /// with the checked-form gate applied when the sample arrives (`notify_state`).
-    fn handle_state(
-        &mut self,
-        pid: ProcessId,
-        check: Option<usize>,
-    ) -> Result<Option<Action<E>>, Error> {
+    /// answers synchronously; a remote one parks the caller and routes like an await.
+    fn handle_state(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
         let target_value = {
             let process = self
                 .get_process_mut(pid)
@@ -2505,13 +2486,8 @@ impl<E: Effect> Executor<E> {
         };
 
         if let Some(target_process) = self.get_process(target) {
-            // Local: snapshot the state cell, gated on the expected shape exactly as
-            // checked annotation retrieval gates an entry — a mismatch answers nil.
-            let state = target_process.state.clone();
-            let sample = match check {
-                Some(type_id) if !self.check_type_compatible(&state, type_id) => Value::nil(),
-                _ => state,
-            };
+            // Local: snapshot the state cell.
+            let sample = target_process.state.clone();
             self.retain(&sample);
             let process = self
                 .get_process_mut(pid)
@@ -2525,7 +2501,6 @@ impl<E: Effect> Executor<E> {
 
         // Remote: park and route through the environment. Ownership of any resource
         // handles in the state does NOT transfer (a sample is a read, not a message).
-        self.pending_state_checks.insert(pid, check);
         self.mark_sampling(pid);
         Ok(Some(Action::ReadState {
             caller: pid,

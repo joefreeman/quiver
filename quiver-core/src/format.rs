@@ -56,35 +56,37 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
         Type::Integer => "'int".to_string(),
         Type::Binary => "'bin".to_string(),
         Type::Reference => "'ref".to_string(),
-        Type::Process { send, receive } => {
-            let formatted = match (send, receive) {
-                (Some(send_id), Some(receive_id)) => {
-                    let send_str = lookup
-                        .lookup_type(*send_id)
-                        .map(|t| format_type_impl(lookup, t, true))
-                        .unwrap_or_else(|| format!("Type{}", send_id));
-                    let receive_str = lookup
-                        .lookup_type(*receive_id)
-                        .map(|t| format_type_impl(lookup, t, true))
-                        .unwrap_or_else(|| format!("Type{}", receive_id));
-                    format!("@{} -> {}", send_str, receive_str)
-                }
-                (Some(send_id), None) => {
-                    let send_str = lookup
-                        .lookup_type(*send_id)
-                        .map(|t| format_type_impl(lookup, t, true))
-                        .unwrap_or_else(|| format!("Type{}", send_id));
-                    format!("@{} -> ?", send_str)
-                }
-                (None, Some(receive_id)) => {
-                    let receive_str = lookup
-                        .lookup_type(*receive_id)
-                        .map(|t| format_type_impl(lookup, t, true))
-                        .unwrap_or_else(|| format!("Type{}", receive_id));
-                    format!("@-> {}", receive_str)
-                }
-                (None, None) => "@".to_string(),
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => {
+            // Compose the written clause forms: `@'msg`, `@'msg -> 'r`, `@-> 'r`, and the
+            // sampling clause ` ?'s` (glued directly after a bare `@`: `@?'s`).
+            let fmt = |id: usize| {
+                lookup
+                    .lookup_type(id)
+                    .map(|t| format_type_impl(lookup, t, true))
+                    .unwrap_or_else(|| format!("Type{}", id))
             };
+            let mut formatted = "@".to_string();
+            if let Some(id) = send {
+                formatted.push_str(&fmt(*id));
+            }
+            if let Some(id) = receive {
+                if send.is_some() {
+                    formatted.push(' ');
+                }
+                formatted.push_str("-> ");
+                formatted.push_str(&fmt(*id));
+            }
+            if let Some(id) = state {
+                if send.is_some() || receive.is_some() {
+                    formatted.push(' ');
+                }
+                formatted.push('?');
+                formatted.push_str(&fmt(*id));
+            }
 
             if nested {
                 format!("({})", formatted)
@@ -125,17 +127,29 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
         Type::Callable {
             parameter,
             result,
-            receive: _,
+            receive,
+            states,
         } => {
-            let param_str = lookup
-                .lookup_type(*parameter)
-                .map(|t| format_type_impl(lookup, t, true))
-                .unwrap_or_else(|| format!("Type{}", parameter));
-            let result_str = lookup
-                .lookup_type(*result)
-                .map(|t| format_type_impl(lookup, t, true))
-                .unwrap_or_else(|| format!("Type{}", result));
-            let formatted = format!("#{} -> {}", param_str, result_str);
+            let fmt = |id: usize| {
+                lookup
+                    .lookup_type(id)
+                    .map(|t| format_type_impl(lookup, t, true))
+                    .unwrap_or_else(|| format!("Type{}", id))
+            };
+            let mut formatted = format!("#{} -> {}", fmt(*parameter), fmt(*result));
+            // The written clause forms: ` !'recv` when the function receives, ` ?'states`
+            // when its states go beyond its parameter (the parameter alone is the implicit
+            // seed and stays unwritten; an unknown-states callable also renders bare).
+            if lookup.lookup_type(*receive).map(|t| t.is_never()) != Some(true) {
+                formatted.push_str(" !");
+                formatted.push_str(&fmt(*receive));
+            }
+            if let Some(s) = states
+                && s != parameter
+            {
+                formatted.push_str(" ?");
+                formatted.push_str(&fmt(*s));
+            }
 
             if nested {
                 format!("({})", formatted)

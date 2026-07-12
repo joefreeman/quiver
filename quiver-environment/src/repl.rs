@@ -161,6 +161,8 @@ impl<E: Effect> Repl<E> {
                 parameter: last_result_type_id,
                 result: result_type_id,
                 receive: receive_type_id,
+                // The REPL wrapper is never spawned; grant nothing.
+                states: None,
             });
             let function = Function {
                 instructions,

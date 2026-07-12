@@ -121,6 +121,7 @@ impl TypeSpec {
                 program.register_type(Type::Process {
                     send: send_id,
                     receive: receive_id,
+                    state: None,
                 })
             }
             TypeSpec::Resource(name) => program.register_type(Type::Resource(name.clone())),
@@ -160,6 +161,7 @@ impl TypeSpec {
                 Type::Process {
                     send: send_id,
                     receive: receive_id,
+                    state: None,
                 }
             }
             TypeSpec::Resource(name) => Type::Resource(name.clone()),

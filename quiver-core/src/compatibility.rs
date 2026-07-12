@@ -39,20 +39,24 @@ pub struct CompatibilityInput<'a> {
     pub resource_names: &'a [String],
 }
 
+/// A `Type::Process`'s components — (send, receive, state) — as an index key.
+type ProcessTypeKey = (Option<usize>, Option<usize>, Option<usize>);
+
 /// Extract function type components from a function's type_id.
-/// Returns (parameter_type_id, callable_type_id, process_send, process_receive).
+/// Returns (parameter, callable_type_id, process_send, process_receive, process_state).
 fn extract_function_type_info(
     func: &Function,
     types: &[Type],
-) -> (usize, usize, Option<usize>, Option<usize>) {
+) -> (usize, usize, Option<usize>, Option<usize>, Option<usize>) {
     let type_id = func.type_id;
     match types.get(type_id) {
         Some(Type::Callable {
             parameter,
             result,
             receive,
-        }) => (*parameter, type_id, Some(*receive), Some(*result)),
-        _ => (0, type_id, None, None),
+            states,
+        }) => (*parameter, type_id, Some(*receive), Some(*result), *states),
+        _ => (0, type_id, None, None, None),
     }
 }
 
@@ -70,9 +74,7 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
     for function in input.functions {
         for instruction in &function.instructions {
             match instruction {
-                Instruction::IsType(type_id)
-                | Instruction::GetAnnotation(_, Some(type_id))
-                | Instruction::State(Some(type_id)) => {
+                Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) => {
                     pattern_type_ids.insert(*type_id);
                 }
                 _ => {}
@@ -160,7 +162,7 @@ pub fn compute_param_compatibility(
         .functions
         .iter()
         .map(|func| {
-            let (parameter, _, _, _) = extract_function_type_info(func, input.types);
+            let (parameter, _, _, _, _) = extract_function_type_info(func, input.types);
             compatible_for(parameter)
         })
         .collect();
@@ -185,8 +187,8 @@ struct TypeIndex {
     tuple_to_type: Vec<Option<usize>>,
     /// (parameter, result) -> type id of a never-receiving `Type::Callable` (for builtins)
     callable_to_type: HashMap<(usize, usize), usize>,
-    /// (send, receive) -> type id of `Type::Process`
-    process_to_type: HashMap<(Option<usize>, Option<usize>), usize>,
+    /// (send, receive, state) -> type id of `Type::Process`
+    process_to_type: HashMap<ProcessTypeKey, usize>,
     /// resource name -> type id of `Type::Resource`
     resource_to_type: HashMap<String, usize>,
 }
@@ -226,6 +228,7 @@ impl TypeIndex {
                     parameter,
                     result,
                     receive,
+                    states: _,
                 } => {
                     if lookup.lookup_type(*receive).map(|t| t.is_never()) == Some(true) {
                         index
@@ -234,10 +237,14 @@ impl TypeIndex {
                             .or_insert(type_id);
                     }
                 }
-                Type::Process { send, receive } => {
+                Type::Process {
+                    send,
+                    receive,
+                    state,
+                } => {
                     index
                         .process_to_type
-                        .entry((*send, *receive))
+                        .entry((*send, *receive, *state))
                         .or_insert(type_id);
                 }
                 Type::Resource(name) => {
@@ -315,7 +322,7 @@ fn compute_compatible_concrete_types(
 
     // Check all Functions - use their callable type ID from type_id
     for (func_id, func) in input.functions.iter().enumerate() {
-        let (_, callable, _, _) = extract_function_type_info(func, input.types);
+        let (_, callable, _, _, _) = extract_function_type_info(func, input.types);
         if is_compatible(callable, pattern_id, lookup) {
             compat_set.insert(ConcreteType::Function(func_id));
         }
@@ -332,10 +339,16 @@ fn compute_compatible_concrete_types(
         }
     }
 
-    // Check all Processes - derive process type from function's send/receive
+    // Check all Processes - derive process type from function's send/receive/states. The
+    // state component rides this check: it is what makes a received pid trustworthy for
+    // bare `?p` (which has no runtime test of its own).
     for (func_id, func) in input.functions.iter().enumerate() {
-        let (_, _, process_send, process_receive) = extract_function_type_info(func, input.types);
-        if let Some(&process_id) = index.process_to_type.get(&(process_send, process_receive))
+        let (_, _, process_send, process_receive, process_state) =
+            extract_function_type_info(func, input.types);
+        if let Some(&process_id) =
+            index
+                .process_to_type
+                .get(&(process_send, process_receive, process_state))
             && is_compatible(process_id, pattern_id, lookup)
         {
             compat_set.insert(ConcreteType::Process(func_id));

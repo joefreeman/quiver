@@ -334,6 +334,8 @@ pub fn contract_type(program: &mut Program, name: &str, parameter: usize, result
         parameter: contract_parameter,
         result: verdict,
         receive: never,
+        // An expected (declared-shape) type: no states grant.
+        states: None,
     })
 }
 

@@ -125,12 +125,11 @@ pub enum Term {
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
     /// The `Spanned` is the `!`, for hover (shows the received/awaited result type).
     Select(Option<Vec<Chain>>, Spanned),
-    /// Sample a process's current state (`?` — docs/process-state.md): `?('t)p` is the
-    /// checked form (yields `'t | []`, runtime-tested like checked annotation retrieval);
-    /// the bare form `?p` parses but is rejected in typing until inferred state types
-    /// land. The access names the target (a variable or import member holding a pid);
-    /// the `Spanned` is the `?`, for hover.
-    State(Option<Type>, Access, Spanned),
+    /// Sample a process's current state (`?p` — docs/process-state.md): yields the
+    /// target's state type, which the process type carries (inferred from spawn sites,
+    /// or stated with a `?'s` clause). The access names the target (a variable or import
+    /// member holding a pid); the `Spanned` is the `?`, for hover.
+    State(Access, Spanned),
     Process(usize),
     /// Reference operator (`&`): references a value without calling it — a variable, import
     /// member, builtin, or self (`&x`, `&m.f`, `&__integer_add__`, `&.`).
@@ -407,6 +406,8 @@ pub enum Type {
 pub struct ProcessType {
     pub receive_type: Option<Box<Type>>,
     pub return_type: Option<Box<Type>>,
+    /// The `?'s` clause: what `?p` samples. Omitted = sampling not granted.
+    pub state_type: Option<Box<Type>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -440,6 +441,13 @@ pub enum FieldType {
 pub struct FunctionType {
     pub input: Box<Type>,
     pub output: Box<Type>,
+    /// The `!'c` clause: what the function receives while running (widens the
+    /// caller's/spawner's receive type). Omitted = receives nothing.
+    pub receive: Option<Box<Type>>,
+    /// The `?'d` clause: the states a spawn of it moves through, *beyond* the
+    /// parameter (which is included implicitly: states = input | d). Omitted =
+    /// sampling not granted through this type.
+    pub states: Option<Box<Type>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
