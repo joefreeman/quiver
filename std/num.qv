@@ -39,8 +39,8 @@
 reduce = #'rational {
   // The caller must supply a non-zero denominator; the result is always canonical form,
   // whose denominator is positive.
-  :pre #{ $ =Rational[_, ('int)d], [d, 0] __integer_compare__ { =0 => [] | Ok } }
-  :post #{ $ =(out: Rational[_, ('int)d]), [d, 0] __integer_compare__ =1 }
+  :pre #{ $ =Rational[_, ('int)d]; [d, 0] __integer_compare__ { =0 => [] | Ok } }
+  :post #{ $ =(out: Rational[_, ('int)d]); [d, 0] __integer_compare__ =1 }
   =Rational[n, d]
   {
     | [d, 0] __integer_compare__ =-1 => {
@@ -280,7 +280,7 @@ to_int = #'opt {
     }
     [sgn, [nlo, d] __integer_divide__] __integer_multiply__
   }
-  | ='coeff => { $ to_rational =Rational[m, d], [m, d] __integer_divide__ }
+  | ='coeff => { $ to_rational =Rational[m, d]; [m, d] __integer_divide__ }
 }
 
 // Sign of a number: -1, 0, or 1 (nil for a nil operand).
@@ -309,12 +309,12 @@ clamp = #['opt, 'opt, 'opt] {
   // The caller must give a non-empty range (`lo ≤ hi`); the result then lies within it.
   // Comparisons that are nil (a nil operand, or incompatible surds) can't witness a
   // breach, so they pass — the checks only fire on a definite ordering violation.
-  :pre #{ $ =[_, lo, hi], [lo, hi] compare { =1 => [] | Ok } }
+  :pre #{ $ =[_, lo, hi]; [lo, hi] compare { =1 => [] | Ok } }
   :post #{
     $ =[in: [_, lo, hi], out: o]
     o {
       | =[] => Ok
-      | =v => { [lo, v] compare { =1 => [] | Ok }, [v, hi] compare { =1 => [] | Ok } }
+      | =v => { [lo, v] compare { =1 => [] | Ok }; [v, hi] compare { =1 => [] | Ok } }
     }
   }
   | =([[], _, _] | [_, [], _] | [_, _, []]) => []
@@ -412,7 +412,7 @@ d_term = #'%meta.cb {
 
 // The two precedence levels over a factor parser.
 d_expr_of = #'%parse.p<'dexpr> {
-  =factor, term = [&factor, &d_mul_op] %parse.chainl, [&term, &d_add_op] %parse.chainl
+  =factor; term = [&factor, &d_mul_op] %parse.chainl; [&term, &d_add_op] %parse.chainl
 }
 
 // The factor grammar, self-passed (together with the host-term operand parser) to tie
@@ -540,7 +540,7 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
   abs: #'opt {
     :doc "The absolute value of a number, preserving its kind; nil for a nil operand."
     // The result is never negative (nil passes through).
-    :post #{ $ =(out: o), o { =[] => Ok | sign { =-1 => [] | Ok } } }
+    :post #{ $ =(out: o); o { =[] => Ok | sign { =-1 => [] | Ok } } }
     | =Surd[a, b, n] => {
       ar = a to_rational
       br = b to_rational
@@ -568,22 +568,22 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
 
   eq?: #['opt, 'opt] {
     :doc "Whether two numbers are equal."
-    compare =0, Ok
+    compare =0; Ok
   },
   lt?: #['opt, 'opt] {
     :doc "Whether the first number is less than the second."
-    compare =-1, Ok
+    compare =-1; Ok
   },
   le?: #['opt, 'opt] {
     :doc "Whether the first number is at most the second."
-    compare { =-1 | =0 }, Ok
+    compare { =-1 | =0 }; Ok
   },
   gt?: #['opt, 'opt] {
     :doc "Whether the first number is greater than the second."
-    compare =1, Ok
+    compare =1; Ok
   },
   ge?: #['opt, 'opt] {
     :doc "Whether the first number is at least the second."
-    compare { =0 | =1 }, Ok
+    compare { =0 | =1 }; Ok
   },
 ] { :dialect &num_dialect }

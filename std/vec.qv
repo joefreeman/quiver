@@ -63,7 +63,7 @@ lcm_denoms = #['int, '%list<'%num>] {
 // representable). `[[vec, mapper], values] -> 'vec | []`.
 buildValues = #[['vec, 'mapper], '%list<'%num>] {
   | =[[v, _], Nil] => v
-  | =[[v, f], Cons[x, rest]] => { x f =stored, stored, [[[v, stored] push, &f], rest] ^ }
+  | =[[v, f], Cons[x, rest]] => { x f =stored; stored; [[[v, stored] push, &f], rest] ^ }
 }
 
 // Multiply every lane of a buffer by an integer `factor` (used to rescale to a finer scale).
@@ -103,7 +103,7 @@ reconcile = #['%num, '%num] {
 // `['vec, 'vec] -> [d, width, scale, data_a, data_b] | []` (nil on dtype mismatch / overflow).
 align = #['vec, 'vec] {
   | =[Vec[dtype: d, scale: s, data: da], Vec[dtype: d, scale: s, data: db]] => {
-      d width =w, [d, w, s, da, db]
+      d width =w; [d, w, s, da, db]
     }
   | =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]] => {
       d width =w
@@ -118,7 +118,7 @@ align = #['vec, 'vec] {
   // An empty vector with the given dtype and (canonicalised) scale.
   new: #['dtype, '%num] {
     :doc "Creates an empty vector with the given dtype and scale."
-    =[d, scale], Vec[dtype: d, scale: scale norm, data: 0x]
+    =[d, scale]; Vec[dtype: d, scale: scale norm, data: 0x]
   },
 
   // Build from a dtype, scale, and a list of *stored* integer lanes. Each lane's logical
@@ -135,7 +135,7 @@ align = #['vec, 'vec] {
     :doc "A vector built from values; nil unless every value is an exact multiple of the scale."
     =[d, scale, values]
     scale norm =s
-    m = #'%num { [~, s] %num.div =Rational[n, 1], n }
+    m = #'%num { [~, s] %num.div =Rational[n, 1]; n }
     [[Vec[dtype: d, scale: s, data: 0x], &m], values] buildValues
   },
 
@@ -248,15 +248,15 @@ align = #['vec, 'vec] {
   // rescale overflow.
   lt: #['vec, 'vec] {
     :doc "A mask selecting lanes where the first vector is less than the second; nil on mismatch."
-    align =[_, w, _, da, db], [da, db, w] __vector_less_than__ =('bin)m, Mask[m]
+    align =[_, w, _, da, db]; [da, db, w] __vector_less_than__ =('bin)m; Mask[m]
   },
   eq: #['vec, 'vec] {
     :doc "A mask selecting lanes where the two vectors are equal; nil on mismatch."
-    align =[_, w, _, da, db], [da, db, w] __vector_equal__ =('bin)m, Mask[m]
+    align =[_, w, _, da, db]; [da, db, w] __vector_equal__ =('bin)m; Mask[m]
   },
   gt: #['vec, 'vec] {
     :doc "A mask selecting lanes where the first vector exceeds the second; nil on mismatch."
-    align =[_, w, _, da, db], [da, db, w] __vector_greater_than__ =('bin)m, Mask[m]
+    align =[_, w, _, da, db]; [da, db, w] __vector_greater_than__ =('bin)m; Mask[m]
   },
 
   // Keep only the lanes the mask selects (non-zero byte), preserving dtype and scale. The mask

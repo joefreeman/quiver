@@ -48,9 +48,9 @@ fn test_inferred_param_via_local_higher_order_function() {
             r#"
             'list<'t> = Nil | Cons['t, ^]
             map = #<'t, 'u>['list<'t>, #'t -> 'u, 'list<'u>] {
-              =[lst, f, acc],
+              =[lst, f, acc];
               lst { =Nil => acc | =Cons[h, t] => [t, &f, Cons[h f, acc]] ^ }
-            },
+            };
             Cons[[1, 10], Cons[[2, 20], Nil]] [~, #{ $0 }, Nil] map
             "#,
         )
@@ -63,7 +63,7 @@ fn test_inferred_param_concrete_callee() {
     quiver()
         .evaluate(
             r#"
-            run = #[#'int -> 'int] { =[g], 10 g },
+            run = #[#'int -> 'int] { =[g]; 10 g };
             [#{ [$, 1] %num.add }] run
             "#,
         )
@@ -73,11 +73,11 @@ fn test_inferred_param_concrete_callee() {
 #[test]
 fn test_unannotated_literal_without_context_stays_nilary() {
     // With no expected type from context, `#{ ... }` keeps its nilary-function meaning.
-    quiver().evaluate("f = #{ 42 }, 99 f").expect("42");
+    quiver().evaluate("f = #{ 42 }; 99 f").expect("42");
 }
 
 #[test]
 fn test_explicit_nil_parameter_form() {
     // `#[] { ... }` forces a nil parameter even where a context type is available.
-    quiver().evaluate("f = #[] { 7 }, 99 f").expect("7");
+    quiver().evaluate("f = #[] { 7 }; 99 f").expect("7");
 }

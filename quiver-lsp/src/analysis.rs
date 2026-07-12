@@ -351,7 +351,7 @@ mod tests {
     fn tail_call_hovers_and_navigates_to_the_function() {
         // `^fact` is an access whose source is the tail target; hovering it shows the function's
         // type and go-to-definition jumps to its binding.
-        let text = "fact = #'int { ~ },\nrun = #'int { ~ ^fact }";
+        let text = "fact = #'int { ~ };\nrun = #'int { ~ ^fact }";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -373,7 +373,7 @@ mod tests {
     fn ripple_field_access_records_each_component() {
         use quiver_compiler::recorder::SymbolKind;
         // `~.x` hovers as two components: the `~` (the flowing value) and the `x` (the field).
-        let text = "pt = [x: 5, y: 10],\npt ~.x";
+        let text = "pt = [x: 5, y: 10];\npt ~.x";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -601,7 +601,7 @@ mod tests {
         std::fs::write(&util, "[ double: #'int { [~, 2] %num.mul } ]").unwrap();
 
         // `double` is destructured (no `%util.double` access) and then used twice.
-        let text = "(double) = %util,\n#{ [ 1 double, 2 double ] }";
+        let text = "(double) = %util;\n#{ [ 1 double, 2 double ] }";
         let resolver = PackageResolver::for_entry_file(&src.join("main.qv"));
         let analysis = analyze(text, &LineIndex::new(text), &resolver);
         let semantics = analysis.semantics.expect("semantics");
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn hover_on_operators_shows_their_inferred_types() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "f = #'int { ~ },\nt = [a: 1, b: 2],\n5 [~, 1],\np = @{ 42 },\n!p";
+        let text = "f = #'int { ~ };\nt = [a: 1, b: 2];\n5 [~, 1];\np = @{ 42 };\n!p";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.unwrap();
@@ -699,7 +699,7 @@ mod tests {
     #[test]
     fn operator_hover_covers_only_the_token_not_the_interior() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "f = #'int { [~, 1] __integer_add__ },\nt = [a: 1, b: 2]";
+        let text = "f = #'int { [~, 1] __integer_add__ };\nt = [a: 1, b: 2]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),

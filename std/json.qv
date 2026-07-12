@@ -110,7 +110,7 @@ value = #'%parse { [&value_step, $] value_step }
 // The dialect entry point: the compiler calls this with the dialect context record; the
 // grammar needs only the content (escape spans come from its own positions).
 json = #(content: Str['bin]) {
-  full = [&value, &%parse.ws] %parse.left, [$content, &full] %parse.run
+  full = [&value, &%parse.ws] %parse.left; [$content, &full] %parse.run
 }
 
 // === Runtime codec ======================================================================
@@ -135,12 +135,12 @@ pow10 = #['int, 'int] {
 lower_num = #'%num.coeff { =Rational[n, 1] => n | =x => x }
 
 // A digit byte (for `take_while`): the byte itself when it is `0`–`9`, else nil.
-digit? = #'int { [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0), $ }
+digit? = #'int { [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0); $ }
 
 digits = &digit? %parse.take_while
 
 // The byte at the parse state's position, or nil at end of input.
-peek_at = #'%parse { [$pos, $len] %num.lt?, [$data, $pos] %bin.get_byte }
+peek_at = #'%parse { [$pos, $len] %num.lt?; [$data, $pos] %bin.get_byte }
 
 // Assemble a JSON number from its scanned parts: `sign` (±1), the integer- and fractional-
 // part digit bytes, and the exponent. Exact: the value is `sign · M · 10^(exp − |frac|)`,
@@ -207,7 +207,7 @@ number = #'%parse {
       est2 digits =[ebb, st4a]
       {
         | ebb %bin.length =0 => [st3, "digits in the exponent"] %parse.fail_in
-        | ebb Str[~] %str.parse_int =('int)emag, [[esign, emag] __integer_multiply__, st4a]
+        | ebb Str[~] %str.parse_int =('int)emag; [[esign, emag] __integer_multiply__, st4a]
       }
     }
     | [0, st3]
@@ -266,7 +266,7 @@ parse_p = &parse_value %parse.rec
 
 parse = #Str['bin] {
   :doc "Parses a JSON string into a '%json value, or nil with a positioned :error on malformed input."
-  full = [&parse_p, &%parse.ws] %parse.left, [$, &full] %parse.run
+  full = [&parse_p, &%parse.ws] %parse.left; [$, &full] %parse.run
 }
 
 // Escape a string's interior bytes. Only the escapes the parser understands are emitted
@@ -401,7 +401,7 @@ str_step = #[#^ -> Str['bin], '] -> Str['bin] {
     | =Rational[n, d] => [n, d] format_rational
     | =Str[bytes] => Str[bytes] escape_str
     | =Array[items] => {
-      body = [items, &go, "", 1] join_strs, ["[", body] %str.concat [~, "]"] %str.concat
+      body = [items, &go, "", 1] join_strs; ["[", body] %str.concat [~, "]"] %str.concat
     }
     | =Object[pairs] => {
       render = #[Str['bin], '] {

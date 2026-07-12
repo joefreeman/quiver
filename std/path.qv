@@ -56,7 +56,7 @@ parse = #['%list<'%str>, '] {
     :doc "Parses a slash-separated string into a path, normalising . and .. segments."
     [~, "/"] %str.split %list.collect {
       | =Nil => Relative[0]
-      | =Cons[first, rest], first %str.empty? => [rest, Root] parse
+      | =Cons[first, rest]; first %str.empty? => [rest, Root] parse
       | [~, Relative[0]] parse
     }
   },

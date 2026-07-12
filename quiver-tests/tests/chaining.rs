@@ -51,35 +51,35 @@ fn test_nested_chain_value_dropped() {
 fn test_sequence_threads_previous_result() {
     // A `,`-separated step operates on the previous step's result (threading), not on the block
     // parameter. So `~` in the second step is the first step's `5`, not the argument `9`.
-    quiver().evaluate("f = #'int { 5, ~ }, 9 f").expect("5");
+    quiver().evaluate("f = #'int { 5; ~ }; 9 f").expect("5");
 }
 
 #[test]
 fn test_sequence_threads_through_multiple_steps() {
     // The value flows step to step: 1 -> 11 -> 111.
     quiver()
-        .evaluate("f = #'int { 1, [~, 10] __integer_add__, [~, 100] __integer_add__ }, 0 f")
+        .evaluate("f = #'int { 1; [~, 10] __integer_add__; [~, 100] __integer_add__ }; 0 f")
         .expect("111");
 }
 
 #[test]
 fn test_dollar_is_always_the_parameter_across_steps() {
     // `$` always refers to the function parameter, regardless of threading; `~` would be `5`.
-    quiver().evaluate("f = #'int { 5, $ }, 9 f").expect("9");
+    quiver().evaluate("f = #'int { 5; $ }; 9 f").expect("9");
 }
 
 #[test]
 fn test_sequence_short_circuits_on_nil() {
     // A step that yields nil short-circuits the rest of the sequence to nil (threading keeps the
     // existing short-circuit semantics).
-    quiver().evaluate("[], 5").expect("[]");
+    quiver().evaluate("[]; 5").expect("[]");
 }
 
 #[test]
 fn test_sequence_binding_persists_across_steps() {
     // Bindings persist across steps; naming a binding ignores the threaded value.
     quiver()
-        .evaluate("f = #'int { x = 5, [x, $] }, 9 f")
+        .evaluate("f = #'int { x = 5; [x, $] }; 9 f")
         .expect("[5, 9]");
 }
 
@@ -91,7 +91,7 @@ fn test_whitespace_is_a_chain_separator() {
 
 #[test]
 fn test_newline_is_a_sequence_separator() {
-    // A newline is a sequence separator, synonymous with comma: the steps thread 1 -> 11 -> 111.
+    // A newline is a sequence separator, synonymous with semicolon: the steps thread 1 -> 11 -> 111.
     quiver()
         .evaluate("f = #'int {\n  1\n  [~, 10] __integer_add__\n  [~, 100] __integer_add__\n}\n0 f")
         .expect("111");
@@ -127,6 +127,6 @@ fn test_leading_tilde_arrow_continues_a_chain_across_lines() {
 fn test_chain_passes_nil_but_sequence_short_circuits() {
     // Within a chain, nil flows into the next term (no short-circuit)...
     quiver().evaluate("[] ~> [~, 5]").expect("[[], 5]");
-    // ...but across a sequence separator (comma/newline), a nil step short-circuits to nil.
-    quiver().evaluate("[], [~, 5]").expect("[]");
+    // ...but across a sequence separator (semicolon/newline), a nil step short-circuits to nil.
+    quiver().evaluate("[]; [~, 5]").expect("[]");
 }

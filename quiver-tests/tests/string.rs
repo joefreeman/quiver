@@ -5,15 +5,15 @@ use common::*;
 fn test_interpolation() {
     // A single hole, substituted from a bound variable.
     quiver()
-        .evaluate(r#"name = "world", "hello {name}""#)
+        .evaluate(r#"name = "world"; "hello {name}""#)
         .expect("\"hello world\"");
     // Leading, middle, and trailing text around multiple holes.
     quiver()
-        .evaluate(r#"a = "X", b = "Y", "[{a}-{b}]""#)
+        .evaluate(r#"a = "X"; b = "Y"; "[{a}-{b}]""#)
         .expect("\"[X-Y]\"");
     // Adjacent holes with no text between them.
     quiver()
-        .evaluate(r#"a = "X", b = "Y", "{a}{b}""#)
+        .evaluate(r#"a = "X"; b = "Y"; "{a}{b}""#)
         .expect("\"XY\"");
     // A hole containing an arbitrary expression that evaluates to a `Str`.
     quiver()
@@ -47,11 +47,11 @@ fn test_interpolation_hole_receives_chained_value() {
 fn test_multiline_interpolation() {
     // Holes are substituted, the line structure is preserved, and `\{` is a literal brace.
     quiver()
-        .evaluate("name = \"ada\", \"\"\"\n  hi {name}\n  bye\n  \"\"\"")
+        .evaluate("name = \"ada\"; \"\"\"\n  hi {name}\n  bye\n  \"\"\"")
         .expect("\"hi ada\\nbye\"");
     // A multi-line interpolated string equals the single-line string with the same value.
     quiver()
-        .evaluate("x = \"v\", s = \"a v\", \"\"\"\n  a {x}\n  \"\"\" =&s")
+        .evaluate("x = \"v\"; s = \"a v\"; \"\"\"\n  a {x}\n  \"\"\" =&s")
         .expect("Ok");
     // A literal brace via `\{`, and a hole containing an expression.
     quiver()
@@ -63,10 +63,10 @@ fn test_multiline_interpolation() {
 fn test_string_pattern_matches() {
     // A string-literal pattern matches the equal string and fails on a different one.
     quiver()
-        .evaluate(r#"role = "admin", role ="admin""#)
+        .evaluate(r#"role = "admin"; role ="admin""#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"role = "guest", role ="admin""#)
+        .evaluate(r#"role = "guest"; role ="admin""#)
         .expect("[]");
 }
 
@@ -74,7 +74,7 @@ fn test_string_pattern_matches() {
 fn test_single_and_multi_line_values_are_equal() {
     // The two delimiter styles are only a surface form: they produce identical values.
     quiver()
-        .evaluate("s = \"a\\nb\", \"\"\"\na\nb\n\"\"\" =&s")
+        .evaluate("s = \"a\\nb\"; \"\"\"\na\nb\n\"\"\" =&s")
         .expect("Ok");
 }
 
@@ -82,7 +82,7 @@ fn test_single_and_multi_line_values_are_equal() {
 fn test_interpolation_requires_str_hole() {
     // A hole that is not a `Str` (here an `'int`) is a compile-time type error.
     quiver()
-        .evaluate(r#"n = 5, "count {n}""#)
+        .evaluate(r#"n = 5; "count {n}""#)
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "Str".to_string(),
             found: "'int".to_string(),
@@ -223,7 +223,7 @@ fn test_split_returns_iterator() {
     // The result is a lazy iterator: bound to a variable it is a value (wrapped in
     // Iter[...]), so it flows through a chain without being called - no `&` needed.
     quiver()
-        .evaluate(r#"parts = ["1,2,3", ","] %str.split, parts [~, " + "] %str.join"#)
+        .evaluate(r#"parts = ["1,2,3", ","] %str.split; parts [~, " + "] %str.join"#)
         .expect("\"1 + 2 + 3\"");
     // Laziness: the first field can be taken without materialising the rest.
     quiver()

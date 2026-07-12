@@ -177,7 +177,7 @@ value, so `~` refers to it; it can also draw on variables in scope. A literal br
 (In a *pattern*, `{` is literal; patterns don't interpolate.)
 
 ```quiver
-name = "world",
+name = "world"
 "hello {name}"               // "hello world"
 "world" "hello, {~}"         // "hello, world" — the chained value flows into the hole
 "sum: {[a, b] %str.concat}"  // any expression that yields a Str
@@ -207,13 +207,13 @@ The newline before the closing `"""` is not included (end with a blank line for 
 
 ## Expressions
 
-A whole program is a single **sequence**: a series of **steps** separated by a comma or a newline (the two are synonyms). Type-alias declarations may be interspersed between steps and are transparent to the flow. Each step is a [chain](#chains).
+A whole program is a single **sequence**: a series of **steps** separated by a semicolon or a newline (the two are synonyms). Type-alias declarations may be interspersed between steps and are transparent to the flow. Each step is a [chain](#chains).
 
-A sequence **threads** and is **fallible**: each step starts from the previous step's result, and if a step evaluates to nil (`[]`) the rest of the sequence short-circuits and the whole sequence evaluates to nil. Variable bindings persist across steps. (`;` is not a separator — it does not exist in the syntax.)
+A sequence **threads** and is **fallible**: each step starts from the previous step's result, and if a step evaluates to nil (`[]`) the rest of the sequence short-circuits and the whole sequence evaluates to nil. Variable bindings persist across steps. (`,` is not a step separator — it appears only inside brackets: tuple fields, type arguments, and select sources.)
 
 ### Chains
 
-A chain is a whitespace-separated sequence of terms — the basic unit of left-to-right flow. The first term starts from the chain's input (the previous step's result, or, for the first step of a block, the block's parameter); each subsequent term transforms the flowing value. A chain is an **infallible pipe**: nil flows through it like any other value (no short-circuit *within* a chain — only a comma/newline step boundary short-circuits on nil). So the two-axis model is: *chain = infallible pipe (nil flows), sequence = fallible pipe (nil short-circuits)*, and `~` always names "the value to the left."
+A chain is a whitespace-separated sequence of terms — the basic unit of left-to-right flow. The first term starts from the chain's input (the previous step's result, or, for the first step of a block, the block's parameter); each subsequent term transforms the flowing value. A chain is an **infallible pipe**: nil flows through it like any other value (no short-circuit *within* a chain — only a semicolon/newline step boundary short-circuits on nil). So the two-axis model is: *chain = infallible pipe (nil flows), sequence = fallible pipe (nil short-circuits)*, and `~` always names "the value to the left."
 
 A bare newline ends a chain (starting a new sequence step). To continue one chain across several lines, begin the continuation line with `~>`, which is also the explicit, optional synonym for the space between terms:
 
@@ -238,18 +238,18 @@ chain, and into the arguments of a call. Each field/argument receives its own co
 callable there is called with it (and a non-callable value simply replaces it):
 
 ```quiver
-inc = #'int { [~, 1] num.add },
+inc = #'int { [~, 1] num.add }
 5 [inc, 100]            // [6, 100] - inc is called with 5
 5 [&inc, 100]           // [<function>, 100] - & passes inc by value
 ```
 
 ### Control flow
 
-Steps in a sequence are executed one at a time. If a step evaluates to nil (`[]`), the sequence short-circuits and evaluates to nil. Since comma and newline are synonyms, the same holds across lines:
+Steps in a sequence are executed one at a time. If a step evaluates to nil (`[]`), the sequence short-circuits and evaluates to nil. Since semicolon and newline are synonyms, the same holds across lines:
 
 ```quiver
 [] 5      // one step (a chain) — nil flows through, evaluates to 5
-[], 5     // two steps — the first is nil, so the sequence short-circuits to []
+[]; 5     // two steps — the first is nil, so the sequence short-circuits to []
 ```
 
 See [Blocks](#blocks) below for further control flow (branches and matching).
@@ -292,7 +292,7 @@ A[x: 1] B[...]           // B[x: 1] - replaces name
 Identifiers (for variables and tuple field names) start with a lowercase letter, followed by alphanumeric characters or underscores. Optional suffixes: `?`, `!` (in order).
 
 ```quiver
-x, a1, first_name
+x; a1; first_name
 is_empty?      // ? for predicates
 validate!      // ! for emphasis
 is_valid?!     // Combined
@@ -300,7 +300,7 @@ is_valid?!     // Combined
 
 ## Pattern matching
 
-Pattern matching binds variables and tests values. Patterns can appear before a chain (`x = ...`) or within a chain (`... =x`). A match **evaluates to `Ok` if it succeeds and nil (`[]`) if it fails** — the matched value does not flow onward, but any variables the pattern binds are in scope afterwards. So an in-chain match doubles as a guard, and within a sequence a failing match short-circuits (the basis for nil-propagation). A bare binder (`=x`) always succeeds — it binds any value, including `[]` — whereas a type, literal, or structural pattern fails when it doesn't match. To keep using a matched value, reference the variable it bound: `expr =x, x ...`.
+Pattern matching binds variables and tests values. Patterns can appear before a chain (`x = ...`) or within a chain (`... =x`). A match **evaluates to `Ok` if it succeeds and nil (`[]`) if it fails** — the matched value does not flow onward, but any variables the pattern binds are in scope afterwards. So an in-chain match doubles as a guard, and within a sequence a failing match short-circuits (the basis for nil-propagation). A bare binder (`=x`) always succeeds — it binds any value, including `[]` — whereas a type, literal, or structural pattern fails when it doesn't match. To keep using a matched value, reference the variable it bound: `expr =x; x ...`.
 
 Note the spacing convention that distinguishes the two forms: `x = e` (spaces around `=`) is a binding, whereas `e =x` (`=` glued to the pattern) is an in-chain match.
 
@@ -408,7 +408,7 @@ B[42] { =A[a] => 1 | =B[b] => 2 }   // 2 - both branches test B[42]
 Blocks create new scopes. Variables assigned within a block shadow outer variables but don't affect them; a branch's bindings are likewise local to the block.
 
 ```quiver
-x = 42, { x = 5 }, x  // 42
+x = 42; { x = 5 }; x  // 42
 ```
 
 ### Branches
@@ -546,7 +546,7 @@ Release builds emit a plain call, so a correct program behaves identically in bo
 ```quiver
 half = #'int {
   :pre #{ [~, 0] num.gt? }              // the argument must be positive
-  :post #{ $ =[in: i, out: o], [i, o] num.gt? }   // the result is smaller
+  :post #{ $ =[in: i, out: o]; [i, o] num.gt? }   // the result is smaller
   [~, 2] int.div
 }
 ```
@@ -556,16 +556,16 @@ half = #'int {
 The `%ref` module is a single nilary function that mints a unique, opaque identifier (of type `'ref`). Unlike other standard-library modules — which import a record of functions — `%ref` *is* the function, so each evaluation yields a fresh ref. Refs support equality and pattern matching.
 
 ```quiver
-tag = %ref,                   // mint a ref inline
-[tag, 42] =[&tag, x],
+tag = %ref                   // mint a ref inline
+[tag, 42] =[&tag, x]
 x   // 42
 ```
 
 To name the minting function, bind it by reference (`&`, like any function value) and call it repeatedly:
 
 ```quiver
-ref = &%ref,
-a = ref, b = ref,
+ref = &%ref
+a = ref; b = ref
 a =&b           // [] — two distinct refs are not equal
 ```
 
@@ -643,7 +643,7 @@ There is no juxtaposition (`f x` / `f [args]`) and no bare ripple application. T
 function that is itself the flowing value, bind it to a name first, then apply argument-first:
 
 ```quiver
-f = &num.add, [1, 2] f   // 3 — apply the bound function to [1, 2]
+f = &num.add; [1, 2] f   // 3 — apply the bound function to [1, 2]
 ```
 
 ### Tail recursion
@@ -663,15 +663,15 @@ f = #['int, 'int] {
 Named tail calls to other functions:
 
 ```quiver
-f = #['int, 'int] { num.mul },
+f = #['int, 'int] { num.mul }
 fact = #'int { [~, 1] ^f }
 ```
 
 Tail calls take their argument the same way — written before the target:
 
 ```quiver
-g = #['int, 'int] { num.mul },
-f = #'int { [~, 1] num.add [~, 2] ^g },
+g = #['int, 'int] { num.mul }
+f = #'int { [~, 1] num.add [~, 2] ^g }
 10 f   // 22
 ```
 
@@ -679,8 +679,8 @@ The flowing value itself can be the tail-call target, using the ripple form `^~`
 is **bare** — it hands the flowing value (which must be a nilary function) a nil argument:
 
 ```quiver
-g = #{ 10 },              // a nilary function
-f = #'int { &g ^~ },      // tail-call g (the flowing value), with nil
+g = #{ 10 }              // a nilary function
+f = #'int { &g ^~ }      // tail-call g (the flowing value), with nil
 5 f                       // 10
 ```
 
@@ -693,7 +693,7 @@ Quiver supports lightweight concurrent processes inspired by Erlang. Processes c
 Spawn a process by applying the `@` operator to a function:
 
 ```quiver
-process = #{ ... },
+process = #{ ... }
 processor = @process
 ```
 
@@ -764,7 +764,7 @@ Send a message to a process by applying a value to the process:
 The select operator (`!`) introduced above can also be used to await the result of a process:
 
 ```quiver
-p = @f,
+p = @f
 !p
 ```
 
@@ -896,10 +896,10 @@ doubled = [x, 2] __integer_multiply__         // Built-in multiplication
 
 ```quiver
 // Import num functions
-(add, mul, sub) = %num,
+(add, mul, sub) = %num
 
 // Create and manipulate values
-x = 10, y = 20,
+x = 10; y = 20
 [x, y] add [~, 2] mul [~, 1] sub
 ```
 
@@ -909,9 +909,9 @@ x = 10, y = 20,
 'point = Point[x: 'int, y: 'int]
 
 // Define points
-p0 = Point[x: 2, y: 3],
-p1 = Point[...p0, x: 5],
-p2 = Point[...p1, y: 4],
+p0 = Point[x: 2, y: 3]
+p1 = Point[...p0, x: 5]
+p2 = Point[...p1, y: 4]
 
 // Function to add points
 add_points = #['point, 'point] {
@@ -919,7 +919,7 @@ add_points = #['point, 'point] {
     x: [$.0.x, $.1.x] %num.add,
     y: [$.0.y, $.1.y] %num.add,
   ]
-},
+}
 
 [p1, p2] add_points   // Point[x: 10, y: 7]
 ```
@@ -934,10 +934,10 @@ contains? = #<'t>['list<'t>, 't] {
   | =[Nil, _] => []
   | =[Cons[value, _], value] => Ok
   | =[Cons[_, tail], value] => [tail, value] ^
-},
+}
 
-xs = Cons[1, Cons[2, Cons[3, Nil]]],
-[xs, 3] contains?,   // Ok
+xs = Cons[1, Cons[2, Cons[3, Nil]]]
+[xs, 3] contains?   // Ok
 [xs, 4] contains?    // []
 ```
 
@@ -949,10 +949,10 @@ clamp = #'int {
   | [~, 100] %num.gt? => 100
   | [~, 0] %num.lt? => 0
   | $
-},
+}
 
-150 clamp,   // 100
--10 clamp,   // 0
+150 clamp   // 100
+-10 clamp   // 0
 50 clamp    // 50
 ```
 
@@ -967,7 +967,7 @@ clamp = #'int {
 [
   bounding_box: #'shape {
     | =Circle[radius: r] => {
-      x = [r, 2] %num.mul,
+      x = [r, 2] %num.mul
       Rectangle[width: x, height: x]
     }
     | =Rectangle[width: w, height: h] => {
@@ -983,12 +983,12 @@ clamp = #'int {
 
 ```quiver
 // main.qv
-(bounding_box, is_square?) = %shapes,
+(bounding_box, is_square?) = %shapes
 
-circle = Circle[radius: 5],
-rectangle = Rectangle[width: 10, height: 10],
+circle = Circle[radius: 5]
+rectangle = Rectangle[width: 10, height: 10]
 
-circle bounding_box,      // Rectangle[width: 10, height: 10]
+circle bounding_box      // Rectangle[width: 10, height: 10]
 rectangle is_square?      // Ok
 ```
 
@@ -1003,12 +1003,12 @@ person = Person[
     month: June,
     day: 23
   ]
-],
-person.name,                           // Extract name field
-person .date_of_birth .month,          // Chain field access
+]
+person.name                           // Extract name field
+person .date_of_birth .month          // Chain field access
 
 // Built-in operations
-next_year = person.age [~, 1] %num.add,
+next_year = person.age [~, 1] %num.add
 ```
 
 ### Concurrent processes
@@ -1019,14 +1019,14 @@ pid = @{
   !#Str['bin] {
     | ="" => []              // Stop on empty string
     | =s => {
-      s __println__,         // (not implemented!)
+      s __println__         // (not implemented!)
       [] ^                    // Receive another message
     }
   }
-},
+}
 
 // Send messages
-"hello" pid,
-"bye" pid,
+"hello" pid
+"bye" pid
 "" pid                       // (stop the process)
 ```

@@ -150,10 +150,10 @@ fn sequence_doc(
     skip_first_leading: bool,
     continuation_nest: usize,
 ) -> Doc {
-    // Comma and newline are synonymous step separators, so a broken sequence uses a bare newline
-    // (the lighter form) and only the inline form needs the comma.
+    // Semicolon and newline are synonymous step separators, so a broken sequence uses a bare
+    // newline (the lighter form) and only the inline form needs the semicolon.
     let separator = pretty::concat(vec![
-        pretty::if_break(pretty::nil(), pretty::text(",")),
+        pretty::if_break(pretty::nil(), pretty::text(";")),
         pretty::line(),
     ]);
     let mut first = pretty::nil();
@@ -209,7 +209,7 @@ fn is_tall_step(chain: &Chain, body: &Doc) -> bool {
 fn block_doc(trivia: &Trivia, expression: &Expression) -> Doc {
     let branches = &expression.branches;
     // The annotation prefix (`:key value` steps). With a body following, each annotation ends
-    // in a hardline — the comma/newline separator is what ends an annotation's value chain, so
+    // in a hardline — the semicolon/newline separator is what ends an annotation's value chain, so
     // a flat space-joined rendering would re-parse differently. An annotation-only block may
     // stay flat (`{ :error X }`).
     let annotation_parts: Vec<Doc> = expression
@@ -223,12 +223,12 @@ fn block_doc(trivia: &Trivia, expression: &Expression) -> Doc {
                 } else if index == 0 {
                     pretty::line()
                 } else {
-                    // Annotations are steps: a flat layout needs the comma separator
-                    // (`{ :a X, :b Y }`) — space-joined, the second `:b` re-parses as
+                    // Annotations are steps: a flat layout needs the semicolon separator
+                    // (`{ :a X; :b Y }`) — space-joined, the second `:b` re-parses as
                     // part of the first annotation's value chain. Like sequence steps,
                     // a broken layout uses the bare newline.
                     pretty::concat(vec![
-                        pretty::if_break(pretty::nil(), pretty::text(",")),
+                        pretty::if_break(pretty::nil(), pretty::text(";")),
                         pretty::line(),
                     ])
                 },
@@ -462,7 +462,7 @@ fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
 /// Render a dialect term. The content is preserved verbatim — re-indenting it would change what
 /// the dialect function receives — so multi-line content becomes text segments joined by literal
 /// lines (newlines without indentation), which the width engine counts as breaks, forcing the
-/// enclosing groups open instead of comma-joining around the embedded newlines.
+/// enclosing groups open instead of separator-joining around the embedded newlines.
 fn dialect_doc(dialect: &Dialect) -> Doc {
     let rendered = format!("%{}{{{}}}", dialect.path.join("/"), dialect.raw);
     if !rendered.contains('\n') {
@@ -1552,7 +1552,7 @@ mod tests {
     #[test]
     fn multiline_dialect_breaks_enclosing_layout() {
         // The embedded newlines count as breaks (literal lines): the enclosing block must not be
-        // comma-joined around them, and the content is not re-indented.
+        // separator-joined around them, and the content is not re-indented.
         let source = "f = #{\n  d = %dict{ \"a\" => 1,\n    \"b\" => 2 }\n  d\n}\nf";
         assert_formats(
             source,
@@ -1594,11 +1594,11 @@ mod tests {
     fn tall_steps_get_surrounding_blank_lines() {
         // A `~>` pipeline step is set off from its short neighbours with a blank line on each side…
         assert_formats(
-            "#{ first_step, target_len [~, suffix_len] %num.sub [target, ~, target_len] %bin.slice =&suffix, last_step }",
+            "#{ first_step; target_len [~, suffix_len] %num.sub [target, ~, target_len] %bin.slice =&suffix; last_step }",
             "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len] %num.sub\n  ~> [target, ~, target_len] %bin.slice\n  ~> =&suffix\n\n  last_step\n}\n",
         );
         // …but a body of only short steps stays packed (no imposed blanks).
-        assert_formats("#{ aa, bb, cc }", "#{ aa, bb, cc }\n");
+        assert_formats("#{ aa; bb; cc }", "#{ aa; bb; cc }\n");
     }
 
     #[test]
@@ -1656,18 +1656,18 @@ mod tests {
     #[test]
     fn groups_compound_consequences() {
         // A bare multi-step frame-free consequence is wrapped in grouping braces…
-        assert_formats("x = 5 { =0 => a, b | c }", "x = 5 { =0 => { a, b } | c }\n");
+        assert_formats("x = 5 { =0 => a; b | c }", "x = 5 { =0 => { a; b } | c }\n");
         // …a single-step consequence (one chain, many terms) stays bare…
         assert_formats("x = 5 { =0 => a b | c }", "x = 5 { =0 => a b | c }\n");
         // …a binding consequence keeps its own markers and stays bare…
         assert_formats(
-            "x = 5 { =0 => y = 1, [y, 2] g | c }",
-            "x = 5 { =0 => y = 1, [y, 2] g | c }\n",
+            "x = 5 { =0 => y = 1; [y, 2] g | c }",
+            "x = 5 { =0 => y = 1; [y, 2] g | c }\n",
         );
         // …and an already-braced consequence is not double-wrapped.
         assert_formats(
-            "x = 5 { =0 => { a, b } | c }",
-            "x = 5 { =0 => { a, b } | c }\n",
+            "x = 5 { =0 => { a; b } | c }",
+            "x = 5 { =0 => { a; b } | c }\n",
         );
     }
 
@@ -1698,7 +1698,7 @@ mod tests {
     #[test]
     fn keeps_meaningful_blocks() {
         // A binding inside the block would leak if inlined, so the block stays.
-        assert_formats("x = { 5 =y, y }", "x = { 5 =y, y }\n");
+        assert_formats("x = { 5 =y; y }", "x = { 5 =y; y }\n");
         // Multiple branches are not redundant.
         assert_formats("x = 5 { =0 => a | b }", "x = 5 { =0 => a | b }\n");
         // A comment inside the block keeps it (so the comment is not lost).
@@ -1936,8 +1936,8 @@ mod tests {
             "#'int",
             "#'int -> 'bin { $ }",
             // --- multi-chain sequences & control flow ---
-            "tag = %ref, [tag, 42] =[&tag, x], x",
-            "[], 5",
+            "tag = %ref; [tag, 42] =[&tag, x]; x",
+            "[]; 5",
             // --- type aliases: unions, intersections, partials, modules, recursion ---
             "'bool = True | False",
             "'shape = Circle[radius: 'int] | Rectangle[width: 'int, height: 'int]",

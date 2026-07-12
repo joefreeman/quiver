@@ -55,7 +55,7 @@ fn test_ident_and_quoted() {
 #[test]
 fn test_literal() {
     quiver()
-        .evaluate("p = [\"let\", \"'let'\"] %parse.literal, [\"let\", &p] %parse.run")
+        .evaluate("p = [\"let\", \"'let'\"] %parse.literal; [\"let\", &p] %parse.run")
         .expect("Ok");
 }
 
@@ -194,7 +194,7 @@ fn test_many0_zero_width_match_has_no_phantom_element() {
     quiver()
         .evaluate(
             r#"
-            digit? = #'int { [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0), Ok }
+            digit? = #'int { [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0); Ok }
             p = &digit? %parse.take_while %parse.many0
             ["12", &p] %parse.run
             "#,
@@ -208,7 +208,7 @@ fn test_chainl_nullable_operator_terminates() {
     quiver()
         .evaluate(
             r#"
-            digit? = #'int { [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0), Ok }
+            digit? = #'int { [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0); Ok }
             p = &digit? %parse.take_while
             op = [&%parse.ws, #{ &%bin.concat }] %parse.map
             c = [&p, &op] %parse.chainl
@@ -238,7 +238,7 @@ fn test_ident_accepts_host_identifier_grammar() {
 #[test]
 fn test_quoted_backspace_and_formfeed_escapes() {
     quiver()
-        .evaluate(r#"["\"a\\b\\f\"", &%parse.quoted] %parse.run =Str[b], b"#)
+        .evaluate(r#"["\"a\\b\\f\"", &%parse.quoted] %parse.run =Str[b]; b"#)
         .expect("0x61080c");
 }
 

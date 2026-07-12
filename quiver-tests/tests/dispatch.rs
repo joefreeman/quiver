@@ -6,17 +6,17 @@ use common::*;
 // rather than the whole union of branch results.
 
 const ADD: &str = r#"
-'n = 'int | Rational['int, 'int],
+'n = 'int | Rational['int, 'int];
 radd_ = #[Rational['int, 'int], Rational['int, 'int]] {
-  =[Rational[a, b], Rational[c, d]],
+  =[Rational[a, b], Rational[c, d]];
   Rational[[[a, d] __integer_multiply__, [c, b] __integer_multiply__] __integer_add__, [b, d] __integer_multiply__]
-},
-tr_ = #'n { | =Rational[n, d] => Rational[n, d] | =n => Rational[n, 1] },
+};
+tr_ = #'n { | =Rational[n, d] => Rational[n, d] | =n => Rational[n, 1] };
 add = #['n, 'n] {
   | =[Rational[a, b], y] => [Rational[a, b], y tr_] radd_
   | =[x, Rational[c, d]] => [x tr_, Rational[c, d]] radd_
   | =[a, b] => [a, b] __integer_add__
-},
+};
 "#;
 
 #[test]
@@ -52,7 +52,7 @@ fn test_unknown_kind_infers_union() {
     // degradation rather than a wrong narrow answer.
     quiver()
         .evaluate(&format!(
-            "{ADD} mk = #'int {{ =0 => 1/2 | 7 }}, m = 0 mk, [m, m] add"
+            "{ADD} mk = #'int {{ =0 => 1/2 | 7 }}; m = 0 mk; [m, m] add"
         ))
         .expect_type("'int | Rational['int, 'int]");
 }
@@ -125,12 +125,12 @@ fn test_nested_cross_field_dispatch() {
     quiver()
         .evaluate(
             r#"
-            'n = 'int | Rational['int, 'int],
+            'n = 'int | Rational['int, 'int];
             f = #[p: ['n, 'n]] {
               | =[p: [Rational[a, b], y]] => Rat
               | =[p: [x, Rational[c, d]]] => Rat
               | =[p: [a, b]] => [a, b] __integer_add__
-            },
+            };
             [p: [2, 3]] f
             "#,
         )

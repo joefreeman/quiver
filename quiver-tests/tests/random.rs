@@ -20,12 +20,12 @@ fn test_bytes_length() {
 fn test_hex_token() {
     quiver()
         .with_io()
-        .evaluate("8 %random.hex =Str[b], b %bin.length")
+        .evaluate("8 %random.hex =Str[b]; b %bin.length")
         .expect("16");
     // Two independent 16-byte tokens colliding would be a broken entropy source.
     quiver()
         .with_io()
-        .evaluate("a = 16 %random.hex, b = 16 %random.hex, { | a =&b => Same | Different }")
+        .evaluate("a = 16 %random.hex; b = 16 %random.hex; { | a =&b => Same | Different }")
         .expect("Different");
 }
 
@@ -43,7 +43,7 @@ fn test_below_stays_in_range() {
                  [v, 10] __integer_compare__ =-1
                  [$, 1] __integer_subtract__ ^
                }
-             },
+             };
              40 chk",
         )
         .expect("Ok");

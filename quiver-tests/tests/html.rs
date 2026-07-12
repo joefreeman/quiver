@@ -55,7 +55,7 @@ fn test_root_whitespace_is_trimmed_interior_preserved() {
 #[test]
 fn test_text_holes_are_escaped() {
     quiver()
-        .evaluate(r#"name = "<b>&\"x", %html{ <p>{name}</p> } %html.render"#)
+        .evaluate(r#"name = "<b>&\"x"; %html{ <p>{name}</p> } %html.render"#)
         .expect(r#""<p>&lt;b&gt;&amp;\"x</p>""#);
 }
 
@@ -85,10 +85,10 @@ fn test_int_holes_render_as_digits() {
 fn test_nil_hole_renders_nothing() {
     // A hole is a host block; one that fails (nil) renders nothing — the conditional idiom.
     quiver()
-        .evaluate(r#"no = [], %html{ <p>x{ no => "yes" }y</p> } %html.render"#)
+        .evaluate(r#"no = []; %html{ <p>x{ no => "yes" }y</p> } %html.render"#)
         .expect(r#""<p>xy</p>""#);
     quiver()
-        .evaluate(r#"ok? = Ok, %html{ <p>{ ok? => "yes" }</p> } %html.render"#)
+        .evaluate(r#"ok? = Ok; %html{ <p>{ ok? => "yes" }</p> } %html.render"#)
         .expect(r#""<p>yes</p>""#);
 }
 
@@ -104,7 +104,7 @@ fn test_flowing_value_in_holes() {
 fn test_attribute_holes() {
     // A Str renders as the value (escaped); an int as digits; Ok bare; nil omits.
     quiver()
-        .evaluate(r#"c = "a\"b", %html{ <div class={c} data-n={ 7 }>x</div> } %html.render"#)
+        .evaluate(r#"c = "a\"b"; %html{ <div class={c} data-n={ 7 }>x</div> } %html.render"#)
         .expect(r#""<div class=\"a&quot;b\" data-n=\"7\">x</div>""#);
     quiver()
         .evaluate(r#"%html{ <input disabled={ Ok } value={ [] }> } %html.render"#)
@@ -118,7 +118,7 @@ fn test_node_list_holes_render_as_fragments() {
             r#"
             items = %list{ "a", "b" } %list.iter
               ~> [~, #Str['bin] { %html{ <li>{$}</li> } }] %iter.map
-              ~> %list.collect,
+              ~> %list.collect;
             %html{ <ul>{items}</ul> } %html.render
             "#,
         )
@@ -133,7 +133,7 @@ fn test_components_are_functions() {
             r#"
             card = #[title: Str['bin], children: '%html] {
               %html{ <section><h2>{$title}</h2>{$children}</section> }
-            },
+            };
             %html{ <main>{ [title: "T", children: %html{ <p>b</p> }] card }</main> } %html.render
             "#,
         )
@@ -144,10 +144,10 @@ fn test_components_are_functions() {
 fn test_tree_is_pattern_matchable() {
     // The dialect yields an inspectable tree — structural assertions instead of string goldens.
     quiver()
-        .evaluate(r#"%html{ <div id="x">hi</div> } =Element(tag: t), t"#)
+        .evaluate(r#"%html{ <div id="x">hi</div> } =Element(tag: t); t"#)
         .expect(r#""div""#);
     quiver()
-        .evaluate(r#"%html{ <br> } =Element[tag: "br", attrs: Nil, children: Nil], Ok"#)
+        .evaluate(r#"%html{ <br> } =Element[tag: "br", attrs: Nil, children: Nil]; Ok"#)
         .expect("Ok");
 }
 

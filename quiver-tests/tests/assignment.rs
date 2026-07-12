@@ -4,49 +4,49 @@ use common::*;
 #[test]
 fn test_simple_assignment() {
     quiver()
-        .evaluate("1 =x, 2 =y, [x, y] __integer_add__")
+        .evaluate("1 =x; 2 =y; [x, y] __integer_add__")
         .expect("3");
 
-    quiver().evaluate("x = 42, x").expect("42");
+    quiver().evaluate("x = 42; x").expect("42");
 }
 
 #[test]
 fn test_tuple_destructuring() {
     quiver()
-        .evaluate("[1, 2] =[a, b], [a, b] __integer_add__")
+        .evaluate("[1, 2] =[a, b]; [a, b] __integer_add__")
         .expect("3");
 
-    quiver().evaluate("[x, y] = [1, 2], y").expect("2");
+    quiver().evaluate("[x, y] = [1, 2]; y").expect("2");
 }
 
 #[test]
 fn test_named_field_assignment() {
-    quiver().evaluate("A[a: 1] =A[a: a], a").expect("1");
-    quiver().evaluate("A[a: 1] =[a: a], a").expect("[]");
-    quiver().evaluate("A[a: 1] =A[a: a, b: b], a").expect("[]");
-    quiver().evaluate("A[a: 1] =A[x: a], a").expect("[]");
-    quiver().evaluate("A[a: 1] =A[a], a").expect("[]");
-    quiver().evaluate("A[a: a] = A[a: 5], a").expect("5");
+    quiver().evaluate("A[a: 1] =A[a: a]; a").expect("1");
+    quiver().evaluate("A[a: 1] =[a: a]; a").expect("[]");
+    quiver().evaluate("A[a: 1] =A[a: a, b: b]; a").expect("[]");
+    quiver().evaluate("A[a: 1] =A[x: a]; a").expect("[]");
+    quiver().evaluate("A[a: 1] =A[a]; a").expect("[]");
+    quiver().evaluate("A[a: a] = A[a: 5]; a").expect("5");
 }
 
 #[test]
 fn test_nested_field_assignment() {
     quiver()
-        .evaluate("A[a: B[b: 2]] =A[a: B[b: b]], b")
+        .evaluate("A[a: B[b: 2]] =A[a: B[b: b]]; b")
         .expect("2");
 }
 
 #[test]
 fn test_partial_tuple_assignment() {
     quiver()
-        .evaluate("[x: 1, y: 2, z: 3] =(x, y), [x, y] __integer_add__")
+        .evaluate("[x: 1, y: 2, z: 3] =(x, y); [x, y] __integer_add__")
         .expect("3");
 }
 
 #[test]
 fn test_named_partial_pattern() {
     quiver()
-        .evaluate("A[x: 1, y: 2, z: 3] =A(x, z), [x, z]")
+        .evaluate("A[x: 1, y: 2, z: 3] =A(x, z); [x, z]")
         .expect("[1, 3]");
     quiver().evaluate("A[x: 1, y: 2] =B(x, y)").expect("[]");
 }
@@ -56,10 +56,10 @@ fn test_named_partial_pattern_with_union() {
     quiver()
         .evaluate(
             r#"
-            'union = A[x: 'int, y: 'int] | B[x: 'int, z: 'int],
-            #'union { =A(x) => x } =f,
-            A[x: 1, y: 2] f =a,
-            B[x: 3, z: 4] f =b,
+            'union = A[x: 'int, y: 'int] | B[x: 'int, z: 'int];
+            #'union { =A(x) => x } =f;
+            A[x: 1, y: 2] f =a;
+            B[x: 3, z: 4] f =b;
             [a, b]
             "#,
         )
@@ -83,11 +83,11 @@ fn test_named_partial_pattern_in_block() {
 #[test]
 fn test_star_assignment() {
     quiver()
-        .evaluate("[a: 1, b: 2] =*, [a, b] __integer_add__")
+        .evaluate("[a: 1, b: 2] =*; [a, b] __integer_add__")
         .expect("3");
 
     quiver()
-        .evaluate("* = [a: 1, b: 2], [a, b] __integer_add__")
+        .evaluate("* = [a: 1, b: 2]; [a, b] __integer_add__")
         .expect("3");
 }
 
@@ -95,11 +95,11 @@ fn test_star_assignment() {
 fn test_named_star_assignment() {
     // A named star binds all named fields, like `*`, but also requires the tuple name.
     quiver()
-        .evaluate("Config[a: 1, b: 2] =Config*, [a, b] __integer_add__")
+        .evaluate("Config[a: 1, b: 2] =Config*; [a, b] __integer_add__")
         .expect("3");
 
     quiver()
-        .evaluate("Config* = Config[a: 1, b: 2], [a, b] __integer_add__")
+        .evaluate("Config* = Config[a: 1, b: 2]; [a, b] __integer_add__")
         .expect("3");
 }
 
@@ -123,7 +123,7 @@ fn test_named_star_discriminates_union() {
 
 #[test]
 fn test_ignore_placeholder() {
-    quiver().evaluate("[1, 2] =[a, _], a").expect("1");
+    quiver().evaluate("[1, 2] =[a, _]; a").expect("1");
     quiver().evaluate("[1, 2] =_").expect("Ok");
     quiver().evaluate("_ = [1, 2]").expect("Ok");
 }
@@ -136,7 +136,7 @@ fn test_failed_assignment_length() {
 
 #[test]
 fn test_failed_assignment_on_mismatched_literal() {
-    quiver().evaluate("4 =a, a =3").expect("[]");
+    quiver().evaluate("4 =a; a =3").expect("[]");
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            #[a: 'int, b: 'int] { =(a, b) => [a, b] } =f,
+            #[a: 'int, b: 'int] { =(a, b) => [a, b] } =f;
             [a: 1, b: 2] f
             "#,
         )
@@ -198,10 +198,10 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            'union = [a: 'int, b: 'int] | [x: 'int],
-            #'union { =(a, b) => [a, b] } =f,
-            [a: 1, b: 2] f =b1,
-            [x: 3] f =b2,
+            'union = [a: 'int, b: 'int] | [x: 'int];
+            #'union { =(a, b) => [a, b] } =f;
+            [a: 1, b: 2] f =b1;
+            [x: 3] f =b2;
             [b1, b2]
             "#,
         )
@@ -210,10 +210,10 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            'union = [a: 'int, b: 'int] | [b: 'int, c: 'int],
-            #'union { =(b) => b } =f,
-            [a: 1, b: 2] f =b1,
-            [b: 3, c: 4] f =b2,
+            'union = [a: 'int, b: 'int] | [b: 'int, c: 'int];
+            #'union { =(b) => b } =f;
+            [a: 1, b: 2] f =b1;
+            [b: 3, c: 4] f =b2;
             [b1, b2]
             "#,
         )
@@ -222,10 +222,10 @@ fn test_union_type_partial_destructuring() {
     quiver()
         .evaluate(
             r#"
-            'union = [a: 'int, b: 'int] | [b: 'int, c: 'int],
-            #'union { =(a, b) => [a, b] } =f,
-            [a: 1, b: 2] f =b1,
-            [b: 3, c: 4] f =b2,
+            'union = [a: 'int, b: 'int] | [b: 'int, c: 'int];
+            #'union { =(a, b) => [a, b] } =f;
+            [a: 1, b: 2] f =b1;
+            [b: 3, c: 4] f =b2;
             [b1, b2]
             "#,
         )
@@ -237,11 +237,11 @@ fn test_match_union_in_nested_tuple() {
     quiver()
         .evaluate(
             r#"
-            'option = Some['int] | None,
+            'option = Some['int] | None;
             #['option, 'int] {
               | =[None, z] => 0
               | =[Some[x], z] => [x, z] __integer_add__
-            } =f,
+            } =f;
             [Some[5], 2] f
             "#,
         )
@@ -251,19 +251,19 @@ fn test_match_union_in_nested_tuple() {
 #[test]
 fn test_multiple_placeholders() {
     quiver()
-        .evaluate("[1, 2, 3, 4, 5] =[_, x, _, y, _], [x, y] __integer_add__")
+        .evaluate("[1, 2, 3, 4, 5] =[_, x, _, y, _]; [x, y] __integer_add__")
         .expect("6");
 }
 
 #[test]
 fn test_mixed_pattern_literal_and_binding() {
-    quiver().evaluate("[1, 2, 3] =[1, x, 3], x").expect("2");
+    quiver().evaluate("[1, 2, 3] =[1, x, 3]; x").expect("2");
     quiver().evaluate("[1, 2, 4] =[1, x, 3]").expect("[]"); // Literal 4 doesn't match 3
 }
 
 #[test]
 fn test_deeply_nested_tuple_pattern() {
-    quiver().evaluate("A[B[C[42]]] =A[B[C[x]]], x").expect("42");
+    quiver().evaluate("A[B[C[42]]] =A[B[C[x]]]; x").expect("42");
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn test_empty_tuple_pattern() {
 fn test_string_literal_pattern() {
     // String literal matching with integer extraction
     quiver()
-        .evaluate(r#"["hello", 123] =["hello", x], x"#)
+        .evaluate(r#"["hello", 123] =["hello", x]; x"#)
         .expect("123");
 
     quiver()
@@ -289,8 +289,8 @@ fn test_complex_union_pattern_matching() {
     quiver()
         .evaluate(
             r#"
-            'result = Ok['int] | Err['int],
-            'option = Some['result] | None,
+            'result = Ok['int] | Err['int];
+            'option = Some['result] | None;
 
             Some[Ok[42]] {
               | =None => 0
@@ -305,7 +305,7 @@ fn test_complex_union_pattern_matching() {
 #[test]
 fn test_simple_partial_pattern() {
     // Test a simple partial pattern without unions first
-    quiver().evaluate("[x: 1, y: 2] =(x, y), x").expect("1");
+    quiver().evaluate("[x: 1, y: 2] =(x, y); x").expect("1");
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn test_star_pattern_order_for_union() {
 #[test]
 fn test_recursive_destructuring() {
     quiver()
-        .evaluate("A[B[i: 1], C[j: 2, k: 3], D[l: 4, m: 5]] =A[B[i: i], C(j), *], [i, j, l, m]")
+        .evaluate("A[B[i: 1], C[j: 2, k: 3], D[l: 4, m: 5]] =A[B[i: i], C(j), *]; [i, j, l, m]")
         .expect("[1, 2, 4, 5]");
 }
 
@@ -355,14 +355,14 @@ fn test_wildcard() {
 #[test]
 fn test_repeated_identifier_bind() {
     // Repeated identifier in bind mode - checks equality
-    quiver().evaluate("[1, 1] =[x, x], x").expect("1");
+    quiver().evaluate("[1, 1] =[x, x]; x").expect("1");
     quiver().evaluate("[1, 2] =[x, x]").expect("[]");
 }
 
 #[test]
 fn test_repeated_identifier_nested() {
     quiver()
-        .evaluate("[Point[1, 2], 1] =[Point[x, _], x], x")
+        .evaluate("[Point[1, 2], 1] =[Point[x, _], x]; x")
         .expect("1");
     quiver()
         .evaluate("[Point[1, 2], 2] =[Point[x, _], x]")
@@ -371,6 +371,6 @@ fn test_repeated_identifier_nested() {
 
 #[test]
 fn test_repeated_identifier_multiple_times() {
-    quiver().evaluate("[1, 1, 1] =[x, x, x], x").expect("1");
+    quiver().evaluate("[1, 1, 1] =[x, x, x]; x").expect("1");
     quiver().evaluate("[1, 1, 2] =[x, x, x]").expect("[]");
 }

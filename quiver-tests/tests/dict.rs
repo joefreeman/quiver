@@ -100,8 +100,8 @@ fn test_canonical_insertion_order_independent() {
     quiver()
         .evaluate(
             r#"
-            d1 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "charlie", 3] %dict.put,
-            d2 = %dict.new [~, "charlie", 3] %dict.put [~, "bravo", 2] %dict.put [~, "alpha", 1] %dict.put,
+            d1 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "charlie", 3] %dict.put;
+            d2 = %dict.new [~, "charlie", 3] %dict.put [~, "bravo", 2] %dict.put [~, "alpha", 1] %dict.put;
             d1 =&d2
         "#,
         )
@@ -114,8 +114,8 @@ fn test_canonical_remove_matches_direct_build() {
     quiver()
         .evaluate(
             r#"
-            d1 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "charlie", 3] %dict.put [~, "delta", 4] %dict.put [~, "charlie"] %dict.remove,
-            d2 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "delta", 4] %dict.put,
+            d1 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "charlie", 3] %dict.put [~, "delta", 4] %dict.put [~, "charlie"] %dict.remove;
+            d2 = %dict.new [~, "alpha", 1] %dict.put [~, "bravo", 2] %dict.put [~, "delta", 4] %dict.put;
             d1 =&d2
         "#,
         )
@@ -127,7 +127,7 @@ fn test_canonical_collision_remove_matches_direct_build() {
     // a collision that loses one entry equals directly building the single-key dict
     quiver()
         .evaluate(&format!(
-            "d1 = {DA} [~, {KA}] %dict.remove, d2 = %dict.new [~, {KB}, 2] %dict.put, d1 =&d2"
+            "d1 = {DA} [~, {KA}] %dict.remove; d2 = %dict.new [~, {KB}, 2] %dict.put; d1 =&d2"
         ))
         .expect("Ok");
 }
@@ -228,8 +228,8 @@ fn test_immutability() {
     quiver()
         .evaluate(
             r#"
-            d = %dict.new [~, "a", 1] %dict.put,
-            d [~, "a", 99] %dict.put,
+            d = %dict.new [~, "a", 1] %dict.put;
+            d [~, "a", 99] %dict.put;
             d [~, "a"] %dict.get
         "#,
         )
@@ -290,8 +290,8 @@ fn test_merge_b_wins() {
     quiver()
         .evaluate(
             r#"
-            a = %dict.new [~, "k", 1] %dict.put,
-            b = %dict.new [~, "k", 9] %dict.put,
+            a = %dict.new [~, "k", 1] %dict.put;
+            b = %dict.new [~, "k", 9] %dict.put;
             [a, b] %dict.merge [~, "k"] %dict.get
         "#,
         )
@@ -303,8 +303,8 @@ fn test_merge_keeps_disjoint() {
     quiver()
         .evaluate(
             r#"
-            a = %dict.new [~, "x", 1] %dict.put,
-            b = %dict.new [~, "y", 2] %dict.put,
+            a = %dict.new [~, "x", 1] %dict.put;
+            b = %dict.new [~, "y", 2] %dict.put;
             [a, b] %dict.merge [~, "x"] %dict.get
         "#,
         )
@@ -332,7 +332,7 @@ fn test_iter_sum_values() {
 fn test_keys_present() {
     // every original key is found via has?
     quiver()
-        .evaluate(&format!(r#"{FROM} =d, ["alpha", "delta", "kilo"] {{ =[a, b, c], [d [~, a] %dict.has?, d [~, b] %dict.has?, d [~, c] %dict.has?] }}"#))
+        .evaluate(&format!(r#"{FROM} =d; ["alpha", "delta", "kilo"] {{ =[a, b, c]; [d [~, a] %dict.has?, d [~, b] %dict.has?, d [~, c] %dict.has?] }}"#))
         .expect("[Ok, Ok, Ok]");
 }
 

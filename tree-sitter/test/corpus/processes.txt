@@ -38,7 +38,7 @@ p = @{ !'int { =0 => "done" | [] ^ } }
 spawn typed and await
 ==================
 
-p = [42, 100] @['int, 'int] { $ }, !p
+p = [42, 100] @['int, 'int] { $ }; !p
 
 ---
 
@@ -92,7 +92,7 @@ p1 ! [~, 1000]
 send and self
 ==================
 
-42 pid, &. =self_pid
+42 pid; &. =self_pid
 
 ---
 

@@ -57,17 +57,17 @@ rev = #<'t>['items<'t>, 'items<'t>] {
 // === The dialect grammar ================================================================
 
 // The byte at the parse state's position / one past it, or nil at end of input.
-peek_at = #'%parse { [$pos, $len] __integer_compare__ =-1, [$data, $pos] %bin.get_byte }
+peek_at = #'%parse { [$pos, $len] __integer_compare__ =-1; [$data, $pos] %bin.get_byte }
 peek_at2 = #'%parse {
-  p = [$pos, 1] __integer_add__, [p, $len] __integer_compare__ =-1, [$data, p] %bin.get_byte
+  p = [$pos, 1] __integer_add__; [p, $len] __integer_compare__ =-1; [$data, p] %bin.get_byte
 }
 
-lower? = #'int { [$, 97] __integer_compare__ =(0 | 1), [$, 122] __integer_compare__ =(-1 | 0), $ }
+lower? = #'int { [$, 97] __integer_compare__ =(0 | 1); [$, 122] __integer_compare__ =(-1 | 0); $ }
 
-digit? = #'int { [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0), $ }
+digit? = #'int { [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0); $ }
 
 letter? = #'int {
-  | [$, 65] __integer_compare__ =(0 | 1), [$, 90] __integer_compare__ =(-1 | 0) => $
+  | [$, 65] __integer_compare__ =(0 | 1); [$, 90] __integer_compare__ =(-1 | 0) => $
   | $ lower?
 }
 
@@ -114,7 +114,7 @@ comment_end = #['bin, 'int, 'int] {
   {
     | [[pos, 3] __integer_add__, len] __integer_compare__
       ~> =1 => []
-    | [data, pos] %bin.get_byte =45, [data, [pos, 1] __integer_add__] %bin.get_byte =45, [data, [pos, 2] __integer_add__] %bin.get_byte =62 => [
+    | [data, pos] %bin.get_byte =45; [data, [pos, 1] __integer_add__] %bin.get_byte =45; [data, [pos, 2] __integer_add__] %bin.get_byte =62 => [
       pos,
       3,
     ] __integer_add__
@@ -148,8 +148,8 @@ ws_only_from = #['bin, 'int] {
 tag_name = #'%parse {
   =st
   {
-    | st peek_at =('int)b, b lower? => { st tag_rest, =[bytes, st2], [Str[bytes], st2] }
-    | st peek_at =('int)b, [b, 65] __integer_compare__ =(0 | 1), [b, 90] __integer_compare__ =(-1 | 0) => {
+    | st peek_at =('int)b; b lower? => { st tag_rest; =[bytes, st2]; [Str[bytes], st2] }
+    | st peek_at =('int)b; [b, 65] __integer_compare__ =(0 | 1); [b, 90] __integer_compare__ =(-1 | 0) => {
       [
         st,
         "a lowercase tag name (capitalized tags are reserved for components)",
@@ -204,7 +204,7 @@ attrs_loop = #['%meta.cb, '%parse, 'alist] {
   st0 %parse.ws
   =[_, st]
   {
-    | st peek_at =('int)b, b letter? => {
+    | st peek_at =('int)b; b letter? => {
       st attr_rest
       =[nb, st2]
       name = Str[nb]
@@ -346,7 +346,7 @@ nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
                   =[fkids, st5]
                   kids = [fkids, Nil] strip
                   {
-                    | st5 peek_at =60, st5 peek_at2 =47 => {
+                    | st5 peek_at =60; st5 peek_at2 =47 => {
                       st6 = st5 ~[..., pos: [st5.pos, 2] __integer_add__]
                       st6 tag_name
                       =[ctag, st7]

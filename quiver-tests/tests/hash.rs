@@ -39,8 +39,8 @@ fn test_hmac_sha256_rfc4231_vectors() {
             r#"rep = #['bin, 'int, 'int] {
                  =[acc, b, n]
                  { | n =0 => acc | [[acc, b, 1] %bin.append, b, [n, 1] __integer_subtract__] ^ }
-               },
-               key = [0x, 170, 131] rep,
+               };
+               key = [0x, 170, 131] rep;
                [key, "Test Using Larger Than Block-Size Key - Hash Key First" .0] %hash.hmac_sha256 %bin.to_hex"#,
         )
         .expect(r#""60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54""#);

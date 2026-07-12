@@ -16,7 +16,9 @@ fn test_parse_scalars() {
     quiver().evaluate(r#""false" %json.parse"#).expect("False");
     quiver().evaluate(r#""42" %json.parse"#).expect("42");
     quiver().evaluate(r#""-17" %json.parse"#).expect("-17");
-    quiver().evaluate(r#""\"hi\"" %json.parse"#).expect(r#""hi""#);
+    quiver()
+        .evaluate(r#""\"hi\"" %json.parse"#)
+        .expect(r#""hi""#);
 }
 
 #[test]
@@ -35,7 +37,9 @@ fn test_parse_object_preserves_key_order() {
     quiver()
         .evaluate(r#""\{\"a\": 1, \"b\": true}" %json.parse"#)
         .expect(r#"Object[Cons[["a", 1], Cons[["b", True], Nil]]]"#);
-    quiver().evaluate(r#""\{}" %json.parse"#).expect("Object[Nil]");
+    quiver()
+        .evaluate(r#""\{}" %json.parse"#)
+        .expect("Object[Nil]");
 }
 
 #[test]
@@ -89,10 +93,10 @@ fn test_stringify_escapes_strings() {
 fn test_round_trip() {
     // `parse` is nilable, so narrow with `=('%json)v` before feeding `stringify`.
     quiver()
-        .evaluate(r#""[1, [2, 3], [], -4]" %json.parse =('%json)v, v %json.stringify"#)
+        .evaluate(r#""[1, [2, 3], [], -4]" %json.parse =('%json)v; v %json.stringify"#)
         .expect(r#""[1,[2,3],[],-4]""#);
     quiver()
-        .evaluate(r#""\{\"k\": [true, null]}" %json.parse =('%json)v, v %json.stringify"#)
+        .evaluate(r#""\{\"k\": [true, null]}" %json.parse =('%json)v; v %json.stringify"#)
         .expect(r#""{\"k\":[true,null]}""#);
 }
 
@@ -129,7 +133,7 @@ fn test_parse_large_exponent_stays_exact() {
         .expect("1000000000000000000000000000000");
     quiver()
         .evaluate(
-            r#"doc = "1000000000000000000000000000000", doc %json.parse =('%json)v, v %json.stringify =&doc"#,
+            r#"doc = "1000000000000000000000000000000"; doc %json.parse =('%json)v; v %json.stringify =&doc"#,
         )
         .expect("Ok");
 }
@@ -138,21 +142,21 @@ fn test_parse_large_exponent_stays_exact() {
 fn test_stringify_rationals() {
     // Terminating rational -> its exact decimal.
     quiver()
-        .evaluate(r#"[314, 100] %num.div =('%json)v, v %json.stringify"#)
+        .evaluate(r#"[314, 100] %num.div =('%json)v; v %json.stringify"#)
         .expect(r#""3.14""#);
     // Non-terminating -> rounded (half away from zero) to 12 fractional digits.
     quiver()
-        .evaluate(r#"[1, 3] %num.div =('%json)v, v %json.stringify"#)
+        .evaluate(r#"[1, 3] %num.div =('%json)v; v %json.stringify"#)
         .expect(r#""0.333333333333""#);
     quiver()
-        .evaluate(r#"[2, 3] %num.div =('%json)v, v %json.stringify"#)
+        .evaluate(r#"[2, 3] %num.div =('%json)v; v %json.stringify"#)
         .expect(r#""0.666666666667""#);
     quiver()
-        .evaluate(r#"[-2, 7] %num.div =('%json)v, v %json.stringify"#)
+        .evaluate(r#"[-2, 7] %num.div =('%json)v; v %json.stringify"#)
         .expect(r#""-0.285714285714""#);
     // Below 12 fractional digits of significance rounds to 0 (and never "-0").
     quiver()
-        .evaluate(r#"[1, 10000000000000] %num.div =('%json)v, v %json.stringify"#)
+        .evaluate(r#"[1, 10000000000000] %num.div =('%json)v; v %json.stringify"#)
         .expect(r#""0""#);
 }
 
@@ -170,7 +174,9 @@ fn test_decimal_round_trips() {
     ];
     for (input, output) in cases {
         quiver()
-            .evaluate(&format!("{input} %json.parse =('%json)v, v %json.stringify"))
+            .evaluate(&format!(
+                "{input} %json.parse =('%json)v; v %json.stringify"
+            ))
             .expect(output);
     }
 }
@@ -184,7 +190,7 @@ fn test_round_trip_complex_document() {
     // which exercises parse and stringify together across the whole nesting in one shot.
     quiver()
         .evaluate(
-            r#"doc = "\{\"user\":\{\"name\":\"Ada \\\"L\\\"\",\"age\":36,\"active\":true,\"roles\":[\"admin\",\"dev\"],\"manager\":null},\"scores\":[10,-5,0],\"empty_obj\":\{},\"empty_arr\":[],\"path\":\"a\\\\b\\nc\"}", doc %json.parse =('%json)v, v %json.stringify =&doc"#,
+            r#"doc = "\{\"user\":\{\"name\":\"Ada \\\"L\\\"\",\"age\":36,\"active\":true,\"roles\":[\"admin\",\"dev\"],\"manager\":null},\"scores\":[10,-5,0],\"empty_obj\":\{},\"empty_arr\":[],\"path\":\"a\\\\b\\nc\"}"; doc %json.parse =('%json)v; v %json.stringify =&doc"#,
         )
         .expect("Ok");
 }

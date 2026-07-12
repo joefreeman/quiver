@@ -81,7 +81,7 @@ fn returned_binaries_stay_counted() {
 fn discarded_binary_becomes_unreachable() {
     // `c` is built then never used in the result; once its top-level local is released on
     // completion it must end at refcount 0 (a dead, reclaimable slot), exercising the release side.
-    let ex = run("c = [0x09, 0x09] __binary_concat__, [0xaa, 0xbb] __binary_concat__");
+    let ex = run("c = [0x09, 0x09] __binary_concat__; [0xaa, 0xbb] __binary_concat__");
     assert!(ex.check_refcounts().is_ok(), "{:?}", ex.check_refcounts());
     assert!(
         ex.heap_stats().dead() >= 1,
@@ -94,7 +94,7 @@ fn discarded_binary_becomes_unreachable() {
 fn nested_tuples_and_field_access_balance() {
     // Build a nested structure, then project a field out of it — exercises tuple construct
     // (deep retain) and `get` (release the tuple, retain the field).
-    let ex = run("p = [a: [0x01, 0x02] __binary_concat__, b: 0x03], p.a");
+    let ex = run("p = [a: [0x01, 0x02] __binary_concat__, b: 0x03]; p.a");
     assert!(ex.check_refcounts().is_ok(), "{:?}", ex.check_refcounts());
 }
 
@@ -104,7 +104,7 @@ fn reclamation_bounds_heap_growth() {
     // With reclamation the discarded slots are reused, so the heap stays far below the iteration
     // count (without it, each iteration would strand a slot, growing the heap to ~2000).
     let ex = run(
-        "count = #'int { | =0 => Ok | =n => { [0x01, 0x02] __binary_concat__, [n, 1] __integer_subtract__ ^ } }, 2000 count",
+        "count = #'int { | =0 => Ok | =n => { [0x01, 0x02] __binary_concat__; [n, 1] __integer_subtract__ ^ } }; 2000 count",
     );
     let stats = ex.heap_stats();
     println!("reclamation loop heap stats: {stats:?}");

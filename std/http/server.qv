@@ -28,7 +28,7 @@ plain = #['int, Str['bin]] {
 
 // Whether the connection should be kept open after answering the request.
 keep_alive? = #'request {
-  | [$headers, "connection"] %http.header =Str[cb], Str[cb] %http.lower ="close" => []
+  | [$headers, "connection"] %http.header =Str[cb]; Str[cb] %http.lower ="close" => []
   | $version ="HTTP/1.1" => Ok
   | []
 }
@@ -79,15 +79,15 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
   }
 }
 
-conn = #[\TcpSocket, 'handler] { =[sock, h], [sock, &h, 0x] conn_loop }
+conn = #[\TcpSocket, 'handler] { =[sock, h]; [sock, &h, 0x] conn_loop }
 
 accept_loop = #[\TcpListener, 'handler] {
-  =[l, h], l __tcp_listener_accept__ [~, &h] @conn, [l, &h] ^
+  =[l, h]; l __tcp_listener_accept__ [~, &h] @conn; [l, &h] ^
 }
 
 serve = #[port: 'int, handler: 'handler] {
   :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). Blocks forever."
-  =[port: p, handler: h], p [~, 128] __tcp_listen__ [~, &h] accept_loop
+  =[port: p, handler: h]; p [~, 128] __tcp_listen__ [~, &h] accept_loop
 }
 
 html = #'%html {

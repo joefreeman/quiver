@@ -91,7 +91,7 @@
             },
             {
               "type": "STRING",
-              "value": ","
+              "value": ";"
             }
           ]
         }

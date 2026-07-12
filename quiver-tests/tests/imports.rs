@@ -28,7 +28,7 @@ fn test_destructured_import() {
         .with_modules(modules)
         .evaluate(
             r#"
-            (add, sub) = %mymath,
+            (add, sub) = %mymath;
             [3, 4] add [~, 2] sub
             "#,
         )
@@ -45,7 +45,7 @@ fn test_star_import() {
 
     quiver()
         .with_modules(modules)
-        .evaluate("* = %mymath, [3, 4] add")
+        .evaluate("* = %mymath; [3, 4] add")
         .expect("7");
 }
 
@@ -54,7 +54,7 @@ fn test_import_function_with_capture() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["capture".to_string()],
-        "x = 42, #{ [x, 2] __integer_multiply__ }".to_string(),
+        "x = 42; #{ [x, 2] __integer_multiply__ }".to_string(),
     );
 
     quiver()
@@ -69,8 +69,8 @@ fn test_import_nested_function_captures() {
     modules.insert(
         vec!["nested".to_string()],
         r#"
-        x = 10,
-        inner = #{ [x, 1] __integer_add__ },
+        x = 10;
+        inner = #{ [x, 1] __integer_add__ };
         #{ [] inner [~, 2] __integer_multiply__ }
         "#
         .to_string(),
@@ -87,12 +87,12 @@ fn test_import_tuple_with_captured_function() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["tuple_capture".to_string()],
-        "x = 5, y = 3, [x, #{ [x, y] __integer_add__ }, y]".to_string(),
+        "x = 5; y = 3; [x, #{ [x, y] __integer_add__ }, y]".to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("t = %tuple_capture, f = &t.1, [] f")
+        .evaluate("t = %tuple_capture; f = &t.1; [] f")
         .expect("8");
 }
 
@@ -101,12 +101,12 @@ fn test_multi_level_import_with_captures() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["level1".to_string()],
-        "base = 100, #{ [base, 1] __integer_add__ }".to_string(),
+        "base = 100; #{ [base, 1] __integer_add__ }".to_string(),
     );
     modules.insert(
         vec!["level2".to_string()],
         r#"
-        x = 3,
+        x = 3;
         #{ [] %level1 [~, x] __integer_multiply__ }
         "#
         .to_string(),
@@ -114,7 +114,7 @@ fn test_multi_level_import_with_captures() {
     modules.insert(
         vec!["level3".to_string()],
         r#"
-        x = 5,
+        x = 5;
         [#{ [] %level2 }, #{ [] %level2 [~, x] __integer_add__ }]
         "#
         .to_string(),
@@ -122,12 +122,12 @@ fn test_multi_level_import_with_captures() {
 
     quiver()
         .with_modules(modules.clone())
-        .evaluate("funcs = %level3, f1 = &funcs.0, [] f1")
+        .evaluate("funcs = %level3; f1 = &funcs.0; [] f1")
         .expect("303"); // (100 + 1) * 3 = 303
 
     quiver()
         .with_modules(modules)
-        .evaluate("funcs = %level3, f2 = &funcs.1, [] f2")
+        .evaluate("funcs = %level3; f2 = &funcs.1; [] f2")
         .expect("308"); // ((100 + 1) * 3) + 5 = 308
 }
 
@@ -136,14 +136,14 @@ fn test_named_module_type_alias() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
-        "'ok = Ok['int], 'err = Err['int], []".to_string(),
+        "'ok = Ok['int]; 'err = Err['int]; []".to_string(),
     );
     quiver()
         .with_modules(modules)
         .evaluate(
             r#"
-            'ok = '%types.ok,
-            double = #'ok { =Ok[x] => [x, 2] __integer_multiply__ },
+            'ok = '%types.ok;
+            double = #'ok { =Ok[x] => [x, 2] __integer_multiply__ };
             Ok[21] double
             "#,
         )
@@ -156,13 +156,13 @@ fn test_named_module_type_inline() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
-        "'result = Ok['int] | Err['int], []".to_string(),
+        "'result = Ok['int] | Err['int]; []".to_string(),
     );
     quiver()
         .with_modules(modules)
         .evaluate(
             r#"
-            unwrap = #'%types.result { =Ok[x] => x | =Err[x] => 0 },
+            unwrap = #'%types.result { =Ok[x] => x | =Err[x] => 0 };
             Ok[42] unwrap
             "#,
         )
@@ -175,13 +175,13 @@ fn test_default_module_type() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["result".to_string()],
-        "' = Ok['int] | Err['int], []".to_string(),
+        "' = Ok['int] | Err['int]; []".to_string(),
     );
     quiver()
         .with_modules(modules)
         .evaluate(
             r#"
-            unwrap = #'%result { =Ok[x] => x | =Err[x] => 0 },
+            unwrap = #'%result { =Ok[x] => x | =Err[x] => 0 };
             Ok[42] unwrap
             "#,
         )
@@ -193,7 +193,7 @@ fn test_generic_module_type() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["types".to_string()],
-        "'list<'t> = Nil | Cons['t, ^],".to_string(),
+        "'list<'t> = Nil | Cons['t, ^];".to_string(),
     );
     quiver()
         .with_modules(modules)
@@ -207,7 +207,7 @@ fn test_generic_default_module_type_applied() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["list".to_string()],
-        "'<'t> = Nil | Cons['t, ^],".to_string(),
+        "'<'t> = Nil | Cons['t, ^];".to_string(),
     );
     quiver()
         .with_modules(modules)
@@ -218,7 +218,7 @@ fn test_generic_default_module_type_applied() {
 #[test]
 fn test_module_type_missing() {
     let mut modules = HashMap::new();
-    modules.insert(vec!["types".to_string()], "'ok = Ok['int], []".to_string());
+    modules.insert(vec!["types".to_string()], "'ok = Ok['int]; []".to_string());
     quiver()
         .with_modules(modules)
         .evaluate(r#"'nope = '%types.missing"#)
@@ -233,7 +233,7 @@ fn test_default_aliasing_named_in_same_module() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["range".to_string()],
-        "'range = Range['int, 'int], ' = 'range, []".to_string(),
+        "'range = Range['int, 'int]; ' = 'range; []".to_string(),
     );
     quiver()
         .with_modules(modules)

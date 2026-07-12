@@ -32,7 +32,7 @@ stat = #Str['bin] {
       ~,
       #\Dir {
         $ __directory_next__ {
-          | =[] => { $ __directory_close__, [] }
+          | =[] => { $ __directory_close__; [] }
           | =e [Entry[name: Str[e.0], kind: e.1], $]
         }
       },

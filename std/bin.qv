@@ -10,15 +10,15 @@ hex_digit = #'int {
 
 // The numeric value of an ASCII hex digit, or nil.
 hex_val = #'int {
-  | [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0) => [
+  | [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0) => [
     $,
     48,
   ] __integer_subtract__
-  | [$, 97] __integer_compare__ =(0 | 1), [$, 102] __integer_compare__ =(-1 | 0) => [
+  | [$, 97] __integer_compare__ =(0 | 1); [$, 102] __integer_compare__ =(-1 | 0) => [
     [$, 97] __integer_subtract__,
     10,
   ] __integer_add__
-  | [$, 65] __integer_compare__ =(0 | 1), [$, 70] __integer_compare__ =(-1 | 0) => [
+  | [$, 65] __integer_compare__ =(0 | 1); [$, 70] __integer_compare__ =(-1 | 0) => [
     [$, 65] __integer_subtract__,
     10,
   ] __integer_add__

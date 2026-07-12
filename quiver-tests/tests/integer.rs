@@ -76,7 +76,7 @@ fn test_extract_hash_bits() {
     quiver()
         .evaluate(
             r#"
-            hash = 305419896,
+            hash = 305419896;
             [hash, 31] %int.and
             "#,
         )
@@ -85,10 +85,10 @@ fn test_extract_hash_bits() {
     quiver()
         .evaluate(
             r#"
-            hash = 305419896,
-            depth = 1,
-            shift = [depth, 5] __integer_multiply__,
-            shifted = [hash, [0, shift] __integer_subtract__] %int.shift,
+            hash = 305419896;
+            depth = 1;
+            shift = [depth, 5] __integer_multiply__;
+            shifted = [hash, [0, shift] __integer_subtract__] %int.shift;
             [shifted, 31] %int.and
             "#,
         )
@@ -100,9 +100,9 @@ fn test_chained_operations() {
     quiver()
         .evaluate(
             r#"
-            a = [255, 240] %int.and,
-            b = [a, 15] %int.or,
-            c = b %int.not,
+            a = [255, 240] %int.and;
+            b = [a, 15] %int.or;
+            c = b %int.not;
             [c, 8] %int.shift
             "#,
         )

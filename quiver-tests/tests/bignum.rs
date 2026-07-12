@@ -121,7 +121,7 @@ fn test_compare_small_against_big() {
 fn test_literal_match_across_boundary() {
     // A computed big value must match a big literal pattern (Constant + Equal path).
     quiver()
-        .evaluate("[9223372036854775807, 1] __integer_add__ =9223372036854775808, Ok")
+        .evaluate("[9223372036854775807, 1] __integer_add__ =9223372036854775808; Ok")
         .expect("Ok");
 }
 

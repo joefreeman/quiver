@@ -48,8 +48,8 @@ fn test_integer_valued_literals_stay_rational() {
 
 #[test]
 fn test_positional_access_still_works() {
-    quiver().evaluate("x = [10, 20], x.0").expect("10");
-    quiver().evaluate("x = [[1, 99], 20], x.0.1").expect("99");
+    quiver().evaluate("x = [10, 20]; x.0").expect("10");
+    quiver().evaluate("x = [[1, 99], 20]; x.0.1").expect("99");
 }
 
 // --- Polymorphic arithmetic: integers are closed under add/sub/mul (integer in, integer
@@ -246,17 +246,17 @@ fn test_sqrt_of_surd_is_nil() {
 fn test_surd_add_same_radical() {
     // √2 + √2 = 2√2; √2 + √8 = √2 + 2√2 = 3√2.
     quiver()
-        .evaluate("s = 2 %num.sqrt, [s, s] %num.add")
+        .evaluate("s = 2 %num.sqrt; [s, s] %num.add")
         .expect("2√2");
     quiver()
-        .evaluate("a = 2 %num.sqrt, b = 8 %num.sqrt, [a, b] %num.add")
+        .evaluate("a = 2 %num.sqrt; b = 8 %num.sqrt; [a, b] %num.add")
         .expect("3√2");
 }
 
 #[test]
 fn test_surd_add_rational_part() {
     quiver()
-        .evaluate("s = 2 %num.sqrt, [1, s] %num.add")
+        .evaluate("s = 2 %num.sqrt; [1, s] %num.add")
         .expect("1 + √2");
 }
 
@@ -264,7 +264,7 @@ fn test_surd_add_rational_part() {
 fn test_surd_cancels_to_rational() {
     // (1 + √2) − √2 = 1 (collapses to a bare integer).
     quiver()
-        .evaluate("s = 2 %num.sqrt, x = [1, s] %num.add, [x, s] %num.sub")
+        .evaluate("s = 2 %num.sqrt; x = [1, s] %num.add; [x, s] %num.sub")
         .expect("1");
 }
 
@@ -272,7 +272,7 @@ fn test_surd_cancels_to_rational() {
 fn test_surd_mul_squares_to_integer() {
     // √2 · √2 = 2.
     quiver()
-        .evaluate("s = 2 %num.sqrt, [s, s] %num.mul")
+        .evaluate("s = 2 %num.sqrt; [s, s] %num.mul")
         .expect("2");
 }
 
@@ -281,7 +281,7 @@ fn test_surd_mul_conjugates() {
     // (1 + √2)(1 − √2) = 1 − 2 = −1.
     quiver()
         .evaluate(
-            "s = 2 %num.sqrt, a = [1, s] %num.add, b = [1, s %num.neg] %num.add, [a, b] %num.mul",
+            "s = 2 %num.sqrt; a = [1, s] %num.add; b = [1, s %num.neg] %num.add; [a, b] %num.mul",
         )
         .expect("-1");
 }
@@ -290,7 +290,7 @@ fn test_surd_mul_conjugates() {
 fn test_surd_div_rationalizes() {
     // 1/√2 = (1/2)√2.
     quiver()
-        .evaluate("s = 2 %num.sqrt, [1, s] %num.div")
+        .evaluate("s = 2 %num.sqrt; [1, s] %num.div")
         .expect("(1/2)√2");
 }
 
@@ -298,10 +298,10 @@ fn test_surd_div_rationalizes() {
 fn test_mixed_radicals_fail_to_nil() {
     // √2 and √3 live in different fields; arithmetic across them is unsupported.
     quiver()
-        .evaluate("a = 2 %num.sqrt, b = 3 %num.sqrt, [a, b] %num.mul")
+        .evaluate("a = 2 %num.sqrt; b = 3 %num.sqrt; [a, b] %num.mul")
         .expect("[]");
     quiver()
-        .evaluate("a = 2 %num.sqrt, b = 3 %num.sqrt, [a, b] %num.add")
+        .evaluate("a = 2 %num.sqrt; b = 3 %num.sqrt; [a, b] %num.add")
         .expect("[]");
 }
 
@@ -343,18 +343,18 @@ fn test_surd_negative_ordering() {
 #[test]
 fn test_surd_equality() {
     quiver()
-        .evaluate("s = 2 %num.sqrt, [s, s] %num.eq?")
+        .evaluate("s = 2 %num.sqrt; [s, s] %num.eq?")
         .expect("Ok");
     // 1 + √2 equals √2 + 1 regardless of construction order.
     quiver()
-        .evaluate("s = 2 %num.sqrt, a = [1, s] %num.add, b = [s, 1] %num.add, [a, b] %num.eq?")
+        .evaluate("s = 2 %num.sqrt; a = [1, s] %num.add; b = [s, 1] %num.add; [a, b] %num.eq?")
         .expect("Ok");
 }
 
 #[test]
 fn test_different_radicals_are_not_equal() {
     quiver()
-        .evaluate("a = 2 %num.sqrt, b = 3 %num.sqrt, [a, b] %num.eq?")
+        .evaluate("a = 2 %num.sqrt; b = 3 %num.sqrt; [a, b] %num.eq?")
         .expect("[]");
 }
 
@@ -362,7 +362,7 @@ fn test_different_radicals_are_not_equal() {
 fn test_golden_ratio() {
     // φ = (1 + √5)/2 ≈ 1.618; bracket it between consecutive Fibonacci ratios 8/5 and 13/8.
     // Failable results (sqrt, div) are bound before reuse so the binding narrows away `[]`.
-    let phi = "r = 5 %num.sqrt, s = [1, r] %num.add, phi = [s, 2] %num.div,";
+    let phi = "r = 5 %num.sqrt; s = [1, r] %num.add; phi = [s, 2] %num.div;";
     quiver()
         .evaluate(&format!("{phi} [phi, 8/5] %num.gt?"))
         .expect("Ok");
@@ -372,7 +372,7 @@ fn test_golden_ratio() {
     // φ² = φ + 1.
     quiver()
         .evaluate(&format!(
-            "{phi} sq = [phi, phi] %num.mul, p1 = [phi, 1] %num.add, [sq, p1] %num.eq?"
+            "{phi} sq = [phi, phi] %num.mul; p1 = [phi, 1] %num.add; [sq, p1] %num.eq?"
         ))
         .expect("Ok");
 }
@@ -385,13 +385,13 @@ fn test_surd_to_int_truncates_toward_zero() {
         .evaluate("2 %num.sqrt %num.neg %num.to_int")
         .expect("-1");
     quiver()
-        .evaluate("s = 2 %num.sqrt, [1, s] %num.add %num.to_int")
+        .evaluate("s = 2 %num.sqrt; [1, s] %num.add %num.to_int")
         .expect("2");
     quiver()
-        .evaluate("s = 2 %num.sqrt, [s, 5] %num.mul %num.to_int")
+        .evaluate("s = 2 %num.sqrt; [s, 5] %num.mul %num.to_int")
         .expect("7");
     quiver()
-        .evaluate("s = 2 %num.sqrt, n = 3 %num.neg, [n, s] %num.add %num.to_int")
+        .evaluate("s = 2 %num.sqrt; n = 3 %num.neg; [n, s] %num.add %num.to_int")
         .expect("-1");
     quiver().evaluate("1/2 %num.sqrt %num.to_int").expect("0");
 }
@@ -403,14 +403,14 @@ fn test_surd_formatting() {
     quiver().evaluate("8 %num.sqrt").expect("2√2");
     quiver().evaluate("1/2 %num.sqrt").expect("(1/2)√2");
     quiver()
-        .evaluate("s = 2 %num.sqrt, [1, s] %num.add")
+        .evaluate("s = 2 %num.sqrt; [1, s] %num.add")
         .expect("1 + √2");
     quiver()
-        .evaluate("s = 2 %num.sqrt, n = s %num.neg, [3, n] %num.add")
+        .evaluate("s = 2 %num.sqrt; n = s %num.neg; [3, n] %num.add")
         .expect("3 - √2");
     quiver().evaluate("2 %num.sqrt %num.neg").expect("-√2");
     // φ = 1/2 + (1/2)√5.
     quiver()
-        .evaluate("f = 5 %num.sqrt, s = [1, f] %num.add, [s, 2] %num.div")
+        .evaluate("f = 5 %num.sqrt; s = [1, f] %num.add; [s, 2] %num.div")
         .expect("1/2 + (1/2)√5");
 }

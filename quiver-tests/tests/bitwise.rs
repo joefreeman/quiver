@@ -204,10 +204,10 @@ fn test_bitwise_chaining() {
     quiver()
         .evaluate(
             r#"
-            a = 0xaa,  // 10101010
-            b = 0x55,  // 01010101
+            a = 0xaa;  // 10101010
+            b = 0x55;  // 01010101
             // XOR then AND
-            xor_result = [a, b] __binary_xor__,  // Should be 0xFF
+            xor_result = [a, b] __binary_xor__;  // Should be 0xFF
             [xor_result, a] __binary_and__  // 0xFF & 0xAA = 0xAA
             "#,
         )
@@ -269,21 +269,21 @@ fn test_hamt_simulation() {
         .evaluate(
             r#"
             // Simulate HAMT bitmap operations
-            bitmap = 8 __binary_new__,  // 8-byte bitmap
+            bitmap = 8 __binary_new__;  // 8-byte bitmap
 
             // Set bits at positions that would represent hash collisions
-            step1 = [bitmap, 0, 5, 1, 1] __binary_set__,   // Set bit 5
-            step2 = [step1, 1, 5, 1, 1] __binary_set__,   // Set bit 13
-            step3 = [step2, 2, 5, 1, 1] __binary_set__,   // Set bit 21
+            step1 = [bitmap, 0, 5, 1, 1] __binary_set__;   // Set bit 5
+            step2 = [step1, 1, 5, 1, 1] __binary_set__;   // Set bit 13
+            step3 = [step2, 2, 5, 1, 1] __binary_set__;   // Set bit 21
 
             // Count how many slots are occupied
-            occupied_count = step3 __binary_popcount__,
+            occupied_count = step3 __binary_popcount__;
 
             // Extract a 5-bit chunk (like HAMT does for navigation)
-            shifted = [step3, -3] __binary_shift__,  // Shift right by 3 (negative = right)
-            mask = 4 __binary_new__,  // Create mask binary
-            mask_with_bits = [mask, 0, 0, 1, 1] __binary_set__,  // Set LSB
-            chunk = [shifted, mask_with_bits] __binary_and__,
+            shifted = [step3, -3] __binary_shift__;  // Shift right by 3 (negative = right)
+            mask = 4 __binary_new__;  // Create mask binary
+            mask_with_bits = [mask, 0, 0, 1, 1] __binary_set__;  // Set LSB
+            chunk = [shifted, mask_with_bits] __binary_and__;
 
             occupied_count
             "#,

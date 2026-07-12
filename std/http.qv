@@ -42,7 +42,7 @@ lower_loop = #['bin, 'int, 'int, 'bin] {
     | {
       b = [data, pos] %bin.get_byte
       b2 = {
-        | [b, 65] __integer_compare__ =(0 | 1), [b, 90] __integer_compare__ =(-1 | 0) => [
+        | [b, 65] __integer_compare__ =(0 | 1); [b, 90] __integer_compare__ =(-1 | 0) => [
           b,
           32,
         ] __integer_add__
@@ -55,7 +55,7 @@ lower_loop = #['bin, 'int, 'int, 'bin] {
 
 lower = #Str['bin] {
   :doc "The string with ASCII letters lowercased."
-  =Str[b], [b, 0, b %bin.length, 0x] lower_loop Str[~]
+  =Str[b]; [b, 0, b %bin.length, 0x] lower_loop Str[~]
 }
 
 // The first value whose name matches case-insensitively, or nil.
@@ -64,7 +64,7 @@ header_find = #['pairs, 'bin] {
   pairs {
     | =Nil => []
     | =Cons[[n, v], rest] => {
-      | n lower =Str[nb], nb =&target => v
+      | n lower =Str[nb]; nb =&target => v
       | [rest, target] ^
     }
   }
@@ -72,7 +72,7 @@ header_find = #['pairs, 'bin] {
 
 header = #['pairs, Str['bin]] {
   :doc "The first value of a header by case-insensitive name, or nil when absent."
-  =[pairs, name], name lower =Str[target], [pairs, target] header_find
+  =[pairs, name]; name lower =Str[target]; [pairs, target] header_find
 }
 
 get = #['pairs, Str['bin]] {
@@ -86,15 +86,15 @@ get = #['pairs, Str['bin]] {
 
 // The numeric value of an ASCII hex digit, or nil.
 hex_val = #'int {
-  | [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0) => [
+  | [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0) => [
     $,
     48,
   ] __integer_subtract__
-  | [$, 97] __integer_compare__ =(0 | 1), [$, 102] __integer_compare__ =(-1 | 0) => [
+  | [$, 97] __integer_compare__ =(0 | 1); [$, 102] __integer_compare__ =(-1 | 0) => [
     [$, 97] __integer_subtract__,
     10,
   ] __integer_add__
-  | [$, 65] __integer_compare__ =(0 | 1), [$, 70] __integer_compare__ =(-1 | 0) => [
+  | [$, 65] __integer_compare__ =(0 | 1); [$, 70] __integer_compare__ =(-1 | 0) => [
     [$, 65] __integer_subtract__,
     10,
   ] __integer_add__
@@ -126,7 +126,7 @@ pct_loop = #['bin, 'int, 'int, 'int, 'bin] {
 
           [data, [pos, 3] __integer_add__, len, plus?, [acc, decoded, 1] %bin.append] ^
         }
-        | b =43, plus? =1 => {
+        | b =43; plus? =1 => {
           [data, [pos, 1] __integer_add__, len, plus?, [acc, 32, 1] %bin.append] ^
         }
         | {
@@ -172,7 +172,7 @@ path_segments = #'bin {
     | {
       revd = [data, 0, 0, data %bin.length, Nil] segs_loop
       trimmed = {
-        | revd =Cons[Str[last], rest], last %bin.length =0 => rest
+        | revd =Cons[Str[last], rest]; last %bin.length =0 => rest
         | revd
       }
       [trimmed, Nil] rev
@@ -232,7 +232,7 @@ head_end = #['bin, 'int, 'int] {
   {
     | [[pos, 4] __integer_add__, len] __integer_compare__
       ~> =1 => []
-    | [data, pos] %bin.get_byte =13, [data, [pos, 1] __integer_add__] %bin.get_byte =10, [data, [pos, 2] __integer_add__] %bin.get_byte =13, [data, [pos, 3] __integer_add__] %bin.get_byte =10 => pos
+    | [data, pos] %bin.get_byte =13; [data, [pos, 1] __integer_add__] %bin.get_byte =10; [data, [pos, 2] __integer_add__] %bin.get_byte =13; [data, [pos, 3] __integer_add__] %bin.get_byte =10 => pos
     | [data, [pos, 1] __integer_add__, len] ^
   }
 }
@@ -243,12 +243,12 @@ line_end = #['bin, 'int, 'int] {
   {
     | [[pos, 1] __integer_add__, end] __integer_compare__
       ~> =(0 | 1) => end
-    | [data, pos] %bin.get_byte =13, [data, [pos, 1] __integer_add__] %bin.get_byte =10 => pos
+    | [data, pos] %bin.get_byte =13; [data, [pos, 1] __integer_add__] %bin.get_byte =10 => pos
     | [data, [pos, 1] __integer_add__, end] ^
   }
 }
 
-ows? = #'int { $ =(32 | 9), $ }
+ows? = #'int { $ =(32 | 9); $ }
 
 trim_start = #['bin, 'int, 'int] {
   =[data, pos, end]
@@ -355,7 +355,7 @@ content_length = #'pairs {
   =hs
   {
     | [hs, "content-length"] header =Str[v] => {
-      Str[v] %str.parse_int =('int)n, [n, 0] __integer_compare__ =(0 | 1), n
+      Str[v] %str.parse_int =('int)n; [n, 0] __integer_compare__ =(0 | 1); n
     }
     | 0
   }
@@ -480,9 +480,9 @@ serialize_response = #'response {
 
 // Whether a byte is unreserved under percent-encoding (ALPHA / DIGIT / - . _ ~).
 enc_plain? = #'int {
-  | [$, 48] __integer_compare__ =(0 | 1), [$, 57] __integer_compare__ =(-1 | 0) => $
-  | [$, 65] __integer_compare__ =(0 | 1), [$, 90] __integer_compare__ =(-1 | 0) => $
-  | [$, 97] __integer_compare__ =(0 | 1), [$, 122] __integer_compare__ =(-1 | 0) => $
+  | [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0) => $
+  | [$, 65] __integer_compare__ =(0 | 1); [$, 90] __integer_compare__ =(-1 | 0) => $
+  | [$, 97] __integer_compare__ =(0 | 1); [$, 122] __integer_compare__ =(-1 | 0) => $
   | $ =(45 | 46 | 95 | 126) => $
 }
 
@@ -546,7 +546,7 @@ cookie_seg = #['bin, 'int, 'int, 'pairs] {
   s = [data, s0, e0] trim_start
   e = [data, s, e0] trim_end
   {
-    | [data, 61, s] %bin.index =('int)eq, [eq, e] __integer_compare__ =-1, [eq, s] __integer_compare__ =1 => Cons[
+    | [data, 61, s] %bin.index =('int)eq; [eq, e] __integer_compare__ =-1; [eq, s] __integer_compare__ =1 => Cons[
       [Str[[data, s, eq] %bin.slice], Str[[data, [eq, 1] __integer_add__, e] %bin.slice]],
       acc,
     ]

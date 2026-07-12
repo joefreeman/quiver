@@ -55,9 +55,9 @@ fn test_now_is_plausible() {
     quiver()
         .with_io()
         .evaluate(
-            "n = %time.now,
-             [n, 1750000000000] __integer_compare__ =1,
-             [n, 32503680000000] __integer_compare__ =-1,
+            "n = %time.now;
+             [n, 1750000000000] __integer_compare__ =1;
+             [n, 32503680000000] __integer_compare__ =-1;
              Ok",
         )
         .expect("Ok");
@@ -68,9 +68,9 @@ fn test_monotonic_never_goes_backwards() {
     quiver()
         .with_io()
         .evaluate(
-            "a = %time.monotonic,
-             b = %time.monotonic,
-             [b, a] __integer_compare__ =(0 | 1),
+            "a = %time.monotonic;
+             b = %time.monotonic;
+             [b, a] __integer_compare__ =(0 | 1);
              Ok",
         )
         .expect("Ok");

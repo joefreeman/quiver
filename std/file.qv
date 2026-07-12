@@ -25,7 +25,7 @@ serve = #\File {
 
       $ ^
     }
-    | =Flush[reply, id] => { $ __file_flush__ Reply[id, ~] reply, $ ^ }
+    | =Flush[reply, id] => { $ __file_flush__ Reply[id, ~] reply; $ ^ }
     | =Close => $ __file_close__
   }
 }
@@ -35,7 +35,7 @@ do_read = #[', 'int, 'int] {
   =[f, offset, length]
   id = %ref
   Read[offset, length, &., id] f.0
-  ! [#Reply['ref, 'bin] { =Reply[&id, _], Ok }] { =Reply[_, data] => data }
+  ! [#Reply['ref, 'bin] { =Reply[&id, _]; Ok }] { =Reply[_, data] => data }
 }
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
@@ -79,7 +79,7 @@ lines_step = #[', 'int, 'bin, 'int] {
       }
     }
     | =index => {
-      line = [buf, pos, index] %bin.slice, [Str[line], [f, offset, buf, [index, 1] %num.add]]
+      line = [buf, pos, index] %bin.slice; [Str[line], [f, offset, buf, [index, 1] %num.add]]
     }
   }
 }
@@ -120,7 +120,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     =[f, offset, data]
     id = %ref
     Write[offset, data, &., id] f.0
-    ! [#Reply['ref, 'int] { =Reply[&id, _], Ok }] { =Reply[_, written] => written }
+    ! [#Reply['ref, 'int] { =Reply[&id, _]; Ok }] { =Reply[_, written] => written }
   },
 
   flush: #' {
@@ -128,11 +128,11 @@ lines_step = #[', 'int, 'bin, 'int] {
     =f
     id = %ref
     Flush[&., id] f.0
-    ! [#Reply['ref, Ok] { =Reply[&id, _], Ok }] { =Reply[_, ok] => ok }
+    ! [#Reply['ref, Ok] { =Reply[&id, _]; Ok }] { =Reply[_, ok] => ok }
   },
 
   close: #' {
     :doc "Closes the file, releasing the descriptor and stopping its process."
-    Close $0, Ok
+    Close $0; Ok
   },
 ]

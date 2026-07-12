@@ -9,6 +9,4 @@ sum_ = #['list<'int>, 'int] {
 
 sum = #'list<'int> { [~, 0] sum_ }
 
-#{
-  %list{ 1, 2, 3 } sum
-}
+#{ %list{ 1, 2, 3 } sum }

@@ -65,6 +65,9 @@ pub enum ErrorKind {
     ExpectedPipe,
     InvalidFunctionBody,
 
+    // Sequence errors
+    StepComma,
+
     // Generic parser errors
     ParseError(String),
     UnexpectedToken { expected: String, found: String },
@@ -89,6 +92,8 @@ impl std::fmt::Display for ErrorKind {
 
             ErrorKind::ExpectedPipe => write!(f, "Expected a term after '~>'"),
             ErrorKind::InvalidFunctionBody => write!(f, "Invalid function body"),
+
+            ErrorKind::StepComma => write!(f, "Unexpected ','; use ';' between steps"),
 
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
             ErrorKind::UnexpectedToken { expected, found } => {
@@ -117,6 +122,9 @@ impl ErrorKind {
                 "'~>' continues a chain and must be followed by a term, e.g. '[1, 2] ~> __integer_add__'"
             }
             ErrorKind::InvalidFunctionBody => "A function body should be a valid expression",
+            ErrorKind::StepComma => {
+                "',' separates tuple fields and type arguments; sequence steps are separated by ';' or a newline"
+            }
             ErrorKind::HexMalformed(_) => {
                 "Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F"
             }
@@ -223,6 +231,11 @@ pub fn parse(source: &str) -> Result<Program, Error> {
             let remaining_fragment = remaining.fragment().trim();
             if !remaining_fragment.is_empty() {
                 let span = Some(SourceSpan::from_span(remaining));
+                // A sequence stops in front of a comma (commas are bracket-only), so leftover
+                // input starting with one is a step-level comma: point at the `;` fix.
+                if remaining_fragment.starts_with(',') {
+                    return Err(Error::new(ErrorKind::StepComma, span));
+                }
                 let found = remaining_fragment.chars().take(10).collect::<String>();
                 return Err(Error::new(
                     ErrorKind::UnexpectedToken {
@@ -239,6 +252,12 @@ pub fn parse(source: &str) -> Result<Program, Error> {
                 nom::Err::Error(e) | nom::Err::Failure(e) => {
                     let span = Some(SourceSpan::from_span(e.input));
                     let fragment = e.input.fragment();
+
+                    // A failure sitting on a comma is a step-level comma (a bracket-internal
+                    // comma is consumed by its bracket's own parser): point at the `;` fix.
+                    if fragment.trim_start().starts_with(',') {
+                        return Err(Error::new(ErrorKind::StepComma, span));
+                    }
 
                     let kind = match e.code {
                         nom::error::ErrorKind::Eof => detect_error_kind(source, span.as_ref()),
@@ -1949,7 +1968,7 @@ fn expression(input: Span) -> IResult<Span, Expression> {
 }
 
 /// One annotation in a block prefix: `:key value`, where `value` is a chain. The `:` must be
-/// glued to the key name; the value is terminated like any step (comma/newline).
+/// glued to the key name; the value is terminated like any step (semicolon/newline).
 fn annotation(input: Span) -> IResult<Span, Annotation> {
     let start = input;
     let (rest, ((name_span, name), value)) =
@@ -1975,7 +1994,10 @@ fn block(input: Span) -> IResult<Span, Expression> {
             // Annotation prefix (one or more), then an optional body.
             map(
                 pair(
-                    terminated(separated_list1(seq_sep, annotation), opt(seq_sep)),
+                    terminated(
+                        separated_list1(seq_sep, annotation),
+                        pair(opt(seq_sep), step_comma_cut),
+                    ),
                     opt(expression),
                 ),
                 |(annotations, body)| Expression {
@@ -2463,33 +2485,50 @@ fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {
     )(input)
 }
 
-/// Separator between the chains of a sequence: a comma or a newline (they are synonyms), with
+/// Separator between the chains of a sequence: a semicolon or a newline (they are synonyms), with
 /// surrounding horizontal whitespace and line comments, collapsing runs of them. Unlike the
 /// chain-step separator (horizontal whitespace), this is where the value short-circuits on nil and
 /// a new binding scope point begins. A newline therefore ends a chain and starts the next step.
+/// A comma is NOT a step separator — commas are bracket-only (tuple fields, type args, select
+/// sources); `parse` maps a step-level comma to the pointed `StepComma` error.
 fn seq_sep(input: Span) -> IResult<Span, ()> {
     nom_value(
         (),
         tuple((
             // Leading horizontal whitespace / line comments (a newline here is the separator).
             many0(alt((nom_value((), space1), nom_value((), comment)))),
-            // The separator itself: a comma or a newline.
-            alt((nom_value((), char(',')), nom_value((), line_ending))),
+            // The separator itself: a semicolon or a newline.
+            alt((nom_value((), char(';')), nom_value((), line_ending))),
             // Collapse any following whitespace, comments, and further separators.
             many0(alt((
                 nom_value((), multispace1),
                 nom_value((), comment),
-                nom_value((), char(',')),
+                nom_value((), char(';')),
             ))),
         )),
     )(input)
 }
 
+/// A comma directly after a sequence step is a step-level comma — every legitimate comma
+/// (tuple fields, type args, select sources) is consumed by its bracket's own parser before a
+/// step list sees it. Peek past horizontal whitespace/comments and fail hard, positioned on the
+/// comma (so `parse` reports the pointed `StepComma` error rather than a generic one from
+/// backtracking). Consumes nothing.
+fn step_comma_cut(input: Span) -> IResult<Span, ()> {
+    let (after_ws, _) = many0(alt((nom_value((), space1), nom_value((), comment))))(input)?;
+    if after_ws.fragment().starts_with(',') {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            after_ws,
+            nom::error::ErrorKind::Char,
+        )));
+    }
+    Ok((input, ()))
+}
+
 fn sequence(input: Span) -> IResult<Span, Sequence> {
-    map(
-        terminated(separated_list1(seq_sep, chain), opt(seq_sep)),
-        |chains| Sequence { chains },
-    )(input)
+    let (rest, chains) = terminated(separated_list1(seq_sep, chain), opt(seq_sep))(input)?;
+    let (rest, _) = step_comma_cut(rest)?;
+    Ok((rest, Sequence { chains }))
 }
 
 // Statement parsers
@@ -2538,9 +2577,9 @@ fn top_level_item(input: Span) -> IResult<Span, Statement> {
 }
 
 /// A program is a single threaded sequence of chains with type-alias declarations interspersed —
-/// all separated by the sequence separator (comma or newline, which are synonyms). The chains
+/// all separated by the sequence separator (semicolon or newline, which are synonyms). The chains
 /// thread and short-circuit as one sequence; type aliases are transparent to that flow. (There is
-/// no separate statement separator and no `;`.)
+/// no separate statement separator; `,` appears only inside brackets.)
 fn program(input: Span) -> IResult<Span, Program> {
     map(
         delimited(
@@ -2667,6 +2706,35 @@ mod tests {
         assert!(err.span.is_some());
         let span = err.span.unwrap();
         assert_eq!(span.line, 1);
+    }
+
+    #[test]
+    fn test_step_comma_is_a_pointed_error() {
+        // `,` is not a step separator; the error names the `;` fix and points at the comma —
+        // at the top level, in a block body, in a consequence, and in an annotation prefix.
+        for (source, column) in [
+            ("1, 2", 2),
+            ("x = { 1, 2 }; x", 8),
+            ("5 { =5 => 1, 2 | 0 }", 12),
+            ("f = #'int { :doc \"d\", :pre #{ Ok } | $ }; 1 f", 21),
+        ] {
+            let err = parse(source).expect_err(source);
+            assert!(
+                matches!(err.kind, ErrorKind::StepComma),
+                "for {source}: {:?}",
+                err.kind
+            );
+            let span = err.span.expect(source);
+            assert_eq!((span.line, span.column), (1, column), "for {source}");
+        }
+        // Bracket-internal commas are untouched: tuple fields, type parameters, select sources.
+        for source in [
+            "[1, 2] f",
+            "f = #<'t, 'u>['t, 'u] { $0 }",
+            "p = @#{ 42 }; ! [p, 1000]",
+        ] {
+            assert!(parse(source).is_ok(), "expected {source} to parse");
+        }
     }
 
     #[test]

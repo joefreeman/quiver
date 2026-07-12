@@ -3,7 +3,7 @@
 mod common;
 use common::*;
 
-const INC: &str = "inc = #'int { [~, 1] __integer_add__ },";
+const INC: &str = "inc = #'int { [~, 1] __integer_add__ };";
 
 #[test]
 fn callable_field_is_called_with_flow() {
@@ -24,14 +24,14 @@ fn each_field_independently_receives_flow() {
 fn nil_arg_callable_field_called_with_nil_param() {
     // Standalone record: the implicit nil parameter flows in, so a nil-arg callable
     // field is called. `&` is required to store the function instead.
-    quiver().evaluate("g = #{ 42 }, [g]").expect("[42]");
+    quiver().evaluate("g = #{ 42 }; [g]").expect("[42]");
 }
 
 #[test]
 fn amp_builtin_reference_in_record() {
     // `&__builtin__` stores a builtin as a value (e.g. a module export tuple).
     quiver()
-        .evaluate("r = [a: &__integer_add__], [3, 4] r.a")
+        .evaluate("r = [a: &__integer_add__]; [3, 4] r.a")
         .expect("7");
 }
 
@@ -39,7 +39,7 @@ fn amp_builtin_reference_in_record() {
 fn amp_passes_callable_by_value() {
     // `&inc` stores the function (not called with 5); it can be called later.
     quiver()
-        .evaluate(&format!("{INC} t = 5 [&inc, 100], 10 t.0"))
+        .evaluate(&format!("{INC} t = 5 [&inc, 100]; 10 t.0"))
         .expect("11");
 }
 
@@ -66,7 +66,7 @@ fn higher_order_argument_needs_amp() {
     // Passing a function as an argument requires `&`; it is then applied inside.
     quiver()
         .evaluate(&format!(
-            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 $.0 $.0 }}, [&inc, 5] twice"
+            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 $.0 $.0 }}; [&inc, 5] twice"
         ))
         .expect("7");
 }
@@ -75,7 +75,7 @@ fn higher_order_argument_needs_amp() {
 fn nil_arg_callable_passed_then_called() {
     // A nil-arg function passed by `&`, then explicitly called.
     quiver()
-        .evaluate("g = #{ 42 }, t = [&g], [] t.0")
+        .evaluate("g = #{ 42 }; t = [&g]; [] t.0")
         .expect("42");
 }
 
@@ -84,10 +84,10 @@ fn tuple_field_provenance_preserved() {
     // The `~` field must preserve provenance so field access still narrows.
     quiver()
         .evaluate(
-            "make_ab = #'int { =0 => A[a: 1] | B[b: 2] },
-             x = 0 make_ab,
-             t = x [~, 1],
-             t.0 =A[a: 'int], x.a",
+            "make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+             x = 0 make_ab;
+             t = x [~, 1];
+             t.0 =A[a: 'int]; x.a",
         )
         .expect("1");
 }

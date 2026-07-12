@@ -3,17 +3,17 @@ use common::*;
 
 #[test]
 fn test_branch_first_succeeds() {
-    quiver().evaluate("{ 1, 2 | 3 }").expect("2");
+    quiver().evaluate("{ 1; 2 | 3 }").expect("2");
 }
 
 #[test]
 fn test_branch_first_fails_first_term() {
-    quiver().evaluate("{ [], 2 | 3 }").expect("3");
+    quiver().evaluate("{ []; 2 | 3 }").expect("3");
 }
 
 #[test]
 fn test_branch_first_fails_second_term() {
-    quiver().evaluate("{ 1, [] | 3 }").expect("3");
+    quiver().evaluate("{ 1; [] | 3 }").expect("3");
 }
 
 #[test]
@@ -23,7 +23,7 @@ fn test_branch_with_consequence() {
 
 #[test]
 fn test_branch_with_failing_consequence() {
-    quiver().evaluate("{ 1 => [], 10 | 2 => 20 }").expect("[]");
+    quiver().evaluate("{ 1 => []; 10 | 2 => 20 }").expect("[]");
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn test_consequence_ripple_is_block_parameter_not_condition_result() {
     quiver()
         .evaluate(
             r#"
-            ok? = #'int { =0 => Ok },
+            ok? = #'int { =0 => Ok };
             0 { | ok? => ~ | 999 }
             "#,
         )
@@ -69,7 +69,7 @@ fn test_consequence_ripple_in_tuple() {
     quiver()
         .evaluate(
             r#"
-            ok? = #'int { =0 => Ok },
+            ok? = #'int { =0 => Ok };
             0 { | ok? => [~, 1] | [~, 2] }
             "#,
         )
@@ -82,7 +82,7 @@ fn test_consequence_ripple_fallback_branch() {
     quiver()
         .evaluate(
             r#"
-            ok? = #'int { =0 => Ok },
+            ok? = #'int { =0 => Ok };
             5 { | ok? => [~, 1] | [~, 2] }
             "#,
         )
@@ -110,5 +110,5 @@ fn test_toplevel_branch_in_block() {
 #[test]
 fn test_toplevel_sequence_bindings_persist() {
     // A statement is a branchless sequence sharing the enclosing scope, so its bindings persist.
-    quiver().evaluate("x = 5, y = 10, [x, y]").expect("[5, 10]");
+    quiver().evaluate("x = 5; y = 10; [x, y]").expect("[5, 10]");
 }

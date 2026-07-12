@@ -103,7 +103,7 @@ from_chars = #'%iter<'int> {
 int_digits = #['bin, 'int, 'int, 'int] {
   =[data, pos, len, acc]
   {
-    | [pos, len] %num.lt?, [data, pos] %bin.get_byte =('int)b, [b, 48] %num.ge?, [b, 57] %num.le? => {
+    | [pos, len] %num.lt?; [data, pos] %bin.get_byte =('int)b; [b, 48] %num.ge?; [b, 57] %num.le? => {
       [[acc, 10] %num.mul, [b, 48] %num.sub] %num.add
       ~> [data, [pos, 1] %num.add, len, ~] ^
     }
@@ -138,7 +138,7 @@ int_bytes = #['int, 'bin] {
     =Str[data]
     len = data %bin.length
     start = {
-      | [len, 0] %num.gt?, [data, 0] %bin.get_byte =45, 1
+      | [len, 0] %num.gt?; [data, 0] %bin.get_byte =45; 1
       | 0
     }
     [start, len] %num.lt?
@@ -159,12 +159,12 @@ int_bytes = #['int, 'bin] {
 
   empty?: #' {
     :doc "Whether a string is empty."
-    .0 %bin.length =0, Ok
+    .0 %bin.length =0; Ok
   },
 
   concat: #[', '] {
     :doc "Concatenates two strings."
-    =[Str[a], Str[b]], [a, b] %bin.concat Str[~]
+    =[Str[a], Str[b]]; [a, b] %bin.concat Str[~]
   },
 
   starts_with?: #[', '] {

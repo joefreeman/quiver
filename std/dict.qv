@@ -421,7 +421,7 @@ dict_dialect = #(content: Str['bin], chain: '%meta.cb) {
 
   has?: #<'v>['<'v>, 'key] {
     :doc "Whether the dict contains the key."
-    [$0, $1, $1 hash, 0] get, Ok
+    [$0, $1, $1 hash, 0] get; Ok
   },
 
   count: #<'v>'<'v> {

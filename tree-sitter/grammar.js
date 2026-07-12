@@ -14,13 +14,14 @@
  *   (no short-circuit). `~>` is an *optional* separator equivalent to a space, and doubles
  *   as a **line continuation**: a chain ends at a bare newline, but a newline followed by
  *   `~>` continues it.
- * - **A sequence is chains separated by comma or newline** (the two are synonyms). This is
- *   where the value short-circuits on nil and where binding scope advances.
+ * - **A sequence is chains separated by semicolon or newline** (the two are synonyms). This
+ *   is where the value short-circuits on nil and where binding scope advances.
  * - **The program is one sequence** of chains with type-alias declarations interspersed,
- *   all separated by the sequence separator. There is no `;`.
+ *   all separated by the sequence separator. Commas are *not* step separators — they
+ *   appear only inside brackets (tuple fields, type arguments, select sources).
  *
  * Whitespace handling: spaces, tabs and comments are `extras` (ignored everywhere), but
- * newlines are significant. A newline (or comma) separates the chains of a sequence;
+ * newlines are significant. A newline (or semicolon) separates the chains of a sequence;
  * continuation points (after `~>`, `,`, `|`, `=>`, `=`, and inside brackets) explicitly
  * permit newlines via the `_nl` helper.
  */
@@ -94,7 +95,7 @@ module.exports = grammar({
     // newline after a complete one ends the chain rather than extending it.
     [$.function],
     [$.function_type],
-    // After a chain, a separator (comma/newline) may continue the current sequence
+    // After a chain, a separator (semicolon/newline) may continue the current sequence
     // (another chain) or end it so the surrounding construct can take a trailing separator.
     [$.expression],
     // After a term, a newline may continue the chain (next line starts with `~>`) or end
@@ -128,8 +129,8 @@ module.exports = grammar({
 
   rules: {
     // The program is a single sequence of chains with type-alias declarations
-    // interspersed, all separated by the sequence separator (comma or newline, which are
-    // synonyms). Consecutive chains group into an `expression`; type aliases break a run.
+    // interspersed, all separated by the sequence separator (semicolon or newline, which
+    // are synonyms). Consecutive chains group into an `expression`; type aliases break a run.
     source_file: $ => seq(
       optional($._sep),
       optional(seq(
@@ -141,9 +142,10 @@ module.exports = grammar({
 
     _top_level_item: $ => choice($.type_alias, $.expression),
 
-    // The sequence separator: one or more commas/newlines (they are synonyms), collapsing
-    // runs. This is where the flow short-circuits on nil and binding scope advances.
-    _sep: _ => prec.right(repeat1(choice('\n', ','))),
+    // The sequence separator: one or more semicolons/newlines (they are synonyms),
+    // collapsing runs. This is where the flow short-circuits on nil and binding scope
+    // advances. (Commas are *not* step separators — they appear only inside brackets.)
+    _sep: _ => prec.right(repeat1(choice('\n', ';'))),
 
     // One or more newlines: a continuation point inside an unfinished construct.
     _nl: _ => prec.right(repeat1('\n')),
@@ -171,7 +173,7 @@ module.exports = grammar({
     annotation_name: _ => token(seq(':', /[a-z][a-z0-9_]*[?!]?/)),
 
     // One block-prefix annotation: `:key value`, the value an ordinary chain terminated by
-    // comma/newline. Dynamic precedence prefers this reading over a source-less
+    // semicolon/newline. Dynamic precedence prefers this reading over a source-less
     // annotation-retrieval access at the start of a block.
     annotation: $ => prec.dynamic(1, seq(field('key', $.annotation_name), $.chain)),
 
@@ -179,8 +181,8 @@ module.exports = grammar({
 
     // ----------------------------------------------------------------- expressions
 
-    // A sequence of chains separated by the sequence separator (comma or newline). Used at
-    // the top level (grouping a run of chains) and as block/branch bodies.
+    // A sequence of chains separated by the sequence separator (semicolon or newline). Used
+    // at the top level (grouping a run of chains) and as block/branch bodies.
     expression: $ => seq(
       $.chain,
       repeat(seq($._sep, $.chain)),
@@ -434,7 +436,7 @@ module.exports = grammar({
 
     // ----------------------------------------------------------------------- blocks
 
-    // A block may open with an annotation prefix (`:key value` steps, comma/newline
+    // A block may open with an annotation prefix (`:key value` steps, semicolon/newline
     // separated), attaching to the value the braces denote; an annotation-only block
     // (`{ :error X }`) is identity-plus-attach and has no branches.
     block: $ => seq(

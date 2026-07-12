@@ -6,8 +6,8 @@ fn test_tail_call() {
     quiver()
         .evaluate(
             r#"
-            g = #'int { [~, 2] __integer_multiply__ },
-            f = #'int { [~, 1] __integer_add__ ^g },
+            g = #'int { [~, 2] __integer_multiply__ };
+            f = #'int { [~, 1] __integer_add__ ^g };
             1 f
             "#,
         )
@@ -22,7 +22,7 @@ fn test_countdown() {
             countdown = #'int {
               | =0 => 0
               | [~, 1] __integer_subtract__ ^
-            },
+            };
             5 countdown
             "#,
         )
@@ -34,8 +34,8 @@ fn test_tail_call_with_arguments() {
     quiver()
         .evaluate(
             r#"
-            g = #['int, 'int] { %num.mul },
-            f = #'int { [~, 1] %num.add [~ , 2] ^g },
+            g = #['int, 'int] { %num.mul };
+            f = #'int { [~, 1] %num.add [~ , 2] ^g };
             1 f
             "#,
         )
@@ -53,8 +53,8 @@ fn test_factorial() {
                 [x, 1] __integer_subtract__,
                 [x, y] __integer_multiply__
               ] ^
-            },
-            fact = #'int { [~, 1] f },
+            };
+            fact = #'int { [~, 1] f };
             5 fact
             "#,
         )
@@ -75,8 +75,8 @@ fn tail_call_with_argument_is_argument_first() {
     quiver()
         .evaluate(
             r#"
-            g = #'int { [~, 2] __integer_multiply__ },
-            f = #'int { $ ^g },
+            g = #'int { [~, 2] __integer_multiply__ };
+            f = #'int { $ ^g };
             5 f
             "#,
         )
@@ -89,8 +89,8 @@ fn test_ripple_tail_call_without_argument() {
     quiver()
         .evaluate(
             r#"
-            g = #{ 42 },
-            f = #{ &g ^~ },
+            g = #{ 42 };
+            f = #{ &g ^~ };
             [] f
             "#,
         )
@@ -102,7 +102,7 @@ fn test_ripple_tail_call_requires_function() {
     // `^~` on a non-function flowing value is a type error. (Bare `^~`, since the
     // argument-supplying `^~ x` form was removed; the flowing int is not callable.)
     quiver()
-        .evaluate("f = #'int { ^~ }, 5 f")
+        .evaluate("f = #'int { ^~ }; 5 f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function".to_string(),
             found: "'int".to_string(),

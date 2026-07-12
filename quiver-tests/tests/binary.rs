@@ -23,8 +23,8 @@ fn test_concat() {
     quiver()
         .evaluate(
             r#"
-            a = 2 %bin.new,
-            b = 3 %bin.new,
+            a = 2 %bin.new;
+            b = 3 %bin.new;
             [a, b] %bin.concat
             "#,
         )
@@ -107,7 +107,7 @@ fn test_set_byte() {
     quiver()
         .evaluate(
             r#"
-            b = 3 %bin.new,
+            b = 3 %bin.new;
             [b, 1, 255] %bin.set_byte
             "#,
         )
@@ -161,9 +161,9 @@ fn test_chained_operations() {
     quiver()
         .evaluate(
             r#"
-            a = 2 %bin.new,
-            b = [a, 0, 255] %bin.set_byte,
-            c = [b, 1, 170] %bin.set_byte,
+            a = 2 %bin.new;
+            b = [a, 0, 255] %bin.set_byte;
+            c = [b, 1, 170] %bin.set_byte;
             [0xff00, c] %bin.concat
             "#,
         )
@@ -173,8 +173,8 @@ fn test_chained_operations() {
     quiver()
         .evaluate(
             r#"
-            a = 0xaa,
-            b = 0xff,
+            a = 0xaa;
+            b = 0xff;
             [a, b] %bin.and %bin.not
             "#,
         )
@@ -187,10 +187,10 @@ fn test_bit_manipulation_pattern() {
     quiver()
         .evaluate(
             r#"
-            bitmap = 1 %bin.new,
-            step1 = [bitmap, 0, 1] %bin.set_bit,
-            step2 = [step1, 3, 1] %bin.set_bit,
-            step3 = [step2, 7, 1] %bin.set_bit,
+            bitmap = 1 %bin.new;
+            step1 = [bitmap, 0, 1] %bin.set_bit;
+            step2 = [step1, 3, 1] %bin.set_bit;
+            step3 = [step2, 7, 1] %bin.set_bit;
             step3
             "#,
         )
@@ -213,9 +213,9 @@ fn test_append() {
     quiver()
         .evaluate(
             r#"
-            step1 = [0x, 65, 1] %bin.append,
-            step2 = [step1, 50089, 2] %bin.append,
-            step3 = [step2, 14844588, 3] %bin.append,
+            step1 = [0x, 65, 1] %bin.append;
+            step2 = [step1, 50089, 2] %bin.append;
+            step3 = [step2, 14844588, 3] %bin.append;
             step3
             "#,
         )

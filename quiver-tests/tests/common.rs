@@ -303,9 +303,7 @@ impl TestResult {
     #[allow(dead_code)]
     pub fn expect_type_mismatch(self) {
         match self.result {
-            Err(ReplError::Compiler(quiver_compiler::compiler::Error::TypeMismatch {
-                ..
-            })) => {}
+            Err(ReplError::Compiler(quiver_compiler::compiler::Error::TypeMismatch { .. })) => {}
             Ok(result) => panic!(
                 "Expected a type mismatch, but evaluation succeeded with: {:?} for source: {}",
                 result, self.source
