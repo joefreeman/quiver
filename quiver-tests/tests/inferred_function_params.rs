@@ -1,8 +1,10 @@
 mod common;
 use common::*;
 
-// An un-annotated function literal (`#{ ... }`) passed directly as a call argument infers its
-// parameter type from the callee's signature, with type variables pinned by sibling arguments.
+// An un-annotated function literal (`#{ ... }`) infers its parameter type at the Apply site
+// only: it must be the argument (or a top-level field of the bracket argument) of a juxtaposed
+// call whose callee is known (`f [.., #{ ... }]`), with type variables pinned by sibling
+// arguments. A literal in any other position falls back to its nilary meaning.
 
 #[test]
 fn test_inferred_mapper_through_iter_map() {
@@ -10,7 +12,7 @@ fn test_inferred_mapper_through_iter_map() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~> [~, #{ [$, 10] ~> %num.mul }] ~> %iter.map ~> %list.collect
+            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~> %iter.map [~, #{ %num.mul [$, 10] }] ~> %list.collect
             "#,
         )
         .expect("Cons[10, Cons[20, Cons[30, Nil]]]");
@@ -21,7 +23,7 @@ fn test_inferred_predicate_through_iter_filter() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~> [~, #{ [$, 2] ~> %int.mod ~> =0 }] ~> %iter.filter ~> %list.collect
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~> %iter.filter [~, #{ %int.mod [$, 2] ~> =0 }] ~> %list.collect
             "#,
         )
         .expect("Cons[2, Cons[4, Nil]]");
@@ -34,7 +36,7 @@ fn test_inferred_tuple_param_through_iter_fold() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~> [~, 0, #{ [$0, $1] ~> %num.add }] ~> %iter.fold
+            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~> %iter.fold [~, 0, #{ %num.add [$0, $1] }]
             "#,
         )
         .expect("6");
@@ -51,7 +53,7 @@ fn test_inferred_param_via_local_higher_order_function() {
               =[lst, f, acc];
               lst ~> { =Nil => acc | =Cons[h, t] => [t, &f, Cons[h ~> f, acc]] ~> ^ }
             };
-            Cons[[1, 10], Cons[[2, 20], Nil]] ~> [~, #{ $0 }, Nil] ~> map
+            Cons[[1, 10], Cons[[2, 20], Nil]] ~> map [~, #{ $0 }, Nil]
             "#,
         )
         .expect("Cons[2, Cons[1, Nil]]");
@@ -64,7 +66,7 @@ fn test_inferred_param_concrete_callee() {
         .evaluate(
             r#"
             run = #[#'int -> 'int] { =[g]; 10 ~> g };
-            [#{ [$, 1] ~> %num.add }] ~> run
+            run [#{ %num.add [$, 1] }]
             "#,
         )
         .expect("11");
@@ -80,6 +82,16 @@ fn test_unannotated_literal_without_context_stays_nilary() {
 fn test_explicit_nil_parameter_form() {
     // `#[] { ... }` forces a nil parameter even where a context type is available.
     quiver().evaluate("f = #[] { 7 }; 99 ~> f").expect("7");
+}
+
+#[test]
+fn test_chain_position_no_longer_infers() {
+    // A literal that is merely a *chain term* before the callee (`[~, #{…}] ~> f`) gets no
+    // expected type: it falls back to nil, and a body that reads `$` fails with a note
+    // pointing at the Apply-site rule.
+    let result = quiver()
+        .evaluate("Cons[1, Nil] ~> %list.iter ~> [~, #{ %int.mod [$, 2] ~> =0 }] ~> %iter.filter");
+    result.expect_error_containing("parameter inference is Apply-site only");
 }
 
 #[test]

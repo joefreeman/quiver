@@ -6,60 +6,59 @@ join = #[#^ -> (' | []), ', '] {
     | =[_, Root] => []
     | =[_, Relative[0]] => p1
     | =[Root, Relative[_]] => []
-    | =[Relative[m], Relative[n]] => [m, n] ~> %num.add ~> Relative[~]
-    | =[Path[_, p], Relative[n]] => [&self, p, Relative[[n, 1] ~> %num.sub]] ~> self
-    | =[_, Path[s, parent]] => [&self, p1, parent] ~> self ~> { =[] => [] | Path[s, ~] }
+    | =[Relative[m], Relative[n]] => %num.add [m, n] ~> Relative[~]
+    | =[Path[_, p], Relative[n]] => self [&self, p, Relative[%num.sub [n, 1]]]
+    | =[_, Path[s, parent]] => self [&self, p1, parent] ~> { =[] => [] | Path[s, ~] }
   }
 }
 
 to_string = #[', '%str] {
   | =[Root, acc] => {
-    | acc ~> %str.empty? => "/"
-    | ["/", acc] ~> %str.concat
+    | %str.empty? acc => "/"
+    | %str.concat ["/", acc]
   }
-  | =[Relative[0], acc] => { acc ~> %str.empty? => "." | acc }
+  | =[Relative[0], acc] => { %str.empty? acc => "." | acc }
   | =[Relative[n], acc] => {
     prefix = {
-      | acc ~> %str.empty? => ".."
-      | ["../", acc] ~> %str.concat
+      | %str.empty? acc => ".."
+      | %str.concat ["../", acc]
     }
 
-    [n, 1] ~> %num.sub
-    ~> Relative[~] ~> [~, prefix] ~> ^
+    %num.sub [n, 1] ~> Relative[~] ~> ^ [~, prefix]
   }
   | =[Path[s, parent], acc] => {
     new_acc = {
-      | acc ~> %str.empty? => s
-      | [s, "/"] ~> %str.concat ~> [~, acc] ~> %str.concat
+      | %str.empty? acc => s
+      | %str.concat [s, "/"] ~> %str.concat [~, acc]
     }
-    [parent, new_acc] ~> ^
+    ^ [parent, new_acc]
   }
 }
 
 parse = #['%list<'%str>, '] {
   | =[Nil, acc] => acc
   | =[Cons[head, tail], acc] => head ~> {
-    | %str.empty? => [tail, acc] ~> ^
-    | =Str[0x2e] => [tail, acc] ~> ^
+    | %str.empty? => ^ [tail, acc]
+    | =Str[0x2e] => ^ [tail, acc]
     | =Str[0x2e2e] => {
       new_acc = acc ~> {
         | =Path[_, parent] => parent
-        | =Relative[n] => [n, 1] ~> %num.add ~> Relative[~]
+        | =Relative[n] => %num.add [n, 1] ~> Relative[~]
         | =Root => Root
       }
-      [tail, new_acc] ~> ^
+      ^ [tail, new_acc]
     }
-    | [tail, Path[~, acc]] ~> ^
+    | ^ [tail, Path[~, acc]]
   }
 }
 
 [
   parse: #'%str {
     :doc "Parses a slash-separated string into a path, normalising . and .. segments."
-    [~, "/"] ~> %str.split ~> %list.collect ~> {
+    %str.split [~, "/"] ~> %list.collect ~> {
       | =Nil => Relative[0]
-      | =Cons[first, rest]; first ~> %str.empty? => [rest, Root] ~> parse
-      | [~, Relative[0]] ~> parse
+      | =Cons[first, rest]; %str.empty? first => parse [rest, Root]
+      | parse [~, Relative[0]]
     }
   },
 
@@ -72,7 +71,7 @@ parse = #['%list<'%str>, '] {
     :doc "The parent of a path; the root is its own parent."
     | =Path[_, p] => p
     | =Root => Root
-    | =Relative[n] => [n, 1] ~> %num.add ~> Relative[~]
+    | =Relative[n] => %num.add [n, 1] ~> Relative[~]
   },
 
   // Accepts a nil path (e.g. the result of an invalid `join`) and propagates it, so a nil flows
@@ -80,23 +79,23 @@ parse = #['%list<'%str>, '] {
   // module's default type (`='`, a non-nil path) leaves nil to fall through to nil.
   to_string: #(' | []) {
     :doc "Formats a path as a slash-separated string, propagating nil for a nil path."
-    =' => [~, ""] ~> to_string
+    =' => to_string [~, ""]
   },
 
   absolute?: #' {
     :doc "Whether a path descends from the root."
     | =Root => Ok
-    | =Path[_, p] => p ~> ^
+    | =Path[_, p] => ^ p
   },
 
   relative?: #' {
     :doc "Whether a path is relative to the current directory."
     | =Relative[_] => Ok
-    | =Path[_, p] => p ~> ^
+    | =Path[_, p] => ^ p
   },
 
   join: #[', '] {
     :doc "Joins the second path onto the first; nil when the second is absolute or escapes the root."
-    [&join, ...] ~> join
+    join [&join, ...]
   },
 ]

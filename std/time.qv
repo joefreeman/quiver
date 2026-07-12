@@ -13,33 +13,29 @@
 // timestamps by a day/second).
 fmod = #['int, 'int] {
   =[a, b]
-  [
-    [[a, b] ~> __integer_modulo__, b] ~> __integer_add__,
-    b,
-  ] ~> __integer_modulo__
+  __integer_modulo__ [__integer_add__ [__integer_modulo__ [a, b], b], b]
 }
 
 fdiv = #['int, 'int] {
   =[a, b]
-  [[a, [a, b] ~> fmod] ~> __integer_subtract__, b] ~> __integer_divide__
+  __integer_divide__ [__integer_subtract__ [a, fmod [a, b]], b]
 }
 
 parts = #'int {
   :doc "The UTC calendar components of an epoch-milliseconds timestamp: [year, month, day, hour, minute, second, millisecond, weekday]."
   =total
-  millisecond = [total, 1000] ~> fmod
-  secs = [total, 1000] ~> fdiv
-  sod = [secs, 86400] ~> fmod
-  days = [secs, 86400] ~> fdiv
+  millisecond = fmod [total, 1000]
+  secs = fdiv [total, 1000]
+  sod = fmod [secs, 86400]
+  days = fdiv [secs, 86400]
 
-  hour = [sod, 3600] ~> __integer_divide__
+  hour = __integer_divide__ [sod, 3600]
 
-  minute =
-    [[sod, 3600] ~> __integer_modulo__, 60] ~> __integer_divide__
+  minute = __integer_divide__ [__integer_modulo__ [sod, 3600], 60]
 
-  second = [sod, 60] ~> __integer_modulo__
+  second = __integer_modulo__ [sod, 60]
 
-  weekday = [[days, 4] ~> __integer_add__, 7] ~> fmod ~> {
+  weekday = fmod [__integer_add__ [days, 4], 7] ~> {
     | =0 => Sun
     | =1 => Mon
     | =2 => Tue
@@ -50,46 +46,36 @@ parts = #'int {
   }
 
   // Civil-from-days (Howard Hinnant's algorithm), proleptic Gregorian.
-  z = [days, 719468] ~> __integer_add__
-  era = [z, 146097] ~> fdiv
+  z = __integer_add__ [days, 719468]
+  era = fdiv [z, 146097]
 
-  doe =
-    [z, [era, 146097] ~> __integer_multiply__] ~> __integer_subtract__
+  doe = __integer_subtract__ [z, __integer_multiply__ [era, 146097]]
 
-  yoe =
-    [doe, [doe, 1460] ~> __integer_divide__] ~> __integer_subtract__
-    ~> [~, [doe, 36524] ~> __integer_divide__] ~> __integer_add__
-    ~> [~, [doe, 146096] ~> __integer_divide__] ~> __integer_subtract__
-    ~> [~, 365] ~> __integer_divide__
+  yoe = __integer_subtract__ [doe, __integer_divide__ [doe, 1460]] ~> __integer_add__ [~, __integer_divide__ [doe, 36524]] ~> __integer_subtract__ [~, __integer_divide__ [doe, 146096]] ~> __integer_divide__ [
+    ~,
+    365,
+  ]
 
-  y =
-    [yoe, [era, 400] ~> __integer_multiply__] ~> __integer_add__
+  y = __integer_add__ [yoe, __integer_multiply__ [era, 400]]
 
-  doy =
-    [[365, yoe] ~> __integer_multiply__, [yoe, 4] ~> __integer_divide__] ~> __integer_add__
-    ~> [~, [yoe, 100] ~> __integer_divide__] ~> __integer_subtract__
-    ~> [doe, ~] ~> __integer_subtract__
+  doy = __integer_add__ [__integer_multiply__ [365, yoe], __integer_divide__ [yoe, 4]] ~> __integer_subtract__ [~, __integer_divide__ [yoe, 100]] ~> __integer_subtract__ [
+    doe,
+    ~,
+  ]
 
-  mp =
-    [
-      [[5, doy] ~> __integer_multiply__, 2] ~> __integer_add__,
-      153,
-    ] ~> __integer_divide__
+  mp = __integer_divide__ [__integer_add__ [__integer_multiply__ [5, doy], 2], 153]
 
-  day =
-    [
-      [[153, mp] ~> __integer_multiply__, 2] ~> __integer_add__,
-      5,
-    ] ~> __integer_divide__
-    ~> [doy, ~] ~> __integer_subtract__
-    ~> [~, 1] ~> __integer_add__
+  day = __integer_divide__ [
+    __integer_add__ [__integer_multiply__ [153, mp], 2],
+    5,
+  ] ~> __integer_subtract__ [doy, ~] ~> __integer_add__ [~, 1]
 
   month = {
-    | [mp, 10] ~> __integer_compare__ ~> =-1 => [mp, 3] ~> __integer_add__
-    | [mp, 9] ~> __integer_subtract__
+    | __integer_compare__ [mp, 10] ~> =-1 => __integer_add__ [mp, 3]
+    | __integer_subtract__ [mp, 9]
   }
   year = {
-    | [month, 2] ~> __integer_compare__ ~> =(-1 | 0) => [y, 1] ~> __integer_add__
+    | __integer_compare__ [month, 2] ~> =(-1 | 0) => __integer_add__ [y, 1]
     | y
   }
 
@@ -106,14 +92,14 @@ parts = #'int {
 }
 
 pad2 = #'int {
-  | [$, 10] ~> __integer_compare__ ~> =-1 => "0{$ ~> %str.from_int}"
-  | $ ~> %str.from_int
+  | __integer_compare__ [$, 10] ~> =-1 => "0{%str.from_int $}"
+  | %str.from_int $
 }
 
 pad3 = #'int {
-  | [$, 10] ~> __integer_compare__ ~> =-1 => "00{$ ~> %str.from_int}"
-  | [$, 100] ~> __integer_compare__ ~> =-1 => "0{$ ~> %str.from_int}"
-  | $ ~> %str.from_int
+  | __integer_compare__ [$, 10] ~> =-1 => "00{%str.from_int $}"
+  | __integer_compare__ [$, 100] ~> =-1 => "0{%str.from_int $}"
+  | %str.from_int $
 }
 
 day_name = #'weekday {
@@ -143,14 +129,14 @@ month_name = #'int {
 
 http_date = #'int {
   :doc "An epoch-milliseconds timestamp as an HTTP date (IMF-fixdate), e.g. \"Sun, 06 Nov 1994 08:49:37 GMT\"."
-  p = $ ~> parts
-  "{p.weekday ~> day_name}, {p.day ~> pad2} {p.month ~> month_name} {p.year ~> %str.from_int} {p.hour ~> pad2}:{p.minute ~> pad2}:{p.second ~> pad2} GMT"
+  p = parts $
+  "{day_name p.weekday}, {pad2 p.day} {month_name p.month} {%str.from_int p.year} {pad2 p.hour}:{pad2 p.minute}:{pad2 p.second} GMT"
 }
 
 iso8601 = #'int {
   :doc "An epoch-milliseconds timestamp as UTC ISO 8601, e.g. \"2024-01-01T00:00:00.123Z\"."
-  p = $ ~> parts
-  "{p.year ~> %str.from_int}-{p.month ~> pad2}-{p.day ~> pad2}T{p.hour ~> pad2}:{p.minute ~> pad2}:{p.second ~> pad2}.{p.millisecond ~> pad3}Z"
+  p = parts $
+  "{%str.from_int p.year}-{pad2 p.month}-{pad2 p.day}T{pad2 p.hour}:{pad2 p.minute}:{pad2 p.second}.{pad3 p.millisecond}Z"
 }
 
 [

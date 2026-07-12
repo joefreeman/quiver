@@ -28,10 +28,9 @@ plain = #['int, Str['bin]] {
 
 // Whether the connection should be kept open after answering the request.
 keep_alive? = #'request {
-  | [$headers, "connection"] ~> %http.header
-  ~> =Str[cb]
+  | %http.header [$headers, "connection"] ~> =Str[cb]
 
-    Str[cb] ~> %http.lower ~> ="close" => []
+    %http.lower Str[cb] ~> ="close" => []
   | $version ~> ="HTTP/1.1" => Ok
   | []
 }
@@ -41,24 +40,24 @@ keep_alive? = #'request {
 // non-keep-alive exchange.
 conn_loop = #[\TcpSocket, 'handler, 'bin] {
   =[sock, h, buf]
-  buf ~> %http.parse_request ~> {
+  %http.parse_request buf ~> {
     | =Incomplete => {
-      chunk = [sock, 8192] ~> __tcp_socket_read__
+      chunk = __tcp_socket_read__ [sock, 8192]
       {
-        | chunk ~> %bin.length ~> =0 => sock ~> __tcp_socket_close__
-        | [sock, &h, [buf, chunk] ~> %bin.concat] ~> ^
+        | %bin.length chunk ~> =0 => __tcp_socket_close__ sock
+        | ^ [sock, &h, %bin.concat [buf, chunk]]
       }
     }
     | =Bad[status: s, reason: r] => {
-      out = [s, r] ~> plain ~> %http.serialize_response
-      [sock, out] ~> __tcp_socket_write__
-      sock ~> __tcp_socket_close__
+      out = plain [s, r] ~> %http.serialize_response
+      __tcp_socket_write__ [sock, out]
+      __tcp_socket_close__ sock
     }
     | =[req, rest] => {
-      r = req ~> h
+      r = h req
       resp = {
         | r ~> =('%http.response)ok => ok
-        | [500, "Internal Server Error"] ~> plain
+        | plain [500, "Internal Server Error"]
       }
       // (Explicit construction, not `resp ~[..., …]`: ripple-spread currently types its
       // result as an unnamed tuple even though the value keeps its name — TODO compiler.)
@@ -66,40 +65,38 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
         | req.method ~> =HEAD => Response[
           status: resp.status,
           headers: Cons[
-            ["content-length", resp.body ~> %bin.length ~> %str.from_int],
+            ["content-length", %bin.length resp.body ~> %str.from_int],
             resp.headers,
           ],
           body: 0x,
         ]
         | resp
       }
-      [sock, resp2 ~> %http.serialize_response] ~> __tcp_socket_write__
+      __tcp_socket_write__ [sock, %http.serialize_response resp2]
       {
-        | req ~> keep_alive? => [sock, &h, rest] ~> ^
-        | sock ~> __tcp_socket_close__
+        | keep_alive? req => ^ [sock, &h, rest]
+        | __tcp_socket_close__ sock
       }
     }
   }
 }
 
-conn = #[\TcpSocket, 'handler] { =[sock, h]; [sock, &h, 0x] ~> conn_loop }
+conn = #[\TcpSocket, 'handler] { =[sock, h]; conn_loop [sock, &h, 0x] }
 
 accept_loop = #[\TcpListener, 'handler] {
-  =[l, h]; l ~> __tcp_listener_accept__ ~> [~, &h] ~> @conn; [l, &h] ~> ^
+  =[l, h]; __tcp_listener_accept__ l ~> [~, &h] ~> @conn; ^ [l, &h]
 }
 
 serve = #[port: 'int, handler: 'handler] {
   :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). Blocks forever."
   =[port: p, handler: h]
 
-  p
-  ~> [~, 128] ~> __tcp_listen__
-  ~> [~, &h] ~> accept_loop
+  p ~> __tcp_listen__ [~, 128] ~> accept_loop [~, &h]
 }
 
 html = #'%html {
   :doc "A 200 text/html response of the rendered tree (no doctype — see `page`)."
-  $ ~> %html.render ~> =Str[b]
+  %html.render $ ~> =Str[b]
   Response[
     status: 200,
     headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],
@@ -109,7 +106,7 @@ html = #'%html {
 
 page = #'%html {
   :doc "A 200 text/html response of the doctype-prefixed rendered tree — a whole page."
-  $ ~> %html.page ~> =Str[b]
+  %html.page $ ~> =Str[b]
   Response[
     status: 200,
     headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],
@@ -119,12 +116,12 @@ page = #'%html {
 
 text = #Str['bin] {
   :doc "A 200 text/plain response."
-  [200, $] ~> plain
+  plain [200, $]
 }
 
 json = #'%json {
   :doc "A 200 application/json response of the serialized value."
-  $ ~> %json.stringify ~> =Str[b]
+  %json.stringify $ ~> =Str[b]
   Response[status: 200, headers: Cons[["content-type", "application/json"], Nil], body: b]
 }
 
@@ -135,7 +132,7 @@ redirect = #Str['bin] {
 
 not_found = #{
   :doc "A plain 404 response."
-  [404, "Not Found"] ~> plain
+  plain [404, "Not Found"]
 }
 
 [

@@ -13,13 +13,11 @@
       o ~> {
         | =[] => b ~> =0
         | =q => {
-          rem =
-            [a, [q, b] ~> __integer_multiply__] ~> __integer_subtract__
+          rem = __integer_subtract__ [a, __integer_multiply__ [q, b]]
 
-          [rem ~> __integer_abs__, b ~> __integer_abs__] ~> __integer_compare__
-          ~> =-1
+          __integer_compare__ [__integer_abs__ rem, __integer_abs__ b] ~> =-1
 
-          [a, rem] ~> __integer_multiply__ ~> [~, 0] ~> __integer_compare__ ~> { =-1 => [] | Ok }
+          __integer_multiply__ [a, rem] ~> __integer_compare__ [~, 0] ~> { =-1 => [] | Ok }
         }
       }
     }
@@ -36,10 +34,9 @@
       o ~> {
         | =[] => b ~> =0
         | =r => {
-          [r ~> __integer_abs__, b ~> __integer_abs__] ~> __integer_compare__
-          ~> =-1
+          __integer_compare__ [__integer_abs__ r, __integer_abs__ b] ~> =-1
 
-          [a, r] ~> __integer_multiply__ ~> [~, 0] ~> __integer_compare__ ~> { =-1 => [] | Ok }
+          __integer_multiply__ [a, r] ~> __integer_compare__ [~, 0] ~> { =-1 => [] | Ok }
         }
       }
     }
@@ -54,18 +51,16 @@
     :post #{
       $ ~> =[in: n, out: o]
       o ~> {
-        | =[] => [n, 0] ~> __integer_compare__ ~> =-1
+        | =[] => __integer_compare__ [n, 0] ~> =-1
         | =r => {
-          | [[r, r] ~> __integer_multiply__, n] ~> __integer_compare__
-            ~> =1 => []
-          | s = [r, 1] ~> __integer_add__
+          | __integer_compare__ [__integer_multiply__ [r, r], n] ~> =1 => []
+          | s = __integer_add__ [r, 1]
 
-            [n, [s, s] ~> __integer_multiply__] ~> __integer_compare__
-            ~> =-1
+            __integer_compare__ [n, __integer_multiply__ [s, s]] ~> =-1
         }
       }
     }
-    | [$, 0] ~> __integer_compare__ ~> =-1 => []
+    | __integer_compare__ [$, 0] ~> =-1 => []
     | __integer_sqrt__
   },
 

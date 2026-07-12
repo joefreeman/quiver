@@ -30,15 +30,13 @@
 'expr = '%meta.expr
 
 // A byte token with leading whitespace skipped.
-tok = #['int, Str['bin]] {
-  [&%parse.ws, [$0, $1] ~> %parse.byte] ~> %parse.right
-}
+tok = #['int, Str['bin]] { %parse.right [&%parse.ws, %parse.byte [$0, $1]] }
 
 // `~`: the value flowing into the dialect term, spliced as its own 1-byte host span.
 ripple_p = #'%parse {
   =st
-  tilde = [126, "'~'"] ~> %parse.byte
-  st ~> tilde
+  tilde = %parse.byte [126, "'~'"]
+  tilde st
   =[_, st2]
   [Unquote[offset: st.pos, length: 1], st2]
 }
@@ -47,14 +45,14 @@ ripple_p = #'%parse {
 // identifier's span is spliced as host code (a caller-scope variable).
 word_p = #'%parse {
   =st
-  st ~> %parse.ident
+  %parse.ident st
   =[w, st2]
   w ~> {
     | ="null" => [Tuple[name: "Null", fields: Nil], st2]
     | ="true" => [Tuple[name: "True", fields: Nil], st2]
     | ="false" => [Tuple[name: "False", fields: Nil], st2]
     | [
-      Unquote[offset: st.pos, length: [st2.pos, st.pos] ~> __integer_subtract__],
+      Unquote[offset: st.pos, length: __integer_subtract__ [st2.pos, st.pos]],
       st2,
     ]
   }
@@ -63,62 +61,56 @@ word_p = #'%parse {
 // The value grammar, self-passed to tie the value↔array/object recursion.
 value_step = #[#^ -> (['expr, '%parse] | []), '%parse] {
   =[self, st]
-  value = #'%parse { [&self, $] ~> self }
+  value = #'%parse { self [&self, $] }
 
-  comma = [44, "','"] ~> tok
+  comma = tok [44, "','"]
 
-  elems = [&value, &comma] ~> %parse.sep_end_by
+  elems = %parse.sep_end_by [&value, &comma]
 
-  a1 =
-    [[91, "'['"] ~> %parse.byte, &elems] ~> %parse.right
+  a1 = %parse.right [%parse.byte [91, "'['"], &elems]
 
-  a2 = [&a1, [93, "']'"] ~> tok] ~> %parse.left
+  a2 = %parse.left [&a1, tok [93, "']'"]]
 
-  array =
-    [
-      &a2,
-      #{
-        Tuple[name: "Array", fields: Cons[$ ~> %meta.list_expr, Nil]]
-      },
-    ] ~> %parse.map
+  array = %parse.map [
+    &a2,
+    #{
+      Tuple[name: "Array", fields: Cons[%meta.list_expr $, Nil]]
+    },
+  ]
 
-  key = [&%parse.ws, &%parse.quoted] ~> %parse.right
-  k1 = [&key, [58, "':'"] ~> tok] ~> %parse.left
+  key = %parse.right [&%parse.ws, &%parse.quoted]
+  k1 = %parse.left [&key, tok [58, "':'"]]
 
-  pair =
-    [[&k1, &value] ~> %parse.then, #{ [$0, $1] ~> %meta.pair2 }] ~> %parse.map
+  pair = %parse.map [%parse.then [&k1, &value], #{ %meta.pair2 [$0, $1] }]
 
-  pairs = [&pair, &comma] ~> %parse.sep_end_by
+  pairs = %parse.sep_end_by [&pair, &comma]
 
-  o1 =
-    [[123, "'\{'"] ~> %parse.byte, &pairs] ~> %parse.right
+  o1 = %parse.right [%parse.byte [123, "'\{'"], &pairs]
 
-  o2 = [&o1, [125, "'}'"] ~> tok] ~> %parse.left
+  o2 = %parse.left [&o1, tok [125, "'}'"]]
 
-  object =
-    [
-      &o2,
-      #{
-        Tuple[name: "Object", fields: Cons[$ ~> %meta.list_expr, Nil]]
-      },
-    ] ~> %parse.map
+  object = %parse.map [
+    &o2,
+    #{
+      Tuple[name: "Object", fields: Cons[%meta.list_expr $, Nil]]
+    },
+  ]
 
-  composite =
-    [&array, &object, &%parse.quoted, &%parse.int] ~> %parse.alt4
+  composite = %parse.alt4 [&array, &object, &%parse.quoted, &%parse.int]
 
-  leaf = [&ripple_p, &word_p] ~> %parse.alt2
-  core = [&composite, &leaf] ~> %parse.alt2
-  core_ws = [&%parse.ws, &core] ~> %parse.right
+  leaf = %parse.alt2 [&ripple_p, &word_p]
+  core = %parse.alt2 [&composite, &leaf]
+  core_ws = %parse.right [&%parse.ws, &core]
 
-  st ~> core_ws
+  core_ws st
 }
 
-value = #'%parse { [&value_step, $] ~> value_step }
+value = #'%parse { value_step [&value_step, $] }
 
 // The dialect entry point: the compiler calls this with the dialect context record; the
 // grammar needs only the content (escape spans come from its own positions).
 json = #(content: Str['bin]) {
-  full = [&value, &%parse.ws] ~> %parse.left; [$content, &full] ~> %parse.run
+  full = %parse.left [&value, &%parse.ws]; %parse.run [$content, &full]
 }
 
 // === Runtime codec ======================================================================
@@ -132,9 +124,7 @@ pow10 = #['int, 'int] {
   =[acc, k]
   {
     | k ~> =0 => acc
-    | {
-      [[acc, 10] ~> __integer_multiply__, [k, 1] ~> __integer_subtract__] ~> ^
-    }
+    | ^ [__integer_multiply__ [acc, 10], __integer_subtract__ [k, 1]]
   }
 }
 
@@ -144,13 +134,13 @@ lower_num = #'%num.coeff { =Rational[n, 1] => n | =x => x }
 
 // A digit byte (for `take_while`): the byte itself when it is `0`–`9`, else nil.
 digit? = #'int {
-  [$, 48] ~> __integer_compare__ ~> =(0 | 1); [$, 57] ~> __integer_compare__ ~> =(-1 | 0); $
+  __integer_compare__ [$, 48] ~> =(0 | 1); __integer_compare__ [$, 57] ~> =(-1 | 0); $
 }
 
-digits = &digit? ~> %parse.take_while
+digits = %parse.take_while &digit?
 
 // The byte at the parse state's position, or nil at end of input.
-peek_at = #'%parse { [$pos, $len] ~> %num.lt?; [$data, $pos] ~> %bin.get_byte }
+peek_at = #'%parse { %num.lt? [$pos, $len]; %bin.get_byte [$data, $pos] }
 
 // Assemble a JSON number from its scanned parts: `sign` (±1), the integer- and fractional-
 // part digit bytes, and the exponent. Exact: the value is `sign · M · 10^(exp − |frac|)`,
@@ -159,22 +149,20 @@ peek_at = #'%parse { [$pos, $len] ~> %num.lt?; [$data, $pos] ~> %bin.get_byte }
 build_number = #[sign: 'int, int_b: 'bin, frac_b: 'bin, exp: 'int] {
   =[sign: s, int_b: ib, frac_b: fb, exp: e]
 
-  [ib, fb] ~> %bin.concat
-  ~> Str[~] ~> %str.parse_int
-  ~> =('int)mag
+  %bin.concat [ib, fb] ~> %str.parse_int Str[~] ~> =('int)mag
 
-  m = [s, mag] ~> __integer_multiply__
-  total_exp = [e, fb ~> %bin.length] ~> __integer_subtract__
+  m = __integer_multiply__ [s, mag]
+  total_exp = __integer_subtract__ [e, %bin.length fb]
   {
-    | [total_exp, 0] ~> __integer_compare__ ~> =(0 | 1) => {
-      [m, [1, total_exp] ~> pow10] ~> __integer_multiply__
-    }
+    | __integer_compare__ [total_exp, 0] ~> =(0 | 1) => __integer_multiply__ [
+      m,
+      pow10 [1, total_exp],
+    ]
     | {
-      den =
-        [1, [0, total_exp] ~> __integer_subtract__] ~> pow10
+      den = pow10 [1, __integer_subtract__ [0, total_exp]]
 
-      [m, den] ~> %num.div ~> =('%num.coeff)r
-      r ~> lower_num
+      %num.div [m, den] ~> =('%num.coeff)r
+      lower_num r
     }
   }
 }
@@ -182,27 +170,27 @@ build_number = #[sign: 'int, int_b: 'bin, frac_b: 'bin, exp: 'int] {
 // A JSON number: `-? int-digits (. frac-digits)? ([eE] [+-]? exp-digits)?`, as a `'%num.coeff`.
 number = #'%parse {
   =st0
-  neg? = { st0 ~> peek_at ~> =45 => Ok | [] }
+  neg? = { peek_at st0 ~> =45 => Ok | [] }
   st1 = {
-    | neg? => st0 ~> ~[..., pos: [st0.pos, 1] ~> %num.add]
+    | neg? => st0 ~> ~[..., pos: %num.add [st0.pos, 1]]
     | st0
   }
   sign = { neg? => -1 | 1 }
 
-  st1 ~> digits ~> =[ib, st2]
+  digits st1 ~> =[ib, st2]
   {
-    | ib ~> %bin.length ~> =0 => [st0, "a number"] ~> %parse.fail_in
+    | %bin.length ib ~> =0 => %parse.fail_in [st0, "a number"]
     | Ok
   }
 
   frac = {
-    | st2 ~> peek_at ~> =46 => {
+    | peek_at st2 ~> =46 => {
       st2
-      ~> ~[..., pos: [st2.pos, 1] ~> %num.add] ~> digits
+      ~> ~[..., pos: %num.add [st2.pos, 1]] ~> digits
       ~> =[fbb, st3a]
 
       {
-        | fbb ~> %bin.length ~> =0 => [st2, "digits after '.'"] ~> %parse.fail_in
+        | %bin.length fbb ~> =0 => %parse.fail_in [st2, "digits after '.'"]
         | [fbb, st3a]
       }
     }
@@ -211,26 +199,24 @@ number = #'%parse {
   frac ~> =[fb, st3]
 
   ex = {
-    | st3 ~> peek_at ~> =(101 | 69) => {
-      est = st3 ~> ~[..., pos: [st3.pos, 1] ~> %num.add]
-      esign = { est ~> peek_at ~> =45 => -1 | 1 }
+    | peek_at st3 ~> =(101 | 69) => {
+      est = st3 ~> ~[..., pos: %num.add [st3.pos, 1]]
+      esign = { peek_at est ~> =45 => -1 | 1 }
       est2 = {
-        | est ~> peek_at ~> =(43 | 45) => est ~> ~[..., pos: [est.pos, 1] ~> %num.add]
+        | peek_at est ~> =(43 | 45) => est ~> ~[..., pos: %num.add [est.pos, 1]]
         | est
       }
-      est2 ~> digits ~> =[ebb, st4a]
+      digits est2 ~> =[ebb, st4a]
       {
-        | ebb ~> %bin.length ~> =0 => [st3, "digits in the exponent"] ~> %parse.fail_in
-        | ebb ~> Str[~] ~> %str.parse_int ~> =('int)emag
-          [[esign, emag] ~> __integer_multiply__, st4a]
+        | %bin.length ebb ~> =0 => %parse.fail_in [st3, "digits in the exponent"]
+        | ebb ~> %str.parse_int Str[~] ~> =('int)emag; [__integer_multiply__ [esign, emag], st4a]
       }
     }
     | [0, st3]
   }
   ex ~> =[expv, st4]
 
-  val =
-    [sign: sign, int_b: ib, frac_b: fb, exp: expv] ~> build_number
+  val = build_number [sign: sign, int_b: ib, frac_b: fb, exp: expv]
 
   [val, st4]
 }
@@ -241,53 +227,50 @@ number = #'%parse {
 parse_value = #['%parse.p<'>, '%parse] {
   =[value_p, st]
 
-  comma = [44, "','"] ~> tok
+  comma = tok [44, "','"]
 
-  elems = [&value_p, &comma] ~> %parse.sep_end_by
+  elems = %parse.sep_end_by [&value_p, &comma]
 
-  a1 =
-    [[91, "'['"] ~> %parse.byte, &elems] ~> %parse.right
+  a1 = %parse.right [%parse.byte [91, "'['"], &elems]
 
-  a2 = [&a1, [93, "']'"] ~> tok] ~> %parse.left
-  array = [&a2, #{ Array[$] }] ~> %parse.map
+  a2 = %parse.left [&a1, tok [93, "']'"]]
+  array = %parse.map [&a2, #{ Array[$] }]
 
-  key = [&%parse.ws, &%parse.quoted] ~> %parse.right
-  k1 = [&key, [58, "':'"] ~> tok] ~> %parse.left
-  pair = [&k1, &value_p] ~> %parse.then
-  pairs = [&pair, &comma] ~> %parse.sep_end_by
+  key = %parse.right [&%parse.ws, &%parse.quoted]
+  k1 = %parse.left [&key, tok [58, "':'"]]
+  pair = %parse.then [&k1, &value_p]
+  pairs = %parse.sep_end_by [&pair, &comma]
 
-  o1 =
-    [[123, "'\{'"] ~> %parse.byte, &pairs] ~> %parse.right
+  o1 = %parse.right [%parse.byte [123, "'\{'"], &pairs]
 
-  o2 = [&o1, [125, "'}'"] ~> tok] ~> %parse.left
-  object = [&o2, #{ Object[$] }] ~> %parse.map
+  o2 = %parse.left [&o1, tok [125, "'}'"]]
+  object = %parse.map [&o2, #{ Object[$] }]
 
   keyword = #'%parse {
     =kst
-    kst ~> %parse.ident
+    %parse.ident kst
     =[w, kst2]
     w ~> {
       | ="null" => [Null, kst2]
       | ="true" => [True, kst2]
       | ="false" => [False, kst2]
-      | [kst, "null, true, or false"] ~> %parse.fail_in
+      | %parse.fail_in [kst, "null, true, or false"]
     }
   }
 
-  composite =
-    [&array, &object, &%parse.quoted, &number] ~> %parse.alt4
+  composite = %parse.alt4 [&array, &object, &%parse.quoted, &number]
 
-  core = [&composite, &keyword] ~> %parse.alt2
-  core_ws = [&%parse.ws, &core] ~> %parse.right
+  core = %parse.alt2 [&composite, &keyword]
+  core_ws = %parse.right [&%parse.ws, &core]
 
-  st ~> core_ws
+  core_ws st
 }
 
-parse_p = &parse_value ~> %parse.rec
+parse_p = %parse.rec &parse_value
 
 parse = #Str['bin] {
   :doc "Parses a JSON string into a '%json value, or nil with a positioned :error on malformed input."
-  full = [&parse_p, &%parse.ws] ~> %parse.left; [$, &full] ~> %parse.run
+  full = %parse.left [&parse_p, &%parse.ws]; %parse.run [$, &full]
 }
 
 // Escape a string's interior bytes. Only the escapes the parser understands are emitted
@@ -295,20 +278,20 @@ parse = #Str['bin] {
 esc_loop = #['bin, 'int, 'int, 'bin] {
   =[data, pos, len, acc]
   {
-    | [pos, len] ~> __integer_compare__ ~> =(0 | 1) => acc
+    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
     | {
-      b = [data, pos] ~> %bin.get_byte
+      b = %bin.get_byte [data, pos]
       acc2 = b ~> {
-        | =34 => [acc, 0x5c22] ~> %bin.concat
-        | =92 => [acc, 0x5c5c] ~> %bin.concat
-        | =8 => [acc, 0x5c62] ~> %bin.concat
-        | =12 => [acc, 0x5c66] ~> %bin.concat
-        | =10 => [acc, 0x5c6e] ~> %bin.concat
-        | =13 => [acc, 0x5c72] ~> %bin.concat
-        | =9 => [acc, 0x5c74] ~> %bin.concat
-        | [acc, b, 1] ~> %bin.append
+        | =34 => %bin.concat [acc, 0x5c22]
+        | =92 => %bin.concat [acc, 0x5c5c]
+        | =8 => %bin.concat [acc, 0x5c62]
+        | =12 => %bin.concat [acc, 0x5c66]
+        | =10 => %bin.concat [acc, 0x5c6e]
+        | =13 => %bin.concat [acc, 0x5c72]
+        | =9 => %bin.concat [acc, 0x5c74]
+        | %bin.append [acc, b, 1]
       }
-      [data, [pos, 1] ~> %num.add, len, acc2] ~> ^
+      ^ [data, %num.add [pos, 1], len, acc2]
     }
   }
 }
@@ -316,8 +299,8 @@ esc_loop = #['bin, 'int, 'int, 'bin] {
 // A JSON string literal: the bytes escaped and wrapped in double quotes.
 escape_str = #Str['bin] {
   =Str[bytes]
-  inner = [bytes, 0, bytes ~> %bin.length, 0x] ~> esc_loop
-  [0x22, inner] ~> %bin.concat ~> [~, 0x22] ~> %bin.concat ~> Str[~]
+  inner = esc_loop [bytes, 0, %bin.length bytes, 0x]
+  %bin.concat [0x22, inner] ~> %bin.concat [~, 0x22] ~> Str[~]
 }
 
 // Concatenate a `Nil`/`Cons` list's elements — each rendered to a string by `render` —
@@ -327,15 +310,12 @@ join_strs = #<'x>[(Nil | Cons['x, ^]), #'x -> Str['bin], Str['bin], 'int] {
   items ~> {
     | =Nil => acc
     | =Cons[h, t] => {
-      piece = h ~> render
+      piece = render h
       acc2 = {
-        | first ~> =1 => [acc, piece] ~> %str.concat
-        | {
-          [acc, ","] ~> %str.concat
-          ~> [~, piece] ~> %str.concat
-        }
+        | first ~> =1 => %str.concat [acc, piece]
+        | %str.concat [acc, ","] ~> %str.concat [~, piece]
       }
-      [t, &render, acc2, 0] ~> ^
+      ^ [t, &render, acc2, 0]
     }
   }
 }
@@ -345,22 +325,18 @@ repeat_byte = #['bin, 'int, 'int] {
   =[acc, b, n]
   {
     | n ~> =0 => acc
-    | {
-      [[acc, b, 1] ~> %bin.append, b, [n, 1] ~> __integer_subtract__] ~> ^
-    }
+    | ^ [%bin.append [acc, b, 1], b, __integer_subtract__ [n, 1]]
   }
 }
 
 // Drop trailing `0x30` (`'0'`) bytes from a binary.
 strip_zeros = #'bin {
   =b
-  len = b ~> %bin.length
+  len = %bin.length b
   {
     | len ~> =0 => b
-    | [b, [len, 1] ~> __integer_subtract__] ~> %bin.get_byte
-      ~> =48 => {
-        [b, 0, [len, 1] ~> __integer_subtract__] ~> %bin.slice
-        ~> ^
+    | %bin.get_byte [b, __integer_subtract__ [len, 1]] ~> =48 => {
+        %bin.slice [b, 0, __integer_subtract__ [len, 1]] ~> ^
       }
     | b
   }
@@ -370,11 +346,10 @@ strip_zeros = #'bin {
 // zeros stripped — the digits that follow the decimal point.
 frac_bytes = #['int, 'int] {
   =[fracpart, width]
-  ds = fracpart ~> %str.from_int ~> .0
-  pad = [width, ds ~> %bin.length] ~> __integer_subtract__
+  ds = %str.from_int fracpart ~> .0
+  pad = __integer_subtract__ [width, %bin.length ds]
 
-  [[0x, 48, pad] ~> repeat_byte, ds] ~> %bin.concat
-  ~> strip_zeros
+  [repeat_byte [0x, 48, pad], ds] ~> strip_zeros %bin.concat
 }
 
 // Format a canonical rational `n/d` (`d > 0`, gcd 1) as a JSON decimal: the exact finite
@@ -383,39 +358,30 @@ frac_bytes = #['int, 'int] {
 // `(2·|n|·10^12 + d) / (2d)`; trailing zeros are then stripped.
 format_rational = #['int, 'int] {
   =[n, d]
-  neg? = [n, 0] ~> __integer_compare__ ~> =-1
-  mag = {
-    | neg? => [0, n] ~> __integer_subtract__
-    | n
-  }
-  p10 = [1, 12] ~> pow10
+  neg? = __integer_compare__ [n, 0] ~> =-1
+  mag = { neg? => __integer_subtract__ [0, n] | n }
+  p10 = pow10 [1, 12]
 
-  scaled =
-    [
-      [
-        [2, [mag, p10] ~> __integer_multiply__] ~> __integer_multiply__,
-        d,
-      ] ~> __integer_add__,
-      [2, d] ~> __integer_multiply__,
-    ] ~> __integer_divide__
+  scaled = __integer_divide__ [
+    __integer_add__ [
+      __integer_multiply__ [2, __integer_multiply__ [mag, p10]],
+      d,
+    ],
+    __integer_multiply__ [2, d],
+  ]
 
   {
     | scaled ~> =0 => "0"
     | {
-      intpart = [scaled, p10] ~> __integer_divide__
-      fracpart = [scaled, p10] ~> __integer_modulo__
-      ib = intpart ~> %str.from_int ~> .0
+      intpart = __integer_divide__ [scaled, p10]
+      fracpart = __integer_modulo__ [scaled, p10]
+      ib = %str.from_int intpart ~> .0
       full = {
         | fracpart ~> =0 => ib
-        | {
-          [
-            ib,
-            [0x2e, [fracpart, 12] ~> frac_bytes] ~> %bin.concat,
-          ] ~> %bin.concat
-        }
+        | %bin.concat [ib, %bin.concat [0x2e, frac_bytes [fracpart, 12]]]
       }
       {
-        | neg? => [0x2d, full] ~> %bin.concat ~> Str[~]
+        | neg? => %bin.concat [0x2d, full] ~> Str[~]
         | full ~> Str[~]
       }
     }
@@ -425,36 +391,31 @@ format_rational = #['int, 'int] {
 // Serialize a `'%json` value to its compact string form, self-passed to recurse.
 str_step = #[#^ -> Str['bin], '] -> Str['bin] {
   =[self, v]
-  go = #' { [&self, $] ~> self }
+  go = #' { self [&self, $] }
   v ~> {
     | =Null => "null"
     | =True => "true"
     | =False => "false"
-    | =('int)n => n ~> %str.from_int
-    | =Rational[n, d] => [n, d] ~> format_rational
-    | =Str[bytes] => Str[bytes] ~> escape_str
+    | =('int)n => %str.from_int n
+    | =Rational[n, d] => format_rational [n, d]
+    | =Str[bytes] => escape_str Str[bytes]
     | =Array[items] => {
-      body = [items, &go, "", 1] ~> join_strs
+      body = join_strs [items, &go, "", 1]
 
-      ["[", body] ~> %str.concat
-      ~> [~, "]"] ~> %str.concat
+      %str.concat ["[", body] ~> %str.concat [~, "]"]
     }
     | =Object[pairs] => {
-      render = #[Str['bin], '] {
-        [$0 ~> escape_str, ":"] ~> %str.concat
-        ~> [~, $1 ~> go] ~> %str.concat
-      }
-      body = [pairs, &render, "", 1] ~> join_strs
+      render = #[Str['bin], '] { %str.concat [escape_str $0, ":"] ~> %str.concat [~, go $1] }
+      body = join_strs [pairs, &render, "", 1]
 
-      ["\{", body] ~> %str.concat
-      ~> [~, "}"] ~> %str.concat
+      %str.concat ["\{", body] ~> %str.concat [~, "}"]
     }
   }
 }
 
 stringify = #' {
   :doc "Serializes a '%json value to its compact JSON string form."
-  [&str_step, $] ~> str_step
+  str_step [&str_step, $]
 }
 
 {

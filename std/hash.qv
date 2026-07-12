@@ -8,53 +8,40 @@
 
 // Masked 32-bit add.
 madd = #['int, 'int] {
-  [[$0, $1] ~> __integer_add__, 4294967295] ~> __integer_and__
+  __integer_and__ [__integer_add__ [$0, $1], 4294967295]
 }
 
 // Rotate a 32-bit word right by n.
 rotr = #['int, 'int] {
   =[x, n]
 
-  [
-    [x, [0, n] ~> __integer_subtract__] ~> __integer_shift__,
-    [x, [32, n] ~> __integer_subtract__] ~> __integer_shift__,
-  ] ~> __integer_or__
-  ~> [~, 4294967295] ~> __integer_and__
+  __integer_or__ [
+    __integer_shift__ [x, __integer_subtract__ [0, n]],
+    __integer_shift__ [x, __integer_subtract__ [32, n]],
+  ] ~> __integer_and__ [~, 4294967295]
 }
 
 // Logical right shift.
 shr = #['int, 'int] {
-  [$0, [0, $1] ~> __integer_subtract__] ~> __integer_shift__
+  __integer_shift__ [$0, __integer_subtract__ [0, $1]]
 }
 
 // The 32-bit word at index i of a binary of big-endian words.
 w_at = #['bin, 'int] {
-  [$0, [$1, 4] ~> __integer_multiply__, 0, 32] ~> __binary_get__
+  __binary_get__ [$0, __integer_multiply__ [$1, 4], 0, 32]
 }
 
 ssig0 = #'int {
-  [
-    [[$, 7] ~> rotr, [$, 18] ~> rotr] ~> __integer_xor__,
-    [$, 3] ~> shr,
-  ] ~> __integer_xor__
+  __integer_xor__ [__integer_xor__ [rotr [$, 7], rotr [$, 18]], shr [$, 3]]
 }
 ssig1 = #'int {
-  [
-    [[$, 17] ~> rotr, [$, 19] ~> rotr] ~> __integer_xor__,
-    [$, 10] ~> shr,
-  ] ~> __integer_xor__
+  __integer_xor__ [__integer_xor__ [rotr [$, 17], rotr [$, 19]], shr [$, 10]]
 }
 bsig0 = #'int {
-  [
-    [[$, 2] ~> rotr, [$, 13] ~> rotr] ~> __integer_xor__,
-    [$, 22] ~> rotr,
-  ] ~> __integer_xor__
+  __integer_xor__ [__integer_xor__ [rotr [$, 2], rotr [$, 13]], rotr [$, 22]]
 }
 bsig1 = #'int {
-  [
-    [[$, 6] ~> rotr, [$, 11] ~> rotr] ~> __integer_xor__,
-    [$, 25] ~> rotr,
-  ] ~> __integer_xor__
+  __integer_xor__ [__integer_xor__ [rotr [$, 6], rotr [$, 11]], rotr [$, 25]]
 }
 
 // The SHA-256 round constants (64 words) and initial state (8 words).
@@ -67,20 +54,12 @@ extend = #['bin, 'int] {
   {
     | t ~> =64 => w
     | {
-      wt =
-        [
-          [w, [t, 2] ~> __integer_subtract__] ~> w_at
-          ~> ssig1,
-          [w, [t, 7] ~> __integer_subtract__] ~> w_at,
-        ] ~> madd
-        ~> [
-          ~,
-          [w, [t, 15] ~> __integer_subtract__] ~> w_at
-          ~> ssig0,
-        ] ~> madd
-        ~> [~, [w, [t, 16] ~> __integer_subtract__] ~> w_at] ~> madd
+      wt = madd [w_at [w, __integer_subtract__ [t, 2]] ~> ssig1, w_at [w, __integer_subtract__ [t, 7]]] ~> madd [~, w_at [w, __integer_subtract__ [t, 15]] ~> ssig0] ~> madd [
+        ~,
+        w_at [w, __integer_subtract__ [t, 16]],
+      ]
 
-      [[w, wt, 4] ~> __binary_append__, [t, 1] ~> __integer_add__] ~> ^
+      ^ [__binary_append__ [w, wt, 4], __integer_add__ [t, 1]]
     }
   }
 }
@@ -93,30 +72,24 @@ rounds = #['bin, 'int, 'state] {
   {
     | t ~> =64 => [a, b, c, d, e, f, g, h]
     | {
-      ch =
-        [
-          [e, f] ~> __integer_and__,
-          [[e, 4294967295] ~> __integer_xor__, g] ~> __integer_and__,
-        ] ~> __integer_xor__
+      ch = __integer_xor__ [
+        __integer_and__ [e, f],
+        __integer_and__ [__integer_xor__ [e, 4294967295], g],
+      ]
 
-      temp1 =
-        [h, e ~> bsig1] ~> madd
-        ~> [~, ch] ~> madd
-        ~> [~, [k256, t] ~> w_at] ~> madd
-        ~> [~, [w, t] ~> w_at] ~> madd
+      temp1 = madd [h, bsig1 e] ~> madd [~, ch] ~> madd [~, w_at [k256, t]] ~> madd [~, w_at [w, t]]
 
-      maj =
-        [
-          [[a, b] ~> __integer_and__, [a, c] ~> __integer_and__] ~> __integer_xor__,
-          [b, c] ~> __integer_and__,
-        ] ~> __integer_xor__
+      maj = __integer_xor__ [
+        __integer_xor__ [__integer_and__ [a, b], __integer_and__ [a, c]],
+        __integer_and__ [b, c],
+      ]
 
-      temp2 = [a ~> bsig0, maj] ~> madd
-      [
+      temp2 = madd [bsig0 a, maj]
+      ^ [
         w,
-        [t, 1] ~> __integer_add__,
-        [[temp1, temp2] ~> madd, a, b, c, [d, temp1] ~> madd, e, f, g],
-      ] ~> ^
+        __integer_add__ [t, 1],
+        [madd [temp1, temp2], a, b, c, madd [d, temp1], e, f, g],
+      ]
     }
   }
 }
@@ -125,29 +98,27 @@ rounds = #['bin, 'int, 'state] {
 blocks = #['bin, 'int, 'state] {
   =[data, off, st]
   {
-    | [off, data ~> __binary_length__] ~> __integer_compare__
-      ~> =(0 | 1) => st
+    | __integer_compare__ [off, __binary_length__ data] ~> =(0 | 1) => st
     | {
-      w =
-        [
-          [data, off, [off, 64] ~> __integer_add__] ~> __binary_slice__,
-          16,
-        ] ~> extend
+      w = extend [
+        __binary_slice__ [data, off, __integer_add__ [off, 64]],
+        16,
+      ]
 
       st ~> =[a0, b0, c0, d0, e0, f0, g0, h0]
-      [w, 0, [a0, b0, c0, d0, e0, f0, g0, h0]] ~> rounds
+      rounds [w, 0, [a0, b0, c0, d0, e0, f0, g0, h0]]
       =[a, b, c, d, e, f, g, h]
       st2 = [
-        [a0, a] ~> madd,
-        [b0, b] ~> madd,
-        [c0, c] ~> madd,
-        [d0, d] ~> madd,
-        [e0, e] ~> madd,
-        [f0, f] ~> madd,
-        [g0, g] ~> madd,
-        [h0, h] ~> madd,
+        madd [a0, a],
+        madd [b0, b],
+        madd [c0, c],
+        madd [d0, d],
+        madd [e0, e],
+        madd [f0, f],
+        madd [g0, g],
+        madd [h0, h],
       ]
-      [data, [off, 64] ~> __integer_add__, st2] ~> ^
+      ^ [data, __integer_add__ [off, 64], st2]
     }
   }
 }
@@ -155,45 +126,44 @@ blocks = #['bin, 'int, 'state] {
 // The message padded to a whole number of blocks: 0x80, zeros, 8-byte bit length.
 pad = #'bin {
   =msg
-  len = msg ~> __binary_length__
-  after = [len, 1] ~> __integer_add__
+  len = __binary_length__ msg
+  after = __integer_add__ [len, 1]
 
-  zeros =
-    [56, [after, 64] ~> __integer_modulo__] ~> __integer_subtract__
-    ~> [~, 64] ~> __integer_add__
-    ~> [~, 64] ~> __integer_modulo__
+  zeros = __integer_subtract__ [56, __integer_modulo__ [after, 64]] ~> __integer_add__ [~, 64] ~> __integer_modulo__ [
+    ~,
+    64,
+  ]
 
-  [msg, 128, 1] ~> __binary_append__
-  ~> [~, zeros ~> __binary_new__] ~> __binary_concat__
-  ~> [~, [len, 8] ~> __integer_multiply__, 8] ~> __binary_append__
+  __binary_append__ [msg, 128, 1] ~> __binary_concat__ [~, __binary_new__ zeros] ~> __binary_append__ [
+    ~,
+    __integer_multiply__ [len, 8],
+    8,
+  ]
 }
 
 digest = #'state {
   =[a, b, c, d, e, f, g, h]
 
-  [0x, a, 4] ~> __binary_append__
-  ~> [~, b, 4] ~> __binary_append__
-  ~> [~, c, 4] ~> __binary_append__
-  ~> [~, d, 4] ~> __binary_append__
-  ~> [~, e, 4] ~> __binary_append__
-  ~> [~, f, 4] ~> __binary_append__
-  ~> [~, g, 4] ~> __binary_append__
-  ~> [~, h, 4] ~> __binary_append__
+  __binary_append__ [0x, a, 4] ~> __binary_append__ [~, b, 4] ~> __binary_append__ [~, c, 4] ~> __binary_append__ [~, d, 4] ~> __binary_append__ [~, e, 4] ~> __binary_append__ [~, f, 4] ~> __binary_append__ [~, g, 4] ~> __binary_append__ [
+    ~,
+    h,
+    4,
+  ]
 }
 
 sha256 = #'bin {
   :doc "The SHA-256 digest of the bytes, as a 32-byte binary."
   init = [
-    [h256, 0] ~> w_at,
-    [h256, 1] ~> w_at,
-    [h256, 2] ~> w_at,
-    [h256, 3] ~> w_at,
-    [h256, 4] ~> w_at,
-    [h256, 5] ~> w_at,
-    [h256, 6] ~> w_at,
-    [h256, 7] ~> w_at,
+    w_at [h256, 0],
+    w_at [h256, 1],
+    w_at [h256, 2],
+    w_at [h256, 3],
+    w_at [h256, 4],
+    w_at [h256, 5],
+    w_at [h256, 6],
+    w_at [h256, 7],
   ]
-  [$ ~> pad, 0, init] ~> blocks ~> digest
+  blocks [pad $, 0, init] ~> digest
 }
 
 ipad = 0x36363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636
@@ -203,24 +173,19 @@ hmac_sha256 = #['bin, 'bin] {
   :doc "The HMAC-SHA256 of the message under the key, as a 32-byte binary."
   =[key, msg]
   k1 = {
-    | [key ~> __binary_length__, 64] ~> __integer_compare__
-      ~> =1 => key ~> sha256
+    | __integer_compare__ [__binary_length__ key, 64] ~> =1 => sha256 key
     | key
   }
 
-  kp =
-    [
-      k1,
-      [64, k1 ~> __binary_length__] ~> __integer_subtract__
-      ~> __binary_new__,
-    ] ~> __binary_concat__
+  kp = __binary_concat__ [
+    k1,
+    __integer_subtract__ [64, __binary_length__ k1] ~> __binary_new__,
+  ]
 
   inner =
-    [[kp, ipad] ~> __binary_xor__, msg] ~> __binary_concat__
-    ~> sha256
+    __binary_concat__ [__binary_xor__ [kp, ipad], msg] ~> sha256
 
-  [[kp, opad] ~> __binary_xor__, inner] ~> __binary_concat__
-  ~> sha256
+  __binary_concat__ [__binary_xor__ [kp, opad], inner] ~> sha256
 }
 
 [sha256: &sha256, hmac_sha256: &hmac_sha256]

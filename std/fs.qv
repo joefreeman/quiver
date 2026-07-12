@@ -26,17 +26,15 @@ stat = #Str['bin] {
   list: #Str['bin] {
     :doc "Lazily iterates the entries of a directory, yielding an Entry (name and kind) each."
     // Each step yields an `Entry` or nil at the end, with `kind` already a `'kind` tag.
-    .0
-    ~> __directory_read__
-    ~> [
+    .0 ~> __directory_read__ ~> %iter.unfold [
       ~,
       #\Dir {
-        $ ~> __directory_next__ ~> {
-          | =[] => { $ ~> __directory_close__; [] }
+        __directory_next__ $ ~> {
+          | =[] => { __directory_close__ $; [] }
           | =e ~> [Entry[name: Str[e.0], kind: e.1], $]
         }
       },
-    ] ~> %iter.unfold
+    ]
   },
 
   stat: #Str['bin] {

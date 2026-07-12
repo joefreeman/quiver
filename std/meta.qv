@@ -52,7 +52,7 @@ rev = #['elist, 'elist] {
   =[items, acc]
   items ~> {
     | =Nil => acc
-    | =Cons[h, t] => [t, Cons[h, acc]] ~> ^
+    | =Cons[h, t] => ^ [t, Cons[h, acc]]
   }
 }
 
@@ -60,12 +60,10 @@ build_rev = #['elist, 'expr] {
   =[items, acc]
   items ~> {
     | =Nil => acc
-    | =Cons[h, t] => {
-      [
-        t,
-        Tuple[name: "Cons", fields: Cons[h, Cons[acc, Nil]]],
-      ] ~> ^
-    }
+    | =Cons[h, t] => ^ [
+      t,
+      Tuple[name: "Cons", fields: Cons[h, Cons[acc, Nil]]],
+    ]
   }
 }
 
@@ -81,7 +79,7 @@ call2 = #[Str['bin], 'expr, 'expr] {
 
 list_expr = #'elist {
   :doc "An in-order list of element expressions as a nested Cons/Nil list expression."
-  [[~, Nil] ~> rev, Nil] ~> build_rev
+  build_rev [rev [~, Nil], Nil]
 }
 
 [pair2: &pair2, call2: &call2, list_expr: &list_expr]

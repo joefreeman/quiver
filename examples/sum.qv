@@ -4,9 +4,9 @@
 // Compute the sum of a list using tail recursion
 sum_ = #['list<'int>, 'int] {
   | =[Nil, acc] => acc
-  | =[Cons[head, tail], acc] => [head, acc] ~> %num.add ~> [tail, ~] ~> ^
+  | =[Cons[head, tail], acc] => %num.add [head, acc] ~> ^ [tail, ~]
 }
 
-sum = #'list<'int> { [~, 0] ~> sum_ }
+sum = #'list<'int> { sum_ [~, 0] }
 
 #{ %list{ 1, 2, 3 } ~> sum }

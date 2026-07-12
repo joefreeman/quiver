@@ -163,12 +163,70 @@ pub enum Error {
     InternalError {
         message: String,
     },
+
+    /// An error augmented with a usage hint — e.g. the Apply-site-inference note attached
+    /// when a `#{…}` literal that reads `$` fell back to a nil parameter and its body failed.
+    Noted {
+        error: Box<Error>,
+        note: String,
+    },
+}
+
+/// Whether an expression's chains read the enclosing function's parameter (`$`, `$x`, `$0`) —
+/// without descending into nested function literals, whose `$` is their own. Used to decide
+/// whether a failed fallback-nil `#{…}` literal deserves the Apply-site-inference note.
+fn expression_references_parameter(expression: &ast::Expression) -> bool {
+    let chain = |chain: &ast::Chain| chain.terms.iter().any(term_references_parameter);
+    expression.annotations.iter().any(|a| chain(&a.value))
+        || expression.branches.iter().any(|branch| {
+            branch.condition.chains.iter().any(chain)
+                || branch
+                    .consequence
+                    .as_ref()
+                    .is_some_and(|c| c.chains.iter().any(chain))
+        })
+}
+
+fn term_references_parameter(term: &ast::Term) -> bool {
+    let chain = |chain: &ast::Chain| chain.terms.iter().any(term_references_parameter);
+    match term {
+        ast::Term::Access(access) | ast::Term::Reference(access) => {
+            matches!(access.source, Some(ast::AccessSource::Parameter))
+        }
+        ast::Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
+            ast::FieldValue::Chain(c) => chain(c),
+            ast::FieldValue::Spread(_) => false,
+        }),
+        ast::Term::String(_, segments) => segments.iter().any(|segment| match segment {
+            ast::StrSegment::Hole(expression) => expression_references_parameter(expression),
+            ast::StrSegment::Text(_) => false,
+        }),
+        ast::Term::Block(expression) => expression_references_parameter(expression),
+        // A nested function literal's `$` is its own parameter.
+        ast::Term::Function(_) => false,
+        ast::Term::Apply(access, argument) => {
+            matches!(access.source, Some(ast::AccessSource::Parameter))
+                || term_references_parameter(argument)
+        }
+        ast::Term::Spawn(inner, argument, _) => {
+            term_references_parameter(inner)
+                || argument.as_deref().is_some_and(term_references_parameter)
+        }
+        ast::Term::Select(Some(sources), _) => sources.iter().any(chain),
+        ast::Term::Literal(_)
+        | ast::Term::Match(_)
+        | ast::Term::Self_
+        | ast::Term::Select(None, _)
+        | ast::Term::Process(_)
+        | ast::Term::Dialect(_) => false,
+    }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::VariableUndefined(name) => write!(f, "Undefined variable: {name}"),
+            Error::Noted { error, note } => write!(f, "{error} ({note})"),
             Error::BuiltinUndefined(name) => write!(f, "Undefined builtin: {name}"),
             Error::FunctionUndefined(index) => write!(f, "Undefined function: {index}"),
             Error::TypeUnresolved(name) => write!(f, "Unresolved type: {name}"),
@@ -3057,25 +3115,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// #{…}]` once did — the inference reads off the value flow rather than a bundled call node.
     /// Only `Tuple`/`Function` terms consume an expected type (every other term ignores it), so we
     /// only bother looking ahead for those.
-    fn expected_for_term(
-        &mut self,
-        terms: &[ast::Term],
-        i: usize,
-        last_index: usize,
-        chain_expected: Option<usize>,
-    ) -> Option<usize> {
-        if i == last_index {
-            return chain_expected;
-        }
-        if !matches!(terms[i], ast::Term::Tuple(_) | ast::Term::Function(_)) {
-            return None;
-        }
-        match &terms[i + 1] {
-            ast::Term::Access(next) => self.callee_parameter_type(next),
-            _ => None,
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn compile_chain_with_input(
         &mut self,
@@ -3109,7 +3148,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let terms: Vec<_> = chain.terms.into_iter().collect();
         let last_index = terms.len().saturating_sub(1);
         for (i, term) in terms.iter().enumerate() {
-            let term_expected = self.expected_for_term(&terms, i, last_index, expected);
+            // Only the chain's final term produces the chain's value, so only it receives the
+            // chain's expected type. `#{…}` parameter inference is Apply-site only: a literal
+            // in a call's argument infers from the callee (`f [.., #{…}]`), never from a
+            // downstream chain term.
+            let term_expected = if i == last_index { expected } else { None };
             let (term_type, term_prov) = self.compile_term(
                 term.clone(),
                 FlowingValue {
@@ -3347,8 +3390,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Compile the module body as one threaded sequence; the final value is the module value.
         // On failure, restore the saved compiler state before propagating. This is not just
-        // hygiene: module imports are also triggered by *speculative* probes (the argument-first
-        // look-ahead in `expected_for_term`), whose callers swallow errors and continue — leaving
+        // hygiene: module imports are also triggered by *speculative* probes (the Apply-site
+        // inference's `callee_parameter_type`), whose callers swallow errors and continue — leaving
         // the module's scopes/instructions in place would have the enclosing program compile
         // against the failed module's scope chain (cascading `VariableUndefined`s), and a zeroed
         // `function_depth` panics with a usize underflow in the enclosing `compile_function`,
@@ -4912,7 +4955,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         Some(Type::Callable { parameter, .. }) => Some(*parameter),
                         _ => None,
                     });
-                let function_type = self.compile_function(func, expected_parameter)?;
+                // With no callable expected type, an un-annotated literal falls back to a nil
+                // parameter. If its body then fails while actually reading `$`, the real
+                // problem is almost always the missed inference: point at the Apply-site rule.
+                let inference_fell_back = func.parameter_type.is_none()
+                    && expected_parameter.is_none()
+                    && func
+                        .body
+                        .as_ref()
+                        .is_some_and(expression_references_parameter);
+                let function_type =
+                    self.compile_function(func, expected_parameter)
+                        .map_err(|e| {
+                            if inference_fell_back {
+                                Error::Noted {
+                                    error: Box::new(e),
+                                    note: "this `#{…}` literal's parameter defaulted to nil — \
+                                       parameter inference is Apply-site only, so write the \
+                                       call callee-first (`f […, #{…}]`) or annotate the \
+                                       parameter"
+                                        .to_string(),
+                                }
+                            } else {
+                                e
+                            }
+                        })?;
                 // Hover on `#` shows the inferred function type.
                 self.record_typed(span, function_type, SymbolKind::Expression, None);
                 Ok((function_type, Provenance::Unknown))

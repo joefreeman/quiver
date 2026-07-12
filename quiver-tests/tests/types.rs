@@ -1268,7 +1268,7 @@ fn test_generic_type_parameters_do_not_collide_across_definitions() {
         .evaluate(
             r#"
             apply = #<'t, 'u>['t, #'t -> 'u] { =[v, f]; v ~> f }
-            pick = #<'t, 'u>['t, 'u] { =[a, b]; [[a, b], #{ $0 }] ~> apply }
+            pick = #<'t, 'u>['t, 'u] { =[a, b]; apply [[a, b], #{ $0 }] }
             [1, "x"] ~> pick
             "#,
         )
@@ -1322,7 +1322,7 @@ fn test_union_folds_members_differing_only_by_annotation_row() {
             elems = [&%parse.int, &comma] ~> %parse.sep_by
             a1 = [[91, "'['"] ~> %parse.byte, &elems] ~> %parse.right
             a3 = [&a1, [93, "']'"] ~> %parse.byte] ~> %parse.left
-            [&a3, #{ $ }] ~> %parse.map
+            %parse.map [&a3, #{ $ }]
             "#,
         )
         .expect_type(

@@ -14,19 +14,17 @@
 serve = #\File {
   !#'command ~> {
     | =Read[offset, length, reply, id] => {
-      [$, offset, length] ~> __file_read__
-      ~> Reply[id, ~] ~> reply
+      __file_read__ [$, offset, length] ~> Reply[id, ~] ~> reply
 
-      $ ~> ^
+      ^ $
     }
     | =Write[offset, data, reply, id] => {
-      [$, offset, data] ~> __file_write__
-      ~> Reply[id, ~] ~> reply
+      __file_write__ [$, offset, data] ~> Reply[id, ~] ~> reply
 
-      $ ~> ^
+      ^ $
     }
-    | =Flush[reply, id] => { $ ~> __file_flush__ ~> Reply[id, ~] ~> reply; $ ~> ^ }
-    | =Close => $ ~> __file_close__
+    | =Flush[reply, id] => { __file_flush__ $ ~> Reply[id, ~] ~> reply; ^ $ }
+    | =Close => __file_close__ $
   }
 }
 
@@ -41,13 +39,10 @@ do_read = #[', 'int, 'int] {
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
 read_all = #[', 'int, 'bin] {
   =[f, offset, acc]
-  chunk = [f, offset, 65536] ~> do_read
-  chunk ~> %bin.length ~> {
+  chunk = do_read [f, offset, 65536]
+  %bin.length chunk ~> {
     | =0 => acc
-    | =n => {
-      [acc, chunk] ~> %bin.concat
-      ~> [f, [offset, n] ~> %num.add, ~] ~> ^
-    }
+    | =n => %bin.concat [acc, chunk] ~> ^ [f, %num.add [offset, n], ~]
   }
 }
 
@@ -59,28 +54,23 @@ read_all = #[', 'int, 'bin] {
 // compacted once per chunk read, keeping the whole pass linear.
 lines_step = #[', 'int, 'bin, 'int] {
   =[f, offset, buf, pos]
-  len = buf ~> %bin.length
-  [buf, 10, pos] ~> %bin.index ~> {
+  len = %bin.length buf
+  %bin.index [buf, 10, pos] ~> {
     | =[] => {
       // No newline in the remaining buffer: keep the unconsumed tail and read more.
-      leftover = [buf, pos, len] ~> %bin.slice
-      chunk = [f, offset, 65536] ~> do_read
-      chunk ~> %bin.length ~> {
+      leftover = %bin.slice [buf, pos, len]
+      chunk = do_read [f, offset, 65536]
+      %bin.length chunk ~> {
         | =0 => {
           // EOF: emit the final unterminated line if there is one, otherwise stop.
-          | leftover ~> %bin.length ~> =0 => []
+          | %bin.length leftover ~> =0 => []
           | [Str[leftover], [f, offset, 0x, 0]]
         }
-        | =n => {
-          n
-          ~> [offset, ~] ~> %num.add
-          ~> [f, ~, [leftover, chunk] ~> %bin.concat, 0] ~> ^
-        }
+        | =n => n ~> %num.add [offset, ~] ~> ^ [f, ~, %bin.concat [leftover, chunk], 0]
       }
     }
     | =index => {
-      line = [buf, pos, index] ~> %bin.slice
-      [Str[line], [f, offset, buf, [index, 1] ~> %num.add]]
+      line = %bin.slice [buf, pos, index]; [Str[line], [f, offset, buf, %num.add [index, 1]]]
     }
   }
 }
@@ -96,9 +86,9 @@ lines_step = #[', 'int, 'bin, 'int] {
       | =(mode: A) => 1089
       | 0
     }
-    name = $0 ~> %path.to_string ~> .0
+    name = %path.to_string $0 ~> .0
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
-    File[[name, flags, 420] ~> __file_open__ ~> @serve]
+    File[__file_open__ [name, flags, 420] ~> @serve]
   },
 
   read: #[', 'int, 'int] {
@@ -108,12 +98,12 @@ lines_step = #[', 'int, 'bin, 'int] {
 
   read_all: #' {
     :doc "Reads the entire file from the start, returning all its bytes."
-    [~, 0, 0x] ~> read_all
+    read_all [~, 0, 0x]
   },
 
   lines: #' {
     :doc "Iterates over the lines of the file, without their trailing newlines."
-    [[~, 0, 0x, 0], &lines_step] ~> %iter.unfold
+    %iter.unfold [[~, 0, 0x, 0], &lines_step]
   },
 
   write: #[', 'int, 'bin] {

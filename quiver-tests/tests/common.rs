@@ -315,6 +315,29 @@ impl TestResult {
         }
     }
 
+    /// Assert that compilation fails with an error whose rendering contains `needle` —
+    /// for asserting notes/hints without pinning the full error value.
+    pub fn expect_error_containing(self, needle: &str) {
+        match self.result {
+            Err(ReplError::Compiler(e)) => {
+                let rendered = format!("{e}");
+                assert!(
+                    rendered.contains(needle),
+                    "Expected a compile error containing {needle:?}, but got: {rendered} for source: {}",
+                    self.source
+                );
+            }
+            Ok(result) => panic!(
+                "Expected a compile error containing {needle:?}, but evaluation succeeded with: {:?} for source: {}",
+                result, self.source
+            ),
+            Err(e) => panic!(
+                "Expected a compile error containing {needle:?}, but got {:?} for source: {}",
+                e, self.source
+            ),
+        }
+    }
+
     /// Assert that the source fails to parse (any parse error), without pinning the
     /// exact error value.
     pub fn expect_parse_failure(self) {

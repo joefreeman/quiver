@@ -11,12 +11,12 @@
 // `[value, next_state]`, or to `[]` to terminate.
 unfold = #<'s, 't>[#^ -> 'thunk<'t>, 's, #'s -> (['t, 's] | [])] {
   =[self, state, step]
-  #{ state ~> step ~> =[value, next_state]; [value, [&self, next_state, &step] ~> self] }
+  #{ step state ~> =[value, next_state]; [value, self [&self, next_state, &step]] }
 }
 
 map = #<'t, 'u>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> 'u] {
   =[self, it, f]
-  #{ it ~> =[value, next]; value ~> f ~> [~, [&self, &next, &f] ~> self] }
+  #{ it ~> =[value, next]; f value ~> [~, self [&self, &next, &f]] }
 }
 
 filter = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
@@ -24,8 +24,8 @@ filter = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
   #{
     it ~> =[value, next]
     {
-      | value ~> pred => [&self, &next, &pred] ~> self ~> [value, ~]
-      | [&self, &next, &pred] ~> self ~> ^~
+      | pred value => self [&self, &next, &pred] ~> [value, ~]
+      | self [&self, &next, &pred] ~> ^~
     }
   }
 }
@@ -34,7 +34,7 @@ take = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
   =[self, it, n]
   #{
     | n ~> =0 => []
-    | { it ~> =[value, next]; n ~> [~, 1] ~> %num.sub ~> [&self, &next, ~] ~> self ~> [value, ~] }
+    | { it ~> =[value, next]; n ~> %num.sub [~, 1] ~> self [&self, &next, ~] ~> [value, ~] }
   }
 }
 
@@ -46,16 +46,14 @@ drop = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'int] {
       it ~> =[_, next]
 
       n
-      ~> [~, 1] ~> %num.sub
-      ~> [&self, &next, ~] ~> self
-      ~> ^~
+      ~> %num.sub [~, 1] ~> self [&self, &next, ~] ~> ^~
     }
   }
 }
 
 take_while = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
   =[self, it, pred]
-  #{ it ~> =[value, next]; value ~> pred; [&self, &next, &pred] ~> self ~> [value, ~] }
+  #{ it ~> =[value, next]; pred value; self [&self, &next, &pred] ~> [value, ~] }
 }
 
 drop_while = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
@@ -63,7 +61,7 @@ drop_while = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
   #{
     it ~> =[value, next]
     {
-      | value ~> pred => [&self, &next, &pred] ~> self ~> ^~
+      | pred value => self [&self, &next, &pred] ~> ^~
       | [value, &next]
     }
   }
@@ -72,8 +70,8 @@ drop_while = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, #'t -> ('t | [])] {
 flat_map = #<'t, 'u>[#^ -> 'thunk<'u>, 'thunk<'t>, #'t -> '<'u>, 'thunk<'u>] {
   =[self, source, f, current]
   #{
-    | { current ~> =[value, next]; [value, [&self, &source, &f, &next] ~> self] }
-    | { source ~> =[value, next]; value ~> f ~> =Iter[fc]; [&self, &next, &f, &fc] ~> self ~> ^~ }
+    | { current ~> =[value, next]; [value, self [&self, &source, &f, &next]] }
+    | { source ~> =[value, next]; f value ~> =Iter[fc]; self [&self, &next, &f, &fc] ~> ^~ }
   }
 }
 
@@ -81,7 +79,7 @@ chain = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
   =[self, first, second]
   #{
     first ~> {
-      | =[value, next] => [value, [&self, &next, &second] ~> self]
+      | =[value, next] => [value, self [&self, &next, &second]]
       | =[] => second
     }
   }
@@ -89,14 +87,13 @@ chain = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
 
 zip = #<'t, 'u>[#^ -> 'thunk<['t, 'u]>, 'thunk<'t>, 'thunk<'u>] {
   =[self, it1, it2]
-  #{ it1 ~> =[v1, next1]; it2 ~> =[v2, next2]; [[v1, v2], [&self, &next1, &next2] ~> self] }
+  #{ it1 ~> =[v1, next1]; it2 ~> =[v2, next2]; [[v1, v2], self [&self, &next1, &next2]] }
 }
 
 enumerate = #<'t>[#^ -> 'thunk<['int, 't]>, 'thunk<'t>, 'int] {
   =[self, it, index]
   #{
-    it ~> =[value, next]
-    index ~> [~, 1] ~> %num.add ~> [&self, &next, ~] ~> self ~> [[index, value], ~]
+    it ~> =[value, next]; index ~> %num.add [~, 1] ~> self [&self, &next, ~] ~> [[index, value], ~]
   }
 }
 
@@ -104,177 +101,162 @@ cycle = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 'thunk<'t>] {
   =[self, original, current]
   #{
     current ~> {
-      | =[value, next] => [value, [&self, &original, &next] ~> self]
-      | [&self, &original, &original] ~> self ~> ^~
+      | =[value, next] => [value, self [&self, &original, &next]]
+      | self [&self, &original, &original] ~> ^~
     }
   }
 }
 
-repeat = #<'t>[#^ -> 'thunk<'t>, 't] { =[self, value]; #{ [value, [&self, value] ~> self] } }
+repeat = #<'t>[#^ -> 'thunk<'t>, 't] { =[self, value]; #{ [value, self [&self, value]] } }
 
 fold = #<'t, 'acc>['thunk<'t>, 'acc, #['acc, 't] -> 'acc] {
   =[it, acc, f]
   it ~> {
-    | =[value, next] => [acc, value] ~> f ~> [&next, ~, &f] ~> ^
+    | =[value, next] => f [acc, value] ~> ^ [&next, ~, &f]
     | acc
   }
 }
 
 find = #<'t>['thunk<'t>, #'t -> ('t | [])] {
-  =[it, pred]
-  it ~> =[value, next]
-  {
-    | value ~> pred => value
-    | [&next, &pred] ~> ^
-  }
+  =[it, pred]; it ~> =[value, next]; { pred value => value | ^ [&next, &pred] }
 }
 
 find_index = #<'t>['thunk<'t>, #'t -> ('t | []), 'int] {
   =[it, pred, index]
   it ~> =[value, next]
   {
-    | value ~> pred => index
-    | {
-      index
-      ~> [~, 1] ~> %num.add
-      ~> [&next, &pred, ~] ~> ^
-    }
+    | pred value => index
+    | index ~> %num.add [~, 1] ~> ^ [&next, &pred, ~]
   }
 }
 
 any = #<'t>['thunk<'t>, #'t -> ('t | [])] {
-  =[it, pred]
-  it ~> =[value, next]
-  {
-    | value ~> pred => Ok
-    | [&next, &pred] ~> ^
-  }
+  =[it, pred]; it ~> =[value, next]; { pred value => Ok | ^ [&next, &pred] }
 }
 
 all = #<'t>['thunk<'t>, #'t -> ('t | [])] {
   =[it, pred]
   it ~> {
     | =[] => Ok
-    | =[value, next]; value ~> pred => [&next, &pred] ~> ^
+    | =[value, next]; pred value => ^ [&next, &pred]
     | []
   }
 }
 
 nth = #<'t>['thunk<'t>, 'int] {
   | =[it, 0] => { it ~> =[value, _]; value }
-  | =[it, n] => { it ~> =[_, next]; n ~> [~, 1] ~> %num.sub ~> [&next, ~] ~> ^ }
+  | =[it, n] => { it ~> =[_, next]; n ~> %num.sub [~, 1] ~> ^ [&next, ~] }
 }
 
 intersperse = #<'t>[#^ -> 'thunk<'t>, 'thunk<'t>, 't] {
   =[self, it, sep]
-  #{ it ~> =[value, next]; [sep, #{ [value, [&self, &next, sep] ~> self] }] }
+  #{ it ~> =[value, next]; [sep, #{ [value, self [&self, &next, sep]] }] }
 }
 
 [
   unfold: #<'s, 't>['s, #'s -> (['t, 's] | [])] {
     :doc "An iterator built from a seed state and a step function; ends when the step yields nil."
-    =[state, step]; [&unfold, state, &step] ~> unfold ~> Iter[~]
+    =[state, step]; unfold [&unfold, state, &step] ~> Iter[~]
   },
 
   map: #<'t, 'u>['<'t>, #'t -> 'u] {
     :doc "Transforms each element of an iterator with a function, lazily."
-    =[Iter[r], f]; [&map, &r, &f] ~> map ~> Iter[~]
+    =[Iter[r], f]; map [&map, &r, &f] ~> Iter[~]
   },
 
   filter: #<'t>['<'t>, #'t -> ('t | [])] {
     :doc "Keeps only the elements for which the predicate is non-nil, lazily."
-    =[Iter[r], pred]; [&filter, &r, &pred] ~> filter ~> Iter[~]
+    =[Iter[r], pred]; filter [&filter, &r, &pred] ~> Iter[~]
   },
 
   take: #<'t>['<'t>, 'int] {
     :doc "An iterator over at most the first n elements."
-    =[Iter[r], n]; [&take, &r, n] ~> take ~> Iter[~]
+    =[Iter[r], n]; take [&take, &r, n] ~> Iter[~]
   },
 
   drop: #<'t>['<'t>, 'int] {
     :doc "An iterator that skips the first n elements."
-    =[Iter[r], n]; [&drop, &r, n] ~> drop ~> Iter[~]
+    =[Iter[r], n]; drop [&drop, &r, n] ~> Iter[~]
   },
 
   take_while: #<'t>['<'t>, #'t -> ('t | [])] {
     :doc "Yields elements while the predicate is non-nil, then ends."
-    =[Iter[r], pred]; [&take_while, &r, &pred] ~> take_while ~> Iter[~]
+    =[Iter[r], pred]; take_while [&take_while, &r, &pred] ~> Iter[~]
   },
 
   drop_while: #<'t>['<'t>, #'t -> ('t | [])] {
     :doc "Skips elements while the predicate is non-nil, yielding the rest."
-    =[Iter[r], pred]; [&drop_while, &r, &pred] ~> drop_while ~> Iter[~]
+    =[Iter[r], pred]; drop_while [&drop_while, &r, &pred] ~> Iter[~]
   },
 
   flat_map: #<'t, 'u>['<'t>, #'t -> '<'u>] {
     :doc "Maps each element to an iterator and concatenates the results, lazily."
-    =[Iter[r], f]; [&flat_map, &r, &f, #{ [] }] ~> flat_map ~> Iter[~]
+    =[Iter[r], f]; flat_map [&flat_map, &r, &f, #{ [] }] ~> Iter[~]
   },
 
   chain: #<'t>['<'t>, '<'t>] {
     :doc "An iterator over the first iterator's elements followed by the second's."
-    =[Iter[r1], Iter[r2]]; [&chain, &r1, &r2] ~> chain ~> Iter[~]
+    =[Iter[r1], Iter[r2]]; chain [&chain, &r1, &r2] ~> Iter[~]
   },
 
   zip: #<'t, 'u>['<'t>, '<'u>] {
     :doc "Pairs up elements from two iterators, ending when either is exhausted."
-    =[Iter[r1], Iter[r2]]; [&zip, &r1, &r2] ~> zip ~> Iter[~]
+    =[Iter[r1], Iter[r2]]; zip [&zip, &r1, &r2] ~> Iter[~]
   },
 
   enumerate: #<'t>'<'t> {
     :doc "Pairs each element with its zero-based index."
-    =Iter[r]; [&enumerate, &r, 0] ~> enumerate ~> Iter[~]
+    =Iter[r]; enumerate [&enumerate, &r, 0] ~> Iter[~]
   },
 
   cycle: #<'t>'<'t> {
     :doc "An iterator that repeats the elements endlessly."
-    =Iter[r]; [&cycle, &r, &r] ~> cycle ~> Iter[~]
+    =Iter[r]; cycle [&cycle, &r, &r] ~> Iter[~]
   },
 
   repeat: #<'t>'t {
     :doc "An endless iterator that yields the given value."
-    [&repeat, ~] ~> repeat ~> Iter[~]
+    repeat [&repeat, ~] ~> Iter[~]
   },
 
   fold: #<'t, 'acc>['<'t>, 'acc, #['acc, 't] -> 'acc] {
     :doc "Reduces an iterator by folding each element into an accumulator."
-    =[Iter[r], acc, f]; [&r, acc, &f] ~> fold
+    =[Iter[r], acc, f]; fold [&r, acc, &f]
   },
 
   find: #<'t>['<'t>, #'t -> ('t | [])] {
     :doc "The first element for which the predicate is non-nil, or nil when none matches."
-    =[Iter[r], pred]; [&r, &pred] ~> find
+    =[Iter[r], pred]; find [&r, &pred]
   },
 
   find_index: #<'t>['<'t>, #'t -> ('t | [])] {
     :doc "The zero-based index of the first matching element, or nil when none matches."
-    =[Iter[r], pred]; [&r, &pred, 0] ~> find_index
+    =[Iter[r], pred]; find_index [&r, &pred, 0]
   },
 
   any?: #<'t>['<'t>, #'t -> ('t | [])] {
     :doc "Whether any element satisfies the predicate."
-    =[Iter[r], pred]; [&r, &pred] ~> any
+    =[Iter[r], pred]; any [&r, &pred]
   },
 
   all?: #<'t>['<'t>, #'t -> ('t | [])] {
     :doc "Whether every element satisfies the predicate."
-    =[Iter[r], pred]; [&r, &pred] ~> all
+    =[Iter[r], pred]; all [&r, &pred]
   },
 
   count: #<'t>'<'t> {
     :doc "The number of elements in the iterator."
-    =Iter[r]
-    [&r, 0, #['int, 'int] { [$0, 1] ~> %num.add }] ~> fold
+    =Iter[r]; fold [&r, 0, #['int, 'int] { %num.add [$0, 1] }]
   },
 
   nth: #<'t>['<'t>, 'int] {
     :doc "The element at the given zero-based index, or nil when the iterator is too short."
-    =[Iter[r], n]; [&r, n] ~> nth
+    =[Iter[r], n]; nth [&r, n]
   },
 
   intersperse: #<'t>['<'t>, 't] {
     :doc "An iterator with the separator inserted between consecutive elements."
     =[Iter[r], sep]
-    #{ r ~> =[first, rest]; [first, [&intersperse, &rest, sep] ~> intersperse] } ~> Iter[~]
+    #{ r ~> =[first, rest]; [first, intersperse [&intersperse, &rest, sep]] } ~> Iter[~]
   },
 ]
