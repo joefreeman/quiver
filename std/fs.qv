@@ -14,9 +14,9 @@
 // failures (e.g. permission denied) are runtime errors. The builtin returns a transient
 // `[kind, size, modified, mode]` tuple read by index, with `kind` already a `'kind` tag.
 stat = #Str['bin] {
-  .0 __filesystem_stat__ {
+  .0 ~> __filesystem_stat__ ~> {
     | =[] => []
-    | =s Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
+    | =s ~> Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
   }
 }
 
@@ -31,12 +31,12 @@ stat = #Str['bin] {
     ~> [
       ~,
       #\Dir {
-        $ __directory_next__ {
-          | =[] => { $ __directory_close__; [] }
-          | =e [Entry[name: Str[e.0], kind: e.1], $]
+        $ ~> __directory_next__ ~> {
+          | =[] => { $ ~> __directory_close__; [] }
+          | =e ~> [Entry[name: Str[e.0], kind: e.1], $]
         }
       },
-    ] %iter.unfold
+    ] ~> %iter.unfold
   },
 
   stat: #Str['bin] {
@@ -51,11 +51,11 @@ stat = #Str['bin] {
 
   dir?: #Str['bin] {
     :doc "Whether a path exists and is a directory."
-    stat =(kind: Dir) => Ok
+    stat ~> =(kind: Dir) => Ok
   },
 
   file?: #Str['bin] {
     :doc "Whether a path exists and is a regular file."
-    stat =(kind: File) => Ok
+    stat ~> =(kind: File) => Ok
   },
 ]

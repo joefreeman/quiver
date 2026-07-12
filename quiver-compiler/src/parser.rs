@@ -67,6 +67,7 @@ pub enum ErrorKind {
 
     // Sequence errors
     StepComma,
+    MissingChainArrow,
 
     // Generic parser errors
     ParseError(String),
@@ -94,6 +95,9 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::InvalidFunctionBody => write!(f, "Invalid function body"),
 
             ErrorKind::StepComma => write!(f, "Unexpected ','; use ';' between steps"),
+            ErrorKind::MissingChainArrow => {
+                write!(f, "Expected '~>' between chain terms, or ';' between steps")
+            }
 
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
             ErrorKind::UnexpectedToken { expected, found } => {
@@ -124,6 +128,9 @@ impl ErrorKind {
             ErrorKind::InvalidFunctionBody => "A function body should be a valid expression",
             ErrorKind::StepComma => {
                 "',' separates tuple fields and type arguments; sequence steps are separated by ';' or a newline"
+            }
+            ErrorKind::MissingChainArrow => {
+                "Whitespace does not join chain terms: write 'a ~> b' to chain them, or 'a; b' for separate steps"
             }
             ErrorKind::HexMalformed(_) => {
                 "Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F"
@@ -248,6 +255,7 @@ pub fn parse(source: &str) -> Result<Program, Error> {
             Ok(prog)
         }
         Err(e) => {
+            let is_failure = matches!(&e, nom::Err::Failure(_));
             let (span, kind) = match &e {
                 nom::Err::Error(e) | nom::Err::Failure(e) => {
                     let span = Some(SourceSpan::from_span(e.input));
@@ -257,6 +265,11 @@ pub fn parse(source: &str) -> Result<Program, Error> {
                     // comma is consumed by its bracket's own parser): point at the `;` fix.
                     if fragment.trim_start().starts_with(',') {
                         return Err(Error::new(ErrorKind::StepComma, span));
+                    }
+                    // `sequence_boundary_cut` smuggles a missing chain `~>` out as a hard
+                    // failure with the (otherwise unused) `Space` code.
+                    if is_failure && e.code == nom::error::ErrorKind::Space {
+                        return Err(Error::new(ErrorKind::MissingChainArrow, span));
                     }
 
                     let kind = match e.code {
@@ -1722,14 +1735,16 @@ fn make_receive(param_type: Type, body: Option<Expression>) -> Term {
 
 // Parse select operator - all forms desugar to Vec<Chain>
 //
-// The general form takes a *tuple* of sources and requires a space after `!` (`! [...]`),
+// The general form takes a *tuple* of sources and requires a space after `!` (`![...]`),
 // mirroring function application (`f [...]`). The tight forms (no space) are shorthand for
 // selecting on a single source.
 //
-// Syntax forms (the type shorthands are *body-less* identity receives — a `{ … }` after a select
-// is a handler chain-step that processes the received message, not a filter):
-// - ! [...]          - Tuple of source chains (general form; space required). A filter is a
-//                      function *with a body* here: `! [#'int { =42 => Ok }]` (only the general
+// Syntax forms. A type shorthand with a same-line `{ … }` block is a receive function *with a
+// body* — a **filter** (`!'int { =42 => Ok }` — the message stays in the mailbox on a nil
+// verdict); a handler is an arrowed block chain-step (`!'int ~> { … }`) that processes the
+// received message. The body-presence rule:
+// - ![...]           - Tuple of source chains (general form, glued). A filter is
+//                      equally writable here: `![#'int { =42 => Ok }]` (and this is the only
 //                      form can filter — it leaves a non-matching message in the mailbox, whereas
 //                      a handler block consumes the message and discards it if it doesn't match).
 // - !                - Bare select (postfix form, empty sources)
@@ -1744,32 +1759,48 @@ fn select_term(input: Span) -> IResult<Span, Term> {
     let (rest, term) = preceded(
         char('!'),
         alt((
-            // ` [...]` - Tuple of source chains (general form). The leading space distinguishes it
-            // from the tight single-source shorthands, so `! f` is not a single-source form.
+            // `[...]` - Tuple of source chains (general form), glued like every other select
+            // form: `![p1, p2, 5000]`, `![]`.
             map(
                 delimited(
-                    tuple((hspace1, char('['), wsc)),
+                    pair(char('['), wsc),
                     separated_list0(tuple((wsc, char(','), wsc)), chain),
                     pair(wsc, char(']')),
                 ),
                 |sources| Term::Select(Some(sources), Spanned::default()),
             ),
-            // (type) - parenthesized receive type (body-less identity receive).
+            // (type) - parenthesized receive type: a partial type (`!(x: 'int)` — the parens
+            // are part of the type) or a grouped union (`!('int | 'bin)`). An optional
+            // same-line block is the receive function's body — a filter (`!(...) { … }`).
             map(
-                delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
-                |param_type| make_receive(param_type, None),
+                pair(
+                    alt((
+                        partial_type,
+                        delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+                    )),
+                    opt(preceded(opt(hspace1), block)),
+                ),
+                |(param_type, body)| make_receive(param_type, body),
             ),
-            // 'type - named receive type (body-less identity receive): `!'int`.
-            map(type_identifier, |param_type| make_receive(param_type, None)),
+            // 'type - named receive type: `!'int`, or a filter with a body `!'int { … }`.
+            map(
+                pair(type_identifier, opt(preceded(opt(hspace1), block))),
+                |(param_type, body)| make_receive(param_type, body),
+            ),
             // access (variable / module member) → reference it as a single source. Select
             // sources are a tuple of values, so a callable source must be referenced rather
-            // than called: the tight form `!f` desugars to `! [&f]` (the `&` is part of the
+            // than called: the tight form `!f` desugars to `![&f]` (the `&` is part of the
             // sugar). A process variable references harmlessly (`&p` is just `p`).
             map(access, |acc| single_source(Term::Reference(acc))),
-            // #type - `#`-typed receive (body-less identity receive): `!#'int`, `!#Reply[...]`.
-            map(preceded(char('#'), function_input_type), |param_type| {
-                make_receive(param_type, None)
-            }),
+            // #type - `#`-typed receive: `!#'int`, `!#Reply[...]`, or a filter with a body
+            // (`!#'int { … }`).
+            map(
+                pair(
+                    preceded(char('#'), function_input_type),
+                    opt(preceded(opt(hspace1), block)),
+                ),
+                |(param_type, body)| make_receive(param_type, body),
+            ),
             // @N process reference (must come before spawn_term to match @1 before @f)
             map(process_ref_term, single_source),
             // @spawn
@@ -1996,7 +2027,10 @@ fn block(input: Span) -> IResult<Span, Expression> {
                 pair(
                     terminated(
                         separated_list1(seq_sep, annotation),
-                        pair(opt(seq_sep), step_comma_cut),
+                        // A step separator after the annotations means a body may follow; only
+                        // when there is none must the block be ending (or the boundary is a
+                        // step-level mistake the cut reports).
+                        alt((nom_value((), seq_sep), sequence_boundary_cut)),
                     ),
                     opt(expression),
                 ),
@@ -2124,6 +2158,7 @@ fn spawn_of_function(parameter_type: Option<Type>, body: Expression) -> Term {
             body: Some(body),
             span: Spanned::default(),
         })),
+        None,
         Spanned::default(),
     )
 }
@@ -2169,6 +2204,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                     base_span: Spanned::default(),
                     span: Spanned::default(),
                 }))),
+                None,
                 Spanned::default(),
             )
         }),
@@ -2176,7 +2212,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
     // Attach the `@` span to the spawn, for hover (shows the process type).
     let term = match term {
         // Stamp just the `@`, not the spawned function body.
-        Term::Spawn(inner, _) => Term::Spawn(inner, Spanned(Some(token_span(start, 1)))),
+        Term::Spawn(inner, arg, _) => Term::Spawn(inner, arg, Spanned(Some(token_span(start, 1)))),
         other => other,
     };
     Ok((rest, term))
@@ -2464,25 +2500,50 @@ fn chain(input: Span) -> IResult<Span, Chain> {
     Ok((rest, chain))
 }
 
+/// A term is a primary optionally applied to a single argument by juxtaposition
+/// (`f x`, `f [args]`, `f &g`, `@f x`, `^f [args]`, `~ [args]`, `^~ arg`). The gap is horizontal
+/// whitespace, so it doesn't cross the newline that ends a chain. Application by juxtaposition
+/// targets an *applicable* head: a looked-up callable `Access` (a variable, `$`, import member,
+/// builtin, tail call, or a ripple — whose head consumes the flowing value and the argument
+/// applies to its result), or a spawn (`@f x` supplies the spawned function's init argument,
+/// mirroring `x ~> @f`). A *bare* field access (`.f`) is the one access that can't be applied —
+/// write `~.f`. A literal/tuple/function-literal head isn't applicable either (`#{…} 5` is a
+/// syntax error). Exactly one argument: `f x y` fails at the chain separator.
+fn term(input: Span) -> IResult<Span, Term> {
+    let (input, head) = primary(input)?;
+    let applicable = match &head {
+        Term::Access(access) => access.source.is_some(),
+        Term::Spawn(..) => true,
+        _ => false,
+    };
+    if !applicable {
+        return Ok((input, head));
+    }
+    // The `~` of a `~>` chain separator begins a valid primary (a ripple), so guard against
+    // consuming it as an application argument.
+    let (input, arg) = opt(preceded(pair(hspace1, not(peek(tag("~>")))), primary))(input)?;
+    let Some(arg) = arg else {
+        return Ok((input, head));
+    };
+    let term = match head {
+        Term::Access(access) => Term::Apply(access, Box::new(arg)),
+        Term::Spawn(function, _, span) => Term::Spawn(function, Some(Box::new(arg)), span),
+        _ => unreachable!("only applicable heads reach here"),
+    };
+    Ok((input, term))
+}
+
 fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {
-    // A chain is a sequence of `primary` terms; the value flows left→right through them, with nil
-    // passing through (no short-circuit — that is the sequence separator's job). Terms are joined
-    // by horizontal whitespace (`a b c`), or, equivalently, by an optional `~>` — which doubles as
-    // an explicit **line continuation**: a chain ends at a bare newline, but a newline followed by
-    // `~>` continues it, so a long chain can span lines:
+    // A chain is a sequence of `term`s joined by a mandatory `~>`; the value flows left→right
+    // through them, with nil passing through (no short-circuit — that is the sequence
+    // separator's job). Whitespace does NOT join chain terms (it binds a juxtaposed application
+    // argument to its head instead — see [`term`]). The separator's surrounding whitespace may
+    // include newlines, so `~>` doubles as a **line continuation**: a chain ends at a bare
+    // newline, but a newline followed by `~>` continues it, so a long chain can span lines:
     //   foo
     //   ~> bar
     //   ~> baz
-    // (`~>` is just the separator written explicitly; `a ~> b` and `a b` are identical.)
-    //
-    // Application is argument-first (`[args] f`); there is no juxtaposition. The bare ripple terms
-    // `~`, `^~`, `@~`, `~.f` are primaries in their own right and take no juxtaposed argument
-    // (`^~`/`@~` hand the flowing function a nil argument, so it must be nilary; to pass an
-    // argument, bind the function first and name it).
-    separated_list1(
-        alt((nom_value((), tuple((ws1, tag("~>"), ws1))), hspace1)),
-        primary,
-    )(input)
+    separated_list1(nom_value((), tuple((ws1, tag("~>"), ws1))), term)(input)
 }
 
 /// Separator between the chains of a sequence: a semicolon or a newline (they are synonyms), with
@@ -2509,17 +2570,42 @@ fn seq_sep(input: Span) -> IResult<Span, ()> {
     )(input)
 }
 
-/// A comma directly after a sequence step is a step-level comma — every legitimate comma
-/// (tuple fields, type args, select sources) is consumed by its bracket's own parser before a
-/// step list sees it. Peek past horizontal whitespace/comments and fail hard, positioned on the
-/// comma (so `parse` reports the pointed `StepComma` error rather than a generic one from
-/// backtracking). Consumes nothing.
-fn step_comma_cut(input: Span) -> IResult<Span, ()> {
-    let (after_ws, _) = many0(alt((nom_value((), space1), nom_value((), comment))))(input)?;
-    if after_ws.fragment().starts_with(',') {
+/// Guard the boundary after a sequence: peek past horizontal whitespace and fail hard on the two
+/// step-level mistakes, positioned on the offending token, so `parse` reports a pointed error
+/// rather than a generic one from backtracking. Consumes nothing.
+///
+/// - A comma is a step-level comma (every legitimate comma — tuple fields, type args, select
+///   sources — is consumed by its bracket's own parser before a step list sees it). Reported as
+///   `StepComma` via the fragment check in `parse`.
+/// - Any other token that isn't a legitimate sequence terminator (`}`/`]`/`)`/`|`/`;`, a `=>`
+///   consequence marker, a comment, a newline, or end of input) is a chain term missing its `~>`
+///   separator — whitespace no longer joins terms. Reported as `MissingChainArrow` via the
+///   `Failure(Space)` code in `parse`. A `~` is let through so a dangling `~>` keeps its own
+///   `ExpectedPipe` diagnosis.
+fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
+    let (after_ws, _) = many0(nom_value((), space1))(input)?;
+    let fragment = after_ws.fragment();
+    if fragment.starts_with(',') {
         return Err(nom::Err::Failure(nom::error::Error::new(
             after_ws,
             nom::error::ErrorKind::Char,
+        )));
+    }
+    // The missing-arrow diagnosis only applies when whitespace actually separates the sequence
+    // from the offending token — two space-separated terms. A token glued to the sequence (e.g.
+    // the `{` of a malformed function literal whose bare `#` parsed as a term) is some other
+    // syntax error; defer to the ordinary error machinery for a better diagnosis.
+    if after_ws.location_offset() == input.location_offset() {
+        return Ok((input, ()));
+    }
+    let terminated = fragment.is_empty()
+        || fragment.starts_with(['}', ']', ')', '|', ';', '\n', '\r', '~'])
+        || fragment.starts_with("=>")
+        || fragment.starts_with("//");
+    if !terminated {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            after_ws,
+            nom::error::ErrorKind::Space,
         )));
     }
     Ok((input, ()))
@@ -2527,7 +2613,7 @@ fn step_comma_cut(input: Span) -> IResult<Span, ()> {
 
 fn sequence(input: Span) -> IResult<Span, Sequence> {
     let (rest, chains) = terminated(separated_list1(seq_sep, chain), opt(seq_sep))(input)?;
-    let (rest, _) = step_comma_cut(rest)?;
+    let (rest, _) = sequence_boundary_cut(rest)?;
     Ok((rest, Sequence { chains }))
 }
 
@@ -2570,7 +2656,12 @@ fn top_level_item(input: Span) -> IResult<Span, Statement> {
             // a function type also parses as a chain (`'q<'t> = #['int] -> ('t | [])`
             // reads as a binding of an identity literal with a declared return type), so
             // the sequence would consume it and the alias's parameters would never bind.
-            separated_list1(seq_sep, preceded(not(peek(type_alias)), chain)),
+            // The boundary cut (which consumes nothing) gives top-level step mistakes the
+            // same pointed errors as block bodies.
+            terminated(
+                separated_list1(seq_sep, preceded(not(peek(type_alias)), chain)),
+                sequence_boundary_cut,
+            ),
             |chains| Statement::Expression(Sequence { chains }),
         ),
     ))(input)
@@ -2624,7 +2715,7 @@ mod tests {
 
     #[test]
     fn test_context_detection_unclosed_block() {
-        let source = "#{ { let x = 1 ";
+        let source = "#{ { x = 1 ";
         let result = parse(source);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2645,7 +2736,7 @@ mod tests {
 
     #[test]
     fn test_valid_program_parses() {
-        let source = "#{ [1, 2] __integer_add__ }";
+        let source = "#{ [1, 2] ~> __integer_add__ }";
         let result = parse(source);
         assert!(result.is_ok());
     }
@@ -2657,7 +2748,7 @@ mod tests {
 
     #[test]
     fn parse_populates_access_spans() {
-        let source = "point double";
+        let source = "point ~> double";
         let program = parse(source).unwrap();
         let Statement::Expression(expr) = &program.statements[0] else {
             panic!("expected expression statement");
@@ -2715,8 +2806,8 @@ mod tests {
         for (source, column) in [
             ("1, 2", 2),
             ("x = { 1, 2 }; x", 8),
-            ("5 { =5 => 1, 2 | 0 }", 12),
-            ("f = #'int { :doc \"d\", :pre #{ Ok } | $ }; 1 f", 21),
+            ("5 ~> { =5 => 1, 2 | 0 }", 15),
+            ("f = #'int { :doc \"d\", :pre #{ Ok } | $ }; 1 ~> f", 21),
         ] {
             let err = parse(source).expect_err(source);
             assert!(
@@ -2729,9 +2820,39 @@ mod tests {
         }
         // Bracket-internal commas are untouched: tuple fields, type parameters, select sources.
         for source in [
-            "[1, 2] f",
+            "[1, 2] ~> f",
             "f = #<'t, 'u>['t, 'u] { $0 }",
-            "p = @#{ 42 }; ! [p, 1000]",
+            "p = @#{ 42 }; ![p, 1000]",
+        ] {
+            assert!(parse(source).is_ok(), "expected {source} to parse");
+        }
+    }
+
+    #[test]
+    fn test_missing_chain_arrow_is_a_pointed_error() {
+        // Whitespace no longer joins chain terms; the error names the `~>`/`;` fix and points
+        // at the term that is missing its separator.
+        for (source, column) in [
+            ("5 double", 3),
+            ("x = { 1 f }; x", 9),
+            ("5 ~> { =5 => 1 f | 0 }", 16),
+        ] {
+            let err = parse(source).expect_err(source);
+            assert!(
+                matches!(err.kind, ErrorKind::MissingChainArrow),
+                "for {source}: {:?}",
+                err.kind
+            );
+            let span = err.span.expect(source);
+            assert_eq!((span.line, span.column), (1, column), "for {source}");
+        }
+        // Legitimate sequence terminators do not trip the cut.
+        for source in [
+            "5 ~> double",
+            "5 ~> { =5 => 1 | 0 }",
+            "x = 5; x",
+            "f = #'int { $ }",
+            "5 ~> double // trailing comment",
         ] {
             assert!(parse(source).is_ok(), "expected {source} to parse");
         }

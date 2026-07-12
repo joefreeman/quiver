@@ -1,19 +1,22 @@
 ==================
-chain by whitespace
+juxtaposed application
 ==================
 
-5 double increment
+add [3, 4]
 
 ---
 
 (source_file
   (expression
     (chain
-      (integer)
-      (access
-        source: (identifier))
-      (access
-        source: (identifier)))))
+      (application
+        function: (access
+          source: (identifier))
+        argument: (tuple
+          (chain
+            (integer))
+          (chain
+            (integer)))))))
 
 ==================
 chain with pipe operator
@@ -122,7 +125,7 @@ a[..., y: 3]
 ripple
 ==================
 
-5 [~, 1]
+5 ~> [~, 1]
 
 ---
 
@@ -141,28 +144,30 @@ ripple
 builtin and access
 ==================
 
-[1, 2] math.add [~, 3] __integer_multiply__
+math.add [1, 2] ~> __integer_multiply__ [~, 3]
 
 ---
 
 (source_file
   (expression
     (chain
-      (tuple
-        (chain
-          (integer))
-        (chain
-          (integer)))
-      (access
-        source: (identifier)
-        field: (identifier))
-      (tuple
-        (chain
-          (access
-            source: (ripple)))
-        (chain
-          (integer)))
-      (builtin))))
+      (application
+        function: (access
+          source: (identifier)
+          field: (identifier))
+        argument: (tuple
+          (chain
+            (integer))
+          (chain
+            (integer))))
+      (application
+        function: (builtin)
+        argument: (tuple
+          (chain
+            (access
+              source: (ripple)))
+          (chain
+            (integer)))))))
 
 ==================
 multi-line string
@@ -235,7 +240,7 @@ string with interpolation hole
 string hole containing a nested string
 ==================
 
-"nested {"quoted" f} end"
+"nested {"quoted" ~> f} end"
 
 ---
 
@@ -271,3 +276,112 @@ multi-line string with interpolation hole
               (chain
                 (access
                   source: (identifier))))))))))
+
+==================
+ripple application
+==================
+
+~ [1, 2]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (ripple))
+        argument: (tuple
+          (chain
+            (integer))
+          (chain
+            (integer)))))))
+
+==================
+builtin application
+==================
+
+__integer_add__ [3, 4]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (builtin)
+        argument: (tuple
+          (chain
+            (integer))
+          (chain
+            (integer)))))))
+
+==================
+reference as an argument
+==================
+
+map [xs, &double]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (identifier))
+        argument: (tuple
+          (chain
+            (access
+              source: (identifier)))
+          (chain
+            (reference
+              (access
+                source: (identifier)))))))))
+
+==================
+chained juxtaposed applications
+==================
+
+double 5 ~> add [~, 1]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (identifier))
+        argument: (integer))
+      (application
+        function: (access
+          source: (identifier))
+        argument: (tuple
+          (chain
+            (access
+              source: (ripple)))
+          (chain
+            (integer)))))))
+
+==================
+missing chain arrow is an error
+:error
+==================
+
+5 double
+
+---
+
+(source_file)
+
+==================
+juxtaposition takes a single argument
+:error
+==================
+
+f x y
+
+---
+
+(source_file)

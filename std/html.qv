@@ -48,53 +48,59 @@
 
 rev = #<'t>['items<'t>, 'items<'t>] {
   =[items, acc]
-  items {
+  items ~> {
     | =Nil => acc
-    | =Cons[h, t] => [t, Cons[h, acc]] ^
+    | =Cons[h, t] => [t, Cons[h, acc]] ~> ^
   }
 }
 
 // === The dialect grammar ================================================================
 
 // The byte at the parse state's position / one past it, or nil at end of input.
-peek_at = #'%parse { [$pos, $len] __integer_compare__ =-1; [$data, $pos] %bin.get_byte }
+peek_at = #'%parse { [$pos, $len] ~> __integer_compare__ ~> =-1; [$data, $pos] ~> %bin.get_byte }
 peek_at2 = #'%parse {
-  p = [$pos, 1] __integer_add__; [p, $len] __integer_compare__ =-1; [$data, p] %bin.get_byte
+  p = [$pos, 1] ~> __integer_add__
+  [p, $len] ~> __integer_compare__ ~> =-1
+  [$data, p] ~> %bin.get_byte
 }
 
-lower? = #'int { [$, 97] __integer_compare__ =(0 | 1); [$, 122] __integer_compare__ =(-1 | 0); $ }
+lower? = #'int {
+  [$, 97] ~> __integer_compare__ ~> =(0 | 1); [$, 122] ~> __integer_compare__ ~> =(-1 | 0); $
+}
 
-digit? = #'int { [$, 48] __integer_compare__ =(0 | 1); [$, 57] __integer_compare__ =(-1 | 0); $ }
+digit? = #'int {
+  [$, 48] ~> __integer_compare__ ~> =(0 | 1); [$, 57] ~> __integer_compare__ ~> =(-1 | 0); $
+}
 
 letter? = #'int {
-  | [$, 65] __integer_compare__ =(0 | 1); [$, 90] __integer_compare__ =(-1 | 0) => $
-  | $ lower?
+  | [$, 65] ~> __integer_compare__ ~> =(0 | 1); [$, 90] ~> __integer_compare__ ~> =(-1 | 0) => $
+  | $ ~> lower?
 }
 
 // Tag names: lowercase letters, digits, `-` (custom elements included).
 tag_char? = #'int {
-  | $ lower? => $
-  | $ digit? => $
-  | $ =45 => $
+  | $ ~> lower? => $
+  | $ ~> digit? => $
+  | $ ~> =45 => $
 }
 
 // Attribute names: letters, digits, `-`, `:`, `_`.
 attr_char? = #'int {
-  | $ letter? => $
-  | $ digit? => $
-  | $ =(45 | 58 | 95) => $
+  | $ ~> letter? => $
+  | $ ~> digit? => $
+  | $ ~> =(45 | 58 | 95) => $
 }
 
-tag_rest = &tag_char? %parse.take_while
-attr_rest = &attr_char? %parse.take_while
+tag_rest = &tag_char? ~> %parse.take_while
+attr_rest = &attr_char? ~> %parse.take_while
 
 // The end of a text run: the next `<` or `{`, or end of input.
 text_end = #['bin, 'int, 'int] {
   =[data, pos, len]
   {
-    | [pos, len] __integer_compare__ =(0 | 1) => pos
-    | [data, pos] %bin.get_byte =(60 | 123) => pos
-    | [data, [pos, 1] __integer_add__, len] ^
+    | [pos, len] ~> __integer_compare__ ~> =(0 | 1) => pos
+    | [data, pos] ~> %bin.get_byte ~> =(60 | 123) => pos
+    | [data, [pos, 1] ~> __integer_add__, len] ~> ^
   }
 }
 
@@ -102,9 +108,9 @@ text_end = #['bin, 'int, 'int] {
 lit_end = #['bin, 'int, 'int] {
   =[data, pos, len]
   {
-    | [pos, len] __integer_compare__ =(0 | 1) => []
-    | [data, pos] %bin.get_byte =34 => pos
-    | [data, [pos, 1] __integer_add__, len] ^
+    | [pos, len] ~> __integer_compare__ ~> =(0 | 1) => []
+    | [data, pos] ~> %bin.get_byte ~> =34 => pos
+    | [data, [pos, 1] ~> __integer_add__, len] ~> ^
   }
 }
 
@@ -112,25 +118,28 @@ lit_end = #['bin, 'int, 'int] {
 comment_end = #['bin, 'int, 'int] {
   =[data, pos, len]
   {
-    | [[pos, 3] __integer_add__, len] __integer_compare__
+    | [[pos, 3] ~> __integer_add__, len] ~> __integer_compare__
       ~> =1 => []
-    | [data, pos] %bin.get_byte =45; [data, [pos, 1] __integer_add__] %bin.get_byte =45; [data, [pos, 2] __integer_add__] %bin.get_byte =62 => [
-      pos,
-      3,
-    ] __integer_add__
-    | [data, [pos, 1] __integer_add__, len] ^
+    | [data, pos] ~> %bin.get_byte ~> =45
+
+      [data, [pos, 1] ~> __integer_add__] ~> %bin.get_byte
+      ~> =45
+
+      [data, [pos, 2] ~> __integer_add__] ~> %bin.get_byte
+      ~> =62 => [pos, 3] ~> __integer_add__
+    | [data, [pos, 1] ~> __integer_add__, len] ~> ^
   }
 }
 
 // Whether the state sits at `<!--` (the `<` and `!` already checked by the caller).
 at_comment? = #'%parse {
-  [[$pos, 4] __integer_add__, $len] __integer_compare__
+  [[$pos, 4] ~> __integer_add__, $len] ~> __integer_compare__
   ~> =(-1 | 0)
 
-  [$data, [$pos, 2] __integer_add__] %bin.get_byte
+  [$data, [$pos, 2] ~> __integer_add__] ~> %bin.get_byte
   ~> =45
 
-  [$data, [$pos, 3] __integer_add__] %bin.get_byte
+  [$data, [$pos, 3] ~> __integer_add__] ~> %bin.get_byte
   ~> =45
 
   Ok
@@ -139,93 +148,95 @@ at_comment? = #'%parse {
 ws_only_from = #['bin, 'int] {
   =[data, pos]
   {
-    | [pos, data %bin.length] __integer_compare__
+    | [pos, data ~> %bin.length] ~> __integer_compare__
       ~> =(0 | 1) => Ok
-    | [data, pos] %bin.get_byte =(32 | 9 | 10 | 13) => [data, [pos, 1] __integer_add__] ^
+    | [data, pos] ~> %bin.get_byte
+      ~> =(32 | 9 | 10 | 13) => [data, [pos, 1] ~> __integer_add__] ~> ^
   }
 }
 
 tag_name = #'%parse {
   =st
   {
-    | st peek_at =('int)b; b lower? => { st tag_rest; =[bytes, st2]; [Str[bytes], st2] }
-    | st peek_at =('int)b; [b, 65] __integer_compare__ =(0 | 1); [b, 90] __integer_compare__ =(-1 | 0) => {
+    | st ~> peek_at ~> =('int)b; b ~> lower? => { st ~> tag_rest; =[bytes, st2]; [Str[bytes], st2] }
+    | st ~> peek_at ~> =('int)b; [b, 65] ~> __integer_compare__ ~> =(0 | 1); [b, 90] ~> __integer_compare__ ~> =(-1 | 0) => {
       [
         st,
         "a lowercase tag name (capitalized tags are reserved for components)",
-      ] %parse.fail_in
+      ] ~> %parse.fail_in
     }
-    | [st, "a tag name"] %parse.fail_in
+    | [st, "a tag name"] ~> %parse.fail_in
   }
 }
 
 // Whether an attribute name already occurs in the accumulated list.
 seen? = #['alist, Str['bin]] {
   | =[Nil, _] => []
-  | =[Cons[[n, _], rest], name] => { n =&name => Ok | [rest, name] ^ }
+  | =[Cons[[n, _], rest], name] => { n ~> =&name => Ok | [rest, name] ~> ^ }
 }
 
 // An attribute value after its `=`: a `"…"` literal (spliced as the string itself) or a
 // `{ … }` hole (spliced as an `attr_value` normalization of the block).
 attr_value_p = #['%meta.cb, '%parse] {
   =[cb, st0]
-  st0 %parse.ws
+  st0 ~> %parse.ws
   =[_, st]
   {
-    | st peek_at =34 => {
-      qstart = [st.pos, 1] __integer_add__
+    | st ~> peek_at ~> =34 => {
+      qstart = [st.pos, 1] ~> __integer_add__
       {
-        | [st.data, qstart, st.len] lit_end =('int)endq => [
-          Str[[st.data, qstart, endq] %bin.slice],
-          st ~[..., pos: [endq, 1] __integer_add__],
-        ]
+        | [st.data, qstart, st.len] ~> lit_end
+          ~> =('int)endq => [
+            Str[[st.data, qstart, endq] ~> %bin.slice],
+            st ~> ~[..., pos: [endq, 1] ~> __integer_add__],
+          ]
         | {
-          [st, "'\"' (unterminated attribute value)"] %parse.fail_in
+          [st, "'\"' (unterminated attribute value)"] ~> %parse.fail_in
         }
       }
     }
-    | st peek_at =123 => [st.data, st.pos] cb {
+    | st ~> peek_at ~> =123 => [st.data, st.pos] ~> cb ~> {
       | =('int)end => [
         Call[
           member: "attr_value",
-          arg: Unquote[offset: st.pos, length: [end, st.pos] __integer_subtract__],
+          arg: Unquote[offset: st.pos, length: [end, st.pos] ~> __integer_subtract__],
         ],
-        st ~[..., pos: end],
+        st ~> ~[..., pos: end],
       ]
-      | [st.pos, "an expression"] %parse.fail
+      | [st.pos, "an expression"] ~> %parse.fail
     }
-    | [st, "'\"' or '\{' after '='"] %parse.fail_in
+    | [st, "'\"' or '\{' after '='"] ~> %parse.fail_in
   }
 }
 
 // Zero or more attributes, in source order: `name`, `name="literal"`, or `name={ … }`.
 attrs_loop = #['%meta.cb, '%parse, 'alist] {
   =[cb, st0, acc]
-  st0 %parse.ws
+  st0 ~> %parse.ws
   =[_, st]
   {
-    | st peek_at =('int)b; b letter? => {
-      st attr_rest
+    | st ~> peek_at ~> =('int)b; b ~> letter? => {
+      st ~> attr_rest
       =[nb, st2]
       name = Str[nb]
       {
-        | [acc, name] seen? => [st.pos, "a unique attribute name"] %parse.fail
+        | [acc, name] ~> seen? => [st.pos, "a unique attribute name"] ~> %parse.fail
         | Ok
       }
-      st2 %parse.ws
+      st2 ~> %parse.ws
       =[_, st3]
       {
-        | st3 peek_at =61 => {
-          [&cb, st3 ~[..., pos: [st3.pos, 1] __integer_add__]] attr_value_p
+        | st3 ~> peek_at ~> =61 => {
+          [&cb, st3 ~> ~[..., pos: [st3.pos, 1] ~> __integer_add__]] ~> attr_value_p
           =[vexpr, st4]
-          [&cb, st4, Cons[[name, vexpr], acc]] ^
+          [&cb, st4, Cons[[name, vexpr], acc]] ~> ^
         }
         | {
-          [&cb, st3, Cons[[name, Tuple[name: "Ok", fields: Nil]], acc]] ^
+          [&cb, st3, Cons[[name, Tuple[name: "Ok", fields: Nil]], acc]] ~> ^
         }
       }
     }
-    | [[acc, Nil] rev, st]
+    | [[acc, Nil] ~> rev, st]
   }
 }
 
@@ -248,9 +259,9 @@ void? = #Str['bin] {
 // Attribute pairs as a list expression of `[name, value]` tuple expressions.
 attr_exprs = #['alist, 'xs] {
   =[items, acc]
-  items {
-    | =Nil => [acc, Nil] rev
-    | =Cons[[n, v], t] => [t, Cons[[n, v] %meta.pair2, acc]] ^
+  items ~> {
+    | =Nil => [acc, Nil] ~> rev
+    | =Cons[[n, v], t] => [t, Cons[[n, v] ~> %meta.pair2, acc]] ~> ^
   }
 }
 
@@ -262,9 +273,9 @@ el_expr = #[Str['bin], 'alist, 'xs] {
     fields: Cons[
       Labeled[label: "tag", value: tag],
       Cons[
-        Labeled[label: "attrs", value: [alist, Nil] attr_exprs %meta.list_expr],
+        Labeled[label: "attrs", value: [alist, Nil] ~> attr_exprs ~> %meta.list_expr],
         Cons[
-          Labeled[label: "children", value: kids %meta.list_expr],
+          Labeled[label: "children", value: kids ~> %meta.list_expr],
           Nil,
         ],
       ],
@@ -273,24 +284,29 @@ el_expr = #[Str['bin], 'alist, 'xs] {
 }
 
 // Drop leading whitespace-only text nodes.
-drop_ws = #'fxs { =Cons[[_, Ok], t] => t ^ | $ }
+drop_ws = #'fxs { =Cons[[_, Ok], t] => t ~> ^ | $ }
 
 // Trim whitespace-only text nodes from both ends of the root node list.
-trim_root = #'fxs { drop_ws [~, Nil] rev drop_ws [~, Nil] rev }
+trim_root = #'fxs {
+  drop_ws
+  ~> [~, Nil] ~> rev
+  ~> drop_ws
+  ~> [~, Nil] ~> rev
+}
 
 // The expressions of a flagged node list, in order.
 strip = #['fxs, 'xs] {
   =[items, acc]
-  items {
-    | =Nil => [acc, Nil] rev
-    | =Cons[[e, _], t] => [t, Cons[e, acc]] ^
+  items ~> {
+    | =Nil => [acc, Nil] ~> rev
+    | =Cons[[e, _], t] => [t, Cons[e, acc]] ~> ^
   }
 }
 
 // A single root splices bare; zero or several splice as a `Fragment`.
 root_expr = #'xs {
   | =Cons[e, Nil] => e
-  | =items => Tuple[name: "Fragment", fields: Cons[items %meta.list_expr, Nil]]
+  | =items => Tuple[name: "Fragment", fields: Cons[items ~> %meta.list_expr, Nil]]
 }
 
 // The node-list loop: elements, holes, and text runs, in source order, stopping before a
@@ -298,128 +314,132 @@ root_expr = #'xs {
 nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
   =[self, cb, st, acc]
   {
-    | st peek_at =('int)b => {
-      | b =60 => {
-        | st peek_at2 =47 => [[acc, Nil] rev, st]
-        | st peek_at2 =33 => {
-          | st at_comment? => [st.data, [st.pos, 4] __integer_add__, st.len] comment_end {
-            | =('int)after => [&self, &cb, st ~[..., pos: after], acc] ^
-            | [st.pos, "'-->'"] %parse.fail
+    | st ~> peek_at ~> =('int)b => {
+      | b ~> =60 => {
+        | st ~> peek_at2 ~> =47 => [[acc, Nil] ~> rev, st]
+        | st ~> peek_at2 ~> =33 => {
+          | st ~> at_comment? => [st.data, [st.pos, 4] ~> __integer_add__, st.len] ~> comment_end ~> {
+            | =('int)after => [&self, &cb, st ~> ~[..., pos: after], acc] ~> ^
+            | [st.pos, "'-->'"] ~> %parse.fail
           }
           | {
             [
               st.pos,
               "a comment ('<!--'; the doctype comes from html.page)",
-            ] %parse.fail
+            ] ~> %parse.fail
           }
         }
         | {
           // An element: `<` tag attrs (`/>` | `>` children `</` tag `>`).
-          st1 = st ~[..., pos: [st.pos, 1] __integer_add__]
-          st1 tag_name
+          st1 = st ~> ~[..., pos: [st.pos, 1] ~> __integer_add__]
+          st1 ~> tag_name
           =[tag, st2]
           {
-            | tag =("script" | "style") => {
+            | tag ~> =("script" | "style") => {
               [
                 st1.pos,
                 "a supported tag (inline script/style is not supported)",
-              ] %parse.fail
+              ] ~> %parse.fail
             }
             | Ok
           }
-          [&cb, st2, Nil] attrs_loop
+          [&cb, st2, Nil] ~> attrs_loop
           =[alist, st3]
           {
-            | st3 peek_at =47 => {
-              | st3 peek_at2 =62 => [
-                [tag, alist, Nil] el_expr,
-                st3 ~[..., pos: [st3.pos, 2] __integer_add__],
+            | st3 ~> peek_at ~> =47 => {
+              | st3 ~> peek_at2 ~> =62 => [
+                [tag, alist, Nil] ~> el_expr,
+                st3 ~> ~[..., pos: [st3.pos, 2] ~> __integer_add__],
               ]
-              | [st3, "'/>'"] %parse.fail_in
+              | [st3, "'/>'"] ~> %parse.fail_in
             }
-            | st3 peek_at =62 => {
-              st4 = st3 ~[..., pos: [st3.pos, 1] __integer_add__]
+            | st3 ~> peek_at ~> =62 => {
+              st4 = st3 ~> ~[..., pos: [st3.pos, 1] ~> __integer_add__]
               {
-                | tag void? => [[tag, alist, Nil] el_expr, st4]
+                | tag ~> void? => [[tag, alist, Nil] ~> el_expr, st4]
                 | {
-                  [&self, &cb, st4, Nil] self
+                  [&self, &cb, st4, Nil] ~> self
                   =[fkids, st5]
-                  kids = [fkids, Nil] strip
+                  kids = [fkids, Nil] ~> strip
                   {
-                    | st5 peek_at =60; st5 peek_at2 =47 => {
-                      st6 = st5 ~[..., pos: [st5.pos, 2] __integer_add__]
-                      st6 tag_name
+                    | st5 ~> peek_at ~> =60; st5 ~> peek_at2 ~> =47 => {
+                      st6 = st5 ~> ~[..., pos: [st5.pos, 2] ~> __integer_add__]
+                      st6 ~> tag_name
                       =[ctag, st7]
                       {
-                        | ctag =&tag => Ok
+                        | ctag ~> =&tag => Ok
                         | {
-                          msg = ["'</", tag] %str.concat [~, ">'"] %str.concat
-                          [st6.pos, msg] %parse.fail
+                          msg =
+                            ["'</", tag] ~> %str.concat
+                            ~> [~, ">'"] ~> %str.concat
+
+                          [st6.pos, msg] ~> %parse.fail
                         }
                       }
-                      st7 %parse.ws
+                      st7 ~> %parse.ws
                       =[_, st8]
                       {
-                        | st8 peek_at =62 => [
-                          [tag, alist, kids] el_expr,
-                          st8 ~[..., pos: [st8.pos, 1] __integer_add__],
+                        | st8 ~> peek_at ~> =62 => [
+                          [tag, alist, kids] ~> el_expr,
+                          st8 ~> ~[..., pos: [st8.pos, 1] ~> __integer_add__],
                         ]
-                        | [st8, "'>'"] %parse.fail_in
+                        | [st8, "'>'"] ~> %parse.fail_in
                       }
                     }
                     | {
-                      msg = ["'</", tag] %str.concat [~, ">'"] %str.concat
-                      [st5, msg] %parse.fail_in
+                      msg =
+                        ["'</", tag] ~> %str.concat
+                        ~> [~, ">'"] ~> %str.concat
+
+                      [st5, msg] ~> %parse.fail_in
                     }
                   }
                 }
               }
             }
-            | [st3, "'>'"] %parse.fail_in
+            | [st3, "'>'"] ~> %parse.fail_in
           }
           =[node, stn]
-          [&self, &cb, stn, Cons[[node, []], acc]] ^
+          [&self, &cb, stn, Cons[[node, []], acc]] ~> ^
         }
       }
-      | b =123 => [st.data, st.pos] cb {
+      | b ~> =123 => [st.data, st.pos] ~> cb ~> {
         | =('int)end => {
           hole = Call[
             member: "child",
-            arg: Unquote[offset: st.pos, length: [end, st.pos] __integer_subtract__],
+            arg: Unquote[offset: st.pos, length: [end, st.pos] ~> __integer_subtract__],
           ]
-          [&self, &cb, st ~[..., pos: end], Cons[[hole, []], acc]] ^
+          [&self, &cb, st ~> ~[..., pos: end], Cons[[hole, []], acc]] ~> ^
         }
-        | [st.pos, "an expression"] %parse.fail
+        | [st.pos, "an expression"] ~> %parse.fail
       }
       | {
-        end = [st.data, st.pos, st.len] text_end
-        bytes = [st.data, st.pos, end] %bin.slice
+        end = [st.data, st.pos, st.len] ~> text_end
+        bytes = [st.data, st.pos, end] ~> %bin.slice
         node = Tuple[name: "Raw", fields: Cons[Str[bytes], Nil]]
-        ws = [bytes, 0] ws_only_from
-        [&self, &cb, st ~[..., pos: end], Cons[[node, ws], acc]] ^
+        ws = [bytes, 0] ~> ws_only_from
+        [&self, &cb, st ~> ~[..., pos: end], Cons[[node, ws], acc]] ~> ^
       }
     }
-    | [[acc, Nil] rev, st]
+    | [[acc, Nil] ~> rev, st]
   }
 }
 
 // The dialect entry point: the compiler calls this with the dialect context record.
 html_dialect = #(content: Str['bin], term: '%meta.cb) {
-  $ =(content, term: cb)
+  $ ~> =(content, term: cb)
   full = #'%parse {
-    [&nodes_loop, &cb, $, Nil] nodes_loop
+    [&nodes_loop, &cb, $, Nil] ~> nodes_loop
     =[items, st]
     {
-      | [st.pos, st.len] __integer_compare__ =(0 | 1) => [
-        [items trim_root, Nil] strip root_expr,
-        st,
-      ]
+      | [st.pos, st.len] ~> __integer_compare__
+        ~> =(0 | 1) => [[items ~> trim_root, Nil] ~> strip ~> root_expr, st]
       | {
-        [st, "end of input (unmatched close tag?)"] %parse.fail_in
+        [st, "end of input (unmatched close tag?)"] ~> %parse.fail_in
       }
     }
   }
-  [content, &full] %parse.run
+  [content, &full] ~> %parse.run
 }
 
 // === Rendering ==========================================================================
@@ -428,16 +448,16 @@ html_dialect = #(content: Str['bin], term: '%meta.cb) {
 esc_text = #['bin, 'int, 'int, 'bin] {
   =[data, pos, len, acc]
   {
-    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | [pos, len] ~> __integer_compare__ ~> =(0 | 1) => acc
     | {
-      b = [data, pos] %bin.get_byte
-      acc2 = b {
-        | =38 => [acc, "&amp;" .0] %bin.concat
-        | =60 => [acc, "&lt;" .0] %bin.concat
-        | =62 => [acc, "&gt;" .0] %bin.concat
-        | [acc, b, 1] %bin.append
+      b = [data, pos] ~> %bin.get_byte
+      acc2 = b ~> {
+        | =38 => [acc, "&amp;" ~> .0] ~> %bin.concat
+        | =60 => [acc, "&lt;" ~> .0] ~> %bin.concat
+        | =62 => [acc, "&gt;" ~> .0] ~> %bin.concat
+        | [acc, b, 1] ~> %bin.append
       }
-      [data, [pos, 1] __integer_add__, len, acc2] ^
+      [data, [pos, 1] ~> __integer_add__, len, acc2] ~> ^
     }
   }
 }
@@ -446,15 +466,15 @@ esc_text = #['bin, 'int, 'int, 'bin] {
 esc_attr = #['bin, 'int, 'int, 'bin] {
   =[data, pos, len, acc]
   {
-    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | [pos, len] ~> __integer_compare__ ~> =(0 | 1) => acc
     | {
-      b = [data, pos] %bin.get_byte
-      acc2 = b {
-        | =38 => [acc, "&amp;" .0] %bin.concat
-        | =34 => [acc, "&quot;" .0] %bin.concat
-        | [acc, b, 1] %bin.append
+      b = [data, pos] ~> %bin.get_byte
+      acc2 = b ~> {
+        | =38 => [acc, "&amp;" ~> .0] ~> %bin.concat
+        | =34 => [acc, "&quot;" ~> .0] ~> %bin.concat
+        | [acc, b, 1] ~> %bin.append
       }
-      [data, [pos, 1] __integer_add__, len, acc2] ^
+      [data, [pos, 1] ~> __integer_add__, len, acc2] ~> ^
     }
   }
 }
@@ -462,20 +482,20 @@ esc_attr = #['bin, 'int, 'int, 'bin] {
 // Append rendered attributes onto `acc`: ` name`, ` name="escaped value"`; nil omits.
 render_attrs = #['attrs, 'bin] {
   =[items, acc]
-  items {
+  items ~> {
     | =Nil => acc
     | =Cons[[Str[n], v], rest] => {
-      acc2 = v {
+      acc2 = v ~> {
         | =[] => acc
-        | =Ok => [[acc, 32, 1] %bin.append, n] %bin.concat
+        | =Ok => [[acc, 32, 1] ~> %bin.append, n] ~> %bin.concat
         | =Str[vb] => {
-          [[acc, 32, 1] %bin.append, n] %bin.concat
-          ~> [~, 0x3d22] %bin.concat
-          ~> [vb, 0, vb %bin.length, ~] esc_attr
-          ~> [~, 34, 1] %bin.append
+          [[acc, 32, 1] ~> %bin.append, n] ~> %bin.concat
+          ~> [~, 0x3d22] ~> %bin.concat
+          ~> [vb, 0, vb ~> %bin.length, ~] ~> esc_attr
+          ~> [~, 34, 1] ~> %bin.append
         }
       }
-      [rest, acc2] ^
+      [rest, acc2] ~> ^
     }
   }
 }
@@ -483,43 +503,44 @@ render_attrs = #['attrs, 'bin] {
 // Render a list of nodes onto `acc`, self-passed to recurse into children.
 render_list = #[#^ -> 'bin, 'nodes, 'bin] {
   =[self, items, acc]
-  items {
+  items ~> {
     | =Nil => acc
     | =Cons[node, rest] => {
-      acc2 = node {
-        | =Raw[Str[b]] => [acc, b] %bin.concat
-        | =Text[Str[b]] => [b, 0, b %bin.length, acc] esc_text
-        | =Fragment[kids] => [&self, kids, acc] self
+      acc2 = node ~> {
+        | =Raw[Str[b]] => [acc, b] ~> %bin.concat
+        | =Text[Str[b]] => [b, 0, b ~> %bin.length, acc] ~> esc_text
+        | =Fragment[kids] => [&self, kids, acc] ~> self
         | =Element[tag: Str[t], attrs: attrs, children: kids] => {
             opened =
-              [[acc, 60, 1] %bin.append, t] %bin.concat
-              ~> [attrs, ~] render_attrs
+              [[acc, 60, 1] ~> %bin.append, t] ~> %bin.concat
+              ~> [attrs, ~] ~> render_attrs
 
             {
-              | Str[t] void? => [opened, 62, 1] %bin.append
+              | Str[t] ~> void? => [opened, 62, 1] ~> %bin.append
               | {
-                inner = [&self, kids, [opened, 62, 1] %bin.append] self
+                inner =
+                  [&self, kids, [opened, 62, 1] ~> %bin.append] ~> self
 
-                [inner, 0x3c2f] %bin.concat
-                ~> [~, t] %bin.concat
-                ~> [~, 62, 1] %bin.append
+                [inner, 0x3c2f] ~> %bin.concat
+                ~> [~, t] ~> %bin.concat
+                ~> [~, 62, 1] ~> %bin.append
               }
             }
           }
       }
-      [&self, rest, acc2] ^
+      [&self, rest, acc2] ~> ^
     }
   }
 }
 
 render = #' {
   :doc "Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes are emitted verbatim, nil-valued attributes are omitted, and Ok-valued attributes render bare."
-  [&render_list, Cons[$, Nil], 0x] render_list Str[~]
+  [&render_list, Cons[$, Nil], 0x] ~> render_list ~> Str[~]
 }
 
 page = #' {
   :doc "Renders a node tree as a whole page: the doctype followed by the rendered tree."
-  ["<!doctype html>", $ render] %str.concat
+  ["<!doctype html>", $ ~> render] ~> %str.concat
 }
 
 raw = #Str['bin] {
@@ -537,7 +558,7 @@ text = #Str['bin] {
 // renders nothing.
 child = #('node | Str['bin] | 'int | 'nodes | []) {
   | =Str[b] => Text[Str[b]]
-  | =('int)i => i %str.from_int Text[~]
+  | =('int)i => i ~> %str.from_int ~> Text[~]
   | =[] => Fragment[Nil]
   | =('nodes)items => Fragment[items]
   | =('node)n => n
@@ -547,7 +568,7 @@ child = #('node | Str['bin] | 'int | 'nodes | []) {
 // its digits, Ok renders the attribute bare, and nil omits it.
 attr_value = #(Str['bin] | 'int | Ok | []) {
   | =Str[b] => Str[b]
-  | =('int)i => i %str.from_int
+  | =('int)i => i ~> %str.from_int
   | =Ok => Ok
   | =[] => []
 }

@@ -2,7 +2,7 @@
 function with pattern match
 ==================
 
-area = #'shape { | =Circle[radius: r] => [r, r] math.mul | =Rectangle[width: w, height: h] => [w, h] math.mul }
+area = #'shape { | =Circle[radius: r] => math.mul [r, r] | =Rectangle[width: w, height: h] => math.mul [w, h] }
 
 ---
 
@@ -24,16 +24,17 @@ area = #'shape { | =Circle[radius: r] => [r, r] math.mul | =Rectangle[width: w, 
                     (identifier)))))
             consequence: (expression
               (chain
-                (tuple
-                  (chain
-                    (access
-                      source: (identifier)))
-                  (chain
-                    (access
-                      source: (identifier))))
-                (access
-                  source: (identifier)
-                  field: (identifier)))))
+                (application
+                  function: (access
+                    source: (identifier)
+                    field: (identifier))
+                  argument: (tuple
+                    (chain
+                      (access
+                        source: (identifier)))
+                    (chain
+                      (access
+                        source: (identifier))))))))
           (branch
             condition: (expression
               (chain
@@ -46,16 +47,17 @@ area = #'shape { | =Circle[radius: r] => [r, r] math.mul | =Rectangle[width: w, 
                     (identifier)))))
             consequence: (expression
               (chain
-                (tuple
-                  (chain
-                    (access
-                      source: (identifier)))
-                  (chain
-                    (access
-                      source: (identifier))))
-                (access
-                  source: (identifier)
-                  field: (identifier))))))))))
+                (application
+                  function: (access
+                    source: (identifier)
+                    field: (identifier))
+                  argument: (tuple
+                    (chain
+                      (access
+                        source: (identifier)))
+                    (chain
+                      (access
+                        source: (identifier)))))))))))))
 
 ==================
 identity shorthand
@@ -77,7 +79,7 @@ f = #'int
 tail call
 ==================
 
-fact = #'int { [~, 1] ^f }
+fact = #'int { ^f [~, 1] }
 
 ---
 
@@ -92,11 +94,47 @@ fact = #'int { [~, 1] ^f }
           (branch
             (expression
               (chain
-                (tuple
-                  (chain
-                    (access
-                      source: (ripple)))
-                  (chain
-                    (integer)))
-                (tail_call
-                  function: (identifier))))))))))
+                (application
+                  function: (tail_call
+                    function: (identifier))
+                  argument: (tuple
+                    (chain
+                      (access
+                        source: (ripple)))
+                    (chain
+                      (integer))))))))))))
+
+==================
+tail-call ripple application
+==================
+
+g = #{ 10 }; f = #'int { &g ~> ^~ 5 }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        (block
+          (branch
+            (expression
+              (chain
+                (integer)))))))
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (type_identifier
+          name: (type_name))
+        (block
+          (branch
+            (expression
+              (chain
+                (reference
+                  (access
+                    source: (identifier)))
+                (application
+                  function: (tail_call
+                    (ripple))
+                  argument: (integer))))))))))

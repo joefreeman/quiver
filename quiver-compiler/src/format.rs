@@ -1,7 +1,7 @@
 //! An AST pretty-printer that renders a parsed [`Program`] back to canonical Quiver source.
 //!
 //! The AST is rendered to a [`crate::pretty`] document and laid out against a fixed target
-//! [`WIDTH`]: a construct stays on one line if it fits, otherwise it breaks using its own
+//![`WIDTH`]: a construct stays on one line if it fits, otherwise it breaks using its own
 //! reparse-safe separator — chains continue with `~>`, blocks lead each branch with `|`, tuples
 //! and multi-chain sequences put one item per line.
 //!
@@ -345,7 +345,7 @@ fn wrap_breaking_body(sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc
     }
 }
 
-/// A chain: an optional `pattern = ` binding followed by space-joined terms. When the terms do not
+/// A chain: an optional `pattern = ` binding followed by `~>`-joined terms. When the terms do not
 /// fit, they break with a leading `~>` per continuation line. A trailing breakable container (a
 /// block, tuple, or function) is kept attached to the preceding terms and allowed to break
 /// internally, rather than forcing the whole chain onto `~>` lines.
@@ -369,11 +369,11 @@ fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
                 .iter()
                 .map(pretty::flatten)
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join(" ~> ");
             return pretty::concat(vec![
                 prefix,
                 pretty::text(head_flat),
-                pretty::text(" "),
+                pretty::text(" ~> "),
                 term_doc(trivia, &tail[0]),
             ]);
         }
@@ -395,19 +395,20 @@ fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
     pretty::concat(vec![prefix, pretty::group(inner)])
 }
 
-/// Lay out a chain's terms, breaking only at *call-unit* boundaries: a break point sits after a term
-/// that consumes the flowing value (an `[args] callable` unit just completed), rendered as a `~>`
-/// continuation. Terms within a unit stay space-joined, so an argument tuple stays on the same line
-/// as its callable.
+/// Lay out a chain's terms, joined by an explicit `~>` between every pair of adjacent terms, and
+/// breaking only at *call-unit* boundaries: a break point sits after a term that consumes the
+/// flowing value (an `[args] ~> callable` unit just completed), rendered as a leading-`~>`
+/// continuation line. The separator within a unit is a hard ` ~> ` (never breaks), so an argument
+/// tuple stays on the same line as its callable.
 fn chain_terms_doc(trivia: &Trivia, terms: &[Term]) -> Doc {
     let mut parts = Vec::new();
     for (index, term) in terms.iter().enumerate() {
         if index > 0 {
             if is_call_ender(&terms[index - 1]) {
                 parts.push(pretty::line());
-                parts.push(pretty::if_break(pretty::text("~> "), pretty::nil()));
+                parts.push(pretty::text("~> "));
             } else {
-                parts.push(pretty::text(" "));
+                parts.push(pretty::text(" ~> "));
             }
         }
         parts.push(term_doc(trivia, term));
@@ -439,7 +440,12 @@ fn is_breakable_container(term: &Term) -> bool {
         Term::Block(_) => true,
         Term::Tuple(tuple) => !tuple.fields.is_empty(),
         Term::Function(function) => function.body.is_some(),
-        Term::Spawn(inner, _) => matches!(inner.as_ref(), Term::Function(_)),
+        Term::Spawn(inner, argument, _) => {
+            argument.is_none() && matches!(inner.as_ref(), Term::Function(_))
+        }
+        // An application whose argument is a container (`f [ … ]`, `f { … }`) can absorb
+        // overflow by breaking inside the argument.
+        Term::Apply(_, argument) => is_breakable_container(argument),
         _ => false,
     }
 }
@@ -452,9 +458,16 @@ fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
         Term::String(style, segments) => string_term_doc(trivia, *style, segments),
         Term::Block(expression) => block_doc(trivia, expression),
         Term::Function(function) => function_doc(trivia, function),
-        Term::Spawn(inner, _) => spawn_doc(trivia, inner),
+        Term::Spawn(inner, argument, _) => spawn_doc(trivia, inner, argument.as_deref()),
         Term::Select(sources, _) => select_doc(trivia, sources),
         Term::Dialect(dialect) => dialect_doc(dialect),
+        // A juxtaposed application `head arg`: the head is always atomic (an access), the
+        // argument may be a container.
+        Term::Apply(access, argument) => pretty::concat(vec![
+            pretty::text(render_access(access)),
+            pretty::text(" "),
+            term_doc(trivia, argument),
+        ]),
         atom => pretty::text(render_term_atom(atom)),
     }
 }
@@ -490,7 +503,8 @@ fn render_term_atom(term: &Term) -> String {
         | Term::Block(_)
         | Term::Function(_)
         | Term::Spawn(..)
-        | Term::Select(..) => unreachable!("container terms are rendered by term_doc"),
+        | Term::Select(..)
+        | Term::Apply(..) => unreachable!("container terms are rendered by term_doc"),
     }
 }
 
@@ -725,8 +739,8 @@ fn function_doc(trivia: &Trivia, function: &Function) -> Doc {
 /// Render a spawn (`@f`, `@~`, `@{ … }`, `@('int) { … }`). An inline spawned function must use the
 /// `@`-sugar forms — the parser does not accept `@#…` — so a function head is emitted as `@{ body }`
 /// or `@(type) { body }` (the parenthesised arm accepts any type).
-fn spawn_doc(trivia: &Trivia, func: &Term) -> Doc {
-    match func {
+fn spawn_doc(trivia: &Trivia, func: &Term, argument: Option<&Term>) -> Doc {
+    let head = match func {
         Term::Function(function) => {
             let head = match &function.parameter_type {
                 None => "@".to_string(),
@@ -738,6 +752,11 @@ fn spawn_doc(trivia: &Trivia, func: &Term) -> Doc {
             }
         }
         other => pretty::text(format!("@{}", render_term_atom(other))),
+    };
+    match argument {
+        // A juxtaposed init argument (`@f x`).
+        Some(argument) => pretty::concat(vec![head, pretty::text(" "), term_doc(trivia, argument)]),
+        None => head,
     }
 }
 
@@ -745,15 +764,28 @@ fn select_doc(trivia: &Trivia, sources: &Option<Vec<Chain>>) -> Doc {
     let Some(chains) = sources else {
         return pretty::text("!");
     };
-    // A single source that has a tight shorthand keeps it (`!p`, `!#'int`, …): the general
-    // `! [#'int]` form is *not* always equivalent — a following `{ … }` handler binds differently —
-    // and a select source list takes no trailing comma, so it is reserved for genuine multi-source
-    // and filter selects.
+    // A single source that has a tight shorthand keeps it (`!p`, `!#'int`, …); the general
+    // `![…]` form is reserved for genuine multi-source selects.
     if let Some(shorthand) = select_shorthand(chains) {
         return pretty::text(shorthand);
     }
+    // A single receive function *with* a body — a filter — keeps the tight shorthand too,
+    // its body rendering as an ordinary block: `!#'int { =42 => Ok }`.
+    if let [chain] = chains.as_slice()
+        && chain.match_pattern.is_none()
+        && let [Term::Function(function)] = chain.terms.as_slice()
+        && function.type_parameters.is_empty()
+        && function.return_type.is_none()
+        && let Some(body) = &function.body
+        && let Some(parameter_type) = &function.parameter_type
+    {
+        return pretty::concat(vec![
+            pretty::text(format!("!#{} ", render_type_atom(parameter_type))),
+            block_doc(trivia, body),
+        ]);
+    }
     bracketed(
-        "! [".to_string(),
+        "![".to_string(),
         "]",
         chains
             .iter()
@@ -765,7 +797,7 @@ fn select_doc(trivia: &Trivia, sources: &Option<Vec<Chain>>) -> Doc {
 
 /// The tight single-source shorthand for a select, when the source list is a single source whose AST
 /// has one (`!p`/`!f`, `!#'int`, `!1000`). Returns `None` for the general form — several sources, or
-/// a filter (a receive function *with* a body, which only the general `! […]` form can express).
+/// a filter (a receive function *with* a body, which only the general `![…]` form can express).
 fn select_shorthand(chains: &[Chain]) -> Option<String> {
     let [chain] = chains else { return None };
     if chain.match_pattern.is_some() {
@@ -1087,7 +1119,13 @@ fn visit_term(term: &Term, out: &mut Collected) {
                 visit_expression(body, out);
             }
         }
-        Term::Spawn(inner, _) => visit_term(inner, out),
+        Term::Spawn(inner, argument, _) => {
+            visit_term(inner, out);
+            if let Some(argument) = argument {
+                visit_term(argument, out);
+            }
+        }
+        Term::Apply(_, argument) => visit_term(argument, out),
         Term::Select(Some(chains), _) => {
             for chain in chains {
                 visit_chain(chain, out);
@@ -1564,13 +1602,16 @@ mod tests {
     #[test]
     fn drops_redundant_blocks() {
         // A single branchless, binding-free block is spliced into the surrounding chain.
-        assert_formats("bit = { [a, b] f [1, ~] g }", "bit = [a, b] f [1, ~] g\n");
+        assert_formats(
+            "bit = { [a, b] ~> f ~> [1, ~] ~> g }",
+            "bit = [a, b] ~> f ~> [1, ~] ~> g\n",
+        );
         // Nested redundant blocks collapse fully.
         assert_formats("x = { { 5 } }", "x = 5\n");
         // A block in a consequence position is also unwrapped.
         assert_formats(
-            "f = #'int { =0 => { [~, 1] g } | h }",
-            "f = #'int { =0 => [~, 1] g | h }\n",
+            "f = #'int { =0 => { [~, 1] ~> g } | h }",
+            "f = #'int { =0 => [~, 1] ~> g | h }\n",
         );
     }
 
@@ -1579,14 +1620,14 @@ mod tests {
         // A consequence block's `}` aligns with the bar (`|`) of the line carrying its `{`, indented
         // from the bar rather than from the content past the `| `.
         assert_formats(
-            "f = #'t { =B[h, t] => { idx =0 => h | [idx, 1] %num.sub [t, ~] ^ } | other_branch }",
-            "f = #'t {\n  | =B[h, t] => {\n    | idx =0 => h\n    | [idx, 1] %num.sub [t, ~] ^\n  }\n  | other_branch\n}\n",
+            "f = #'t { =B[h, t] => { idx ~> =0 => h | [idx, 1] ~> %num.sub ~> [t, ~] ~> ^ } | other_branch }",
+            "f = #'t {\n  | =B[h, t] => {\n    | idx ~> =0 => h\n    | [idx, 1] ~> %num.sub ~> [t, ~] ~> ^\n  }\n  | other_branch\n}\n",
         );
         // The same when the block ends a branch's *condition* chain (`| lst { … }`): the body is one
         // chain, so the block stays at the bar indent and its `}` aligns with the `|`.
         assert_formats(
-            "f = #'t { lst { =Nil => empty_result | =Cons[h, t] => [h, t] process } | fallback }",
-            "f = #'t {\n  | lst {\n    | =Nil => empty_result\n    | =Cons[h, t] => [h, t] process\n  }\n  | fallback\n}\n",
+            "f = #'t { lst ~> { =Nil => empty_result | =Cons[h, t] => [h, t] ~> process } | fallback }",
+            "f = #'t {\n  | lst ~> {\n    | =Nil => empty_result\n    | =Cons[h, t] => [h, t] ~> process\n  }\n  | fallback\n}\n",
         );
     }
 
@@ -1594,8 +1635,8 @@ mod tests {
     fn tall_steps_get_surrounding_blank_lines() {
         // A `~>` pipeline step is set off from its short neighbours with a blank line on each side…
         assert_formats(
-            "#{ first_step; target_len [~, suffix_len] %num.sub [target, ~, target_len] %bin.slice =&suffix; last_step }",
-            "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len] %num.sub\n  ~> [target, ~, target_len] %bin.slice\n  ~> =&suffix\n\n  last_step\n}\n",
+            "#{ first_step; target_len ~> [~, suffix_len] ~> %num.sub ~> [target, ~, target_len] ~> %bin.slice ~> =&suffix; last_step }",
+            "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len] ~> %num.sub\n  ~> [target, ~, target_len] ~> %bin.slice\n  ~> =&suffix\n\n  last_step\n}\n",
         );
         // …but a body of only short steps stays packed (no imposed blanks).
         assert_formats("#{ aa; bb; cc }", "#{ aa; bb; cc }\n");
@@ -1606,13 +1647,13 @@ mod tests {
         // A binding whose value breaks into a `~>` pipeline breaks after the `=` and indents the
         // pipeline, rather than leaving the head on the `=` line and dangling the continuations.
         assert_formats(
-            "#{ char_end = byte_pos [~, 1] %num.add [data, ~, data_len] skip_continuation }",
-            "#{\n  char_end =\n    byte_pos\n    ~> [~, 1] %num.add\n    ~> [data, ~, data_len] skip_continuation\n}\n",
+            "#{ char_end = byte_pos ~> [~, 1] ~> %num.add ~> [data, ~, data_len] ~> skip_continuation }",
+            "#{\n  char_end =\n    byte_pos\n    ~> [~, 1] ~> %num.add\n    ~> [data, ~, data_len] ~> skip_continuation\n}\n",
         );
         // A short binding stays inline…
         assert_formats(
-            "#{ x = byte_pos [~, 1] %num.add }",
-            "#{ x = byte_pos [~, 1] %num.add }\n",
+            "#{ x = byte_pos ~> [~, 1] ~> %num.add }",
+            "#{ x = byte_pos ~> [~, 1] ~> %num.add }\n",
         );
         // …and a value ending in a self-breaking container stays on the `=` line (the container
         // opens there and breaks internally).
@@ -1627,14 +1668,14 @@ mod tests {
         // A `cond => …` guard that is a single `~>` pipeline indents its continuations under the
         // head (past the `| `), so they read as part of the condition rather than dangling at the bar.
         assert_formats(
-            "#{ x { haystack_len [~, needle_len] %num.sub [haystack, needle, 0, ~] find_index => Ok | other } }",
-            "#{\n  x {\n    | haystack_len\n      ~> [~, needle_len] %num.sub\n      ~> [haystack, needle, 0, ~] find_index => Ok\n    | other\n  }\n}\n",
+            "#{ x ~> { haystack_len ~> [~, needle_len] ~> %num.sub ~> [haystack, needle, 0, ~] ~> find_index => Ok | other } }",
+            "#{\n  x ~> {\n    | haystack_len\n      ~> [~, needle_len] ~> %num.sub\n      ~> [haystack, needle, 0, ~] ~> find_index => Ok\n    | other\n  }\n}\n",
         );
         // A consequence that follows the last continuation on the same line lays out relative to
         // that deeper indent too — a breaking tuple's fields indent under its `[`, `]` aligned.
         assert_formats(
-            "#{ x { [haystack, delim, start, end] find_index =('int)index => [haystack [~, start, index] %bin.slice Str[~], [index, delim_len] %num.add, another_field, one_more_field] | other } }",
-            "#{\n  x {\n    | [haystack, delim, start, end] find_index\n      ~> =('int)index => [\n        haystack [~, start, index] %bin.slice Str[~],\n        [index, delim_len] %num.add,\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
+            "#{ x ~> { [haystack, delim, start, end] ~> find_index ~> =('int)index => [haystack ~> [~, start, index] ~> %bin.slice ~> Str[~], [index, delim_len] ~> %num.add, another_field, one_more_field] | other } }",
+            "#{\n  x ~> {\n    | [haystack, delim, start, end] ~> find_index\n      ~> =('int)index => [\n        haystack ~> [~, start, index] ~> %bin.slice ~> Str[~],\n        [index, delim_len] ~> %num.add,\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
         );
     }
 
@@ -1643,31 +1684,37 @@ mod tests {
         // A consequence that is a single chain breaking into a `~>` pipeline is wrapped in grouping
         // braces, so the continuation reads as a delimited body instead of dangling at the bar.
         assert_formats(
-            "f = #'t { =Cons[[k, val], t] => [&put, d, k, val, k hash, 0] put [&self, ~, t] self | =Nil => d }",
-            "f = #'t {\n  | =Cons[[k, val], t] => {\n    [&put, d, k, val, k hash, 0] put\n    ~> [&self, ~, t] self\n  }\n  | =Nil => d\n}\n",
+            "f = #'t { =Cons[[k, val], t] => [&put, d, k, val, k ~> hash, 0] ~> put ~> [&self, ~, t] ~> self | =Nil => d }",
+            "f = #'t {\n  | =Cons[[k, val], t] => {\n    [&put, d, k, val, k ~> hash, 0] ~> put\n    ~> [&self, ~, t] ~> self\n  }\n  | =Nil => d\n}\n",
         );
         // A short consequence stays bare (it does not break).
         assert_formats(
-            "f = #'t { =A => a b | =B => c }",
-            "f = #'t { =A => a b | =B => c }\n",
+            "f = #'t { =A => a ~> b | =B => c }",
+            "f = #'t { =A => a ~> b | =B => c }\n",
         );
     }
 
     #[test]
     fn groups_compound_consequences() {
         // A bare multi-step frame-free consequence is wrapped in grouping braces…
-        assert_formats("x = 5 { =0 => a; b | c }", "x = 5 { =0 => { a; b } | c }\n");
+        assert_formats(
+            "x = 5 ~> { =0 => a; b | c }",
+            "x = 5 ~> { =0 => { a; b } | c }\n",
+        );
         // …a single-step consequence (one chain, many terms) stays bare…
-        assert_formats("x = 5 { =0 => a b | c }", "x = 5 { =0 => a b | c }\n");
+        assert_formats(
+            "x = 5 ~> { =0 => a ~> b | c }",
+            "x = 5 ~> { =0 => a ~> b | c }\n",
+        );
         // …a binding consequence keeps its own markers and stays bare…
         assert_formats(
-            "x = 5 { =0 => y = 1; [y, 2] g | c }",
-            "x = 5 { =0 => y = 1; [y, 2] g | c }\n",
+            "x = 5 ~> { =0 => y = 1; [y, 2] ~> g | c }",
+            "x = 5 ~> { =0 => y = 1; [y, 2] ~> g | c }\n",
         );
         // …and an already-braced consequence is not double-wrapped.
         assert_formats(
-            "x = 5 { =0 => { a; b } | c }",
-            "x = 5 { =0 => { a; b } | c }\n",
+            "x = 5 ~> { =0 => { a; b } | c }",
+            "x = 5 ~> { =0 => { a; b } | c }\n",
         );
     }
 
@@ -1676,9 +1723,12 @@ mod tests {
         // Regression: flattening a chain head or guard condition that carries a comment must not
         // inline the comment (which would comment out the rest of the line). The output must reparse
         // and be a fixpoint — the corrupt output of the old bug did neither.
-        assert_idempotent("#{\n  // c\n  foo\n} g [x, y]", "commented chain head");
         assert_idempotent(
-            "5 {\n  [ z: ~, // c\n  ] foo? => x | y\n}",
+            "#{\n  // c\n  foo\n} ~> g ~> [x, y]",
+            "commented chain head",
+        );
+        assert_idempotent(
+            "5 ~> {\n  [ z: ~, // c\n  ] ~> foo? => x | y\n}",
             "comment on a guard field",
         );
     }
@@ -1686,23 +1736,29 @@ mod tests {
     #[test]
     fn keeps_narrowing_barrier_and_unsafe_tail_blocks() {
         // A block wrapping a match can be a deliberate narrowing barrier — never strip it.
-        assert_formats("x = 5 { { =A } => 1 | 2 }", "x = 5 { { =A } => 1 | 2 }\n");
+        assert_formats(
+            "x = 5 ~> { { =A } => 1 | 2 }",
+            "x = 5 ~> { { =A } => 1 | 2 }\n",
+        );
         // A tail call that is not the chain's last term keeps its block (no mid-chain dead code)…
-        assert_formats("x = { [a] ^ } f", "x = { [a] ^ } f\n");
+        assert_formats("x = { [a] ~> ^ } ~> f", "x = { [a] ~> ^ } ~> f\n");
         // …a non-final tail call inside the body keeps the block too…
-        assert_formats("x = 5 { ^ foo }", "x = 5 { ^ foo }\n");
+        assert_formats("x = 5 ~> { ^ ~> foo }", "x = 5 ~> { ^ ~> foo }\n");
         // …but a block whose tail call ends up last after splicing is dropped cleanly.
-        assert_formats("x = y { [a] ^ }", "x = y [a] ^\n");
+        assert_formats("x = y ~> { [a] ~> ^ }", "x = y ~> [a] ~> ^\n");
     }
 
     #[test]
     fn keeps_meaningful_blocks() {
         // A binding inside the block would leak if inlined, so the block stays.
-        assert_formats("x = { 5 =y; y }", "x = { 5 =y; y }\n");
+        assert_formats("x = { 5 ~> =y; y }", "x = { 5 ~> =y; y }\n");
         // Multiple branches are not redundant.
-        assert_formats("x = 5 { =0 => a | b }", "x = 5 { =0 => a | b }\n");
+        assert_formats("x = 5 ~> { =0 => a | b }", "x = 5 ~> { =0 => a | b }\n");
         // A comment inside the block keeps it (so the comment is not lost).
-        assert_formats("x = {\n  // note\n  5 f\n}", "x = {\n  // note\n  5 f\n}\n");
+        assert_formats(
+            "x = {\n  // note\n  5 ~> f\n}",
+            "x = {\n  // note\n  5 ~> f\n}\n",
+        );
     }
 
     #[test]
@@ -1741,8 +1797,8 @@ mod tests {
             "x = \"hello {name}!\"",
             "x = \"{a}{b}\"",
             "x = \"a \\{ b\"",
-            "x = \"pair: {[p, q] %str.concat}\"",
-            "x = \"v: {flag { =Ok => \"yes\" | \"no\" }}\"",
+            "x = \"pair: {[p, q] ~> %str.concat}\"",
+            "x = \"v: {flag ~> { =Ok => \"yes\" | \"no\" }}\"",
         ] {
             assert_idempotent(source, source);
         }
@@ -1766,7 +1822,10 @@ mod tests {
     #[test]
     fn string_pattern_renders_as_string() {
         // A string pattern reconstructs as `"…"`, not the desugared `Str[0x…]`.
-        assert_formats("f = #{ role =\"admin\" }", "f = #{ role =\"admin\" }\n");
+        assert_formats(
+            "f = #{ role ~> =\"admin\" }",
+            "f = #{ role ~> =\"admin\" }\n",
+        );
     }
 
     #[test]
@@ -1803,9 +1862,9 @@ mod tests {
         // text/spaces, a nested-string hole, an escaped literal brace, and a hole that itself spans
         // lines. Each must format to a value-preserving fixpoint.
         for source in [
-            "s = \"\"\"\n    hi {name}\n    {x}\n    a \\{ b {[p, q] %str.concat} c\n    \"\"\"",
+            "s = \"\"\"\n    hi {name}\n    {x}\n    a \\{ b {[p, q] ~> %str.concat} c\n    \"\"\"",
             // A hole whose expression spans multiple lines stays a single hole.
-            "s = \"\"\"\n    pick {flag {\n      =Ok => \"y\"\n      | \"n\"\n    }} done\n    \"\"\"",
+            "s = \"\"\"\n    pick {flag ~> {\n      =Ok => \"y\"\n      | \"n\"\n    }} done\n    \"\"\"",
         ] {
             let ast = parse(source).unwrap_or_else(|e| panic!("source must parse: {e:?}"));
             let printed = format_program(&ast, source);
@@ -1861,51 +1920,51 @@ mod tests {
         // A snippet corpus exercising every AST variant the printer must handle. Each must parse
         // and reach a print fixpoint.
         let corpus: &[&str] = &[
-            // --- argument-first application ---
-            "[3, 4] add [~, 2] mul",
-            "x f",
-            "[[x] g, y] f",
-            "[3, 4] __integer_add__",
-            "&g f",
-            "5 f",
+            // --- argument-first application (chain terms joined by `~>`) ---
+            "[3, 4] ~> add ~> [~, 2] ~> mul",
+            "x ~> f",
+            "[[x] ~> g, y] ~> f",
+            "[3, 4] ~> __integer_add__",
+            "&g ~> f",
+            "5 ~> f",
             // --- bare ripple (flowing-value) terms: no juxtaposed argument ---
-            "5 ~",
-            "num ~.add",
-            "&g ^~",
-            "&g @~",
+            "5 ~> ~",
+            "num ~> ~.add",
+            "&g ~> ^~",
+            "&g ~> @~",
             // --- argument-first tail calls ---
-            "[a, b] ^",
-            "[x] ^foo",
-            // --- spawn ---
+            "[a, b] ~> ^",
+            "[x] ~> ^foo",
+            // --- spawn (the block is part of the spawn, so it stays a single term) ---
             "@f",
             "@{ 5 }",
             "@'int { $ }",
             "@('int | 'bin) { $ }",
-            "x @counter",
+            "x ~> @counter",
             // --- select / process / references ---
             "!'int",
-            "!'int { =0 => Ok | [] }",
-            "! [p, 1000]",
+            "!'int ~> { =0 => Ok | [] }",
+            "![p, 1000]",
             "!p",
-            "! []",
+            "![]",
             "&f",
             "&.",
             "&__integer_add__",
-            "42 pid",
+            "42 ~> pid",
             "@3",
             // --- ripple / spread values ---
-            "5 [~, 1]",
-            "0 Point[x: ~, y: ~]",
+            "5 ~> [~, 1]",
+            "0 ~> Point[x: ~, y: ~]",
             "a[..., y: 3]",
             "~[..., y: 3]",
-            "A[x: 1] B[...]",
+            "A[x: 1] ~> B[...]",
             "[...a, ...b]",
             "[w: 0, ...a]",
             // --- field access / self / operators ---
-            "point.x .name",
-            "$ $.x $.0",
-            "[] =[]",
-            "42 .",
+            "point.x ~> .name",
+            "$ ~> $.x ~> $.0",
+            "[] ~> =[]",
+            "42 ~> .",
             // --- match forms ---
             "=Point[x, y]",
             "=(x: 'int)",
@@ -1926,17 +1985,17 @@ mod tests {
             "[x: a, y: b] = p",
             "Config(host, port) = c",
             // --- blocks / branches / consequence ---
-            "v { =0 => \"zero\" | \"neg\" }",
-            "item { is_valid? process | [] show_error }",
-            "{ =Square[x] [x, 10] num.gt? => \"large\" | \"small\" }",
-            // --- functions ---
-            "xs [~, #{ $0 }, Nil] map",
+            "v ~> { =0 => \"zero\" | \"neg\" }",
+            "item ~> { is_valid? ~> process | [] ~> show_error }",
+            "{ =Square[x] ~> [x, 10] ~> num.gt? => \"large\" | \"small\" }",
+            // --- functions (the function body block is part of the term) ---
+            "xs ~> [~, #{ $0 }, Nil] ~> map",
             "#['int, 'int] { =[a, b] => [b, a] }",
             "#<'t>'t { $ }",
             "#'int",
             "#'int -> 'bin { $ }",
             // --- multi-chain sequences & control flow ---
-            "tag = %ref; [tag, 42] =[&tag, x]; x",
+            "tag = %ref; [tag, 42] ~> =[&tag, x]; x",
             "[]; 5",
             // --- type aliases: unions, intersections, partials, modules, recursion ---
             "'bool = True | False",

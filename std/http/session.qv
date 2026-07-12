@@ -15,9 +15,14 @@
 or_loop = #['bin, 'int, 'int, 'int] {
   =[data, pos, len, acc]
   {
-    | [pos, len] __integer_compare__ =(0 | 1) => acc
+    | [pos, len] ~> __integer_compare__ ~> =(0 | 1) => acc
     | {
-      [data, [pos, 1] __integer_add__, len, [acc, [data, pos] %bin.get_byte] __integer_or__] ^
+      [
+        data,
+        [pos, 1] ~> __integer_add__,
+        len,
+        [acc, [data, pos] ~> %bin.get_byte] ~> __integer_or__,
+      ] ~> ^
     }
   }
 }
@@ -26,11 +31,11 @@ or_loop = #['bin, 'int, 'int, 'int] {
 const_eq? = #['bin, 'bin] {
   =[a, b]
 
-  [a %bin.length, b %bin.length] __integer_compare__
+  [a ~> %bin.length, b ~> %bin.length] ~> __integer_compare__
   ~> =0
 
-  x = [a, b] %bin.xor
-  [x, 0, x %bin.length, 0] or_loop =0
+  x = [a, b] ~> %bin.xor
+  [x, 0, x ~> %bin.length, 0] ~> or_loop ~> =0
   Ok
 }
 
@@ -40,35 +45,35 @@ get = #['%http, 'bin] {
 
   req
   ~> %http.cookies
-  ~> [~, "session"] %http.get
+  ~> [~, "session"] ~> %http.get
   ~> =Str[raw]
 
-  [raw, 46, 0] %bin.index =('int)dot
+  [raw, 46, 0] ~> %bin.index ~> =('int)dot
 
-  [raw, 0, dot] %bin.slice
-  ~> Str[~] %bin.from_hex
+  [raw, 0, dot] ~> %bin.slice
+  ~> Str[~] ~> %bin.from_hex
   ~> =('bin)payload
 
-  [raw, [dot, 1] __integer_add__, raw %bin.length] %bin.slice
-  ~> Str[~] %bin.from_hex
+  [raw, [dot, 1] ~> __integer_add__, raw ~> %bin.length] ~> %bin.slice
+  ~> Str[~] ~> %bin.from_hex
   ~> =('bin)mac
 
-  [[key, payload] %hash.hmac_sha256, mac] const_eq?
-  payload %http.form_decode
+  [[key, payload] ~> %hash.hmac_sha256, mac] ~> const_eq?
+  payload ~> %http.form_decode
 }
 
 put = #['%http.response, 'bin, 'pairs] {
   :doc "The response with a Set-Cookie header carrying the signed session (Path=/; HttpOnly; SameSite=Lax)."
   =[resp, key, sess]
-  payload = sess %http.form_encode
-  value = "{payload %bin.to_hex}.{[key, payload] %hash.hmac_sha256 %bin.to_hex}"
+  payload = sess ~> %http.form_encode
+  value = "{payload ~> %bin.to_hex}.{[key, payload] ~> %hash.hmac_sha256 ~> %bin.to_hex}"
 
   h =
     [
       "session",
       value,
       Cons["Path=/", Cons["HttpOnly", Cons["SameSite=Lax", Nil]]],
-    ] %http.set_cookie
+    ] ~> %http.set_cookie
 
   Response[status: resp.status, headers: Cons[h, resp.headers], body: resp.body]
 }
@@ -76,7 +81,7 @@ put = #['%http.response, 'bin, 'pairs] {
 clear = #'%http.response {
   :doc "The response with a Set-Cookie header that expires the session cookie."
   h =
-    ["session", "", Cons["Path=/", Cons["Max-Age=0", Nil]]] %http.set_cookie
+    ["session", "", Cons["Path=/", Cons["Max-Age=0", Nil]]] ~> %http.set_cookie
 
   Response[status: $status, headers: Cons[h, $headers], body: $body]
 }

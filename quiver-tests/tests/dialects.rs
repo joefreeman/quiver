@@ -10,7 +10,7 @@ fn dialect_module(body: &str, exports: &str) -> HashMap<Vec<String>, String> {
     modules.insert(
         vec!["m".to_string()],
         format!(
-            "d0 = #Str['bin] {{ {body} }}\nd = #(content: Str['bin]) {{ $content d0 }}\n{{ :dialect &d; {exports} }}"
+            "d0 = #Str['bin] {{ {body} }}\nd = #(content: Str['bin]) {{ $content ~> d0 }}\n{{ :dialect &d; {exports} }}"
         ),
     );
     modules
@@ -79,7 +79,7 @@ fn test_unquote_undefined_variable_is_a_compile_error() {
 fn test_flow_receives_the_flowing_value() {
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
-        .evaluate("5 %m{~}")
+        .evaluate("5 ~> %m{~}")
         .expect("5");
 }
 
@@ -88,9 +88,9 @@ fn test_call_applies_a_module_export() {
     quiver()
         .with_modules(dialect_module(
             "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
-            "[double: #'int { [~, 2] __integer_multiply__ }]",
+            "[double: #'int { [~, 2] ~> __integer_multiply__ }]",
         ))
-        .evaluate("5 %m{~}")
+        .evaluate("5 ~> %m{~}")
         .expect("10");
 }
 
@@ -99,9 +99,9 @@ fn test_expansions_chain() {
     quiver()
         .with_modules(dialect_module(
             "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
-            "[double: #'int { [~, 2] __integer_multiply__ }]",
+            "[double: #'int { [~, 2] ~> __integer_multiply__ }]",
         ))
-        .evaluate("5 %m{~} %m{~}")
+        .evaluate("5 ~> %m{~} ~> %m{~}")
         .expect("20");
 }
 
@@ -132,7 +132,7 @@ fn test_expansion_inside_a_function_captures_variables() {
     // The dialect expands before capture collection, so the closure captures `x`.
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
-        .evaluate("x = 7; f = #[] { %m{x} }; [] f")
+        .evaluate("x = 7; f = #[] { %m{x} }; [] ~> f")
         .expect("7");
 }
 
@@ -169,7 +169,7 @@ fn test_module_without_dialect_annotation() {
 fn test_error_payload_maps_to_a_source_position() {
     quiver()
         .with_modules(dialect_module(
-            "[] { :error Expected[offset: 2, message: \"a value\"] }",
+            "[] ~> { :error Expected[offset: 2, message: \"a value\"] }",
             "Ok",
         ))
         .evaluate("%m{abc}")
@@ -212,14 +212,14 @@ fn test_json_dialect() {
 #[test]
 fn test_json_dialect_flow() {
     quiver()
-        .evaluate("5 %json{ [1, ~] }")
+        .evaluate("5 ~> %json{ [1, ~] }")
         .expect("Array[Cons[1, Cons[5, Nil]]]");
 }
 
 #[test]
 fn test_json_dialect_unifies_with_module_type() {
     quiver()
-        .evaluate("f = #'%json { Ok }; %json{ [null, -3, \"s\"] } f")
+        .evaluate("f = #'%json { Ok }; %json{ [null, -3, \"s\"] } ~> f")
         .expect("Ok");
 }
 
@@ -238,7 +238,7 @@ fn test_num_dialect_vars_and_parens() {
 
 #[test]
 fn test_num_dialect_flow_and_unary() {
-    quiver().evaluate("5 %num{ ~ * 2 - 1 }").expect("9");
+    quiver().evaluate("5 ~> %num{ ~ * 2 - 1 }").expect("9");
     quiver().evaluate("%num{ -(1 + 2) * 4 }").expect("-12");
 }
 
@@ -246,17 +246,17 @@ fn test_num_dialect_flow_and_unary() {
 fn test_dict_dialect_generic_values() {
     // The `from` splice unifies dict.from's 'v across mixed 'int / Str values.
     quiver()
-        .evaluate(r#"d = %dict{ "a" => 1, "b" => "foo" }; [d, "b"] %dict.get"#)
+        .evaluate(r#"d = %dict{ "a" => 1, "b" => "foo" }; [d, "b"] ~> %dict.get"#)
         .expect("\"foo\"");
 }
 
 #[test]
 fn test_dict_dialect_var_and_flow() {
     quiver()
-        .evaluate(r#"x = 5; %dict{ "k" => x } [~, "k"] %dict.get"#)
+        .evaluate(r#"x = 5; %dict{ "k" => x } ~> [~, "k"] ~> %dict.get"#)
         .expect("5");
     quiver()
-        .evaluate(r#"9 %dict{ "flow" => ~ } [~, "flow"] %dict.get"#)
+        .evaluate(r#"9 ~> %dict{ "flow" => ~ } ~> [~, "flow"] ~> %dict.get"#)
         .expect("9");
 }
 
@@ -272,7 +272,7 @@ fn test_list_dialect() {
 fn test_list_dialect_tuples_and_flow() {
     // Elements are host expressions: `[1, 2]` is a tuple, exactly as it would be inline.
     quiver()
-        .evaluate("5 %list{ ~, [1, 2] }")
+        .evaluate("5 ~> %list{ ~, [1, 2] }")
         .expect("Cons[5, Cons[[1, 2], Nil]]");
 }
 
@@ -288,13 +288,13 @@ fn test_list_dialect_nested_dialect() {
 #[test]
 fn test_list_dialect_expression_elements() {
     quiver()
-        .evaluate("inc = #'int { [~, 1] __integer_add__ }; x = 2; %list{ x inc, &inc }")
+        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ }; x = 2; %list{ x ~> inc, &inc }")
         .expect_type("Cons['int, Cons[(#'int -> 'int), Nil]]");
 }
 
 #[test]
 fn test_list_dialect_unifies_with_module_type() {
-    quiver().evaluate("%list{ 7, 8 } %list.head").expect("7");
+    quiver().evaluate("%list{ 7, 8 } ~> %list.head").expect("7");
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn test_spaced_brace_is_not_a_dialect() {
     modules.insert(vec!["m".to_string()], "[val: 3]".to_string());
     quiver()
         .with_modules(modules)
-        .evaluate("%m { .val }")
+        .evaluate("%m ~> { .val }")
         .expect("3");
 }
 
@@ -344,7 +344,7 @@ fn test_positional_error_payload_maps_to_a_source_position() {
     // offset→source-position mapping, like `Splicer::field`'s positional fallback.
     quiver()
         .with_modules(dialect_module(
-            "[] { :error Expected[2, \"a value\"] }",
+            "[] ~> { :error Expected[2, \"a value\"] }",
             "Ok",
         ))
         .evaluate("%m{abc}")
@@ -358,8 +358,8 @@ fn test_positional_error_payload_maps_to_a_source_position() {
 fn test_expansion_inside_nested_function_literals() {
     // Dialects in doubly nested bodies are expanded by the outermost walk exactly once.
     quiver()
-        .with_modules(dialect_module("$ %str.parse_int", "Ok"))
-        .evaluate("f = #{ g = #{ [%m{7}, 1] __integer_add__ }; g }; f")
+        .with_modules(dialect_module("$ ~> %str.parse_int", "Ok"))
+        .evaluate("f = #{ g = #{ [%m{7}, 1] ~> __integer_add__ }; g }; f")
         .expect("8");
 }
 
@@ -370,11 +370,11 @@ fn test_generics_in_module_imported_inside_a_function_body() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["g".to_string()],
-        "id = #<'t>'t { $ }\nwrap = #<'t>'t { [$ id, Nil] }\n[id: &id, wrap: &wrap]".to_string(),
+        "id = #<'t>'t { $ }\nwrap = #<'t>'t { [$ ~> id, Nil] }\n[id: &id, wrap: &wrap]".to_string(),
     );
     quiver()
         .with_modules(modules)
-        .evaluate("f = #'int { (id, wrap) = %g; [$ id, \"x\" wrap] }; 3 f")
+        .evaluate("f = #'int { (id, wrap) = %g; [$ ~> id, \"x\" ~> wrap] }; 3 ~> f")
         .expect("[3, [\"x\", Nil]]");
 }
 
@@ -403,7 +403,7 @@ fn test_unquote_callable_is_called_with_the_flowing_value() {
     // Host semantics: a bare callable in a hole is *called* with the dialect input.
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 3]", "Ok"))
-        .evaluate("inc = #'int { [~, 1] __integer_add__ }; 5 %m{inc}")
+        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ }; 5 ~> %m{inc}")
         .expect("6");
 }
 
@@ -412,7 +412,7 @@ fn test_unquote_reference_passes_by_value() {
     // `&f` in a hole references without calling — and elides its binding (pure term).
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 4]", "Ok"))
-        .evaluate("inc = #'int { [~, 1] __integer_add__ }; f = %m{&inc}; 5 f")
+        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ }; f = %m{&inc}; 5 ~> f")
         .expect("6");
 }
 
@@ -420,7 +420,7 @@ fn test_unquote_reference_passes_by_value() {
 fn test_unquote_ripple_is_the_dialect_input() {
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
-        .evaluate("5 %m{~}")
+        .evaluate("5 ~> %m{~}")
         .expect("5");
 }
 
@@ -429,7 +429,7 @@ fn test_unquote_hole_receives_the_flowing_value() {
     // Inside a larger hole, `~` at chain start is the value flowing into the dialect term.
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 6]", "Ok"))
-        .evaluate("5 %m{[~, 1]}")
+        .evaluate("5 ~> %m{[~, 1]}")
         .expect("[5, 1]");
 }
 
@@ -442,7 +442,7 @@ fn test_unquote_duplicated_span_evaluates_once() {
             "Tuple[name: Nil, fields: Cons[Unquote[offset: 0, length: 3], Cons[Unquote[offset: 0, length: 3], Nil]]]",
             "Ok",
         ))
-        .evaluate("ref = &%ref; %m{ref} =[a, b]; a =&b")
+        .evaluate("ref = &%ref; %m{ref} ~> =[a, b]; a ~> =&b")
         .expect("Ok");
 }
 
@@ -450,8 +450,8 @@ fn test_unquote_duplicated_span_evaluates_once() {
 fn test_unquote_expression_chain() {
     // A multi-term chain hole, evaluated in the caller's scope.
     quiver()
-        .with_modules(dialect_module("Unquote[offset: 0, length: 28]", "Ok"))
-        .evaluate("xs = [1, 2]; %m{[xs.0, xs.1] __integer_add__}")
+        .with_modules(dialect_module("Unquote[offset: 0, length: 31]", "Ok"))
+        .evaluate("xs = [1, 2]; %m{[xs.0, xs.1] ~> __integer_add__}")
         .expect("3");
 }
 
@@ -465,8 +465,8 @@ fn test_context_record_chain_callback() {
         vec!["m".to_string()],
         r#"'cb = #['bin, 'int] -> ('int | [])
 d = #(content: Str['bin], chain: 'cb) {
-  $.content =Str[data]
-  [data, 0] $.chain =('int)end
+  $.content ~> =Str[data]
+  [data, 0] ~> $.chain ~> =('int)end
   Unquote[offset: 0, length: end]
 }
 { :dialect &d; Ok }"#

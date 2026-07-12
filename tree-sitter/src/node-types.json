@@ -82,6 +82,120 @@
     }
   },
   {
+    "type": "application",
+    "named": true,
+    "fields": {
+      "argument": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "access",
+            "named": true
+          },
+          {
+            "type": "binary",
+            "named": true
+          },
+          {
+            "type": "bind_match",
+            "named": true
+          },
+          {
+            "type": "block",
+            "named": true
+          },
+          {
+            "type": "builtin",
+            "named": true
+          },
+          {
+            "type": "dialect",
+            "named": true
+          },
+          {
+            "type": "equality",
+            "named": true
+          },
+          {
+            "type": "function",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "multiline_string",
+            "named": true
+          },
+          {
+            "type": "not",
+            "named": true
+          },
+          {
+            "type": "process_ref",
+            "named": true
+          },
+          {
+            "type": "reference",
+            "named": true
+          },
+          {
+            "type": "select",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": true
+          },
+          {
+            "type": "spawn",
+            "named": true
+          },
+          {
+            "type": "spread_update",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "tail_call",
+            "named": true
+          },
+          {
+            "type": "tuple",
+            "named": true
+          }
+        ]
+      },
+      "function": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "access",
+            "named": true
+          },
+          {
+            "type": "builtin",
+            "named": true
+          },
+          {
+            "type": "spawn",
+            "named": true
+          },
+          {
+            "type": "tail_call",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "bind_match",
     "named": true,
     "fields": {},
@@ -272,6 +386,10 @@
       "types": [
         {
           "type": "access",
+          "named": true
+        },
+        {
+          "type": "application",
           "named": true
         },
         {
@@ -1456,6 +1574,16 @@
     "type": "select",
     "named": true,
     "fields": {
+      "filter": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
       "receive": {
         "multiple": true,
         "required": false,

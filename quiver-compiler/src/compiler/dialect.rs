@@ -670,9 +670,16 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
             }
         }
         ast::Term::Access(access) | ast::Term::Reference(access) => walk_access_spans(access, f),
-        ast::Term::Spawn(inner, span) => {
+        ast::Term::Spawn(inner, arg, span) => {
             f(span);
             walk_term_spans(inner, f);
+            if let Some(arg) = arg {
+                walk_term_spans(arg, f);
+            }
+        }
+        ast::Term::Apply(access, arg) => {
+            walk_access_spans(access, f);
+            walk_term_spans(arg, f);
         }
         ast::Term::Select(sources, span) => {
             f(span);

@@ -12,14 +12,14 @@ use common::*;
 fn test_match_failure_is_stamped() {
     quiver()
         .debug()
-        .evaluate("x = 5; x =6")
+        .evaluate("x = 5; x ~> =6")
         .expect("[]")
         .expect_origin("match failed at test:1:8");
 }
 
 #[test]
 fn test_release_builds_carry_no_origin() {
-    quiver().evaluate("x = 5; x =6").expect_no_origin();
+    quiver().evaluate("x = 5; x ~> =6").expect_no_origin();
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn test_origin_propagates_out_of_calls() {
     // so the caller sees the callee's site, not its own.
     quiver()
         .debug()
-        .evaluate("f = #'int { =0 => Ok }; 5 f")
+        .evaluate("f = #'int { =0 => Ok }; 5 ~> f")
         .expect_origin("match failed at test:1:13");
 }
 
@@ -38,8 +38,8 @@ fn test_recovery_swallow_gets_its_own_site() {
     // discards the original diagnosis, and the fresh nil is stamped at the swallow.
     quiver()
         .debug()
-        .evaluate("5 { | =6 => Ok | [] }")
-        .expect_origin("nil result at test:1:18");
+        .evaluate("5 ~> { | =6 => Ok | [] }")
+        .expect_origin("nil result at test:1:21");
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn test_extracted_nil_result_is_stamped() {
     // positional rule stamps it at the extraction.
     quiver()
         .debug()
-        .evaluate("[[], 1] .0")
+        .evaluate("[[], 1] ~> .0")
         .expect("[]")
         .expect_origin("nil result at test:1:1");
 }
@@ -74,7 +74,7 @@ fn test_program_reads_origin_by_shape() {
     // partial's own layout. Presence is observable today.)
     quiver()
         .debug()
-        .evaluate("f = #'int { =0 => Ok }; x = 5 f; x:((line: 'int))origin { =[] => NoOrigin | HasOrigin }")
+        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f; x:((line: 'int))origin ~> { =[] => NoOrigin | HasOrigin }")
         .expect("HasOrigin");
 }
 
@@ -82,7 +82,7 @@ fn test_program_reads_origin_by_shape() {
 fn test_checked_origin_read_is_nil_in_release() {
     // Same program, release build: same types, the retrieval just answers nil.
     quiver()
-        .evaluate("f = #'int { =0 => Ok }; x = 5 f; x:((line: 'int))origin =[]")
+        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f; x:((line: 'int))origin ~> =[]")
         .expect("Ok");
 }
 
@@ -93,8 +93,8 @@ fn test_origin_coexists_with_error_payload() {
     quiver()
         .debug()
         .evaluate(
-            "div = #['int, 'int] { | =[_, 0] => [] { :error DivZero } | __integer_divide__ };
-             [4, 0] div :error",
+            "div = #['int, 'int] { | =[_, 0] => [] ~> { :error DivZero } | __integer_divide__ };
+             [4, 0] ~> div ~> :error",
         )
         .expect("DivZero");
 }
@@ -105,9 +105,12 @@ fn test_stamped_nil_is_still_nil() {
     // returned from a call still matches `=[]`, and still short-circuits a sequence.
     quiver()
         .debug()
-        .evaluate("f = #'int { =0 => Ok }; 5 f { =[] => StillNil | Huh }")
+        .evaluate("f = #'int { =0 => Ok }; 5 ~> f ~> { =[] => StillNil | Huh }")
         .expect("StillNil");
-    quiver().debug().evaluate("5 =6; Unreachable").expect("[]");
+    quiver()
+        .debug()
+        .evaluate("5 ~> =6; Unreachable")
+        .expect("[]");
 }
 
 #[test]
@@ -115,6 +118,6 @@ fn test_module_sites_name_the_module() {
     // A failure inside an imported module points into that module's source.
     quiver()
         .debug()
-        .evaluate("[5, 0] %int.div")
+        .evaluate("[5, 0] ~> %int.div")
         .expect_origin("nil result at int:26:18");
 }

@@ -9,17 +9,17 @@
     // dividend's sign (`a·r ≥ 0`) — the second guard pins `q` to the toward-zero
     // truncation (without it, `q` off by one toward the opposite sign also fits `|r| < |b|`).
     :post #{
-      $ =[in: [a, b], out: o]
-      o {
-        | =[] => b =0
+      $ ~> =[in: [a, b], out: o]
+      o ~> {
+        | =[] => b ~> =0
         | =q => {
           rem =
-            [a, [q, b] __integer_multiply__] __integer_subtract__
+            [a, [q, b] ~> __integer_multiply__] ~> __integer_subtract__
 
-          [rem __integer_abs__, b __integer_abs__] __integer_compare__
+          [rem ~> __integer_abs__, b ~> __integer_abs__] ~> __integer_compare__
           ~> =-1
 
-          [a, rem] __integer_multiply__ [~, 0] __integer_compare__ { =-1 => [] | Ok }
+          [a, rem] ~> __integer_multiply__ ~> [~, 0] ~> __integer_compare__ ~> { =-1 => [] | Ok }
         }
       }
     }
@@ -32,14 +32,14 @@
     // Remainder invariant: nil exactly for a zero divisor, and otherwise `|r| < |b|` with
     // `r` taking the sign of the dividend (truncating division), so `a·r ≥ 0`.
     :post #{
-      $ =[in: [a, b], out: o]
-      o {
-        | =[] => b =0
+      $ ~> =[in: [a, b], out: o]
+      o ~> {
+        | =[] => b ~> =0
         | =r => {
-          [r __integer_abs__, b __integer_abs__] __integer_compare__
+          [r ~> __integer_abs__, b ~> __integer_abs__] ~> __integer_compare__
           ~> =-1
 
-          [a, r] __integer_multiply__ [~, 0] __integer_compare__ { =-1 => [] | Ok }
+          [a, r] ~> __integer_multiply__ ~> [~, 0] ~> __integer_compare__ ~> { =-1 => [] | Ok }
         }
       }
     }
@@ -52,30 +52,30 @@
     // The floor-sqrt invariant: nil exactly for a negative input, and otherwise the
     // unique r ≥ 0 with r² ≤ n < (r+1)².
     :post #{
-      $ =[in: n, out: o]
-      o {
-        | =[] => [n, 0] __integer_compare__ =-1
+      $ ~> =[in: n, out: o]
+      o ~> {
+        | =[] => [n, 0] ~> __integer_compare__ ~> =-1
         | =r => {
-          | [[r, r] __integer_multiply__, n] __integer_compare__
+          | [[r, r] ~> __integer_multiply__, n] ~> __integer_compare__
             ~> =1 => []
-          | s = [r, 1] __integer_add__
+          | s = [r, 1] ~> __integer_add__
 
-            [n, [s, s] __integer_multiply__] __integer_compare__
+            [n, [s, s] ~> __integer_multiply__] ~> __integer_compare__
             ~> =-1
         }
       }
     }
-    | [$, 0] __integer_compare__ =-1 => []
+    | [$, 0] ~> __integer_compare__ ~> =-1 => []
     | __integer_sqrt__
   },
 
-  and: &__integer_and__ { :doc "The bitwise AND of two integers." },
-  or: &__integer_or__ { :doc "The bitwise OR of two integers." },
-  xor: &__integer_xor__ { :doc "The bitwise XOR of two integers." },
-  not: &__integer_not__ { :doc "The bitwise complement of an integer." },
-  shift: &__integer_shift__ {
+  and: &__integer_and__ ~> { :doc "The bitwise AND of two integers." },
+  or: &__integer_or__ ~> { :doc "The bitwise OR of two integers." },
+  xor: &__integer_xor__ ~> { :doc "The bitwise XOR of two integers." },
+  not: &__integer_not__ ~> { :doc "The bitwise complement of an integer." },
+  shift: &__integer_shift__ ~> {
     :doc "The integer shifted by a number of bits — left when positive, right when negative."
   },
 
-  popcount: &__integer_popcount__ { :doc "The number of set bits (population count)." },
+  popcount: &__integer_popcount__ ~> { :doc "The number of set bits (population count)." },
 ]

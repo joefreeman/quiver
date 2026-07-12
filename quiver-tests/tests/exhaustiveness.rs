@@ -16,7 +16,7 @@ fn test_non_exhaustive_enumeration_names_unhandled() {
               | =Circle[r] => r
               | =Rectangle[w, h] => w
             };
-            Circle[1] area
+            Circle[1] ~> area
             "#,
         )
         .expect_compile_error(Error::NonExhaustiveReturn {
@@ -35,7 +35,7 @@ fn test_exhaustive_enumeration_compiles() {
               | =Circle[r] => r
               | =Rectangle[w, h] => w
             };
-            Rectangle[3, 4] area
+            Rectangle[3, 4] ~> area
             "#,
         )
         .expect("3");
@@ -50,7 +50,7 @@ fn test_partial_match_without_annotation_is_allowed() {
             r#"
             'shape = Circle['int] | Rectangle['int, 'int];
             is_circle? = #'shape { =Circle[_] => Ok };
-            Rectangle[1, 2] is_circle?
+            Rectangle[1, 2] ~> is_circle?
             "#,
         )
         .expect("[]");
@@ -67,7 +67,7 @@ fn test_genuine_mismatch_still_reports_type_mismatch() {
               | =Circle[r] => r
               | =Rectangle[w, h] => w
             };
-            Circle[1] f
+            Circle[1] ~> f
             "#,
         )
         .expect_compile_error(Error::TypeMismatch {

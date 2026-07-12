@@ -145,7 +145,12 @@ fn strip_term(term: Term, options: &Options) -> Term {
             function.body = function.body.map(|body| strip_expression(body, options));
             Term::Function(function)
         }
-        Term::Spawn(inner, span) => Term::Spawn(Box::new(strip_term(*inner, options)), span),
+        Term::Spawn(inner, arg, span) => Term::Spawn(
+            Box::new(strip_term(*inner, options)),
+            arg.map(|arg| Box::new(strip_term(*arg, options))),
+            span,
+        ),
+        Term::Apply(access, arg) => Term::Apply(access, Box::new(strip_term(*arg, options))),
         Term::Select(Some(chains), span) => Term::Select(
             Some(
                 chains

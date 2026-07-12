@@ -31,9 +31,15 @@
 
 (builtin) @function.builtin
 
-; Application is argument-first (`[args] f`), so a call head is just an ordinary access
-; term and can't be distinguished syntactically from a value reference; the tail-call
-; target, however, is unambiguously a call.
+; A juxtaposed application (`add [3, 4]`, `double 5`) has an explicit head, so a bare
+; variable head reads as a call. A dotted head (`math.add`) keeps its `.field` @property
+; below; builtins and tail-call targets carry their own captures.
+(application
+  function: (access
+    source: (identifier) @function.call
+    !field))
+
+; The tail-call target is unambiguously a call.
 (tail_call function: (identifier) @function.call)
 
 ; -------------------------------------------------------------------- imports

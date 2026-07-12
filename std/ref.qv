@@ -1,5 +1,5 @@
 // Unique, opaque identifiers. Unlike other standard-library modules this is a single nilary
 // function rather than a record: `ref = %ref, tag = ref` mints a fresh ref each call.
-&__reference__ {
+&__reference__ ~> {
   :doc "A fresh ref — a unique, opaque identifier supporting equality and pattern matching."
 }

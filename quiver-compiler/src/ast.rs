@@ -109,10 +109,17 @@ pub enum Term {
     Block(Expression),
     Function(Function),
     Access(Access),
-    /// Spawn a process from a function (`@f`, `@~`, `@{ … }`). The init argument comes from the
-    /// chained value (`x ~> @f`), or is nil. For `@~` the chained value *is* the function, which
-    /// is therefore spawned with a nil argument (so `@~` requires a nilary function).
-    Spawn(Box<Term>, Spanned),
+    /// A juxtaposition application `f x` / `f [args]`: the access head applied to a single
+    /// argument written after it, separated by horizontal space. The head covers everything an
+    /// `Access` can name — a variable, `$`, import member, builtin, tail call (`^f [args]`,
+    /// `^ [args]`), or a ripple (`~ [args]`, `~.f [args]`, `^~ arg`). The flowing value flows
+    /// into the argument (so `f [~, 1]` works); for ripple heads it is consumed by the head
+    /// instead, and the argument is evaluated without it.
+    Apply(Access, Box<Term>),
+    /// Spawn a process from a function (`@f`, `@~`, `@{ … }`). The init argument is the
+    /// juxtaposed argument (`@f x`, `@~ x`) when present, otherwise the chained value
+    /// (`x ~> @f`), or nil.
+    Spawn(Box<Term>, Option<Box<Term>>, Spanned),
     Self_,
     /// Select operation. None means bare `!` (postfix form using chained value).
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).

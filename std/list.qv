@@ -2,7 +2,7 @@
 
 reverse = #<'t>['<'t>, '<'t>] {
   | =[Nil, xs] => xs
-  | =[Cons[head, tail], xs] => Cons[head, xs] [tail, ~] ^
+  | =[Cons[head, tail], xs] => Cons[head, xs] ~> [tail, ~] ~> ^
 }
 
 // --- the `%list{ … }` dialect --------------------------------------------------------
@@ -12,7 +12,8 @@ reverse = #<'t>['<'t>, '<'t>] {
 // mean exactly what they'd mean inline, evaluated with the dialect's flowing value as
 // input. The dialect owns only the commas.
 
-d_comma = [&%parse.ws, [44, "','"] %parse.byte] %parse.right
+d_comma =
+  [&%parse.ws, [44, "','"] ~> %parse.byte] ~> %parse.right
 
 // One element: skip whitespace, then hand the host prefix-parser the exact start of the
 // expression and splice the span it reports.
@@ -20,25 +21,25 @@ d_elem = #'%meta.cb {
   =cb
   #'%parse {
     =st
-    [st.data, st.pos] cb {
+    [st.data, st.pos] ~> cb ~> {
       | =('int)end => [
-        Unquote[offset: st.pos, length: [end, st.pos] __integer_subtract__],
-        st ~[..., pos: end],
+        Unquote[offset: st.pos, length: [end, st.pos] ~> __integer_subtract__],
+        st ~> ~[..., pos: end],
       ]
-      | [st.pos, "an expression"] %parse.fail
+      | [st.pos, "an expression"] ~> %parse.fail
     }
   }
 }
 
 list_dialect = #(content: Str['bin], chain: '%meta.cb) {
-  $ =(content, chain: cb)
-  elem = &cb d_elem
-  elem_ws = [&%parse.ws, &elem] %parse.right
-  elems = [&elem_ws, &d_comma] %parse.sep_by
-  e2 = [&elems, &d_comma %parse.opt] %parse.left
-  e3 = [&e2, &%parse.ws] %parse.left
-  full = [&e3, #{ $ %meta.list_expr }] %parse.map
-  [content, &full] %parse.run
+  $ ~> =(content, chain: cb)
+  elem = &cb ~> d_elem
+  elem_ws = [&%parse.ws, &elem] ~> %parse.right
+  elems = [&elem_ws, &d_comma] ~> %parse.sep_by
+  e2 = [&elems, &d_comma ~> %parse.opt] ~> %parse.left
+  e3 = [&e2, &%parse.ws] ~> %parse.left
+  full = [&e3, #{ $ ~> %meta.list_expr }] ~> %parse.map
+  [content, &full] ~> %parse.run
 }
 
 [
@@ -69,12 +70,13 @@ list_dialect = #(content: Str['bin], chain: '%meta.cb) {
 
   append: #<'t>['<'t>, 't] {
     :doc "The list with an element added at the end."
-    [$0, Nil] reverse [Cons[$1, ~], Nil] reverse
+    [$0, Nil] ~> reverse
+    ~> [Cons[$1, ~], Nil] ~> reverse
   },
 
   reverse: #<'t>'<'t> {
     :doc "The list with its elements in reverse order."
-    [~, Nil] reverse
+    [~, Nil] ~> reverse
   },
 
   iter: #<'t>'<'t> {
@@ -85,12 +87,12 @@ list_dialect = #(content: Str['bin], chain: '%meta.cb) {
         | =Cons[head, tail] => [head, tail]
         | =Nil => []
       },
-    ] %iter.unfold
+    ] ~> %iter.unfold
   },
 
   collect: #<'t>'%iter<'t> {
     :doc "Collects the elements of an iterator into a list."
-    [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] %iter.fold
-    ~> [~, Nil] reverse
+    [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> %iter.fold
+    ~> [~, Nil] ~> reverse
   },
-] { :dialect &list_dialect }
+] ~> { :dialect &list_dialect }

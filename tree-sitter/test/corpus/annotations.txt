@@ -2,7 +2,7 @@
 annotation-only block
 ==================
 
-[] { :error DivisionByZero }
+[] ~> { :error DivisionByZero }
 
 ---
 
@@ -23,7 +23,7 @@ block with annotation prefix and body
 
 #'int {
   :doc "Doubles"
-  [~, 2] mul
+  [~, 2] ~> mul
 }
 
 ---
@@ -70,7 +70,7 @@ f:doc
 annotation retrieval in a chain
 ==================
 
-[4, 0] div :error
+[4, 0] ~> div ~> :error
 
 ---
 

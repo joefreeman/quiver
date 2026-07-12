@@ -141,21 +141,22 @@ spaced brace is not a dialect
 (source_file
   (expression
     (chain
-      (access
-        source: (import
-          (identifier)))
-      (block
-        (branch
-          (expression
-            (chain
-              (access
-                field: (identifier)))))))))
+      (application
+        function: (access
+          source: (import
+            (identifier)))
+        argument: (block
+          (branch
+            (expression
+              (chain
+                (access
+                  field: (identifier))))))))))
 
 ==================
 dialect in a chain
 ==================
 
-%json{ {"a": 1} } .a
+%json{ {"a": 1} } ~> .a
 
 ---
 

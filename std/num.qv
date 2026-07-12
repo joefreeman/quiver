@@ -39,16 +39,16 @@
 reduce = #'rational {
   // The caller must supply a non-zero denominator; the result is always canonical form,
   // whose denominator is positive.
-  :pre #{ $ =Rational[_, ('int)d]; [d, 0] __integer_compare__ { =0 => [] | Ok } }
-  :post #{ $ =(out: Rational[_, ('int)d]); [d, 0] __integer_compare__ =1 }
+  :pre #{ $ ~> =Rational[_, ('int)d]; [d, 0] ~> __integer_compare__ ~> { =0 => [] | Ok } }
+  :post #{ $ ~> =(out: Rational[_, ('int)d]); [d, 0] ~> __integer_compare__ ~> =1 }
   =Rational[n, d]
   {
-    | [d, 0] __integer_compare__ =-1 => {
-      Rational[[n, -1] __integer_multiply__, [d, -1] __integer_multiply__] ^
+    | [d, 0] ~> __integer_compare__ ~> =-1 => {
+      Rational[[n, -1] ~> __integer_multiply__, [d, -1] ~> __integer_multiply__] ~> ^
     }
     | {
-      g = [n, d] __integer_gcd__
-      Rational[[n, g] __integer_divide__, [d, g] __integer_divide__]
+      g = [n, d] ~> __integer_gcd__
+      Rational[[n, g] ~> __integer_divide__, [d, g] ~> __integer_divide__]
     }
   }
 }
@@ -64,41 +64,43 @@ to_rational = #'coeff {
 }
 
 // Sign of a canonical rational (-1/0/1); the denominator is positive by invariant.
-rsign = #'rational { =Rational[n, _] => [n, 0] __integer_compare__ }
+rsign = #'rational { =Rational[n, _] => [n, 0] ~> __integer_compare__ }
 
 // Negate a rational.
-rneg = #'rational { =Rational[n, d] => Rational[[n, -1] __integer_multiply__, d] reduce }
+rneg = #'rational {
+  =Rational[n, d] => Rational[[n, -1] ~> __integer_multiply__, d] ~> reduce
+}
 
 // Rational arithmetic on two canonical rationals, each returning a reduced rational.
 radd = #['rational, 'rational] {
   =[Rational[a, b], Rational[c, d]]
   Rational[
-    [[a, d] __integer_multiply__, [c, b] __integer_multiply__] __integer_add__,
-    [b, d] __integer_multiply__,
-  ] reduce
+    [[a, d] ~> __integer_multiply__, [c, b] ~> __integer_multiply__] ~> __integer_add__,
+    [b, d] ~> __integer_multiply__,
+  ] ~> reduce
 }
 rsub = #['rational, 'rational] {
   =[Rational[a, b], Rational[c, d]]
   Rational[
-    [[a, d] __integer_multiply__, [c, b] __integer_multiply__] __integer_subtract__,
-    [b, d] __integer_multiply__,
-  ] reduce
+    [[a, d] ~> __integer_multiply__, [c, b] ~> __integer_multiply__] ~> __integer_subtract__,
+    [b, d] ~> __integer_multiply__,
+  ] ~> reduce
 }
 rmul = #['rational, 'rational] {
   =[Rational[a, b], Rational[c, d]]
-  Rational[[a, c] __integer_multiply__, [b, d] __integer_multiply__] reduce
+  Rational[[a, c] ~> __integer_multiply__, [b, d] ~> __integer_multiply__] ~> reduce
 }
 // Rational quotient assuming a non-zero divisor (the caller guarantees it).
 rquot = #['rational, 'rational] {
   =[Rational[a, b], Rational[c, d]]
-  Rational[[a, d] __integer_multiply__, [b, c] __integer_multiply__] reduce
+  Rational[[a, d] ~> __integer_multiply__, [b, c] ~> __integer_multiply__] ~> reduce
 }
 
 // Compare two canonical rationals, returning -1, 0, or 1 (cross-multiplied; denominators
 // positive by invariant, so the sign of the comparison is preserved).
 rcompare = #['rational, 'rational] {
   =[Rational[a, b], Rational[c, d]]
-  [[a, d] __integer_multiply__, [c, b] __integer_multiply__] __integer_compare__
+  [[a, d] ~> __integer_multiply__, [c, b] ~> __integer_multiply__] ~> __integer_compare__
 }
 
 // --- Surd kernel ---
@@ -108,25 +110,25 @@ rcompare = #['rational, 'rational] {
 sqfree = #['int, 'int, 'int] {
   =[k, m, d]
   {
-    | [[d, d] __integer_multiply__, m] __integer_compare__
+    | [[d, d] ~> __integer_multiply__, m] ~> __integer_compare__
       ~> =1 => [k, m]
-    | [m, [d, d] __integer_multiply__] __integer_modulo__
+    | [m, [d, d] ~> __integer_multiply__] ~> __integer_modulo__
       ~> =0 => {
         [
-          [k, d] __integer_multiply__,
-          [m, [d, d] __integer_multiply__] __integer_divide__,
+          [k, d] ~> __integer_multiply__,
+          [m, [d, d] ~> __integer_multiply__] ~> __integer_divide__,
           d,
-        ] ^
+        ] ~> ^
       }
-    | [k, m, [d, 1] __integer_add__] ^
+    | [k, m, [d, 1] ~> __integer_add__] ~> ^
   }
 }
 
 // Expand a number to `[a, b, n]` (rational a, rational b, radical n); a pure rational is
 // `[a, 0, 1]`. The inverse of `build`.
 explode = #' {
-  | =Surd[a, b, n] => [a to_rational, b to_rational, n]
-  | =r => [r to_rational, Rational[0, 1], 1]
+  | =Surd[a, b, n] => [a ~> to_rational, b ~> to_rational, n]
+  | =r => [r ~> to_rational, Rational[0, 1], 1]
 }
 
 // The radical shared by two operands, or nil if they carry different (incompatible) radicals.
@@ -134,9 +136,9 @@ explode = #' {
 radical = #['rational, 'int, 'rational, 'int] {
   =[b1, n1, b2, n2]
   {
-    | b1 rsign =0 => n2
-    | b2 rsign =0 => n1
-    | [n1, n2] __integer_compare__ =0 => n1
+    | b1 ~> rsign ~> =0 => n2
+    | b2 ~> rsign ~> =0 => n1
+    | [n1, n2] ~> __integer_compare__ ~> =0 => n1
     | []
   }
 }
@@ -147,9 +149,9 @@ radical = #['rational, 'int, 'rational, 'int] {
 build = #['rational, 'rational, 'int] {
   =[a, b, n]
   {
-    | [n, 1] __integer_compare__ =0 => [a, b] radd lower
-    | b rsign =0 => a lower
-    | Surd[a lower, b lower, n]
+    | [n, 1] ~> __integer_compare__ ~> =0 => [a, b] ~> radd ~> lower
+    | b ~> rsign ~> =0 => a ~> lower
+    | Surd[a ~> lower, b ~> lower, n]
   }
 }
 
@@ -157,21 +159,21 @@ build = #['rational, 'rational, 'int] {
 // and surd parts have opposing signs the decision reduces to comparing `a²` with `b²·n`.
 ssign = #['rational, 'rational, 'int] {
   =[a, b, n]
-  sb = b rsign
+  sb = b ~> rsign
   {
-    | [sb, 0] __integer_compare__ =0 => a rsign
+    | [sb, 0] ~> __integer_compare__ ~> =0 => a ~> rsign
     | {
-      a2 = [a, a] rmul
-      b2n = [[b, b] rmul, Rational[n, 1]] rmul
-      dsign = [a2, b2n] rcompare
-      sa = a rsign
+      a2 = [a, a] ~> rmul
+      b2n = [[b, b] ~> rmul, Rational[n, 1]] ~> rmul
+      dsign = [a2, b2n] ~> rcompare
+      sa = a ~> rsign
       {
-        | [sb, 0] __integer_compare__ =1 => {
-          | [sa, 0] __integer_compare__ =-1 => [dsign, -1] __integer_multiply__
+        | [sb, 0] ~> __integer_compare__ ~> =1 => {
+          | [sa, 0] ~> __integer_compare__ ~> =-1 => [dsign, -1] ~> __integer_multiply__
           | 1
         }
         | {
-          | [sa, 0] __integer_compare__ =1 => dsign
+          | [sa, 0] ~> __integer_compare__ ~> =1 => dsign
           | -1
         }
       }
@@ -183,60 +185,60 @@ ssign = #['rational, 'rational, 'int] {
 // (`[...] radical` returns nil and the re-emitted `n` short-circuits the whole chain).
 surd_add = #[', '] {
   =[x, y]
-  x explode =[a1, b1, n1]
-  y explode =[a2, b2, n2]
-  [b1, n1, b2, n2] radical =('int)n
-  [[a1, a2] radd, [b1, b2] radd, n] build
+  x ~> explode ~> =[a1, b1, n1]
+  y ~> explode ~> =[a2, b2, n2]
+  [b1, n1, b2, n2] ~> radical ~> =('int)n
+  [[a1, a2] ~> radd, [b1, b2] ~> radd, n] ~> build
 }
 surd_sub = #[', '] {
   =[x, y]
-  x explode =[a1, b1, n1]
-  y explode =[a2, b2, n2]
-  [b1, n1, b2, n2] radical =('int)n
-  [[a1, a2] rsub, [b1, b2] rsub, n] build
+  x ~> explode ~> =[a1, b1, n1]
+  y ~> explode ~> =[a2, b2, n2]
+  [b1, n1, b2, n2] ~> radical ~> =('int)n
+  [[a1, a2] ~> rsub, [b1, b2] ~> rsub, n] ~> build
 }
 // (a₁ + b₁√n)(a₂ + b₂√n) = (a₁a₂ + b₁b₂·n) + (a₁b₂ + a₂b₁)√n.
 surd_mul = #[', '] {
   =[x, y]
-  x explode =[a1, b1, n1]
-  y explode =[a2, b2, n2]
-  [b1, n1, b2, n2] radical =('int)n
+  x ~> explode ~> =[a1, b1, n1]
+  y ~> explode ~> =[a2, b2, n2]
+  [b1, n1, b2, n2] ~> radical ~> =('int)n
   [
-    [[a1, a2] rmul, [[b1, b2] rmul, Rational[n, 1]] rmul] radd,
-    [[a1, b2] rmul, [a2, b1] rmul] radd,
+    [[a1, a2] ~> rmul, [[b1, b2] ~> rmul, Rational[n, 1]] ~> rmul] ~> radd,
+    [[a1, b2] ~> rmul, [a2, b1] ~> rmul] ~> radd,
     n,
-  ] build
+  ] ~> build
 }
 // Multiply by the conjugate: divide by `a₂ + b₂√n` via the rational denominator a₂² − b₂²·n.
 surd_div = #[', '] {
   =[x, y]
-  x explode =[a1, b1, n1]
-  y explode =[a2, b2, n2]
-  [b1, n1, b2, n2] radical =('int)n
+  x ~> explode ~> =[a1, b1, n1]
+  y ~> explode ~> =[a2, b2, n2]
+  [b1, n1, b2, n2] ~> radical ~> =('int)n
 
   dd =
-    [[a2, a2] rmul, [[b2, b2] rmul, Rational[n, 1]] rmul] rsub
+    [[a2, a2] ~> rmul, [[b2, b2] ~> rmul, Rational[n, 1]] ~> rmul] ~> rsub
 
   {
-    | dd rsign =0 => []
+    | dd ~> rsign ~> =0 => []
     | {
       [
         [
-          [[a1, a2] rmul, [[b1, b2] rmul, Rational[n, 1]] rmul] rsub,
+          [[a1, a2] ~> rmul, [[b1, b2] ~> rmul, Rational[n, 1]] ~> rmul] ~> rsub,
           dd,
-        ] rquot,
-        [[[b1, a2] rmul, [a1, b2] rmul] rsub, dd] rquot,
+        ] ~> rquot,
+        [[[b1, a2] ~> rmul, [a1, b2] ~> rmul] ~> rsub, dd] ~> rquot,
         n,
-      ] build
+      ] ~> build
     }
   }
 }
 surd_compare = #[', '] {
   =[x, y]
-  x explode =[a1, b1, n1]
-  y explode =[a2, b2, n2]
-  [b1, n1, b2, n2] radical =('int)n
-  [[a1, a2] rsub, [b1, b2] rsub, n] ssign
+  x ~> explode ~> =[a1, b1, n1]
+  y ~> explode ~> =[a2, b2, n2]
+  [b1, n1, b2, n2] ~> radical ~> =('int)n
+  [[a1, a2] ~> rsub, [b1, b2] ~> rsub, n] ~> ssign
 }
 
 // Compare two numbers, returning -1/0/1 (or nil for incomparable mixed radicals). Integers
@@ -244,11 +246,11 @@ surd_compare = #[', '] {
 compare = #['opt, 'opt] {
   | =[[], _] => []
   | =[_, []] => []
-  | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_compare
-  | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_compare
-  | =[Rational[a, b], y] => [Rational[a, b], y to_rational] rcompare
-  | =[x, Rational[c, d]] => [x to_rational, Rational[c, d]] rcompare
-  | =[x, y] => [x, y] __integer_compare__
+  | =[Surd[a, b, n], y] => [Surd[a, b, n], y] ~> surd_compare
+  | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] ~> surd_compare
+  | =[Rational[a, b], y] => [Rational[a, b], y ~> to_rational] ~> rcompare
+  | =[x, Rational[c, d]] => [x ~> to_rational, Rational[c, d]] ~> rcompare
+  | =[x, y] => [x, y] ~> __integer_compare__
 }
 
 // Truncate toward zero to a bare integer. For a surd `a + b√n`, work with `|v|` (so the
@@ -259,47 +261,49 @@ compare = #['opt, 'opt] {
 to_int = #'opt {
   :doc "Truncates a number toward zero to an integer; nil for a nil operand."
   | =Surd[a, b, n] => {
-    ar = a to_rational
-    br = b to_rational
-    [ar, br, n] ssign =sgn
+    ar = a ~> to_rational
+    br = b ~> to_rational
+    [ar, br, n] ~> ssign ~> =sgn
     {
-      | [sgn, 0] __integer_compare__ =-1 => [ar rneg, br rneg]
+      | [sgn, 0] ~> __integer_compare__ ~> =-1 => [ar ~> rneg, br ~> rneg]
       | [ar, br]
-    } =[Rational[pa, qa], Rational[pb, qb]]
-    p = [pa, qb] __integer_multiply__
-    q = [pb, qa] __integer_multiply__
-    d = [qa, qb] __integer_multiply__
+    } ~> =[Rational[pa, qa], Rational[pb, qb]]
+    p = [pa, qb] ~> __integer_multiply__
+    q = [pb, qa] ~> __integer_multiply__
+    d = [qa, qb] ~> __integer_multiply__
 
     s =
-      [[q, q] __integer_multiply__, n] __integer_multiply__
+      [[q, q] ~> __integer_multiply__, n] ~> __integer_multiply__
       ~> __integer_sqrt__
 
     nlo = {
-      | [q, 0] __integer_compare__ =1 => [p, s] __integer_add__
-      | [p, [s, 1] __integer_add__] __integer_subtract__
+      | [q, 0] ~> __integer_compare__ ~> =1 => [p, s] ~> __integer_add__
+      | {
+        [p, [s, 1] ~> __integer_add__] ~> __integer_subtract__
+      }
     }
-    [sgn, [nlo, d] __integer_divide__] __integer_multiply__
+    [sgn, [nlo, d] ~> __integer_divide__] ~> __integer_multiply__
   }
-  | ='coeff => { $ to_rational =Rational[m, d]; [m, d] __integer_divide__ }
+  | ='coeff => { $ ~> to_rational ~> =Rational[m, d]; [m, d] ~> __integer_divide__ }
 }
 
 // Sign of a number: -1, 0, or 1 (nil for a nil operand).
 sign = #'opt {
   :doc "The sign of a number: -1, 0, or 1; nil for a nil operand."
-  [$, 0] compare
+  [$, 0] ~> compare
 }
 
 // Smaller / larger of two numbers (nil if either operand is nil).
 min = #['opt, 'opt] {
   :doc "The smaller of two numbers; nil when either operand is nil."
   | =([[], _] | [_, []]) => []
-  | compare =1 => $1
+  | compare ~> =1 => $1
   | $0
 }
 max = #['opt, 'opt] {
   :doc "The larger of two numbers; nil when either operand is nil."
   | =([[], _] | [_, []]) => []
-  | compare =-1 => $1
+  | compare ~> =-1 => $1
   | $0
 }
 
@@ -309,18 +313,18 @@ clamp = #['opt, 'opt, 'opt] {
   // The caller must give a non-empty range (`lo ≤ hi`); the result then lies within it.
   // Comparisons that are nil (a nil operand, or incompatible surds) can't witness a
   // breach, so they pass — the checks only fire on a definite ordering violation.
-  :pre #{ $ =[_, lo, hi]; [lo, hi] compare { =1 => [] | Ok } }
+  :pre #{ $ ~> =[_, lo, hi]; [lo, hi] ~> compare ~> { =1 => [] | Ok } }
   :post #{
-    $ =[in: [_, lo, hi], out: o]
-    o {
+    $ ~> =[in: [_, lo, hi], out: o]
+    o ~> {
       | =[] => Ok
-      | =v => { [lo, v] compare { =1 => [] | Ok }; [v, hi] compare { =1 => [] | Ok } }
+      | =v => { [lo, v] ~> compare ~> { =1 => [] | Ok }; [v, hi] ~> compare ~> { =1 => [] | Ok } }
     }
   }
   | =([[], _, _] | [_, [], _] | [_, _, []]) => []
   | =[x, lo, hi] => {
-    | [x, lo] compare =-1 => lo
-    | [x, hi] compare =1 => hi
+    | [x, lo] ~> compare ~> =-1 => lo
+    | [x, hi] ~> compare ~> =1 => hi
     | x
   }
 }
@@ -330,17 +334,17 @@ clamp = #['opt, 'opt, 'opt] {
 // for a non-nil operand, so nil flows straight through.
 floor = #'opt {
   :doc "The largest integer not greater than the number; nil for a nil operand."
-  $ to_int =('int)t
+  $ ~> to_int ~> =('int)t
   {
-    | [$, t] compare =-1 => [t, 1] __integer_subtract__
+    | [$, t] ~> compare ~> =-1 => [t, 1] ~> __integer_subtract__
     | t
   }
 }
 ceil = #'opt {
   :doc "The smallest integer not less than the number; nil for a nil operand."
-  $ to_int =('int)t
+  $ ~> to_int ~> =('int)t
   {
-    | [$, t] compare =1 => [t, 1] __integer_add__
+    | [$, t] ~> compare ~> =1 => [t, 1] ~> __integer_add__
     | t
   }
 }
@@ -351,13 +355,13 @@ ceil = #'opt {
 round = #'opt {
   :doc "Rounds to the nearest integer, halves away from zero; nil for a nil operand."
   | =[] => []
-  | floor =('int)f => {
-    mid = f [~, 2] __integer_multiply__ [~, 1] __integer_add__ Rational[~, 2]
+  | floor ~> =('int)f => {
+    mid = f ~> [~, 2] ~> __integer_multiply__ ~> [~, 1] ~> __integer_add__ ~> Rational[~, 2]
     {
-      | [$, mid] compare =1 => [f, 1] __integer_add__
-      | [$, mid] compare =-1 => f
-      | [f, 0] __integer_compare__ =-1 => f
-      | [f, 1] __integer_add__
+      | [$, mid] ~> compare ~> =1 => [f, 1] ~> __integer_add__
+      | [$, mid] ~> compare ~> =-1 => f
+      | [f, 0] ~> __integer_compare__ ~> =-1 => f
+      | [f, 1] ~> __integer_add__
     }
   }
 }
@@ -374,24 +378,32 @@ round = #'opt {
 
 'dexpr = '%meta.expr
 
-d_add = #['dexpr, 'dexpr] { ["add", $0, $1] %meta.call2 }
-d_sub = #['dexpr, 'dexpr] { ["sub", $0, $1] %meta.call2 }
-d_mul = #['dexpr, 'dexpr] { ["mul", $0, $1] %meta.call2 }
-d_div = #['dexpr, 'dexpr] { ["div", $0, $1] %meta.call2 }
+d_add = #['dexpr, 'dexpr] { ["add", $0, $1] ~> %meta.call2 }
+d_sub = #['dexpr, 'dexpr] { ["sub", $0, $1] ~> %meta.call2 }
+d_mul = #['dexpr, 'dexpr] { ["mul", $0, $1] ~> %meta.call2 }
+d_div = #['dexpr, 'dexpr] { ["div", $0, $1] ~> %meta.call2 }
 
 // Operator parsers: leading whitespace, the symbol, yielding the combining function.
 d_add_op = {
-  plus = [[43, "'+'"] %parse.byte, #{ &d_add }] %parse.map
-  minus = [[45, "'-'"] %parse.byte, #{ &d_sub }] %parse.map
-  ops = [&plus, &minus] %parse.alt2
-  [&%parse.ws, &ops] %parse.right
+  plus =
+    [[43, "'+'"] ~> %parse.byte, #{ &d_add }] ~> %parse.map
+
+  minus =
+    [[45, "'-'"] ~> %parse.byte, #{ &d_sub }] ~> %parse.map
+
+  ops = [&plus, &minus] ~> %parse.alt2
+  [&%parse.ws, &ops] ~> %parse.right
 }
 
 d_mul_op = {
-  times = [[42, "'*'"] %parse.byte, #{ &d_mul }] %parse.map
-  divide = [[47, "'/'"] %parse.byte, #{ &d_div }] %parse.map
-  ops = [&times, &divide] %parse.alt2
-  [&%parse.ws, &ops] %parse.right
+  times =
+    [[42, "'*'"] ~> %parse.byte, #{ &d_mul }] ~> %parse.map
+
+  divide =
+    [[47, "'/'"] ~> %parse.byte, #{ &d_div }] ~> %parse.map
+
+  ops = [&times, &divide] ~> %parse.alt2
+  [&%parse.ws, &ops] ~> %parse.right
 }
 
 // One host term as an operand: the host prefix-parser answers the exclusive end offset
@@ -400,19 +412,19 @@ d_term = #'%meta.cb {
   =cb
   #'%parse {
     =st
-    [st.data, st.pos] cb {
+    [st.data, st.pos] ~> cb ~> {
       | =('int)end => [
-        Unquote[offset: st.pos, length: [end, st.pos] __integer_subtract__],
-        st ~[..., pos: end],
+        Unquote[offset: st.pos, length: [end, st.pos] ~> __integer_subtract__],
+        st ~> ~[..., pos: end],
       ]
-      | [st.pos, "an expression"] %parse.fail
+      | [st.pos, "an expression"] ~> %parse.fail
     }
   }
 }
 
 // The two precedence levels over a factor parser.
 d_expr_of = #'%parse.p<'dexpr> {
-  =factor; term = [&factor, &d_mul_op] %parse.chainl; [&term, &d_add_op] %parse.chainl
+  =factor; term = [&factor, &d_mul_op] ~> %parse.chainl; [&term, &d_add_op] ~> %parse.chainl
 }
 
 // The factor grammar, self-passed (together with the host-term operand parser) to tie
@@ -420,30 +432,36 @@ d_expr_of = #'%parse.p<'dexpr> {
 // dialect's own parens and number literals first, the host term last.
 d_factor_step = #[#^ -> (['dexpr, '%parse] | []), '%parse.p<'dexpr>, '%parse] {
   =[self, term, st]
-  factor = #'%parse { [&self, &term, $] self }
-  expr = &factor d_expr_of
+  factor = #'%parse { [&self, &term, $] ~> self }
+  expr = &factor ~> d_expr_of
 
-  n1 = [[45, "'-'"] %parse.byte, &factor] %parse.right
+  n1 =
+    [[45, "'-'"] ~> %parse.byte, &factor] ~> %parse.right
 
-  neg = [&n1, #{ Call[member: "neg", arg: $] }] %parse.map
+  neg =
+    [&n1, #{ Call[member: "neg", arg: $] }] ~> %parse.map
 
-  close = [&%parse.ws, [41, "')'"] %parse.byte] %parse.right
-  p1 = [[40, "'('"] %parse.byte, &expr] %parse.right
-  paren = [&p1, &close] %parse.left
+  close =
+    [&%parse.ws, [41, "')'"] ~> %parse.byte] ~> %parse.right
 
-  core = [&paren, &%parse.int, &neg, &term] %parse.alt4
+  p1 =
+    [[40, "'('"] ~> %parse.byte, &expr] ~> %parse.right
 
-  core_ws = [&%parse.ws, &core] %parse.right
-  st core_ws
+  paren = [&p1, &close] ~> %parse.left
+
+  core = [&paren, &%parse.int, &neg, &term] ~> %parse.alt4
+
+  core_ws = [&%parse.ws, &core] ~> %parse.right
+  st ~> core_ws
 }
 
 num_dialect = #(content: Str['bin], term: '%meta.cb) {
-  $ =(content, term: cb)
-  host_term = &cb d_term
-  factor = #'%parse { [&d_factor_step, &host_term, $] d_factor_step }
-  expr = &factor d_expr_of
-  full = [&expr, &%parse.ws] %parse.left
-  [content, &full] %parse.run
+  $ ~> =(content, term: cb)
+  host_term = &cb ~> d_term
+  factor = #'%parse { [&d_factor_step, &host_term, $] ~> d_factor_step }
+  expr = &factor ~> d_expr_of
+  full = [&expr, &%parse.ws] ~> %parse.left
+  [content, &full] ~> %parse.run
 }
 
 [
@@ -466,13 +484,15 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
     :doc "The exact square root, as a rational or surd; nil on negative or surd input."
     | =Surd[a, b, n] => []
     | ='coeff => {
-      $ to_rational =Rational[p, q]
+      $ ~> to_rational ~> =Rational[p, q]
       {
-        | [p, 0] __integer_compare__ =-1 => []
-        | [p, 0] __integer_compare__ =0 => 0
+        | [p, 0] ~> __integer_compare__ ~> =-1 => []
+        | [p, 0] ~> __integer_compare__ ~> =0 => 0
         | {
-          [1, [p, q] __integer_multiply__, 2] sqfree =[k, m]
-          [Rational[0, 1], Rational[k, q] reduce, m] build
+          [1, [p, q] ~> __integer_multiply__, 2] ~> sqfree
+          ~> =[k, m]
+
+          [Rational[0, 1], Rational[k, q] ~> reduce, m] ~> build
         }
       }
     }
@@ -484,29 +504,29 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
   add: #['opt, 'opt] {
     :doc "Adds two numbers exactly; nil on a nil operand or mixed radicals."
     | =([[], _] | [_, []]) => []
-    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_add
-    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_add
-    | =[Rational[a, b], y] => [Rational[a, b], y to_rational] radd
-    | =[x, Rational[c, d]] => [x to_rational, Rational[c, d]] radd
-    | =[a, b] => [a, b] __integer_add__
+    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] ~> surd_add
+    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] ~> surd_add
+    | =[Rational[a, b], y] => [Rational[a, b], y ~> to_rational] ~> radd
+    | =[x, Rational[c, d]] => [x ~> to_rational, Rational[c, d]] ~> radd
+    | =[a, b] => [a, b] ~> __integer_add__
   },
   sub: #['opt, 'opt] {
     :doc "Subtracts the second number from the first exactly; nil on a nil operand or mixed radicals."
     | =([[], _] | [_, []]) => []
-    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_sub
-    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_sub
-    | =[Rational[a, b], y] => [Rational[a, b], y to_rational] rsub
-    | =[x, Rational[c, d]] => [x to_rational, Rational[c, d]] rsub
-    | =[a, b] => [a, b] __integer_subtract__
+    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] ~> surd_sub
+    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] ~> surd_sub
+    | =[Rational[a, b], y] => [Rational[a, b], y ~> to_rational] ~> rsub
+    | =[x, Rational[c, d]] => [x ~> to_rational, Rational[c, d]] ~> rsub
+    | =[a, b] => [a, b] ~> __integer_subtract__
   },
   mul: #['opt, 'opt] {
     :doc "Multiplies two numbers exactly; nil on a nil operand or mixed radicals."
     | =([[], _] | [_, []]) => []
-    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_mul
-    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_mul
-    | =[Rational[a, b], y] => [Rational[a, b], y to_rational] rmul
-    | =[x, Rational[c, d]] => [x to_rational, Rational[c, d]] rmul
-    | =[a, b] => [a, b] __integer_multiply__
+    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] ~> surd_mul
+    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] ~> surd_mul
+    | =[Rational[a, b], y] => [Rational[a, b], y ~> to_rational] ~> rmul
+    | =[x, Rational[c, d]] => [x ~> to_rational, Rational[c, d]] ~> rmul
+    | =[a, b] => [a, b] ~> __integer_multiply__
   },
 
   // Division. With surd operands, rationalize; otherwise exact rational division (always a
@@ -514,15 +534,15 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
   div: #['opt, 'opt] {
     :doc "Divides exactly; nil on a zero divisor, nil operand, or mixed radicals."
     | =([[], _] | [_, []]) => []
-    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] surd_div
-    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] surd_div
+    | =[Surd[a, b, n], y] => [Surd[a, b, n], y] ~> surd_div
+    | =[x, Surd[a, b, n]] => [x, Surd[a, b, n]] ~> surd_div
     | =[x, y] => {
-      x to_rational =Rational[a, b]
-      y to_rational =Rational[c, d]
+      x ~> to_rational ~> =Rational[a, b]
+      y ~> to_rational ~> =Rational[c, d]
       {
-        | c =0 => []
+        | c ~> =0 => []
         | {
-          Rational[[a, d] __integer_multiply__, [b, c] __integer_multiply__] reduce
+          Rational[[a, d] ~> __integer_multiply__, [b, c] ~> __integer_multiply__] ~> reduce
         }
       }
     }
@@ -531,26 +551,30 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
   // Negation preserves kind: integer stays integer, rational stays rational, surd stays surd.
   neg: #'opt {
     :doc "Negates a number, preserving its kind; nil for a nil operand."
-    | =Surd[a, b, n] => [a to_rational rneg, b to_rational rneg, n] build
-    | =Rational[m, d] => Rational[[m, -1] __integer_multiply__, d] reduce
-    | ='int => [$, -1] __integer_multiply__
+    | =Surd[a, b, n] => {
+      [a ~> to_rational ~> rneg, b ~> to_rational ~> rneg, n] ~> build
+    }
+    | =Rational[m, d] => {
+      Rational[[m, -1] ~> __integer_multiply__, d] ~> reduce
+    }
+    | ='int => [$, -1] ~> __integer_multiply__
   },
 
   // Absolute value, preserving kind.
   abs: #'opt {
     :doc "The absolute value of a number, preserving its kind; nil for a nil operand."
     // The result is never negative (nil passes through).
-    :post #{ $ =(out: o); o { =[] => Ok | sign { =-1 => [] | Ok } } }
+    :post #{ $ ~> =(out: o); o ~> { =[] => Ok | sign ~> { =-1 => [] | Ok } } }
     | =Surd[a, b, n] => {
-      ar = a to_rational
-      br = b to_rational
+      ar = a ~> to_rational
+      br = b ~> to_rational
       {
-        | [ar, br, n] ssign =-1 => [ar rneg, br rneg, n] build
+        | [ar, br, n] ~> ssign ~> =-1 => [ar ~> rneg, br ~> rneg, n] ~> build
         | Surd[a, b, n]
       }
     }
-    | =Rational[m, d] => Rational[m __integer_abs__, d]
-    | ='int => $ __integer_abs__
+    | =Rational[m, d] => Rational[m ~> __integer_abs__, d]
+    | ='int => $ ~> __integer_abs__
   },
 
   // Truncate toward zero / round toward ∓∞ / round to nearest, each to a bare integer. See the
@@ -568,22 +592,22 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
 
   eq?: #['opt, 'opt] {
     :doc "Whether two numbers are equal."
-    compare =0; Ok
+    compare ~> =0; Ok
   },
   lt?: #['opt, 'opt] {
     :doc "Whether the first number is less than the second."
-    compare =-1; Ok
+    compare ~> =-1; Ok
   },
   le?: #['opt, 'opt] {
     :doc "Whether the first number is at most the second."
-    compare { =-1 | =0 }; Ok
+    compare ~> { =-1 | =0 }; Ok
   },
   gt?: #['opt, 'opt] {
     :doc "Whether the first number is greater than the second."
-    compare =1; Ok
+    compare ~> =1; Ok
   },
   ge?: #['opt, 'opt] {
     :doc "Whether the first number is at least the second."
-    compare { =0 | =1 }; Ok
+    compare ~> { =0 | =1 }; Ok
   },
-] { :dialect &num_dialect }
+] ~> { :dialect &num_dialect }

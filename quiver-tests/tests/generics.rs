@@ -43,11 +43,11 @@ fn test_generic_function_single_type_param() {
 
     // Inline functions are not auto-called; bind first, then call
     quiver()
-        .evaluate("f = #<'t>'t { =x => x }; 42 f")
+        .evaluate("f = #<'t>'t { =x => x }; 42 ~> f")
         .expect_type("'int");
 
     quiver()
-        .evaluate("f = #<'t>'t { =x => x }; 0x00 f")
+        .evaluate("f = #<'t>'t { =x => x }; 0x00 ~> f")
         .expect_type("'bin");
 }
 
@@ -57,7 +57,7 @@ fn test_generic_function_multiple_type_params() {
         .evaluate(
             r#"
             pair = #<'a, 'b>['a, 'b] { =[x, y] => [y, x] };
-            [1, 0x00] pair
+            [1, 0x00] ~> pair
             "#,
         )
         .expect("[0x00, 1]");
@@ -67,7 +67,7 @@ fn test_generic_function_multiple_type_params() {
 fn test_generic_function_with_same_type_param_widening() {
     // Inline functions are not auto-called; bind first, then call
     quiver()
-        .evaluate("f = #<'t>['t, 't] { =[a, _] => a }; [1, 0x00] f")
+        .evaluate("f = #<'t>['t, 't] { =[a, _] => a }; [1, 0x00] ~> f")
         .expect_type("'bin | 'int");
 }
 
@@ -81,7 +81,7 @@ fn test_generic_function_with_recursive_type() {
               | =Cons[h, _] => h
               | =Nil => 0
             };
-            Cons[42, Cons[99, Nil]] head
+            Cons[42, Cons[99, Nil]] ~> head
             "#,
         )
         .expect("42");
@@ -96,7 +96,7 @@ fn test_generic_type_structural_equivalence() {
             f = #'list<'int> { =xs => xs };
             g = #'list<'int> { =xs => xs };
             xs = Cons[42, Nil];
-            xs f g
+            xs ~> f ~> g
             "#,
         )
         .expect("Cons[42, Nil]");
@@ -107,7 +107,7 @@ fn test_heterogeneous_list_via_widening() {
     quiver()
         .evaluate(
             r#"
-            %list.new [~, 5] %list.append [~, "a"] %list.append;
+            %list.new ~> [~, 5] ~> %list.append ~> [~, "a"] ~> %list.append;
             "#,
         )
         .expect_type("Cons[('int | Str['bin]), μ1] | Nil");
@@ -144,7 +144,7 @@ fn test_generic_function_with_tuple_fields() {
             swap = #<'a, 'b>'pair<'a, 'b> {
               =Pair[fst: x, snd: y] => Pair[fst: y, snd: x]
             };
-            Pair[fst: 1, snd: "a"] swap
+            Pair[fst: 1, snd: "a"] ~> swap
             "#,
         )
         .expect("Pair[fst: \"a\", snd: 1]");
@@ -171,7 +171,7 @@ fn test_generic_type_with_partial_type() {
             r#"
             'pair<'t> = Pair[fst: 't, snd: 't];
             get_fst = #<'t>'pair<'t> { .fst };
-            Pair[fst: 42, snd: 99] get_fst
+            Pair[fst: 42, snd: 99] ~> get_fst
             "#,
         )
         .expect("42");
@@ -184,10 +184,10 @@ fn test_generic_function_pattern_matching() {
             r#"
             'list<'t> = Nil | Cons['t, ^];
             sum_first_two = #'list<'int> {
-              | =Cons[a, Cons[b, _]] => [a, b] __integer_add__
+              | =Cons[a, Cons[b, _]] => [a, b] ~> __integer_add__
               | 0
             };
-            Cons[10, Cons[20, Cons[30, Nil]]] sum_first_two
+            Cons[10, Cons[20, Cons[30, Nil]]] ~> sum_first_two
             "#,
         )
         .expect("30");
@@ -227,7 +227,7 @@ fn test_generic_function_with_union_result() {
             r#"
             'maybe<'t> = None | Some['t];
             wrap_some = #<'t>'t { =x => Some[x] };
-            42 wrap_some
+            42 ~> wrap_some
             "#,
         )
         .expect("Some[42]");
@@ -241,7 +241,7 @@ fn test_generic_nested_function_calls() {
             'list<'t> = Nil | Cons['t, ^];
             singleton = #<'t>'t { =x => Cons[x, Nil] };
             head = #<'t>'list<'t> { =Cons[h, _] => h };
-            42 singleton head
+            42 ~> singleton ~> head
             "#,
         )
         .expect("42");
@@ -268,9 +268,9 @@ fn test_rigid_type_variable_rejects_concrete_requirement() {
     quiver()
         .evaluate(
             r#"
-            g = #<'t>['int, 't] { =[a, b]; [a, 1] __integer_add__ };
-            f = #<'u>'u { [$, 5] g };
-            #{ "x" f }
+            g = #<'t>['int, 't] { =[a, b]; [a, 1] ~> __integer_add__ };
+            f = #<'u>'u { [$, 5] ~> g };
+            #{ "x" ~> f }
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(

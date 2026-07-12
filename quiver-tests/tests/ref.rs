@@ -4,14 +4,14 @@ use common::*;
 #[test]
 fn test_ref_creation() {
     // Each %ref creates a unique ref
-    quiver().evaluate("%ref =r; r").expect_type("'ref");
+    quiver().evaluate("%ref ~> =r; r").expect_type("'ref");
 }
 
 #[test]
 fn test_ref_uniqueness() {
     // Multiple refs are unique
     quiver()
-        .evaluate("[%ref, %ref, %ref] =[a, b, c]; [a =&b, b =&c, a =&c]")
+        .evaluate("[%ref, %ref, %ref] ~> =[a, b, c]; [a ~> =&b, b ~> =&c, a ~> =&c]")
         .expect("[[], [], []]");
 }
 
@@ -19,27 +19,29 @@ fn test_ref_uniqueness() {
 fn test_ref_via_reference_binding() {
     // Binding the function with `&%ref` mints a fresh ref on each call
     quiver()
-        .evaluate("ref = &%ref; a = ref; b = ref; a =&b")
+        .evaluate("ref = &%ref; a = ref; b = ref; a ~> =&b")
         .expect("[]");
 }
 
 #[test]
 fn test_ref_equality_same() {
     // Same ref compared to itself is equal
-    quiver().evaluate("r = %ref; r =&r").expect("Ok");
+    quiver().evaluate("r = %ref; r ~> =&r").expect("Ok");
 }
 
 #[test]
 fn test_ref_equality_different() {
     // Different refs are not equal
-    quiver().evaluate("a = %ref; b = %ref; a =&b").expect("[]");
+    quiver()
+        .evaluate("a = %ref; b = %ref; a ~> =&b")
+        .expect("[]");
 }
 
 #[test]
 fn test_ref_in_tuple() {
     // Refs can be stored in tuples
     quiver()
-        .evaluate("r = %ref; [tag: r, data: 42] .tag")
+        .evaluate("r = %ref; [tag: r, data: 42] ~> .tag")
         .expect_type("'ref");
 }
 
@@ -47,7 +49,7 @@ fn test_ref_in_tuple() {
 fn test_ref_pattern_matching() {
     // Refs can be used in pattern matching with pinning
     quiver()
-        .evaluate("tag = %ref; [tag: tag, data: 42] =[tag: &tag, data: d]; d")
+        .evaluate("tag = %ref; [tag: tag, data: 42] ~> =[tag: &tag, data: d]; d")
         .expect("42");
 }
 
@@ -55,7 +57,7 @@ fn test_ref_pattern_matching() {
 fn test_ref_pattern_matching_mismatch() {
     // Pattern match fails when ref doesn't match
     quiver()
-        .evaluate("tag1 = %ref; tag2 = %ref; [tag: tag1, data: 42] =[tag: &tag2, data: d]; d")
+        .evaluate("tag1 = %ref; tag2 = %ref; [tag: tag1, data: 42] ~> =[tag: &tag2, data: d]; d")
         .expect("[]");
 }
 
@@ -63,7 +65,7 @@ fn test_ref_pattern_matching_mismatch() {
 fn test_ref_type_annotation() {
     // ref type can be used in function signatures
     quiver()
-        .evaluate("f = #'ref { $ }; %ref f")
+        .evaluate("f = #'ref { $ }; %ref ~> f")
         .expect_type("'ref");
 }
 
@@ -71,9 +73,9 @@ fn test_ref_type_annotation() {
 fn test_ref_in_union_type() {
     // ref can be part of union types
     quiver()
-        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; %ref f")
+        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; %ref ~> f")
         .expect("2");
     quiver()
-        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; 42 f")
+        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; 42 ~> f")
         .expect("1");
 }

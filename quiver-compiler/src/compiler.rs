@@ -1458,6 +1458,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Ok(None)
                 }
             }
+            ast::Term::Apply(_access, argument) => {
+                // The argument may contain a select defining a receive type (`f [!#'int]`).
+                self.collect_receive_types_from_term(argument, chained_type, receive_types)?;
+                Ok(None)
+            }
             ast::Term::Block(block) => {
                 self.collect_receive_types(block, receive_types)?;
                 Ok(None)
@@ -3676,7 +3681,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.expand_dialects_in_expression(body)?;
                 }
             }
-            ast::Term::Spawn(inner, _) => self.expand_dialects_in_term(inner)?,
+            ast::Term::Spawn(inner, arg, _) => {
+                self.expand_dialects_in_term(inner)?;
+                if let Some(arg) = arg {
+                    self.expand_dialects_in_term(arg)?;
+                }
+            }
+            ast::Term::Apply(_, arg) => self.expand_dialects_in_term(arg)?,
             ast::Term::Select(sources, _) => {
                 if let Some(sources) = sources {
                     for source in sources {
@@ -4093,6 +4104,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         function: ast::Term,
         value_type: Option<usize>,
+        explicit_argument: bool,
     ) -> Result<usize, Error> {
         // `@~`: the chained value is the function to spawn (already on the stack), spawned with
         // nil — so the flowing function must be nilary.
@@ -4125,6 +4137,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         if let Some(arg_type) = value_type {
             if param_is_nil {
+                if explicit_argument {
+                    // An explicit juxtaposed argument (`@f x`) to a nilary process function is
+                    // rejected, exactly as an explicit call argument to a nilary function is —
+                    // only the implicit flow (`x ~> @f`) is quietly discarded.
+                    return Err(Error::TypeMismatch {
+                        expected: "function with nil parameter (no argument)".to_string(),
+                        found: format!(
+                            "argument {}",
+                            quiver_core::format::format_type_by_id(&*self.program, arg_type)
+                        ),
+                    });
+                }
                 // Discard the chained value (Stack: [value, function] -> [function]), spawn with nil.
                 self.codegen.add_instruction(Instruction::Rotate(2));
                 self.codegen.add_instruction(Instruction::Pop);
@@ -4564,7 +4588,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             Some(ast::AccessSource::TailCallRipple) => {
                 // `^~` - tail-call the flowing value (a nilary function) with nil.
-                let ty = self.compile_ripple_tail_call(value_type)?;
+                let ty = self.compile_ripple_tail_call(None, value_type)?;
                 Ok((ty, Provenance::Unknown))
             }
             Some(ast::AccessSource::Self_) => {
@@ -4933,11 +4957,130 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // against the disjoint verdict type collapsing the matched type to never.
                 Ok((ty, value_provenance))
             }
-            ast::Term::Spawn(function, span) => {
-                let ty = self.compile_spawn(*function, value_type)?;
+            ast::Term::Spawn(function, argument, span) => {
+                let ty = match (function.is_bare_ripple(), argument) {
+                    (true, Some(argument)) => {
+                        // `@~ arg`: the flowing value is the function to spawn; the juxtaposed
+                        // argument — compiled without the flow, which the head consumed — is
+                        // the init. Stack: [function] -> [function, arg] -> [arg, function].
+                        let fn_type = value_type.ok_or_else(|| {
+                            Error::FeatureUnsupported(
+                                "Ripple spawn requires piped value".to_string(),
+                            )
+                        })?;
+                        let (arg_type, _) = self.compile_term(
+                            *argument,
+                            FlowingValue {
+                                ty: None,
+                                provenance: Provenance::Unknown,
+                            },
+                            on_no_match,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        self.codegen.add_instruction(Instruction::Rotate(2));
+                        self.emit_arg_spawn(fn_type, arg_type)?
+                    }
+                    (_, argument) => {
+                        // A juxtaposed argument (`@f x`) supplies the init, with the flowing
+                        // value flowing into it (`10 ~> @adder [~, 5]`); otherwise the flowing
+                        // value itself is the (implicit) init.
+                        let explicit = argument.is_some();
+                        let init_type = match argument {
+                            Some(argument) => Some(
+                                self.compile_term(
+                                    *argument,
+                                    FlowingValue {
+                                        ty: value_type,
+                                        provenance: value_provenance,
+                                    },
+                                    on_no_match,
+                                    ripple_context,
+                                    None,
+                                    None,
+                                )?
+                                .0,
+                            ),
+                            None => value_type,
+                        };
+                        self.compile_spawn(*function, init_type, explicit)?
+                    }
+                };
                 // Hover on `@` shows the spawned process's type.
                 self.record_typed(span.get(), ty, SymbolKind::Expression, None);
                 Ok((ty, Provenance::Unknown))
+            }
+            ast::Term::Apply(access, argument)
+                if matches!(access.source, Some(ast::AccessSource::TailCallRipple)) =>
+            {
+                // `^~ x`: tail-call the flowing value (the function) with `x`. Like the ripple
+                // head below, `^~` consumes the flowing value, so the argument is evaluated
+                // without it.
+                let ty = self.compile_ripple_tail_call(Some(*argument), value_type)?;
+                Ok((ty, Provenance::Unknown))
+            }
+            ast::Term::Apply(access, argument)
+                if matches!(access.source, Some(ast::AccessSource::Ripple)) =>
+            {
+                // Ripple head (`~ [args]`, `~.field [args]`): the head consumes the flowing
+                // value (`~` *is* it; `~.field` reads the field off it), producing a callable,
+                // and the argument is applied to that result. The argument therefore does not
+                // receive the flowing value.
+                let (callable_type, _) = self.compile_access(
+                    access,
+                    value_type,
+                    value_provenance,
+                    ripple_context,
+                    true,
+                )?;
+                let (arg_type, _) = self.compile_term(
+                    *argument,
+                    FlowingValue {
+                        ty: None,
+                        provenance: Provenance::Unknown,
+                    },
+                    on_no_match,
+                    None,
+                    None,
+                    None,
+                )?;
+                // The callable is below the argument on the stack; swap so the call sees it on
+                // top. An explicit argument is type-checked, not an implicit flow.
+                self.codegen.add_instruction(Instruction::Rotate(2));
+                let ty = self.apply_value_to_type(callable_type, arg_type, false, None)?;
+                Ok((ty, Provenance::Unknown))
+            }
+            ast::Term::Apply(access, argument) => {
+                // Looked-up head: the flowing value flows into the argument (so `f [~, 1]`
+                // works), and the head is then invoked with the argument's result. The head's
+                // parameter type (resolved without emitting code) is the expected type of the
+                // argument, so an un-annotated function-literal argument can infer its
+                // parameter from it.
+                let expected_arg = self.callee_parameter_type(&access);
+                let (arg_type, arg_prov) = self.compile_term(
+                    *argument,
+                    FlowingValue {
+                        ty: value_type,
+                        provenance: value_provenance,
+                    },
+                    on_no_match,
+                    ripple_context,
+                    None,
+                    expected_arg,
+                )?;
+                // A builtin/tail call can fail for non-type reasons, so disable complement
+                // narrowing.
+                if matches!(
+                    access.source,
+                    Some(ast::AccessSource::Builtin(_)) | Some(ast::AccessSource::TailCall(_))
+                ) && let Some(n) = narrowing.as_deref_mut()
+                {
+                    n.disable();
+                }
+                // The head is invoked with the explicit argument, not an implicit flow, so a
+                // nilary head rejects it rather than ignoring it.
+                self.compile_access(access, Some(arg_type), arg_prov, None, false)
             }
             ast::Term::Select(select, span) => {
                 let ty = self.compile_select(select, value_type)?;
@@ -5562,7 +5705,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// function and is already on the stack. The argument comes by juxtaposition (`^~ x`), or is
     /// nil for the bare form; either way it does not receive the flowing value (which is the
     /// function being called).
-    fn compile_ripple_tail_call(&mut self, value_type: Option<usize>) -> Result<usize, Error> {
+    fn compile_ripple_tail_call(
+        &mut self,
+        argument: Option<ast::Term>,
+        value_type: Option<usize>,
+    ) -> Result<usize, Error> {
         let fn_type = value_type.ok_or_else(|| {
             Error::FeatureUnsupported("`^~` tail call requires a piped function".to_string())
         })?;
@@ -5577,17 +5724,42 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
         let (parameter, result) = (*parameter, *result);
 
-        // `^~` supplies no argument, so the flowing function must take nil.
-        let nil_type_id = self.program.register_type(Type::nil());
-        if parameter != nil_type_id {
-            return Err(Error::TypeMismatch {
-                expected: "nilary function".to_string(),
-                found: quiver_core::format::format_type_by_id(&*self.program, fn_type),
-            });
+        match argument {
+            Some(argument) => {
+                // `^~ x`: the juxtaposed argument is evaluated without the flow (the head
+                // consumed it as the function) and type-checked against its parameter.
+                let (arg_type, _) = self.compile_term(
+                    argument,
+                    FlowingValue {
+                        ty: None,
+                        provenance: Provenance::Unknown,
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+                if !quiver_core::types::is_compatible(arg_type, parameter, &*self.program) {
+                    return Err(Error::TypeMismatch {
+                        expected: quiver_core::format::format_type_by_id(&*self.program, parameter),
+                        found: quiver_core::format::format_type_by_id(&*self.program, arg_type),
+                    });
+                }
+            }
+            None => {
+                // Bare `^~` supplies no argument, so the flowing function must take nil.
+                let nil_type_id = self.program.register_type(Type::nil());
+                if parameter != nil_type_id {
+                    return Err(Error::TypeMismatch {
+                        expected: "nilary function".to_string(),
+                        found: quiver_core::format::format_type_by_id(&*self.program, fn_type),
+                    });
+                }
+                let nil_tuple_id = self.program.register_tuple(None, vec![]);
+                self.codegen
+                    .add_instruction(Instruction::Tuple(nil_tuple_id));
+            }
         }
-        let nil_tuple_id = self.program.register_tuple(None, vec![]);
-        self.codegen
-            .add_instruction(Instruction::Tuple(nil_tuple_id));
 
         // Stack: [function, argument] -> [argument, function], as the tail call expects.
         self.codegen.add_instruction(Instruction::Rotate(2));

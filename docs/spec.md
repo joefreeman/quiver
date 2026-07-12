@@ -1,6 +1,6 @@
 # Quiver language specification
 
-Quiver is a statically-typed functional programming language with structural typing, pattern matching, and a whitespace-driven, argument-first syntax. Programs are composed of immutable values flowing left-to-right through transformation pipelines.
+Quiver is a statically-typed functional programming language with structural typing, pattern matching, and a pipeline syntax. Programs are composed of immutable values flowing left-to-right through `~>`-separated transformation pipelines.
 
 ## Core concepts
 
@@ -14,13 +14,13 @@ All values in Quiver are immutable. The language supports:
 
 ### Value flow
 
-A value flows left-to-right through a whitespace-separated sequence of transformations. Terms are written one after another; the value produced by one becomes the input to the next:
+A value flows left-to-right through a **pipeline** — a sequence of terms joined by the pipe marker `~>`. The value produced by one term becomes the input to the next:
 
 ```quiver
-5 double increment
+5 ~> double ~> increment
 ```
 
-Application is **argument-first**: a callable consumes the value flowing into it from the left, so the argument is written *before* the function (`5 double`, `[3, 4] num.add`). The optional `~>` marker is an explicit synonym for the space — `5 ~> double` is identical to `5 double` — and also serves as a line continuation (see [Chains](#chains)).
+A callable term consumes the value flowing into it, so piping a value into a function calls it (`5 ~> double`). Application can also be written **function-first** by juxtaposition — a callable followed by a single argument (`double 5`, `num.add [3, 4]`); the flowing value flows into that argument, so `5 ~> num.add [~, 100]` computes `[5, 100]`'s sum (see [Function application](#function-application)).
 
 ### Pattern matching
 
@@ -179,8 +179,8 @@ value, so `~` refers to it; it can also draw on variables in scope. A literal br
 ```quiver
 name = "world"
 "hello {name}"               // "hello world"
-"world" "hello, {~}"         // "hello, world" — the chained value flows into the hole
-"sum: {[a, b] %str.concat}"  // any expression that yields a Str
+"world" ~> "hello, {~}"      // "hello, world" — the chained value flows into the hole
+"sum: {%str.concat [a, b]}"  // any expression that yields a Str
 "a \{ b"                     // a literal brace
 ```
 
@@ -213,9 +213,9 @@ A sequence **threads** and is **fallible**: each step starts from the previous s
 
 ### Chains
 
-A chain is a whitespace-separated sequence of terms — the basic unit of left-to-right flow. The first term starts from the chain's input (the previous step's result, or, for the first step of a block, the block's parameter); each subsequent term transforms the flowing value. A chain is an **infallible pipe**: nil flows through it like any other value (no short-circuit *within* a chain — only a semicolon/newline step boundary short-circuits on nil). So the two-axis model is: *chain = infallible pipe (nil flows), sequence = fallible pipe (nil short-circuits)*, and `~` always names "the value to the left."
+A chain is a `~>`-separated sequence of terms — the basic unit of left-to-right flow. The first term starts from the chain's input (the previous step's result, or, for the first step of a block, the block's parameter); each subsequent term transforms the flowing value. The `~>` marker between terms is **mandatory** — whitespace alone does not join terms (a missing `~>` is a pointed parse error). A chain is an **infallible pipe**: nil flows through it like any other value (no short-circuit *within* a chain — only a semicolon/newline step boundary short-circuits on nil). So the two-axis model is: *chain = infallible pipe (nil flows), sequence = fallible pipe (nil short-circuits)*, and `~` always names "the value to the left."
 
-A bare newline ends a chain (starting a new sequence step). To continue one chain across several lines, begin the continuation line with `~>`, which is also the explicit, optional synonym for the space between terms:
+A bare newline ends a chain (starting a new sequence step). To continue one chain across several lines, begin the continuation line with `~>` — the ordinary term separator, placed at the start of the line:
 
 ```quiver
 foo
@@ -228,7 +228,10 @@ When a term receives a value:
 - **Literals and tuples** replace the value (discarding it)
 - **Variables** depend on their type: callable variables are called, others replace the value
 
-So a nilary `f` needs no explicit argument: `f` and `5 f` both call it with nil.
+So a nilary `f` needs no explicit argument: `f` and `5 ~> f` both call it with nil.
+
+A term may also be a **function-first application** — a callable followed by a single
+argument (`double 5`, `num.add [3, 4]`); see [Function application](#function-application).
 
 To explicitly control this behavior:
 - `&f` references `f` without calling it
@@ -238,9 +241,9 @@ chain, and into the arguments of a call. Each field/argument receives its own co
 callable there is called with it (and a non-callable value simply replaces it):
 
 ```quiver
-inc = #'int { [~, 1] num.add }
-5 [inc, 100]            // [6, 100] - inc is called with 5
-5 [&inc, 100]           // [<function>, 100] - & passes inc by value
+inc = #'int { num.add [~, 1] }
+5 ~> [inc, 100]         // [6, 100] - inc is called with 5
+5 ~> [&inc, 100]        // [<function>, 100] - & passes inc by value
 ```
 
 ### Control flow
@@ -248,7 +251,7 @@ inc = #'int { [~, 1] num.add }
 Steps in a sequence are executed one at a time. If a step evaluates to nil (`[]`), the sequence short-circuits and evaluates to nil. Since semicolon and newline are synonyms, the same holds across lines:
 
 ```quiver
-[] 5      // one step (a chain) — nil flows through, evaluates to 5
+[] ~> 5   // one step (a chain) — nil flows through, evaluates to 5
 []; 5     // two steps — the first is nil, so the sequence short-circuits to []
 ```
 
@@ -259,8 +262,8 @@ See [Blocks](#blocks) below for further control flow (branches and matching).
 The value flowing in a chain can be 'expanded' using the `~` ('ripple') operator. This allows the value to be wrapped in a tuple:
 
 ```quiver
-5 [~, 1]                 // [5, 1]
-0 Point[x: ~, y: ~]      // Point[x: 0, y: 0]
+5 ~> [~, 1]              // [5, 1]
+0 ~> Point[x: ~, y: ~]   // Point[x: 0, y: 0]
 ```
 
 ### Spread operator
@@ -282,9 +285,9 @@ b = [z: 5]
 [w: 0, ...a]             // [w: 0, x: 1, y: 2] - prepends w
 
 // Spread flowing value
-A[x: 1] [..., y: 2]      // [x: 1, y: 2] - removes name
-A[x: 1] ~[..., y: 2]     // A[x: 1, y: 2] - preserves name
-A[x: 1] B[...]           // B[x: 1] - replaces name
+A[x: 1] ~> [..., y: 2]   // [x: 1, y: 2] - removes name
+A[x: 1] ~> ~[..., y: 2]  // A[x: 1, y: 2] - preserves name
+A[x: 1] ~> B[...]        // B[x: 1] - replaces name
 ```
 
 ## Identifiers
@@ -311,7 +314,7 @@ Create variable bindings:
 ```quiver
 x = 42
 p = Point[x: 10, y: 20]
-p.y =y
+p.y ~> =y
 ```
 
 ### Destructuring
@@ -336,10 +339,10 @@ Mix literals with bindings to test and extract:
 Point[x: 0, y] = Point[0, 10]    // Succeeds if x=0, binds y to 10
 Point[x: 0, y] = Point[1, 10]    // Fails (evaluates to [])
 
-5 =5                             // Literal match (Ok)
-5 =6                             // Fails ([])
-role ="admin"                    // String matching
-[] =[]                           // Nil test (Ok when the value is nil, [] otherwise)
+5 ~> =5                          // Literal match (Ok)
+5 ~> =6                          // Fails ([])
+role ~> ="admin"                 // String matching (with ~>, so this tests — bare `role =...` would bind)
+[] ~> =[]                        // Nil test (Ok when the value is nil, [] otherwise)
 ```
 
 ### References
@@ -348,20 +351,20 @@ Use `&` to check against an existing variable, instead of binding:
 
 ```quiver
 y = 2
-2 =&y                             // Ok (matches)
-3 =&y                             // [] (doesn't match)
+2 ~> =&y                          // Ok (matches)
+3 ~> =&y                          // [] (doesn't match)
 
 Point[x, &y] = Point[1, 2]       // Binds x, checks y is 2
-Point[1, 2] =Point[x, &y]        // x bound, y pinned
+Point[1, 2] ~> =Point[x, &y]     // x bound, y pinned
 A[x, B[&y, C[z]]]                // Mixed; x and z bound; y pinned
 ```
 
 Type references need no `&`: because types are never bound, a type name (carrying its `'` prefix) is always a reference:
 
 ```quiver
-42 ='int                          // Ok
-A[2] =A[&y]                       // Ok
-P[x: 1, y: 2] =(x: 'int)         // Ok
+42 ~> ='int                       // Ok
+A[2] ~> =A[&y]                    // Ok
+P[x: 1, y: 2] ~> =(x: 'int)      // Ok
 ```
 
 Identifiers in patterns bind by default. Use `&` to reference an existing variable instead of binding; type references (`'int`, `'point`, …) are always references and need no `&`.
@@ -371,26 +374,26 @@ Identifiers in patterns bind by default. Use `&` to reference an existing variab
 A parenthesised type immediately followed by an identifier, `(T)x`, asserts the value's type *and* binds the whole value (at the narrowed type) to `x`. The identifier must be adjacent (no space after `)`). It composes anywhere a pattern can, including field values — so it can narrow a union variant by field type and capture the field in one step:
 
 ```quiver
-42 =('int)x                       // x = 42, asserted 'int
-shape =A[a: ('int)n]              // matches A whose field a is an int, binds n to it
-[] =('int)x                       // fails ([]) — nil isn't an int, so this propagates
+42 ~> =('int)x                    // x = 42, asserted 'int
+shape ~> =A[a: ('int)n]           // matches A whose field a is an int, binds n to it
+[] ~> =('int)x                    // fails ([]) — nil isn't an int, so this propagates
 ```
 
-This is also the idiom for "bind, but fail (propagate) on the wrong type": `[...] find =('int)i` binds `i` only when the result is a non-nil int.
+This is also the idiom for "bind, but fail (propagate) on the wrong type": `find [...] ~> =('int)i` binds `i` only when the result is a non-nil int.
 
 ### Alternation
 
 A parenthesised, `|`-separated list of patterns is an *alternation*: it matches if any alternative matches.
 
 ```quiver
-[[], 5] =([[], _] | [_, []])      // Ok (first element is nil)
-42 =('int | 'bin)                 // Ok (type alternatives)
+[[], 5] ~> =([[], _] | [_, []])   // Ok (first element is nil)
+42 ~> =('int | 'bin)              // Ok (type alternatives)
 ```
 
 Every alternative must bind the same set of variables, so the body sees them whichever one matched:
 
 ```quiver
-shape { =(Circle[r] | Square[r]) => [r] area_from | ... }   // both bind `r`
+shape ~> { =(Circle[r] | Square[r]) => area_from [r] | ... }   // both bind `r`
 ```
 
 Binding different variables in different alternatives is a compile error. (A parenthesised group of named fields is a [partial pattern](#destructuring), not an alternation — the two are distinguished by `:`/`,` versus `|`, exactly as for type expressions.)
@@ -400,7 +403,7 @@ Binding different variables in different alternatives is a compile error. (A par
 A block is a braced expression, `{ … }`. It introduces a scope, and it is where branches (`|`) and condition-consequence matching (`=>`) live — these don't appear at the statement level. Like any chain, each branch starts from the block's parameter, so a value piped into a block is shared across all its branches:
 
 ```quiver
-B[42] { =A[a] => 1 | =B[b] => 2 }   // 2 - both branches test B[42]
+B[42] ~> { =A[a] => 1 | =B[b] => 2 }   // 2 - both branches test B[42]
 ```
 
 ### Variable scoping
@@ -417,10 +420,10 @@ A block may contain multiple branches, separated by `|`. If a branch's sequence 
 
 ```quiver
 // If item is valid, try to process it, otherwise show error
-item { is_valid? process | [] show_error }
+item ~> { is_valid? ~> process | [] ~> show_error }
 
 // Try multiple sources with fallback
-value = id {
+value = id ~> {
   | read_cache         // try using the id to read from the cache
   | query_database     // try using the id to query the database
   | default_value      // fall back to using a default value
@@ -432,9 +435,9 @@ value = id {
 A branch can use 'condition-consequence' syntax - `... => ... | ...`. If the 'condition' sequence (on the left of the `=>`) doesn't evaluate to nil (`[]`), then the 'consequence' sequence will be executed, and then execution will jump to the end of the block, taking the value of the consequence. If the condition does evaluate to nil, execution will jump to the next branch, if any; otherwise the block will evaluate to nil. The significance is that if a consequence fails (i.e., evaluates to nil), execution jumps to the end rather than to the next branch.
 
 ```quiver
-value {
+value ~> {
   | =0 => "zero"
-  | [~, 0] num.gt? => "positive"
+  | num.gt? [~, 0] => "positive"
   | "negative"
 }
 ```
@@ -442,7 +445,7 @@ value {
 This allows 'guard'-style checks to be added to a condition:
 
 ```quiver
-{ =Square[x] [x, 10] num.gt? => "large" | "small" }
+{ =Square[x] ~> num.gt? [x, 10] => "large" | "small" }
 ```
 
 ## Field access
@@ -458,8 +461,8 @@ nested.outer.inner   // Chained access
 Field access can also be used as postfix operations:
 
 ```quiver
-name = data .name        // Extract field in pipeline
-x = coords .0            // Positional access in pipeline
+name = data ~> .name     // Extract field in pipeline
+x = coords ~> .0         // Positional access in pipeline
 ```
 
 ## Annotations
@@ -486,7 +489,7 @@ the block completes. Attaching is copy-on-write; re-attaching a key replaces it.
 ```quiver
 div = #['int, 'int] {
   :doc "Integer division. Fails with :error on a zero divisor."
-  | =[_, 0] => [] { :error DivisionByZero }
+  | =[_, 0] => [] ~> { :error DivisionByZero }
   | __integer_divide__
 }
 ```
@@ -499,7 +502,7 @@ nil value, an `:error` payload survives to the caller — through calls — whil
 recovering branch discards it with the nil it replaces.
 
 ```quiver
-[4, 0] div :error              // DivisionByZero — likewise via a call: `10 half_inc :error`
+div [4, 0] ~> :error           // DivisionByZero — likewise via a call: `half_inc 10 ~> :error`
 div:doc                        // an access, so div is not called
 ```
 
@@ -545,9 +548,9 @@ Release builds emit a plain call, so a correct program behaves identically in bo
 
 ```quiver
 half = #'int {
-  :pre #{ [~, 0] num.gt? }              // the argument must be positive
-  :post #{ $ =[in: i, out: o]; [i, o] num.gt? }   // the result is smaller
-  [~, 2] int.div
+  :pre #{ num.gt? [~, 0] }              // the argument must be positive
+  :post #{ $ ~> =[in: i, out: o]; num.gt? [i, o] }   // the result is smaller
+  int.div [~, 2]
 }
 ```
 
@@ -557,7 +560,7 @@ The `%ref` module is a single nilary function that mints a unique, opaque identi
 
 ```quiver
 tag = %ref                   // mint a ref inline
-[tag, 42] =[&tag, x]
+[tag, 42] ~> =[&tag, x]
 x   // 42
 ```
 
@@ -566,7 +569,7 @@ To name the minting function, bind it by reference (`&`, like any function value
 ```quiver
 ref = &%ref
 a = ref; b = ref
-a =&b           // [] — two distinct refs are not equal
+a ~> =&b        // [] — two distinct refs are not equal
 ```
 
 ## Functions
@@ -578,7 +581,7 @@ Functions are defined with `#... { ... }` syntax, where the first `...` is the t
 The parameter type may be omitted, writing just `#{ ... }`. Such a literal **infers its parameter type from context** when it appears directly as a call argument (the whole argument, or a top-level field of the argument's bracket tuple) and the callee's corresponding parameter type is known. Type variables in that expected type are pinned by the sibling arguments, so the inferring literal must come *after* the arguments that determine its type:
 
 ```quiver
-xs [~, #{ $0 }, Nil] map   // #{ $0 } infers its parameter from map's #'t -> 'u argument
+xs ~> map [~, #{ $0 }, Nil]   // #{ $0 } infers its parameter from map's #'t -> 'u argument
 ```
 
 When no expected type is available — or it resolves to a bare, unpinned type variable — `#{ ... }` falls back to a **nil parameter**, the shorthand for a nilary function. To force a nil parameter even where a context type is available, write the parameter explicitly as `#[] { ... }`.
@@ -591,12 +594,12 @@ Identity functions (that simply return their input unchanged) can be defined wit
 
 ```quiver
 // Single parameter function
-double = #'int { [~, 2] num.mul }
+double = #'int { num.mul [~, 2] }
 
 // Pattern matching on union types
 area = #'shape {
-  | =Circle[radius: r] => [r, r] num.mul
-  | =Rectangle[width: w, height: h] => [w, h] num.mul
+  | =Circle[radius: r] => num.mul [r, r]
+  | =Rectangle[width: w, height: h] => num.mul [w, h]
 }
 
 // Using a tuple for multiple values
@@ -609,24 +612,46 @@ swap = #['int, 'int] { =[a, b] => [b, a] }
 f = #'int
 
 // Parameter reference with $
-sum = #['int, 'int] { [$.0, $.1] num.add }
+sum = #['int, 'int] { num.add [$.0, $.1] }
 ```
 
 ### Function application
 
-Application is **argument-first**: a function is applied to the value flowing into it from the left. Build the argument first — a bracketed tuple or a single value — then name the function:
+Application is written **function-first** by juxtaposition: a callable, a space, and a
+single argument primary (a bracketed tuple or a single value):
 
 ```quiver
-5 double                 // Apply double to 5
-[3, 4] num.add           // Apply add to the tuple [3, 4]
-[1, 2] num.add [~, 3] num.mul   // Chained calls: (1+2) then (×3) -> 9
+double 5                 // Apply double to 5
+num.add [3, 4]           // Apply add to the tuple [3, 4]
+num.add [1, 2] ~> num.mul [~, 3]   // Chained calls: (1+2) then (×3) -> 9
 ```
 
-A nilary function (one taking nil) is called with nil automatically, ignoring any flowing value:
+The head must be **applicable** — a variable, `$`, an import member (`num.add`), a builtin,
+a tail call (`^`/`^f`), a ripple (`~`/`~.f`), or a spawn (`@f`). Exactly one argument is
+taken: `f x y` is an error; nest through the pipeline instead (`g x ~> f`). Non-applicable
+heads — literals, tuples, `&f` references, function literals, selects — cannot take an
+argument.
+
+The flowing value flows **into the argument** (each field of a bracket tuple receives its
+own copy), so a juxtaposed call combines the incoming flow with an explicit argument:
 
 ```quiver
-list.new                  // create a new list (any flowing value is ignored)
-5 list.new                // the 5 is ignored; list.new is called with nil
+5 ~> num.add [~, 100]    // 105 — the flowing 5 fills ~ in the argument
+```
+
+A function can equally be applied by **piping** the whole value into it, with no explicit
+argument — the flowing value becomes the argument:
+
+```quiver
+[3, 4] ~> num.add        // 7 — same as `num.add [3, 4]`
+```
+
+A nilary function (one taking nil) is called with nil automatically, ignoring any flowing
+value; giving it an explicit argument is a type error:
+
+```quiver
+list.new                 // create a new list (any flowing value is ignored)
+5 ~> list.new            // the 5 is ignored; list.new is called with nil
 ```
 
 To reference a function without calling it, use `&`. Because tuple fields and call
@@ -635,28 +660,30 @@ is *called* unless prefixed with `&`:
 
 ```quiver
 &double                  // Reference to double (not called)
-[xs, &double] map        // Pass double as an argument (without &, double would be called)
+map [xs, &double]        // Pass double as an argument (without &, double would be called)
 [add: &__integer_add__]  // A record of functions; & references a builtin without calling it
 ```
 
-There is no juxtaposition (`f x` / `f [args]`) and no bare ripple application. To apply a
-function that is itself the flowing value, bind it to a name first, then apply argument-first:
+To apply a function that is itself the **flowing value**, use the ripple head `~`: it
+consumes the flowing function and applies it to the given argument (the argument does *not*
+receive the flow). `~.field` applies a function drawn from a field of the flowing value:
 
 ```quiver
-f = &num.add; [1, 2] f   // 3 — apply the bound function to [1, 2]
+&num.add ~> ~ [1, 2]     // 3 — the flowing function applied to [1, 2]
+num ~> ~.add [1, 2]      // 3 — apply the num record's `add` field to [1, 2]
 ```
 
 ### Tail recursion
 
-Use `^` for tail-recursive calls. Like any call it is argument-first — build the argument tuple, then `^`:
+Use `^` for tail-recursive calls. Like any call, `^` takes its argument by juxtaposition — the target, then the argument:
 
 ```quiver
 f = #['int, 'int] {
   | =[1, y] => y
-  | =[x, y] => [
-    [x, 1] num.sub,
-    [x, y] num.mul
-  ] ^
+  | =[x, y] => ^ [
+    num.sub [x, 1],
+    num.mul [x, y]
+  ]
 }
 ```
 
@@ -664,24 +691,29 @@ Named tail calls to other functions:
 
 ```quiver
 f = #['int, 'int] { num.mul }
-fact = #'int { [~, 1] ^f }
+fact = #'int { ^f [~, 1] }
 ```
 
-Tail calls take their argument the same way — written before the target:
+Tail calls take their argument the same way — juxtaposed after the target:
 
 ```quiver
 g = #['int, 'int] { num.mul }
-f = #'int { [~, 1] num.add [~, 2] ^g }
-10 f   // 22
+f = #'int { num.add [~, 1] ~> ^g [~, 2] }
+10 ~> f   // 22
 ```
 
-The flowing value itself can be the tail-call target, using the ripple form `^~`. This form
-is **bare** — it hands the flowing value (which must be a nilary function) a nil argument:
+The flowing value itself can be the tail-call target, using the ripple form `^~`. Bare
+`^~` hands the flowing value (which must be a nilary function) a nil argument; `^~ arg`
+tail-calls the flowing function with an explicit argument:
 
 ```quiver
 g = #{ 10 }              // a nilary function
-f = #'int { &g ^~ }      // tail-call g (the flowing value), with nil
-5 f                       // 10
+f = #'int { &g ~> ^~ }   // tail-call g (the flowing value), with nil
+5 ~> f                    // 10
+
+h = #'int { num.add [~, 100] }
+k = #'int { &h ~> ^~ 5 }  // tail-call h (the flowing value), with 5
+0 ~> k                     // 105
 ```
 
 ## Processes
@@ -706,13 +738,13 @@ counter = @'int { ... }
 The init argument is supplied by the value flowing into the spawn:
 
 ```quiver
-p = 42 @counter   // init argument from the flowing value
+p = 42 ~> @counter   // init argument from the flowing value
 ```
 
-Like any argument-first call, build the argument first; the flowing value flows into it
-(`10 [~, 5] @adder` spawns `adder` with `[10, 5]`). When the function to spawn is itself the
-flowing value, use the **bare** ripple form `@~`, which spawns it with a nil init argument:
-`&f @~`.
+Like any juxtaposed call, the spawn takes its init argument after `@target`, and the flowing
+value flows into it (`10 ~> @adder [~, 5]` spawns `adder` with `[10, 5]`). When the function
+to spawn is itself the flowing value, use the ripple form `@~`: bare `@~` spawns it with a nil
+init argument (`&f ~> @~`), and `@~ arg` spawns it with an explicit argument.
 
 ### Receiving messages
 
@@ -723,31 +755,36 @@ The function's parameter type defines the message type to be received. And this 
 ```quiver
 // Spawn a process with an int receive type
 p1 = @{
-  !'int {
+  !'int ~> {
     | =0 => "done"
-    | [] ^
+    | [] ~> ^
   }
 }
 ```
 
 #### Handlers and filters
 
-The select *shorthands* — `!#'int`, `!'int`, `!(...)` — are **body-less identity receives**: they only name the message type and yield the received message. A `{ … }` written *after* a select is therefore an ordinary chain step — a **handler** — that processes the received message (receive-then-handle):
+The select *shorthands* — `!#'int`, `!'int`, `!(...)` — are **body-less identity receives**: they only name the message type and yield the received message.
+
+A `{ … }` written directly after a select shorthand — glued or space-separated, **not** joined with `~>` — is a **filter body** for the receive: it inspects each candidate message and decides whether to accept it. A filter follows Quiver's usual truthiness convention: if it evaluates to nil (`[]`) the message is skipped (it remains in the mailbox, to be received in future); any non-nil result accepts the message. The filter's result is only a verdict — the select always yields the *received message*, never the filter's result. If none of the messages in the mailbox match, the select waits to receive a message that does. The general form `![#T { filter }]` is an equivalent way to write a filter:
 
 ```quiver
-!#'command {            // receive a command, then dispatch it
+!'int { =42 => Ok | [] }   // wait specifically for the message 42, leaving others queued
+![#'int { =42 => Ok }]    // the general form — equivalent filter
+```
+
+To **handle** the received message instead — process it *after* it has been received — write the block as a separate chain step, joined with `~>`. This is an ordinary handler chain step, applied to the message the select yields (receive-then-handle):
+
+```quiver
+!#'command ~> {         // receive a command, then dispatch it
   | =Read[...] => ...
   | =Close => ...
 }
 ```
 
-To **filter** the mailbox instead — leaving non-matching messages in place to be received later — use the **general form** with a filter body, `! [#T { filter }]`. A filter follows Quiver's usual truthiness convention: if it evaluates to nil (`[]`) the message is skipped (it remains in the mailbox, to be received in future); any non-nil result accepts the message. The filter's result is only a verdict — the select always yields the received message, never the filter's result. If none of the messages in the mailbox match, the select waits to receive a message that does:
+> **The `~>` before a block at a select is load-bearing.** A block glued or spaced directly after a select (`!'int { … }`) is a **filter** — evaluated *during* the receive to accept or skip candidate messages. A block joined with `~>` (`!'int ~> { … }`) is a **handler** — an ordinary chain step that processes the message the select has already yielded.
 
-```quiver
-! [#'int { =42 => Ok }]   // wait specifically for the message 42, leaving others queued
-```
-
-A builtin (which has no body) is body-less, exactly like an identity function, so it just names the message type and is never applied to the message. So `! [&%int.and]` receives an `['int, 'int]` message and yields it unchanged, identically to `!#['int, 'int]`.
+A builtin (which has no body) is body-less, exactly like an identity function, so it just names the message type and is never applied to the message. So `![&%int.and]` receives an `['int, 'int]` message and yields it unchanged, identically to `!#['int, 'int]`.
 
 It's important to avoid side effects in a filter, since it may be evaluated multiple times. Filters are not permitted to spawn processes, send messages or contain nested selects.
 
@@ -756,7 +793,7 @@ It's important to avoid side effects in a filter, since it may be evaluated mult
 Send a message to a process by applying a value to the process:
 
 ```quiver
-42 pid
+42 ~> pid
 ```
 
 ### Awaiting processes
@@ -774,7 +811,7 @@ If a process has failed with a runtime error, that error will be propagated to t
 
 As well as being used for receiving messages and awaiting the result of a single process, the select operator can specify multiple sources at once to 'race' them. And also for specifying timeouts.
 
-The general form is `! [sources]`, which takes a tuple of sources. **A space is required** between `!` and the tuple; this distinguishes the general form from the tight single-source shorthands below. The tuple is an ordinary value tuple, so a *function* source must be passed by reference with `&` (a bare callable would be called); processes and timeouts are plain values and need no `&`. Sources can be:
+The general form is `![sources]`, which takes a tuple of sources glued to the `!`, like every other select form. The tuple is an ordinary value tuple, so a *function* source must be passed by reference with `&` (a bare callable would be called); processes and timeouts are plain values and need no `&`. Sources can be:
 
 - Processes (to await their result)
 - Functions, by reference (for receiving messages) — e.g. `&f`, `&%mod.recv`
@@ -783,28 +820,28 @@ The general form is `! [sources]`, which takes a tuple of sources. **A space is 
 For example, given two processes, `p1` and `p2`, the following select will wait for whichever finishes first (prioritising `p1` if both are already finished), or time out after 5 seconds:
 
 ```quiver
-! [p1, p2, 5000]
+![p1, p2, 5000]
 ```
 
 A select operator can be used in a chain by including the ripple operator (`~`) to refer to the flowing value. For example, to wait for a process, but timeout after one second:
 
 ```quiver
-p1 ! [~, 1000]
+p1 ~> ![~, 1000]
 ```
 
-Shorthand forms (tight, no space — each selects on a *single* source):
+Shorthand forms (each selects on a *single* source):
 
-- `!x` is sugar for `! [&x]`, for any variable or module member (`!p`, `!f`, `!%mod.recv`) — the `&` is part of the sugar, so it works inline with no binding. The `&` references the value rather than calling it: required for a function receiver, and a harmless no-op for a process (`&p` is just `p`), so the same form covers both awaiting a process and receiving on a function.
-- `!'int` (also `!#'int`, `!(...)`) is sugar for `! [#'int]` (body-less identity receive for a type)
-- `! []` is a no-op (returns nil immediately)
+- `!x` is sugar for `![&x]`, for any variable or module member (`!p`, `!f`, `!%mod.recv`) — the `&` is part of the sugar, so it works inline with no binding. The `&` references the value rather than calling it: required for a function receiver, and a harmless no-op for a process (`&p` is just `p`), so the same form covers both awaiting a process and receiving on a function.
+- `!'int` (also `!#'int`, `!(...)`) is sugar for `![#'int]` (body-less identity receive for a type)
+- `![]` is a no-op (returns nil immediately)
 
-A `{ … }` following a select is *not* part of these shorthands — it is a separate chain step (a [handler](#handlers-and-filters)) that processes the received message. To filter the mailbox, use the general form `! [#T { filter }]`.
+A `{ … }` glued or spaced directly after a select shorthand is a **filter** body for the receive (see [Handlers and filters](#handlers-and-filters)); a block joined with `~>` is a separate [handler](#handlers-and-filters) chain step that processes the received message. The general form `![#T { filter }]` is an equivalent way to write a filter.
 
 ### Referring to processes
 
 When spawning, a process identifier is returned. The current process can refer to itself using:
-- `.` to send a message to self: `42 .`
-- `&.` to get a reference to self without sending: `&. =self_pid`
+- `.` to send a message to self: `42 ~> .`
+- `&.` to get a reference to self without sending: `&. ~> =self_pid`
 
 To specify a type that refers to a process, use `@` followed by a type. For example, `@'int` is a process that receives integers.
 
@@ -886,8 +923,8 @@ The following standard library modules are available:
 Built-in functions can be accessed using double underscores, although access via the standard library should be preferred.
 
 ```quiver
-sum = [3, 4] __integer_add__                  // Built-in addition
-doubled = [x, 2] __integer_multiply__         // Built-in multiplication
+sum = __integer_add__ [3, 4]                  // Built-in addition
+doubled = __integer_multiply__ [x, 2]         // Built-in multiplication
 ```
 
 ## Examples
@@ -900,7 +937,7 @@ doubled = [x, 2] __integer_multiply__         // Built-in multiplication
 
 // Create and manipulate values
 x = 10; y = 20
-[x, y] add [~, 2] mul [~, 1] sub
+add [x, y] ~> mul [~, 2] ~> sub [~, 1]
 ```
 
 ### Working with tuples
@@ -916,12 +953,12 @@ p2 = Point[...p1, y: 4]
 // Function to add points
 add_points = #['point, 'point] {
   Point[
-    x: [$.0.x, $.1.x] %num.add,
-    y: [$.0.y, $.1.y] %num.add,
+    x: %num.add [$.0.x, $.1.x],
+    y: %num.add [$.0.y, $.1.y],
   ]
 }
 
-[p1, p2] add_points   // Point[x: 10, y: 7]
+add_points [p1, p2]   // Point[x: 10, y: 7]
 ```
 
 ### Pattern matching
@@ -933,12 +970,12 @@ add_points = #['point, 'point] {
 contains? = #<'t>['list<'t>, 't] {
   | =[Nil, _] => []
   | =[Cons[value, _], value] => Ok
-  | =[Cons[_, tail], value] => [tail, value] ^
+  | =[Cons[_, tail], value] => ^ [tail, value]
 }
 
 xs = Cons[1, Cons[2, Cons[3, Nil]]]
-[xs, 3] contains?   // Ok
-[xs, 4] contains?    // []
+contains? [xs, 3]   // Ok
+contains? [xs, 4]    // []
 ```
 
 ### Conditional logic
@@ -946,14 +983,14 @@ xs = Cons[1, Cons[2, Cons[3, Nil]]]
 ```quiver
 // Clamp value to range [0, 100]
 clamp = #'int {
-  | [~, 100] %num.gt? => 100
-  | [~, 0] %num.lt? => 0
+  | %num.gt? [~, 100] => 100
+  | %num.lt? [~, 0] => 0
   | $
 }
 
-150 clamp   // 100
--10 clamp   // 0
-50 clamp    // 50
+150 ~> clamp   // 100
+-10 ~> clamp   // 0
+50 ~> clamp    // 50
 ```
 
 ### Module organization
@@ -967,7 +1004,7 @@ clamp = #'int {
 [
   bounding_box: #'shape {
     | =Circle[radius: r] => {
-      x = [r, 2] %num.mul
+      x = %num.mul [r, 2]
       Rectangle[width: x, height: x]
     }
     | =Rectangle[width: w, height: h] => {
@@ -988,8 +1025,8 @@ clamp = #'int {
 circle = Circle[radius: 5]
 rectangle = Rectangle[width: 10, height: 10]
 
-circle bounding_box      // Rectangle[width: 10, height: 10]
-rectangle is_square?      // Ok
+circle ~> bounding_box   // Rectangle[width: 10, height: 10]
+rectangle ~> is_square?  // Ok
 ```
 
 ### Using built-ins and field access
@@ -1005,10 +1042,10 @@ person = Person[
   ]
 ]
 person.name                           // Extract name field
-person .date_of_birth .month          // Chain field access
+person ~> .date_of_birth ~> .month    // Chain field access
 
 // Built-in operations
-next_year = person.age [~, 1] %num.add
+next_year = person.age ~> %num.add [~, 1]
 ```
 
 ### Concurrent processes
@@ -1016,17 +1053,17 @@ next_year = person.age [~, 1] %num.add
 ```quiver
 // Spawn process that receives strings
 pid = @{
-  !#Str['bin] {
+  !#Str['bin] ~> {
     | ="" => []              // Stop on empty string
     | =s => {
-      s __println__         // (not implemented!)
-      [] ^                    // Receive another message
+      s ~> __println__      // (not implemented!)
+      [] ~> ^                 // Receive another message
     }
   }
 }
 
 // Send messages
-"hello" pid
-"bye" pid
-"" pid                       // (stop the process)
+"hello" ~> pid
+"bye" ~> pid
+"" ~> pid                    // (stop the process)
 ```

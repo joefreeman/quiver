@@ -17,7 +17,7 @@ fn test_interpolation() {
         .expect("\"XY\"");
     // A hole containing an arbitrary expression that evaluates to a `Str`.
     quiver()
-        .evaluate(r#""got: {["a", "b"] %str.concat}""#)
+        .evaluate(r#""got: {["a", "b"] ~> %str.concat}""#)
         .expect("\"got: ab\"");
     // A `\{` escape is a literal brace, not a hole.
     quiver().evaluate(r#""a \{ b""#).expect("\"a { b\"");
@@ -29,17 +29,17 @@ fn test_interpolation() {
 fn test_interpolation_hole_receives_chained_value() {
     // Like a tuple field, a hole receives the flowing value, so `~` is the chained value.
     quiver()
-        .evaluate(r#""world" "hello, {~}""#)
+        .evaluate(r#""world" ~> "hello, {~}""#)
         .expect("\"hello, world\"");
     // The value is copied into each hole, so it can be used more than once.
-    quiver().evaluate(r#""x" "{~}-{~}""#).expect("\"x-x\"");
+    quiver().evaluate(r#""x" ~> "{~}-{~}""#).expect("\"x-x\"");
     // `~` can drive an expression, and a field of the flowing value can be reached.
     quiver()
-        .evaluate(r#"Person[name: "Bo"] "hi {~.name}""#)
+        .evaluate(r#"Person[name: "Bo"] ~> "hi {~.name}""#)
         .expect("\"hi Bo\"");
     // A multi-line hole sees the chained value too.
     quiver()
-        .evaluate("\"ada\" \"\"\"\n  hi {~}\n  \"\"\"")
+        .evaluate("\"ada\" ~> \"\"\"\n  hi {~}\n  \"\"\"")
         .expect("\"hi ada\"");
 }
 
@@ -51,11 +51,11 @@ fn test_multiline_interpolation() {
         .expect("\"hi ada\\nbye\"");
     // A multi-line interpolated string equals the single-line string with the same value.
     quiver()
-        .evaluate("x = \"v\"; s = \"a v\"; \"\"\"\n  a {x}\n  \"\"\" =&s")
+        .evaluate("x = \"v\"; s = \"a v\"; \"\"\"\n  a {x}\n  \"\"\" ~> =&s")
         .expect("Ok");
     // A literal brace via `\{`, and a hole containing an expression.
     quiver()
-        .evaluate("\"\"\"\n  \\{ {[\"p\", \"q\"] %str.concat}\n  \"\"\"")
+        .evaluate("\"\"\"\n  \\{ {[\"p\", \"q\"] ~> %str.concat}\n  \"\"\"")
         .expect("\"{ pq\"");
 }
 
@@ -63,10 +63,10 @@ fn test_multiline_interpolation() {
 fn test_string_pattern_matches() {
     // A string-literal pattern matches the equal string and fails on a different one.
     quiver()
-        .evaluate(r#"role = "admin"; role ="admin""#)
+        .evaluate(r#"role = "admin"; role ~> ="admin""#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"role = "guest"; role ="admin""#)
+        .evaluate(r#"role = "guest"; role ~> ="admin""#)
         .expect("[]");
 }
 
@@ -74,7 +74,7 @@ fn test_string_pattern_matches() {
 fn test_single_and_multi_line_values_are_equal() {
     // The two delimiter styles are only a surface form: they produce identical values.
     quiver()
-        .evaluate("s = \"a\\nb\"; \"\"\"\na\nb\n\"\"\" =&s")
+        .evaluate("s = \"a\\nb\"; \"\"\"\na\nb\n\"\"\" ~> =&s")
         .expect("Ok");
 }
 
@@ -92,129 +92,131 @@ fn test_interpolation_requires_str_hole() {
 #[test]
 fn test_bytes() {
     quiver()
-        .evaluate(r#""hello" %str.bytes"#)
+        .evaluate(r#""hello" ~> %str.bytes"#)
         .expect("0x68656c6c6f");
-    quiver().evaluate(r#""" %str.bytes"#).expect("0x");
-    quiver().evaluate(r#""🚀" %str.bytes"#).expect("0xf09f9a80");
+    quiver().evaluate(r#""" ~> %str.bytes"#).expect("0x");
+    quiver()
+        .evaluate(r#""🚀" ~> %str.bytes"#)
+        .expect("0xf09f9a80");
 }
 
 #[test]
 fn test_empty() {
-    quiver().evaluate(r#""" %str.empty?"#).expect("Ok");
-    quiver().evaluate(r#""hello" %str.empty?"#).expect("[]");
-    quiver().evaluate(r#""x" %str.empty?"#).expect("[]");
+    quiver().evaluate(r#""" ~> %str.empty?"#).expect("Ok");
+    quiver().evaluate(r#""hello" ~> %str.empty?"#).expect("[]");
+    quiver().evaluate(r#""x" ~> %str.empty?"#).expect("[]");
 }
 
 #[test]
 fn test_concat() {
     quiver()
-        .evaluate(r#"["hello", " "] %str.concat"#)
+        .evaluate(r#"["hello", " "] ~> %str.concat"#)
         .expect("\"hello \"");
     quiver()
-        .evaluate(r#"["hello", " world"] %str.concat"#)
+        .evaluate(r#"["hello", " world"] ~> %str.concat"#)
         .expect("\"hello world\"");
     quiver()
-        .evaluate(r#"["", "hello"] %str.concat"#)
+        .evaluate(r#"["", "hello"] ~> %str.concat"#)
         .expect("\"hello\"");
     quiver()
-        .evaluate(r#"["hello", ""] %str.concat"#)
+        .evaluate(r#"["hello", ""] ~> %str.concat"#)
         .expect("\"hello\"");
     quiver()
-        .evaluate(r#"["🚀", "!"] %str.concat"#)
+        .evaluate(r#"["🚀", "!"] ~> %str.concat"#)
         .expect("\"🚀!\"");
 }
 
 #[test]
 fn test_starts_with() {
     quiver()
-        .evaluate(r#"["hello world", "hello"] %str.starts_with?"#)
+        .evaluate(r#"["hello world", "hello"] ~> %str.starts_with?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hello world", "world"] %str.starts_with?"#)
+        .evaluate(r#"["hello world", "world"] ~> %str.starts_with?"#)
         .expect("[]");
     quiver()
-        .evaluate(r#"["hello", "hello"] %str.starts_with?"#)
+        .evaluate(r#"["hello", "hello"] ~> %str.starts_with?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hello", ""] %str.starts_with?"#)
+        .evaluate(r#"["hello", ""] ~> %str.starts_with?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hi", "hello"] %str.starts_with?"#)
+        .evaluate(r#"["hi", "hello"] ~> %str.starts_with?"#)
         .expect("[]");
     quiver()
-        .evaluate(r#"["🚀 rocket", "🚀"] %str.starts_with?"#)
+        .evaluate(r#"["🚀 rocket", "🚀"] ~> %str.starts_with?"#)
         .expect("Ok");
 }
 
 #[test]
 fn test_ends_with() {
     quiver()
-        .evaluate(r#"["hello world", "world"] %str.ends_with?"#)
+        .evaluate(r#"["hello world", "world"] ~> %str.ends_with?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hello world", "hello"] %str.ends_with?"#)
+        .evaluate(r#"["hello world", "hello"] ~> %str.ends_with?"#)
         .expect("[]");
     quiver()
-        .evaluate(r#"["hello", "hello"] %str.ends_with?"#)
+        .evaluate(r#"["hello", "hello"] ~> %str.ends_with?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hello", ""] %str.ends_with?"#)
+        .evaluate(r#"["hello", ""] ~> %str.ends_with?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hi", "hello"] %str.ends_with?"#)
+        .evaluate(r#"["hi", "hello"] ~> %str.ends_with?"#)
         .expect("[]");
     quiver()
-        .evaluate(r#"["rocket 🚀", "🚀"] %str.ends_with?"#)
+        .evaluate(r#"["rocket 🚀", "🚀"] ~> %str.ends_with?"#)
         .expect("Ok");
 }
 
 #[test]
 fn test_contains() {
     quiver()
-        .evaluate(r#"["hello world", "world"] %str.contains?"#)
+        .evaluate(r#"["hello world", "world"] ~> %str.contains?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hello world", "hello"] %str.contains?"#)
+        .evaluate(r#"["hello world", "hello"] ~> %str.contains?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hello world", "o w"] %str.contains?"#)
+        .evaluate(r#"["hello world", "o w"] ~> %str.contains?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hello world", "xyz"] %str.contains?"#)
+        .evaluate(r#"["hello world", "xyz"] ~> %str.contains?"#)
         .expect("[]");
     quiver()
-        .evaluate(r#"["hello", ""] %str.contains?"#)
+        .evaluate(r#"["hello", ""] ~> %str.contains?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["hi", "hello"] %str.contains?"#)
+        .evaluate(r#"["hi", "hello"] ~> %str.contains?"#)
         .expect("[]");
     quiver()
-        .evaluate(r#"["hello", "hello"] %str.contains?"#)
+        .evaluate(r#"["hello", "hello"] ~> %str.contains?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["🚀 rocket 🌙", "rocket"] %str.contains?"#)
+        .evaluate(r#"["🚀 rocket 🌙", "rocket"] ~> %str.contains?"#)
         .expect("Ok");
     quiver()
-        .evaluate(r#"["🚀 rocket 🌙", "🌙"] %str.contains?"#)
+        .evaluate(r#"["🚀 rocket 🌙", "🌙"] ~> %str.contains?"#)
         .expect("Ok");
 }
 
 #[test]
 fn test_split() {
     quiver()
-        .evaluate(r#"["hello,world,test", ","] %str.split %list.collect"#)
+        .evaluate(r#"["hello,world,test", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"hello\", Cons[\"world\", Cons[\"test\", Nil]]]");
     quiver()
-        .evaluate(r#"["hello", ","] %str.split %list.collect"#)
+        .evaluate(r#"["hello", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"hello\", Nil]");
     quiver()
-        .evaluate(r#"["a::b::c", "::"] %str.split %list.collect"#)
+        .evaluate(r#"["a::b::c", "::"] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"a\", Cons[\"b\", Cons[\"c\", Nil]]]");
     quiver()
-        .evaluate(r#"["", ","] %str.split %list.collect"#)
+        .evaluate(r#"["", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"\", Nil]");
     quiver()
-        .evaluate(r#"[",hello,", ","] %str.split %list.collect"#)
+        .evaluate(r#"[",hello,", ","] ~> %str.split ~> %list.collect"#)
         .expect("Cons[\"\", Cons[\"hello\", Cons[\"\", Nil]]]");
 }
 
@@ -223,97 +225,97 @@ fn test_split_returns_iterator() {
     // The result is a lazy iterator: bound to a variable it is a value (wrapped in
     // Iter[...]), so it flows through a chain without being called - no `&` needed.
     quiver()
-        .evaluate(r#"parts = ["1,2,3", ","] %str.split; parts [~, " + "] %str.join"#)
+        .evaluate(r#"parts = ["1,2,3", ","] ~> %str.split; parts ~> [~, " + "] ~> %str.join"#)
         .expect("\"1 + 2 + 3\"");
     // Laziness: the first field can be taken without materialising the rest.
     quiver()
-        .evaluate(r#"["a,b,c", ","] %str.split [~, 0] %iter.nth"#)
+        .evaluate(r#"["a,b,c", ","] ~> %str.split ~> [~, 0] ~> %iter.nth"#)
         .expect("\"a\"");
 }
 
 #[test]
 fn test_length() {
     // ASCII strings
-    quiver().evaluate(r#""hello" %str.length"#).expect("5");
-    quiver().evaluate(r#""" %str.length"#).expect("0");
-    quiver().evaluate(r#""a" %str.length"#).expect("1");
+    quiver().evaluate(r#""hello" ~> %str.length"#).expect("5");
+    quiver().evaluate(r#""" ~> %str.length"#).expect("0");
+    quiver().evaluate(r#""a" ~> %str.length"#).expect("1");
 
     // Multi-byte UTF-8 characters
-    quiver().evaluate(r#""🚀" %str.length"#).expect("1");
-    quiver().evaluate(r#""🚀🌙" %str.length"#).expect("2");
+    quiver().evaluate(r#""🚀" ~> %str.length"#).expect("1");
+    quiver().evaluate(r#""🚀🌙" ~> %str.length"#).expect("2");
     quiver()
-        .evaluate(r#""hello 🚀 world 🌙" %str.length"#)
+        .evaluate(r#""hello 🚀 world 🌙" ~> %str.length"#)
         .expect("15");
 
     // Mixed ASCII and multi-byte
-    quiver().evaluate(r#""café" %str.length"#).expect("4");
-    quiver().evaluate(r#""日本語" %str.length"#).expect("3");
+    quiver().evaluate(r#""café" ~> %str.length"#).expect("4");
+    quiver().evaluate(r#""日本語" ~> %str.length"#).expect("3");
 }
 
 #[test]
 fn test_slice() {
     // ASCII strings
     quiver()
-        .evaluate(r#"["hello", 0, 5] %str.slice"#)
+        .evaluate(r#"["hello", 0, 5] ~> %str.slice"#)
         .expect("\"hello\"");
     quiver()
-        .evaluate(r#"["hello", 1, 4] %str.slice"#)
+        .evaluate(r#"["hello", 1, 4] ~> %str.slice"#)
         .expect("\"ell\"");
     quiver()
-        .evaluate(r#"["hello", 0, 1] %str.slice"#)
+        .evaluate(r#"["hello", 0, 1] ~> %str.slice"#)
         .expect("\"h\"");
     quiver()
-        .evaluate(r#"["hello", 4, 5] %str.slice"#)
+        .evaluate(r#"["hello", 4, 5] ~> %str.slice"#)
         .expect("\"o\"");
     quiver()
-        .evaluate(r#"["hello", 2, 2] %str.slice"#)
+        .evaluate(r#"["hello", 2, 2] ~> %str.slice"#)
         .expect("\"\"");
 
     // Multi-byte UTF-8 characters
     quiver()
-        .evaluate(r#"["🚀🌙⭐", 0, 1] %str.slice"#)
+        .evaluate(r#"["🚀🌙⭐", 0, 1] ~> %str.slice"#)
         .expect("\"🚀\"");
     quiver()
-        .evaluate(r#"["🚀🌙⭐", 1, 2] %str.slice"#)
+        .evaluate(r#"["🚀🌙⭐", 1, 2] ~> %str.slice"#)
         .expect("\"🌙\"");
     quiver()
-        .evaluate(r#"["🚀🌙⭐", 0, 3] %str.slice"#)
+        .evaluate(r#"["🚀🌙⭐", 0, 3] ~> %str.slice"#)
         .expect("\"🚀🌙⭐\"");
 
     // Mixed ASCII and multi-byte
     quiver()
-        .evaluate(r#"["hello 🚀 world", 6, 7] %str.slice"#)
+        .evaluate(r#"["hello 🚀 world", 6, 7] ~> %str.slice"#)
         .expect("\"🚀\"");
     quiver()
-        .evaluate(r#"["hello 🚀 world", 0, 6] %str.slice"#)
+        .evaluate(r#"["hello 🚀 world", 0, 6] ~> %str.slice"#)
         .expect("\"hello \"");
     quiver()
-        .evaluate(r#"["hello 🚀 world", 8, 13] %str.slice"#)
+        .evaluate(r#"["hello 🚀 world", 8, 13] ~> %str.slice"#)
         .expect("\"world\"");
 }
 
 #[test]
 fn test_index_of() {
     quiver()
-        .evaluate(r#"["hello world", "world"] %str.index_of"#)
+        .evaluate(r#"["hello world", "world"] ~> %str.index_of"#)
         .expect("6");
     quiver()
-        .evaluate(r#"["hello world", "hello"] %str.index_of"#)
+        .evaluate(r#"["hello world", "hello"] ~> %str.index_of"#)
         .expect("0");
     quiver()
-        .evaluate(r#"["hello world", "o"] %str.index_of"#)
+        .evaluate(r#"["hello world", "o"] ~> %str.index_of"#)
         .expect("4");
     quiver()
-        .evaluate(r#"["hello world", "xyz"] %str.index_of"#)
+        .evaluate(r#"["hello world", "xyz"] ~> %str.index_of"#)
         .expect("[]");
     quiver()
-        .evaluate(r#"["hello", ""] %str.index_of"#)
+        .evaluate(r#"["hello", ""] ~> %str.index_of"#)
         .expect("0");
     quiver()
-        .evaluate(r#"["🚀 rocket 🌙", "rocket"] %str.index_of"#)
+        .evaluate(r#"["🚀 rocket 🌙", "rocket"] ~> %str.index_of"#)
         .expect("2");
     quiver()
-        .evaluate(r#"["🚀 rocket 🌙", "🌙"] %str.index_of"#)
+        .evaluate(r#"["🚀 rocket 🌙", "🌙"] ~> %str.index_of"#)
         .expect("9");
 }
 
@@ -321,19 +323,19 @@ fn test_index_of() {
 fn test_iter() {
     // Iterator now yields UTF-8 codepoints as integers
     quiver()
-        .evaluate(r#""hello" %str.iter %list.collect"#)
+        .evaluate(r#""hello" ~> %str.iter ~> %list.collect"#)
         .expect("Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]]");
 
     quiver()
-        .evaluate(r#""" %str.iter %list.collect"#)
+        .evaluate(r#""" ~> %str.iter ~> %list.collect"#)
         .expect("Nil");
 
     quiver()
-        .evaluate(r#""🚀" %str.iter %list.collect"#)
+        .evaluate(r#""🚀" ~> %str.iter ~> %list.collect"#)
         .expect("Cons[4036991616, Nil]");
 
     quiver()
-        .evaluate(r#""hi🚀" %str.iter %list.collect"#)
+        .evaluate(r#""hi🚀" ~> %str.iter ~> %list.collect"#)
         .expect("Cons[104, Cons[105, Cons[4036991616, Nil]]]");
 }
 
@@ -343,24 +345,24 @@ fn test_collect() {
     quiver()
         .evaluate(
             r#"
-            Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]] %list.iter %str.collect
+            Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]] ~> %list.iter ~> %str.collect
             "#,
         )
         .expect("\"hello\"");
 
     quiver()
-        .evaluate(r#"Nil %list.iter %str.collect"#)
+        .evaluate(r#"Nil ~> %list.iter ~> %str.collect"#)
         .expect("\"\"");
 
     quiver()
-        .evaluate(r#"Cons[4036991616, Nil] %list.iter %str.collect"#)
+        .evaluate(r#"Cons[4036991616, Nil] ~> %list.iter ~> %str.collect"#)
         .expect("\"🚀\"");
 }
 
 #[test]
 fn test_iter_collect_roundtrip() {
     quiver()
-        .evaluate(r#""hello world 🚀" %str.iter %str.collect"#)
+        .evaluate(r#""hello world 🚀" ~> %str.iter ~> %str.collect"#)
         .expect("\"hello world 🚀\"");
 }
 
@@ -369,7 +371,7 @@ fn test_iter_with_transformations() {
     quiver()
         .evaluate(
             r#"
-            "hello" %str.iter [~, 3] %iter.take %str.collect
+            "hello" ~> %str.iter ~> [~, 3] ~> %iter.take ~> %str.collect
             "#,
         )
         .expect("\"hel\"");
@@ -377,7 +379,7 @@ fn test_iter_with_transformations() {
     quiver()
         .evaluate(
             r#"
-            "hello" %str.iter [~, 2] %iter.drop %str.collect
+            "hello" ~> %str.iter ~> [~, 2] ~> %iter.drop ~> %str.collect
             "#,
         )
         .expect("\"llo\"");
@@ -388,16 +390,16 @@ fn test_join() {
     quiver()
         .evaluate(
             r#"
-            Cons["one", Cons["two", Cons["three", Nil]]] %list.iter [~, ", "] %str.join
+            Cons["one", Cons["two", Cons["three", Nil]]] ~> %list.iter ~> [~, ", "] ~> %str.join
             "#,
         )
         .expect("\"one, two, three\"");
 
     quiver()
-        .evaluate(r#"Cons["only", Nil] %list.iter [~, ", "] %str.join"#)
+        .evaluate(r#"Cons["only", Nil] ~> %list.iter ~> [~, ", "] ~> %str.join"#)
         .expect("\"only\"");
 
     quiver()
-        .evaluate(r#"Nil %list.iter [~, ", "] %str.join"#)
+        .evaluate(r#"Nil ~> %list.iter ~> [~, ", "] ~> %str.join"#)
         .expect("\"\"");
 }

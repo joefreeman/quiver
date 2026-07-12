@@ -84,7 +84,7 @@ Point[x, &y] = Point[1, 2]
 or-pattern
 ==================
 
-x =([[], _] | [_, []])
+x ~> =([[], _] | [_, []])
 
 ---
 
@@ -106,7 +106,7 @@ x =([[], _] | [_, []])
 default type pattern
 ==================
 
-x ='
+x ~> ='
 
 ---
 
@@ -122,7 +122,7 @@ x ='
 type-ascribed binding
 ==================
 
-f =('int)n
+f ~> =('int)n
 
 ---
 
@@ -141,7 +141,7 @@ f =('int)n
 type-ascribed binding in tuple pattern
 ==================
 
-p =Rational[_, ('int)d]
+p ~> =Rational[_, ('int)d]
 
 ---
 
@@ -163,7 +163,7 @@ p =Rational[_, ('int)d]
 type-ascribed binding with union type
 ==================
 
-x =('int | 'bin)v
+x ~> =('int | 'bin)v
 
 ---
 
@@ -185,7 +185,7 @@ x =('int | 'bin)v
 spaced paren type is not an ascription
 ==================
 
-y =('int) x
+y ~> =('int) ~> x
 
 ---
 

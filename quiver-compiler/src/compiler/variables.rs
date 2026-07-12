@@ -98,8 +98,15 @@ impl<'a> FreeVariableCollector<'a> {
                 // imports, builtins, and ripples don't.
                 self.visit_access_capture(access);
             }
-            ast::Term::Spawn(function, _) => {
+            ast::Term::Spawn(function, argument, _) => {
                 self.visit_term(function);
+                if let Some(argument) = argument {
+                    self.visit_term(argument);
+                }
+            }
+            ast::Term::Apply(access, argument) => {
+                self.visit_access_capture(access);
+                self.visit_term(argument);
             }
             ast::Term::Self_ => {}
             ast::Term::Process(_) => {}

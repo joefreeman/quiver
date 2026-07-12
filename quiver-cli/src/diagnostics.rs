@@ -55,6 +55,7 @@ fn hint(kind: &ErrorKind) -> String {
         ErrorKind::InvalidFunctionBody => "function body is incomplete or invalid".to_string(),
 
         ErrorKind::StepComma => "',' is not a step separator".to_string(),
+        ErrorKind::MissingChainArrow => "expected '~>' or ';' here".to_string(),
 
         ErrorKind::IntegerMalformed(lit) => format!("'{}' is not a valid integer", lit),
         ErrorKind::HexMalformed(lit) => format!("'{}' is not a valid hex literal", lit),

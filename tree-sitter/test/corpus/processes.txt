@@ -2,7 +2,7 @@
 spawn and receive
 ==================
 
-p = @{ !'int { =0 => "done" | [] ^ } }
+p = @{ !'int { =0 => "done" | [] ~> ^ } }
 
 ---
 
@@ -18,27 +18,27 @@ p = @{ !'int { =0 => "done" | [] ^ } }
                 (select
                   (receive_type
                     (type_identifier
-                      name: (type_name))))
-                (block
-                  (branch
-                    condition: (expression
-                      (chain
-                        (bind_match
-                          (integer))))
-                    consequence: (expression
-                      (chain
-                        (string))))
-                  (branch
-                    (expression
-                      (chain
-                        (tuple)
-                        (tail_call)))))))))))))
+                      name: (type_name)))
+                  filter: (block
+                    (branch
+                      condition: (expression
+                        (chain
+                          (bind_match
+                            (integer))))
+                      consequence: (expression
+                        (chain
+                          (string))))
+                    (branch
+                      (expression
+                        (chain
+                          (tuple)
+                          (tail_call))))))))))))))
 
 ==================
 spawn typed and await
 ==================
 
-p = [42, 100] @['int, 'int] { $ }; !p
+p = [42, 100] ~> @['int, 'int] { $ }; !p
 
 ---
 
@@ -72,7 +72,7 @@ p = [42, 100] @['int, 'int] { $ }; !p
 select with timeout
 ==================
 
-p1 ! [~, 1000]
+p1 ~> ![~, 1000]
 
 ---
 
@@ -92,7 +92,7 @@ p1 ! [~, 1000]
 send and self
 ==================
 
-42 pid; &. =self_pid
+42 ~> pid; &. ~> =self_pid
 
 ---
 
@@ -107,3 +107,154 @@ send and self
         (self))
       (bind_match
         (identifier)))))
+
+==================
+select filter with body
+==================
+
+!'int { =2 => Ok | [] }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (select
+        (receive_type
+          (type_identifier
+            name: (type_name)))
+        filter: (block
+          (branch
+            condition: (expression
+              (chain
+                (bind_match
+                  (integer))))
+            consequence: (expression
+              (chain
+                (tuple
+                  name: (tuple_name)))))
+          (branch
+            (expression
+              (chain
+                (tuple)))))))))
+
+==================
+select filter on hash type
+==================
+
+!#Reply[code: 'int] { =Reply[code: 200] => Ok }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (select
+        receive: (tuple_type
+          name: (tuple_name)
+          name: (identifier)
+          (type_identifier
+            name: (type_name)))
+        filter: (block
+          (branch
+            condition: (expression
+              (chain
+                (bind_match
+                  (pattern_tuple
+                    name: (tuple_name)
+                    name: (identifier)
+                    (integer)))))
+            consequence: (expression
+              (chain
+                (tuple
+                  name: (tuple_name))))))))))
+
+==================
+select filter on parenthesised type
+==================
+
+!('int) { =2 => Ok }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (select
+        (type_identifier
+          name: (type_name))
+        filter: (block
+          (branch
+            condition: (expression
+              (chain
+                (bind_match
+                  (integer))))
+            consequence: (expression
+              (chain
+                (tuple
+                  name: (tuple_name))))))))))
+
+==================
+select handler is a separate step
+==================
+
+!'int ~> { =2 => Ok }
+
+---
+
+(source_file
+  (expression
+    (chain
+      (select
+        (receive_type
+          (type_identifier
+            name: (type_name))))
+      (block
+        (branch
+          condition: (expression
+            (chain
+              (bind_match
+                (integer))))
+          consequence: (expression
+            (chain
+              (tuple
+                name: (tuple_name)))))))))
+
+==================
+spawn juxtaposed with init argument
+==================
+
+x ~> @counter 5
+
+---
+
+(source_file
+  (expression
+    (chain
+      (access
+        source: (identifier))
+      (application
+        function: (spawn
+          (access
+            source: (identifier)))
+        argument: (integer)))))
+
+==================
+spawn ripple with init argument
+==================
+
+&f ~> @~ 3
+
+---
+
+(source_file
+  (expression
+    (chain
+      (reference
+        (access
+          source: (identifier)))
+      (application
+        function: (spawn
+          (access
+            source: (ripple)))
+        argument: (integer)))))

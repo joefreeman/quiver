@@ -35,8 +35,8 @@ impl Drop for TempFile {
     }
 }
 
-const UNFORMATTED: &str = "#{[1,2]   __integer_add__}\n";
-const FORMATTED: &str = "#{ [1, 2] __integer_add__ }\n";
+const UNFORMATTED: &str = "#{[1,2]   ~>  __integer_add__}\n";
+const FORMATTED: &str = "#{ [1, 2] ~> __integer_add__ }\n";
 
 #[test]
 fn formats_a_file_in_place() {
@@ -78,7 +78,7 @@ fn check_fails_on_an_unformatted_file_without_writing() {
 #[test]
 fn eval_writes_to_stdout() {
     let out = quiv()
-        .args(["format", "-e", "#{[1,2] __integer_add__}"])
+        .args(["format", "-e", "#{[1,2] ~> __integer_add__}"])
         .output()
         .unwrap();
     assert!(out.status.success());
