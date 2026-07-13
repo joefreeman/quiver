@@ -78,6 +78,9 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         field_offsets,
         canonical_tuples,
         debug: bytecode.debug,
+        // The sync driver rejects spawn/send/await, so crashes are never delivered
+        // here; a select timeout falls back to a bare nil.
+        crash: None,
     };
 
     executor.update_program(program_update);
@@ -123,6 +126,8 @@ pub fn execute_bytecode_sync_with<E: Effect>(
                 Action::Await { .. } => "awaiting a process",
                 Action::RequestEffect { .. } => "performing an effect",
                 Action::ReadState { .. } => "reading a process's state",
+                Action::Kill { .. } => "killing a process",
+                Action::Link { .. } => "linking processes",
             };
             return Err(Error::OperationNotAllowed {
                 operation: operation.to_string(),

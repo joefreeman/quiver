@@ -6,11 +6,13 @@
 //   handler = #'%http { ... routes ... }
 //   [port: 4000, handler: &handler] %http/server.serve
 //
-// One process per connection: a crashed handler drops that connection, never the
-// server. A handler that *fails* (returns nil) gets a plain 500 — Quiver's
-// short-circuit semantics degrade to a well-formed response. Keep-alive is
-// HTTP/1.1's default (`Connection: close` honored); responses are always
-// Content-Length framed. `HEAD` answers like `GET` with the body bytes dropped.
+// One process per connection, and one per request: the handler runs in its own
+// process and is awaited, so a handler that *crashes* answers the same plain 500 as
+// one that *fails* (returns nil) — `!` is never lethal (the crash arrives as a
+// `:crash`-stamped nil; see docs/process-state.md), and the connection with its
+// keep-alive survives both. Keep-alive is HTTP/1.1's default (`Connection: close`
+// honored); responses are always Content-Length framed. `HEAD` answers like `GET`
+// with the body bytes dropped.
 
 'request = '%http
 'response = '%http.response
@@ -54,7 +56,10 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
       __tcp_socket_close__ sock
     }
     | =[req, rest] => {
-      r = h req
+      // Run the handler in its own process: a crash surfaces here as a stamped nil,
+      // degrading to the 500 below exactly like a plain failed handler.
+      hp = req ~> @h
+      r = !hp
       resp = {
         | r ~> =('%http.response)ok => ok
         | plain [500, "Internal Server Error"]

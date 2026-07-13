@@ -4748,8 +4748,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     receive: Some(recv_type),
                     ..
                 } => {
-                    // Process (process or resource) - get its receive type
+                    // Awaiting a process yields its result — or nil, since `!` is never
+                    // lethal: a crashed source answers a `:crash`-stamped nil (see
+                    // docs/process-state.md). The nil member is exact-rowed (the stamp
+                    // is row-invisible, like `origin`), so it doesn't poison bare
+                    // retrieval of ordinary keys through an await.
                     result_types.push(*recv_type);
+                    result_types.push(annotations::closed_nil(self.program));
                 }
                 Type::Process { receive: None, .. } => {
                     return Err(Error::TypeMismatch {
@@ -4762,8 +4767,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     result_types.push(*parameter);
                 }
                 Type::Integer => {
-                    // Timeout source
-                    result_types.push(self.program.register_type(Type::nil()));
+                    // Timeout source: nil, stamped `:timeout` at runtime (row-invisible,
+                    // hence the exact row here too).
+                    result_types.push(annotations::closed_nil(self.program));
                 }
                 _ => {
                     return Err(Error::TypeMismatch {

@@ -82,6 +82,26 @@ pub struct Site {
     pub kind: SiteKind,
 }
 
+/// The crash-delivery table (both build modes): the ids the executor needs to build the
+/// `:crash` / `:timeout` stamped nils that a never-lethal await delivers (see
+/// docs/process-state.md). Not carried by `Bytecode` — the environment derives it on its
+/// merged program (`Program::crash_table`) and ships it with each `ProgramUpdate`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrashTable {
+    /// Annotation key id of `crash`.
+    pub crash_key: usize,
+    /// Annotation key id of `timeout`.
+    pub timeout_key: usize,
+    /// Tuple id of `Error[pid: (@), message: Str['bin]]` (runtime errors).
+    pub error_tuple: usize,
+    /// Tuple id of `Panic[pid: (@), message: Str['bin]]` (`__panic__` aborts).
+    pub panic_tuple: usize,
+    /// Tuple id of `Killed` (empty; kill/link/teardown — step 4).
+    pub killed_tuple: usize,
+    /// Tuple id of `Str['bin]`.
+    pub str_tuple: usize,
+}
+
 /// The failure-provenance table of a debug build: the sites plus the ids the executor
 /// needs to prebuild each site's annotated-nil value at load time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

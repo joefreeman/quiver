@@ -33,7 +33,36 @@ pub enum Error {
     // contract whose verdict was nil, or an `assert`/`unreachable` helper.
     Panic(String),
 
+    // Terminated from outside: containment teardown of a terminated parent's subtree
+    // (and, later, an explicit `%proc.kill` or link propagation). Reified for awaiters
+    // as the `Killed` crash kind (see docs/process-state.md).
+    Killed,
+
     // Scope management errors
     ScopeCountInvalid { expected: usize, found: usize },
     ScopeUnderflow,
+}
+
+impl Error {
+    /// A human-readable message for crash delivery (the `message` field of a `'crash`
+    /// value — see docs/process-state.md). Internal-invariant errors (stack/scope/table
+    /// misuse — compiler bugs, not user-reachable) all read as internal errors.
+    pub fn crash_message(&self) -> String {
+        match self {
+            Error::Panic(message) => message.clone(),
+            Error::Killed => "killed".to_string(),
+            Error::TypeMismatch { expected, found } => {
+                format!("type mismatch: expected {expected}, found {found}")
+            }
+            Error::ArityMismatch { expected, found } => {
+                format!("arity mismatch: expected {expected}, found {found}")
+            }
+            Error::InvalidArgument(message) => message.clone(),
+            Error::OperationNotAllowed { operation, context } => {
+                format!("{operation} is not allowed in {context}")
+            }
+            Error::VariableUndefined(name) => format!("undefined variable: {name}"),
+            other => format!("internal error: {other:?}"),
+        }
+    }
 }

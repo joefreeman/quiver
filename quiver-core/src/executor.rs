@@ -2,7 +2,9 @@ use crate::binary::BinaryData;
 use crate::bytecode::{ConcreteType, Constant, Function, Instruction};
 use crate::effects::Effect;
 use crate::error::Error;
-use crate::process::{Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState};
+use crate::process::{
+    Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState, Watcher,
+};
 use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Payload, Value};
 use num_traits::ToPrimitive;
@@ -37,6 +39,9 @@ pub struct ProgramUpdate {
     /// Failure-provenance sites (debug builds): the full table, from which the executor
     /// prebuilds each site's annotated-nil value. `None` leaves any existing table as is.
     pub debug: Option<crate::bytecode::SiteTable>,
+    /// Crash-delivery ids (both build modes; see `Program::crash_table`). `None` leaves
+    /// any existing table as is (the compile-time sync driver never delivers crashes).
+    pub crash: Option<crate::bytecode::CrashTable>,
     /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
     /// treat structurally-identical tuples built via different paths as equal.
     pub canonical_tuples: Vec<usize>,
@@ -218,6 +223,11 @@ pub struct Executor<E: Effect> {
     effecting: HashSet<ProcessId>,
     /// Parked on a remote `?` state read, woken by `notify_state`.
     sampling: HashSet<ProcessId>,
+    /// Completion notifications awaiting delivery: `(watcher, completed pid)` pairs
+    /// recorded when a watched process terminated (see `flush_watchers`). The runtime
+    /// above drains these via `take_watcher_events` — delivery routes through the
+    /// environment, which the executor knows nothing about.
+    pending_watcher_events: Vec<(Watcher, ProcessId)>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
@@ -266,6 +276,9 @@ pub struct Executor<E: Effect> {
     site_nils: Vec<Value>,
     site_origins: Vec<Value>,
     origin_key: Option<usize>,
+    // Crash delivery (both build modes): the ids for building `:crash`/`:timeout`
+    // stamped nils (see `crash_value` / `handle_select_timeout`).
+    crash_table: Option<crate::bytecode::CrashTable>,
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
     // Profiling
@@ -529,6 +542,10 @@ impl<E: Effect> Executor<E> {
     /// exist yet (see docs/process-state.md). Persistent (REPL) processes are exempt — they
     /// resume across submissions and keep their locals and mailbox. Idempotent.
     pub fn tombstone(&mut self, pid: ProcessId) {
+        // Every kill path sets `result` before tombstoning, so flushing here gives all
+        // completions — step-finish, effect failure, error propagation — one choke
+        // point for watcher notification. Idempotent (the list is taken).
+        self.flush_watchers(pid);
         let taken = self.get_process_mut(pid).and_then(|process| {
             if process.persistent {
                 return None;
@@ -558,6 +575,136 @@ impl<E: Effect> Executor<E> {
             }
         }
         self.truncate_locals_pid(pid, 0);
+    }
+
+    /// Register a watcher on `target`, to be notified when it terminates. Returns
+    /// `false` when the target has already terminated (its result is set — including a
+    /// sleeping persistent process's) — the caller answers the watcher immediately
+    /// instead — or when the target is unknown to this executor.
+    pub fn add_watcher(&mut self, target: ProcessId, watcher: Watcher) -> bool {
+        match self.get_process_mut(target) {
+            Some(process) if process.result.is_none() => {
+                process.watchers.push(watcher);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Add the target-side half of a link (idempotent — one entry per peer): `peer` is
+    /// killed when `target` terminates abnormally. No-op on a terminated or unknown
+    /// target (the caller decides what an already-dead target means).
+    pub fn add_link(&mut self, target: ProcessId, peer: ProcessId) {
+        if let Some(process) = self.get_process_mut(target) {
+            let entry = Watcher::Link { pid: peer };
+            if process.result.is_none() && !process.watchers.contains(&entry) {
+                process.watchers.push(entry);
+            }
+        }
+    }
+
+    /// Move a terminated process's watchers onto the pending-events queue for the
+    /// runtime above to deliver. No-op until the process has a result; idempotent
+    /// thereafter (the list is taken). A persistent (REPL) process's completion is a
+    /// sleep, not a termination: its result-observers (awaiters) fire, but its
+    /// termination-observers (owned children) survive across the resume.
+    fn flush_watchers(&mut self, pid: ProcessId) {
+        let Some(process) = self.get_process_mut(pid) else {
+            return;
+        };
+        if process.result.is_none() || process.watchers.is_empty() {
+            return;
+        }
+        let watchers = if process.persistent {
+            let (flushed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut process.watchers)
+                .into_iter()
+                .partition(|watcher| matches!(watcher, Watcher::Awaiter { .. }));
+            process.watchers = kept;
+            flushed
+        } else {
+            std::mem::take(&mut process.watchers)
+        };
+        self.pending_watcher_events
+            .extend(watchers.into_iter().map(|watcher| (watcher, pid)));
+    }
+
+    /// Terminate a process from outside — containment teardown of a terminated
+    /// parent's subtree (later also `%proc.kill`): record the error as its result and
+    /// tombstone it, which flushes its own watchers — awaiters observe the crash, and
+    /// the teardown cascades through its owned children. No-op on terminated
+    /// (idempotent), unknown, and persistent processes (a REPL process is the host's
+    /// to stop).
+    pub fn kill(&mut self, pid: ProcessId, error: Error) {
+        match self.get_process_mut(pid) {
+            Some(process) if process.result.is_none() && !process.persistent => {
+                process.result = Some(Err(error));
+                process.frames.clear();
+            }
+            _ => return,
+        }
+        self.tombstone(pid);
+    }
+
+    /// Drain pending completion notifications: `(watcher, completed pid)` pairs. The
+    /// caller (the worker) delivers each — routing through the environment, since a
+    /// watcher's pid may live on another worker.
+    pub fn take_watcher_events(&mut self) -> Vec<(Watcher, ProcessId)> {
+        std::mem::take(&mut self.pending_watcher_events)
+    }
+
+    /// Build — extracted, ready to ship — the `:crash`-stamped nil a never-lethal await
+    /// delivers for a crashed process (see docs/process-state.md): nil annotated under
+    /// the `crash` key with `Panic[pid, message]` for a `__panic__` abort, and
+    /// `Error[pid, message]` for every other runtime error. Must run on the *crashed
+    /// process's* executor: the pid field carries its root function index, so it
+    /// compares equal (`=&p`) to the pid values other processes hold.
+    pub fn crash_result(
+        &mut self,
+        pid: ProcessId,
+        error: &Error,
+    ) -> Result<(Value, Vec<Vec<u8>>), Error> {
+        let table = self
+            .crash_table
+            .clone()
+            .ok_or_else(|| Error::InvalidArgument("crash table not installed".to_string()))?;
+        let payload = match error {
+            // A teardown/kill answers the bare `Killed` kind (see docs/process-state.md).
+            Error::Killed => Value::tuple(table.killed_tuple, vec![]),
+            _ => {
+                let function_index = self
+                    .process_function_indices
+                    .get(&pid)
+                    .copied()
+                    .ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "no function index for crashed process {pid}"
+                        ))
+                    })?;
+                let message_binary = self.allocate_binary(error.crash_message().into_bytes())?;
+                let message = Value::tuple(table.str_tuple, vec![Value::Binary(message_binary)]);
+                let kind_tuple = match error {
+                    Error::Panic(_) => table.panic_tuple,
+                    _ => table.error_tuple,
+                };
+                Value::tuple(
+                    kind_tuple,
+                    vec![Value::Process(pid, function_index), message],
+                )
+            }
+        };
+        let stamped = Value::Tuple(
+            NIL,
+            Arc::new(Payload::with_annotations(
+                vec![],
+                vec![(table.crash_key, payload)],
+            )),
+        );
+        // Root → extract → release, so the freshly allocated message binary goes
+        // through the refcount lifecycle and its slot is reclaimable afterwards.
+        self.retain(&stamped);
+        let extracted = self.extract_heap_data(&stamped);
+        self.release(&stamped);
+        extracted
     }
 
     /// Validate the reference-count invariant against the tracing oracle: every heap slot must
@@ -686,6 +833,7 @@ impl<E: Effect> Executor<E> {
             selecting: HashSet::new(),
             effecting: HashSet::new(),
             sampling: HashSet::new(),
+            pending_watcher_events: Vec::new(),
             constants: vec![],
             functions: vec![],
             builtins: vec![],
@@ -708,6 +856,7 @@ impl<E: Effect> Executor<E> {
             site_nils: vec![],
             site_origins: vec![],
             origin_key: None,
+            crash_table: None,
             builtins_registry,
             stats: ExecutionStats::new(),
             profile,
@@ -874,8 +1023,13 @@ impl<E: Effect> Executor<E> {
         let injected_result = self.inject_heap_data(result, &heap)?;
 
         // Store the result in the process's awaiting map (retaining as it enters storage,
-        // releasing any stale result the insert displaces).
-        if self.get_process(awaiter).is_some() {
+        // releasing any stale result the insert displaces). A terminated awaiter (e.g.
+        // killed while parked on this very select) is skipped, like a dead message
+        // target — its watcher entry on the source dangles harmlessly.
+        if self
+            .get_process(awaiter)
+            .is_some_and(|p| p.persistent || p.result.is_none())
+        {
             self.retain(&injected_result);
             let displaced = self
                 .get_process_mut(awaiter)
@@ -1225,6 +1379,9 @@ impl<E: Effect> Executor<E> {
         if let Some(table) = update.debug {
             self.install_sites(&table);
         }
+        if let Some(table) = update.crash {
+            self.crash_table = Some(table);
+        }
     }
 
     /// Prebuild the per-site provenance values a debug build's `Stamp` instructions use.
@@ -1398,65 +1555,22 @@ impl<E: Effect> Executor<E> {
         let finished = process.map(|p| p.frames.is_empty()).unwrap_or(false);
 
         if finished {
-            // Store result
-            let result_value = if let Some(process) = self.get_process_mut(current_pid) {
-                // If error is already set (during execution), use nil as placeholder
-                if let Some(Err(_)) = process.result {
-                    Value::nil()
-                } else {
-                    // No error yet - pop result from stack
-                    let Some(result) = process.stack.pop() else {
-                        // Stack underflow - process finished with no result on stack
-                        process.result = Some(Err(Error::StackUnderflow));
-                        return (true, None); // Did work but hit error
-                    };
-                    process.result = Some(Ok(result.clone()));
-                    result
-                }
-            } else {
-                Value::nil()
-            };
-
-            // Notify any processes awaiting this one
-            let awaiters: Vec<ProcessId> = self
-                .processes
-                .iter()
-                .filter_map(|(pid, proc)| {
-                    if proc.awaiting.contains_key(&current_pid) {
-                        Some(*pid)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Get the process result to check if it's an error
-            let process_result = self.get_process(current_pid).and_then(|p| p.result.clone());
-
-            for awaiter in awaiters {
-                match &process_result {
-                    Some(Ok(_)) => {
-                        // Success - notify with the result value
-                        self.notify_result(awaiter, current_pid, result_value.clone(), vec![])
-                            .ok(); // Ignore errors since this is internal notification
-                    }
-                    Some(Err(error)) => {
-                        // Error - propagate to awaiter by setting their result
-                        if let Some(awaiter_process) = self.get_process_mut(awaiter) {
-                            awaiter_process.result = Some(Err(error.clone()));
-                            awaiter_process.frames.clear();
-                        }
-                        self.tombstone(awaiter);
-                    }
-                    None => {
-                        // No result yet (shouldn't happen at this point)
-                        self.notify_result(awaiter, current_pid, result_value.clone(), vec![])
-                            .ok();
-                    }
-                }
+            // Store the result (unless an error was already set during execution).
+            if let Some(process) = self.get_process_mut(current_pid)
+                && !matches!(process.result, Some(Err(_)))
+            {
+                // The popped stack slot's retained count transfers into `result`.
+                process.result = Some(match process.stack.pop() {
+                    Some(result) => Ok(result),
+                    None => Err(Error::StackUnderflow),
+                });
             }
 
-            // The process can never run again: drop its execution state, keeping the result.
+            // The process can never run again: drop its execution state, keeping the
+            // result. Tombstoning also hands the completion to this process's watchers
+            // (`flush_watchers` — drained by the runtime above via
+            // `take_watcher_events`); that runs ahead of the persistent exemption, so
+            // sleeping REPL processes notify their watchers too.
             self.tombstone(current_pid);
 
             // Validate the refcount invariant at this quiescent point (debug only) — the
@@ -2101,8 +2215,80 @@ impl<E: Effect> Executor<E> {
                     entry.1 += elapsed;
                 }
 
-                // Handle both immediate and action results
+                // Handle immediate, action, and detach results
                 match result {
+                    crate::builtins::BuiltinResult::Detach { child } => {
+                        // The caller's record is the step-local `proc` (taken out of
+                        // the map for the slice), so the entry removal happens here,
+                        // not in the builtin. Parent-only, fail-fast: no entry means
+                        // the caller doesn't own the child.
+                        if proc.is_receiving() {
+                            return Err(Error::OperationNotAllowed {
+                                operation: "detach".to_string(),
+                                context: "receive function".to_string(),
+                            });
+                        }
+                        let before = proc.watchers.len();
+                        proc.watchers.retain(
+                            |watcher| !matches!(watcher, Watcher::OwnedChild { pid } if *pid == child),
+                        );
+                        if proc.watchers.len() == before {
+                            return Err(Error::OperationNotAllowed {
+                                operation: "detach".to_string(),
+                                context: "a process that is not an owned child of the caller"
+                                    .to_string(),
+                            });
+                        }
+                        self.push_value(proc, Value::ok());
+                        if let Some(frame) = proc.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+                        Ok(None)
+                    }
+                    crate::builtins::BuiltinResult::Kill { target } => {
+                        // Fire-and-forget: answer Ok immediately (no parking) and route
+                        // the kill through the environment. A self-kill lands at the
+                        // next command-processing point, when the caller is back in
+                        // the map.
+                        if proc.is_receiving() {
+                            return Err(Error::OperationNotAllowed {
+                                operation: "kill".to_string(),
+                                context: "receive function".to_string(),
+                            });
+                        }
+                        self.push_value(proc, Value::ok());
+                        if let Some(frame) = proc.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+                        Ok(Some(Action::Kill { target }))
+                    }
+                    crate::builtins::BuiltinResult::Link { target } => {
+                        // The caller-side half lives on the step-local `proc`; the
+                        // target-side half routes through the environment. Idempotent
+                        // (one entry per peer); self-link is a no-op — a process
+                        // cannot fate-share with itself.
+                        if proc.is_receiving() {
+                            return Err(Error::OperationNotAllowed {
+                                operation: "link".to_string(),
+                                context: "receive function".to_string(),
+                            });
+                        }
+                        self.push_value(proc, Value::ok());
+                        if let Some(frame) = proc.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+                        if target == pid {
+                            return Ok(None);
+                        }
+                        let entry = Watcher::Link { pid: target };
+                        if !proc.watchers.contains(&entry) {
+                            proc.watchers.push(entry);
+                        }
+                        Ok(Some(Action::Link {
+                            caller: pid,
+                            target,
+                        }))
+                    }
                     crate::builtins::BuiltinResult::Value(value) => {
                         // Immediate result: push value (retaining any freshly allocated binaries)
                         // and increment counter.
@@ -2126,6 +2312,8 @@ impl<E: Effect> Executor<E> {
                                     Action::Deliver { .. } => "send",
                                     Action::Await { .. } => "await",
                                     Action::ReadState { .. } => "state read",
+                                    Action::Kill { .. } => "kill",
+                                    Action::Link { .. } => "link",
                                 }
                                 .to_string(),
                                 context: "receive function".to_string(),
@@ -2731,7 +2919,10 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    /// Check if timeout has elapsed, returning nil if so
+    /// Check if timeout has elapsed, returning a `:timeout`-stamped nil if so — the
+    /// stamp carries the ms that fired, so a fallback branch can discriminate a timeout
+    /// from a crash or a legit nil result (see docs/process-state.md). Bare nil when no
+    /// crash table is installed (the compile-time sync driver).
     fn handle_select_timeout(
         &mut self,
         timeout_ms: i64,
@@ -2740,7 +2931,13 @@ impl<E: Effect> Executor<E> {
     ) -> Result<Option<Value>, Error> {
         let elapsed = current_time_ms.saturating_sub(start_time);
         if elapsed >= timeout_ms.max(0) as u64 {
-            Ok(Some(Value::nil()))
+            let value = match &self.crash_table {
+                Some(table) => Value::nil()
+                    .annotated(table.timeout_key, Value::int(timeout_ms.max(0)))
+                    .expect("nil carries annotations"),
+                None => Value::nil(),
+            };
+            Ok(Some(value))
         } else {
             Ok(None)
         }

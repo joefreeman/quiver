@@ -925,9 +925,13 @@ fn analyze_partial_pattern(
         value_type_id,
     )?;
 
-    // Check if the original value type could be multiple types (for adding type checks)
+    // Check if the original value type could be multiple types (for adding type checks).
+    // Members that contribute no field source at all (primitives, callables — and they
+    // can reach here through a union) still make the check necessary: without it the
+    // field fetch below would run unguarded against them.
     let value_type_sources = extract_field_sources(program, value_type_id);
-    let needs_type_check = value_type_sources.len() > 1;
+    let needs_type_check =
+        value_type_sources.len() > 1 || has_sourceless_members(program, value_type_id);
 
     // Narrowed type accumulated per matchable variant, reconstructed with field-level precision so
     // a later branch's complement reflects the field check (e.g. `mode: R | A` after `=(mode: W)`).
@@ -972,15 +976,29 @@ fn analyze_partial_pattern(
                 )
             }
             FieldMatch::Partial {
+                name,
                 fields,
                 field_indices,
             } => {
+                // A partial source is a structural constraint, not a concrete type — but
+                // when the value could also be *other* members (e.g. the nil of a
+                // `shape | []` union), the constraint itself is the runtime test;
+                // without it the field fetch below would run unguarded against them.
+                if needs_type_check {
+                    let partial_type_id = program.register_type(Type::Partial {
+                        name: name.clone(),
+                        fields: fields.clone(),
+                    });
+                    requirements.push(Requirement {
+                        path: path.clone(),
+                        check: RuntimeCheck::TypeId(partial_type_id),
+                    });
+                }
                 // Convert partial fields to (Option<String>, usize) format
                 let converted: Vec<(Option<String>, usize)> = fields
                     .iter()
                     .map(|(name, type_id)| (Some(name.clone()), *type_id))
                     .collect();
-                // No type check needed for partials - they're type constraints, not concrete types
                 (converted, field_indices, None)
             }
         };
@@ -1269,6 +1287,7 @@ enum FieldMatch {
         field_indices: Vec<usize>,
     },
     Partial {
+        name: Option<String>,
         fields: Vec<(String, usize)>, // (field_name, type_id)
         field_indices: Vec<usize>,
     },
@@ -1321,6 +1340,7 @@ fn find_types_with_fields_and_name(
 
                 if let Some(indices) = find_field_indices(field_names, &converted_fields) {
                     matches.push(FieldMatch::Partial {
+                        name,
                         fields,
                         field_indices: indices,
                     });
@@ -1364,6 +1384,23 @@ enum FieldSource {
         name: Option<String>,
         fields: Vec<(String, usize)>, // (field_name, type_id) - all partial fields are named
     },
+}
+
+/// Whether the type has members that contribute no field source at all (primitives,
+/// callables, processes, variables): a field pattern can never match them, so their
+/// presence forces a runtime type check on the members it *can* match.
+fn has_sourceless_members(program: &Program, type_id: usize) -> bool {
+    let Some(ty) = program.lookup_type(type_id) else {
+        return true;
+    };
+    match ty {
+        Type::Annotated { base, .. } => has_sourceless_members(program, *base),
+        Type::Tuple(_) | Type::Partial { .. } => false,
+        Type::Union(type_ids) => type_ids
+            .iter()
+            .any(|&tid| has_sourceless_members(program, tid)),
+        _ => true,
+    }
 }
 
 /// Extract field sources from a type (tuples and partials)

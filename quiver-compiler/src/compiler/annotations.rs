@@ -22,11 +22,18 @@ pub const POST: &str = "post";
 /// simply never stamps, so the checked retrieval is always nil there).
 pub const ORIGIN: &str = "origin";
 
+/// The runtime-owned crash-delivery keys, attached row-invisibly in both build modes: a
+/// never-lethal await answers a crashed source with a `:crash`-stamped nil, and a select
+/// timeout stamps `:timeout` (the ms that fired). See docs/process-state.md.
+pub const CRASH: &str = "crash";
+pub const TIMEOUT: &str = "timeout";
+
 /// Whether an exact row lacking `name` proves the annotation absent. True for ordinary
 /// keys (attach is the only writer, and attaches are row-tracked); false for keys with a
-/// row-invisible writer.
+/// row-invisible writer — for those, a checked retrieval must keep its runtime gate even
+/// on an exact-empty row (a select's nil member is exact-rowed yet may carry the stamp).
 fn exactness_proves_absence(name: &str) -> bool {
-    name != ORIGIN
+    !matches!(name, ORIGIN | CRASH | TIMEOUT)
 }
 
 /// Intern an annotation key by name. Any name is valid; typos are caught at retrieval

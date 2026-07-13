@@ -74,6 +74,18 @@ pub enum BuiltinResult<E: Effect> {
     Value(Value),
     /// Action that requires Environment coordination
     Action(Action<E>),
+    /// Detach `child` from the calling process's owned children (the parent-only
+    /// `%proc.detach`). Applied by the dispatch site, which holds the caller's
+    /// `Process` — taken out of the map for the step, so the builtin itself cannot
+    /// reach it. Errors there when the caller doesn't own the child.
+    Detach { child: ProcessId },
+    /// Kill `target` (`%proc.kill`): the dispatch site answers `Ok` immediately
+    /// (fire-and-forget — no parking) and routes an `Action::Kill`.
+    Kill { target: ProcessId },
+    /// Link the caller and `target` (`%proc.link`): the dispatch site records the
+    /// caller-side half on the step-local `Process`, answers `Ok`, and routes an
+    /// `Action::Link` for the target-side half. Self-link is a no-op.
+    Link { target: ProcessId },
 }
 
 /// Type specification for lazy type resolution
@@ -483,6 +495,69 @@ pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "panic", builtin_panic, str => TypeSpec::Union(vec![]));
 }
 
+/// Detach an owned child from the calling process (the parent-only `%proc.detach`,
+/// see docs/process-state.md): the child survives the caller's termination. The
+/// removal itself happens at the dispatch site (see [`BuiltinResult::Detach`]), which
+/// errors when the argument is not an owned child of the caller — ownership is the
+/// parent's to relinquish, like operating on another process's resource.
+pub fn builtin_process_detach<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    let Value::Process(child, _) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "process".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    Ok(BuiltinResult::Detach { child: *child })
+}
+
+/// Kill a process (`%proc.kill`, see docs/process-state.md): always effective — there
+/// is no trap flag — and idempotent on an already-terminated target. Awaiters observe
+/// the `Killed` crash kind; the target's owned subtree is torn down with it.
+pub fn builtin_process_kill<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    let Value::Process(target, _) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "process".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    Ok(BuiltinResult::Kill { target: *target })
+}
+
+/// Link the calling process and the target (`%proc.link`): symmetric fate-sharing —
+/// if either terminates *abnormally* (crash or kill), the other is killed; normal
+/// completion never propagates. Linking an already-crashed process kills the caller
+/// immediately (tombstones keep the error, so there is no establishment race).
+pub fn builtin_process_link<E: Effect>(
+    _process_id: ProcessId,
+    arg: &Value,
+    _executor: &mut Executor<E>,
+) -> Result<BuiltinResult<E>, Error> {
+    let Value::Process(target, _) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "process".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    Ok(BuiltinResult::Link { target: *target })
+}
+
+/// Register the process-management builtins (`%proc`).
+pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let pid = TypeSpec::Process(None, None);
+    let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
+    register_builtin!(registry, "process_detach", builtin_process_detach, pid.clone() => ok.clone());
+    register_builtin!(registry, "process_kill", builtin_process_kill, pid.clone() => ok.clone());
+    register_builtin!(registry, "process_link", builtin_process_link, pid => ok);
+}
+
 /// Get all core builtin modules. This establishes the full builtin *contract* every host shares:
 /// the pure builtins (integer/binary/vector) with their universal implementations, and the IO
 /// builtins' signatures (with placeholder implementations that executing hosts replace via
@@ -494,6 +569,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_vector_builtins,
         register_reference_builtins,
         register_control_builtins,
+        register_process_builtins,
         io::register_io_signatures,
     ]
 }

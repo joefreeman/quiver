@@ -200,6 +200,11 @@ fn test_receive_filter_type_is_parameter_not_result() {
         .expect_type("#[] -> 'int !'int");
 }
 
+// A restricted-context violation crashes the *filtering* process; `!` is never lethal,
+// so the awaiter observes the crash as a `:crash`-stamped nil (an `Error[pid, message]`
+// payload) rather than dying with it — see docs/process-state.md. These tests read the
+// stamp with a checked retrieval; one also pins the crashed pid.
+
 #[test]
 fn test_receive_function_cannot_spawn() {
     quiver()
@@ -207,13 +212,12 @@ fn test_receive_function_cannot_spawn() {
             r#"
             p = @#{ ![#'int { @#{ 42 }; Ok }] };
             10 ~> p;
-            !p
+            r = !p;
+            r:((message: Str['bin]))crash ~> =(message: m);
+            m
             "#,
         )
-        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
-            operation: "spawn".to_string(),
-            context: "receive function".to_string(),
-        });
+        .expect("\"spawn is not allowed in receive function\"");
 }
 
 #[test]
@@ -224,13 +228,12 @@ fn test_receive_function_cannot_send() {
             p1 = @#{ !#'int };
             p2 = @#{ ![#'int { 42 ~> p1; Ok }] };
             10 ~> p2;
-            !p2
+            r = !p2;
+            r:((message: Str['bin]))crash ~> =(message: m);
+            m
             "#,
         )
-        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
-            operation: "send".to_string(),
-            context: "receive function".to_string(),
-        });
+        .expect("\"send is not allowed in receive function\"");
 }
 
 #[test]
@@ -240,30 +243,29 @@ fn test_receive_function_cannot_select() {
             r#"
             p = @#{ ![#'int { !#'int; Ok }] };
             10 ~> p;
-            !p
+            r = !p;
+            r:((message: Str['bin]))crash ~> =(message: m);
+            m
             "#,
         )
-        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
-            operation: "select".to_string(),
-            context: "receive function".to_string(),
-        });
+        .expect("\"select is not allowed in receive function\"");
 }
 
 #[test]
 fn test_receive_function_cannot_await() {
+    // Also pins the crash payload's pid: it must compare equal (`=&p`) to the pid the
+    // spawner holds, and the kind must be `Error` (a runtime error, not a panic).
     quiver()
         .evaluate(
             r#"
             q = @#{ 42 };
             p = @#{ ![#'int { !q; Ok }] };
             10 ~> p;
-            !p
+            r = !p;
+            r:(Error(pid: (@)))crash ~> =Error(pid: &p)
             "#,
         )
-        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
-            operation: "select".to_string(),
-            context: "receive function".to_string(),
-        });
+        .expect("Ok");
 }
 
 #[test]
@@ -274,13 +276,199 @@ fn test_receive_function_cannot_perform_effect() {
             r#"
             p = @#{ ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__; Ok }] };
             10 ~> p;
-            !p
+            r = !p;
+            r:((message: Str['bin]))crash ~> =(message: m);
+            m
+            "#,
+        )
+        .expect("\"effect is not allowed in receive function\"");
+}
+
+// Containment-by-default ownership (docs/process-state.md): `@f` spawns an owned
+// child, torn down when its parent terminates — any reason, like resource auto-close.
+// `%proc.detach` (parent-only) opts a child out. Note the reference idiom: a bare pid
+// receiving a flowing value is a *send*, so arguments pass pids as `&p`.
+
+#[test]
+fn test_parent_termination_tears_down_children() {
+    // The parent completes normally; both children (blocked receiving) are killed, and
+    // awaiting them answers the `Killed` crash kind. Round-robin placement makes the
+    // cross-worker kill path the common case here.
+    quiver()
+        .evaluate(
+            r#"
+            a = @#{ [@#{ !'int }, @#{ !'int }] };
+            !a ~> =[b1, b2];
+            r1 = !b1;
+            r2 = !b2;
+            [r1:(Killed)crash, r2:(Killed)crash]
+            "#,
+        )
+        .expect("[Killed, Killed]");
+}
+
+#[test]
+fn test_detached_child_survives_parent() {
+    quiver()
+        .evaluate(
+            r#"
+            a = @#{ p = @#{ !'int }; %proc.detach &p; [&p] };
+            !a ~> =[b];
+            42 ~> b;
+            !b ~> =('int)v;
+            v
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_detach_requires_ownership() {
+    // Detaching is the owner's prerogative; a second detach (the entry is gone) fails
+    // exactly like any non-owner's attempt.
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ !'int };
+            %proc.detach &p;
+            %proc.detach &p
             "#,
         )
         .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
-            operation: "effect".to_string(),
-            context: "receive function".to_string(),
+            operation: "detach".to_string(),
+            context: "a process that is not an owned child of the caller".to_string(),
         });
+}
+
+#[test]
+fn test_kill_terminates_a_running_process() {
+    // Retrieves with the `'%proc.crash` module alias (the documented general form):
+    // the union admits any crash kind, and the expectation pins it to `Killed`. The
+    // neighbouring tests use narrow shapes (`(Killed)`, `(Panic(message: …))`), where
+    // the retrieval gate itself asserts the kind.
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ !'int };
+            %proc.kill &p;
+            r = !p;
+            r:('%proc.crash)crash
+            "#,
+        )
+        .expect("Killed");
+}
+
+#[test]
+fn test_kill_of_completed_process_is_noop() {
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ 42 };
+            !p ~> =('int)v;
+            %proc.kill &p;
+            v
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_link_fires_on_abnormal_termination() {
+    // Symmetric fate-sharing: c links v, then panics — v is killed with it.
+    quiver()
+        .evaluate(
+            r#"
+            v = @#{ !'int };
+            c = @#{ %proc.link &v; "die" ~> __panic__ };
+            rc = !c;
+            rv = !v;
+            rv:(Killed)crash
+            "#,
+        )
+        .expect("Killed");
+}
+
+#[test]
+fn test_link_is_silent_on_normal_completion() {
+    // A finished peer doesn't take its gang with it: c completes normally, v lives on.
+    quiver()
+        .evaluate(
+            r#"
+            v = @#{ !'int };
+            c = @#{ %proc.link &v; 1 };
+            !c ~> =('int)one;
+            42 ~> v;
+            !v ~> =('int)out;
+            out
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_link_to_crashed_process_kills_immediately() {
+    // Tombstones keep the error, so there is no establishment race: linking a
+    // dead-by-crash process kills the caller on the spot.
+    quiver()
+        .evaluate(
+            r#"
+            dead = @#{ "x" ~> __panic__ };
+            { ![50] | Ok };
+            c = @#{ %proc.link &dead; !'int };
+            r = !c;
+            r:(Killed)crash
+            "#,
+        )
+        .expect("Killed");
+}
+
+#[test]
+fn test_panic_is_catchable_at_await() {
+    // A child's `__panic__` arrives at the await as a catchable `:crash` value of kind
+    // `Panic` carrying the panic message — a process boundary is where "unrecoverable"
+    // ends (docs/process-state.md).
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ "boom" ~> __panic__ };
+            r = !p;
+            r:(Panic(message: Str['bin]))crash ~> =(message: m);
+            m
+            "#,
+        )
+        .expect("\"boom\"");
+}
+
+#[test]
+fn test_timeout_stamp_carries_the_ms() {
+    // A timed-out select answers nil stamped `:timeout` with the ms that fired,
+    // discriminating a timeout from a crash or a legit nil result.
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ !'int };
+            r = ![p, 30];
+            r:('int)timeout
+            "#,
+        )
+        .expect("30");
+}
+
+#[test]
+fn test_late_await_of_crashed_process_yields_same_crash() {
+    // The crash persists on the tombstone: awaiting after the death answers the same
+    // stamped nil as awaiting before it — observation has no deadline.
+    quiver()
+        .evaluate(
+            r#"
+            p = @#{ "gone" ~> __panic__ };
+            { ![20] | Ok };
+            r = !p;
+            r:(Panic(pid: (@), message: Str['bin]))crash ~> =(pid: &p, message: m);
+            m
+            "#,
+        )
+        .expect("\"gone\"");
 }
 
 #[test]

@@ -668,9 +668,10 @@ mod tests {
         assert!(at("[a:", 0).1.contains("a:"));
         // `~` (in `[~, 1]`) → the flowing value's type.
         assert_eq!(at("[~, 1]", 1).1, "'int");
-        // `@` → the process type; `!` → the awaited result.
+        // `@` → the process type; `!` → the awaited result (fallible: `!` is never
+        // lethal, so a crashed source answers a stamped nil).
         assert!(at("@{", 0).1.contains('@'));
-        assert_eq!(at("!p", 0).1, "'int");
+        assert_eq!(at("!p", 0).1, "'int | []");
     }
 
     #[test]

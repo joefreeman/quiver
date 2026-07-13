@@ -180,6 +180,35 @@ fn test_served_connection_end_to_end() {
 }
 
 #[test]
+fn test_crashed_handler_answers_500_and_connection_survives() {
+    // A handler that *crashes* (a `__panic__` here) runs in its own process and is
+    // awaited: the crash arrives as a `:crash`-stamped nil (never-lethal `!`, see
+    // docs/process-state.md) and degrades to the same plain 500 as a failed handler —
+    // and the connection pump survives to answer the next pipelined request normally.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"
+            handler = #'%http {
+              [$method, $path] ~> {
+                | =[GET, Cons["boom", Nil]] => "handler crashed" ~> __panic__
+                | %http/server.not_found
+              }
+            };
+            @{ [port: 4182, handler: &handler] ~> %http/server.serve };
+            { ![50] | Ok };
+            sock = [0x7f000001, 4182] ~> __tcp_connect__;
+            [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__;
+            r1 = [sock, 4096] ~> __tcp_socket_read__;
+            r2 = [sock, 4096] ~> __tcp_socket_read__;
+            sock ~> __tcp_socket_close__;
+            [Str[[r1, r2] ~> %bin.concat]]
+            "#,
+        )
+        .expect(r#"["HTTP/1.1 500 Internal Server Error\r\ncontent-length: 21\r\ncontent-type: text/plain; charset=utf-8\r\n\r\nInternal Server ErrorHTTP/1.1 404 Not Found\r\ncontent-length: 9\r\ncontent-type: text/plain; charset=utf-8\r\n\r\nNot Found"]"#);
+}
+
+#[test]
 fn test_cookie_parsing() {
     quiver()
         .evaluate(

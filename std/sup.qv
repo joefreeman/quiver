@@ -1,0 +1,147 @@
+// Supervision (docs/process-state.md): restart strategies as ordinary library code
+// on the step-2 primitives. A supervisor is a state loop whose table maps child ids
+// to pids and restart recipes; every child gets a *watcher* — a tiny process that
+// awaits it (never-lethal `!`), classifies the outcome, and reports
+// `Down[id, outcome]` to the supervisor's mailbox. The mailbox multiplexes, so the
+// child set may be dynamic; identity comes from the watcher's creation-time
+// knowledge, never from the await.
+//
+// Ownership does the rest: children and watchers are spawned in the supervisor's
+// process, so stopping the supervisor — or its own crash, e.g. giving up past the
+// restart-intensity limit — tears the whole subtree down. A parent supervisor's
+// watcher sees that crash as an ordinary Down: escalation is just crashing.
+//
+//   spec = [id: "worker", restart: Permanent, start: &start_worker]
+//   sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+//
+// A start closure spawns the child, wires its watcher, and answers the (widened)
+// pid — note the reference idiom, `&w`, wherever a pid sits in argument position:
+//
+//   start_worker = #[Str['bin], (@'%sup.down)] {
+//     =[id, sup]
+//     w = @worker
+//     %sup.watch [id, &w, &sup]
+//     &w
+//   }
+
+'restart = Permanent | Transient | Temporary
+'outcome = Done | Crashed['%proc.crash]
+'down = Down[id: Str['bin], outcome: 'outcome]
+'start = #[Str['bin], @'down] -> @
+'spec = [id: Str['bin], restart: 'restart, start: 'start]
+'specs = Nil | Cons['spec, ^]
+
+'stamps = Nil | Cons['int, ^]
+'row = [id: Str['bin], pid: @, spec: 'spec, restarts: 'stamps]
+'table = Nil | Cons['row, ^]
+'state = [table: 'table, max: 'int, window: 'int]
+
+watch = #<'r>[Str['bin], (@-> 'r), @'down] {
+  :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, outcome] to the supervisor. Call from a start closure, passing the child and supervisor by reference."
+  =[i, c, s]
+  @{
+    r = !c
+    o = {
+      | r:('%proc.crash)crash ~> =('%proc.crash)e => Crashed[e]
+      | Done
+    }
+    Down[id: i, outcome: o] ~> s
+  }
+  Ok
+}
+
+// One table row per child: spawn via the spec's start closure (which wires the
+// watcher) and record the pid.
+start_row = #['spec, @'down] {
+  =[s, sup]; p = s ~> ~.start [s.id, &sup]; [id: s.id, pid: &p, spec: s, restarts: Nil]
+}
+
+seed = #['specs, @'down, 'table] {
+  | =[Nil, _, acc] => acc
+  | =[Cons[s, rest], sup, acc] => ^ [rest, &sup, Cons[start_row [s, &sup], acc]]
+}
+
+find = #['table, Str['bin]] {
+  | =[Nil, _] => []
+  | =[Cons[r, _], id] ~> r.id ~> =&id => r
+  | =[Cons[_, rest], id] => ^ [rest, id]
+}
+
+// Table order is irrelevant, so removal accumulates (reversing as it goes).
+remove_loop = #['table, Str['bin], 'table] {
+  | =[Nil, _, acc] => acc
+  | =[Cons[r, rest], id, acc] ~> r.id ~> =&id => ^ [rest, id, acc]
+  | =[Cons[r, rest], id, acc] => ^ [rest, id, Cons[r, acc]]
+}
+
+remove = #['table, Str['bin]] { =[t, id]; remove_loop [t, id, Nil] }
+
+// Timestamps newer than the cutoff (the sliding intensity window); order irrelevant.
+prune_loop = #['stamps, 'int, 'stamps] {
+  | =[Nil, _, acc] => acc
+  | =[Cons[t, rest], cutoff, acc] ~> __integer_compare__ [
+      t,
+      cutoff,
+    ] ~> =1 => ^ [rest, cutoff, Cons[t, acc]]
+  | =[Cons[_, rest], cutoff, acc] => ^ [rest, cutoff, acc]
+}
+
+prune = #['stamps, 'int] { =[ts, cutoff]; prune_loop [ts, cutoff, Nil] }
+
+len = #['stamps, 'int] {
+  | =[Nil, n] => n
+  | =[Cons[_, rest], n] => ^ [rest, __integer_add__ [n, 1]]
+}
+
+// Whether the child's restart type wants a restart for this outcome: Permanent
+// always, Temporary never, Transient only after a crash.
+restart? = #['row, 'outcome] {
+  =[r, o]
+  r.spec.restart ~> {
+    | =Permanent => Ok
+    | =Temporary => []
+    | o ~> =Crashed[_] => Ok
+    | []
+  }
+}
+
+loop = #'state {
+  =[table: t, max: m, window: w]
+  !#'down ~> =Down[id: i, outcome: o]
+  {
+    | find [t, i] ~> =('row)r => {
+      | restart? [r, o] => {
+        now = %time.monotonic
+        recent = Cons[now, prune [r.restarts, __integer_subtract__ [now, w]]]
+        {
+          | __integer_compare__ [len [recent, 0], m] ~> =1 => "%sup: restart intensity exceeded" ~> __panic__
+          | {
+            p = r.spec ~> ~.start [i, &.]
+            ^ [
+              table: Cons[[id: i, pid: &p, spec: r.spec, restarts: recent], remove [t, i]],
+              max: m,
+              window: w,
+            ]
+          }
+        }
+      }
+      // No restart wanted: the child is done — drop its row.
+      | ^ [table: remove [t, i], max: m, window: w]
+    }
+    // A Down for an id no longer in the table (e.g. a deliberately stopped child's
+    // watcher reporting the kill) is silently dropped.
+    | ^ [table: t, max: m, window: w]
+  }
+}
+
+run = #[specs: 'specs, max: 'int, window: 'int] {
+  =[specs: ss, max: m, window: w]
+  ^loop [table: seed [ss, &., Nil], max: m, window: w]
+}
+
+start = #[children: 'specs, max_restarts: 'int, window: 'int] {
+  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times within window ms — beyond that the supervisor gives up and crashes, tearing down its subtree. Answers the supervisor's pid, owned by the caller."
+  =[children: ss, max_restarts: m, window: w]; [specs: ss, max: m, window: w] ~> @run
+}
+
+[start: &start, watch: &watch]

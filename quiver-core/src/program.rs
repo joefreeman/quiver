@@ -327,6 +327,47 @@ impl Program {
         self.debug.as_ref()
     }
 
+    /// The crash-delivery table (both build modes): the key and tuple/type ids the
+    /// executor needs to build `:crash` / `:timeout` stamped nils (see
+    /// docs/process-state.md). Registers the shapes on first call — everything dedups
+    /// by content, so repeated calls (e.g. per REPL merge) return stable ids. Not
+    /// memoised for the same reason: registration is a handful of table lookups.
+    pub fn crash_table(&mut self) -> crate::bytecode::CrashTable {
+        let crash_key = self.register_annotation_key("crash");
+        let timeout_key = self.register_annotation_key("timeout");
+        let binary_type = self.register_type(Type::Binary);
+        let str_tuple = self.register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
+        let str_type = self.register_type(Type::Tuple(str_tuple));
+        // The capability-less process type `(@)` — the pid field grants identity only.
+        let pid_type = self.register_type(Type::Process {
+            send: None,
+            receive: None,
+            state: None,
+        });
+        let crash_fields = vec![
+            (Some("pid".to_string()), pid_type),
+            (Some("message".to_string()), str_type),
+        ];
+        let error_tuple = self.register_tuple(Some("Error".to_string()), crash_fields.clone());
+        let panic_tuple = self.register_tuple(Some("Panic".to_string()), crash_fields);
+        let killed_tuple = self.register_tuple(Some("Killed".to_string()), vec![]);
+        // Give each shape a type-table presence: checked retrievals (`x:('t)crash`)
+        // enumerate compatible concrete types from the types table.
+        let member_types: Vec<usize> = [error_tuple, panic_tuple, killed_tuple]
+            .into_iter()
+            .map(|tuple_id| self.register_type(Type::Tuple(tuple_id)))
+            .collect();
+        self.register_type(Type::Union(member_types));
+        crate::bytecode::CrashTable {
+            crash_key,
+            timeout_key,
+            error_tuple,
+            panic_tuple,
+            killed_tuple,
+            str_tuple,
+        }
+    }
+
     /// Register a failure-provenance site (debug builds), creating the table — its
     /// `origin` key, `Site` tuple shape and kind markers — on first use. Returns the site
     /// id a `Stamp` instruction carries.

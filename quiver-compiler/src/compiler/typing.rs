@@ -1328,25 +1328,16 @@ pub fn unify(
             if let (Some(st1), Some(st2)) = (state1, state2) {
                 unify(bindings, *st1, *st2, program)?;
             }
-            // Unify send types (what can be sent TO the process)
-            match (send1, send2) {
-                (Some(s1), Some(s2)) => unify(bindings, *s1, *s2, program)?,
-                (None, None) => {}
-                _ => {
-                    return Err(Error::TypeUnresolved(
-                        "Process types have incompatible send types".to_string(),
-                    ));
-                }
+            // Send and receive likewise: unify only when both are stated. A generic
+            // param like `(@ -> 'r)` accepts any pid whose receive pins 'r — the
+            // send grant is simply dropped, exactly as the covariant subtype allows
+            // (a declared clause grants a capability; omitting one never demands
+            // the value lack it).
+            if let (Some(s1), Some(s2)) = (send1, send2) {
+                unify(bindings, *s1, *s2, program)?;
             }
-            // Unify receive types (what you GET from the process)
-            match (receive1, receive2) {
-                (Some(ret1), Some(ret2)) => unify(bindings, *ret1, *ret2, program)?,
-                (None, None) => {}
-                _ => {
-                    return Err(Error::TypeUnresolved(
-                        "Process types have incompatible receive types".to_string(),
-                    ));
-                }
+            if let (Some(ret1), Some(ret2)) = (receive1, receive2) {
+                unify(bindings, *ret1, *ret2, program)?;
             }
             Ok(())
         }

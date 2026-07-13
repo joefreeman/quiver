@@ -91,6 +91,14 @@ pub enum Action<E: Effect> {
         caller: ProcessId,
         target: ProcessId,
     },
+    /// Kill a process (`%proc.kill` — fire-and-forget; the caller is not parked)
+    Kill { target: ProcessId },
+    /// Establish the target-side half of a link (`%proc.link` — the caller-side half
+    /// was recorded at the call site; fire-and-forget)
+    Link {
+        caller: ProcessId,
+        target: ProcessId,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +136,30 @@ pub struct SelectState {
     pub receiving: Option<(usize, Value)>,
 }
 
+/// A party to notify when the carrying process terminates. Registered on the *target*
+/// (via `Executor::add_watcher`), so completion walks the target's own list instead of
+/// scanning for interested parties (see docs/process-state.md). `Awaiter` is the only
+/// kind today; ownership (owned children) and links ride the same list in later steps.
+/// Entries may dangle — a notification aimed at a terminated watcher is a no-op — and
+/// carry no `Value`s, so they are invisible to heap accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watcher {
+    /// `pid` awaits this process's result via a select: deliver the result (or the
+    /// crash, as a `:crash`-stamped nil) when it terminates.
+    Awaiter { pid: ProcessId },
+    /// `pid` is an owned child of this process (containment-by-default spawning): kill
+    /// it when this process terminates — any reason, like resource auto-close —
+    /// cascading through the subtree. Removed by the parent-only `%proc.detach`. Not
+    /// flushed when a *persistent* (REPL) process completes a submission — sleeping is
+    /// not termination.
+    OwnedChild { pid: ProcessId },
+    /// `pid` is a link peer (`%proc.link` — symmetric fate-sharing: the entry sits in
+    /// both processes' lists): kill it when this process terminates *abnormally*
+    /// (crash or kill; a normal completion never propagates). Like `OwnedChild`, never
+    /// flushed by a persistent process's per-line completion.
+    Link { pid: ProcessId },
+}
+
 #[derive(Debug)]
 pub struct Process {
     pub stack: Vec<Value>,
@@ -138,6 +170,9 @@ pub struct Process {
     pub result: Option<Result<Value, crate::error::Error>>,
     pub select_state: Option<SelectState>,
     pub awaiting: HashMap<ProcessId, Option<Value>>,
+    /// Who to notify when this process terminates (see [`Watcher`]). Taken (emptied)
+    /// exactly once, when the process completes.
+    pub watchers: Vec<Watcher>,
     /// The observable state: the argument the root function was most recently
     /// (tail-)entered with — the spawn init, then each root-frame tail call. Sampled
     /// by `?` (see docs/process-state.md); persists after termination, like `result`.
@@ -164,6 +199,7 @@ impl Process {
             result: None,
             select_state: None,
             awaiting: HashMap::new(),
+            watchers: Vec::new(),
             state: Value::nil(),
         }
     }

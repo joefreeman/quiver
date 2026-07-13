@@ -1,0 +1,28 @@
+// Process management (see docs/process-state.md). Ownership is containment by
+// default: `@f` spawns a child owned by the spawner, and when a process terminates —
+// normally or by crash — its owned subtree is torn down with it, like resources.
+// `detach` is the explicit opt-out, and is parent-only: ownership is the parent's to
+// relinquish.
+//
+// The `'crash` type names the payload a never-lethal await answers for a crashed
+// source, read with a checked retrieval: `r = !p; r:('%proc.crash)crash`.
+
+'crash =
+  | Error[pid: (@), message: Str['bin]]
+  | Panic[pid: (@), message: Str['bin]]
+  | Killed
+
+// Note the reference idiom throughout: a bare pid receiving a flowing value is a
+// send, so pass pids as `&p` — `%proc.detach &p`, `%proc.kill &p`, `%proc.link &p`.
+
+[
+  detach: &__process_detach__ ~> {
+    :doc "Detaches an owned child from the calling process, so it survives the caller's termination. Parent-only: errors unless the argument is a process the caller currently owns."
+  },
+  kill: &__process_kill__ ~> {
+    :doc "Kills the process — always effective (there is no trapping). Its awaiters observe the Killed crash kind, its owned subtree is torn down, and its link peers are killed. A no-op on an already-terminated process."
+  },
+  link: &__process_link__ ~> {
+    :doc "Links the calling process and the target for symmetric fate-sharing: if either terminates abnormally (crash or kill), the other is killed. Normal completion never propagates; linking an already-crashed process kills the caller immediately. Idempotent; self-link is a no-op."
+  },
+]

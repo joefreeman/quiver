@@ -980,6 +980,12 @@ impl<E: Effect> Environment<E> {
             remaps.functions.insert(old_idx, new_idx);
         }
 
+        // Ensure the crash-delivery shapes exist in the merged program *before* the
+        // deltas below are computed, so the workers receive their tuple infos and the
+        // compatibility tables cover them (checked `:crash` retrievals test against
+        // these shapes structurally).
+        let crash_table = self.program.crash_table();
+
         // Compute deltas - only new items since before the merge
         let new_constants: Vec<Constant> =
             self.program.get_constants()[old_constants_len..].to_vec();
@@ -1030,6 +1036,7 @@ impl<E: Effect> Environment<E> {
                 canonical_tuples,
                 // Full snapshot: the executor rebuilds its prebuilt site values from it.
                 debug: self.program.debug_sites().cloned(),
+                crash: Some(crash_table),
             };
 
             let update_cmd = Command::UpdateProgram(Box::new(update));
@@ -1069,6 +1076,8 @@ impl<E: Effect> Environment<E> {
             Event::AwaitAction { awaiter, targets } => {
                 self.handle_await_processes(awaiter, targets)
             }
+            Event::KillAction { target } => self.handle_kill(target),
+            Event::LinkAction { caller, target } => self.handle_link(caller, target),
             Event::ProcessResults { awaiter, results } => {
                 self.handle_process_results(awaiter, results)
             }
@@ -1180,6 +1189,41 @@ impl<E: Effect> Environment<E> {
         }
 
         Ok(())
+    }
+
+    /// Route a containment-teardown kill to its process's worker, freeing the
+    /// resources it owns on the way. The kill is fire-and-forget — there may be no
+    /// awaiter to ever report the death — so this routing point is where the
+    /// environment reliably learns of it. (The process may still run a final slice
+    /// before the command lands; an operation on a just-freed resource then fails,
+    /// which only hastens the death already in progress.)
+    fn handle_kill(&mut self, target: ProcessId) -> Result<(), EnvironmentError> {
+        self.cleanup_process_resources(target);
+        let worker_id = self
+            .process_router
+            .get(&target)
+            .ok_or(EnvironmentError::ProcessNotFound(target))?;
+        self.workers[*worker_id]
+            .send(Command::KillProcess { id: target })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
+    }
+
+    /// Route the target-side half of a link to the target's worker.
+    fn handle_link(
+        &mut self,
+        caller: ProcessId,
+        target: ProcessId,
+    ) -> Result<(), EnvironmentError> {
+        let worker_id = self
+            .process_router
+            .get(&target)
+            .ok_or(EnvironmentError::ProcessNotFound(target))?;
+        self.workers[*worker_id]
+            .send(Command::LinkProcess {
+                target,
+                peer: caller,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
     }
 
     fn handle_process_results(

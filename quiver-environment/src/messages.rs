@@ -140,6 +140,16 @@ pub enum Command<E: Effect> {
     /// subscription simply ignores it.
     Unsubscribe { subscription_id: u64 },
 
+    /// Kill a process — containment teardown of a terminated parent's subtree, an
+    /// explicit `%proc.kill`, or link propagation. The worker records `Killed` as its
+    /// result and tombstones it, cascading to its own watchers.
+    KillProcess { id: ProcessId },
+
+    /// Establish the target-side half of a link (`%proc.link`): kill `peer` when
+    /// `target` terminates abnormally. An already-crashed target kills `peer`
+    /// immediately; a normally-completed one makes this a no-op.
+    LinkProcess { target: ProcessId, peer: ProcessId },
+
     /// Effect operation completed
     EffectCompletion {
         process_id: ProcessId,
@@ -190,6 +200,18 @@ pub enum Event<E: Effect> {
     AwaitAction {
         awaiter: ProcessId,
         targets: Vec<ProcessId>,
+    },
+
+    /// Action: kill a process (containment teardown, `%proc.kill`, or link
+    /// propagation; routed like every cross-process effect, and the point where its
+    /// resources are freed)
+    KillAction { target: ProcessId },
+
+    /// Action: establish the target-side half of a link (`%proc.link` — the
+    /// caller-side half was recorded at the call site)
+    LinkAction {
+        caller: ProcessId,
+        target: ProcessId,
     },
 
     /// Process results (initial snapshot or later completions)

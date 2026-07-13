@@ -3,9 +3,9 @@ use crate::messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 use crate::transport::{CommandReceiver, EventSender};
 use quiver_core::effects::Effect;
 use quiver_core::executor::Executor;
-use quiver_core::process::{Action, Frame, ProcessId, ProcessInfo, ProcessStatus};
+use quiver_core::process::{Action, Frame, ProcessId, ProcessInfo, Watcher};
 use quiver_core::value::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const MAX_STEP_UNITS: usize = 1000;
 
@@ -30,8 +30,6 @@ struct WorkerSubscription {
 
 pub struct Worker<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> {
     executor: Executor<E>,
-    awaited: HashSet<ProcessId>,
-    awaiters_for_target: HashMap<ProcessId, Vec<ProcessId>>, // target -> list of awaiters
     // process_id -> pending result requests; each request's keep-set drives orphaned-local release
     // once the process completes (see `Command::GetResult`).
     pending_result_requests: HashMap<ProcessId, Vec<PendingResultRequest>>,
@@ -104,8 +102,6 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     ) -> Self {
         Self {
             executor: Executor::new(builtins, profile, worker_id),
-            awaited: HashSet::new(),
-            awaiters_for_target: HashMap::new(),
             pending_result_requests: HashMap::new(),
             subscriptions: HashMap::new(),
             worker_id: worker_id as crate::WorkerId,
@@ -244,6 +240,35 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             } => {
                 self.executor
                     .notify_spawn(process_id, Value::Process(spawned_pid, function_index));
+                // Containment-by-default: the spawned process is an owned child of the
+                // spawner. If the spawner terminated while the spawn was in flight, the
+                // establishment window closes fail-safe: the orphan is torn down.
+                if !self
+                    .executor
+                    .add_watcher(process_id, Watcher::OwnedChild { pid: spawned_pid })
+                {
+                    self.sender.send(Event::KillAction {
+                        target: spawned_pid,
+                    })?;
+                }
+            }
+            Command::KillProcess { id } => {
+                self.executor.kill(id, quiver_core::error::Error::Killed);
+            }
+            Command::LinkProcess { target, peer } => {
+                // The target-side half of a link. An already-terminated target:
+                // crashed or killed → the link fires immediately (tombstones keep the
+                // error, so there is no establishment race); completed normally →
+                // nothing can ever fire, so no entry is needed.
+                match self
+                    .executor
+                    .get_process(target)
+                    .and_then(|p| p.result.as_ref())
+                {
+                    None => self.executor.add_link(target, peer),
+                    Some(Err(_)) => self.sender.send(Event::KillAction { target: peer })?,
+                    Some(Ok(_)) => {}
+                }
             }
             Command::GetResult {
                 request_id,
@@ -414,6 +439,13 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 self.sender
                     .send(Event::ReadStateAction { caller, target })?;
             }
+            Action::Kill { target } => {
+                // Fire-and-forget (the caller was answered Ok at the call site).
+                self.sender.send(Event::KillAction { target })?;
+            }
+            Action::Link { caller, target } => {
+                self.sender.send(Event::LinkAction { caller, target })?;
+            }
         }
         Ok(())
     }
@@ -516,48 +548,20 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     ) -> Result<(), EnvironmentError> {
         let mut results = HashMap::new();
 
-        // Query each target and collect results
+        // Register a watcher on each still-running target (completion delivers via the
+        // watcher-event drain in `check_completed_processes`); answer already-terminated
+        // targets immediately.
         for target in &targets {
-            let target_status = self
+            if self
                 .executor
-                .get_process_info(*target)
-                .map(|info| info.status);
-            let is_completed = matches!(
-                target_status,
-                Some(ProcessStatus::Completed) | Some(ProcessStatus::Sleeping)
-            );
-
-            if is_completed {
-                // Process completed - include result in response
-                if let Some(process) = self.executor.get_process(*target) {
-                    let result = process
-                        .result
-                        .as_ref()
-                        .expect("Completed process must have result");
-
-                    let runtime_result = match result {
-                        Ok(value) => {
-                            let (extracted, heap) = self
-                                .executor
-                                .extract_heap_data(value)
-                                .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                            Ok((extracted, heap))
-                        }
-                        Err(error) => Err(error.clone()),
-                    };
-
-                    results.insert(*target, Some(runtime_result));
-                }
-            } else {
-                // Process not yet completed - register as awaiter
-                self.awaited.insert(*target);
-                // Track awaiter for this target so we can notify later
-                self.awaiters_for_target
-                    .entry(*target)
-                    .or_default()
-                    .push(awaiter);
-                // Mark as None in results
+                .add_watcher(*target, Watcher::Awaiter { pid: awaiter })
+            {
                 results.insert(*target, None);
+            } else {
+                let result = self
+                    .awaiter_result(*target)?
+                    .ok_or(EnvironmentError::ProcessNotFound(*target))?;
+                results.insert(*target, Some(result));
             }
         }
 
@@ -606,16 +610,32 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .notify_result(awaiter, awaited, value, heap)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
             }
-            Err(error) => {
-                // Set the process result to the error and clear frames to complete it
-                if let Some(process) = self.executor.get_process_mut(awaiter) {
-                    process.result = Some(Err(error));
-                    process.frames.clear(); // Complete the process
-                }
-                self.executor.tombstone(awaiter);
-            }
+            // `!` is never lethal: a crashed target is delivered to awaiters as a
+            // `:crash`-stamped nil (`awaiter_result`), so an error can never arrive
+            // here. Host-facing paths (`ResultResponse`) still carry errors.
+            Err(error) => unreachable!("crash delivered to awaiter as an error: {error:?}"),
         }
         Ok(())
+    }
+
+    /// The result an *awaiter* receives for a terminated process: its value — or, for a
+    /// crashed process, the `:crash`-stamped nil of the never-lethal `!`, built here on
+    /// the crashed process's worker (where its function index and heap live). `None` if
+    /// the process is unknown or still running. Host-facing result requests use
+    /// `extract_completed_result` instead, which reports the error itself.
+    fn awaiter_result(
+        &mut self,
+        target: ProcessId,
+    ) -> Result<Option<RuntimeResult>, EnvironmentError> {
+        let error = match self.executor.get_process(target).map(|p| &p.result) {
+            Some(Some(Err(error))) => error.clone(),
+            _ => return self.extract_completed_result(target),
+        };
+        let extracted = self
+            .executor
+            .crash_result(target, &error)
+            .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
+        Ok(Some(Ok(extracted)))
     }
 
     fn deliver_message(
@@ -823,21 +843,42 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     }
 
     fn check_completed_processes(&mut self) -> Result<(), EnvironmentError> {
-        // Check awaited processes for completion
-        let awaited_pids: Vec<ProcessId> = self.awaited.iter().copied().collect();
-        for process_id in awaited_pids {
-            if let Some(result) = self.extract_completed_result(process_id)? {
-                // Get all awaiters for this process
-                if let Some(awaiters) = self.awaiters_for_target.remove(&process_id) {
-                    // Send result to each awaiter
-                    for awaiter in awaiters {
-                        let mut results = HashMap::new();
-                        results.insert(process_id, Some(result.clone()));
-                        self.sender
-                            .send(Event::ProcessResults { awaiter, results })?;
+        // Deliver completion notifications recorded by the executor when a watched
+        // process terminated. Routing goes through the environment even for a local
+        // watcher: it keeps delivery uniform, and the environment's completion-report
+        // handling (resource cleanup) depends on seeing the event.
+        for (watcher, target) in self.executor.take_watcher_events() {
+            match watcher {
+                Watcher::Awaiter { pid } => {
+                    let result = self
+                        .awaiter_result(target)?
+                        .expect("watcher event for a process without a result");
+                    let mut results = HashMap::new();
+                    results.insert(target, Some(result));
+                    self.sender.send(Event::ProcessResults {
+                        awaiter: pid,
+                        results,
+                    })?;
+                }
+                Watcher::OwnedChild { pid } => {
+                    // Containment teardown: the terminated process's owned children die
+                    // with it. Routed through the environment (like every delivery) so
+                    // it crosses workers and resource cleanup sees it; the cascade
+                    // continues at each child's own tombstone flush.
+                    self.sender.send(Event::KillAction { target: pid })?;
+                }
+                Watcher::Link { pid } => {
+                    // A link fires on *abnormal* termination only (crash or kill) — a
+                    // finished peer doesn't take its gang with it. `Killed` is an
+                    // error result, so gang teardown cascades transitively.
+                    let abnormal = self
+                        .executor
+                        .get_process(target)
+                        .is_some_and(|p| matches!(p.result, Some(Err(_))));
+                    if abnormal {
+                        self.sender.send(Event::KillAction { target: pid })?;
                     }
                 }
-                self.awaited.remove(&process_id);
             }
         }
 
