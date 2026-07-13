@@ -3,7 +3,8 @@ use crate::bytecode::{ConcreteType, Constant, Function, Instruction};
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::process::{
-    Action, Frame, Process, ProcessId, ProcessInfo, ProcessStatus, SelectState, Watcher,
+    Action, Frame, Process, ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo,
+    ProcessStatus, SelectState, Watcher,
 };
 use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Payload, Value};
@@ -266,6 +267,8 @@ pub struct Executor<E: Effect> {
     freed: Vec<bool>,
     // Cumulative count of slots reclaimed (for the worker inspector's "reclaimed this session").
     reclaimed: usize,
+    // Cumulative count of tombstone process entries reclaimed (see `reclaim_process`).
+    reclaimed_processes: usize,
     // Cache of constant binaries already materialised on the heap, keyed by constant index,
     // so a binary literal in a loop is allocated once rather than on every load.
     constant_binaries: Vec<Option<Binary>>,
@@ -408,7 +411,8 @@ impl<E: Effect> Executor<E> {
 
     /// Account for a value leaving rooted storage: the inverse of [`retain`]. A debug build
     /// panics on underflow — a `release` without a matching `retain`, i.e. an unwired insertion
-    /// site. Reclamation is not yet enabled, so a count reaching 0 leaves the slot in place.
+    /// site. A count reaching 0 queues the slot for `process_pending_free`, which frees it at
+    /// the next safe point.
     fn release(&mut self, value: &Value) {
         match value {
             Value::Binary(Binary::Heap(idx)) => {
@@ -455,8 +459,9 @@ impl<E: Effect> Executor<E> {
     }
 
     /// Pop a value off the process stack, releasing its heap references. The returned handle is
-    /// still valid (reclamation is off); re-inserting it via another `push_*` re-retains it, so a
-    /// pop-then-push "move" nets to zero.
+    /// still valid because reclamation is deferred (a slot at 0 is freed only at the next safe
+    /// point, in `process_pending_free`); re-inserting it via another `push_*` re-retains it
+    /// before then, so a pop-then-push "move" nets to zero and the slot is never reclaimed.
     fn pop_value(&mut self, proc: &mut Process) -> Option<Value> {
         let value = proc.stack.pop();
         if let Some(value) = &value {
@@ -537,10 +542,11 @@ impl<E: Effect> Executor<E> {
 
     /// Drop a completed process's execution state — stack, locals, mailbox, awaited results,
     /// and any select state — releasing the heap references they held. Only the stored
-    /// `result` survives, so late awaits (`!p`) keep working. The entry itself (the tombstone)
-    /// stays in the process map: reclaiming it needs pid-liveness tracking, which doesn't
-    /// exist yet (see docs/process-state.md). Persistent (REPL) processes are exempt — they
-    /// resume across submissions and keep their locals and mailbox. Idempotent.
+    /// `result` (and `state`) survive, so late awaits (`!p`) and samples (`?p`) keep working.
+    /// The entry itself (the tombstone) stays in the process map until the environment proves
+    /// it unreachable and calls `reclaim_process` (see docs/process-state.md, "Reclamation").
+    /// Persistent (REPL) processes are exempt — they resume across submissions and keep their
+    /// locals and mailbox. Idempotent.
     pub fn tombstone(&mut self, pid: ProcessId) {
         // Every kill path sets `result` before tombstoning, so flushing here gives all
         // completions — step-finish, effect failure, error propagation — one choke
@@ -575,6 +581,44 @@ impl<E: Effect> Executor<E> {
             }
         }
         self.truncate_locals_pid(pid, 0);
+    }
+
+    /// Reclaim a tombstone the environment has proven unreachable (see docs/process-state.md,
+    /// "Reclamation"): remove the entry, releasing the heap references its surviving `result`
+    /// and `state` still held. The complement of `tombstone`, which dropped everything *but*
+    /// those. A no-op on an unknown pid. Must only be called on a non-persistent, completed
+    /// process — the environment's mark-sweep guarantees this.
+    pub fn reclaim_process(&mut self, pid: ProcessId) {
+        let Some(process) = self.processes.remove(&pid) else {
+            return;
+        };
+        debug_assert!(
+            process.result.is_some() && !process.persistent,
+            "reclaim of a live or persistent process {pid}",
+        );
+        if let Some(Ok(value)) = &process.result {
+            self.release(value);
+        }
+        self.release(&process.state);
+        self.reclaimed_processes += 1;
+    }
+
+    /// Cumulative count of tombstone entries reclaimed by [`Self::reclaim_process`].
+    pub fn reclaimed_processes(&self) -> usize {
+        self.reclaimed_processes
+    }
+
+    /// Drop watcher entries pointing at any reclaimed pid (see docs/process-state.md,
+    /// "Reclamation"). A parent's `OwnedChild` (and any `Link`) entry outlives the child it
+    /// names — it clears only when the *parent* terminates — so without this a long-lived
+    /// parent that spawns per request leaks watcher entries even as tombstones are reclaimed.
+    /// Harmless to over-apply: acting on a reclaimed (monotonic, never-reused) pid is a no-op.
+    pub fn prune_watchers(&mut self, reclaimed: &HashSet<ProcessId>) {
+        for process in self.processes.values_mut() {
+            process
+                .watchers
+                .retain(|watcher| !reclaimed.contains(&watcher.pid()));
+        }
     }
 
     /// Register a watcher on `target`, to be notified when it terminates. Returns
@@ -801,6 +845,63 @@ impl<E: Effect> Executor<E> {
         indices
     }
 
+    /// This worker's contribution to the reclamation graph: one [`ProcessAdjacency`] per
+    /// process, tagging it `Root` (live/persistent — never swept, seeds the mark set) or
+    /// `Tombstone` (completed, non-persistent — a sweep candidate), with the pids its
+    /// Value-bearing storage references. A tombstone's storage is emptied except
+    /// `result`/`state`, so the same uniform walk yields its surviving edges (a late
+    /// `!p` exposes `result`, `?p` exposes `state`). `Error` results carry no `Value`, so
+    /// only `Ok` is walked. Mirrors the storage set of [`Self::reachable_heap_indices`].
+    ///
+    /// Like [`Self::reachable_heap_indices`], call only at a quiescent point (between
+    /// steps): a process removed from the table mid-`step` would be missed.
+    pub fn process_adjacency(&self) -> Vec<ProcessAdjacency> {
+        self.processes
+            .iter()
+            .map(|(&pid, process)| {
+                let category = if process.result.is_some() && !process.persistent {
+                    ProcessCategory::Tombstone
+                } else {
+                    ProcessCategory::Root
+                };
+                let mut outgoing = Vec::new();
+                for value in &process.stack {
+                    collect_process_refs(value, &mut outgoing);
+                }
+                for value in &process.locals {
+                    collect_process_refs(value, &mut outgoing);
+                }
+                for value in &process.mailbox {
+                    collect_process_refs(value, &mut outgoing);
+                }
+                if let Some(Ok(value)) = &process.result {
+                    collect_process_refs(value, &mut outgoing);
+                }
+                collect_process_refs(&process.state, &mut outgoing);
+                if let Some(state) = &process.select_state {
+                    for value in &state.sources {
+                        collect_process_refs(value, &mut outgoing);
+                    }
+                    if let Some((_, value)) = &state.receiving {
+                        collect_process_refs(value, &mut outgoing);
+                    }
+                }
+                // Only the delivered *results* are live edges — not the keys. `awaiting` is
+                // not cleared on `complete_select`, so a key lingers as a stale entry after
+                // the await finishes; and an *active* await already keeps its target in
+                // `select_state.sources` above, making the key redundant when live.
+                for value in process.awaiting.values().flatten() {
+                    collect_process_refs(value, &mut outgoing);
+                }
+                ProcessAdjacency {
+                    pid,
+                    category,
+                    outgoing,
+                }
+            })
+            .collect()
+    }
+
     /// Snapshot heap occupancy (see [`HeapStats`]). Read-only; call at a quiescent point.
     pub fn heap_stats(&self) -> HeapStats {
         let reachable = self.reachable_heap_indices();
@@ -852,6 +953,7 @@ impl<E: Effect> Executor<E> {
             pending_free: vec![],
             freed: vec![],
             reclaimed: 0,
+            reclaimed_processes: 0,
             constant_binaries: vec![],
             site_nils: vec![],
             site_origins: vec![],
@@ -3414,6 +3516,27 @@ impl<E: Effect> Executor<E> {
     }
 }
 
+/// Recursively collect all pids referenced by a value (the reclamation-graph twin of
+/// [`collect_heap_indices`]). Walks tuple/function/builtin payloads via `all_values()`,
+/// which covers annotations too — so a pid inside a `:crash` payload is followed. Pushes
+/// duplicates; the caller dedups.
+fn collect_process_refs(value: &Value, pids: &mut Vec<ProcessId>) {
+    match value {
+        Value::Process(pid, _) => pids.push(*pid),
+        Value::Tuple(_, elements) | Value::Function(_, elements) => {
+            for elem in elements.all_values() {
+                collect_process_refs(elem, pids);
+            }
+        }
+        Value::Builtin(_, Some(payload)) => {
+            for elem in payload.all_values() {
+                collect_process_refs(elem, pids);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Recursively collect all heap indices referenced by a value
 fn collect_heap_indices(value: &Value, indices: &mut HashSet<usize>) {
     match value {
@@ -3781,6 +3904,120 @@ mod heap_stats_tests {
         ex.process_pending_free();
         assert!(!ex.freed[i], "a re-retained slot must not be reclaimed");
         assert!(ex.free.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod process_adjacency_tests {
+    use super::*;
+    use crate::builtins::BuiltinRegistry;
+    use crate::process::{ProcessCategory, SelectState};
+    use crate::value::ResourceId;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestEffect;
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    fn executor() -> Executor<TestEffect> {
+        Executor::new(BuiltinRegistry::new(), false, 0)
+    }
+
+    fn pid(id: ProcessId) -> Value {
+        Value::Process(id, 0)
+    }
+
+    fn adjacency_of(ex: &Executor<TestEffect>, id: ProcessId) -> ProcessAdjacency {
+        ex.process_adjacency()
+            .into_iter()
+            .find(|a| a.pid == id)
+            .expect("process present in adjacency")
+    }
+
+    fn outgoing_set(a: &ProcessAdjacency) -> HashSet<ProcessId> {
+        a.outgoing.iter().copied().collect()
+    }
+
+    #[test]
+    fn collect_process_refs_finds_nested_pids() {
+        // A pid buried two tuples deep, alongside a non-pid, must still be found.
+        let inner = Value::tuple(0, vec![pid(7), Value::nil()]);
+        let value = Value::tuple(0, vec![Value::nil(), inner, pid(9)]);
+        let mut pids = Vec::new();
+        collect_process_refs(&value, &mut pids);
+        assert_eq!(
+            pids.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([7, 9])
+        );
+    }
+
+    #[test]
+    fn live_process_is_root_and_sweeps_every_edge_kind() {
+        let mut ex = executor();
+        let mut p = Process::new(false);
+        p.stack.push(pid(10));
+        p.locals.push(pid(11));
+        p.mailbox.push_back(pid(12));
+        p.state = pid(13);
+        p.select_state = Some(SelectState {
+            frame: 0,
+            instruction: 0,
+            sources: vec![pid(14)],
+            cursors: vec![],
+            start_time: None,
+            receiving: Some((0, pid(15))),
+        });
+        // A delivered await *result* is an edge; the key (16, the awaited pid) is not — it
+        // can linger stale, and a live await is covered by select_state.sources above.
+        p.awaiting.insert(16, Some(pid(17)));
+        ex.processes.insert(0, p);
+
+        let a = adjacency_of(&ex, 0);
+        assert_eq!(a.category, ProcessCategory::Root);
+        assert_eq!(
+            outgoing_set(&a),
+            HashSet::from([10, 11, 12, 13, 14, 15, 17]),
+        );
+    }
+
+    #[test]
+    fn completed_process_is_tombstone_with_result_and_state_edges() {
+        let mut ex = executor();
+        let mut p = Process::new(false);
+        // A tombstone keeps only result + state; those pids remain reachable via !p / ?p.
+        p.result = Some(Ok(pid(20)));
+        p.state = pid(21);
+        ex.processes.insert(0, p);
+
+        let a = adjacency_of(&ex, 0);
+        assert_eq!(a.category, ProcessCategory::Tombstone);
+        assert_eq!(outgoing_set(&a), HashSet::from([20, 21]));
+    }
+
+    #[test]
+    fn persistent_completed_process_stays_root() {
+        let mut ex = executor();
+        let mut p = Process::new(true); // persistent (REPL): never a sweep candidate
+        p.result = Some(Ok(Value::nil()));
+        ex.processes.insert(0, p);
+
+        assert_eq!(adjacency_of(&ex, 0).category, ProcessCategory::Root);
+    }
+
+    #[test]
+    fn error_result_contributes_no_edges() {
+        let mut ex = executor();
+        let mut p = Process::new(false);
+        p.result = Some(Err(Error::Killed)); // Error carries no Value
+        ex.processes.insert(0, p);
+
+        let a = adjacency_of(&ex, 0);
+        assert_eq!(a.category, ProcessCategory::Tombstone);
+        assert!(a.outgoing.is_empty());
     }
 }
 

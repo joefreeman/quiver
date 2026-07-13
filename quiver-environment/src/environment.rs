@@ -11,7 +11,9 @@ use quiver_core::compatibility::{
 };
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::ProgramUpdate;
-use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus};
+use quiver_core::process::{
+    ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessStatus,
+};
 use quiver_core::program::Program;
 use quiver_core::types::{NIL, OK, Type, TypeLookup};
 use quiver_core::value::{ResourceId, Value};
@@ -24,6 +26,69 @@ enum Aggregation {
     Statuses(WorkerRequestMap<ProcessStatus>),
     ProcessTypes(WorkerRequestMap<usize>), // Maps request_id -> Option<HashMap<ProcessId, function_index>>
     WorkerInfo(HashMap<u64, Option<quiver_core::process::WorkerInfo>>), // Maps request_id -> Option<WorkerInfo>
+}
+
+/// Phase of an in-flight reclamation round (see docs/process-state.md, "Reclamation"). The
+/// round is a two-phase handshake that *creates* quiescence — workers run autonomously, so
+/// there is no natural idle point to detect: first pause every worker, then snapshot the
+/// now-frozen process graph.
+enum CollectionPhase {
+    /// Awaiting each worker's `CollectionReady` ack (i.e. every worker paused). FIFO makes
+    /// this a barrier: once all acks are in, every pre-pause send has been routed.
+    Pausing,
+    /// Awaiting each worker's `AdjacencyResponse` (its slice of the graph).
+    Collecting,
+}
+
+struct CollectionState {
+    phase: CollectionPhase,
+    /// Correlates this round's responses; a stale response from a prior round is ignored.
+    request_id: u64,
+    /// Workers not yet heard from in the current phase.
+    pending: HashSet<WorkerId>,
+    /// Graph slices accumulated during `Collecting`.
+    adjacency: Vec<ProcessAdjacency>,
+}
+
+/// Default spawns since the last reclamation round after which one is auto-triggered (see
+/// docs/process-state.md, "Reclamation"). The pause barrier creates its own quiescence, so
+/// the trigger need not wait for an idle moment; this just bounds how many tombstones may
+/// accumulate between rounds. Overridable via [`Environment::set_collection_threshold`].
+const DEFAULT_COLLECTION_THRESHOLD: usize = 256;
+
+/// Trace the process graph and return the tombstones that are unreachable from any root and
+/// may be reclaimed (see docs/process-state.md, "Reclamation"). Roots are the pids that
+/// `Root`-category (live/persistent) processes reference; reachability follows outgoing edges
+/// — including through a tombstone's surviving `result`/`state`, since a late `!p`/`?p`
+/// exposes those — to a fixpoint. A tombstone not reached is unobservable and collectible;
+/// this naturally sweeps cycles of mutually-referencing dead processes that refcounting can't.
+fn compute_sweep(adjacency: &[ProcessAdjacency]) -> Vec<ProcessId> {
+    let mut edges: HashMap<ProcessId, &[ProcessId]> = HashMap::new();
+    let mut tombstones: HashSet<ProcessId> = HashSet::new();
+    let mut stack: Vec<ProcessId> = Vec::new();
+    for entry in adjacency {
+        edges.insert(entry.pid, &entry.outgoing);
+        match entry.category {
+            // A root's referenced pids seed the mark set (the root itself is never swept).
+            ProcessCategory::Root => stack.extend(entry.outgoing.iter().copied()),
+            ProcessCategory::Tombstone => {
+                tombstones.insert(entry.pid);
+            }
+        }
+    }
+    let mut marked: HashSet<ProcessId> = HashSet::new();
+    while let Some(pid) = stack.pop() {
+        if !marked.insert(pid) {
+            continue;
+        }
+        if let Some(outgoing) = edges.get(&pid) {
+            stack.extend(outgoing.iter().copied());
+        }
+    }
+    tombstones
+        .into_iter()
+        .filter(|pid| !marked.contains(pid))
+        .collect()
 }
 
 fn remap_type_id(id: usize, type_remap: &HashMap<usize, usize>) -> usize {
@@ -419,6 +484,14 @@ pub struct Environment<E: Effect> {
     // Effect backend and resource management
     effect_backend: Option<Box<dyn EffectBackend<E = E>>>,
     resource_ownership: HashMap<ResourceId, ProcessId>,
+
+    // Process reclamation (see docs/process-state.md, "Reclamation"). At most one round runs
+    // at a time; `spawns_since_collection` drives the auto-trigger, `reclaimed_total` is a
+    // cumulative metric / test hook.
+    collection: Option<CollectionState>,
+    spawns_since_collection: usize,
+    collection_threshold: usize,
+    reclaimed_total: usize,
 }
 
 impl<E: Effect> Environment<E> {
@@ -436,7 +509,17 @@ impl<E: Effect> Environment<E> {
             next_process_id: 0,
             effect_backend: None,
             resource_ownership: HashMap::new(),
+            collection: None,
+            spawns_since_collection: 0,
+            collection_threshold: DEFAULT_COLLECTION_THRESHOLD,
+            reclaimed_total: 0,
         }
+    }
+
+    /// Set how many spawns since the last reclamation round trigger the next one (see
+    /// docs/process-state.md, "Reclamation"). Lower values reclaim more eagerly.
+    pub fn set_collection_threshold(&mut self, threshold: usize) {
+        self.collection_threshold = threshold;
     }
 
     /// Set the effect backend for executing platform-specific effects
@@ -489,6 +572,13 @@ impl<E: Effect> Environment<E> {
         // Handle all collected events
         for event in events {
             self.handle_event(event)?;
+        }
+
+        // Auto-trigger a reclamation round once enough processes have accumulated. The round's
+        // pause barrier supplies its own quiescence, so this can fire at any time.
+        if self.collection.is_none() && self.spawns_since_collection >= self.collection_threshold {
+            self.start_collection()?;
+            did_work = true;
         }
 
         Ok(did_work)
@@ -1143,11 +1233,150 @@ impl<E: Effect> Environment<E> {
                     .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
                 Ok(())
             }
+            Event::CollectionReady {
+                request_id,
+                worker_id,
+            } => self.handle_collection_ready(request_id, worker_id),
+            Event::AdjacencyResponse {
+                request_id,
+                worker_id,
+                adjacency,
+            } => self.handle_adjacency_response(request_id, worker_id, adjacency),
             Event::_Phantom(_) => {
                 // This variant is never actually used, only for maintaining generics
                 unreachable!("_Phantom variant should never be constructed")
             }
         }
+    }
+
+    /// Begin a reclamation round if none is in flight (see docs/process-state.md,
+    /// "Reclamation"). Returns whether a round was started. The round advances across
+    /// subsequent `step()`s — pause all workers, snapshot the frozen graph, sweep
+    /// unreachable tombstones, resume — so poll [`Self::is_collecting`] for completion.
+    pub fn start_collection(&mut self) -> Result<bool, EnvironmentError> {
+        if self.collection.is_some() {
+            return Ok(false);
+        }
+        let request_id = self.allocate_request_id();
+        for worker in self.workers.iter_mut() {
+            worker
+                .send(Command::BeginCollection { request_id })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        self.collection = Some(CollectionState {
+            phase: CollectionPhase::Pausing,
+            request_id,
+            pending: (0..self.workers.len()).collect(),
+            adjacency: Vec::new(),
+        });
+        self.spawns_since_collection = 0;
+        Ok(true)
+    }
+
+    /// Whether a reclamation round is currently in flight.
+    pub fn is_collecting(&self) -> bool {
+        self.collection.is_some()
+    }
+
+    /// Cumulative tombstone entries reclaimed across all rounds.
+    pub fn reclaimed_total(&self) -> usize {
+        self.reclaimed_total
+    }
+
+    /// Number of processes the environment still tracks: live processes plus tombstones not
+    /// yet reclaimed. Shrinks as a reclamation round prunes the router. A test/metric hook.
+    pub fn process_count(&self) -> usize {
+        self.process_router.len()
+    }
+
+    /// A worker paused for the current round. Once every worker has acked, FIFO channels
+    /// guarantee all pre-pause sends are routed, so advance to snapshotting.
+    fn handle_collection_ready(
+        &mut self,
+        request_id: u64,
+        worker_id: WorkerId,
+    ) -> Result<(), EnvironmentError> {
+        let advance = match self.collection.as_mut() {
+            Some(state)
+                if state.request_id == request_id
+                    && matches!(state.phase, CollectionPhase::Pausing) =>
+            {
+                state.pending.remove(&worker_id);
+                state.pending.is_empty()
+            }
+            _ => return Ok(()),
+        };
+        if advance {
+            let request_id = self.collection.as_ref().unwrap().request_id;
+            let state = self.collection.as_mut().unwrap();
+            state.phase = CollectionPhase::Collecting;
+            state.pending = (0..self.workers.len()).collect();
+            for worker in self.workers.iter_mut() {
+                worker
+                    .send(Command::CollectAdjacency { request_id })
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A worker's graph slice arrived. Once every worker has reported, trace and sweep.
+    fn handle_adjacency_response(
+        &mut self,
+        request_id: u64,
+        worker_id: WorkerId,
+        adjacency: Vec<ProcessAdjacency>,
+    ) -> Result<(), EnvironmentError> {
+        let complete = match self.collection.as_mut() {
+            Some(state)
+                if state.request_id == request_id
+                    && matches!(state.phase, CollectionPhase::Collecting) =>
+            {
+                if state.pending.remove(&worker_id) {
+                    state.adjacency.extend(adjacency);
+                }
+                state.pending.is_empty()
+            }
+            _ => return Ok(()),
+        };
+        if complete {
+            self.finalize_collection()?;
+        }
+        Ok(())
+    }
+
+    /// Trace the assembled graph, reclaim the unreachable tombstones, prune the router, and
+    /// resume every worker.
+    fn finalize_collection(&mut self) -> Result<(), EnvironmentError> {
+        let Some(state) = self.collection.take() else {
+            return Ok(());
+        };
+        let sweep = compute_sweep(&state.adjacency);
+
+        for pid in &sweep {
+            self.process_router.remove(pid);
+        }
+        self.reclaimed_total += sweep.len();
+
+        // Broadcast the sweep set to every worker: the owner removes each tombstone; all
+        // workers prune stale watcher references to it (an OwnedChild/Link entry may live on a
+        // different worker than its target). Then resume. FIFO keeps Reclaim before
+        // EndCollection, so pruning happens while still paused.
+        if !sweep.is_empty() {
+            for worker in self.workers.iter_mut() {
+                worker
+                    .send(Command::Reclaim {
+                        pids: sweep.clone(),
+                    })
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+            }
+        }
+        for worker in self.workers.iter_mut() {
+            worker
+                .send(Command::EndCollection)
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        Ok(())
     }
 
     fn handle_await_processes(
@@ -1302,6 +1531,9 @@ impl<E: Effect> Environment<E> {
         argument: Value,
         heap: Vec<Vec<u8>>,
     ) -> Result<(), EnvironmentError> {
+        // Each spawn is a future tombstone; count it to drive the reclamation auto-trigger.
+        self.spawns_since_collection += 1;
+
         // Allocate new ProcessId
         let new_pid = self.allocate_process_id();
 
@@ -2232,5 +2464,84 @@ mod tests {
         };
         assert_eq!(env.program.lookup_annotation_key_name(*key), Some("doc"));
         assert_eq!(env.program.get_types()[*value_type], Type::Binary);
+    }
+}
+
+#[cfg(test)]
+mod reclamation_tests {
+    use super::*;
+
+    fn root(pid: ProcessId, outgoing: &[ProcessId]) -> ProcessAdjacency {
+        ProcessAdjacency {
+            pid,
+            category: ProcessCategory::Root,
+            outgoing: outgoing.to_vec(),
+        }
+    }
+
+    fn tombstone(pid: ProcessId, outgoing: &[ProcessId]) -> ProcessAdjacency {
+        ProcessAdjacency {
+            pid,
+            category: ProcessCategory::Tombstone,
+            outgoing: outgoing.to_vec(),
+        }
+    }
+
+    fn sweep_set(adjacency: &[ProcessAdjacency]) -> HashSet<ProcessId> {
+        compute_sweep(adjacency).into_iter().collect()
+    }
+
+    #[test]
+    fn unreferenced_tombstone_is_swept() {
+        // A live root holding nothing; a dead process nobody references.
+        let adj = [root(0, &[]), tombstone(1, &[])];
+        assert_eq!(sweep_set(&adj), HashSet::from([1]));
+    }
+
+    #[test]
+    fn tombstone_held_by_a_live_root_is_kept() {
+        // Root 0 still holds pid 1 (e.g. a bound pid): 1 stays observable via !p / ?p.
+        let adj = [root(0, &[1]), tombstone(1, &[])];
+        assert!(sweep_set(&adj).is_empty());
+    }
+
+    #[test]
+    fn reachability_flows_through_a_kept_tombstone() {
+        // Root holds tombstone 1; 1's result/state holds tombstone 2. Awaiting 1 exposes 2,
+        // so 2 must be kept too. Tombstone 3 is unreferenced and swept.
+        let adj = [
+            root(0, &[1]),
+            tombstone(1, &[2]),
+            tombstone(2, &[]),
+            tombstone(3, &[]),
+        ];
+        assert_eq!(sweep_set(&adj), HashSet::from([3]));
+    }
+
+    #[test]
+    fn dead_cycle_is_collected() {
+        // Two tombstones referencing each other, reachable from no root: refcounting could
+        // never free these, but tracing sweeps both.
+        let adj = [root(0, &[]), tombstone(1, &[2]), tombstone(2, &[1])];
+        assert_eq!(sweep_set(&adj), HashSet::from([1, 2]));
+    }
+
+    #[test]
+    fn live_cycle_holding_a_tombstone_keeps_it() {
+        // Root -> tombstone 1 <-> tombstone 2, and 2 -> tombstone 3. All kept via the root.
+        let adj = [
+            root(0, &[1]),
+            tombstone(1, &[2]),
+            tombstone(2, &[1, 3]),
+            tombstone(3, &[]),
+        ];
+        assert!(sweep_set(&adj).is_empty());
+    }
+
+    #[test]
+    fn reachability_through_a_live_process_keeps_a_tombstone() {
+        // Root holds live process 1; 1 holds tombstone 2 (awaiting/sampling 1 would expose it).
+        let adj = [root(0, &[1]), root(1, &[2]), tombstone(2, &[])];
+        assert!(sweep_set(&adj).is_empty());
     }
 }

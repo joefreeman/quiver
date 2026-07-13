@@ -2,7 +2,7 @@ use crate::WorkerId;
 use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
 use quiver_core::effects::Effect;
 use quiver_core::executor::ProgramUpdate;
-use quiver_core::process::{ProcessId, ProcessInfo, ProcessStatus, WorkerInfo};
+use quiver_core::process::{ProcessAdjacency, ProcessId, ProcessInfo, ProcessStatus, WorkerInfo};
 use quiver_core::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -171,6 +171,25 @@ pub enum Command<E: Effect> {
         heap: Vec<Vec<u8>>,
     },
 
+    /// Phase 1 of a reclamation round (see docs/process-state.md, "Reclamation"): pause
+    /// stepping so the worker produces no new cross-worker traffic, then ack with
+    /// `CollectionReady`. The worker keeps draining commands while paused. FIFO channels
+    /// make the ack a barrier — once every worker has acked, every pre-pause send has
+    /// already been routed by the environment.
+    BeginCollection { request_id: u64 },
+
+    /// Phase 2: report this worker's `process_adjacency()` as an `AdjacencyResponse`.
+    /// Sent only after all workers are paused, so any in-flight message has landed in a
+    /// mailbox (FIFO: the routed `DeliverMessage` precedes this command).
+    CollectAdjacency { request_id: u64 },
+
+    /// Phase 3: reclaim these tombstones (remove the entries, release their result/state
+    /// heap refs). Fire-and-forget; the environment has already proven them unreachable.
+    Reclaim { pids: Vec<ProcessId> },
+
+    /// Phase 4: resume stepping. Fire-and-forget.
+    EndCollection,
+
     // Phantom data to maintain generic parameter
     #[serde(skip)]
     _Phantom(std::marker::PhantomData<E>),
@@ -292,6 +311,19 @@ pub enum Event<E: Effect> {
         caller: ProcessId,
         state: Value,
         heap: Vec<Vec<u8>>,
+    },
+
+    /// Ack for `BeginCollection`: this worker is paused (see docs/process-state.md).
+    CollectionReady {
+        request_id: u64,
+        worker_id: WorkerId,
+    },
+
+    /// Response to `CollectAdjacency`: this worker's slice of the reclamation graph.
+    AdjacencyResponse {
+        request_id: u64,
+        worker_id: WorkerId,
+        adjacency: Vec<ProcessAdjacency>,
     },
 
     // Phantom data to maintain generic parameter

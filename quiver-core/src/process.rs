@@ -68,6 +68,29 @@ pub struct ProcessInfo {
     pub heap: ProcessHeapUsage,
 }
 
+/// How a process participates in the reclamation graph (see docs/process-state.md,
+/// "Reclamation"). A `Root` process is live or persistent: it is never swept, and the
+/// pids it references seed the mark set. A `Tombstone` is a completed, non-persistent
+/// process: a sweep candidate, kept only if reached from a root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessCategory {
+    Root,
+    Tombstone,
+}
+
+/// One process's outgoing edges in the reclamation graph: the pids reachable from its
+/// Value-bearing storage (a `Root`) or from its surviving `result`/`state` (a
+/// `Tombstone`). Reported per worker and unioned centrally to trace live tombstones.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessAdjacency {
+    pub pid: ProcessId,
+    pub category: ProcessCategory,
+    /// Pids this process references. May contain duplicates and self-references; the
+    /// consumer dedups. Watchers are deliberately excluded (control-plane, no-op on a
+    /// missing pid — see docs/process-state.md).
+    pub outgoing: Vec<ProcessId>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Action<E: Effect> {
     /// Spawn a new process with the given function, captures, and argument
@@ -158,6 +181,16 @@ pub enum Watcher {
     /// (crash or kill; a normal completion never propagates). Like `OwnedChild`, never
     /// flushed by a persistent process's per-line completion.
     Link { pid: ProcessId },
+}
+
+impl Watcher {
+    /// The process this watcher references. Used to drop stale entries when their target is
+    /// reclaimed (see docs/process-state.md, "Reclamation").
+    pub fn pid(&self) -> ProcessId {
+        match self {
+            Watcher::Awaiter { pid } | Watcher::OwnedChild { pid } | Watcher::Link { pid } => *pid,
+        }
+    }
 }
 
 #[derive(Debug)]

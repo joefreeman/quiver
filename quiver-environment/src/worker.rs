@@ -38,6 +38,11 @@ pub struct Worker<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> {
     subscriptions: HashMap<u64, WorkerSubscription>,
     // This worker's id, stamped into `SubscriptionUpdate` events so the environment can merge.
     worker_id: crate::WorkerId,
+    // Paused for a reclamation round (see docs/process-state.md): while true the worker still
+    // drains commands (so routed messages land in mailboxes and the collection handshake
+    // proceeds) but does not step the executor, producing no new cross-worker traffic. Set by
+    // `BeginCollection`, cleared by `EndCollection`.
+    collecting: bool,
     receiver: R,
     sender: S,
 }
@@ -105,6 +110,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             pending_result_requests: HashMap::new(),
             subscriptions: HashMap::new(),
             worker_id: worker_id as crate::WorkerId,
+            collecting: false,
             receiver,
             sender,
         }
@@ -119,6 +125,13 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         while let Some(cmd) = self.receiver.try_recv()? {
             self.handle_command(cmd)?;
             did_work = true;
+        }
+
+        // While paused for a reclamation round, do not step the executor: the snapshot must
+        // see a frozen graph and no new sends/spawns/completions may occur. Commands are
+        // still drained above so routed messages queue and the handshake completes.
+        if self.collecting {
+            return Ok(did_work);
         }
 
         // Execute one step
@@ -363,6 +376,39 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 self.executor
                     .notify_state(process_id, state, heap)
                     .map_err(EnvironmentError::Executor)?;
+            }
+            Command::BeginCollection { request_id } => {
+                // Freeze stepping and ack. FIFO ordering makes this ack a barrier: the
+                // environment has already received (and routed) every event this worker
+                // emitted before the pause.
+                self.collecting = true;
+                self.sender.send(Event::CollectionReady {
+                    request_id,
+                    worker_id: self.worker_id,
+                })?;
+            }
+            Command::CollectAdjacency { request_id } => {
+                // Paused, and every routed message has landed in a mailbox (FIFO: the
+                // DeliverMessage command preceded this one), so the graph slice is complete.
+                self.sender.send(Event::AdjacencyResponse {
+                    request_id,
+                    worker_id: self.worker_id,
+                    adjacency: self.executor.process_adjacency(),
+                })?;
+            }
+            Command::Reclaim { pids } => {
+                // Broadcast: remove any of these tombstones this worker owns (a no-op for the
+                // rest), then drop stale watcher entries pointing at them — an OwnedChild/Link
+                // entry may sit on a process on a different worker than its target.
+                let reclaimed: std::collections::HashSet<ProcessId> =
+                    pids.iter().copied().collect();
+                for pid in pids {
+                    self.executor.reclaim_process(pid);
+                }
+                self.executor.prune_watchers(&reclaimed);
+            }
+            Command::EndCollection => {
+                self.collecting = false;
             }
             Command::_Phantom(_) => {
                 // This variant is never actually used, only for maintaining generics

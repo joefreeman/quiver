@@ -90,6 +90,7 @@ pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
     with_io: bool,
     debug: bool,
+    collection_threshold: Option<usize>,
 }
 
 #[allow(dead_code)]
@@ -111,6 +112,13 @@ impl TestBuilder {
     /// Compile in debug mode: nil results carry failure-provenance `origin` stamps.
     pub fn debug(mut self) -> Self {
         self.debug = true;
+        self
+    }
+
+    /// Auto-trigger a process-reclamation round every `n` spawns (see docs/process-state.md).
+    /// Lets a test exercise reclamation under load without a huge spawn count.
+    pub fn with_collection_threshold(mut self, n: usize) -> Self {
+        self.collection_threshold = Some(n);
         self
     }
 
@@ -159,6 +167,10 @@ impl TestBuilder {
 
         // Create environment and REPL
         let mut environment = Environment::<NativeEffect>::new(workers);
+
+        if let Some(threshold) = self.collection_threshold {
+            environment.set_collection_threshold(threshold);
+        }
 
         // Set the effect backend
         if let Some(backend) = effect_backend {
@@ -486,6 +498,63 @@ impl TestResult {
     /// Evaluate another expression, chaining from the previous evaluation
     pub fn then_evaluate(self, source: &str) -> Self {
         evaluate(self.environment, self.repl, self.virtual_time, source)
+    }
+
+    /// Run a full process-reclamation round to completion (see docs/process-state.md). Drives
+    /// the pause/snapshot/sweep handshake across `step()`s until it settles. If an
+    /// auto-triggered round is already in flight, this simply pumps it to completion.
+    pub fn force_collection(mut self) -> Self {
+        self.environment
+            .start_collection()
+            .expect("failed to start collection");
+        let start = std::time::Instant::now();
+        while self.environment.is_collecting() {
+            let did_work = self.environment.step().unwrap_or(false);
+            if !did_work {
+                if start.elapsed() > std::time::Duration::from_secs(5) {
+                    panic!(
+                        "collection did not complete within 5s for source: {}",
+                        self.source
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_micros(10));
+            }
+        }
+        self
+    }
+
+    /// Assert exactly `n` tombstones have been reclaimed in total across all rounds so far.
+    pub fn expect_reclaimed(self, n: usize) -> Self {
+        let actual = self.environment.reclaimed_total();
+        assert_eq!(
+            actual, n,
+            "expected {n} reclaimed processes, got {actual} for source: {}",
+            self.source
+        );
+        self
+    }
+
+    /// Assert at least `n` tombstones have been reclaimed in total across all rounds so far.
+    pub fn expect_reclaimed_at_least(self, n: usize) -> Self {
+        let actual = self.environment.reclaimed_total();
+        assert!(
+            actual >= n,
+            "expected at least {n} reclaimed processes, got {actual} for source: {}",
+            self.source
+        );
+        self
+    }
+
+    /// Assert the environment tracks fewer than `n` processes (live plus unreclaimed
+    /// tombstones) — i.e. reclamation kept the population bounded.
+    pub fn expect_process_count_below(self, n: usize) -> Self {
+        let actual = self.environment.process_count();
+        assert!(
+            actual < n,
+            "expected fewer than {n} tracked processes, got {actual} for source: {}",
+            self.source
+        );
+        self
     }
 }
 
