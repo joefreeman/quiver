@@ -245,6 +245,13 @@ pub struct Executor<E: Effect> {
     // Resolved builtin implementations, indexed by builtin_id (parallel to `builtins`).
     // Resolved once at update_program time to avoid a String clone + HashMap lookup per call.
     builtin_impls: Vec<Option<crate::builtins::BuiltinFn<E>>>,
+    // Purity classes, indexed by builtin_id (parallel to `builtins`) — the dispatch
+    // site's purity gate reads these before invoking.
+    builtin_purities: Vec<crate::builtins::Purity>,
+    /// Whether this executor drives compile-time execution (a program's top level and
+    /// module bodies), which must be deterministic: `Purity::HostRead` builtins are
+    /// rejected. Set only by the sync driver; runtime workers leave it false.
+    pub(crate) compile_time: bool,
     tuples: Vec<usize>,     // Tuple arities
     resources: Vec<String>, // Resource type names
     /// For each tuple_id, a canonical value-shape id (same name + field labels) — used by `==`
@@ -1015,6 +1022,8 @@ impl<E: Effect> Executor<E> {
             functions: vec![],
             builtins: vec![],
             builtin_impls: vec![],
+            builtin_purities: vec![],
+            compile_time: false,
             tuples: vec![0, 0], // NIL and OK have 0 fields
             // NIL (id 0) and OK (id 1) are each their own canonical shape; replaced on first update.
             canonical_tuples: vec![0, 1],
@@ -1546,6 +1555,12 @@ impl<E: Effect> Executor<E> {
         for b in &update.builtins {
             self.builtin_impls
                 .push(self.builtins_registry.get_implementation(&b.name));
+            // An unknown builtin errors at call time; Pure keeps the gate out of its way.
+            self.builtin_purities.push(
+                self.builtins_registry
+                    .get_purity(&b.name)
+                    .unwrap_or(crate::builtins::Purity::Pure),
+            );
             self.builtins.push(b.name.clone());
         }
         self.resources = update.resources;
@@ -2392,6 +2407,31 @@ impl<E: Effect> Executor<E> {
                             .unwrap_or("<unknown>");
                         Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
                     })?;
+
+                // Purity gate: reject a stateful or host-reading builtin, before it
+                // runs, wherever re-evaluation stability or determinism is assumed.
+                // (`Effect` and `Process` builtins are governed by their own gates —
+                // the effect-completion check and the context verbs.)
+                let purity = self
+                    .builtin_purities
+                    .get(builtin_id)
+                    .copied()
+                    .unwrap_or(crate::builtins::Purity::Pure);
+                if matches!(
+                    purity,
+                    crate::builtins::Purity::Stateful | crate::builtins::Purity::HostRead
+                ) {
+                    let operation = match purity {
+                        crate::builtins::Purity::HostRead => Operation::HostRead,
+                        _ => Operation::CreateRef,
+                    };
+                    if let Some(context) = proc.restricted_context() {
+                        return Err(Error::OperationNotAllowed { operation, context });
+                    }
+                    if purity == crate::builtins::Purity::HostRead && self.compile_time {
+                        return Err(Error::UnsupportedAtCompileTime { operation });
+                    }
+                }
 
                 let start = if self.profile {
                     Some(Instant::now())

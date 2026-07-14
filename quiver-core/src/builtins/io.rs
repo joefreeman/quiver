@@ -6,7 +6,7 @@
 //! alone via [`register_io_signatures`]; an executing host registers the same signatures paired
 //! with its own implementations (e.g. `quiver-io`'s native io-uring backend, or a web backend).
 
-use super::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion, TypeSpec};
+use super::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion, Purity, TypeSpec};
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::value::Value;
@@ -174,14 +174,21 @@ fn unimplemented_builtin<E: Effect>(
 }
 
 /// Register the IO builtins' type signatures (no implementations) — so code using `__file_read__`,
-/// `%file`, `%dns`, etc. type-checks in a host that doesn't run effects.
+/// `%file`, `%dns`, etc. type-checks in a host that doesn't run effects. The purity classes are
+/// part of the contract: file/network builtins park for effects, and the system builtins
+/// (entropy, clocks) read host state synchronously.
 pub fn register_io_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    for (name, param, result) in file_signatures()
-        .into_iter()
-        .chain(network_signatures())
-        .chain(system_signatures())
-    {
-        let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
-        registry.register(name.to_string(), placeholder, param, result);
+    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
+    for (name, param, result) in file_signatures().into_iter().chain(network_signatures()) {
+        registry.register(name.to_string(), placeholder, Purity::Effect, param, result);
+    }
+    for (name, param, result) in system_signatures() {
+        registry.register(
+            name.to_string(),
+            placeholder,
+            Purity::HostRead,
+            param,
+            result,
+        );
     }
 }

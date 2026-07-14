@@ -75,3 +75,21 @@ fn test_monotonic_never_goes_backwards() {
         )
         .expect("Ok");
 }
+
+#[test]
+fn test_clock_rejected_in_receive_filter() {
+    // A filter may be re-evaluated, so its verdict must be stable: reading the clock
+    // inside one is rejected by the purity gate, like a send or an effect.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"
+            p = @#{ !'int { %time.now; Ok } }
+            10 ~> p
+            r = !p
+            r:((message: Str['bin]))crash ~> =(message: m)
+            m
+            "#,
+        )
+        .expect("\"host read is not allowed in receive function\"");
+}

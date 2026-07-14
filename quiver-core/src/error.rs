@@ -16,6 +16,11 @@ pub enum Operation {
     Link,
     Detach,
     Track,
+    /// A host-state read (clock, entropy) — a `Purity::HostRead` builtin.
+    HostRead,
+    /// Minting a ref (`%ref`) — currently the only `Purity::Stateful` builtin; revisit
+    /// the label if another appears.
+    CreateRef,
 }
 
 impl fmt::Display for Operation {
@@ -31,6 +36,8 @@ impl fmt::Display for Operation {
             Operation::Link => "link",
             Operation::Detach => "detach",
             Operation::Track => "track",
+            Operation::HostRead => "host read",
+            Operation::CreateRef => "ref creation",
         })
     }
 }
@@ -135,6 +142,8 @@ impl Error {
                     Operation::Link => "linking processes",
                     Operation::Detach => "detaching a process",
                     Operation::Track => "running a tracked render",
+                    Operation::HostRead => "reading host state",
+                    Operation::CreateRef => "creating a ref",
                 };
                 format!(
                     "{doing} is not supported in compile-time execution (a program's top \

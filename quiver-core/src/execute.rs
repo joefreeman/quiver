@@ -40,6 +40,9 @@ pub fn execute_bytecode_sync_with<E: Effect>(
 
     // Use worker_id 0 for single-threaded execution
     let mut executor = Executor::new(builtins.clone(), profile, 0);
+    // Compile-time execution must be deterministic: host-state reads (clock, entropy)
+    // are rejected at the builtin dispatch site.
+    executor.compile_time = true;
 
     // Compute type compatibility for O(1) runtime type checks
     assert!(

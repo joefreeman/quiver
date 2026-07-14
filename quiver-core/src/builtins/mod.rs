@@ -286,6 +286,33 @@ impl TypeSpec {
 /// Function signature for builtin implementations
 pub type BuiltinFn<E> = fn(&Value, &mut BuiltinContext<'_, E>) -> Result<Completion<E>, Error>;
 
+/// How a builtin relates to state outside its argument — part of its signature contract,
+/// independent of any host. The dispatch site consults it before invoking: contexts that
+/// assume re-evaluation stability (receive filters, tracked renders) reject `Stateful`
+/// and `HostRead`, and compile-time execution (which must be deterministic) rejects
+/// `HostRead`. `Effect` and `Process` builtins are governed by their own gates — the
+/// effect-completion check and the context verbs — so the purity gate passes them
+/// through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purity {
+    /// A pure function of its argument (and the heap data it references) — allowed
+    /// everywhere.
+    Pure,
+    /// Advances executor-local state (`%ref`'s counter): deterministic within a run —
+    /// so compile-time evaluation permits it — but unstable across re-evaluations.
+    /// (A compile-time ref is sound while it stays within the evaluation; escaping
+    /// into emitted bytecode is a separate lowering limitation.)
+    Stateful,
+    /// Reads host state (clock, entropy): nondeterministic across runs.
+    HostRead,
+    /// Parks for a host effect ([`Completion::Effect`]): rejected where effects are,
+    /// at the completion site.
+    Effect,
+    /// Operates on the calling process through [`BuiltinContext`] verbs, each of which
+    /// carries its own restricted-context check.
+    Process,
+}
+
 /// Function signature for builtin module registration
 pub type BuiltinModule<E> = fn(&mut BuiltinRegistry<E>);
 
@@ -294,18 +321,30 @@ const fn coerce_builtin<E: Effect>(f: BuiltinFn<E>) -> BuiltinFn<E> {
     f
 }
 
-/// Macro for registering a single builtin function
+/// Macro for registering a single builtin function. The purity class may be omitted
+/// for a [`Purity::Pure`] builtin.
 macro_rules! register_builtin {
     ($registry:expr, $fn_name:literal, $impl:path, $param:expr => $result:expr) => {
-        $registry.register($fn_name.to_string(), coerce_builtin($impl), $param, $result);
+        register_builtin!($registry, $fn_name, $impl, Purity::Pure, $param => $result);
     };
+    ($registry:expr, $fn_name:literal, $impl:path, $purity:expr, $param:expr => $result:expr) => {
+        $registry.register($fn_name.to_string(), coerce_builtin($impl), $purity, $param, $result);
+    };
+}
+
+/// A registered builtin: its implementation, purity class, and type signature.
+#[derive(Clone)]
+pub struct BuiltinEntry<E: Effect> {
+    pub implementation: BuiltinFn<E>,
+    pub purity: Purity,
+    pub parameter: TypeSpec,
+    pub result: TypeSpec,
 }
 
 /// Registry of all available builtin functions
 #[derive(Clone)]
 pub struct BuiltinRegistry<E: Effect> {
-    /// Function name -> (implementation, param_spec, result_spec)
-    functions: HashMap<String, (BuiltinFn<E>, TypeSpec, TypeSpec)>,
+    functions: HashMap<String, BuiltinEntry<E>>,
 }
 
 impl<E: Effect> Default for BuiltinRegistry<E> {
@@ -327,10 +366,19 @@ impl<E: Effect> BuiltinRegistry<E> {
         &mut self,
         name: String,
         impl_fn: BuiltinFn<E>,
+        purity: Purity,
         param: TypeSpec,
         result: TypeSpec,
     ) {
-        self.functions.insert(name, (impl_fn, param, result));
+        self.functions.insert(
+            name,
+            BuiltinEntry {
+                implementation: impl_fn,
+                purity,
+                parameter: param,
+                result,
+            },
+        );
     }
 
     /// Attach (replace) the implementation of an already-registered builtin, keeping its
@@ -340,7 +388,7 @@ impl<E: Effect> BuiltinRegistry<E> {
     /// host (native io-uring, a web backend, or none in a type-checker).
     pub fn attach_implementation(&mut self, name: &str, impl_fn: BuiltinFn<E>) {
         match self.functions.get_mut(name) {
-            Some((existing, _, _)) => *existing = impl_fn,
+            Some(entry) => entry.implementation = impl_fn,
             None => debug_assert!(
                 false,
                 "attaching an implementation for unregistered builtin `{name}`; its signature \
@@ -365,25 +413,30 @@ impl<E: Effect> BuiltinRegistry<E> {
 
     /// Get the implementation function for a builtin by function name
     pub fn get_implementation(&self, function: &str) -> Option<BuiltinFn<E>> {
-        self.functions.get(function).map(|(impl_fn, _, _)| *impl_fn)
+        self.functions
+            .get(function)
+            .map(|entry| entry.implementation)
+    }
+
+    /// Get the purity class for a builtin by function name
+    pub fn get_purity(&self, function: &str) -> Option<Purity> {
+        self.functions.get(function).map(|entry| entry.purity)
     }
 
     /// Resolve and get the type signature for a builtin by function name
     pub fn resolve_signature(&self, function: &str, program: &mut Program) -> Option<(Type, Type)> {
-        self.functions
-            .get(function)
-            .map(|(_, param_spec, result_spec)| {
-                let param_type = param_spec.resolve(program);
-                let result_type = result_spec.resolve(program);
-                (param_type, result_type)
-            })
+        self.functions.get(function).map(|entry| {
+            let param_type = entry.parameter.resolve(program);
+            let result_type = entry.result.resolve(program);
+            (param_type, result_type)
+        })
     }
 
     /// Get the type specs for a builtin by function name (without resolving)
     pub fn get_specs(&self, function: &str) -> Option<(&TypeSpec, &TypeSpec)> {
         self.functions
             .get(function)
-            .map(|(_, param_spec, result_spec)| (param_spec, result_spec))
+            .map(|entry| (&entry.parameter, &entry.result))
     }
 
     /// Get all available function names
@@ -555,7 +608,9 @@ pub fn register_vector_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// Register the reference builtin (`%ref`): a nilary function minting a unique, opaque ref.
 pub fn register_reference_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let nil = TypeSpec::Tuple(None, vec![]);
-    register_builtin!(registry, "reference", reference::builtin_reference, nil => TypeSpec::Reference);
+    // Stateful: each call advances the executor's ref counter, so a fresh identity per
+    // evaluation — unstable under re-evaluation, but deterministic at compile time.
+    register_builtin!(registry, "reference", reference::builtin_reference, Purity::Stateful, nil => TypeSpec::Reference);
 }
 
 /// Abort the current process with a runtime panic carrying the given `Str` message. It
@@ -676,9 +731,9 @@ pub fn builtin_track<E: Effect>(
 pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let pid = TypeSpec::Process(None, None);
     let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
-    register_builtin!(registry, "process_detach", builtin_process_detach, pid.clone() => ok.clone());
-    register_builtin!(registry, "process_kill", builtin_process_kill, pid.clone() => ok.clone());
-    register_builtin!(registry, "process_link", builtin_process_link, pid => ok);
+    register_builtin!(registry, "process_detach", builtin_process_detach, Purity::Process, pid.clone() => ok.clone());
+    register_builtin!(registry, "process_kill", builtin_process_kill, Purity::Process, pid.clone() => ok.clone());
+    register_builtin!(registry, "process_link", builtin_process_link, Purity::Process, pid => ok);
     // `track`'s polymorphic type `#(#[] -> 'v) -> 'v`: it takes a nilary thunk and returns
     // whatever the thunk returns. The `'v` variable is unified/substituted fresh per call
     // by the ordinary generic-call path.
@@ -686,7 +741,7 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
         parameter: Box::new(TypeSpec::Tuple(None, vec![])),
         result: Box::new(TypeSpec::Var("v")),
     };
-    register_builtin!(registry, "track", builtin_track, thunk => TypeSpec::Var("v"));
+    register_builtin!(registry, "track", builtin_track, Purity::Process, thunk => TypeSpec::Var("v"));
 }
 
 /// Get all core builtin modules. This establishes the full builtin *contract* every host shares:

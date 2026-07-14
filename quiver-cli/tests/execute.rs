@@ -60,3 +60,24 @@ fn entry_function_spawns_are_unaffected() {
     assert!(out.status.success());
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "42");
 }
+
+#[test]
+fn top_level_host_reads_are_rejected() {
+    // Compile-time execution must be deterministic: clock and entropy reads at the top
+    // level would bake the compile instant into the emitted program.
+    expect_rejected("t = %time.now; #{ t }", "reading host state");
+    expect_rejected("r = %random.bytes 8; #{ r }", "reading host state");
+}
+
+#[test]
+fn top_level_ref_minting_is_permitted() {
+    // Stateful-but-deterministic builtins stay legal at compile time: these refs are
+    // used and discarded during top-level evaluation. (Escaping a ref into the emitted
+    // bytecode is a separate lowering limitation.)
+    let out = quiv()
+        .args(["run", "-e", "a = %ref; b = %ref; x = { a ~> =&b => 1 | 2 }; #{ x }"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "expected success");
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "2");
+}

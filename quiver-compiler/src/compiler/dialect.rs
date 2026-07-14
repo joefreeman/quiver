@@ -23,7 +23,7 @@ use crate::ast;
 use crate::compiler::Error;
 use crate::parser::SourceSpan;
 use quiver_core::{
-    builtins::{BuiltinContext, BuiltinRegistry, Completion, TypeSpec},
+    builtins::{BuiltinContext, BuiltinRegistry, Completion, Purity, TypeSpec},
     bytecode::Constant,
     effects::Effect,
     error::Error as CoreError,
@@ -555,12 +555,14 @@ pub fn register_callbacks<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     registry.register(
         TERM_CALLBACK.to_string(),
         term_callback::<E>,
+        Purity::Pure,
         param.clone(),
         result.clone(),
     );
     registry.register(
         CHAIN_CALLBACK.to_string(),
         chain_callback::<E>,
+        Purity::Pure,
         param,
         result,
     );

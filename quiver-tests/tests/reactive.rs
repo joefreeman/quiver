@@ -63,3 +63,28 @@ fn tracked_render_rejects_effects() {
             context: RestrictedContext::TrackedRender,
         });
 }
+
+#[test]
+fn tracked_render_rejects_host_reads() {
+    // A render must be a pure function of captures + samples: a clock read inside one
+    // could steer a branch with no subscribed dependency, silently going stale.
+    quiver()
+        .with_io()
+        .evaluate("%proc.track #{ %time.now }")
+        .expect_runtime_error(Error::OperationNotAllowed {
+            operation: Operation::HostRead,
+            context: RestrictedContext::TrackedRender,
+        });
+}
+
+#[test]
+fn tracked_render_rejects_ref_creation() {
+    // A fresh ref per render is unstable identity (e.g. keys that never match across
+    // re-renders); mint in the update step and carry the ref in state instead.
+    quiver()
+        .evaluate("%proc.track #{ %ref }")
+        .expect_runtime_error(Error::OperationNotAllowed {
+            operation: Operation::CreateRef,
+            context: RestrictedContext::TrackedRender,
+        });
+}
