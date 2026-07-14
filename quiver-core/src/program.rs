@@ -328,8 +328,8 @@ impl Program {
     }
 
     /// The crash-delivery table (both build modes): the key and tuple/type ids the
-    /// executor needs to build `:crash` / `:timeout` stamped nils (see
-    /// docs/process-state.md). Registers the shapes on first call — everything dedups
+    /// executor needs to build `:crash` / `:timeout` stamped nils.
+    /// Registers the shapes on first call — everything dedups
     /// by content, so repeated calls (e.g. per REPL merge) return stable ids. Not
     /// memoised for the same reason: registration is a handful of table lookups.
     pub fn crash_table(&mut self) -> crate::bytecode::CrashTable {
@@ -358,6 +358,12 @@ impl Program {
             .map(|tuple_id| self.register_type(Type::Tuple(tuple_id)))
             .collect();
         self.register_type(Type::Union(member_types));
+        // The reactive `Changed` wakeup. Content-addressed, so it
+        // shares the id of `std/proc.qv`'s `'changed = Changed`; given a type-table
+        // presence so `'%proc.changed` resolves and pattern-matching a delivered value
+        // works.
+        let changed_tuple = self.register_tuple(Some("Changed".to_string()), vec![]);
+        self.register_type(Type::Tuple(changed_tuple));
         crate::bytecode::CrashTable {
             crash_key,
             timeout_key,
@@ -365,6 +371,7 @@ impl Program {
             panic_tuple,
             killed_tuple,
             str_tuple,
+            changed_tuple,
         }
     }
 

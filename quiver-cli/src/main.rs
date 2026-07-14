@@ -224,7 +224,7 @@ fn compile_and_extract_entry(
 
     // Execute to get the function value
     let (result, executor) = quiver_core::execute_bytecode_sync(bytecode, builtins, false)
-        .map_err(|e| format!("Execution error: {:?}", e))?;
+        .map_err(|e| format!("Execution error: {}", e.crash_message()))?;
 
     // Extract the entry function from the result
     let entry = match result {
@@ -555,7 +555,7 @@ fn execute_bytecode_with_environment(
                 return Ok(());
             }
             Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
-                return Err(format!("Runtime error: {:?}", e).into());
+                return Err(format!("Runtime error: {}", e.crash_message()).into());
             }
             Ok(Some(_)) => {
                 return Err("Unexpected result type".into());

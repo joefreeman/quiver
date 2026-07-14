@@ -1,8 +1,8 @@
 mod common;
 use common::quiver;
 
-// %sup (std/sup.qv): supervision as library code on the step-2 process primitives
-// (docs/process-state.md). Each test's start closure spawns a worker that announces
+// %sup (std/sup.qv): supervision as library code on the step-2 process primitives.
+// Each test's start closure spawns a worker that announces
 // its pid to the test process (so restarts are observable as fresh announcements) and
 // then waits: 0 makes it crash, any other int completes it normally.
 //

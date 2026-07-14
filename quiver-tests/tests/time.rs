@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 
-// `%time` (std/time.qv; docs/random-time.md): the host clocks (`now`, `monotonic` — the
+// `%time` (std/time.qv): the host clocks (`now`, `monotonic` — the
 // `__time_*__` builtins, so those tests need with_io) and the pure calendar functions
 // (`parts`, `http_date`, `iso8601`), which are fully deterministic.
 

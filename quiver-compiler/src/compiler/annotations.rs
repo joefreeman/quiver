@@ -24,7 +24,7 @@ pub const ORIGIN: &str = "origin";
 
 /// The runtime-owned crash-delivery keys, attached row-invisibly in both build modes: a
 /// never-lethal await answers a crashed source with a `:crash`-stamped nil, and a select
-/// timeout stamps `:timeout` (the ms that fired). See docs/process-state.md.
+/// timeout stamps `:timeout` (the ms that fired).
 pub const CRASH: &str = "crash";
 pub const TIMEOUT: &str = "timeout";
 

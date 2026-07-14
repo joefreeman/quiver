@@ -1,4 +1,39 @@
+use crate::process::RestrictedContext;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// An operation that can be rejected — in a [`RestrictedContext`] at runtime, or
+/// during compile-time execution (which routes no actions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Operation {
+    Spawn,
+    Send,
+    Select,
+    Await,
+    Effect,
+    ReadState,
+    Kill,
+    Link,
+    Detach,
+    Track,
+}
+
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Operation::Spawn => "spawn",
+            Operation::Send => "send",
+            Operation::Select => "select",
+            Operation::Await => "await",
+            Operation::Effect => "effect",
+            Operation::ReadState => "state read",
+            Operation::Kill => "kill",
+            Operation::Link => "link",
+            Operation::Detach => "detach",
+            Operation::Track => "track",
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Error {
@@ -19,15 +54,38 @@ pub enum Error {
     FieldAccessInvalid(usize),
 
     // Type system errors
-    TypeMismatch { expected: String, found: String },
-    ArityMismatch { expected: usize, found: usize },
+    TypeMismatch {
+        expected: String,
+        found: String,
+    },
+    ArityMismatch {
+        expected: usize,
+        found: usize,
+    },
     InvalidArgument(String),
 
     // Tuple and structure errors
     TupleEmpty,
 
     // Operation restrictions
-    OperationNotAllowed { operation: String, context: String },
+    OperationNotAllowed {
+        operation: Operation,
+        context: RestrictedContext,
+    },
+
+    // `%proc.detach` of a process the caller doesn't own — ownership is the parent's
+    // to relinquish.
+    NotAnOwnedChild,
+
+    // Compile-time execution (a program's top level and module bodies) routes no
+    // actions, so process and effect work there is rejected at its source.
+    UnsupportedAtCompileTime {
+        operation: Operation,
+    },
+
+    // The compile-time backstop: a receive/select waiting on a message that can never
+    // arrive (no sender can exist, and time is frozen so timeouts never expire).
+    StalledAtCompileTime,
 
     // An explicit, unrecoverable abort (`__panic__`) — e.g. a debug-mode `:pre`/`:post`
     // contract whose verdict was nil, or an `assert`/`unreachable` helper.
@@ -35,17 +93,20 @@ pub enum Error {
 
     // Terminated from outside: containment teardown of a terminated parent's subtree
     // (and, later, an explicit `%proc.kill` or link propagation). Reified for awaiters
-    // as the `Killed` crash kind (see docs/process-state.md).
+    // as the `Killed` crash kind.
     Killed,
 
     // Scope management errors
-    ScopeCountInvalid { expected: usize, found: usize },
+    ScopeCountInvalid {
+        expected: usize,
+        found: usize,
+    },
     ScopeUnderflow,
 }
 
 impl Error {
     /// A human-readable message for crash delivery (the `message` field of a `'crash`
-    /// value — see docs/process-state.md). Internal-invariant errors (stack/scope/table
+    /// value). Internal-invariant errors (stack/scope/table
     /// misuse — compiler bugs, not user-reachable) all read as internal errors.
     pub fn crash_message(&self) -> String {
         match self {
@@ -61,6 +122,30 @@ impl Error {
             Error::OperationNotAllowed { operation, context } => {
                 format!("{operation} is not allowed in {context}")
             }
+            Error::NotAnOwnedChild => "detach requires an owned child of the caller".to_string(),
+            Error::UnsupportedAtCompileTime { operation } => {
+                let doing = match operation {
+                    Operation::Spawn => "spawning a process",
+                    Operation::Send => "sending a message",
+                    Operation::Select => "selecting",
+                    Operation::Await => "awaiting a process",
+                    Operation::Effect => "performing an effect",
+                    Operation::ReadState => "reading a process's state",
+                    Operation::Kill => "killing a process",
+                    Operation::Link => "linking processes",
+                    Operation::Detach => "detaching a process",
+                    Operation::Track => "running a tracked render",
+                };
+                format!(
+                    "{doing} is not supported in compile-time execution (a program's top \
+                     level and module bodies run at compile time — move process and effect \
+                     work inside the entry function)"
+                )
+            }
+            Error::StalledAtCompileTime => "waiting to receive a message that can never \
+                 arrive in compile-time execution (a program's top level and module bodies \
+                 run at compile time — receive inside the entry function instead)"
+                .to_string(),
             Error::VariableUndefined(name) => format!("undefined variable: {name}"),
             other => format!("internal error: {other:?}"),
         }

@@ -51,7 +51,7 @@ pub enum Type {
         result: usize,
         receive: usize,
         /// The states a spawn of this function moves through: the union of parameter
-        /// types over its root tail-call closure (`docs/process-state.md`). `None` means
+        /// types over its root tail-call closure. `None` means
         /// unknown — a declared type without a `?` clause grants no sampling; inferred
         /// literals always carry `Some` unless poisoned by a `^~` on an unknown callee.
         states: Option<usize>,

@@ -125,7 +125,7 @@ pub enum Term {
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
     /// The `Spanned` is the `!`, for hover (shows the received/awaited result type).
     Select(Option<Vec<Chain>>, Spanned),
-    /// Sample a process's current state (`?p` — docs/process-state.md): yields the
+    /// Sample a process's current state (`?p`): yields the
     /// target's state type, which the process type carries (inferred from spawn sites,
     /// or stated with a `?'s` clause). The access names the target (a variable or import
     /// member holding a pid); the `Spanned` is the `?`, for hover.

@@ -1,10 +1,8 @@
 //! Binary builtin function implementations
 use crate::binary::BinaryData;
-use crate::builtins::{BuiltinResult, value_to_i64, value_to_u8, value_to_usize};
+use crate::builtins::{BuiltinContext, Completion, value_to_i64, value_to_u8, value_to_usize};
 use crate::effects::Effect;
 use crate::error::Error;
-use crate::executor::Executor;
-use crate::process::ProcessId;
 use crate::value::Value;
 use num_bigint::BigInt;
 use std::rc::Rc;
@@ -12,19 +10,18 @@ use std::rc::Rc;
 /// Repeat a binary `count` times, sharing the unit lazily (O(1), no materialization).
 /// binary_repeat([bin, count]) -> bin
 pub fn builtin_binary_repeat<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary), count) => {
                 let count = value_to_usize(count)?;
-                let unit = executor.get_binary_data(binary)?.clone();
+                let unit = ctx.executor.get_binary_data(binary)?.clone();
                 let tiled = BinaryData::tiled(Rc::new(unit), count);
                 // allocate_binary_data enforces MAX_BINARY_SIZE against the realized length.
-                let binary = executor.allocate_binary_data(tiled)?;
-                Ok(BuiltinResult::Value(Value::Binary(binary)))
+                let binary = ctx.executor.allocate_binary_data(tiled)?;
+                Ok(Completion::Value(Value::Binary(binary)))
             }
             _ => Err(Error::TypeMismatch {
                 expected: "[binary, integer]".to_string(),
@@ -41,10 +38,9 @@ pub fn builtin_binary_repeat<E: Effect>(
 /// Create a new zero-filled binary of the specified size
 /// binary_new(size: int) -> bin
 pub fn builtin_binary_new<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Int(_) | Value::BigInt(_) => {
             let size = value_to_usize(arg)?;
@@ -57,8 +53,10 @@ pub fn builtin_binary_new<E: Effect>(
             }
 
             // Use BinaryData::zeroed() for efficient zero-filled binary (no allocation)
-            let binary = executor.allocate_binary_data(BinaryData::zeroed(size))?;
-            Ok(BuiltinResult::Value(Value::Binary(binary)))
+            let binary = ctx
+                .executor
+                .allocate_binary_data(BinaryData::zeroed(size))?;
+            Ok(Completion::Value(Value::Binary(binary)))
         }
         other => Err(Error::TypeMismatch {
             expected: "integer".to_string(),
@@ -70,14 +68,13 @@ pub fn builtin_binary_new<E: Effect>(
 /// Get the length of a binary
 /// binary_length(bin) -> int
 pub fn builtin_binary_length<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Binary(binary) => {
-            let binary_data = executor.get_binary_data(binary)?;
-            Ok(BuiltinResult::Value(Value::int(binary_data.len() as i64)))
+            let binary_data = ctx.executor.get_binary_data(binary)?;
+            Ok(Completion::Value(Value::int(binary_data.len() as i64)))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -89,15 +86,14 @@ pub fn builtin_binary_length<E: Effect>(
 /// Concatenate two binaries
 /// binary_concat([bin, bin]) -> bin
 pub fn builtin_binary_concat<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => match (&elements[0], &elements[1]) {
             (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                let binary_data_a = executor.get_binary_data(binary_a)?;
-                let binary_data_b = executor.get_binary_data(binary_b)?;
+                let binary_data_a = ctx.executor.get_binary_data(binary_a)?;
+                let binary_data_b = ctx.executor.get_binary_data(binary_b)?;
 
                 let total_len = binary_data_a.len() + binary_data_b.len();
                 if total_len > crate::value::MAX_BINARY_SIZE {
@@ -114,8 +110,8 @@ pub fn builtin_binary_concat<E: Effect>(
                     Rc::new(binary_data_a.clone()),
                     Rc::new(binary_data_b.clone()),
                 );
-                let binary = executor.allocate_binary_data(concat)?;
-                Ok(BuiltinResult::Value(Value::Binary(binary)))
+                let binary = ctx.executor.allocate_binary_data(concat)?;
+                Ok(Completion::Value(Value::Binary(binary)))
             }
             _ => Err(Error::TypeMismatch {
                 expected: "[binary, binary]".to_string(),
@@ -136,16 +132,15 @@ pub fn builtin_binary_concat<E: Effect>(
 /// Bitwise AND of two binaries
 /// binary_and([bin, bin]) -> bin
 pub fn builtin_binary_and<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                    let binary_data_a = executor.get_binary_data(binary_a)?;
-                    let binary_data_b = executor.get_binary_data(binary_b)?;
+                    let binary_data_a = ctx.executor.get_binary_data(binary_a)?;
+                    let binary_data_b = ctx.executor.get_binary_data(binary_b)?;
 
                     // For bitwise operations, take the shorter length
                     // Use iterators to avoid materializing both binaries
@@ -155,8 +150,8 @@ pub fn builtin_binary_and<E: Effect>(
                         .map(|(a, b)| a & b)
                         .collect();
 
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                    let binary = ctx.executor.allocate_binary(result)?;
+                    Ok(Completion::Value(Value::Binary(binary)))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, binary]".to_string(),
@@ -174,16 +169,15 @@ pub fn builtin_binary_and<E: Effect>(
 /// Bitwise OR of two binaries
 /// binary_or([bin, bin]) -> bin
 pub fn builtin_binary_or<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                    let binary_data_a = executor.get_binary_data(binary_a)?;
-                    let binary_data_b = executor.get_binary_data(binary_b)?;
+                    let binary_data_a = ctx.executor.get_binary_data(binary_a)?;
+                    let binary_data_b = ctx.executor.get_binary_data(binary_b)?;
 
                     // For bitwise operations, take the longer length, padding with zeros
                     let len_a = binary_data_a.len();
@@ -205,8 +199,8 @@ pub fn builtin_binary_or<E: Effect>(
                         result.push(a | b);
                     }
 
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                    let binary = ctx.executor.allocate_binary(result)?;
+                    Ok(Completion::Value(Value::Binary(binary)))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, binary]".to_string(),
@@ -224,16 +218,15 @@ pub fn builtin_binary_or<E: Effect>(
 /// Bitwise XOR of two binaries
 /// binary_xor([bin, bin]) -> bin
 pub fn builtin_binary_xor<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
                 (Value::Binary(binary_a), Value::Binary(binary_b)) => {
-                    let binary_data_a = executor.get_binary_data(binary_a)?;
-                    let binary_data_b = executor.get_binary_data(binary_b)?;
+                    let binary_data_a = ctx.executor.get_binary_data(binary_a)?;
+                    let binary_data_b = ctx.executor.get_binary_data(binary_b)?;
 
                     // For XOR, take the longer length, padding with zeros
                     let len_a = binary_data_a.len();
@@ -255,8 +248,8 @@ pub fn builtin_binary_xor<E: Effect>(
                         result.push(a ^ b);
                     }
 
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                    let binary = ctx.executor.allocate_binary(result)?;
+                    Ok(Completion::Value(Value::Binary(binary)))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, binary]".to_string(),
@@ -274,10 +267,9 @@ pub fn builtin_binary_xor<E: Effect>(
 /// binary_index([bin, byte, offset]) -> int | []
 /// Index of the first occurrence of `byte` (0..=255) at or after `offset`, or nil if absent.
 pub fn builtin_binary_index<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
@@ -286,9 +278,9 @@ pub fn builtin_binary_index<E: Effect>(
                         Error::InvalidArgument("Byte must be in the range 0..=255".to_string())
                     })?;
                     let offset = value_to_usize(offset)?;
-                    let binary_data = executor.get_binary_data(binary)?;
+                    let binary_data = ctx.executor.get_binary_data(binary)?;
                     let result = binary_data.find_byte(byte, offset);
-                    Ok(BuiltinResult::Value(match result {
+                    Ok(Completion::Value(match result {
                         Some(index) => Value::int(index as i64),
                         None => Value::nil(),
                     }))
@@ -309,18 +301,17 @@ pub fn builtin_binary_index<E: Effect>(
 /// Bitwise NOT of a binary
 /// binary_not(bin) -> bin
 pub fn builtin_binary_not<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Binary(binary) => {
-            let binary_data = executor.get_binary_data(binary)?;
+            let binary_data = ctx.executor.get_binary_data(binary)?;
             // Use iterator to avoid double materialization
             let result: Vec<u8> = binary_data.iter().map(|byte| !byte).collect();
 
-            let binary = executor.allocate_binary(result)?;
-            Ok(BuiltinResult::Value(Value::Binary(binary)))
+            let binary = ctx.executor.allocate_binary(result)?;
+            Ok(Completion::Value(Value::Binary(binary)))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -336,10 +327,9 @@ pub fn builtin_binary_not<E: Effect>(
 /// Shift binary by n bits (positive = left, negative = right, logical shift)
 /// binary_shift([bin, int]) -> bin
 pub fn builtin_binary_shift<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 2 => {
             match (&elements[0], &elements[1]) {
@@ -347,10 +337,10 @@ pub fn builtin_binary_shift<E: Effect>(
                     let shift_amount = value_to_i64(shift_amount)?;
                     if shift_amount == 0 {
                         // No shift needed
-                        return Ok(BuiltinResult::Value(Value::Binary(*binary)));
+                        return Ok(Completion::Value(Value::Binary(*binary)));
                     }
 
-                    let binary_data = executor.get_binary_data(binary)?;
+                    let binary_data = ctx.executor.get_binary_data(binary)?;
                     let bytes = binary_data.to_vec();
 
                     let shift_left = shift_amount > 0;
@@ -359,8 +349,8 @@ pub fn builtin_binary_shift<E: Effect>(
                     if shift_bits >= (bytes.len() as u32 * 8) {
                         // Shift larger than total bits results in zeros
                         let result = vec![0u8; bytes.len()];
-                        let binary = executor.allocate_binary(result)?;
-                        return Ok(BuiltinResult::Value(Value::Binary(binary)));
+                        let binary = ctx.executor.allocate_binary(result)?;
+                        return Ok(Completion::Value(Value::Binary(binary)));
                     }
 
                     let mut result = vec![0u8; bytes.len()];
@@ -406,8 +396,8 @@ pub fn builtin_binary_shift<E: Effect>(
                         }
                     }
 
-                    let binary = executor.allocate_binary(result)?;
-                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                    let binary = ctx.executor.allocate_binary(result)?;
+                    Ok(Completion::Value(Value::Binary(binary)))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer]".to_string(),
@@ -428,13 +418,12 @@ pub fn builtin_binary_shift<E: Effect>(
 /// Count number of set bits (popcount) - CRITICAL for HAMT
 /// binary_popcount(bin) -> int
 pub fn builtin_binary_popcount<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Binary(binary) => {
-            let binary_data = executor.get_binary_data(binary)?;
+            let binary_data = ctx.executor.get_binary_data(binary)?;
 
             // Use iterator to avoid materializing the entire binary
             let count: u64 = binary_data
@@ -442,7 +431,7 @@ pub fn builtin_binary_popcount<E: Effect>(
                 .map(|byte| byte.count_ones() as u64)
                 .sum();
 
-            Ok(BuiltinResult::Value(Value::int(count as i64)))
+            Ok(Completion::Value(Value::int(count as i64)))
         }
         other => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -457,15 +446,14 @@ pub fn builtin_binary_popcount<E: Effect>(
 /// bit_offset: which bit within that byte (0-7, 0 is MSB)
 /// num_bits: how many bits to read (1-64)
 pub fn builtin_binary_get<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 4 => {
             match (&elements[0], &elements[1], &elements[2], &elements[3]) {
                 (Value::Binary(binary), byte_offset, bit_offset, num_bits) => {
-                    let binary_data = executor.get_binary_data(binary)?;
+                    let binary_data = ctx.executor.get_binary_data(binary)?;
 
                     let byte_offset = value_to_i64(byte_offset)?;
                     let bit_offset = value_to_i64(bit_offset)?;
@@ -526,7 +514,7 @@ pub fn builtin_binary_get<E: Effect>(
                     };
                     value &= mask;
 
-                    Ok(BuiltinResult::Value(Value::integer(BigInt::from(value))))
+                    Ok(Completion::Value(Value::integer(BigInt::from(value))))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer, integer]".to_string(),
@@ -547,10 +535,9 @@ pub fn builtin_binary_get<E: Effect>(
 /// bit_offset: which bit within that byte (0-7, 0 is MSB)
 /// num_bits: how many bits to write (1-64)
 pub fn builtin_binary_set<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 5 => {
             match (
@@ -561,7 +548,7 @@ pub fn builtin_binary_set<E: Effect>(
                 &elements[4],
             ) {
                 (Value::Binary(binary), byte_offset, bit_offset, value, num_bits) => {
-                    let binary_data = executor.get_binary_data(binary)?;
+                    let binary_data = ctx.executor.get_binary_data(binary)?;
 
                     let byte_offset = value_to_i64(byte_offset)?;
                     let bit_offset = value_to_i64(bit_offset)?;
@@ -687,8 +674,8 @@ pub fn builtin_binary_set<E: Effect>(
                         BinaryData::concat(Rc::new(with_middle), Rc::new(right))
                     };
 
-                    let binary = executor.allocate_binary_data(result)?;
-                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                    let binary = ctx.executor.allocate_binary_data(result)?;
+                    Ok(Completion::Value(Value::Binary(binary)))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer, integer, integer]".to_string(),
@@ -710,15 +697,14 @@ pub fn builtin_binary_set<E: Effect>(
 /// Extract a slice from binary [start, end) (end is exclusive)
 /// binary_slice([bin, int, int]) -> bin
 pub fn builtin_binary_slice<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
                 (Value::Binary(binary), start, end) => {
-                    let binary_data = executor.get_binary_data(binary)?;
+                    let binary_data = ctx.executor.get_binary_data(binary)?;
 
                     let start = value_to_usize(start)?;
                     let end = value_to_usize(end)?;
@@ -740,8 +726,8 @@ pub fn builtin_binary_slice<E: Effect>(
                             .ok_or_else(|| {
                                 Error::InvalidArgument("Failed to create slice".to_string())
                             })?;
-                    let binary = executor.allocate_binary_data(sliced)?;
-                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                    let binary = ctx.executor.allocate_binary_data(sliced)?;
+                    Ok(Completion::Value(Value::Binary(binary)))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer]".to_string(),
@@ -763,20 +749,19 @@ pub fn builtin_binary_slice<E: Effect>(
 /// Simple FNV-1a hash implementation for 32-bit hashes
 /// binary_hash32(bin) -> int
 pub fn builtin_binary_hash32<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Binary(binary) => {
-            let binary_data = executor.get_binary_data(binary)?;
+            let binary_data = ctx.executor.get_binary_data(binary)?;
 
             // FNV-1a 32-bit hash using iterator to avoid materializing
             let hash = binary_data.iter().fold(2166136261u32, |hash, byte| {
                 (hash ^ (byte as u32)).wrapping_mul(16777619)
             });
 
-            Ok(BuiltinResult::Value(Value::int(hash as i64)))
+            Ok(Completion::Value(Value::int(hash as i64)))
         }
         _ => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -788,13 +773,12 @@ pub fn builtin_binary_hash32<E: Effect>(
 /// Simple FNV-1a hash implementation for 64-bit hashes
 /// binary_hash64(bin) -> int
 pub fn builtin_binary_hash64<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Binary(binary) => {
-            let binary_data = executor.get_binary_data(binary)?;
+            let binary_data = ctx.executor.get_binary_data(binary)?;
 
             // FNV-1a 64-bit hash using iterator to avoid materializing
             let hash = binary_data
@@ -805,7 +789,7 @@ pub fn builtin_binary_hash64<E: Effect>(
 
             // Note: This may not fit in i64 but we cast it anyway, preserving the
             // historical wrapping behaviour of the 64-bit hash.
-            Ok(BuiltinResult::Value(Value::int(hash as i64)))
+            Ok(Completion::Value(Value::int(hash as i64)))
         }
         _ => Err(Error::TypeMismatch {
             expected: "binary".to_string(),
@@ -817,10 +801,9 @@ pub fn builtin_binary_hash64<E: Effect>(
 /// Append an integer as bytes to a binary
 /// binary_append([bin, int, num_bytes]) -> bin
 pub fn builtin_binary_append<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     match arg {
         Value::Tuple(_, elements) if elements.len() == 3 => {
             match (&elements[0], &elements[1], &elements[2]) {
@@ -863,13 +846,13 @@ pub fn builtin_binary_append<E: Effect>(
                     }
 
                     // Append using efficient concat
-                    let binary_data = executor.get_binary_data(binary)?;
+                    let binary_data = ctx.executor.get_binary_data(binary)?;
                     let new_data = BinaryData::new(new_bytes);
                     let result =
                         BinaryData::concat(Rc::new(binary_data.clone()), Rc::new(new_data));
 
-                    let binary = executor.allocate_binary_data(result)?;
-                    Ok(BuiltinResult::Value(Value::Binary(binary)))
+                    let binary = ctx.executor.allocate_binary_data(result)?;
+                    Ok(Completion::Value(Value::Binary(binary)))
                 }
                 _ => Err(Error::TypeMismatch {
                     expected: "[binary, integer, integer]".to_string(),

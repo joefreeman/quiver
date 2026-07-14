@@ -23,12 +23,11 @@ use crate::ast;
 use crate::compiler::Error;
 use crate::parser::SourceSpan;
 use quiver_core::{
-    builtins::{BuiltinRegistry, BuiltinResult, TypeSpec},
+    builtins::{BuiltinContext, BuiltinRegistry, Completion, TypeSpec},
     bytecode::Constant,
     effects::Effect,
     error::Error as CoreError,
     executor::Executor,
-    process::ProcessId,
     program::Program,
     types::TypeLookup,
     value::{Binary, Value},
@@ -568,19 +567,17 @@ pub fn register_callbacks<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 }
 
 fn term_callback<E: Effect>(
-    _: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, CoreError> {
-    prefix_callback(arg, executor, crate::parser::term_prefix_end)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, CoreError> {
+    prefix_callback(arg, ctx.executor, crate::parser::term_prefix_end)
 }
 
 fn chain_callback<E: Effect>(
-    _: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, CoreError> {
-    prefix_callback(arg, executor, crate::parser::chain_prefix_end)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, CoreError> {
+    prefix_callback(arg, ctx.executor, crate::parser::chain_prefix_end)
 }
 
 /// Shared body of the two callbacks: takes `['bin, 'int]` (content bytes and a byte
@@ -590,7 +587,7 @@ fn prefix_callback<E: Effect>(
     arg: &Value,
     executor: &mut Executor<E>,
     prefix_end: fn(&str, usize) -> Option<usize>,
-) -> Result<BuiltinResult<E>, CoreError> {
+) -> Result<Completion<E>, CoreError> {
     let Value::Tuple(_, fields) = arg else {
         return Err(CoreError::TypeMismatch {
             expected: "['bin, 'int]".to_string(),
@@ -618,7 +615,7 @@ fn prefix_callback<E: Effect>(
     let end = std::str::from_utf8(&bytes)
         .ok()
         .and_then(|source| prefix_end(source, offset));
-    Ok(BuiltinResult::Value(match end {
+    Ok(Completion::Value(match end {
         Some(end) => Value::int(end as i64),
         None => Value::nil(),
     }))

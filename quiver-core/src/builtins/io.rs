@@ -6,11 +6,9 @@
 //! alone via [`register_io_signatures`]; an executing host registers the same signatures paired
 //! with its own implementations (e.g. `quiver-io`'s native io-uring backend, or a web backend).
 
-use super::{BuiltinFn, BuiltinRegistry, BuiltinResult, TypeSpec};
+use super::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion, TypeSpec};
 use crate::effects::Effect;
 use crate::error::Error;
-use crate::executor::Executor;
-use crate::process::ProcessId;
 use crate::value::Value;
 
 /// The file builtins' contract: `(name, parameter, result)` for each.
@@ -169,10 +167,9 @@ fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
 /// language server, which type-checks but never executes). It is never called — executing hosts
 /// register real implementations against these signatures instead.
 fn unimplemented_builtin<E: Effect>(
-    _: ProcessId,
     _: &Value,
-    _: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    _: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     unreachable!("IO builtin registered for its signature only; no implementation in this host")
 }
 

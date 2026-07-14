@@ -4,7 +4,7 @@ use crate::compatibility::{
     compute_param_compatibility, compute_type_compatibility,
 };
 use crate::effects::Effect;
-use crate::error::Error;
+use crate::error::{Error, Operation};
 use crate::executor::Executor;
 use crate::executor::ProgramUpdate;
 use crate::process::Action;
@@ -121,21 +121,15 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         // environment services these; compile-time execution is single-process by design).
         if let Some(action) = action {
             let operation = match action {
-                Action::Spawn { .. } => "spawning a process",
-                Action::Deliver { .. } => "sending a message",
-                Action::Await { .. } => "awaiting a process",
-                Action::RequestEffect { .. } => "performing an effect",
-                Action::ReadState { .. } => "reading a process's state",
-                Action::Kill { .. } => "killing a process",
-                Action::Link { .. } => "linking processes",
+                Action::Spawn { .. } => Operation::Spawn,
+                Action::Deliver { .. } => Operation::Send,
+                Action::Await { .. } => Operation::Await,
+                Action::RequestEffect { .. } => Operation::Effect,
+                Action::ReadState { .. } => Operation::ReadState,
+                Action::Kill { .. } => Operation::Kill,
+                Action::Link { .. } => Operation::Link,
             };
-            return Err(Error::OperationNotAllowed {
-                operation: operation.to_string(),
-                context: "compile-time execution (a program's top level and module bodies run \
-                          at compile time — move process and effect work inside the entry \
-                          function)"
-                    .to_string(),
-            });
+            return Err(Error::UnsupportedAtCompileTime { operation });
         }
 
         // Backstop: a fully idle step with no result means execution can never progress —
@@ -143,12 +137,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         // waiting on a message that cannot arrive (no sender can exist, and time is frozen
         // so timeouts never expire).
         if !did_work {
-            return Err(Error::OperationNotAllowed {
-                operation: "waiting to receive a message that can never arrive".to_string(),
-                context: "compile-time execution (a program's top level and module bodies run \
-                          at compile time — receive inside the entry function instead)"
-                    .to_string(),
-            });
+            return Err(Error::StalledAtCompileTime);
         }
     }
 }

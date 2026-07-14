@@ -12,11 +12,9 @@
 //! one whose length isn't a whole number of lanes — is a violated invariant (only
 //! reachable by hand-forging a `Vec[...]` value), so it is a runtime error, not nil.
 use crate::binary::BinaryData;
-use crate::builtins::{BuiltinResult, value_to_i64};
+use crate::builtins::{BuiltinContext, Completion, value_to_i64};
 use crate::effects::Effect;
 use crate::error::Error;
-use crate::executor::Executor;
-use crate::process::ProcessId;
 use crate::value::Value;
 use num_bigint::BigInt;
 use num_traits::Zero;
@@ -63,8 +61,8 @@ fn checked_width(width: &Value) -> Result<usize, Error> {
     }
 }
 
-fn nil<E: Effect>() -> BuiltinResult<E> {
-    BuiltinResult::Value(Value::nil())
+fn nil<E: Effect>() -> Completion<E> {
+    Completion::Value(Value::nil())
 }
 
 /// Reject a ragged buffer: a length that isn't a whole number of lanes is a violated
@@ -84,9 +82,9 @@ fn check_lanes(len: usize, width: usize) -> Result<(), Error> {
 /// length. Returns nil on length mismatch or a lane that overflows `width`.
 fn elementwise<E: Effect>(
     arg: &Value,
-    executor: &mut Executor<E>,
+    ctx: &mut BuiltinContext<E>,
     op: impl Fn(i64, i64) -> Option<i64>,
-) -> Result<BuiltinResult<E>, Error> {
+) -> Result<Completion<E>, Error> {
     let (a, b, width) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
             (Value::Binary(a), Value::Binary(b), w) => (a, b, w),
@@ -95,8 +93,8 @@ fn elementwise<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let a = executor.materialize(a)?;
-    let b = executor.materialize(b)?;
+    let a = ctx.executor.materialize(a)?;
+    let b = ctx.executor.materialize(b)?;
     check_lanes(a.len(), width)?;
     check_lanes(b.len(), width)?;
 
@@ -111,36 +109,33 @@ fn elementwise<E: Effect>(
             None => return Ok(nil()), // overflow → nil
         }
     }
-    Ok(BuiltinResult::Value(Value::Binary(
-        executor.allocate_binary(out)?,
+    Ok(Completion::Value(Value::Binary(
+        ctx.executor.allocate_binary(out)?,
     )))
 }
 
 /// Elementwise addition: `vector_add([bin, bin, width]) -> bin | []`
 pub fn builtin_vector_add<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
-    elementwise(arg, executor, i64::checked_add)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    elementwise(arg, ctx, i64::checked_add)
 }
 
 /// Elementwise subtraction: `vector_subtract([bin, bin, width]) -> bin | []`
 pub fn builtin_vector_subtract<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
-    elementwise(arg, executor, i64::checked_sub)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    elementwise(arg, ctx, i64::checked_sub)
 }
 
 /// Elementwise multiplication: `vector_multiply([bin, bin, width]) -> bin | []`
 pub fn builtin_vector_multiply<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
-    elementwise(arg, executor, i64::checked_mul)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    elementwise(arg, ctx, i64::checked_mul)
 }
 
 /// Shared core for the comparison kernels (`lt`/`eq`/`gt`). Both buffers must already share a
@@ -149,9 +144,9 @@ pub fn builtin_vector_multiply<E: Effect>(
 /// predicate holds and `0` otherwise. Returns nil on length mismatch.
 fn compare<E: Effect>(
     arg: &Value,
-    executor: &mut Executor<E>,
+    ctx: &mut BuiltinContext<E>,
     pred: impl Fn(i64, i64) -> bool,
-) -> Result<BuiltinResult<E>, Error> {
+) -> Result<Completion<E>, Error> {
     let (a, b, width) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
             (Value::Binary(a), Value::Binary(b), w) => (a, b, w),
@@ -160,8 +155,8 @@ fn compare<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let a = executor.materialize(a)?;
-    let b = executor.materialize(b)?;
+    let a = ctx.executor.materialize(a)?;
+    let b = ctx.executor.materialize(b)?;
     check_lanes(a.len(), width)?;
     check_lanes(b.len(), width)?;
 
@@ -174,46 +169,42 @@ fn compare<E: Effect>(
     for i in 0..lanes {
         out.push(u8::from(pred(lane(&a, width, i), lane(&b, width, i))));
     }
-    Ok(BuiltinResult::Value(Value::Binary(
-        executor.allocate_binary(out)?,
+    Ok(Completion::Value(Value::Binary(
+        ctx.executor.allocate_binary(out)?,
     )))
 }
 
 /// Elementwise less-than mask: `vector_less_than([bin, bin, width]) -> bin | []`.
 pub fn builtin_vector_less_than<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
-    compare(arg, executor, |a, b| a < b)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    compare(arg, ctx, |a, b| a < b)
 }
 
 /// Elementwise equality mask: `vector_equal([bin, bin, width]) -> bin | []`.
 pub fn builtin_vector_equal<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
-    compare(arg, executor, |a, b| a == b)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    compare(arg, ctx, |a, b| a == b)
 }
 
 /// Elementwise greater-than mask: `vector_greater_than([bin, bin, width]) -> bin | []`.
 pub fn builtin_vector_greater_than<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
-    compare(arg, executor, |a, b| a > b)
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    compare(arg, ctx, |a, b| a > b)
 }
 
 /// Gather the lanes selected by a mask: `vector_take([data, width, mask]) -> bin | []`. `mask` is
 /// one byte per lane (non-zero selects); the kept lanes are packed, in order, into a fresh
 /// buffer. Nil if the mask length doesn't match the lane count.
 pub fn builtin_vector_take<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let (data, width, mask) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
             (Value::Binary(d), w, Value::Binary(m)) => (d, w, m),
@@ -222,8 +213,8 @@ pub fn builtin_vector_take<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let data = executor.materialize(data)?;
-    let mask = executor.materialize(mask)?;
+    let data = ctx.executor.materialize(data)?;
+    let mask = ctx.executor.materialize(mask)?;
     check_lanes(data.len(), width)?;
 
     if mask.len() != data.len() / width {
@@ -236,18 +227,17 @@ pub fn builtin_vector_take<E: Effect>(
             out.extend_from_slice(&data[i * width..(i + 1) * width]);
         }
     }
-    Ok(BuiltinResult::Value(Value::Binary(
-        executor.allocate_binary(out)?,
+    Ok(Completion::Value(Value::Binary(
+        ctx.executor.allocate_binary(out)?,
     )))
 }
 
 /// Read one lane as a signed integer: `vector_get([bin, width, index]) -> int | []`.
 /// Nil for a negative or out-of-bounds index.
 pub fn builtin_vector_get<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let (binary, width, index) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
             (Value::Binary(b), w, i) => (b, w, i),
@@ -256,7 +246,7 @@ pub fn builtin_vector_get<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let bytes = executor.materialize(binary)?;
+    let bytes = ctx.executor.materialize(binary)?;
 
     check_lanes(bytes.len(), width)?;
     let index = index.as_int().ok_or_else(arity_error)?;
@@ -267,7 +257,7 @@ pub fn builtin_vector_get<E: Effect>(
     else {
         return Ok(nil());
     };
-    Ok(BuiltinResult::Value(Value::int(lane(&bytes, width, index))))
+    Ok(Completion::Value(Value::int(lane(&bytes, width, index))))
 }
 
 /// Append one signed lane: `vector_push([bin, width, value]) -> bin | []`.
@@ -277,10 +267,9 @@ pub fn builtin_vector_get<E: Effect>(
 /// `Rc`-backed), so folding this to build a vector is O(n), not O(n²). The result is a rope
 /// that materialises (and compacts) lazily on the next full read — see `Executor::materialize`.
 pub fn builtin_vector_push<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let (binary, width, value) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
             (Value::Binary(b), w, v) => (b, w, v),
@@ -295,7 +284,7 @@ pub fn builtin_vector_push<E: Effect>(
         return Ok(nil());
     };
 
-    let old = executor.get_binary_data(binary)?;
+    let old = ctx.executor.get_binary_data(binary)?;
     let old_len = old.len();
     check_lanes(old_len, width)?;
 
@@ -310,18 +299,17 @@ pub fn builtin_vector_push<E: Effect>(
     } else {
         BinaryData::concat(Rc::new(old.clone()), Rc::new(lane))
     };
-    Ok(BuiltinResult::Value(Value::Binary(
-        executor.allocate_binary_data(appended)?,
+    Ok(Completion::Value(Value::Binary(
+        ctx.executor.allocate_binary_data(appended)?,
     )))
 }
 
 /// Sum of all lanes: `vector_sum([bin, width]) -> int`. Exact (BigInt), so never overflows
 /// and never nil.
 pub fn builtin_vector_sum<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let (binary, width) = match arg {
         Value::Tuple(_, e) if e.len() == 2 => match (&e[0], &e[1]) {
             (Value::Binary(b), w) => (b, w),
@@ -330,22 +318,21 @@ pub fn builtin_vector_sum<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let bytes = executor.materialize(binary)?;
+    let bytes = ctx.executor.materialize(binary)?;
     check_lanes(bytes.len(), width)?;
     let mut acc = BigInt::zero();
     for i in 0..bytes.len() / width {
         acc += lane(&bytes, width, i);
     }
-    Ok(BuiltinResult::Value(Value::integer(acc)))
+    Ok(Completion::Value(Value::integer(acc)))
 }
 
 /// Dot product: `vector_dot([bin, bin, width]) -> int | []`. Exact (BigInt); nil on length
 /// mismatch.
 pub fn builtin_vector_dot<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let (a, b, width) = match arg {
         Value::Tuple(_, e) if e.len() == 3 => match (&e[0], &e[1], &e[2]) {
             (Value::Binary(a), Value::Binary(b), w) => (a, b, w),
@@ -354,8 +341,8 @@ pub fn builtin_vector_dot<E: Effect>(
         _ => return Err(arity_error()),
     };
     let width = checked_width(width)?;
-    let a = executor.materialize(a)?;
-    let b = executor.materialize(b)?;
+    let a = ctx.executor.materialize(a)?;
+    let b = ctx.executor.materialize(b)?;
     check_lanes(a.len(), width)?;
     check_lanes(b.len(), width)?;
     if a.len() != b.len() {
@@ -365,7 +352,7 @@ pub fn builtin_vector_dot<E: Effect>(
     for i in 0..a.len() / width {
         acc += BigInt::from(lane(&a, width, i)) * lane(&b, width, i);
     }
-    Ok(BuiltinResult::Value(Value::integer(acc)))
+    Ok(Completion::Value(Value::integer(acc)))
 }
 
 fn arity_error() -> Error {

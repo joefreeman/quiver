@@ -83,8 +83,8 @@ pub struct Site {
 }
 
 /// The crash-delivery table (both build modes): the ids the executor needs to build the
-/// `:crash` / `:timeout` stamped nils that a never-lethal await delivers (see
-/// docs/process-state.md). Not carried by `Bytecode` — the environment derives it on its
+/// `:crash` / `:timeout` stamped nils that a never-lethal await delivers.
+/// Not carried by `Bytecode` — the environment derives it on its
 /// merged program (`Program::crash_table`) and ships it with each `ProgramUpdate`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrashTable {
@@ -100,6 +100,11 @@ pub struct CrashTable {
     pub killed_tuple: usize,
     /// Tuple id of `Str['bin]`.
     pub str_tuple: usize,
+    /// Tuple id of `Changed` (empty) — the reactive state-change wakeup delivered to a
+    /// `Watcher::Subscriber`. Not crash-related, but registered
+    /// alongside the crash ids since it is likewise a runtime-built, runtime-delivered
+    /// value the executor needs a tuple id for.
+    pub changed_tuple: usize,
 }
 
 /// The failure-provenance table of a debug build: the sites plus the ids the executor
@@ -211,7 +216,7 @@ pub enum Instruction {
     Self_,
     Select,
     Process(usize, usize), // (process_id, function_index)
-    /// Sample a process's current state (`?p` — docs/process-state.md): pop a process
+    /// Sample a process's current state (`?p`): pop a process
     /// value, push its state. No runtime test — the state type is statically known
     /// (inferred at spawns; enforced by strict state subtyping at declared boundaries).
     State,

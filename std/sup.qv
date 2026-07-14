@@ -1,4 +1,4 @@
-// Supervision (docs/process-state.md): restart strategies as ordinary library code
+// Supervision: restart strategies as ordinary library code
 // on the step-2 primitives. A supervisor is a state loop whose table maps child ids
 // to pids and restart recipes; every child gets a *watcher* — a tiny process that
 // awaits it (never-lethal `!`), classifies the outcome, and reports

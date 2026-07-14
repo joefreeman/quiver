@@ -1,10 +1,10 @@
 use crate::binary::BinaryData;
 use crate::bytecode::{ConcreteType, Constant, Function, Instruction};
 use crate::effects::Effect;
-use crate::error::Error;
+use crate::error::{Error, Operation};
 use crate::process::{
     Action, Frame, Process, ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo,
-    ProcessStatus, SelectState, Watcher,
+    ProcessStatus, RestrictedContext, SelectState, Watcher,
 };
 use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Payload, Value};
@@ -229,6 +229,15 @@ pub struct Executor<E: Effect> {
     /// above drains these via `take_watcher_events` — delivery routes through the
     /// environment, which the executor knows nothing about.
     pending_watcher_events: Vec<(Watcher, ProcessId)>,
+    /// Reactive subscribers to wake this round: a set of subscriber pids recorded when a
+    /// process they watch changed state. A set, so several state
+    /// changes to one subscriber's dependencies between drains coalesce into one wakeup.
+    /// Drained by the runtime above via `take_state_wakeups`.
+    pending_state_wakeups: HashSet<ProcessId>,
+    /// Reactive subscriptions to a *remote* target dropped by reconciliation:
+    /// `(target, subscriber)` pairs the runtime above routes as `UnsubscribeState` to the
+    /// target's worker. Drained via `take_unsubscribes`.
+    pending_unsubscribes: Vec<(ProcessId, ProcessId)>,
     // Program data owned by executor
     constants: Vec<Constant>,
     functions: Vec<Function>,
@@ -280,7 +289,7 @@ pub struct Executor<E: Effect> {
     site_origins: Vec<Value>,
     origin_key: Option<usize>,
     // Crash delivery (both build modes): the ids for building `:crash`/`:timeout`
-    // stamped nils (see `crash_value` / `handle_select_timeout`).
+    // stamped nils (see `crash_result` / `handle_select_timeout`).
     crash_table: Option<crate::bytecode::CrashTable>,
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
@@ -544,7 +553,7 @@ impl<E: Effect> Executor<E> {
     /// and any select state — releasing the heap references they held. Only the stored
     /// `result` (and `state`) survive, so late awaits (`!p`) and samples (`?p`) keep working.
     /// The entry itself (the tombstone) stays in the process map until the environment proves
-    /// it unreachable and calls `reclaim_process` (see docs/process-state.md, "Reclamation").
+    /// it unreachable and calls `reclaim_process`.
     /// Persistent (REPL) processes are exempt — they resume across submissions and keep their
     /// locals and mailbox. Idempotent.
     pub fn tombstone(&mut self, pid: ProcessId) {
@@ -556,6 +565,14 @@ impl<E: Effect> Executor<E> {
             if process.persistent {
                 return None;
             }
+            // Reactive tracker state is execution state: a terminated process no longer
+            // renders, so drop its subscriptions (they hold no heap values — raw pids —
+            // so nothing to release) and any in-flight tracking. This keeps a dead
+            // subscriber from pinning its dependencies' tombstones;
+            // the `Subscriber` entries it left on those targets are cleaned by
+            // `prune_watchers` when this process is reclaimed.
+            process.subscriptions.clear();
+            process.tracking = None;
             Some((
                 std::mem::take(&mut process.stack),
                 std::mem::take(&mut process.mailbox),
@@ -583,8 +600,8 @@ impl<E: Effect> Executor<E> {
         self.truncate_locals_pid(pid, 0);
     }
 
-    /// Reclaim a tombstone the environment has proven unreachable (see docs/process-state.md,
-    /// "Reclamation"): remove the entry, releasing the heap references its surviving `result`
+    /// Reclaim a tombstone the environment has proven unreachable: remove the entry,
+    /// releasing the heap references its surviving `result`
     /// and `state` still held. The complement of `tombstone`, which dropped everything *but*
     /// those. A no-op on an unknown pid. Must only be called on a non-persistent, completed
     /// process — the environment's mark-sweep guarantees this.
@@ -608,16 +625,23 @@ impl<E: Effect> Executor<E> {
         self.reclaimed_processes
     }
 
-    /// Drop watcher entries pointing at any reclaimed pid (see docs/process-state.md,
-    /// "Reclamation"). A parent's `OwnedChild` (and any `Link`) entry outlives the child it
+    /// Drop watcher entries pointing at any reclaimed pid.
+    /// A parent's `OwnedChild` (and any `Link`) entry outlives the child it
     /// names — it clears only when the *parent* terminates — so without this a long-lived
     /// parent that spawns per request leaks watcher entries even as tombstones are reclaimed.
     /// Harmless to over-apply: acting on a reclaimed (monotonic, never-reused) pid is a no-op.
     pub fn prune_watchers(&mut self, reclaimed: &HashSet<ProcessId>) {
         for process in self.processes.values_mut() {
-            process
-                .watchers
-                .retain(|watcher| !reclaimed.contains(&watcher.pid()));
+            let mut removed_subscribers = 0u32;
+            process.watchers.retain(|watcher| {
+                let stale = reclaimed.contains(&watcher.pid());
+                // A pruned reactive subscription must return the count to the fast path.
+                if stale && matches!(watcher, Watcher::Subscriber { .. }) {
+                    removed_subscribers += 1;
+                }
+                !stale
+            });
+            process.subscriber_count -= removed_subscribers;
         }
     }
 
@@ -647,6 +671,31 @@ impl<E: Effect> Executor<E> {
         }
     }
 
+    /// Register `subscriber` as a reactive subscriber of `target` (a tracked `?` sample),
+    /// keeping `target.subscriber_count` in step. Idempotent (one
+    /// entry per subscriber). No-op on a terminated or unknown target: its state can no
+    /// longer change, so a subscription would never fire.
+    pub fn add_subscriber(&mut self, target: ProcessId, subscriber: ProcessId) {
+        if let Some(process) = self.get_process_mut(target) {
+            let entry = Watcher::Subscriber { pid: subscriber };
+            if process.result.is_none() && !process.watchers.contains(&entry) {
+                process.watchers.push(entry);
+                process.subscriber_count += 1;
+            }
+        }
+    }
+
+    /// Remove `subscriber`'s reactive subscription from `target` (reconciliation dropped
+    /// the dependency), decrementing `target.subscriber_count`. No-op if absent.
+    pub fn remove_subscriber(&mut self, target: ProcessId, subscriber: ProcessId) {
+        if let Some(process) = self.get_process_mut(target) {
+            let entry = Watcher::Subscriber { pid: subscriber };
+            let before = process.watchers.len();
+            process.watchers.retain(|watcher| *watcher != entry);
+            process.subscriber_count -= (before - process.watchers.len()) as u32;
+        }
+    }
+
     /// Move a terminated process's watchers onto the pending-events queue for the
     /// runtime above to deliver. No-op until the process has a result; idempotent
     /// thereafter (the list is taken). A persistent (REPL) process's completion is a
@@ -668,8 +717,16 @@ impl<E: Effect> Executor<E> {
         } else {
             std::mem::take(&mut process.watchers)
         };
-        self.pending_watcher_events
-            .extend(watchers.into_iter().map(|watcher| (watcher, pid)));
+        // `Subscriber` entries are not termination notifications — a terminated process
+        // will not change state again — so they never become events.
+        // Drop them here; a live subscriber sheds the dead dependency on its next
+        // reconciliation (or reclamation prunes it).
+        self.pending_watcher_events.extend(
+            watchers
+                .into_iter()
+                .filter(|watcher| !matches!(watcher, Watcher::Subscriber { .. }))
+                .map(|watcher| (watcher, pid)),
+        );
     }
 
     /// Terminate a process from outside — containment teardown of a terminated
@@ -696,12 +753,23 @@ impl<E: Effect> Executor<E> {
         std::mem::take(&mut self.pending_watcher_events)
     }
 
+    /// The `Changed` wakeup value delivered to a reactive subscriber — an empty named
+    /// tuple, no heap. Its tuple id comes from the installed crash/runtime table, so it
+    /// matches `std/proc.qv`'s `'changed = Changed`.
+    pub fn changed_value(&self) -> Result<Value, Error> {
+        let table = self
+            .crash_table
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("crash table not installed".to_string()))?;
+        Ok(Value::tuple(table.changed_tuple, vec![]))
+    }
+
     /// Build — extracted, ready to ship — the `:crash`-stamped nil a never-lethal await
-    /// delivers for a crashed process (see docs/process-state.md): nil annotated under
-    /// the `crash` key with `Panic[pid, message]` for a `__panic__` abort, and
-    /// `Error[pid, message]` for every other runtime error. Must run on the *crashed
-    /// process's* executor: the pid field carries its root function index, so it
-    /// compares equal (`=&p`) to the pid values other processes hold.
+    /// delivers for a crashed process: nil annotated under the `crash` key with
+    /// `Panic[pid, message]` for a `__panic__` abort, and `Error[pid, message]` for every
+    /// other runtime error. Must run on the *crashed process's* executor: the pid field
+    /// carries its root function index, so it compares equal (`=&p`) to the pid values
+    /// other processes hold.
     pub fn crash_result(
         &mut self,
         pid: ProcessId,
@@ -712,7 +780,7 @@ impl<E: Effect> Executor<E> {
             .clone()
             .ok_or_else(|| Error::InvalidArgument("crash table not installed".to_string()))?;
         let payload = match error {
-            // A teardown/kill answers the bare `Killed` kind (see docs/process-state.md).
+            // A teardown/kill answers the bare `Killed` kind.
             Error::Killed => Value::tuple(table.killed_tuple, vec![]),
             _ => {
                 let function_index = self
@@ -878,6 +946,12 @@ impl<E: Effect> Executor<E> {
                     collect_process_refs(value, &mut outgoing);
                 }
                 collect_process_refs(&process.state, &mut outgoing);
+                // Reactive subscriptions are edges: a live tracker
+                // pins its sampled dependencies' tombstones so `?dep` keeps yielding their
+                // final state — the twin of an awaiter pinning its target via
+                // `select_state.sources`. Raw pids, so added directly. Cleared at
+                // tombstone, so a dead tracker pins nothing.
+                outgoing.extend(process.subscriptions.iter().copied());
                 if let Some(state) = &process.select_state {
                     for value in &state.sources {
                         collect_process_refs(value, &mut outgoing);
@@ -935,6 +1009,8 @@ impl<E: Effect> Executor<E> {
             effecting: HashSet::new(),
             sampling: HashSet::new(),
             pending_watcher_events: Vec::new(),
+            pending_state_wakeups: HashSet::new(),
+            pending_unsubscribes: Vec::new(),
             constants: vec![],
             functions: vec![],
             builtins: vec![],
@@ -1617,10 +1693,19 @@ impl<E: Effect> Executor<E> {
 
             // Pop the exhausted frame and decide what to release; the local-release happens after
             // the process borrow ends, since it needs `&mut self`.
-            let clear_base = {
+            let (clear_base, is_track_boundary) = {
                 let process = self
                     .get_process_mut(current_pid)
                     .expect("Process should exist");
+
+                // A returning tracked-render thunk is the frame whose
+                // pre-pop depth matches the recorded boundary; its return reconciles the
+                // caller's reactive subscriptions.
+                let pre_pop_len = process.frames.len();
+                let is_track_boundary = process
+                    .tracking
+                    .as_ref()
+                    .is_some_and(|t| t.boundary_len == pre_pop_len);
 
                 // Frame exhausted - pop it without stack manipulation
                 // (the result is already on the stack from the last instruction)
@@ -1646,10 +1731,16 @@ impl<E: Effect> Executor<E> {
                     calling_frame.counter += 1;
                 }
 
-                should_clear_locals.then_some(frame.locals_base)
+                (
+                    should_clear_locals.then_some(frame.locals_base),
+                    is_track_boundary,
+                )
             };
             if let Some(base) = clear_base {
                 self.truncate_locals_pid(current_pid, base);
+            }
+            if is_track_boundary {
+                self.reconcile_tracking(current_pid);
             }
         }
 
@@ -2308,7 +2399,15 @@ impl<E: Effect> Executor<E> {
                     None
                 };
 
-                let result = builtin(pid, &parameter, self)?;
+                // The context wraps the step-local `proc` (out of the map for the
+                // slice) and the executor; its verbs mutate the caller's record and
+                // queue at most one routed action.
+                let (result, action) = {
+                    let mut ctx = crate::builtins::BuiltinContext::new(pid, proc, self);
+                    let result = builtin(&parameter, &mut ctx);
+                    let action = ctx.take_action();
+                    (result, action)
+                };
 
                 if let Some(start) = start {
                     let elapsed = start.elapsed().as_nanos() as u64;
@@ -2317,119 +2416,54 @@ impl<E: Effect> Executor<E> {
                     entry.1 += elapsed;
                 }
 
-                // Handle immediate, action, and detach results
-                match result {
-                    crate::builtins::BuiltinResult::Detach { child } => {
-                        // The caller's record is the step-local `proc` (taken out of
-                        // the map for the slice), so the entry removal happens here,
-                        // not in the builtin. Parent-only, fail-fast: no entry means
-                        // the caller doesn't own the child.
-                        if proc.is_receiving() {
+                match result? {
+                    crate::builtins::Completion::Value(value) => {
+                        // Immediate result: push value (retaining any freshly allocated
+                        // binaries). Builtins don't create a frame, so the counter
+                        // advances here; a verb-queued action (kill/link) routes on.
+                        self.push_value(proc, value);
+                        if let Some(frame) = proc.frames.last_mut() {
+                            frame.counter += 1;
+                        }
+                        Ok(action)
+                    }
+                    crate::builtins::Completion::Effect(effect) => {
+                        // A receive filter or a tracked render may be re-evaluated, so
+                        // parking for an effect is rejected in either restricted context.
+                        if let Some(context) = proc.restricted_context() {
                             return Err(Error::OperationNotAllowed {
-                                operation: "detach".to_string(),
-                                context: "receive function".to_string(),
+                                operation: Operation::Effect,
+                                context,
                             });
                         }
-                        let before = proc.watchers.len();
-                        proc.watchers.retain(
-                            |watcher| !matches!(watcher, Watcher::OwnedChild { pid } if *pid == child),
+                        debug_assert!(
+                            action.is_none(),
+                            "a builtin cannot both queue an action and park for an effect"
                         );
-                        if proc.watchers.len() == before {
-                            return Err(Error::OperationNotAllowed {
-                                operation: "detach".to_string(),
-                                context: "a process that is not an owned child of the caller"
-                                    .to_string(),
-                            });
-                        }
-                        self.push_value(proc, Value::ok());
-                        if let Some(frame) = proc.frames.last_mut() {
-                            frame.counter += 1;
-                        }
-                        Ok(None)
-                    }
-                    crate::builtins::BuiltinResult::Kill { target } => {
-                        // Fire-and-forget: answer Ok immediately (no parking) and route
-                        // the kill through the environment. A self-kill lands at the
-                        // next command-processing point, when the caller is back in
-                        // the map.
-                        if proc.is_receiving() {
-                            return Err(Error::OperationNotAllowed {
-                                operation: "kill".to_string(),
-                                context: "receive function".to_string(),
-                            });
-                        }
-                        self.push_value(proc, Value::ok());
-                        if let Some(frame) = proc.frames.last_mut() {
-                            frame.counter += 1;
-                        }
-                        Ok(Some(Action::Kill { target }))
-                    }
-                    crate::builtins::BuiltinResult::Link { target } => {
-                        // The caller-side half lives on the step-local `proc`; the
-                        // target-side half routes through the environment. Idempotent
-                        // (one entry per peer); self-link is a no-op — a process
-                        // cannot fate-share with itself.
-                        if proc.is_receiving() {
-                            return Err(Error::OperationNotAllowed {
-                                operation: "link".to_string(),
-                                context: "receive function".to_string(),
-                            });
-                        }
-                        self.push_value(proc, Value::ok());
-                        if let Some(frame) = proc.frames.last_mut() {
-                            frame.counter += 1;
-                        }
-                        if target == pid {
-                            return Ok(None);
-                        }
-                        let entry = Watcher::Link { pid: target };
-                        if !proc.watchers.contains(&entry) {
-                            proc.watchers.push(entry);
-                        }
-                        Ok(Some(Action::Link {
-                            caller: pid,
-                            target,
+                        // Park: the result arrives via notify_effect_completion, which
+                        // pushes it and advances the counter.
+                        self.mark_effecting(pid);
+                        Ok(Some(Action::RequestEffect {
+                            process_id: pid,
+                            effect,
                         }))
                     }
-                    crate::builtins::BuiltinResult::Value(value) => {
-                        // Immediate result: push value (retaining any freshly allocated binaries)
-                        // and increment counter.
-                        self.push_value(proc, value);
-
-                        // Unlike regular calls, builtins don't create a new frame
-                        // So we need to manually increment the counter
-                        if let Some(frame) = proc.frames.last_mut() {
-                            frame.counter += 1;
+                    crate::builtins::Completion::Call { function, captures } => {
+                        // Resolve via a call: push the [.., parameter, function] shape
+                        // handle_call expects and leave this call un-advanced — the
+                        // callee frame's return delivers the result and bumps the
+                        // counter, exactly like an ordinary call. The target is a
+                        // genuine function, so handle_call always pushes a frame (and
+                        // returns no action). For a tracked render (begin_tracking),
+                        // the fresh frame is the reconciliation boundary (see the
+                        // frame-pop loop).
+                        self.push_value(proc, Value::nil());
+                        self.push_value(proc, Value::Function(function, captures));
+                        self.handle_call(proc, pid)?;
+                        if let Some(tracking) = &mut proc.tracking {
+                            tracking.boundary_len = proc.frames.len();
                         }
-                        Ok(None)
-                    }
-                    crate::builtins::BuiltinResult::Action(action) => {
-                        // A receive function (select filter) may be re-evaluated, so builtins
-                        // that need routing (effects and friends) are rejected there.
-                        if proc.is_receiving() {
-                            return Err(Error::OperationNotAllowed {
-                                operation: match &action {
-                                    Action::RequestEffect { .. } => "effect",
-                                    Action::Spawn { .. } => "spawn",
-                                    Action::Deliver { .. } => "send",
-                                    Action::Await { .. } => "await",
-                                    Action::ReadState { .. } => "state read",
-                                    Action::Kill { .. } => "kill",
-                                    Action::Link { .. } => "link",
-                                }
-                                .to_string(),
-                                context: "receive function".to_string(),
-                            });
-                        }
-
-                        // Check if this is an effect request and mark process as effecting
-                        if let Action::RequestEffect { process_id, .. } = &action {
-                            self.mark_effecting(*process_id);
-                        }
-
-                        // Action result: return the action for Environment to handle
-                        // Don't increment counter - will be incremented in notify_* method
-                        Ok(Some(action))
+                        Ok(action)
                     }
                 }
             }
@@ -2441,15 +2475,77 @@ impl<E: Effect> Executor<E> {
     }
 
     /// Record a root-frame (re-)entry argument as the process's observable state (sampled
-    /// by `?` — see docs/process-state.md). Tail calls in helper frames (depth > 1) are
+    /// by `?`). Tail calls in helper frames (depth > 1) are
     /// internal and don't touch it.
     fn record_state(&mut self, proc: &mut Process, argument: &Value) {
         if proc.frames.len() != 1 {
             return;
         }
+        // Wake reactive subscribers only on an actual data-plane change. Gated on the
+        // cached count so a never-watched process (the common case) pays one integer
+        // branch and never runs the structural compare.
+        let changed = proc.subscriber_count > 0 && !self.values_equal(&proc.state, argument);
         self.retain(argument);
         let old = std::mem::replace(&mut proc.state, argument.clone());
         self.release(&old);
+        if changed {
+            self.enqueue_state_wakeups(proc);
+        }
+    }
+
+    /// Record each of this process's reactive subscribers for a `Changed` wakeup this
+    /// round. Coalesced by the set: repeated changes before the
+    /// next drain yield one wakeup per subscriber.
+    fn enqueue_state_wakeups(&mut self, proc: &Process) {
+        for watcher in &proc.watchers {
+            if let Watcher::Subscriber { pid } = watcher {
+                self.pending_state_wakeups.insert(*pid);
+            }
+        }
+    }
+
+    /// Drain the reactive wakeups accumulated since the last call: the subscriber pids to
+    /// deliver a `Changed` message to. The `Subscriber` twin of `take_watcher_events`.
+    pub fn take_state_wakeups(&mut self) -> Vec<ProcessId> {
+        std::mem::take(&mut self.pending_state_wakeups)
+            .into_iter()
+            .collect()
+    }
+
+    /// Drain the reactive `(target, subscriber)` unsubscriptions to route to remote
+    /// targets' workers (see `reconcile_tracking`).
+    pub fn take_unsubscribes(&mut self) -> Vec<(ProcessId, ProcessId)> {
+        std::mem::take(&mut self.pending_unsubscribes)
+    }
+
+    /// Reconcile a tracked render's subscriptions against what it just sampled (called when
+    /// the tracked thunk's frame returns). Dependencies still sampled
+    /// stay (they were subscribed atomically at the sample); dependencies no longer sampled
+    /// are unsubscribed — a local target directly, a remote one via `pending_unsubscribes`.
+    fn reconcile_tracking(&mut self, pid: ProcessId) {
+        let dropped: Vec<ProcessId> = {
+            let Some(process) = self.get_process_mut(pid) else {
+                return;
+            };
+            let Some(tracking) = process.tracking.take() else {
+                return;
+            };
+            let sampled = tracking.sampled;
+            let old = std::mem::replace(
+                &mut process.subscriptions,
+                sampled.iter().copied().collect(),
+            );
+            old.into_iter().filter(|p| !sampled.contains(p)).collect()
+        };
+        for target in dropped {
+            // A target on this worker (live or tombstone) is removed directly; a remote one
+            // routes an unsubscribe to its owning worker.
+            if self.get_process(target).is_some() {
+                self.remove_subscriber(target, pid);
+            } else {
+                self.pending_unsubscribes.push((target, pid));
+            }
+        }
     }
 
     fn handle_tail_call(
@@ -2619,20 +2715,19 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    /// Reject `operation` if `pid` is executing a receive function (select filter) — a
-    /// restricted context that may be re-evaluated and must stay pure.
-    fn check_not_receiving(&self, pid: ProcessId, operation: &str) -> Result<(), Error> {
-        if self.get_process(pid).is_some_and(Process::is_receiving) {
-            return Err(Error::OperationNotAllowed {
-                operation: operation.to_string(),
-                context: "receive function".to_string(),
-            });
+    /// Reject `operation` in a restricted context — a receive filter or a `%proc.track`
+    /// render. Both may be re-evaluated, so they must stay pure:
+    /// spawns, sends, effects, and selects are rejected. (`?` sampling is allowed in a
+    /// tracked render — it is a read, and is what tracking is for.)
+    fn check_not_restricted(&self, pid: ProcessId, operation: Operation) -> Result<(), Error> {
+        match self.get_process(pid).and_then(Process::restricted_context) {
+            Some(context) => Err(Error::OperationNotAllowed { operation, context }),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        self.check_not_receiving(pid, "spawn")?;
+        self.check_not_restricted(pid, Operation::Spawn)?;
 
         let (function_value, argument) = {
             let process = self
@@ -2671,7 +2766,7 @@ impl<E: Effect> Executor<E> {
     }
 
     fn handle_send(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        self.check_not_receiving(pid, "send")?;
+        self.check_not_restricted(pid, Operation::Send)?;
 
         let (target_value, message) = {
             let process = self
@@ -2775,10 +2870,22 @@ impl<E: Effect> Executor<E> {
             });
         };
 
+        // A sample inside a `%proc.track` render records the dependency and subscribes the
+        // caller. Recording the intent now — before the local/remote
+        // split — is what lets reconciliation see it whichever path serves the read.
+        let tracking = self.get_process(pid).is_some_and(Process::is_tracking);
+        if tracking && let Some(t) = self.get_process_mut(pid).and_then(|p| p.tracking.as_mut()) {
+            t.sampled.insert(target);
+        }
+
         if let Some(target_process) = self.get_process(target) {
             // Local: snapshot the state cell.
             let sample = target_process.state.clone();
             self.retain(&sample);
+            // Subscribe atomically with the read (idempotent; no-op on a terminated target).
+            if tracking {
+                self.add_subscriber(target, pid);
+            }
             let process = self
                 .get_process_mut(pid)
                 .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -2790,11 +2897,13 @@ impl<E: Effect> Executor<E> {
         }
 
         // Remote: park and route through the environment. Ownership of any resource
-        // handles in the state does NOT transfer (a sample is a read, not a message).
+        // handles in the state does NOT transfer (a sample is a read, not a message). When
+        // tracking, the target's worker registers the subscription as it serves the read.
         self.mark_sampling(pid);
         Ok(Some(Action::ReadState {
             caller: pid,
             target,
+            subscribe: tracking,
         }))
     }
 
@@ -2816,8 +2925,8 @@ impl<E: Effect> Executor<E> {
             // A select at a different position while select state exists is a select (or
             // await) inside a receive function — a restricted context (see `is_receiving`).
             return Err(Error::OperationNotAllowed {
-                operation: "select".to_string(),
-                context: "receive function".to_string(),
+                operation: Operation::Select,
+                context: RestrictedContext::ReceiveFunction,
             });
         }
 
@@ -2843,6 +2952,15 @@ impl<E: Effect> Executor<E> {
         pid: ProcessId,
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
+        // A select inside a tracked render is rejected — a render must stay pure and
+        // non-blocking. A nested select in a receive filter is
+        // caught separately by the continuation guard.
+        if self.get_process(pid).is_some_and(Process::is_tracking) {
+            return Err(Error::OperationNotAllowed {
+                operation: Operation::Select,
+                context: RestrictedContext::TrackedRender,
+            });
+        }
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -3023,7 +3141,7 @@ impl<E: Effect> Executor<E> {
 
     /// Check if timeout has elapsed, returning a `:timeout`-stamped nil if so — the
     /// stamp carries the ms that fired, so a fallback branch can discriminate a timeout
-    /// from a crash or a legit nil result (see docs/process-state.md). Bare nil when no
+    /// from a crash or a legit nil result. Bare nil when no
     /// crash table is installed (the compile-time sync driver).
     fn handle_select_timeout(
         &mut self,
@@ -4160,5 +4278,146 @@ mod annotation_tests {
             target.get_heap_binary(new_idx).unwrap().to_vec(),
             vec![9, 8, 7]
         );
+    }
+}
+
+#[cfg(test)]
+mod reactive_notification_tests {
+    // Slice 1 of the reactive design: the `Subscriber` watcher + `record_state` change
+    // detection + coalesced wakeup drain, plus the count maintenance the fast-path gate
+    // depends on. Deterministic (no timing), unlike the end-to-end reactive tests.
+    use super::*;
+    use crate::builtins::BuiltinRegistry;
+    use crate::value::ResourceId;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestEffect;
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    fn executor() -> Executor<TestEffect> {
+        Executor::new(BuiltinRegistry::new(), false, 0)
+    }
+
+    /// A target process at a root frame (so `record_state` fires) with the given state.
+    fn target_with_state(state: Value) -> Process {
+        let mut p = Process::new(false);
+        p.frames.push(Frame::new(0, 0, 0));
+        p.state = state;
+        p
+    }
+
+    #[test]
+    fn subscribe_maintains_count_and_is_idempotent() {
+        let mut ex = executor();
+        ex.processes.insert(0, target_with_state(Value::int(1)));
+        ex.add_subscriber(0, 1);
+        ex.add_subscriber(0, 1); // idempotent
+        ex.add_subscriber(0, 2);
+        assert_eq!(ex.get_process(0).unwrap().subscriber_count, 2);
+        ex.remove_subscriber(0, 1);
+        assert_eq!(ex.get_process(0).unwrap().subscriber_count, 1);
+        assert_eq!(ex.get_process(0).unwrap().watchers.len(), 1);
+    }
+
+    #[test]
+    fn wakes_only_on_actual_state_change() {
+        let mut ex = executor();
+        ex.processes.insert(0, target_with_state(Value::int(5)));
+        ex.add_subscriber(0, 1);
+
+        // Re-entering the same state wakes no one.
+        let mut target = ex.processes.remove(&0).unwrap();
+        ex.record_state(&mut target, &Value::int(5));
+        ex.processes.insert(0, target);
+        assert!(ex.take_state_wakeups().is_empty());
+
+        // A real change wakes the subscriber exactly once.
+        let mut target = ex.processes.remove(&0).unwrap();
+        ex.record_state(&mut target, &Value::int(10));
+        ex.processes.insert(0, target);
+        assert_eq!(ex.take_state_wakeups(), vec![1]);
+    }
+
+    #[test]
+    fn no_wakeup_without_subscribers() {
+        // The fast-path gate: a change on an unwatched process enqueues nothing.
+        let mut ex = executor();
+        ex.processes.insert(0, target_with_state(Value::int(5)));
+        let mut target = ex.processes.remove(&0).unwrap();
+        ex.record_state(&mut target, &Value::int(10));
+        ex.processes.insert(0, target);
+        assert!(ex.take_state_wakeups().is_empty());
+    }
+
+    #[test]
+    fn changes_coalesce_per_drain() {
+        let mut ex = executor();
+        ex.processes.insert(0, target_with_state(Value::int(0)));
+        ex.add_subscriber(0, 1);
+        for v in [1, 2, 3] {
+            let mut target = ex.processes.remove(&0).unwrap();
+            ex.record_state(&mut target, &Value::int(v));
+            ex.processes.insert(0, target);
+        }
+        // Three changes between drains coalesce into one wakeup.
+        assert_eq!(ex.take_state_wakeups(), vec![1]);
+    }
+
+    #[test]
+    fn tombstone_drops_subscriber_without_emitting_an_event() {
+        // A `Subscriber` is not a termination watcher: it is dropped by `flush_watchers`,
+        // never turned into a completion event.
+        let mut ex = executor();
+        let mut target = target_with_state(Value::int(5));
+        target.result = Some(Ok(Value::int(5)));
+        ex.processes.insert(0, target);
+        ex.add_subscriber(0, 1);
+        ex.tombstone(0);
+        assert!(ex.take_watcher_events().is_empty());
+    }
+
+    #[test]
+    fn reconcile_drops_unsampled_local_dependency() {
+        use crate::process::TrackingState;
+        let mut ex = executor();
+        // Dependency A (pid 1) the tracker (pid 0) is currently subscribed to.
+        ex.processes.insert(1, target_with_state(Value::int(0)));
+        ex.add_subscriber(1, 0);
+        // Tracker mid-render, having sampled nothing this time.
+        let mut tracker = Process::new(false);
+        tracker.frames.push(Frame::new(0, 0, 0));
+        tracker.subscriptions = vec![1];
+        tracker.tracking = Some(TrackingState {
+            sampled: HashSet::new(),
+            boundary_len: 1,
+        });
+        ex.processes.insert(0, tracker);
+
+        ex.reconcile_tracking(0);
+
+        // The dropped dependency is unsubscribed (count back to the fast path) and the
+        // tracking state is cleared.
+        assert!(ex.get_process(0).unwrap().subscriptions.is_empty());
+        assert_eq!(ex.get_process(1).unwrap().subscriber_count, 0);
+        assert!(ex.get_process(0).unwrap().tracking.is_none());
+    }
+
+    #[test]
+    fn prune_watchers_restores_count_for_reclaimed_subscriber() {
+        let mut ex = executor();
+        ex.processes.insert(0, target_with_state(Value::int(5)));
+        ex.add_subscriber(0, 1);
+        ex.add_subscriber(0, 2);
+        assert_eq!(ex.get_process(0).unwrap().subscriber_count, 2);
+        // Subscriber 1 was reclaimed: its entry is pruned and the count returns to the
+        // fast path for the survivor.
+        ex.prune_watchers(&HashSet::from([1]));
+        assert_eq!(ex.get_process(0).unwrap().subscriber_count, 1);
+        assert_eq!(ex.get_process(0).unwrap().watchers.len(), 1);
     }
 }

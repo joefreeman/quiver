@@ -1,7 +1,27 @@
 use crate::effects::Effect;
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+
+/// An evaluation context in which routing and side-effecting operations are rejected,
+/// because the enclosing evaluation may run more than once or must stay pure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RestrictedContext {
+    /// A receive filter: evaluated against each candidate message, possibly repeatedly.
+    ReceiveFunction,
+    /// A tracked render (`%proc.track`): must stay pure and non-blocking.
+    TrackedRender,
+}
+
+impl fmt::Display for RestrictedContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            RestrictedContext::ReceiveFunction => "receive function",
+            RestrictedContext::TrackedRender => "tracked render",
+        })
+    }
+}
 
 pub type ProcessId = usize;
 
@@ -68,8 +88,8 @@ pub struct ProcessInfo {
     pub heap: ProcessHeapUsage,
 }
 
-/// How a process participates in the reclamation graph (see docs/process-state.md,
-/// "Reclamation"). A `Root` process is live or persistent: it is never swept, and the
+/// How a process participates in the reclamation graph.
+/// A `Root` process is live or persistent: it is never swept, and the
 /// pids it references seed the mark set. A `Tombstone` is a completed, non-persistent
 /// process: a sweep candidate, kept only if reached from a root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +107,7 @@ pub struct ProcessAdjacency {
     pub category: ProcessCategory,
     /// Pids this process references. May contain duplicates and self-references; the
     /// consumer dedups. Watchers are deliberately excluded (control-plane, no-op on a
-    /// missing pid — see docs/process-state.md).
+    /// missing pid).
     pub outgoing: Vec<ProcessId>,
 }
 
@@ -109,10 +129,14 @@ pub enum Action<E: Effect> {
     },
     /// Request a platform-specific effect
     RequestEffect { process_id: ProcessId, effect: E },
-    /// Read the current state of a process on another worker (`?` — a snapshot, not a wait)
+    /// Read the current state of a process on another worker (`?` — a snapshot, not a wait).
+    /// `subscribe` (a *tracked* sample) asks the target's worker to
+    /// also register the caller as a reactive `Subscriber` as it serves the read — so
+    /// read-and-subscribe is atomic and no state change is missed.
     ReadState {
         caller: ProcessId,
         target: ProcessId,
+        subscribe: bool,
     },
     /// Kill a process (`%proc.kill` — fire-and-forget; the caller is not parked)
     Kill { target: ProcessId },
@@ -161,7 +185,7 @@ pub struct SelectState {
 
 /// A party to notify when the carrying process terminates. Registered on the *target*
 /// (via `Executor::add_watcher`), so completion walks the target's own list instead of
-/// scanning for interested parties (see docs/process-state.md). `Awaiter` is the only
+/// scanning for interested parties. `Awaiter` is the only
 /// kind today; ownership (owned children) and links ride the same list in later steps.
 /// Entries may dangle — a notification aimed at a terminated watcher is a no-op — and
 /// carry no `Value`s, so they are invisible to heap accounting.
@@ -181,16 +205,38 @@ pub enum Watcher {
     /// (crash or kill; a normal completion never propagates). Like `OwnedChild`, never
     /// flushed by a persistent process's per-line completion.
     Link { pid: ProcessId },
+    /// `pid` is a reactive subscriber: deliver a `Changed`
+    /// wakeup message whenever *this* process's data-plane state changes at a
+    /// root-frame (tail-)entry. Unlike the other kinds, it fires **repeatedly** and is
+    /// **not** consumed at termination — it is dropped (never turned into an event) by
+    /// `flush_watchers`, and removed by reconciliation or reclamation. Registered by a
+    /// tracked `?` sample (`%proc.track`); the target's `subscriber_count` mirrors how
+    /// many of these it carries.
+    Subscriber { pid: ProcessId },
 }
 
 impl Watcher {
     /// The process this watcher references. Used to drop stale entries when their target is
-    /// reclaimed (see docs/process-state.md, "Reclamation").
+    /// reclaimed.
     pub fn pid(&self) -> ProcessId {
         match self {
-            Watcher::Awaiter { pid } | Watcher::OwnedChild { pid } | Watcher::Link { pid } => *pid,
+            Watcher::Awaiter { pid }
+            | Watcher::OwnedChild { pid }
+            | Watcher::Link { pid }
+            | Watcher::Subscriber { pid } => *pid,
         }
     }
+}
+
+/// A `%proc.track` render in progress. Set while the tracked thunk
+/// runs; every `?` sample lands its target in `sampled`, and when the thunk's frame returns
+/// the executor reconciles the process's subscriptions against it. `boundary_len` is the
+/// `frames.len()` just after the thunk frame was pushed, so its return is recognised when a
+/// popped frame had exactly that depth.
+#[derive(Debug)]
+pub struct TrackingState {
+    pub sampled: HashSet<ProcessId>,
+    pub boundary_len: usize,
 }
 
 #[derive(Debug)]
@@ -208,8 +254,20 @@ pub struct Process {
     pub watchers: Vec<Watcher>,
     /// The observable state: the argument the root function was most recently
     /// (tail-)entered with — the spawn init, then each root-frame tail call. Sampled
-    /// by `?` (see docs/process-state.md); persists after termination, like `result`.
+    /// by `?`; persists after termination, like `result`.
     pub state: Value,
+    /// How many `Watcher::Subscriber` entries this process carries.
+    /// A cached count so `record_state` can decide whether to change-detect with one
+    /// integer branch, never scanning `watchers` on the hot tail-call path. Maintained at
+    /// subscribe/unsubscribe (and on reclamation pruning).
+    pub subscriber_count: u32,
+    /// The processes this one is currently subscribed to as a reactive tracker (the
+    /// tracker-side record — the twin of `select_state.sources` for awaits). A reclamation
+    /// edge: it pins a sampled process's tombstone so `?dep` keeps yielding its final
+    /// state. Empty ⇒ no allocation. Reconciled by each `%proc.track` render.
+    pub subscriptions: Vec<ProcessId>,
+    /// Set while a `%proc.track` render runs (see [`TrackingState`]); `None` otherwise.
+    pub tracking: Option<TrackingState>,
 }
 
 impl Process {
@@ -234,6 +292,28 @@ impl Process {
             awaiting: HashMap::new(),
             watchers: Vec::new(),
             state: Value::nil(),
+            subscriber_count: 0,
+            subscriptions: Vec::new(),
+            tracking: None,
+        }
+    }
+
+    /// Whether this process is currently inside a `%proc.track` render — a restricted,
+    /// re-evaluable context, like a receive filter.
+    pub fn is_tracking(&self) -> bool {
+        self.tracking.is_some()
+    }
+
+    /// The name of the restricted context this process is in, if any — a receive filter or
+    /// a tracked render. Both must stay pure (they may be re-evaluated), so spawns, sends,
+    /// effects, and selects are rejected inside them, reported against this name.
+    pub fn restricted_context(&self) -> Option<RestrictedContext> {
+        if self.is_receiving() {
+            Some(RestrictedContext::ReceiveFunction)
+        } else if self.is_tracking() {
+            Some(RestrictedContext::TrackedRender)
+        } else {
+            None
         }
     }
 }

@@ -38,7 +38,7 @@ pub struct Worker<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> {
     subscriptions: HashMap<u64, WorkerSubscription>,
     // This worker's id, stamped into `SubscriptionUpdate` events so the environment can merge.
     worker_id: crate::WorkerId,
-    // Paused for a reclamation round (see docs/process-state.md): while true the worker still
+    // Paused for a reclamation round: while true the worker still
     // drains commands (so routed messages land in mailboxes and the collection handshake
     // proceeds) but does not step the executor, producing no new cross-worker traffic. Set by
     // `BeginCollection`, cleared by `EndCollection`.
@@ -349,10 +349,19 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .notify_effect_completion(process_id, result, heap)
                     .map_err(EnvironmentError::Executor)?;
             }
-            Command::ReadState { caller, target } => {
+            Command::ReadState {
+                caller,
+                target,
+                subscribe,
+            } => {
                 // Snapshot the target's state cell (nil if the process is unknown here —
                 // defensive; routing follows the spawn, so it should exist) and send it
                 // back toward the caller. A read, not a message: no ownership transfer.
+                // A tracked sample subscribes the caller here — atomically with the read,
+                // so no state change between the two is missed.
+                if subscribe {
+                    self.executor.add_subscriber(target, caller);
+                }
                 let state = self
                     .executor
                     .get_process(target)
@@ -367,6 +376,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     state,
                     heap,
                 })?;
+            }
+            Command::UnsubscribeState { target, subscriber } => {
+                self.executor.remove_subscriber(target, subscriber);
             }
             Command::NotifyState {
                 process_id,
@@ -480,10 +492,17 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 self.sender
                     .send(Event::EffectRequest { process_id, effect })?;
             }
-            Action::ReadState { caller, target } => {
+            Action::ReadState {
+                caller,
+                target,
+                subscribe,
+            } => {
                 // The caller is already parked (mark_sampling in handle_state)
-                self.sender
-                    .send(Event::ReadStateAction { caller, target })?;
+                self.sender.send(Event::ReadStateAction {
+                    caller,
+                    target,
+                    subscribe,
+                })?;
             }
             Action::Kill { target } => {
                 // Fire-and-forget (the caller was answered Ok at the call site).
@@ -925,7 +944,38 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                         self.sender.send(Event::KillAction { target: pid })?;
                     }
                 }
+                // Reactive subscriptions are dropped by `flush_watchers`, never turned
+                // into termination events.
+                Watcher::Subscriber { .. } => {
+                    unreachable!("Subscriber is not a completion watcher")
+                }
             }
+        }
+
+        // Deliver reactive state-change wakeups: each subscriber
+        // whose dependency changed state this round gets one `Changed` message, routed
+        // like any send (crosses workers, wakes a parked select, drops on a tombstone).
+        // Draining here — once per worker loop iteration — coalesces a burst of changes.
+        let wakeups = self.executor.take_state_wakeups();
+        if !wakeups.is_empty() {
+            let message = self
+                .executor
+                .changed_value()
+                .map_err(EnvironmentError::Executor)?;
+            for subscriber in wakeups {
+                self.sender.send(Event::DeliverAction {
+                    target: subscriber,
+                    message: message.clone(),
+                    heap: vec![],
+                })?;
+            }
+        }
+
+        // Route reactive unsubscriptions to remote targets' workers (reconciliation dropped
+        // the dependency).
+        for (target, subscriber) in self.executor.take_unsubscribes() {
+            self.sender
+                .send(Event::UnsubscribeAction { target, subscriber })?;
         }
 
         // Check processes with pending result requests

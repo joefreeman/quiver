@@ -202,7 +202,7 @@ fn test_receive_filter_type_is_parameter_not_result() {
 
 // A restricted-context violation crashes the *filtering* process; `!` is never lethal,
 // so the awaiter observes the crash as a `:crash`-stamped nil (an `Error[pid, message]`
-// payload) rather than dying with it — see docs/process-state.md. These tests read the
+// payload) rather than dying with it. These tests read the
 // stamp with a checked retrieval; one also pins the crashed pid.
 
 #[test]
@@ -284,7 +284,7 @@ fn test_receive_function_cannot_perform_effect() {
         .expect("\"effect is not allowed in receive function\"");
 }
 
-// Containment-by-default ownership (docs/process-state.md): `@f` spawns an owned
+// Containment-by-default ownership: `@f` spawns an owned
 // child, torn down when its parent terminates — any reason, like resource auto-close.
 // `%proc.detach` (parent-only) opts a child out. Note the reference idiom: a bare pid
 // receiving a flowing value is a *send*, so arguments pass pids as `&p`.
@@ -334,10 +334,7 @@ fn test_detach_requires_ownership() {
             %proc.detach &p
             "#,
         )
-        .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
-            operation: "detach".to_string(),
-            context: "a process that is not an owned child of the caller".to_string(),
-        });
+        .expect_runtime_error(quiver_core::error::Error::NotAnOwnedChild);
 }
 
 #[test]
@@ -426,7 +423,7 @@ fn test_link_to_crashed_process_kills_immediately() {
 fn test_panic_is_catchable_at_await() {
     // A child's `__panic__` arrives at the await as a catchable `:crash` value of kind
     // `Panic` carrying the panic message — a process boundary is where "unrecoverable"
-    // ends (docs/process-state.md).
+    // ends.
     quiver()
         .evaluate(
             r#"

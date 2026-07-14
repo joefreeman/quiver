@@ -3,7 +3,6 @@
 //! Resolution is **per package**: a module resolves its imports against its own package's
 //! `modules` routing table, never the importer's. A package boundary exists exactly where a
 //! `quiver.toml` exists; the standard library is a built-in package embedded in the binary.
-//! See `docs/module-resolution.md`.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};

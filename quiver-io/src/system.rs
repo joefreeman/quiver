@@ -5,20 +5,17 @@
 
 use crate::NativeEffect;
 use quiver_core::binary::BinaryData;
-use quiver_core::builtins::{BuiltinFn, BuiltinRegistry, BuiltinResult};
+use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion};
 use quiver_core::error::Error;
-use quiver_core::executor::Executor;
-use quiver_core::process::ProcessId;
 use quiver_core::value::Value;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// random_bytes(n) -> bin: n cryptographically secure bytes from the OS entropy source.
 pub fn builtin_random_bytes(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<NativeEffect>,
-) -> Result<BuiltinResult<NativeEffect>, Error> {
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
     let n = match arg {
         Value::Int(n) if *n >= 0 => *n as usize,
         Value::Int(_) => {
@@ -43,34 +40,32 @@ pub fn builtin_random_bytes(
     let mut bytes = vec![0u8; n];
     getrandom::fill(&mut bytes)
         .map_err(|e| Error::InvalidArgument(format!("entropy source failed: {e}")))?;
-    let binary = executor.allocate_binary_data(BinaryData::new(bytes))?;
-    Ok(BuiltinResult::Value(Value::Binary(binary)))
+    let binary = ctx.executor.allocate_binary_data(BinaryData::new(bytes))?;
+    Ok(Completion::Value(Value::Binary(binary)))
 }
 
 /// time_now([]) -> int: milliseconds since the Unix epoch (UTC).
 pub fn builtin_time_now(
-    _process_id: ProcessId,
     _arg: &Value,
-    _executor: &mut Executor<NativeEffect>,
-) -> Result<BuiltinResult<NativeEffect>, Error> {
+    _ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Error::InvalidArgument(format!("system clock before epoch: {e}")))?
         .as_millis() as i64;
-    Ok(BuiltinResult::Value(Value::int(ms)))
+    Ok(Completion::Value(Value::int(ms)))
 }
 
 /// time_monotonic([]) -> int: milliseconds since an arbitrary per-run origin. Steady (never
 /// steps backwards); only differences are meaningful.
 pub fn builtin_time_monotonic(
-    _process_id: ProcessId,
     _arg: &Value,
-    _executor: &mut Executor<NativeEffect>,
-) -> Result<BuiltinResult<NativeEffect>, Error> {
+    _ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     let origin = *ORIGIN.get_or_init(Instant::now);
-    Ok(BuiltinResult::Value(Value::int(
-        origin.elapsed().as_millis() as i64,
+    Ok(Completion::Value(Value::int(
+        origin.elapsed().as_millis() as i64
     )))
 }
 

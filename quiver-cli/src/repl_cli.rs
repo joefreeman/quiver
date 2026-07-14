@@ -673,7 +673,7 @@ impl ReplCli {
                 eprintln!("{}", format!("Compile error: {:?}", e).yellow());
             }
             ReplError::Runtime(e) => {
-                eprintln!("{}", format!("Runtime error: {:?}", e).red());
+                eprintln!("{}", format!("Runtime error: {}", e.crash_message()).red());
             }
             ReplError::Environment(e) => {
                 eprintln!("{}", format!("Environment error: {}", e).red());

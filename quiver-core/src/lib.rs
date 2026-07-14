@@ -14,7 +14,7 @@ pub mod types;
 pub mod value;
 
 pub use binary::{BinaryData, MAX_BINARY_SIZE};
-pub use builtins::BuiltinResult;
+pub use builtins::{BuiltinContext, Completion};
 pub use error::Error;
 pub use execute::{execute_bytecode_sync, execute_bytecode_sync_with};
 pub use executor::Executor;

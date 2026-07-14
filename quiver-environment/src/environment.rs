@@ -28,7 +28,7 @@ enum Aggregation {
     WorkerInfo(HashMap<u64, Option<quiver_core::process::WorkerInfo>>), // Maps request_id -> Option<WorkerInfo>
 }
 
-/// Phase of an in-flight reclamation round (see docs/process-state.md, "Reclamation"). The
+/// Phase of an in-flight reclamation round. The
 /// round is a two-phase handshake that *creates* quiescence — workers run autonomously, so
 /// there is no natural idle point to detect: first pause every worker, then snapshot the
 /// now-frozen process graph.
@@ -50,14 +50,14 @@ struct CollectionState {
     adjacency: Vec<ProcessAdjacency>,
 }
 
-/// Default spawns since the last reclamation round after which one is auto-triggered (see
-/// docs/process-state.md, "Reclamation"). The pause barrier creates its own quiescence, so
-/// the trigger need not wait for an idle moment; this just bounds how many tombstones may
-/// accumulate between rounds. Overridable via [`Environment::set_collection_threshold`].
+/// Default spawns since the last reclamation round after which one is auto-triggered. The
+/// pause barrier creates its own quiescence, so the trigger need not wait for an idle
+/// moment; this just bounds how many tombstones may accumulate between rounds. Overridable
+/// via [`Environment::set_collection_threshold`].
 const DEFAULT_COLLECTION_THRESHOLD: usize = 256;
 
 /// Trace the process graph and return the tombstones that are unreachable from any root and
-/// may be reclaimed (see docs/process-state.md, "Reclamation"). Roots are the pids that
+/// may be reclaimed. Roots are the pids that
 /// `Root`-category (live/persistent) processes reference; reachability follows outgoing edges
 /// — including through a tombstone's surviving `result`/`state`, since a late `!p`/`?p`
 /// exposes those — to a fixpoint. A tombstone not reached is unobservable and collectible;
@@ -485,7 +485,7 @@ pub struct Environment<E: Effect> {
     effect_backend: Option<Box<dyn EffectBackend<E = E>>>,
     resource_ownership: HashMap<ResourceId, ProcessId>,
 
-    // Process reclamation (see docs/process-state.md, "Reclamation"). At most one round runs
+    // Process reclamation. At most one round runs
     // at a time; `spawns_since_collection` drives the auto-trigger, `reclaimed_total` is a
     // cumulative metric / test hook.
     collection: Option<CollectionState>,
@@ -516,8 +516,8 @@ impl<E: Effect> Environment<E> {
         }
     }
 
-    /// Set how many spawns since the last reclamation round trigger the next one (see
-    /// docs/process-state.md, "Reclamation"). Lower values reclaim more eagerly.
+    /// Set how many spawns since the last reclamation round trigger the next one. Lower
+    /// values reclaim more eagerly.
     pub fn set_collection_threshold(&mut self, threshold: usize) {
         self.collection_threshold = threshold;
     }
@@ -1203,7 +1203,11 @@ impl<E: Effect> Environment<E> {
             Event::EffectRequest { process_id, effect } => {
                 self.handle_effect_request(process_id, effect)
             }
-            Event::ReadStateAction { caller, target } => {
+            Event::ReadStateAction {
+                caller,
+                target,
+                subscribe,
+            } => {
                 // Route the read to the target's worker. Unlike delivery, no resource
                 // ownership transfer: a sample is a read, not a message.
                 let worker_id = self
@@ -1211,8 +1215,22 @@ impl<E: Effect> Environment<E> {
                     .get(&target)
                     .ok_or(EnvironmentError::ProcessNotFound(target))?;
                 self.workers[*worker_id]
-                    .send(Command::ReadState { caller, target })
+                    .send(Command::ReadState {
+                        caller,
+                        target,
+                        subscribe,
+                    })
                     .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+                Ok(())
+            }
+            Event::UnsubscribeAction { target, subscriber } => {
+                // Route to the target's worker to drop the reactive subscription. A target
+                // that has since been reclaimed is simply gone — a no-op.
+                if let Some(worker_id) = self.process_router.get(&target) {
+                    self.workers[*worker_id]
+                        .send(Command::UnsubscribeState { target, subscriber })
+                        .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+                }
                 Ok(())
             }
             Event::StateRead {
@@ -1249,10 +1267,10 @@ impl<E: Effect> Environment<E> {
         }
     }
 
-    /// Begin a reclamation round if none is in flight (see docs/process-state.md,
-    /// "Reclamation"). Returns whether a round was started. The round advances across
-    /// subsequent `step()`s — pause all workers, snapshot the frozen graph, sweep
-    /// unreachable tombstones, resume — so poll [`Self::is_collecting`] for completion.
+    /// Begin a reclamation round if none is in flight. Returns whether a round was
+    /// started. The round advances across subsequent `step()`s — pause all workers,
+    /// snapshot the frozen graph, sweep unreachable tombstones, resume — so poll
+    /// [`Self::is_collecting`] for completion.
     pub fn start_collection(&mut self) -> Result<bool, EnvironmentError> {
         if self.collection.is_some() {
             return Ok(false);

@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 
-// `%random` (std/random.qv; docs/random-time.md): host entropy via `__random_bytes__`
+// `%random` (std/random.qv): host entropy via `__random_bytes__`
 // (all tests need with_io), with unbiased integer draws and hex tokens on top.
 
 #[test]

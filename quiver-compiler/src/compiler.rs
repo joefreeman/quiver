@@ -293,7 +293,11 @@ impl std::fmt::Display for Error {
                 write!(f, "Parse error in module '{module}': {error}")
             }
             Error::ModuleExecution { module, error } => {
-                write!(f, "Execution error in module '{module}': {error:?}")
+                write!(
+                    f,
+                    "Execution error in module '{module}': {}",
+                    error.crash_message()
+                )
             }
             Error::ModuleTypeMissing { type_name, module } => {
                 write!(f, "Type '{type_name}' not found in module '{module}'")
@@ -484,9 +488,9 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     current_receive_type_id: usize,
 
     /// The states a spawn of the function being compiled moves through: seeded with its
-    /// parameter type, widened at each tail call by the target's states (see
-    /// docs/process-state.md). `None` = unknown (poisoned by a `^~` on an unknown-states
-    /// callee); baked into the registered `Callable` like `current_receive_type_id`.
+    /// parameter type, widened at each tail call by the target's states. `None` = unknown
+    /// (poisoned by a `^~` on an unknown-states callee); baked into the registered
+    /// `Callable` like `current_receive_type_id`.
     current_states: Option<usize>,
 
     // While compiling a function body, collects per-branch (guard, result) types for the
@@ -4749,10 +4753,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     ..
                 } => {
                     // Awaiting a process yields its result — or nil, since `!` is never
-                    // lethal: a crashed source answers a `:crash`-stamped nil (see
-                    // docs/process-state.md). The nil member is exact-rowed (the stamp
-                    // is row-invisible, like `origin`), so it doesn't poison bare
-                    // retrieval of ordinary keys through an await.
+                    // lethal: a crashed source answers a `:crash`-stamped nil. The nil
+                    // member is exact-rowed (the stamp is row-invisible, like `origin`),
+                    // so it doesn't poison bare retrieval of ordinary keys through an
+                    // await.
                     result_types.push(*recv_type);
                     result_types.push(annotations::closed_nil(self.program));
                 }
@@ -5252,7 +5256,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )
             }
             ast::Term::State(access, span) => {
-                // `?p` — sample a process's state (docs/process-state.md). The result is
+                // `?p` — sample a process's state. The result is
                 // the target process type's state component: inferred at spawn sites, or
                 // stated with a `?'s` clause on a declared process type. No runtime test —
                 // soundness rests on every state write being compile-checked, plus the

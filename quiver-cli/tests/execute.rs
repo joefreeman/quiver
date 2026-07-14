@@ -1,6 +1,6 @@
 //! Integration tests for compile-time (sync) execution of the top level: process work
 //! there cannot be serviced (no action router at compile time) and must fail fast with
-//! a pointed error rather than hang — see docs/spawn-receive-compile-hang.md.
+//! a pointed error rather than hang.
 
 use std::process::Command;
 
@@ -15,9 +15,7 @@ fn expect_rejected(program: &str, operation: &str) {
     assert!(!out.status.success(), "expected failure for: {program}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("OperationNotAllowed")
-            && stderr.contains(operation)
-            && stderr.contains("compile-time execution"),
+        stderr.contains(operation) && stderr.contains("compile-time execution"),
         "expected pointed '{operation}' error for {program}, got: {stderr}"
     );
 }

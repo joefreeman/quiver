@@ -1,13 +1,14 @@
 use crate::effects::Effect;
-use crate::error::Error;
+use crate::error::{Error, Operation};
 use crate::executor::Executor;
-use crate::process::{Action, ProcessId};
+use crate::process::{Action, Process, ProcessId, TrackingState, Watcher};
 use crate::program::Program;
 use crate::types::Type;
-use crate::value::Value;
+use crate::value::{Payload, Value};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// View a value as an integer, erroring with a type mismatch if it isn't one.
 pub fn value_as_int(value: &Value) -> Result<crate::value::IntRef<'_>, Error> {
@@ -67,25 +68,137 @@ pub mod io;
 pub mod reference;
 pub mod vector;
 
-/// Result of a builtin function execution
+/// How a builtin call resolves. The bytecode contract of a builtin call is that exactly
+/// one result lands on the caller's stack and execution advances past the call, exactly
+/// once — a completion names which of the three ways that happens.
 #[derive(Debug)]
-pub enum BuiltinResult<E: Effect> {
-    /// Immediate value result
+pub enum Completion<E: Effect> {
+    /// The result, immediately: the dispatch site pushes it and advances.
     Value(Value),
-    /// Action that requires Environment coordination
-    Action(Action<E>),
-    /// Detach `child` from the calling process's owned children (the parent-only
-    /// `%proc.detach`). Applied by the dispatch site, which holds the caller's
-    /// `Process` — taken out of the map for the step, so the builtin itself cannot
-    /// reach it. Errors there when the caller doesn't own the child.
-    Detach { child: ProcessId },
-    /// Kill `target` (`%proc.kill`): the dispatch site answers `Ok` immediately
-    /// (fire-and-forget — no parking) and routes an `Action::Kill`.
-    Kill { target: ProcessId },
-    /// Link the caller and `target` (`%proc.link`): the dispatch site records the
-    /// caller-side half on the step-local `Process`, answers `Ok`, and routes an
-    /// `Action::Link` for the target-side half. Self-link is a no-op.
-    Link { target: ProcessId },
+    /// The result comes from the host: the caller parks while the environment performs
+    /// the effect, and the completion notification delivers the result and advances.
+    Effect(E),
+    /// The result comes from Quiver code: the dispatch site invokes the (nilary)
+    /// function on a fresh frame and leaves the call un-advanced, so the frame's return
+    /// delivers the callee's result as the builtin's own — exactly like an ordinary
+    /// call (this is how `%proc.track` runs its thunk). The target is specifically a
+    /// function — never a builtin, whose frameless resolution would break the tracking
+    /// boundary and could route an action the dispatch site doesn't collect.
+    Call {
+        function: usize,
+        captures: Arc<Payload>,
+    },
+}
+
+/// What a builtin executes against: the executor (heap, constants, refs) plus verbs on
+/// the calling process's record — which is out of the process map during the step, so
+/// only reachable through here. Verbs take effect immediately (or queue the routed
+/// action the step returns); the builtin's return value is its [`Completion`].
+pub struct BuiltinContext<'a, E: Effect> {
+    /// The executor, for heap and program access (binaries, constants, refs).
+    pub executor: &'a mut Executor<E>,
+    pid: ProcessId,
+    process: &'a mut Process,
+    action: Option<Action<E>>,
+}
+
+impl<'a, E: Effect> BuiltinContext<'a, E> {
+    pub(crate) fn new(
+        pid: ProcessId,
+        process: &'a mut Process,
+        executor: &'a mut Executor<E>,
+    ) -> Self {
+        Self {
+            executor,
+            pid,
+            process,
+            action: None,
+        }
+    }
+
+    /// The calling process's id.
+    pub fn pid(&self) -> ProcessId {
+        self.pid
+    }
+
+    /// Take the routed action a verb queued, for the dispatch site to return from the step.
+    pub(crate) fn take_action(&mut self) -> Option<Action<E>> {
+        self.action.take()
+    }
+
+    fn queue(&mut self, action: Action<E>) {
+        assert!(
+            self.action.is_none(),
+            "a builtin may queue at most one routed action"
+        );
+        self.action = Some(action);
+    }
+
+    /// Refuse `operation` in a restricted context (a receive filter or tracked render,
+    /// either of which may be re-evaluated).
+    fn allow(&self, operation: Operation) -> Result<(), Error> {
+        match self.process.restricted_context() {
+            Some(context) => Err(Error::OperationNotAllowed { operation, context }),
+            None => Ok(()),
+        }
+    }
+
+    /// Kill `target` (`%proc.kill`): fire-and-forget — the kill routes through the
+    /// environment while the caller carries on. A self-kill lands at the next
+    /// command-processing point, once the caller is back in the map.
+    pub fn kill(&mut self, target: ProcessId) -> Result<(), Error> {
+        self.allow(Operation::Kill)?;
+        self.queue(Action::Kill { target });
+        Ok(())
+    }
+
+    /// Link the caller and `target` (`%proc.link`): records the caller-side half on the
+    /// caller's record and routes an `Action::Link` for the target-side half.
+    /// Idempotent (one entry per peer); self-link is a no-op — a process cannot
+    /// fate-share with itself.
+    pub fn link(&mut self, target: ProcessId) -> Result<(), Error> {
+        self.allow(Operation::Link)?;
+        if target == self.pid {
+            return Ok(());
+        }
+        let entry = Watcher::Link { pid: target };
+        if !self.process.watchers.contains(&entry) {
+            self.process.watchers.push(entry);
+        }
+        self.queue(Action::Link {
+            caller: self.pid,
+            target,
+        });
+        Ok(())
+    }
+
+    /// Detach `child` from the caller's owned children (the parent-only `%proc.detach`),
+    /// so it survives the caller's termination. Fail-fast: no owned-child entry means
+    /// the caller doesn't own the child — ownership is the parent's to relinquish.
+    pub fn detach(&mut self, child: ProcessId) -> Result<(), Error> {
+        self.allow(Operation::Detach)?;
+        let before = self.process.watchers.len();
+        self.process
+            .watchers
+            .retain(|watcher| !matches!(watcher, Watcher::OwnedChild { pid } if *pid == child));
+        if self.process.watchers.len() == before {
+            return Err(Error::NotAnOwnedChild);
+        }
+        Ok(())
+    }
+
+    /// Enter a tracked render (`%proc.track`): until the accompanying
+    /// [`Completion::Call`] frame returns and reconciles subscriptions, each `?` the
+    /// caller samples registers a reactive subscription. Renders must be pure and
+    /// non-nested, so this refuses both restricted contexts.
+    pub fn begin_tracking(&mut self) -> Result<(), Error> {
+        self.allow(Operation::Track)?;
+        self.process.tracking = Some(TrackingState {
+            sampled: HashSet::new(),
+            boundary_len: 0,
+        });
+        Ok(())
+    }
 }
 
 /// Type specification for lazy type resolution
@@ -98,46 +211,23 @@ pub enum TypeSpec {
     Union(Vec<TypeSpec>),
     Process(Option<Box<TypeSpec>>, Option<Box<TypeSpec>>), // Process type: (send, receive)
     Resource(String), // Opaque resource type identifier (e.g., "File", "TcpSocket")
+    /// A type variable, for a polymorphic builtin (e.g. `track`'s `'v`). The name should
+    /// carry no `#<number>` suffix so it can't collide with a compiler-uniquified variable;
+    /// the call site unifies and substitutes it fresh per call.
+    Var(&'static str),
+    /// A function type `#parameter -> result` (receives nothing; no state clause), for a
+    /// builtin that takes or returns a function — e.g. `track`'s thunk parameter.
+    Callable {
+        parameter: Box<TypeSpec>,
+        result: Box<TypeSpec>,
+    },
 }
 
 impl TypeSpec {
     /// Resolve this type specification to a type ID in the Program's type registry
     pub fn resolve_to_id(&self, program: &mut Program) -> usize {
-        match self {
-            TypeSpec::Integer => program.register_type(Type::Integer),
-            TypeSpec::Binary => program.register_type(Type::Binary),
-            TypeSpec::Reference => program.register_type(Type::Reference),
-            TypeSpec::Tuple(name, field_specs) => {
-                let fields: Vec<(Option<String>, usize)> = field_specs
-                    .iter()
-                    .map(|(field_name, spec)| {
-                        (
-                            field_name.map(|s| s.to_string()),
-                            spec.resolve_to_id(program),
-                        )
-                    })
-                    .collect();
-                let tuple_id = program.register_tuple(name.map(|s| s.to_string()), fields);
-                program.register_type(Type::Tuple(tuple_id))
-            }
-            TypeSpec::Union(specs) => {
-                let type_ids: Vec<usize> = specs
-                    .iter()
-                    .map(|spec| spec.resolve_to_id(program))
-                    .collect();
-                program.register_type(Type::Union(type_ids))
-            }
-            TypeSpec::Process(send, receive) => {
-                let send_id = send.as_ref().map(|s| s.resolve_to_id(program));
-                let receive_id = receive.as_ref().map(|r| r.resolve_to_id(program));
-                program.register_type(Type::Process {
-                    send: send_id,
-                    receive: receive_id,
-                    state: None,
-                })
-            }
-            TypeSpec::Resource(name) => program.register_type(Type::Resource(name.clone())),
-        }
+        let typ = self.resolve(program);
+        program.register_type(typ)
     }
 
     /// Resolve this type specification to a concrete Type using the Program's type registry
@@ -177,12 +267,24 @@ impl TypeSpec {
                 }
             }
             TypeSpec::Resource(name) => Type::Resource(name.clone()),
+            TypeSpec::Var(name) => Type::Variable(name.to_string()),
+            TypeSpec::Callable { parameter, result } => {
+                let parameter = parameter.resolve_to_id(program);
+                let result = result.resolve_to_id(program);
+                let receive = program.never();
+                Type::Callable {
+                    parameter,
+                    result,
+                    receive,
+                    states: None,
+                }
+            }
         }
     }
 }
 
 /// Function signature for builtin implementations
-pub type BuiltinFn<E> = fn(ProcessId, &Value, &mut Executor<E>) -> Result<BuiltinResult<E>, Error>;
+pub type BuiltinFn<E> = fn(&Value, &mut BuiltinContext<'_, E>) -> Result<Completion<E>, Error>;
 
 /// Function signature for builtin module registration
 pub type BuiltinModule<E> = fn(&mut BuiltinRegistry<E>);
@@ -463,14 +565,14 @@ pub fn register_reference_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>)
 /// deliberately *not* a nil: a panic is an unrecoverable bug, not a short-circuiting
 /// failure, so it propagates as a runtime error rather than flowing on as data.
 pub fn builtin_panic<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let message = match arg {
         Value::Tuple(_, fields) if fields.len() == 1 => match &fields[0] {
             Value::Binary(binary) => {
-                String::from_utf8_lossy(&executor.get_binary_data(binary)?.to_vec()).into_owned()
+                String::from_utf8_lossy(&ctx.executor.get_binary_data(binary)?.to_vec())
+                    .into_owned()
             }
             other => {
                 return Err(Error::TypeMismatch {
@@ -495,40 +597,39 @@ pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "panic", builtin_panic, str => TypeSpec::Union(vec![]));
 }
 
-/// Detach an owned child from the calling process (the parent-only `%proc.detach`,
-/// see docs/process-state.md): the child survives the caller's termination. The
-/// removal itself happens at the dispatch site (see [`BuiltinResult::Detach`]), which
-/// errors when the argument is not an owned child of the caller — ownership is the
-/// parent's to relinquish, like operating on another process's resource.
+/// Detach an owned child from the calling process (the parent-only `%proc.detach`):
+/// the child survives the caller's termination. Errors when the argument is not an
+/// owned child of the caller — ownership is the parent's to relinquish, like operating
+/// on another process's resource.
 pub fn builtin_process_detach<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    _executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let Value::Process(child, _) = arg else {
         return Err(Error::TypeMismatch {
             expected: "process".to_string(),
             found: arg.type_name().to_string(),
         });
     };
-    Ok(BuiltinResult::Detach { child: *child })
+    ctx.detach(*child)?;
+    Ok(Completion::Value(Value::ok()))
 }
 
-/// Kill a process (`%proc.kill`, see docs/process-state.md): always effective — there
+/// Kill a process (`%proc.kill`): always effective — there
 /// is no trap flag — and idempotent on an already-terminated target. Awaiters observe
 /// the `Killed` crash kind; the target's owned subtree is torn down with it.
 pub fn builtin_process_kill<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    _executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let Value::Process(target, _) = arg else {
         return Err(Error::TypeMismatch {
             expected: "process".to_string(),
             found: arg.type_name().to_string(),
         });
     };
-    Ok(BuiltinResult::Kill { target: *target })
+    ctx.kill(*target)?;
+    Ok(Completion::Value(Value::ok()))
 }
 
 /// Link the calling process and the target (`%proc.link`): symmetric fate-sharing —
@@ -536,17 +637,39 @@ pub fn builtin_process_kill<E: Effect>(
 /// completion never propagates. Linking an already-crashed process kills the caller
 /// immediately (tombstones keep the error, so there is no establishment race).
 pub fn builtin_process_link<E: Effect>(
-    _process_id: ProcessId,
     arg: &Value,
-    _executor: &mut Executor<E>,
-) -> Result<BuiltinResult<E>, Error> {
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
     let Value::Process(target, _) = arg else {
         return Err(Error::TypeMismatch {
             expected: "process".to_string(),
             found: arg.type_name().to_string(),
         });
     };
-    Ok(BuiltinResult::Link { target: *target })
+    ctx.link(*target)?;
+    Ok(Completion::Value(Value::ok()))
+}
+
+/// Run a reactive tracked render (`%proc.track thunk`): evaluate the
+/// nilary `thunk` with dependency tracking on, subscribing the caller to every process the
+/// thunk samples (`?`) and reconciling those subscriptions when it returns. Tracking is
+/// entered here; the thunk itself runs as the builtin's [`Completion::Call`], so its
+/// return both reconciles the subscriptions and delivers `track`'s result.
+pub fn builtin_track<E: Effect>(
+    arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let Value::Function(function, captures) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "function".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    ctx.begin_tracking()?;
+    Ok(Completion::Call {
+        function: *function,
+        captures: captures.clone(),
+    })
 }
 
 /// Register the process-management builtins (`%proc`).
@@ -556,6 +679,14 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "process_detach", builtin_process_detach, pid.clone() => ok.clone());
     register_builtin!(registry, "process_kill", builtin_process_kill, pid.clone() => ok.clone());
     register_builtin!(registry, "process_link", builtin_process_link, pid => ok);
+    // `track`'s polymorphic type `#(#[] -> 'v) -> 'v`: it takes a nilary thunk and returns
+    // whatever the thunk returns. The `'v` variable is unified/substituted fresh per call
+    // by the ordinary generic-call path.
+    let thunk = TypeSpec::Callable {
+        parameter: Box::new(TypeSpec::Tuple(None, vec![])),
+        result: Box::new(TypeSpec::Var("v")),
+    };
+    register_builtin!(registry, "track", builtin_track, thunk => TypeSpec::Var("v"));
 }
 
 /// Get all core builtin modules. This establishes the full builtin *contract* every host shares:

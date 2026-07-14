@@ -1,4 +1,4 @@
-// Process management (see docs/process-state.md). Ownership is containment by
+// Process management. Ownership is containment by
 // default: `@f` spawns a child owned by the spawner, and when a process terminates —
 // normally or by crash — its owned subtree is torn down with it, like resources.
 // `detach` is the explicit opt-out, and is parent-only: ownership is the parent's to
@@ -12,6 +12,11 @@
   | Panic[pid: (@), message: Str['bin]]
   | Killed
 
+// The reactive wakeup a tracked render receives when one of its sampled dependencies
+// changes state. A reactive loop receives it alongside its own
+// message type: `!('event | '%proc.changed)`.
+'changed = Changed
+
 // Note the reference idiom throughout: a bare pid receiving a flowing value is a
 // send, so pass pids as `&p` — `%proc.detach &p`, `%proc.kill &p`, `%proc.link &p`.
 
@@ -24,5 +29,8 @@
   },
   link: &__process_link__ ~> {
     :doc "Links the calling process and the target for symmetric fate-sharing: if either terminates abnormally (crash or kill), the other is killed. Normal completion never propagates; linking an already-crashed process kills the caller immediately. Idempotent; self-link is a no-op."
+  },
+  track: &__track__ ~> {
+    :doc "Runs a nilary thunk with reactive dependency tracking, returning its result. Each process the thunk samples with `?` becomes a dependency: when any of them next changes state, the calling process is sent a `'%proc.changed` wakeup. Subscriptions are reconciled on each call, so a dependency no longer sampled is dropped. The thunk must be pure (no spawns, sends, effects, or selects)."
   },
 ]

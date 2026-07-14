@@ -115,7 +115,7 @@ impl TestBuilder {
         self
     }
 
-    /// Auto-trigger a process-reclamation round every `n` spawns (see docs/process-state.md).
+    /// Auto-trigger a process-reclamation round every `n` spawns.
     /// Lets a test exercise reclamation under load without a huge spawn count.
     pub fn with_collection_threshold(mut self, n: usize) -> Self {
         self.collection_threshold = Some(n);
@@ -500,7 +500,7 @@ impl TestResult {
         evaluate(self.environment, self.repl, self.virtual_time, source)
     }
 
-    /// Run a full process-reclamation round to completion (see docs/process-state.md). Drives
+    /// Run a full process-reclamation round to completion. Drives
     /// the pause/snapshot/sweep handshake across `step()`s until it settles. If an
     /// auto-triggered round is already in flight, this simply pumps it to completion.
     pub fn force_collection(mut self) -> Self {

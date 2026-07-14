@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use quiver_compiler::compiler::Error;
 
-// The `%html{ … }` dialect and renderer (std/html.qv; design in docs/html.md): the dialect
+// The `%html{ … }` dialect and renderer (std/html.qv): the dialect
 // parses HTML-with-holes into a '%html node tree at compile time, `render` serializes it.
 // Holes (`{ … }`) are host blocks; their values normalize through `child`/`attr_value`.
 // Static template text is trusted (emitted verbatim); hole values are escaped.

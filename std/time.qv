@@ -1,4 +1,4 @@
-// Clocks and calendar arithmetic (docs/random-time.md). Two host clocks: `now` — wall
+// Clocks and calendar arithmetic. Two host clocks: `now` — wall
 // time as milliseconds since the Unix epoch (UTC) — and `monotonic` — milliseconds
 // from an arbitrary per-run origin, steady, for measuring durations. Everything else
 // is pure: `parts` breaks an epoch timestamp into UTC calendar components (proleptic

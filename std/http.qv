@@ -1,5 +1,5 @@
-// The shared HTTP vocabulary: message types and codecs, pure data, no IO (see
-// docs/http.md). `%http/server` builds the connection pump on these; a client and
+// The shared HTTP vocabulary: message types and codecs, pure data, no IO.
+// `%http/server` builds the connection pump on these; a client and
 // tests use the same records and parsers.
 //
 // The request parser is incremental — reads arrive in arbitrary chunks — answering

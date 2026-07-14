@@ -158,10 +158,19 @@ pub enum Command<E: Effect> {
     },
 
     /// Read a process's current state on behalf of a remote `?` sample (a snapshot —
-    /// the target is not disturbed and resource ownership does not transfer)
+    /// the target is not disturbed and resource ownership does not transfer). When
+    /// `subscribe` (a *tracked* sample), also register `caller` as a
+    /// reactive `Subscriber` of `target` — atomically with the read, on the target's worker.
     ReadState {
         caller: ProcessId,
         target: ProcessId,
+        subscribe: bool,
+    },
+    /// Remove `subscriber`'s reactive subscription from `target` (reconciliation dropped the
+    /// dependency). Fire-and-forget; a no-op on an unknown target.
+    UnsubscribeState {
+        target: ProcessId,
+        subscriber: ProcessId,
     },
 
     /// Deliver a remote `?` sample to the caller that requested it
@@ -171,7 +180,7 @@ pub enum Command<E: Effect> {
         heap: Vec<Vec<u8>>,
     },
 
-    /// Phase 1 of a reclamation round (see docs/process-state.md, "Reclamation"): pause
+    /// Phase 1 of a reclamation round: pause
     /// stepping so the worker produces no new cross-worker traffic, then ack with
     /// `CollectionReady`. The worker keeps draining commands while paused. FIFO channels
     /// make the ack a barrier — once every worker has acked, every pre-pause send has
@@ -300,10 +309,18 @@ pub enum Event<E: Effect> {
     /// Request effect operation from Environment
     EffectRequest { process_id: ProcessId, effect: E },
 
-    /// Action: read a remote process's state (`?` sample)
+    /// Action: read a remote process's state (`?` sample). `subscribe` carries the tracked
+    /// sample's request to also subscribe the caller.
     ReadStateAction {
         caller: ProcessId,
         target: ProcessId,
+        subscribe: bool,
+    },
+    /// Action: remove a reactive subscription from a remote target (reconciliation dropped
+    /// the dependency). Routed to the target's worker.
+    UnsubscribeAction {
+        target: ProcessId,
+        subscriber: ProcessId,
     },
 
     /// A `?` sample read on the target's worker, headed back to the caller
@@ -313,7 +330,7 @@ pub enum Event<E: Effect> {
         heap: Vec<Vec<u8>>,
     },
 
-    /// Ack for `BeginCollection`: this worker is paused (see docs/process-state.md).
+    /// Ack for `BeginCollection`: this worker is paused.
     CollectionReady {
         request_id: u64,
         worker_id: WorkerId,

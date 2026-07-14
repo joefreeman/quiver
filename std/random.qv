@@ -1,5 +1,5 @@
 // Randomness over the host's cryptographically secure entropy source (the
-// `__random_bytes__` builtin — see docs/random-time.md). Everything here is
+// `__random_bytes__` builtin). Everything here is
 // crypto-quality: suitable for session ids and CSRF tokens, not just dice. A seeded,
 // reproducible PRNG (games, property tests) would be a separate, pure module.
 

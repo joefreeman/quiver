@@ -1,5 +1,5 @@
 // An HTML dialect and renderer: `%html{ <div class="x">Hello, {~.name}!</div> }` parses
-// the brace content at compile time into a `'%html` node tree (see docs/html.md).
+// the brace content at compile time into a `'%html` node tree.
 //
 // Holes: a `{ … }` in child or attribute-value position is a host block, located by the
 // context's `term` prefix-parser and spliced as an `Unquote` — so branches, `=>` guards,

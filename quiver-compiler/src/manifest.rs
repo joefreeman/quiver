@@ -1,7 +1,7 @@
 //! Project manifests (`quiver.toml`).
 //!
 //! A manifest declares, among other things, the `modules` an ordered routing table that maps
-//! import names to providers. See `docs/module-resolution.md` for the full design.
+//! import names to providers.
 
 use serde::Deserialize;
 

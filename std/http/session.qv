@@ -1,4 +1,4 @@
-// Signed-cookie sessions (docs/http.md): the session — ordered [name, value] pairs —
+// Signed-cookie sessions: the session — ordered [name, value] pairs —
 // rides in the cookie itself as `hex(payload).hex(hmac)`, HMAC-SHA256-verified on read
 // (constant-time compare), so a client can inspect but not forge or tamper. Stateless:
 // nothing server-side, sessions survive restarts if the key does; the trade is that

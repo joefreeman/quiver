@@ -1,5 +1,5 @@
-// The HTTP server: a connection pump over the TCP builtins and a handler contract
-// (see docs/http.md). A handler is a pure function from a request to a response —
+// The HTTP server: a connection pump over the TCP builtins and a handler contract.
+// A handler is a pure function from a request to a response —
 // values in, values out, never the socket — so handlers are testable without a
 // server and middleware is ordinary function composition.
 //
@@ -9,7 +9,7 @@
 // One process per connection, and one per request: the handler runs in its own
 // process and is awaited, so a handler that *crashes* answers the same plain 500 as
 // one that *fails* (returns nil) — `!` is never lethal (the crash arrives as a
-// `:crash`-stamped nil; see docs/process-state.md), and the connection with its
+// `:crash`-stamped nil), and the connection with its
 // keep-alive survives both. Keep-alive is HTTP/1.1's default (`Connection: close`
 // honored); responses are always Content-Length framed. `HEAD` answers like `GET`
 // with the body bytes dropped.

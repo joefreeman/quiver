@@ -1,6 +1,6 @@
-// Process reclamation (garbage collection of terminated processes). See
-// docs/process-state.md, "Reclamation". These drive the full environment (two worker
-// threads), so children round-robin across workers and exercise the cross-worker sweep.
+// Process reclamation (garbage collection of terminated processes). These drive the full
+// environment (two worker threads), so children round-robin across workers and exercise
+// the cross-worker sweep.
 
 mod common;
 use common::quiver;

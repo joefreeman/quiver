@@ -1,4 +1,4 @@
-// The `?` state-sample operator (docs/process-state.md), bare form `?p`: a process's
+// The `?` state-sample operator, bare form `?p`: a process's
 // observable state is the argument its root function was most recently (tail-)entered
 // with — the spawn init, then each root-frame tail call. The state *type* rides the
 // process type: inferred at spawn sites as the union of parameter types over the root

@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 // The `%http` shared vocabulary (types + codecs, std/http.qv) and the `%http/server`
-// pump (std/http/server.qv); design in docs/http.md. The codecs are pure, so most
+// pump (std/http/server.qv). The codecs are pure, so most
 // coverage needs no sockets; one integration test drives a real served connection.
 
 #[test]
@@ -182,8 +182,8 @@ fn test_served_connection_end_to_end() {
 #[test]
 fn test_crashed_handler_answers_500_and_connection_survives() {
     // A handler that *crashes* (a `__panic__` here) runs in its own process and is
-    // awaited: the crash arrives as a `:crash`-stamped nil (never-lethal `!`, see
-    // docs/process-state.md) and degrades to the same plain 500 as a failed handler —
+    // awaited: the crash arrives as a `:crash`-stamped nil (never-lethal `!`) and
+    // degrades to the same plain 500 as a failed handler —
     // and the connection pump survives to answer the next pipelined request normally.
     quiver()
         .with_io()

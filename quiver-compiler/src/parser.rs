@@ -2484,7 +2484,7 @@ fn primary(input: Span) -> IResult<Span, Term> {
     ))(input)
 }
 
-// Parse the state-sample operator (`?p` — docs/process-state.md), glued like every
+// Parse the state-sample operator (`?p`), glued like every
 // select form. The target is an access: a variable or import member holding a pid.
 // Ordering: `access` runs first in `primary`, so a trailing `?` on an identifier
 // (`empty?`) is consumed there and never reaches this parser.
