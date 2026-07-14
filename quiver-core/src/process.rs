@@ -1,5 +1,5 @@
 use crate::effects::Effect;
-use crate::value::Value;
+use crate::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -122,10 +122,14 @@ pub enum Action<E: Effect> {
     },
     /// Deliver a message to a target process
     Deliver { target: ProcessId, value: Value },
-    /// Request the result of one or more target processes
+    /// Request the results of target processes and/or arm stream-resource reads —
+    /// everything a parking select needs routed. `arm` names owned stream resources
+    /// whose next event should be read; each completion arrives back as a
+    /// resource event (stashed on the caller, waking its select).
     Await {
         targets: Vec<ProcessId>,
         caller: ProcessId,
+        arm: Vec<ResourceId>,
     },
     /// Request a platform-specific effect
     RequestEffect { process_id: ProcessId, effect: E },
@@ -146,6 +150,21 @@ pub enum Action<E: Effect> {
         caller: ProcessId,
         target: ProcessId,
     },
+}
+
+/// A stream resource's next event, as routed from the io backend to the owning
+/// process's worker (the completion of an [`Action::Await`] `arm`). Deliberately
+/// generic — which tuples these become is the stream kind's registry declaration.
+/// `Data` bytes travel in the carrying command's heap side-channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StreamEvent {
+    /// Bytes arrived (the payload is the command's heap entry).
+    Data,
+    /// The stream produced a fresh resource (e.g. an accepted connection). The
+    /// environment has already recorded the receiving process as its owner.
+    Resource { resource_id: ResourceId },
+    /// The stream ended: EOF, or any error — a select answers events, not errno.
+    End,
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +287,14 @@ pub struct Process {
     pub subscriptions: Vec<ProcessId>,
     /// Set while a `%proc.track` render runs (see [`TrackingState`]); `None` otherwise.
     pub tracking: Option<TrackingState>,
+    /// Stream events that arrived while no select was waiting on their resource —
+    /// one slot per resource, since at most one read is armed per stream. Consumed
+    /// (in preference to arming) by the next select naming the resource, or by a
+    /// plain read builtin.
+    pub resource_events: HashMap<ResourceId, Value>,
+    /// Stream resources with a next-event read armed at the io backend. Prevents
+    /// double-arming across select re-entries; cleared as each event arrives.
+    pub armed_resources: HashSet<ResourceId>,
 }
 
 impl Process {
@@ -295,6 +322,8 @@ impl Process {
             subscriber_count: 0,
             subscriptions: Vec::new(),
             tracking: None,
+            resource_events: HashMap::new(),
+            armed_resources: HashSet::new(),
         }
     }
 

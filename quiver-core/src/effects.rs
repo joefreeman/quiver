@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::process::ProcessId;
+use crate::process::{ProcessId, StreamEvent};
 use crate::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -121,6 +121,27 @@ pub trait EffectBackend: Send {
     ///
     /// Default no-op — for backends that produce no such values (e.g. a type-checking host).
     fn set_type_ids(&mut self, _resources: &[String], _results: &[(String, ResultTupleInfo)]) {}
+
+    /// Arm a stream resource's next-event read for a parked select: submit one read
+    /// (socket recv, listener accept) whose completion surfaces via
+    /// [`Self::take_stream_events`] rather than as an effect completion. At most one
+    /// read is armed per resource — arming an already-armed resource is a no-op.
+    ///
+    /// Default: unsupported — for backends without stream resources.
+    fn arm_stream(&mut self, resource_id: ResourceId) -> Result<(), Error> {
+        let _ = resource_id;
+        Err(Error::InvalidArgument(
+            "stream resources are not supported by this host".to_string(),
+        ))
+    }
+
+    /// Drain completed armed reads: `(resource_id, resource_type_id, event, heap)`,
+    /// in per-resource arrival order. The type id lets the executor pick the kind's
+    /// declared event tuples; `Data`'s bytes ride the heap side-channel, like an
+    /// effect completion's.
+    fn take_stream_events(&mut self) -> Vec<(ResourceId, usize, StreamEvent, Vec<Vec<u8>>)> {
+        Vec::new()
+    }
 }
 
 /// The tuple type ids a backend needs to stamp a builtin's composite result value.

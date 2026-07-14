@@ -89,6 +89,8 @@ fn evaluate(
 pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
     with_io: bool,
+    /// Register only the always-set (no io signatures) — the web host's shape.
+    scoped_no_io: bool,
     debug: bool,
     collection_threshold: Option<usize>,
 }
@@ -109,6 +111,13 @@ impl TestBuilder {
         self
     }
 
+    /// A capability-scoped host: no io signatures registered, like the web host —
+    /// io-referencing code fails at compile time.
+    pub fn scoped_no_io(mut self) -> Self {
+        self.scoped_no_io = true;
+        self
+    }
+
     /// Compile in debug mode: nil results carry failure-provenance `origin` stamps.
     pub fn debug(mut self) -> Self {
         self.debug = true;
@@ -126,10 +135,17 @@ impl TestBuilder {
         // Initialize virtual time for testing
         let virtual_time_ms = Arc::new(AtomicU64::new(0));
 
-        // Build builtin registry from core modules
+        // Build builtin registry: the always-set plus the io signature union — the
+        // harness compiles std modules that reference io builtins even without io;
+        // `with_io` only attaches the native implementations.
         let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
             &quiver_core::builtins::core_modules(),
         );
+        if !self.scoped_no_io {
+            for module in quiver_core::builtins::io_modules() {
+                module(&mut builtins);
+            }
+        }
 
         // Add I/O builtins if I/O is enabled
         if self.with_io {
@@ -167,6 +183,7 @@ impl TestBuilder {
 
         // Create environment and REPL
         let mut environment = Environment::<NativeEffect>::new(workers);
+        environment.set_runtime_declarations(builtins.runtime_declarations().clone());
 
         if let Some(threshold) = self.collection_threshold {
             environment.set_collection_threshold(threshold);

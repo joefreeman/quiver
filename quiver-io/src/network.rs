@@ -196,7 +196,7 @@ pub fn builtin_tcp_listen(
 /// Read from a TCP socket (async)
 pub fn builtin_tcp_socket_read(
     value: &Value,
-    _ctx: &mut BuiltinContext<NativeEffect>,
+    ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
     // Extract [socket, length] tuple
     let Value::Tuple(_, fields) = value else {
@@ -233,6 +233,18 @@ pub fn builtin_tcp_socket_read(
     }
 
     // Return Action to request read operation from Environment
+    // Read/select interop on one socket: a stashed select event answers this read
+    // (a Closed stash answers the EOF empty binary); an armed-but-unanswered select
+    // read would race a fresh read out of order, so it is rejected.
+    if let Some(bytes) = ctx.take_stream_bytes(resource_id)? {
+        return Ok(Completion::Value(bytes));
+    }
+    if ctx.stream_armed(resource_id) {
+        return Err(Error::InvalidArgument(
+            "socket has an armed select read; select on it instead of reading".to_string(),
+        ));
+    }
+
     Ok(Completion::Effect(NativeEffect::TcpSocketRead {
         resource_id,
         length: length as usize,

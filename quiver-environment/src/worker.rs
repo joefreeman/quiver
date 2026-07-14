@@ -349,6 +349,17 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .notify_effect_completion(process_id, result, heap)
                     .map_err(EnvironmentError::Executor)?;
             }
+            Command::ResourceEvent {
+                process_id,
+                resource_id,
+                resource_type,
+                event,
+                heap,
+            } => {
+                self.executor
+                    .notify_resource_event(process_id, resource_id, resource_type, event, heap)
+                    .map_err(EnvironmentError::Executor)?;
+            }
             Command::ReadState {
                 caller,
                 target,
@@ -438,24 +449,18 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 captures,
                 argument,
             } => {
-                // Extract heap data from all captures and argument
-                let mut all_heap_data = Vec::new();
-                let mut extracted_captures = Vec::new();
-
-                for capture in captures {
-                    let (extracted, mut heap) = self
-                        .executor
-                        .extract_heap_data(&capture)
-                        .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                    extracted_captures.push(extracted);
-                    all_heap_data.append(&mut heap);
-                }
-
-                let (extracted_argument, mut arg_heap) = self
+                // Extract heap data from the captures and argument together, against
+                // one shared index space — they travel with a single side-channel vec.
+                let mut values = captures;
+                values.push(argument);
+                let (mut extracted, all_heap_data) = self
                     .executor
-                    .extract_heap_data(&argument)
+                    .extract_heap_data_many(&values)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                all_heap_data.append(&mut arg_heap);
+                let extracted_argument = extracted
+                    .pop()
+                    .expect("extract_heap_data_many preserves arity");
+                let extracted_captures = extracted;
 
                 self.sender.send(Event::SpawnAction {
                     caller,
@@ -477,12 +482,31 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     heap,
                 })?;
             }
-            Action::Await { caller, targets } => {
-                // Send single event with all targets
-                self.sender.send(Event::AwaitAction {
-                    awaiter: caller,
-                    targets,
-                })?;
+            Action::Await {
+                caller,
+                targets,
+                arm,
+            } => {
+                // Route the awaits (one event, all targets) and each stream-resource
+                // arm. Arm-only selects get no await answer, so wake the caller once
+                // now: its re-scan finds nothing ready and parks again, but this
+                // guarantees a message already in the mailbox is not missed.
+                let awaits = !targets.is_empty();
+                if awaits {
+                    self.sender.send(Event::AwaitAction {
+                        awaiter: caller,
+                        targets,
+                    })?;
+                }
+                for resource_id in arm {
+                    self.sender.send(Event::ArmStreamAction {
+                        caller,
+                        resource_id,
+                    })?;
+                }
+                if !awaits {
+                    self.executor.mark_active(caller);
+                }
             }
             Action::RequestEffect { process_id, effect } => {
                 // Mark process as effecting - it will be re-queued when effect completes

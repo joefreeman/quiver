@@ -327,52 +327,156 @@ impl Program {
         self.debug.as_ref()
     }
 
-    /// The crash-delivery table (both build modes): the key and tuple/type ids the
-    /// executor needs to build `:crash` / `:timeout` stamped nils.
-    /// Registers the shapes on first call — everything dedups
-    /// by content, so repeated calls (e.g. per REPL merge) return stable ids. Not
-    /// memoised for the same reason: registration is a handful of table lookups.
-    pub fn crash_table(&mut self) -> crate::bytecode::CrashTable {
-        let crash_key = self.register_annotation_key("crash");
-        let timeout_key = self.register_annotation_key("timeout");
-        let binary_type = self.register_type(Type::Binary);
-        let str_tuple = self.register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
-        let str_type = self.register_type(Type::Tuple(str_tuple));
-        // The capability-less process type `(@)` — the pid field grants identity only.
-        let pid_type = self.register_type(Type::Process {
-            send: None,
-            receive: None,
-            state: None,
-        });
-        let crash_fields = vec![
-            (Some("pid".to_string()), pid_type),
-            (Some("message".to_string()), str_type),
-        ];
-        let error_tuple = self.register_tuple(Some("Error".to_string()), crash_fields.clone());
-        let panic_tuple = self.register_tuple(Some("Panic".to_string()), crash_fields);
-        let killed_tuple = self.register_tuple(Some("Killed".to_string()), vec![]);
-        // Give each shape a type-table presence: checked retrievals (`x:('t)crash`)
-        // enumerate compatible concrete types from the types table.
-        let member_types: Vec<usize> = [error_tuple, panic_tuple, killed_tuple]
-            .into_iter()
-            .map(|tuple_id| self.register_type(Type::Tuple(tuple_id)))
-            .collect();
-        self.register_type(Type::Union(member_types));
-        // The reactive `Changed` wakeup. Content-addressed, so it
-        // shares the id of `std/proc.qv`'s `'changed = Changed`; given a type-table
-        // presence so `'%proc.changed` resolves and pattern-matching a delivered value
-        // works.
-        let changed_tuple = self.register_tuple(Some("Changed".to_string()), vec![]);
-        self.register_type(Type::Tuple(changed_tuple));
-        crate::bytecode::CrashTable {
-            crash_key,
-            timeout_key,
-            error_tuple,
-            panic_tuple,
-            killed_tuple,
-            str_tuple,
-            changed_tuple,
+    /// Resolve the host's runtime-delivered vocabulary against this (merged) program,
+    /// demand-scoped: crash shapes whenever declared (any process can crash), the
+    /// `Changed` wakeup only when its demanding builtin (`track`) is referenced, and
+    /// stream events for the stream resource kinds the program names. Registration is
+    /// content-addressed — repeated calls (e.g. per REPL merge) return stable ids,
+    /// and the shapes share ids with any source-level twins (`std/proc.qv`,
+    /// `std/tcp.qv`).
+    pub fn runtime_tables(
+        &mut self,
+        declarations: &crate::builtins::RuntimeDeclarations,
+    ) -> Result<crate::bytecode::RuntimeTables, crate::error::Error> {
+        let crash = match &declarations.crash {
+            Some(decl) => {
+                let crash_key = self.register_annotation_key(&decl.crash_key);
+                let timeout_key = self.register_annotation_key(&decl.timeout_key);
+                let str_tuple = self.vocabulary_tuple(&decl.str)?;
+                let error_tuple = self.vocabulary_tuple(&decl.error)?;
+                let panic_tuple = self.vocabulary_tuple(&decl.panic)?;
+                let killed_tuple = self.vocabulary_tuple(&decl.killed)?;
+                // Give the crash union a type-table presence: checked retrievals
+                // (`x:('t)crash`) enumerate compatible concrete types from it.
+                let member_types: Vec<usize> = [error_tuple, panic_tuple, killed_tuple]
+                    .into_iter()
+                    .map(|tuple_id| self.register_type(Type::Tuple(tuple_id)))
+                    .collect();
+                self.register_type(Type::Union(member_types));
+                Some(crate::bytecode::CrashTable {
+                    crash_key,
+                    timeout_key,
+                    error_tuple,
+                    panic_tuple,
+                    killed_tuple,
+                    str_tuple,
+                })
+            }
+            None => None,
+        };
+
+        let changed = match &declarations.changed {
+            Some(decl) if self.references_builtin(&decl.demand_builtin) => {
+                let tuple = self.vocabulary_tuple(&decl.tuple)?;
+                // Type-table presence so a delivered `Changed` pattern-matches.
+                self.register_type(Type::Tuple(tuple));
+                Some(tuple)
+            }
+            _ => None,
+        };
+
+        let streams = self.derive_stream_table(&declarations.streams)?;
+
+        Ok(crate::bytecode::RuntimeTables {
+            crash,
+            changed,
+            streams,
+        })
+    }
+
+    /// Whether this program references the named builtin (the demand signal for
+    /// gated runtime vocabulary — builtins are registered on use).
+    fn references_builtin(&self, name: &str) -> bool {
+        self.builtins.iter().any(|b| b.name == name)
+    }
+
+    /// Resolve a vocabulary declaration's tuple to its tuple id (registering it —
+    /// content-addressed, so it matches any source-level twin of the same shape).
+    fn vocabulary_tuple(
+        &mut self,
+        spec: &crate::builtins::TypeSpec,
+    ) -> Result<usize, crate::error::Error> {
+        match spec.resolve(self) {
+            Type::Tuple(tuple_id) => Ok(tuple_id),
+            other => Err(crate::error::Error::InvalidArgument(format!(
+                "vocabulary spec must be a tuple, got {other:?}"
+            ))),
         }
+    }
+
+    /// Resolve a stream declaration's event tuple to its tuple id (registering it —
+    /// content-addressed, so it matches any source-level twin of the same shape).
+    fn stream_event_tuple(
+        &mut self,
+        spec: &crate::builtins::TypeSpec,
+    ) -> Result<usize, crate::error::Error> {
+        match spec.resolve(self) {
+            Type::Tuple(tuple_id) => Ok(tuple_id),
+            other => Err(crate::error::Error::InvalidArgument(format!(
+                "stream event spec must be a tuple, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Derive the runtime stream table from the registry's stream declarations, for
+    /// the resource kinds this program actually names — a program touching no stream
+    /// resources gets an empty table and registers no event tuples. Indexed by
+    /// resource type id (`collect_resource_names` order, the same ids `Value::Resource`
+    /// carries).
+    fn derive_stream_table(
+        &mut self,
+        specs: &std::collections::HashMap<String, crate::builtins::StreamSpec>,
+    ) -> Result<crate::bytecode::StreamTable, crate::error::Error> {
+        // Two passes: resolving a spec's tuples can itself register resource names
+        // (a listener's spec names the socket kind it produces), so resolve first,
+        // then index against the final name order — the same order `Value::Resource`
+        // type ids use.
+        // (data tuple, resource tuple + produced kind, end tuple) per stream name.
+        type ResolvedSpec = (Option<usize>, Option<(usize, String)>, usize);
+        let initial = self.collect_resource_names();
+        let mut resolved: std::collections::HashMap<String, ResolvedSpec> =
+            std::collections::HashMap::new();
+        for name in &initial {
+            let Some(spec) = specs.get(name) else {
+                continue;
+            };
+            let data_tuple = match &spec.data {
+                Some(s) => Some(self.stream_event_tuple(s)?),
+                None => None,
+            };
+            let resource_tuple = match &spec.resource {
+                Some((s, produced)) => Some((self.stream_event_tuple(s)?, produced.clone())),
+                None => None,
+            };
+            let end_tuple = self.stream_event_tuple(&spec.end)?;
+            resolved.insert(name.clone(), (data_tuple, resource_tuple, end_tuple));
+        }
+        let names = self.collect_resource_names();
+        let mut streams = Vec::with_capacity(names.len());
+        for name in &names {
+            let Some((data_tuple, resource_tuple, end_tuple)) = resolved.get(name) else {
+                streams.push(None);
+                continue;
+            };
+            let resource_tuple = match resource_tuple {
+                Some((tuple, produced)) => {
+                    let produced_type =
+                        names.iter().position(|n| n == produced).ok_or_else(|| {
+                            crate::error::Error::InvalidArgument(format!(
+                                "stream `{name}` produces unregistered resource `{produced}`"
+                            ))
+                        })?;
+                    Some((*tuple, produced_type))
+                }
+                None => None,
+            };
+            streams.push(Some(crate::bytecode::StreamInfo {
+                data_tuple: *data_tuple,
+                resource_tuple,
+                end_tuple: *end_tuple,
+            }));
+        }
+        Ok(crate::bytecode::StreamTable { streams })
     }
 
     /// Register a failure-provenance site (debug builds), creating the table — its
@@ -546,5 +650,76 @@ impl Program {
                 panic!("Cannot convert ref to instructions")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtins::BuiltinRegistry;
+    use crate::effects::Effect;
+    use crate::value::ResourceId;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestEffect;
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    fn registry() -> BuiltinRegistry<TestEffect> {
+        let mut registry = BuiltinRegistry::with_modules(&crate::builtins::core_modules());
+        for module in crate::builtins::io_modules() {
+            module(&mut registry);
+        }
+        registry
+    }
+
+    #[test]
+    fn runtime_tables_are_demand_scoped() {
+        let registry = registry();
+        let declarations = registry.runtime_declarations().clone();
+
+        // A program touching nothing gated: crash vocabulary always resolves; the
+        // Changed wakeup and stream events do not.
+        let mut bare = Program::new();
+        let tables = bare.runtime_tables(&declarations).unwrap();
+        assert!(tables.crash.is_some());
+        assert!(tables.changed.is_none());
+        assert!(tables.streams.streams.iter().all(|s| s.is_none()));
+
+        // Referencing `track` demands the Changed vocabulary.
+        let mut tracking = Program::new();
+        tracking.register_builtin("track".to_string(), &registry);
+        let tables = tracking.runtime_tables(&declarations).unwrap();
+        assert!(tables.changed.is_some());
+        assert!(tables.streams.streams.iter().all(|s| s.is_none()));
+
+        // Referencing a network builtin names the stream resource kinds, demanding
+        // their event vocabulary — and the produced-kind link resolves.
+        let mut networked = Program::new();
+        networked.register_builtin("tcp_listen".to_string(), &registry);
+        let tables = networked.runtime_tables(&declarations).unwrap();
+        let names = networked.collect_resource_names();
+        let listener = names.iter().position(|n| n == "TcpListener").unwrap();
+        let socket = names.iter().position(|n| n == "TcpSocket").unwrap();
+        let info = tables.streams.streams[listener].as_ref().unwrap();
+        assert!(info.data_tuple.is_none());
+        assert_eq!(info.resource_tuple.unwrap().1, socket);
+        assert!(tables.changed.is_none());
+    }
+
+    #[test]
+    fn runtime_tables_ids_are_stable_across_calls() {
+        // Content-addressing: repeated derivation (per REPL merge) returns the same ids.
+        let registry = registry();
+        let declarations = registry.runtime_declarations().clone();
+        let mut program = Program::new();
+        program.register_builtin("track".to_string(), &registry);
+        let first = program.runtime_tables(&declarations).unwrap();
+        let second = program.runtime_tables(&declarations).unwrap();
+        assert_eq!(first, second);
     }
 }

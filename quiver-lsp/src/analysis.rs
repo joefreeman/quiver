@@ -32,9 +32,16 @@ pub struct Analysis {
 /// type-checks builtin calls without a real I/O backend.
 fn builtins() -> &'static BuiltinRegistry<NoEffect> {
     static REGISTRY: OnceLock<BuiltinRegistry<NoEffect>> = OnceLock::new();
-    // `core_modules` includes the IO builtins' signatures, so `%file`/`%dns` and direct
-    // `__file_read__` calls type-check with no runtime backend attached.
-    REGISTRY.get_or_init(|| BuiltinRegistry::with_modules(&core_modules()))
+    // The LSP edits code destined for arbitrary hosts, so it registers the permissive
+    // union: the always-set plus every io signature group. When the manifest grows a
+    // platform/capability declaration, this scopes per project instead.
+    REGISTRY.get_or_init(|| {
+        let mut registry = BuiltinRegistry::with_modules(&core_modules());
+        for module in quiver_core::builtins::io_modules() {
+            module(&mut registry);
+        }
+        registry
+    })
 }
 
 /// Parse and typecheck `text`, producing diagnostics, a semantic index, and symbols. Imports

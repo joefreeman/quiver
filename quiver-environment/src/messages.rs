@@ -2,8 +2,10 @@ use crate::WorkerId;
 use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
 use quiver_core::effects::Effect;
 use quiver_core::executor::ProgramUpdate;
-use quiver_core::process::{ProcessAdjacency, ProcessId, ProcessInfo, ProcessStatus, WorkerInfo};
-use quiver_core::value::Value;
+use quiver_core::process::{
+    ProcessAdjacency, ProcessId, ProcessInfo, ProcessStatus, StreamEvent, WorkerInfo,
+};
+use quiver_core::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -157,6 +159,17 @@ pub enum Command<E: Effect> {
         heap: Vec<Vec<u8>>,
     },
 
+    /// A stream resource's next event (the completion of a select-armed read):
+    /// stash it on the owning process and wake its select. `Data` bytes travel in
+    /// `heap`.
+    ResourceEvent {
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        resource_type: usize,
+        event: StreamEvent,
+        heap: Vec<Vec<u8>>,
+    },
+
     /// Read a process's current state on behalf of a remote `?` sample (a snapshot —
     /// the target is not disturbed and resource ownership does not transfer). When
     /// `subscribe` (a *tracked* sample), also register `caller` as a
@@ -228,6 +241,13 @@ pub enum Event<E: Effect> {
     AwaitAction {
         awaiter: ProcessId,
         targets: Vec<ProcessId>,
+    },
+
+    /// Action: arm a stream resource's next-event read for a parked select. The
+    /// completion returns as a `Command::ResourceEvent` to the resource's owner.
+    ArmStreamAction {
+        caller: ProcessId,
+        resource_id: ResourceId,
     },
 
     /// Action: kill a process (containment teardown, `%proc.kill`, or link

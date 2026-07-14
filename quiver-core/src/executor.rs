@@ -4,10 +4,10 @@ use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::process::{
     Action, Frame, Process, ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo,
-    ProcessStatus, RestrictedContext, SelectState, Watcher,
+    ProcessStatus, RestrictedContext, SelectState, StreamEvent, Watcher,
 };
 use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
-use crate::value::{Binary, MAX_BINARY_SIZE, Payload, Value};
+use crate::value::{Binary, MAX_BINARY_SIZE, Payload, ResourceId, Value};
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -40,9 +40,11 @@ pub struct ProgramUpdate {
     /// Failure-provenance sites (debug builds): the full table, from which the executor
     /// prebuilds each site's annotated-nil value. `None` leaves any existing table as is.
     pub debug: Option<crate::bytecode::SiteTable>,
-    /// Crash-delivery ids (both build modes; see `Program::crash_table`). `None` leaves
-    /// any existing table as is (the compile-time sync driver never delivers crashes).
-    pub crash: Option<crate::bytecode::CrashTable>,
+    /// The runtime-delivered vocabulary, resolved per merged program (see
+    /// `Program::runtime_tables`): crash shapes, the demand-scoped `Changed` wakeup,
+    /// and stream events. `None` leaves any existing tables as is (the compile-time
+    /// sync driver never delivers any of these).
+    pub runtime: Option<crate::bytecode::RuntimeTables>,
     /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
     /// treat structurally-identical tuples built via different paths as equal.
     pub canonical_tuples: Vec<usize>,
@@ -298,6 +300,10 @@ pub struct Executor<E: Effect> {
     // Crash delivery (both build modes): the ids for building `:crash`/`:timeout`
     // stamped nils (see `crash_result` / `handle_select_timeout`).
     crash_table: Option<crate::bytecode::CrashTable>,
+    /// The `Changed` wakeup tuple id — present iff the program demanded it (`track`).
+    changed_tuple: Option<usize>,
+    /// Stream event vocabulary by resource type id (see `ProgramUpdate::runtime`).
+    stream_table: Option<crate::bytecode::StreamTable>,
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
     // Profiling
@@ -398,7 +404,7 @@ impl<E: Effect> Executor<E> {
     /// references, recursing through tuples/functions. Deep and symmetric with [`release`];
     /// each `retain` must be matched by exactly one `release` when the reference leaves storage.
     ///
-    fn retain(&mut self, value: &Value) {
+    pub(crate) fn retain(&mut self, value: &Value) {
         match value {
             Value::Binary(Binary::Heap(idx)) => {
                 debug_assert!(
@@ -429,7 +435,7 @@ impl<E: Effect> Executor<E> {
     /// panics on underflow — a `release` without a matching `retain`, i.e. an unwired insertion
     /// site. A count reaching 0 queues the slot for `process_pending_free`, which frees it at
     /// the next safe point.
-    fn release(&mut self, value: &Value) {
+    pub(crate) fn release(&mut self, value: &Value) {
         match value {
             Value::Binary(Binary::Heap(idx)) => {
                 debug_assert!(
@@ -580,20 +586,28 @@ impl<E: Effect> Executor<E> {
             // `prune_watchers` when this process is reclaimed.
             process.subscriptions.clear();
             process.tracking = None;
+            // A dead process reads no more stream events: drop the stash (releasing
+            // its values below) and the armed set (an in-flight completion for a
+            // tombstone is dropped at delivery).
+            process.armed_resources.clear();
             Some((
                 std::mem::take(&mut process.stack),
                 std::mem::take(&mut process.mailbox),
                 std::mem::take(&mut process.awaiting),
                 process.select_state.take(),
+                std::mem::take(&mut process.resource_events),
             ))
         });
-        let Some((stack, mailbox, awaiting, select_state)) = taken else {
+        let Some((stack, mailbox, awaiting, select_state, resource_events)) = taken else {
             return;
         };
         for value in stack.iter().chain(mailbox.iter()) {
             self.release(value);
         }
         for value in awaiting.values().flatten() {
+            self.release(value);
+        }
+        for value in resource_events.values() {
             self.release(value);
         }
         if let Some(state) = select_state {
@@ -764,11 +778,12 @@ impl<E: Effect> Executor<E> {
     /// tuple, no heap. Its tuple id comes from the installed crash/runtime table, so it
     /// matches `std/proc.qv`'s `'changed = Changed`.
     pub fn changed_value(&self) -> Result<Value, Error> {
-        let table = self
-            .crash_table
-            .as_ref()
-            .ok_or_else(|| Error::InvalidArgument("crash table not installed".to_string()))?;
-        Ok(Value::tuple(table.changed_tuple, vec![]))
+        // Present iff the program references `track` — and wakeups require
+        // subscriptions, which require `track`, so absence here is a wiring bug.
+        let tuple = self.changed_tuple.ok_or_else(|| {
+            Error::InvalidArgument("Changed vocabulary not installed".to_string())
+        })?;
+        Ok(Value::tuple(tuple, vec![]))
     }
 
     /// Build — extracted, ready to ship — the `:crash`-stamped nil a never-lethal await
@@ -911,6 +926,9 @@ impl<E: Effect> Executor<E> {
             for value in process.awaiting.values().flatten() {
                 collect_heap_indices(value, &mut indices);
             }
+            for value in process.resource_events.values() {
+                collect_heap_indices(value, &mut indices);
+            }
         }
         for binary in self.constant_binaries.iter().flatten() {
             if let Binary::Heap(idx) = binary {
@@ -1044,6 +1062,8 @@ impl<E: Effect> Executor<E> {
             site_origins: vec![],
             origin_key: None,
             crash_table: None,
+            changed_tuple: None,
+            stream_table: None,
             builtins_registry,
             stats: ExecutionStats::new(),
             profile,
@@ -1323,6 +1343,80 @@ impl<E: Effect> Executor<E> {
         Ok(())
     }
 
+    /// Deliver a stream resource's next event (the completion of an armed select
+    /// read): build the event tuple, stash it on the owner — one slot per resource,
+    /// since at most one read is armed — and wake its select. A tombstoned owner
+    /// drops the event.
+    pub fn notify_resource_event(
+        &mut self,
+        id: ProcessId,
+        resource_id: ResourceId,
+        resource_type: usize,
+        event: StreamEvent,
+        heap: Vec<Vec<u8>>,
+    ) -> Result<(), Error> {
+        let deliverable = self
+            .get_process(id)
+            .is_some_and(|p| p.persistent || p.result.is_none());
+        if !deliverable {
+            if let Some(process) = self.get_process_mut(id) {
+                process.armed_resources.remove(&resource_id);
+            }
+            return Ok(());
+        }
+
+        let info = self
+            .stream_table
+            .as_ref()
+            .and_then(|table| table.streams.get(resource_type))
+            .and_then(|entry| entry.clone())
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "no stream declaration for resource type {resource_type}"
+                ))
+            })?;
+        let source = Value::Resource(resource_id, resource_type);
+        let value = match event {
+            StreamEvent::Data => {
+                let tuple = info.data_tuple.ok_or_else(|| {
+                    Error::InvalidArgument("stream kind yields no bytes".to_string())
+                })?;
+                let bytes = heap.into_iter().next().unwrap_or_default();
+                let binary = self.allocate_binary(bytes)?;
+                Value::tuple(tuple, vec![source, Value::Binary(binary)])
+            }
+            StreamEvent::Resource {
+                resource_id: produced,
+            } => {
+                let (tuple, produced_type) = info.resource_tuple.ok_or_else(|| {
+                    Error::InvalidArgument("stream kind yields no resources".to_string())
+                })?;
+                Value::tuple(
+                    tuple,
+                    vec![source, Value::Resource(produced, produced_type)],
+                )
+            }
+            StreamEvent::End => Value::tuple(info.end_tuple, vec![source]),
+        };
+        self.retain(&value);
+
+        let process = self.get_process_mut(id).unwrap();
+        process.armed_resources.remove(&resource_id);
+        let displaced = process.resource_events.insert(resource_id, value);
+        debug_assert!(
+            displaced.is_none(),
+            "a stream resource may have at most one event in flight"
+        );
+        if let Some(old) = displaced {
+            self.release(&old);
+        }
+
+        if self.selecting.remove(&id) {
+            self.queue.push_back(id);
+        }
+        Ok(())
+    }
+
     pub fn mark_spawning(&mut self, id: ProcessId) {
         self.spawning.insert(id);
         self.queue.retain(|&pid| pid != id);
@@ -1446,6 +1540,9 @@ impl<E: Effect> Executor<E> {
             }
         }
         for value in process.awaiting.values().flatten() {
+            collect_heap_indices(value, &mut total);
+        }
+        for value in process.resource_events.values() {
             collect_heap_indices(value, &mut total);
         }
 
@@ -1572,8 +1669,10 @@ impl<E: Effect> Executor<E> {
         if let Some(table) = update.debug {
             self.install_sites(&table);
         }
-        if let Some(table) = update.crash {
-            self.crash_table = Some(table);
+        if let Some(tables) = update.runtime {
+            self.crash_table = tables.crash;
+            self.changed_tuple = tables.changed;
+            self.stream_table = Some(tables.streams);
         }
     }
 
@@ -2840,8 +2939,8 @@ impl<E: Effect> Executor<E> {
                 }))
             }
             Value::Resource(_resource_id, _) => {
-                // Resources are opaque handles - cannot send to them directly
-                // Use built-in functions like __file_write__ or __tcp_socket_write__ instead
+                // Resources are opaque handles — writes go through their builtins,
+                // not sends.
                 Err(Error::TypeMismatch {
                     expected: "process".to_string(),
                     found: "resource".to_string(),
@@ -3032,6 +3131,19 @@ impl<E: Effect> Executor<E> {
             })
             .collect();
 
+        // Stream-resource sources: arm each one's next-event read, unless an event is
+        // already stashed (consumed by the coming scan — the next select re-arms) or a
+        // read is already armed (an earlier select's event is still in flight).
+        let mut arm: Vec<ResourceId> = Vec::new();
+        for source in &sources {
+            if let Value::Resource(rid, _) = source
+                && !process.resource_events.contains_key(rid)
+                && process.armed_resources.insert(*rid)
+            {
+                arm.push(*rid);
+            }
+        }
+
         let current_frame = process.frames.len().saturating_sub(1);
         let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
 
@@ -3051,10 +3163,12 @@ impl<E: Effect> Executor<E> {
             receiving: None,
         });
 
-        // If we found PIDs, register awaits before processing sources. Re-awaiting a
-        // target displaces the previously stored result — release it (it was retained
-        // when it entered the map).
-        if !pid_targets.is_empty() {
+        // If we found PIDs or resources to arm, register/route before processing
+        // sources. Re-awaiting a target displaces the previously stored result —
+        // release it (it was retained when it entered the map). The scan happens on
+        // the guaranteed wake (the await answer, or the worker's wake after routing
+        // the arms).
+        if !pid_targets.is_empty() || !arm.is_empty() {
             let mut displaced = Vec::new();
             for target in &pid_targets {
                 if let Some(Some(old)) = process.awaiting.insert(*target, None) {
@@ -3069,6 +3183,7 @@ impl<E: Effect> Executor<E> {
             return Ok(Some(Action::Await {
                 targets: pid_targets,
                 caller: pid,
+                arm,
             }));
         }
 
@@ -3157,13 +3272,19 @@ impl<E: Effect> Executor<E> {
                         }
                     }
                 }
-                Value::Resource(_resource_id, _) => {
-                    // Resources are opaque handles - cannot select on them directly
-                    // Use built-in functions like __file_read__, __tcp_socket_read__, or __tcp_listener_accept__ instead
-                    return Err(Error::TypeMismatch {
-                        expected: "process, timeout, or receive function".to_string(),
-                        found: "resource".to_string(),
-                    });
+                Value::Resource(resource_id, _) => {
+                    // A stream resource: complete with its stashed next event if one
+                    // has arrived (the armed read was routed at initialization);
+                    // otherwise keep waiting — the event's arrival wakes this select.
+                    let stashed = self
+                        .get_process_mut(pid)
+                        .and_then(|p| p.resource_events.remove(resource_id));
+                    if let Some(event) = stashed {
+                        let completed = self.complete_select(pid, event.clone());
+                        // The stash held one retain; complete_select retained again.
+                        self.release(&event);
+                        return completed;
+                    }
                 }
                 _ => {
                     return Err(Error::InvalidArgument(format!(
@@ -3639,6 +3760,42 @@ impl<E: Effect> Executor<E> {
 
     /// Extract heap data from a value for serialization across thread boundaries
     /// Returns (value, heap_data) where heap_data is a Vec of flattened binary data
+    /// Extract heap data across several values at once, remapped against ONE shared
+    /// index space — the values ship with a single side-channel vec (a spawn's
+    /// captures plus argument). Extracting values separately and concatenating their
+    /// vecs would leave every value after the first pointing at the wrong entries.
+    pub fn extract_heap_data_many(
+        &self,
+        values: &[Value],
+    ) -> Result<(Vec<Value>, Vec<Vec<u8>>), Error> {
+        let mut heap_indices = HashSet::new();
+        for value in values {
+            collect_heap_indices(value, &mut heap_indices);
+        }
+        let mut indices_vec: Vec<usize> = heap_indices.into_iter().collect();
+        indices_vec.sort_unstable();
+        let mut index_map = HashMap::new();
+        for (new_idx, &old_idx) in indices_vec.iter().enumerate() {
+            index_map.insert(old_idx, new_idx);
+        }
+        let mut heap_data = Vec::new();
+        for &old_idx in &indices_vec {
+            if let Some(binary_data) = self.heap.get(old_idx) {
+                heap_data.push(binary_data.to_vec());
+            } else {
+                return Err(Error::InvalidArgument(format!(
+                    "Heap index {} not found",
+                    old_idx
+                )));
+            }
+        }
+        let remapped = values
+            .iter()
+            .map(|value| remap_heap_indices(value, &index_map))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((remapped, heap_data))
+    }
+
     pub fn extract_heap_data(&self, value: &Value) -> Result<(Value, Vec<Vec<u8>>), Error> {
         // Collect all unique heap indices referenced by this value
         let mut heap_indices = HashSet::new();

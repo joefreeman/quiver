@@ -69,6 +69,7 @@ impl ReplCli {
         }
         let effect_backend = crate::create_effect_backend();
         let mut environment = Environment::<NativeEffect>::new(workers);
+        environment.set_runtime_declarations(builtins.runtime_declarations().clone());
 
         // Set the effect backend
         if let Some(backend) = effect_backend {

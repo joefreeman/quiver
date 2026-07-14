@@ -13,10 +13,17 @@
 // keep-alive survives both. Keep-alive is HTTP/1.1's default (`Connection: close`
 // honored); responses are always Content-Length framed. `HEAD` answers like `GET`
 // with the body bytes dropped.
+//
+// A handler may instead answer `Upgrade[handler: …]` — "switch this connection":
+// the pump validates the WebSocket handshake, answers 101, and hands the socket to
+// the upgrade handler as a `'%http/websocket` connection, in the connection's own
+// process. The connection ends with that handler (a socket it leaves open is closed
+// with the process); a request with no Sec-WebSocket-Key answers 400.
 
 'request = '%http
 'response = '%http.response
-'handler = #'request -> ('response | [])
+'upgrade = Upgrade[handler: #'%http/websocket -> (Ok | [])]
+'handler = #'request -> ('response | 'upgrade | [])
 
 // A plain-text response with the given status.
 plain = #['int, Str['bin]] {
@@ -60,27 +67,48 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
       // degrading to the 500 below exactly like a plain failed handler.
       hp = req ~> @h
       r = !hp
-      resp = {
-        | r ~> =('%http.response)ok => ok
-        | plain [500, "Internal Server Error"]
-      }
-      // (Explicit construction, not `resp ~[..., …]`: ripple-spread currently types its
-      // result as an unnamed tuple even though the value keeps its name — TODO compiler.)
-      resp2 = {
-        | req.method ~> =HEAD => Response[
-          status: resp.status,
-          headers: Cons[
-            ["content-length", %bin.length resp.body ~> %str.from_int],
-            resp.headers,
-          ],
-          body: 0x,
-        ]
-        | resp
-      }
-      __tcp_socket_write__ [sock, %http.serialize_response resp2]
       {
-        | keep_alive? req => ^ [sock, &h, rest]
-        | __tcp_socket_close__ sock
+        | r ~> =Upgrade[handler: wh] => {
+          // "Switch this connection": answer the WebSocket handshake and hand the
+          // socket over. The pump's job ends here — the connection process ends
+          // with the upgrade handler, auto-closing a socket it leaves open. Any
+          // bytes already read past the request seed the connection's buffer.
+          | %http.header [req.headers, "sec-websocket-key"] ~> =Str[k] => {
+              __tcp_socket_write__ [sock, %http/websocket.handshake_response Str[k]]
+              %http/websocket.conn [sock, rest] ~> wh
+            }
+          | {
+            out =
+              plain [400, "Bad Request"] ~> %http.serialize_response
+
+            __tcp_socket_write__ [sock, out]
+            __tcp_socket_close__ sock
+          }
+        }
+        | {
+          resp = {
+            | r ~> =('%http.response)ok => ok
+            | plain [500, "Internal Server Error"]
+          }
+          // (Explicit construction, not `resp ~[..., …]`: ripple-spread currently types its
+          // result as an unnamed tuple even though the value keeps its name — TODO compiler.)
+          resp2 = {
+            | req.method ~> =HEAD => Response[
+              status: resp.status,
+              headers: Cons[
+                ["content-length", %bin.length resp.body ~> %str.from_int],
+                resp.headers,
+              ],
+              body: 0x,
+            ]
+            | resp
+          }
+          __tcp_socket_write__ [sock, %http.serialize_response resp2]
+          {
+            | keep_alive? req => ^ [sock, &h, rest]
+            | __tcp_socket_close__ sock
+          }
+        }
       }
     }
   }

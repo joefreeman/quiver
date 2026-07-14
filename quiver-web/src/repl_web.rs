@@ -312,7 +312,13 @@ impl Environment {
 
         // Create environment
         // WASM doesn't use old io_backend (no io_uring available)
-        let environment = quiver_environment::Environment::new(workers);
+        let mut environment = quiver_environment::Environment::new(workers);
+        // The scoped (always-set) registry still declares the crash and Changed
+        // vocabulary; it declares no streams, matching the absent io capability.
+        let web_builtins = quiver_core::builtins::BuiltinRegistry::<WebEffect>::with_modules(
+            &quiver_core::builtins::core_modules(),
+        );
+        environment.set_runtime_declarations(web_builtins.runtime_declarations().clone());
         let environment_rc = Rc::new(RefCell::new(environment));
         let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let subscription_callbacks = Rc::new(RefCell::new(HashMap::new()));
@@ -767,7 +773,7 @@ impl Repl {
         let resolver = create_resolver(parse_files(files)?)?;
         // For WASM, use core modules only (no network builtins)
         let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
-            &quiver_core::builtins::core_modules(),
+            &quiver_core::builtins::core_modules(), // capability-scoped: no io
         );
         let repl = quiver_environment::Repl::new(&mut *env_rc.borrow_mut(), resolver, builtins)
             .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;

@@ -1,8 +1,8 @@
 mod common;
 use common::*;
 
-// `%hash` (std/hash.qv): SHA-256 and HMAC-SHA256, pure Quiver — all deterministic,
-// pinned to the standard test vectors.
+// `%hash` (std/hash.qv): SHA-256, HMAC-SHA256, and SHA-1, pure Quiver — all
+// deterministic, pinned to the standard test vectors.
 
 #[test]
 fn test_sha256_nist_vectors() {
@@ -56,4 +56,20 @@ fn test_bin_hex_codecs() {
         .expect("0xdeadbeef");
     quiver().evaluate(r#""abc" ~> %bin.from_hex"#).expect("[]"); // odd length
     quiver().evaluate(r#""zz" ~> %bin.from_hex"#).expect("[]"); // non-hex
+}
+
+#[test]
+fn test_sha1_fips_vectors() {
+    // FIPS 180-4 examples: empty, "abc", and a two-block message.
+    quiver()
+        .evaluate(r#""" ~> .0 ~> %hash.sha1 ~> %bin.to_hex"#)
+        .expect(r#""da39a3ee5e6b4b0d3255bfef95601890afd80709""#);
+    quiver()
+        .evaluate(r#""abc" ~> .0 ~> %hash.sha1 ~> %bin.to_hex"#)
+        .expect(r#""a9993e364706816aba3e25717850c26c9cd0d89d""#);
+    quiver()
+        .evaluate(
+            r#""abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" ~> .0 ~> %hash.sha1 ~> %bin.to_hex"#,
+        )
+        .expect(r#""84983e441c3bd26ebaae4aa1f95129e5e54670f1""#);
 }

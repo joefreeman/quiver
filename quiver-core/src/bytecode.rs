@@ -100,11 +100,42 @@ pub struct CrashTable {
     pub killed_tuple: usize,
     /// Tuple id of `Str['bin]`.
     pub str_tuple: usize,
-    /// Tuple id of `Changed` (empty) — the reactive state-change wakeup delivered to a
-    /// `Watcher::Subscriber`. Not crash-related, but registered
-    /// alongside the crash ids since it is likewise a runtime-built, runtime-delivered
-    /// value the executor needs a tuple id for.
-    pub changed_tuple: usize,
+}
+
+/// One stream resource kind's event-tuple ids — how the executor turns a generic
+/// [`crate::process::StreamEvent`] into the kind's declared tuples. Derived from the
+/// registry's stream declarations for the resource kinds a program actually names
+/// (see `Program::derive_stream_table`); a program touching no streams carries none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamInfo {
+    /// The bytes event's tuple (`[source, 'bin]`-shaped), when the kind yields bytes.
+    pub data_tuple: Option<usize>,
+    /// The fresh-resource event's tuple (`[source, produced]`-shaped) and the
+    /// produced resource's type id, when the kind yields resources.
+    pub resource_tuple: Option<(usize, usize)>,
+    /// The end-of-stream event's tuple (`[source]`-shaped).
+    pub end_tuple: usize,
+}
+
+/// Stream event vocabulary for the whole program, indexed by resource type id
+/// (`None` for non-stream kinds).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StreamTable {
+    pub streams: Vec<Option<StreamInfo>>,
+}
+
+/// Everything the runtime may deliver to this program, resolved to merged-program
+/// ids from the host's [`crate::builtins::RuntimeDeclarations`] at each merge
+/// (`Program::runtime_tables`) and shipped on `ProgramUpdate`. Each member is
+/// demand-scoped: `crash` requires only the declaration (any process can crash),
+/// `changed` additionally requires the program to reference its demanding builtin
+/// (`track`), and `streams` covers the stream resource kinds the program names.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeTables {
+    pub crash: Option<CrashTable>,
+    /// The `Changed` wakeup tuple id, when demanded.
+    pub changed: Option<usize>,
+    pub streams: StreamTable,
 }
 
 /// The failure-provenance table of a debug build: the sites plus the ids the executor

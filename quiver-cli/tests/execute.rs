@@ -75,7 +75,11 @@ fn top_level_ref_minting_is_permitted() {
     // used and discarded during top-level evaluation. (Escaping a ref into the emitted
     // bytecode is a separate lowering limitation.)
     let out = quiv()
-        .args(["run", "-e", "a = %ref; b = %ref; x = { a ~> =&b => 1 | 2 }; #{ x }"])
+        .args([
+            "run",
+            "-e",
+            "a = %ref; b = %ref; x = { a ~> =&b => 1 | 2 }; #{ x }",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success(), "expected success");

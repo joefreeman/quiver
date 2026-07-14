@@ -22,6 +22,9 @@ pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver
     let mut registry = quiver_core::builtins::BuiltinRegistry::with_modules(
         &quiver_core::builtins::core_modules(),
     );
+    for module in quiver_core::builtins::io_modules() {
+        module(&mut registry);
+    }
     // Add I/O builtins from quiver-io
     // Signatures came from `core_modules`; attach the native implementations.
     quiver_io::attach_network_builtins(&mut registry);
@@ -504,6 +507,7 @@ fn execute_bytecode_with_environment(
     // Create environment with effect backend
     let effect_backend = create_effect_backend();
     let mut environment = Environment::<quiver_io::NativeEffect>::new(workers);
+    environment.set_runtime_declarations(builtins.runtime_declarations().clone());
 
     if let Some(backend) = effect_backend {
         environment.set_effect_backend(backend);

@@ -230,7 +230,11 @@ impl std::fmt::Display for Error {
         match self {
             Error::VariableUndefined(name) => write!(f, "Undefined variable: {name}"),
             Error::Noted { error, note } => write!(f, "{error} ({note})"),
-            Error::BuiltinUndefined(name) => write!(f, "Undefined builtin: {name}"),
+            Error::BuiltinUndefined(name) => write!(
+                f,
+                "builtin `__{name}__` is not available on this host (its capability \
+                 group is not registered)"
+            ),
             Error::FunctionUndefined(index) => write!(f, "Undefined function: {index}"),
             Error::TypeUnresolved(name) => write!(f, "Unresolved type: {name}"),
             Error::TypeAliasMissing(name) => write!(f, "Unknown type alias: {name}"),
@@ -4774,6 +4778,36 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Timeout source: nil, stamped `:timeout` at runtime (row-invisible,
                     // hence the exact row here too).
                     result_types.push(annotations::closed_nil(self.program));
+                }
+                Type::Resource(name) => {
+                    // A stream resource yields its registry-declared event type (a
+                    // socket: `Data[sock, data] | Closed[sock]`; a listener:
+                    // `Accepted[...] | Closed[...]`). Resource kinds without a stream
+                    // declaration have no externally-timed next event and are not
+                    // selectable. Resolution registers the event tuples on demand —
+                    // content-addressed, so they match the runtime's stream table and
+                    // any source-level twins (`std/tcp.qv`).
+                    let name = name.clone();
+                    match self.builtins.stream_spec(&name).cloned() {
+                        Some(spec) => {
+                            let mut members = Vec::new();
+                            if let Some(data) = &spec.data {
+                                members.push(data.resolve_to_id(self.program));
+                            }
+                            if let Some((resource, _)) = &spec.resource {
+                                members.push(resource.resolve_to_id(self.program));
+                            }
+                            members.push(spec.end.resolve_to_id(self.program));
+                            result_types.push(typing::union_type_ids(self.program, members));
+                        }
+                        None => {
+                            return Err(Error::TypeMismatch {
+                                expected: "a stream resource (one with a declared next event)"
+                                    .to_string(),
+                                found: format!("\\{name} (not a stream — no next event)"),
+                            });
+                        }
+                    }
                 }
                 _ => {
                     return Err(Error::TypeMismatch {

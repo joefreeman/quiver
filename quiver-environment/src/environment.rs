@@ -483,6 +483,10 @@ pub struct Environment<E: Effect> {
 
     // Effect backend and resource management
     effect_backend: Option<Box<dyn EffectBackend<E = E>>>,
+    /// The runtime-delivered vocabulary the host's registry declares (crash shapes,
+    /// the reactive wakeup, stream events) — resolved against the merged program at
+    /// each merge (`Program::runtime_tables`).
+    runtime_declarations: quiver_core::builtins::RuntimeDeclarations,
     resource_ownership: HashMap<ResourceId, ProcessId>,
 
     // Process reclamation. At most one round runs
@@ -508,6 +512,7 @@ impl<E: Effect> Environment<E> {
             next_request_id: 0,
             next_process_id: 0,
             effect_backend: None,
+            runtime_declarations: quiver_core::builtins::RuntimeDeclarations::default(),
             resource_ownership: HashMap::new(),
             collection: None,
             spawns_since_collection: 0,
@@ -523,6 +528,17 @@ impl<E: Effect> Environment<E> {
     }
 
     /// Set the effect backend for executing platform-specific effects
+    /// Install the host's runtime-delivered vocabulary (from its builtin registry:
+    /// `registry.runtime_declarations()`), resolved against the merged program at
+    /// each merge. Without it, crash payloads degrade to bare nils and stream
+    /// selects cannot be served — call it right after construction.
+    pub fn set_runtime_declarations(
+        &mut self,
+        declarations: quiver_core::builtins::RuntimeDeclarations,
+    ) {
+        self.runtime_declarations = declarations;
+    }
+
     pub fn set_effect_backend(&mut self, backend: Box<dyn EffectBackend<E = E>>) {
         self.effect_backend = Some(backend);
         // Hand the backend the type ids it needs for any program already loaded (the backend may
@@ -553,6 +569,19 @@ impl<E: Effect> Environment<E> {
                 did_work = true;
                 for (process_id, completion) in completions {
                     self.handle_effect_completion(process_id, completion)?;
+                }
+            }
+        }
+
+        // Route completed armed stream reads to their resources' owners (a select-armed
+        // read completes here even if the select has since been won by another source —
+        // the owner stashes it for its next select or read).
+        if let Some(effect_backend) = self.effect_backend.as_mut() {
+            let events = effect_backend.take_stream_events();
+            if !events.is_empty() {
+                did_work = true;
+                for (resource_id, resource_type, event, heap) in events {
+                    self.route_stream_event(resource_id, resource_type, event, heap)?;
                 }
             }
         }
@@ -1074,7 +1103,10 @@ impl<E: Effect> Environment<E> {
         // deltas below are computed, so the workers receive their tuple infos and the
         // compatibility tables cover them (checked `:crash` retrievals test against
         // these shapes structurally).
-        let crash_table = self.program.crash_table();
+        let runtime_tables = self
+            .program
+            .runtime_tables(&self.runtime_declarations)
+            .map_err(EnvironmentError::Executor)?;
 
         // Compute deltas - only new items since before the merge
         let new_constants: Vec<Constant> =
@@ -1126,7 +1158,7 @@ impl<E: Effect> Environment<E> {
                 canonical_tuples,
                 // Full snapshot: the executor rebuilds its prebuilt site values from it.
                 debug: self.program.debug_sites().cloned(),
-                crash: Some(crash_table),
+                runtime: Some(runtime_tables),
             };
 
             let update_cmd = Command::UpdateProgram(Box::new(update));
@@ -1203,6 +1235,10 @@ impl<E: Effect> Environment<E> {
             Event::EffectRequest { process_id, effect } => {
                 self.handle_effect_request(process_id, effect)
             }
+            Event::ArmStreamAction {
+                caller,
+                resource_id,
+            } => self.handle_arm_stream(caller, resource_id),
             Event::ReadStateAction {
                 caller,
                 target,
@@ -2136,6 +2172,76 @@ impl<E: Effect> Environment<E> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Arm a stream resource's next-event read for a parked select. Ownership is
+    /// enforced like any effect on an existing resource; a violation (or a
+    /// stream-less backend) fails the caller as a runtime error rather than leaving
+    /// its select waiting on an event that never arrives.
+    fn handle_arm_stream(
+        &mut self,
+        caller: ProcessId,
+        resource_id: ResourceId,
+    ) -> Result<(), EnvironmentError> {
+        if let Some(owner) = self.resource_ownership.get(&resource_id)
+            && *owner != caller
+        {
+            return self.report_effect_error(
+                caller,
+                format!("Process {} does not own resource {}", caller, resource_id),
+            );
+        }
+        let Some(effect_backend) = self.effect_backend.as_mut() else {
+            return self.report_effect_error(caller, "No effect backend available".to_string());
+        };
+        if let Err(e) = effect_backend.arm_stream(resource_id) {
+            return self.report_effect_error(caller, format!("{:?}", e));
+        }
+        Ok(())
+    }
+
+    /// Route a completed armed read to its resource's owner as a `ResourceEvent`
+    /// command. An `Accepted` event's fresh socket is recorded as owned by the
+    /// acceptor before it ships. An unowned resource (its owner died — cleanup
+    /// already closed what it could) drops the event.
+    fn route_stream_event(
+        &mut self,
+        resource_id: ResourceId,
+        resource_type: usize,
+        event: quiver_core::process::StreamEvent,
+        heap: Vec<Vec<u8>>,
+    ) -> Result<(), EnvironmentError> {
+        let Some(owner) = self.resource_ownership.get(&resource_id).copied() else {
+            // Owner gone: release anything the event carries. A fresh produced
+            // resource (an accepted socket) would leak its fd otherwise.
+            if let quiver_core::process::StreamEvent::Resource {
+                resource_id: produced,
+            } = event
+                && let Some(backend) = self.effect_backend.as_mut()
+            {
+                backend.close_resource(produced);
+            }
+            return Ok(());
+        };
+        if let quiver_core::process::StreamEvent::Resource {
+            resource_id: produced,
+        } = &event
+        {
+            self.resource_ownership.insert(*produced, owner);
+        }
+        let worker_id = self
+            .process_router
+            .get(&owner)
+            .copied()
+            .ok_or(EnvironmentError::ProcessNotFound(owner))?;
+        self.workers[worker_id].send(Command::ResourceEvent {
+            process_id: owner,
+            resource_id,
+            resource_type,
+            event,
+            heap,
+        })?;
         Ok(())
     }
 

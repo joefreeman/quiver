@@ -1191,3 +1191,25 @@ fn test_receive_type_propagates_through_tail_call() {
         )
         .expect("5");
 }
+
+#[test]
+fn test_spawn_captures_and_heap_argument_share_one_index_space() {
+    // Regression: a spawn's captures and argument ship with ONE heap side-channel.
+    // Extracting them separately (each 0-based) and concatenating the vecs left the
+    // argument's binaries pointing at the wrong entries whenever a capture carried
+    // heap data — a captured string emptied the argument's segments.
+    quiver()
+        .evaluate(
+            r#"
+            s = %bin.concat ["bo" ~> .0, "o!" ~> .0]
+            h = #[Str['bin], Str['bin]] {
+              cap = s
+              [$0, $1, Str[cap]]
+            }
+            arg = [%bin.concat ["w" ~> .0, "s" ~> .0] ~> Str[~], "plain"]
+            hp = arg ~> @h
+            !hp
+            "#,
+        )
+        .expect(r#"["ws", "plain", "boo!"]"#);
+}

@@ -173,6 +173,42 @@ fn unimplemented_builtin<E: Effect>(
     unreachable!("IO builtin registered for its signature only; no implementation in this host")
 }
 
+/// The network resource kinds' stream declarations: what a select on each yields.
+/// Part of the capability contract, like the signatures — a host registering the
+/// network builtins gets selectable sockets/listeners with it.
+fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let socket = TypeSpec::Resource("TcpSocket".to_string());
+    let listener = TypeSpec::Resource("TcpListener".to_string());
+    registry.register_stream(
+        "TcpSocket",
+        crate::builtins::StreamSpec {
+            data: Some(TypeSpec::Tuple(
+                Some("Data"),
+                vec![
+                    (Some("sock"), socket.clone()),
+                    (Some("data"), TypeSpec::Binary),
+                ],
+            )),
+            resource: None,
+            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("sock"), socket.clone())]),
+        },
+    );
+    registry.register_stream(
+        "TcpListener",
+        crate::builtins::StreamSpec {
+            data: None,
+            resource: Some((
+                TypeSpec::Tuple(
+                    Some("Accepted"),
+                    vec![(Some("listener"), listener.clone()), (Some("sock"), socket)],
+                ),
+                "TcpSocket".to_string(),
+            )),
+            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("listener"), listener)]),
+        },
+    );
+}
+
 /// Register the IO builtins' type signatures (no implementations) — so code using `__file_read__`,
 /// `%file`, `%dns`, etc. type-checks in a host that doesn't run effects. The purity classes are
 /// part of the contract: file/network builtins park for effects, and the system builtins
@@ -182,6 +218,7 @@ pub fn register_io_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     for (name, param, result) in file_signatures().into_iter().chain(network_signatures()) {
         registry.register(name.to_string(), placeholder, Purity::Effect, param, result);
     }
+    register_network_streams(registry);
     for (name, param, result) in system_signatures() {
         registry.register(
             name.to_string(),

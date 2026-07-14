@@ -1,0 +1,360 @@
+// WebSocket (RFC 6455) server support over the TCP builtins: the handshake accept
+// key, the frame codec (client frames arrive masked; server frames are sent bare),
+// and a message-level connection API — `%http/server` hands a connection here when a
+// handler answers `Upgrade`.
+//
+// `recv` blocks on the socket and yields whole messages: pings are answered and
+// pongs skipped transparently, fragmented messages are assembled (bounded by the
+// frame/message caps — limits, not timeouts, like the HTTP codec), and a Close —
+// received, or sent by `recv` itself on a protocol violation — is echoed, the TCP
+// socket dropped, and the Close yielded. Sends write single unfragmented frames.
+// Text payloads are not UTF-8 validated.
+
+' = Conn[sock: \TcpSocket, buf: 'bin, part: (Nil | Part[opcode: 'int, data: 'bin])]
+
+'message = Text[Str['bin]] | Binary['bin] | Close[code: 'int, reason: Str['bin]]
+'messages = Nil | Cons['message, ^]
+'frame = Frame[fin: 'int, opcode: 'int, payload: 'bin]
+
+// Frame and assembled-message size cap (16 MiB).
+max_payload = 16777216
+
+accept_key = #Str['bin] {
+  :doc "The Sec-WebSocket-Accept value for a Sec-WebSocket-Key: base64(sha1(key ++ GUID))."
+  =Str[k]
+
+  %bin.concat [k, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ~> .0] ~> %hash.sha1
+  ~> %bin.to_base64
+}
+
+handshake_response = #Str['bin] {
+  :doc "The 101 Switching Protocols bytes answering a handshake with the given Sec-WebSocket-Key."
+  "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept_key $}\r\n\r\n" ~> .0
+}
+
+// XOR a payload with the repeating 4-byte mask (its own inverse). The repeated key
+// is sliced to the payload length — XOR of unequal lengths zero-pads to the longer.
+apply_mask = #['bin, 'bin] {
+  =[payload, key]
+  n = %bin.length payload
+  {
+    | n ~> =0 => 0x
+    | {
+      reps = __integer_divide__ [__integer_add__ [n, 3], 4]
+      %bin.xor [payload, __binary_repeat__ [key, reps] ~> %bin.slice [~, 0, n]]
+    }
+  }
+}
+
+// The first two header bytes for a frame: FIN plus opcode, then the 7-bit length
+// code (with the mask bit when `mask_bit` is 128) and any extended length bytes.
+frame_head = #['int, 'int, 'int] {
+  =[opcode, n, mask_bit]
+  b0 = __binary_append__ [0x, __integer_add__ [128, opcode], 1]
+  {
+    | __integer_compare__ [n, 126] ~> =-1 => __binary_append__ [
+      b0,
+      __integer_add__ [mask_bit, n],
+      1,
+    ]
+    | __integer_compare__ [n, 65536] ~> =-1 => __binary_append__ [b0, __integer_add__ [mask_bit, 126], 1] ~> __binary_append__ [
+      ~,
+      n,
+      2,
+    ]
+    | __binary_append__ [b0, __integer_add__ [mask_bit, 127], 1] ~> __binary_append__ [~, n, 8]
+  }
+}
+
+encode_frame = #['int, 'bin] {
+  :doc "One unfragmented server-to-client frame (FIN set, unmasked): [opcode, payload]."
+  =[opcode, payload]
+  %bin.concat [frame_head [opcode, %bin.length payload, 0], payload]
+}
+
+encode_masked_frame = #['int, 'bin, 'bin] {
+  :doc "One unfragmented client-to-server frame, masked with the 4-byte key — the client half of the codec."
+  =[opcode, payload, key]
+
+  frame_head [opcode, %bin.length payload, 128] ~> %bin.concat [~, key] ~> %bin.concat [
+    ~,
+    apply_mask [payload, key],
+  ]
+}
+
+// The frame proper, once the payload length and mask offset are known.
+frame_tail = #['bin, 'int, 'int, 'int, 'int] {
+  =[buf, fin, opcode, plen, moff]
+  {
+    | __integer_compare__ [plen, max_payload] ~> =1 => Bad["frame too large"]
+    | __integer_compare__ [opcode, 8] ~> =(0 | 1)
+      {
+        | fin ~> =0 => Ok
+        | __integer_compare__ [plen, 125] ~> =1 => Ok
+        | []
+      } => Bad["malformed control frame"]
+    | {
+      total = __integer_add__ [moff, 4] ~> __integer_add__ [~, plen]
+      {
+        | __integer_compare__ [%bin.length buf, total] ~> =-1 => Incomplete
+        | {
+          key = %bin.slice [buf, moff, __integer_add__ [moff, 4]]
+
+          payload = %bin.slice [buf, __integer_add__ [moff, 4], total] ~> apply_mask [~, key]
+
+          [
+            Frame[fin: fin, opcode: opcode, payload: payload],
+            %bin.slice [buf, total, %bin.length buf],
+          ]
+        }
+      }
+    }
+  }
+}
+
+parse_frame = #'bin {
+  :doc "One client frame off the front of the buffer, unmasked: [frame, rest], Incomplete (read more), or Bad (a protocol violation — fail the connection)."
+  =buf
+  have = %bin.length buf
+  {
+    | __integer_compare__ [have, 2] ~> =-1 => Incomplete
+    | {
+      b0 = %bin.get_byte [buf, 0]
+      b1 = %bin.get_byte [buf, 1]
+      {
+        | __integer_modulo__ [
+            __integer_divide__ [b0, 16],
+            8,
+          ] ~> =(1 | 2 | 3 | 4 | 5 | 6 | 7) => Bad["nonzero RSV bits"]
+        | __integer_compare__ [b1, 128] ~> =-1 => Bad["unmasked client frame"]
+        | __integer_modulo__ [
+            b0,
+            16,
+          ] ~> =(3 | 4 | 5 | 6 | 7 | 11 | 12 | 13 | 14 | 15) => Bad["reserved opcode"]
+        | {
+          fin = __integer_divide__ [b0, 128]
+          opcode = __integer_modulo__ [b0, 16]
+          len7 = __integer_subtract__ [b1, 128]
+          {
+            | len7 ~> =126 => {
+              | __integer_compare__ [have, 4] ~> =-1 => Incomplete
+              | frame_tail [buf, fin, opcode, __binary_get__ [buf, 2, 0, 16], 4]
+            }
+            | len7 ~> =127 => {
+              | __integer_compare__ [have, 10] ~> =-1 => Incomplete
+              | frame_tail [buf, fin, opcode, __binary_get__ [buf, 2, 0, 64], 10]
+            }
+            | frame_tail [buf, fin, opcode, len7, 2]
+          }
+        }
+      }
+    }
+  }
+}
+
+// A Close payload decoded to [code, reason] — 1005 ("no status") when empty.
+close_info = #'bin {
+  | __integer_compare__ [%bin.length $, 2] ~> =-1 => [1005, ""]
+  | [__binary_get__ [$, 0, 0, 16], %bin.slice [$, 2, %bin.length $] ~> Str[~]]
+}
+
+// A Close payload from a code and reason.
+close_payload = #['int, Str['bin]] {
+  =[code, Str[r]]; __binary_append__ [0x, code, 2] ~> %bin.concat [~, r]
+}
+
+conn = #[\TcpSocket, 'bin] {
+  :doc "A connection over an upgraded socket, seeded with any bytes already read past the handshake."
+  =[sock, buf]; Conn[sock: sock, buf: buf, part: Nil]
+}
+
+// Wrap an assembled data payload as its message.
+wrap_message = #['int, 'bin] { $0 ~> =1 => Text[Str[$1]] | Binary[$1] }
+
+// Fail the connection (RFC 6455 §7.1.7): send a Close, drop the TCP socket, yield
+// the Close.
+fail = #[', 'int, Str['bin]] {
+  =[Conn(sock: sock), code, reason]
+  __tcp_socket_write__ [sock, close_payload [code, reason] ~> encode_frame [8, ~]]
+  __tcp_socket_close__ sock
+  [Close[code: code, reason: reason], Conn[sock: sock, buf: 0x, part: Nil]]
+}
+
+recv = #' {
+  :doc "The next message as [message, conn]: Text or Binary — pings answered, pongs skipped, fragments assembled — or Close (echoed, and the socket closed); stop on Close."
+  =Conn[sock: sock, buf: buf, part: part]
+  parse_frame buf ~> {
+    | =Incomplete => {
+      chunk = __tcp_socket_read__ [sock, 8192]
+      {
+        | %bin.length chunk ~> =0 => {
+          // The peer vanished without a Close: abnormal closure (1006 is never on
+          // the wire — it names the absence of a close handshake).
+          __tcp_socket_close__ sock
+          [Close[code: 1006, reason: ""], Conn[sock: sock, buf: 0x, part: Nil]]
+        }
+        | ^ Conn[sock: sock, buf: %bin.concat [buf, chunk], part: part]
+      }
+    }
+    | =Bad[r] => fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, r]
+    | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
+      | op ~> =9 => {
+        __tcp_socket_write__ [sock, encode_frame [10, p]]; ^ Conn[sock: sock, buf: rest, part: part]
+      }
+      | op ~> =10 => ^ Conn[sock: sock, buf: rest, part: part]
+      | op ~> =8 => {
+        close_info p ~> =[code, reason]
+        __tcp_socket_write__ [sock, encode_frame [8, p]]
+        __tcp_socket_close__ sock
+        [Close[code: code, reason: reason], Conn[sock: sock, buf: rest, part: Nil]]
+      }
+      | op ~> =0 => part ~> {
+        | =Part[opcode: o, data: d] => {
+          joined = %bin.concat [d, p]
+          {
+            | __integer_compare__ [
+                %bin.length joined,
+                max_payload,
+              ] ~> =1 => fail [Conn[sock: sock, buf: 0x, part: Nil], 1009, "message too big"]
+            | fin ~> =0 => ^ Conn[sock: sock, buf: rest, part: Part[opcode: o, data: joined]]
+            | [wrap_message [o, joined], Conn[sock: sock, buf: rest, part: Nil]]
+          }
+        }
+        | fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, "unexpected continuation"]
+      }
+      | part ~> {
+        | =Part[opcode: _, data: _] => fail [
+          Conn[sock: sock, buf: 0x, part: Nil],
+          1002,
+          "interleaved data frame",
+        ]
+        | fin ~> =0 => ^ Conn[sock: sock, buf: rest, part: Part[opcode: op, data: p]]
+        | [wrap_message [op, p], Conn[sock: sock, buf: rest, part: Nil]]
+      }
+    }
+  }
+}
+
+rev_messages = #['messages, 'messages] {
+  =[items, acc]
+  items ~> {
+    | =Nil => acc
+    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+  }
+}
+
+// The select-mode drain: like `recv`'s dispatch, but an incomplete frame ends the
+// drain (the next select supplies more bytes) instead of reading the socket, and
+// completed messages accumulate (reversed; flipped on exit).
+drain = #[', 'messages] {
+  =[Conn[sock: sock, buf: buf, part: part], acc]
+  parse_frame buf ~> {
+    | =Incomplete => [rev_messages [acc, Nil], Conn[sock: sock, buf: buf, part: part]]
+    | =Bad[r] => {
+      fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, r] ~> =[close, c2]
+      [rev_messages [Cons[close, acc], Nil], c2]
+    }
+    | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
+      | op ~> =9 => {
+        __tcp_socket_write__ [sock, encode_frame [10, p]]
+        ^ [Conn[sock: sock, buf: rest, part: part], acc]
+      }
+      | op ~> =10 => ^ [Conn[sock: sock, buf: rest, part: part], acc]
+      | op ~> =8 => {
+        close_info p ~> =[code, reason]
+        __tcp_socket_write__ [sock, encode_frame [8, p]]
+        __tcp_socket_close__ sock
+        [
+          rev_messages [Cons[Close[code: code, reason: reason], acc], Nil],
+          Conn[sock: sock, buf: rest, part: Nil],
+        ]
+      }
+      | op ~> =0 => part ~> {
+        | =Part[opcode: o, data: d] => {
+          joined = %bin.concat [d, p]
+          {
+            | __integer_compare__ [%bin.length joined, max_payload] ~> =1 => {
+                fail [Conn[sock: sock, buf: 0x, part: Nil], 1009, "message too big"] ~> =[close, c2]
+                [rev_messages [Cons[close, acc], Nil], c2]
+              }
+            | fin ~> =0 => ^ [
+              Conn[sock: sock, buf: rest, part: Part[opcode: o, data: joined]],
+              acc,
+            ]
+            | ^ [Conn[sock: sock, buf: rest, part: Nil], Cons[wrap_message [o, joined], acc]]
+          }
+        }
+        | {
+          fail [
+            Conn[sock: sock, buf: 0x, part: Nil],
+            1002,
+            "unexpected continuation",
+          ] ~> =[close, c2]
+          [rev_messages [Cons[close, acc], Nil], c2]
+        }
+      }
+      | part ~> {
+        | =Part[opcode: _, data: _] => {
+          fail [
+            Conn[sock: sock, buf: 0x, part: Nil],
+            1002,
+            "interleaved data frame",
+          ] ~> =[close, c2]
+          [rev_messages [Cons[close, acc], Nil], c2]
+        }
+        | fin ~> =0 => ^ [
+          Conn[sock: sock, buf: rest, part: Part[opcode: op, data: p]],
+          acc,
+        ]
+        | ^ [Conn[sock: sock, buf: rest, part: Nil], Cons[wrap_message [op, p], acc]]
+      }
+    }
+  }
+}
+
+on_data = #[', 'bin] {
+  :doc "Select-mode: feed bytes from a `Data` event, yielding [messages, conn] — whole messages only (oldest first; pings answered, pongs skipped, fragments assembled; a Close — received or a protocol failure — is echoed, the socket dropped, and final). For a socket that is a select source, this replaces `recv`."
+  =[Conn[sock: sock, buf: buf, part: part], bytes]
+  drain [
+    Conn[sock: sock, buf: %bin.concat [buf, bytes], part: part],
+    Nil,
+  ]
+}
+
+send_text = #[', Str['bin]] {
+  :doc "Send a text message (one unfragmented frame)."
+  =[Conn(sock: sock), Str[b]]; __tcp_socket_write__ [sock, encode_frame [1, b]]; Ok
+}
+
+send_binary = #[', 'bin] {
+  :doc "Send a binary message (one unfragmented frame)."
+  =[Conn(sock: sock), b]; __tcp_socket_write__ [sock, encode_frame [2, b]]; Ok
+}
+
+ping = #[', 'bin] {
+  :doc "Send a ping with the given payload (125 bytes max); the peer's pong is consumed by `recv`."
+  =[Conn(sock: sock), b]; __tcp_socket_write__ [sock, encode_frame [9, b]]; Ok
+}
+
+close = #[', 'int, Str['bin]] {
+  :doc "Close the connection: send a Close frame with the code and reason, then drop the TCP socket (a server may close immediately, RFC 6455 §5.5.1)."
+  =[Conn(sock: sock), code, reason]
+  __tcp_socket_write__ [sock, close_payload [code, reason] ~> encode_frame [8, ~]]
+  __tcp_socket_close__ sock
+  Ok
+}
+
+[
+  accept_key: &accept_key,
+  handshake_response: &handshake_response,
+  parse_frame: &parse_frame,
+  encode_frame: &encode_frame,
+  encode_masked_frame: &encode_masked_frame,
+  conn: &conn,
+  recv: &recv,
+  on_data: &on_data,
+  send_text: &send_text,
+  send_binary: &send_binary,
+  ping: &ping,
+  close: &close,
+]

@@ -1,0 +1,42 @@
+// TCP stream events: the values a selected socket or listener yields. A stream
+// resource is a select source — `![sock, &recv, 1000]` races the socket's next
+// event against messages and timeouts; `![sock]` alone is a plain blocking read.
+//
+// The aliases here are content-addressed twins of the runtime-delivered tuples
+// (like `'%proc.changed`), so pattern-matching a select's result works:
+//
+//   ![sock, &handle] ~> {
+//     | =Data[sock: s, data: d] => ...      // bytes arrived (up to 8 KiB per event)
+//     | =Closed[sock: s] => ...             // EOF or error: the stream ends
+//     | ...                                  // a mailbox message
+//   }
+//
+// Events are chunks, not protocol messages — framing belongs above (e.g.
+// `%http/websocket`'s codec). At most one event is read ahead per resource: while
+// unconsumed, the kernel buffers and TCP flow control throttles the sender.
+
+'data = Data[sock: \TcpSocket, data: 'bin]
+'closed = Closed[sock: \TcpSocket]
+'event = 'data | 'closed
+
+'accepted = Accepted[listener: \TcpListener, sock: \TcpSocket]
+'listener_closed = Closed[listener: \TcpListener]
+'listener_event = 'accepted | 'listener_closed
+
+[
+  connect: &__tcp_connect__ ~> {
+    :doc "Connects to [ip: 'bin (4 or 16 bytes), port: 'int], yielding a \\TcpSocket."
+  },
+  listen: &__tcp_listen__ ~> {
+    :doc "Listens on [port: 'int, backlog: 'int], yielding a \\TcpListener."
+  },
+  read: &__tcp_socket_read__ ~> {
+    :doc "Reads up to [sock, n] bytes, blocking until some arrive; empty at EOF. For racing a read against messages or a timeout, select on the socket instead."
+  },
+  write: &__tcp_socket_write__ ~> { :doc "Writes [sock, 'bin], yielding the byte count." },
+  close: &__tcp_socket_close__ ~> { :doc "Closes a socket." },
+  accept: &__tcp_listener_accept__ ~> {
+    :doc "Accepts one connection, blocking. For racing an accept against messages, select on the listener instead."
+  },
+  close_listener: &__tcp_listener_close__ ~> { :doc "Closes a listener." },
+]

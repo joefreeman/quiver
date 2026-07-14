@@ -3,6 +3,7 @@ use io_uring::{IoUring as IoUringRing, opcode, types};
 use quiver_core::ProcessId;
 use quiver_core::effects::{EffectBackend, EffectError, EffectResult, ResultTupleInfo};
 use quiver_core::error::Error;
+use quiver_core::process::StreamEvent;
 use quiver_core::value::{ResourceId, Value};
 use socket2::Socket;
 use std::collections::HashMap;
@@ -86,6 +87,26 @@ pub struct NativeEffectBackend {
     /// Mapping from builtin name to the type ids of its composite result, so effect results can be
     /// stamped with real type ids (pushed by the environment via `set_type_ids`).
     result_infos: HashMap<String, ResultTupleInfo>,
+    /// Select-armed stream reads in flight, keyed by completion id. Unlike `pending`
+    /// ops, a completion here becomes a stream event (drained by
+    /// `take_stream_events`), not an effect completion — no process is parked on it.
+    armed: HashMap<u64, ArmedOp>,
+    /// Stream resources with an armed read (dedup: at most one per resource).
+    armed_resources: std::collections::HashSet<ResourceId>,
+    /// Completed armed reads awaiting `take_stream_events`.
+    stream_events: Vec<(ResourceId, usize, StreamEvent, Vec<Vec<u8>>)>,
+}
+
+/// A select-armed stream read in flight: the next-event read of a socket or listener.
+#[derive(Debug)]
+enum ArmedOp {
+    Read {
+        resource_id: ResourceId,
+        buffer: Vec<u8>,
+    },
+    Accept {
+        resource_id: ResourceId,
+    },
 }
 
 impl NativeEffectBackend {
@@ -102,6 +123,9 @@ impl NativeEffectBackend {
             next_resource_id: 1,
             resource_type_ids: HashMap::new(),
             result_infos: HashMap::new(),
+            armed: HashMap::new(),
+            armed_resources: std::collections::HashSet::new(),
+            stream_events: Vec::new(),
         })
     }
 
@@ -109,6 +133,61 @@ impl NativeEffectBackend {
     /// pushed yet (which shouldn't happen for an executing host — see `set_type_ids`).
     fn get_resource_type_id(&self, name: &str) -> usize {
         *self.resource_type_ids.get(name).unwrap_or(&0)
+    }
+
+    /// Turn a completed select-armed read into a stream event. Any read/accept error
+    /// ends the stream (`Closed`/listener-`Closed`) — a select answers events, not
+    /// errno values. A successful accept registers the new socket here; the
+    /// environment records its ownership as it routes the event.
+    fn handle_armed_completion(&mut self, armed: ArmedOp, result_code: i32) {
+        match armed {
+            ArmedOp::Read {
+                resource_id,
+                mut buffer,
+            } => {
+                self.armed_resources.remove(&resource_id);
+                let socket_type = self.get_resource_type_id("TcpSocket");
+                if result_code <= 0 {
+                    self.stream_events
+                        .push((resource_id, socket_type, StreamEvent::End, vec![]));
+                } else {
+                    buffer.truncate(result_code as usize);
+                    self.stream_events.push((
+                        resource_id,
+                        socket_type,
+                        StreamEvent::Data,
+                        vec![buffer],
+                    ));
+                }
+            }
+            ArmedOp::Accept { resource_id } => {
+                self.armed_resources.remove(&resource_id);
+                let listener_type = self.get_resource_type_id("TcpListener");
+                if result_code < 0 {
+                    self.stream_events
+                        .push((resource_id, listener_type, StreamEvent::End, vec![]));
+                    return;
+                }
+                let socket = unsafe { Socket::from_raw_fd(result_code) };
+                let peer_addr = socket
+                    .peer_addr()
+                    .ok()
+                    .and_then(|addr| addr.as_socket())
+                    .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
+                let new_resource_id = self.next_resource_id;
+                self.next_resource_id += 1;
+                self.resources
+                    .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
+                self.stream_events.push((
+                    resource_id,
+                    listener_type,
+                    StreamEvent::Resource {
+                        resource_id: new_resource_id,
+                    },
+                    vec![],
+                ));
+            }
+        }
     }
 
     /// The type ids to stamp on the composite result of the named builtin. Errors if they weren't
@@ -206,6 +285,10 @@ impl EffectBackend for NativeEffectBackend {
 
         // Process collected completion entries
         for (completion_id, result_code) in completion_results {
+            if let Some(armed) = self.armed.remove(&completion_id) {
+                self.handle_armed_completion(armed, result_code);
+                continue;
+            }
             if let Some((process_id, op_type)) = self.pending.remove(&completion_id) {
                 match op_type {
                     IoOpType::Read { buffer } => {
@@ -241,9 +324,71 @@ impl EffectBackend for NativeEffectBackend {
         completions
     }
 
+    fn arm_stream(&mut self, resource_id: ResourceId) -> Result<(), Error> {
+        if self.armed_resources.contains(&resource_id) {
+            return Ok(());
+        }
+        let resource = self
+            .resources
+            .get(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+        let fd = resource.fd();
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let op = match resource {
+            Resource::TcpSocket { .. } => {
+                let mut buffer = vec![0u8; 8192];
+                let read_op =
+                    opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+                        .build()
+                        .user_data(completion_id);
+                unsafe {
+                    self.ring.submission().push(&read_op).map_err(|e| {
+                        Error::InvalidArgument(format!("Failed to submit read: {}", e))
+                    })?;
+                }
+                ArmedOp::Read {
+                    resource_id,
+                    buffer,
+                }
+            }
+            Resource::TcpListener { .. } => {
+                let accept_op =
+                    opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut())
+                        .build()
+                        .user_data(completion_id);
+                unsafe {
+                    self.ring.submission().push(&accept_op).map_err(|e| {
+                        Error::InvalidArgument(format!("Failed to submit accept: {}", e))
+                    })?;
+                }
+                ArmedOp::Accept { resource_id }
+            }
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "Resource {} is not a stream (not selectable)",
+                    resource_id
+                )));
+            }
+        };
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
+        self.armed.insert(completion_id, op);
+        self.armed_resources.insert(resource_id);
+        Ok(())
+    }
+
+    fn take_stream_events(&mut self) -> Vec<(ResourceId, usize, StreamEvent, Vec<Vec<u8>>)> {
+        std::mem::take(&mut self.stream_events)
+    }
+
     fn close_resource(&mut self, resource_id: ResourceId) {
-        // Remove resource from registry - Drop impl will close the FD
+        // Remove resource from registry - Drop impl will close the FD. An armed read
+        // on the closed fd completes with an error; its event is dropped at routing
+        // (the owner is gone too).
         self.resources.remove(&resource_id);
+        self.armed_resources.remove(&resource_id);
     }
 
     fn set_type_ids(&mut self, resources: &[String], results: &[(String, ResultTupleInfo)]) {

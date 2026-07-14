@@ -1,6 +1,7 @@
 // Cryptographic hashing, pure Quiver over the integer/binary builtins (no imports).
 // SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104) — the signing primitive for
-// `%http/session`'s cookies. SHA-1 joins this module when websockets need it.
+// `%http/session`'s cookies — plus SHA-1 (legacy, for protocol compatibility such as
+// the WebSocket handshake; not for new designs).
 //
 // Representation notes: the round constants, initial state, and message schedule are
 // *binaries* — `__binary_get__` reads 32-bit big-endian words directly, so no array
@@ -166,6 +167,111 @@ sha256 = #'bin {
   blocks [pad $, 0, init] ~> digest
 }
 
+// --- SHA-1 (FIPS 180-4) ---
+// Shares `pad` (identical padding) and the word helpers. Rotate-left n is
+// rotate-right (32 - n).
+
+// The SHA-1 initial state (5 words).
+h1 = 0x67452301efcdab8998badcfe10325476c3d2e1f0
+
+// Extend a block's 16 words to the full 80-word SHA-1 schedule:
+// w[t] = rotl1(w[t-3] ^ w[t-8] ^ w[t-14] ^ w[t-16]).
+extend1 = #['bin, 'int] {
+  =[w, t]
+  {
+    | t ~> =80 => w
+    | {
+      x = __integer_xor__ [
+        __integer_xor__ [
+          w_at [w, __integer_subtract__ [t, 3]],
+          w_at [w, __integer_subtract__ [t, 8]],
+        ],
+        __integer_xor__ [
+          w_at [w, __integer_subtract__ [t, 14]],
+          w_at [w, __integer_subtract__ [t, 16]],
+        ],
+      ]
+
+      ^ [__binary_append__ [w, rotr [x, 31], 4], __integer_add__ [t, 1]]
+    }
+  }
+}
+
+'state1 = ['int, 'int, 'int, 'int, 'int]
+
+// The round function and constant for round t: choose / parity / majority / parity
+// by 20-round band.
+fk1 = #['int, 'int, 'int, 'int] {
+  =[t, b, c, d]
+  {
+    | __integer_compare__ [t, 20] ~> =-1 => [
+      __integer_or__ [
+        __integer_and__ [b, c],
+        __integer_and__ [__integer_xor__ [b, 4294967295], d],
+      ],
+      1518500249,
+    ]
+    | __integer_compare__ [t, 40] ~> =-1 => [
+      __integer_xor__ [__integer_xor__ [b, c], d],
+      1859775393,
+    ]
+    | __integer_compare__ [t, 60] ~> =-1 => [
+      __integer_or__ [
+        __integer_or__ [__integer_and__ [b, c], __integer_and__ [b, d]],
+        __integer_and__ [c, d],
+      ],
+      2400959708,
+    ]
+    | [__integer_xor__ [__integer_xor__ [b, c], d], 3395469782]
+  }
+}
+
+// The 80 compression rounds over one schedule.
+rounds1 = #['bin, 'int, 'state1] {
+  =[w, t, [a, b, c, d, e]]
+  {
+    | t ~> =80 => [a, b, c, d, e]
+    | {
+      fk1 [t, b, c, d] ~> =[f, k]
+
+      temp = madd [rotr [a, 27], f] ~> madd [~, e] ~> madd [~, k] ~> madd [~, w_at [w, t]]
+
+      ^ [w, __integer_add__ [t, 1], [temp, a, rotr [b, 2], c, d]]
+    }
+  }
+}
+
+// Fold each 64-byte block of the padded message into the SHA-1 state.
+blocks1 = #['bin, 'int, 'state1] {
+  =[data, off, st]
+  {
+    | __integer_compare__ [off, __binary_length__ data] ~> =(0 | 1) => st
+    | {
+      w = extend1 [
+        __binary_slice__ [data, off, __integer_add__ [off, 64]],
+        16,
+      ]
+
+      st ~> =[a0, b0, c0, d0, e0]
+      rounds1 [w, 0, [a0, b0, c0, d0, e0]] ~> =[a, b, c, d, e]
+      st2 = [madd [a0, a], madd [b0, b], madd [c0, c], madd [d0, d], madd [e0, e]]
+      ^ [data, __integer_add__ [off, 64], st2]
+    }
+  }
+}
+
+sha1 = #'bin {
+  :doc "The SHA-1 digest of the bytes, as a 20-byte binary. Legacy — for protocol compatibility (e.g. the WebSocket handshake), not new designs."
+  init = [w_at [h1, 0], w_at [h1, 1], w_at [h1, 2], w_at [h1, 3], w_at [h1, 4]]
+  blocks1 [pad $, 0, init] ~> =[a, b, c, d, e]
+
+  __binary_append__ [0x, a, 4] ~> __binary_append__ [~, b, 4] ~> __binary_append__ [~, c, 4] ~> __binary_append__ [~, d, 4] ~> __binary_append__ [
+    ~,
+    e,
+    4,
+  ]
+}
+
 ipad = 0x36363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636
 opad = 0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c
 
@@ -188,4 +294,4 @@ hmac_sha256 = #['bin, 'bin] {
   __binary_concat__ [__binary_xor__ [kp, opad], inner] ~> sha256
 }
 
-[sha256: &sha256, hmac_sha256: &hmac_sha256]
+[sha256: &sha256, hmac_sha256: &hmac_sha256, sha1: &sha1]

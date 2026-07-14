@@ -81,9 +81,10 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         field_offsets,
         canonical_tuples,
         debug: bytecode.debug,
-        // The sync driver rejects spawn/send/await, so crashes are never delivered
-        // here; a select timeout falls back to a bare nil.
-        crash: None,
+        // The sync driver rejects spawn/send/await, so no runtime-delivered values
+        // arrive here: a select timeout falls back to a bare nil, and stream arms
+        // are rejected as actions.
+        runtime: None,
     };
 
     executor.update_program(program_update);

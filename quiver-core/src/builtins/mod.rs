@@ -4,6 +4,7 @@ use crate::executor::Executor;
 use crate::process::{Action, Process, ProcessId, TrackingState, Watcher};
 use crate::program::Program;
 use crate::types::Type;
+use crate::value::ResourceId;
 use crate::value::{Payload, Value};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -187,6 +188,35 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         Ok(())
     }
 
+    /// Consume a stashed stream event for `resource_id`, yielding its byte payload —
+    /// the pull-read half of read/select interop on one socket. A stashed `Data`
+    /// answers its chunk; a stashed `Closed` answers the empty binary (the read-EOF
+    /// convention). `None` when nothing is stashed.
+    pub fn take_stream_bytes(&mut self, resource_id: ResourceId) -> Result<Option<Value>, Error> {
+        let Some(event) = self.process.resource_events.remove(&resource_id) else {
+            return Ok(None);
+        };
+        let bytes = match &event {
+            Value::Tuple(_, payload) => payload.get(1).cloned(),
+            _ => None,
+        };
+        let bytes = match bytes {
+            Some(b) => b,
+            None => Value::Binary(self.executor.allocate_binary(Vec::new())?),
+        };
+        // Deferred reclamation makes the ordering safe: releasing the event may zero
+        // the chunk's refcount, but the dispatch site re-retains it (push) within the
+        // same step, before any reclamation point.
+        self.executor.release(&event);
+        Ok(Some(bytes))
+    }
+
+    /// Whether `resource_id` has a select-armed read in flight (its event has not
+    /// arrived yet). A plain read would race it out of order — reject instead.
+    pub fn stream_armed(&self, resource_id: ResourceId) -> bool {
+        self.process.armed_resources.contains(&resource_id)
+    }
+
     /// Enter a tracked render (`%proc.track`): until the accompanying
     /// [`Completion::Call`] frame returns and reconciles subscriptions, each `?` the
     /// caller samples registers a reactive subscription. Renders must be pure and
@@ -332,6 +362,66 @@ macro_rules! register_builtin {
     };
 }
 
+/// A stream resource kind's select-event vocabulary, declared alongside the builtin
+/// signatures that produce the resource (see `register_stream`). Each event is a
+/// tuple TypeSpec with a fixed field convention: the first field is the source
+/// resource; `data`'s second field is the byte chunk; `resource`'s second field is
+/// the produced resource (whose kind is named alongside).
+#[derive(Clone, Debug)]
+pub struct StreamSpec {
+    /// The bytes event (e.g. `Data[sock: \TcpSocket, data: 'bin]`), or None for
+    /// streams that never yield bytes.
+    pub data: Option<TypeSpec>,
+    /// The fresh-resource event (e.g. `Accepted[listener, sock]`) and the produced
+    /// resource's type name, or None for byte-only streams.
+    pub resource: Option<(TypeSpec, String)>,
+    /// The end-of-stream event (e.g. `Closed[sock]`).
+    pub end: TypeSpec,
+}
+
+/// The crash-delivery vocabulary: the shapes the runtime synthesizes when a process
+/// crashes, is killed, or a select times out. Declared by the always-set (every
+/// executing host registers it), resolved per merged program by
+/// `Program::runtime_tables`.
+#[derive(Clone, Debug)]
+pub struct CrashDecl {
+    /// `Error[pid: (@), message: Str['bin]]` — a runtime error's crash payload.
+    pub error: TypeSpec,
+    /// `Panic[pid: (@), message: Str['bin]]` — a `__panic__` abort's payload.
+    pub panic: TypeSpec,
+    /// `Killed` — kill/link/containment teardown.
+    pub killed: TypeSpec,
+    /// `Str['bin]` — the message wrapper inside the payloads.
+    pub str: TypeSpec,
+    /// The annotation key a crash's nil is stamped under.
+    pub crash_key: String,
+    /// The annotation key a timeout's nil is stamped under.
+    pub timeout_key: String,
+}
+
+/// The reactive-wakeup vocabulary: the `Changed` message a subscriber receives.
+/// Demand-scoped — resolved only when the gating builtin (`track`) is referenced by
+/// the program, since subscriptions cannot exist without it.
+#[derive(Clone, Debug)]
+pub struct ChangedDecl {
+    /// The wakeup tuple (`Changed`, empty).
+    pub tuple: TypeSpec,
+    /// The builtin whose presence in a program demands this vocabulary.
+    pub demand_builtin: String,
+}
+
+/// Everything the runtime may deliver to programs on this host, as declared by the
+/// registered capability groups: crash shapes (always-set), the reactive wakeup
+/// (gated on `track`), and stream events (per resource kind, from the io groups).
+/// Handed to the environment once (`set_runtime_declarations`) and resolved against
+/// each merged program.
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeDeclarations {
+    pub crash: Option<CrashDecl>,
+    pub changed: Option<ChangedDecl>,
+    pub streams: HashMap<String, StreamSpec>,
+}
+
 /// A registered builtin: its implementation, purity class, and type signature.
 #[derive(Clone)]
 pub struct BuiltinEntry<E: Effect> {
@@ -345,6 +435,10 @@ pub struct BuiltinEntry<E: Effect> {
 #[derive(Clone)]
 pub struct BuiltinRegistry<E: Effect> {
     functions: HashMap<String, BuiltinEntry<E>>,
+    /// The runtime-delivered vocabulary the registered capability groups declare:
+    /// crash shapes, the reactive wakeup, and stream events. Part of the contract,
+    /// like signatures and purity.
+    runtime: RuntimeDeclarations,
 }
 
 impl<E: Effect> Default for BuiltinRegistry<E> {
@@ -358,6 +452,7 @@ impl<E: Effect> BuiltinRegistry<E> {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            runtime: RuntimeDeclarations::default(),
         }
     }
 
@@ -400,6 +495,39 @@ impl<E: Effect> BuiltinRegistry<E> {
     /// Merge another registry into this one
     pub fn merge(&mut self, other: Self) {
         self.functions.extend(other.functions);
+        if other.runtime.crash.is_some() {
+            self.runtime.crash = other.runtime.crash;
+        }
+        if other.runtime.changed.is_some() {
+            self.runtime.changed = other.runtime.changed;
+        }
+        self.runtime.streams.extend(other.runtime.streams);
+    }
+
+    /// Declare a resource kind as a stream: selectable, yielding the spec's events.
+    pub fn register_stream(&mut self, resource_name: &str, spec: StreamSpec) {
+        self.runtime.streams.insert(resource_name.to_string(), spec);
+    }
+
+    /// Declare the crash-delivery vocabulary (the always-set does this once).
+    pub fn declare_crash(&mut self, decl: CrashDecl) {
+        self.runtime.crash = Some(decl);
+    }
+
+    /// Declare the reactive-wakeup vocabulary, gated on its demanding builtin.
+    pub fn declare_changed(&mut self, decl: ChangedDecl) {
+        self.runtime.changed = Some(decl);
+    }
+
+    /// The stream declaration for a resource kind, if it is one.
+    pub fn stream_spec(&self, resource_name: &str) -> Option<&StreamSpec> {
+        self.runtime.streams.get(resource_name)
+    }
+
+    /// Everything the runtime may deliver on this host — for the environment to
+    /// resolve per merged program (`Program::runtime_tables`).
+    pub fn runtime_declarations(&self) -> &RuntimeDeclarations {
+        &self.runtime
     }
 
     /// Create a registry from a list of builtin module functions
@@ -742,12 +870,42 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
         result: Box::new(TypeSpec::Var("v")),
     };
     register_builtin!(registry, "track", builtin_track, Purity::Process, thunk => TypeSpec::Var("v"));
+
+    // The runtime-delivered vocabulary this group brings: crash payloads (any
+    // process can crash — always resolved) and the reactive `Changed` wakeup
+    // (resolved only for programs that reference `track`, since subscriptions
+    // cannot exist without it). Content-addressed twins of `std/proc.qv`'s aliases.
+    let str_spec = TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]);
+    // The capability-less process type `(@)` — a crash payload's pid grants identity only.
+    let crash_fields = |s: &TypeSpec| {
+        vec![
+            (Some("pid"), TypeSpec::Process(None, None)),
+            (Some("message"), s.clone()),
+        ]
+    };
+    registry.declare_crash(CrashDecl {
+        error: TypeSpec::Tuple(Some("Error"), crash_fields(&str_spec)),
+        panic: TypeSpec::Tuple(Some("Panic"), crash_fields(&str_spec)),
+        killed: TypeSpec::Tuple(Some("Killed"), vec![]),
+        str: str_spec,
+        crash_key: "crash".to_string(),
+        timeout_key: "timeout".to_string(),
+    });
+    registry.declare_changed(ChangedDecl {
+        tuple: TypeSpec::Tuple(Some("Changed"), vec![]),
+        demand_builtin: "track".to_string(),
+    });
 }
 
-/// Get all core builtin modules. This establishes the full builtin *contract* every host shares:
-/// the pure builtins (integer/binary/vector) with their universal implementations, and the IO
-/// builtins' signatures (with placeholder implementations that executing hosts replace via
-/// [`BuiltinRegistry::attach_implementation`]).
+/// The always-available builtin modules: the pure builtins (integer/binary/vector)
+/// with their universal implementations, plus refs, control, and process management —
+/// the language runtime, independent of any host capability.
+///
+/// The IO builtins are deliberately NOT here: a registry is a host's *capability
+/// set*, and hosts compose in the [`io_modules`] groups they can actually execute
+/// (attaching implementations via [`BuiltinRegistry::attach_implementation`]).
+/// Referencing a builtin absent from the registry is a compile error, so "the
+/// program compiles" means "this host can run it".
 pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![
         register_binary_builtins,
@@ -756,6 +914,12 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_reference_builtins,
         register_control_builtins,
         register_process_builtins,
-        io::register_io_signatures,
     ]
+}
+
+/// The IO builtin signature groups (file, network + stream declarations, system
+/// clocks/entropy) — the capability vocabulary an executing host opts into, or a
+/// type-checking host (the LSP) registers in full as the permissive union.
+pub fn io_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
+    vec![io::register_io_signatures]
 }

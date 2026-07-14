@@ -258,3 +258,31 @@ fn test_index_across_concat() {
         .evaluate("[0x6162, 0x0a63] ~> %bin.concat ~> [~, 10, 0] ~> %bin.index")
         .expect("2");
 }
+
+#[test]
+fn test_base64_rfc4648_vectors() {
+    quiver()
+        .evaluate(
+            r#"["" ~> .0 ~> %bin.to_base64, "f" ~> .0 ~> %bin.to_base64, "fo" ~> .0 ~> %bin.to_base64, "foo" ~> .0 ~> %bin.to_base64, "foob" ~> .0 ~> %bin.to_base64, "fooba" ~> .0 ~> %bin.to_base64, "foobar" ~> .0 ~> %bin.to_base64]"#,
+        )
+        .expect(r#"["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"]"#);
+}
+
+#[test]
+fn test_base64_decode_round_trip_and_rejects() {
+    quiver()
+        .evaluate(
+            r#"["Zm9vYmFy" ~> %bin.from_base64 ~> Str[~], "Zg==" ~> %bin.from_base64 ~> Str[~], "Zm9vYmE=" ~> %bin.from_base64 ~> Str[~]]"#,
+        )
+        .expect(r#"["foobar", "f", "fooba"]"#);
+    // Malformed: bad characters, bad length, and padding before the final quantum.
+    quiver()
+        .evaluate(r#"{ "ba!d" ~> %bin.from_base64 | Rejected }"#)
+        .expect("Rejected");
+    quiver()
+        .evaluate(r#"{ "abcde" ~> %bin.from_base64 | Rejected }"#)
+        .expect("Rejected");
+    quiver()
+        .evaluate(r#"{ "Zg==Zm9v" ~> %bin.from_base64 | Rejected }"#)
+        .expect("Rejected");
+}

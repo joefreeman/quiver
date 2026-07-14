@@ -19,6 +19,9 @@ fn builtins() -> quiver_core::builtins::BuiltinRegistry<NativeEffect> {
     let mut registry = quiver_core::builtins::BuiltinRegistry::with_modules(
         &quiver_core::builtins::core_modules(),
     );
+    for module in quiver_core::builtins::io_modules() {
+        module(&mut registry);
+    }
     quiver_io::attach_network_builtins(&mut registry);
     quiver_io::attach_file_builtins(&mut registry);
     registry
