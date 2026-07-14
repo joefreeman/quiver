@@ -1355,6 +1355,37 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
     )(input)
 }
 
+/// A *named* tuple type — `Done`, `Reply['ref, 'bin]` — for positions where the unnamed
+/// form would collide with other syntax: after `!`, a glued `[` opens the general
+/// source-list select, so only named tuple types get the bare receive shorthand.
+fn named_tuple_type(input: Span) -> IResult<Span, Type> {
+    map(
+        alt((
+            map(
+                tuple((
+                    tuple_name,
+                    delimited(pair(char('['), wsc), field_type_list, pair(wsc, char(']'))),
+                )),
+                |(name, fields)| TupleType {
+                    name: Some(name),
+                    fields,
+                    is_partial: false,
+                },
+            ),
+            // Bare name, not followed by `(` (a named partial type), mirroring `tuple_type`.
+            map(
+                tuple((tuple_name, peek(not(pair(ws0, char('(')))))),
+                |(name, _)| TupleType {
+                    name: Some(name),
+                    fields: vec![],
+                    is_partial: false,
+                },
+            ),
+        )),
+        Type::Tuple,
+    )(input)
+}
+
 fn type_parameter(input: Span) -> IResult<Span, Type> {
     map(delimited(char('<'), type_name, char('>')), |name| {
         Type::Identifier {
@@ -1762,6 +1793,8 @@ fn make_receive(param_type: Type, body: Option<Expression>) -> Term {
 // - !                - Bare select (postfix form, empty sources)
 // - !(type)          - Identity receive with explicit type
 // - !'type           - Identity receive for a named type
+// - !Name[...]       - Identity receive for a named tuple type (`!Done`, `!Reply['ref, 'bin]`;
+//                      the unnamed `![…]` form is the general source list)
 // - !#type           - Identity receive for a `#`-typed message
 // - !var             - Single source (variable/process)
 // - !@p              - Single source (spawn)
@@ -1794,9 +1827,20 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 ),
                 |(param_type, body)| make_receive(param_type, body),
             ),
-            // 'type - named receive type: `!'int`, or a filter with a body `!'int { … }`.
+            // 'type - named receive type: `!'int`, `!'%proc.changed`, or a filter with a
+            // body `!'int { … }`. Module types first, so `'%` isn't rejected as an identifier.
             map(
-                pair(type_identifier, opt(preceded(opt(hspace1), block))),
+                pair(
+                    alt((module_type, type_identifier)),
+                    opt(preceded(opt(hspace1), block)),
+                ),
+                |(param_type, body)| make_receive(param_type, body),
+            ),
+            // Named tuple type - `!Done`, `!Reply['ref, 'bin]`, or a filter with a body
+            // (`!Reply[...] { … }`). Only the *named* forms: an unnamed `[…]` glued to `!`
+            // is the general source-list select.
+            map(
+                pair(named_tuple_type, opt(preceded(opt(hspace1), block))),
                 |(param_type, body)| make_receive(param_type, body),
             ),
             // access (variable / module member) → reference it as a single source. Select
@@ -2193,10 +2237,11 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
             )),
             |(param_type, body)| spawn_of_function(Some(param_type), body),
         ),
-        // @'type { ... } - Spawn with named type (sugar for @#'type { ... })
+        // @'type { ... } - Spawn with named type (sugar for @#'type { ... }); module types
+        // first, so `@'%mod.event { ... }` isn't rejected as an identifier.
         map(
             tuple((
-                preceded(char('@'), type_identifier),
+                preceded(char('@'), alt((module_type, type_identifier))),
                 preceded(opt(ws1), block),
             )),
             |(param_type, body)| spawn_of_function(Some(param_type), body),
@@ -3041,5 +3086,66 @@ mod tests {
         let source = "#{ \"\"\"\n    hello\n }";
         let err = parse(source).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnterminatedString));
+    }
+
+    #[test]
+    fn select_shorthand_accepts_module_type() {
+        // `!'%mod.name` desugars exactly as `!#'%mod.name` (a body-less identity receive);
+        // spans compare always-equal, so this pins the structural desugaring.
+        assert_eq!(
+            parse("#{ !'%proc.changed }").unwrap(),
+            parse("#{ !#'%proc.changed }").unwrap()
+        );
+        // A module's default type, with and without type arguments.
+        assert_eq!(
+            parse("#{ !'%mod }").unwrap(),
+            parse("#{ !#'%mod }").unwrap()
+        );
+        assert_eq!(
+            parse("#{ !'%list<'int> }").unwrap(),
+            parse("#{ !#'%list<'int> }").unwrap()
+        );
+        // A same-line block is the receive's filter body, as for `!'int { … }`.
+        assert_eq!(
+            parse("#{ !'%proc.changed { Ok } }").unwrap(),
+            parse("#{ !#'%proc.changed { Ok } }").unwrap()
+        );
+    }
+
+    #[test]
+    fn spawn_shorthand_accepts_module_type() {
+        // `@'%mod.name { … }` desugars exactly as `@#'%mod.name { … }`.
+        assert_eq!(
+            parse("#{ @'%proc.changed { $ } }").unwrap(),
+            parse("#{ @#'%proc.changed { $ } }").unwrap()
+        );
+    }
+
+    #[test]
+    fn select_shorthand_accepts_named_tuple_type() {
+        // A named tuple type desugars exactly as its `!#` form — with fields, bare, and
+        // with a filter body.
+        assert_eq!(
+            parse("#{ !Reply['ref, 'bin] }").unwrap(),
+            parse("#{ !#Reply['ref, 'bin] }").unwrap()
+        );
+        assert_eq!(parse("#{ !Done }").unwrap(), parse("#{ !#Done }").unwrap());
+        assert_eq!(
+            parse("#{ !Reply['ref, 'bin] { Ok } }").unwrap(),
+            parse("#{ !#Reply['ref, 'bin] { Ok } }").unwrap()
+        );
+    }
+
+    #[test]
+    fn select_bracket_forms_stay_source_lists() {
+        // Only *named* tuple types get the receive sugar: a glued `[…]` is the general
+        // source-list form, so `![]` is the empty select, not a nil receive.
+        assert_ne!(parse("#{ ![] }").unwrap(), parse("#{ !#[] }").unwrap());
+        // And `![Done]` stays a source list (a chain whose term is the tuple `Done`),
+        // not a `[Done]` receive type.
+        assert_ne!(
+            parse("#{ ![Done] }").unwrap(),
+            parse("#{ !#[Done] }").unwrap()
+        );
     }
 }

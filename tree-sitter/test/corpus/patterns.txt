@@ -199,3 +199,38 @@ y ~> =('int) ~> x
           name: (type_name)))
       (access
         source: (identifier)))))
+
+==================
+statement-level ascribed binding
+==================
+
+('bin)ip = f x
+('int | 'bin)v = g y
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (pattern_ascription
+        (type_identifier
+          name: (type_name))
+        binding: (identifier))
+      (application
+        function: (access
+          source: (identifier))
+        argument: (access
+          source: (identifier))))
+    (chain
+      binding: (pattern_ascription
+        (union_type
+          (type_identifier
+            name: (type_name))
+          (type_identifier
+            name: (type_name)))
+        binding: (identifier))
+      (application
+        function: (access
+          source: (identifier))
+        argument: (access
+          source: (identifier))))))

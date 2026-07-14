@@ -258,3 +258,137 @@ spawn ripple with init argument
           (access
             source: (ripple)))
         argument: (integer)))))
+
+==================
+state sample of a declared clause type
+==================
+
+f = #(@'int ?'int) { ?$ }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (process_type
+          message: (type_identifier
+            name: (type_name))
+          state: (type_identifier
+            name: (type_name)))
+        (block
+          (branch
+            (expression
+              (chain
+                (state
+                  target: (access
+                    source: (parameter)))))))))))
+
+==================
+callable type with receive and states clauses
+==================
+
+'w = #'a -> 'b !'c ?'d
+
+---
+
+(source_file
+  (type_alias
+    name: (type_name)
+    definition: (function_type
+      input: (type_identifier
+        name: (type_name))
+      output: (type_identifier
+        name: (type_name))
+      receive: (type_identifier
+        name: (type_name))
+      states: (type_identifier
+        name: (type_name)))))
+
+==================
+state sample, bare form
+==================
+
+?p
+
+---
+
+(source_file
+  (expression
+    (chain
+      (state
+        target: (access
+          source: (identifier))))))
+
+==================
+receive on a module type
+==================
+
+w = !'%proc.changed
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (select
+        (receive_type
+          (module_type
+            module: (import
+              (identifier))
+            member: (identifier)))))))
+
+==================
+spawn typed with a module type
+==================
+
+p = 5 ~> @'%mod.event { $ }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (integer)
+      (spawn
+        parameter: (module_type
+          module: (import
+            (identifier))
+          member: (identifier))
+        (block
+          (branch
+            (expression
+              (chain
+                (access
+                  source: (parameter))))))))))
+
+==================
+receive on a named tuple type
+==================
+
+!Reply['ref, 'bin]
+!Done ~> f
+
+---
+
+(source_file
+  (expression
+    (chain
+      (select
+        (receive_type
+          (tuple_type
+            name: (tuple_name)
+            (type_identifier
+              name: (type_name))
+            (type_identifier
+              name: (type_name))))))
+    (chain
+      (select
+        (receive_type
+          (tuple_type
+            name: (tuple_name))))
+      (access
+        source: (identifier)))))

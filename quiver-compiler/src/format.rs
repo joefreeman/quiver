@@ -737,15 +737,59 @@ fn function_doc(trivia: &Trivia, function: &Function) -> Doc {
     }
 }
 
-/// Render a spawn (`@f`, `@~`, `@{ … }`, `@('int) { … }`). An inline spawned function must use the
-/// `@`-sugar forms — the parser does not accept `@#…` — so a function head is emitted as `@{ body }`
-/// or `@(type) { body }` (the parenthesised arm accepts any type).
+/// Whether a tuple type renders in a form that can stand bare in a sugar head: its name and
+/// brackets are its own delimiters (`Done`, `Reply['ref, 'bin]`, `['int, 'int]`). False for
+/// partials (parens, handled per head) and for the alias-named spread form (`'v1[...]`, a
+/// lowercase name), which has no bare rendering.
+fn bare_tuple(tuple_type: &TupleType) -> bool {
+    !tuple_type.is_partial
+        && tuple_type
+            .name
+            .as_deref()
+            .is_none_or(|name| name.starts_with(char::is_uppercase))
+}
+
+/// The self-delimiting form of a type in a sugar head position (a select receive or a spawn
+/// parameter), or `None` when it has one only via the head's own bracketing: named and module
+/// types are bare (`'int`, `'%proc.changed`), unions render carrying their own parentheses
+/// (`('int | 'bin)`), and a named tuple type is its own delimiter (`Done`, `Reply['ref, 'bin]`).
+fn sugar_type(type_def: &Type) -> Option<String> {
+    match type_def {
+        Type::Primitive(_) | Type::Identifier { .. } | Type::ModuleType { .. } | Type::Union(_) => {
+            Some(render_type(type_def))
+        }
+        Type::Tuple(tuple_type) if tuple_type.name.is_some() && bare_tuple(tuple_type) => {
+            Some(render_type(type_def))
+        }
+        _ => None,
+    }
+}
+
+/// Render a spawn (`@f`, `@~`, `@{ … }`, `@'int { … }`). An inline spawned function must use the
+/// `@`-sugar forms — the parser does not accept `@#…` — so a function head is emitted as `@{ body }`,
+/// the tight `@'type { body }` where the type allows it, or `@(type) { body }` (the parenthesised
+/// arm accepts any type).
 fn spawn_doc(trivia: &Trivia, func: &Term, argument: Option<&Term>) -> Doc {
     let head = match func {
         Term::Function(function) => {
             let head = match &function.parameter_type {
                 None => "@".to_string(),
-                Some(parameter_type) => format!("@({}) ", render_type(parameter_type)),
+                Some(parameter_type) => {
+                    // The spawn grammar also takes the unnamed tuple form (`@['int, 'int] { … }`
+                    // — there is no `@[sources]` to collide with). A partial has NO bare spawn
+                    // form: its parens read as the grouping arm, whose content must be a full
+                    // type, so it double-wraps (`@((x: 'int)) { … }`).
+                    let bare = sugar_type(parameter_type).or_else(|| match parameter_type {
+                        Type::Tuple(tuple_type) if bare_tuple(tuple_type) => {
+                            Some(render_type(parameter_type))
+                        }
+                        _ => None,
+                    });
+                    match bare {
+                        Some(sugar) => format!("@{} ", sugar),
+                        None => format!("@({}) ", render_type(parameter_type)),
+                    }
+                }
             };
             match &function.body {
                 None => pretty::text(head),
@@ -771,7 +815,7 @@ fn select_doc(trivia: &Trivia, sources: &Option<Vec<Chain>>) -> Doc {
         return pretty::text(shorthand);
     }
     // A single receive function *with* a body — a filter — keeps the tight shorthand too,
-    // its body rendering as an ordinary block: `!#'int { =42 => Ok }`.
+    // its body rendering as an ordinary block: `!'int { =42 => Ok }`.
     if let [chain] = chains.as_slice()
         && chain.match_pattern.is_none()
         && let [Term::Function(function)] = chain.terms.as_slice()
@@ -781,7 +825,7 @@ fn select_doc(trivia: &Trivia, sources: &Option<Vec<Chain>>) -> Doc {
         && let Some(parameter_type) = &function.parameter_type
     {
         return pretty::concat(vec![
-            pretty::text(format!("!#{} ", render_type_atom(parameter_type))),
+            pretty::text(format!("{} ", render_select_head(parameter_type))),
             block_doc(trivia, body),
         ]);
     }
@@ -796,8 +840,25 @@ fn select_doc(trivia: &Trivia, sources: &Option<Vec<Chain>>) -> Doc {
     )
 }
 
+/// The tightest select head for an identity receive's parameter type, mirroring what the select
+/// grammar admits without the `#`: named, module, and named tuple types keep the bare sugar
+/// (`!'int`, `!'%proc.changed`, `!Done`, `!Reply['ref, 'bin]`); unions and partial types the
+/// parenthesised form (`!('int | 'bin)`, `!(x: 'int)` — their rendering carries its own
+/// parentheses); anything else the `#` form (`!#['int, 'int]` — an unnamed tuple type has no
+/// bare form, since `![…]` is the general source list).
+fn render_select_head(parameter_type: &Type) -> String {
+    let bare = sugar_type(parameter_type).or_else(|| match parameter_type {
+        Type::Tuple(tuple_type) if tuple_type.is_partial => Some(render_type(parameter_type)),
+        _ => None,
+    });
+    match bare {
+        Some(sugar) => format!("!{}", sugar),
+        None => format!("!#{}", render_type_atom(parameter_type)),
+    }
+}
+
 /// The tight single-source shorthand for a select, when the source list is a single source whose AST
-/// has one (`!p`/`!f`, `!#'int`, `!1000`). Returns `None` for the general form — several sources, or
+/// has one (`!p`/`!f`, `!'int`, `!1000`). Returns `None` for the general form — several sources, or
 /// a filter (a receive function *with* a body, which only the general `![…]` form can express).
 fn select_shorthand(chains: &[Chain]) -> Option<String> {
     let [chain] = chains else { return None };
@@ -810,16 +871,13 @@ fn select_shorthand(chains: &[Chain]) -> Option<String> {
     match term {
         // `!f`, `!p`, `!%mod.recv`, `!.` — the `&` is part of the sugar.
         Term::Reference(access) => Some(format!("!{}", render_access(access))),
-        // `!#'int`, `!#Reply[...]` — a body-less identity receive.
+        // `!'int`, `!#Reply[...]` — a body-less identity receive.
         Term::Function(function)
             if function.type_parameters.is_empty()
                 && function.return_type.is_none()
                 && function.body.is_none() =>
         {
-            function
-                .parameter_type
-                .as_ref()
-                .map(|parameter_type| format!("!#{}", render_type_atom(parameter_type)))
+            function.parameter_type.as_ref().map(render_select_head)
         }
         // `!1000` — a timeout literal.
         Term::Literal(literal) => Some(format!("!{}", render_literal(literal))),
@@ -1283,8 +1341,18 @@ fn render_match(pattern: &Match) -> String {
                 .join(" | ")
         ),
         // A type-ascribed binding always parenthesises its type: the parser requires `('(' type ')'`
-        // immediately followed by the binder.
-        Match::As(type_def, name, _) => format!("({}){}", render_type(type_def), name),
+        // immediately followed by the binder. A self-parenthesised rendering — a union or an
+        // unnamed partial — already provides that pair (`('int | 'bin)v`, `(x: 'int)p`); a named
+        // partial's parens don't lead, so it still takes the explicit pair (`(Point(x))p`).
+        Match::As(type_def, name, _) => {
+            let self_parenthesised = matches!(type_def, Type::Union(_))
+                || matches!(type_def, Type::Tuple(t) if t.is_partial && t.name.is_none());
+            if self_parenthesised {
+                format!("{}{}", render_type(type_def), name)
+            } else {
+                format!("({}){}", render_type(type_def), name)
+            }
+        }
     }
 }
 
@@ -1446,7 +1514,18 @@ fn render_type_arguments(arguments: &[Type]) -> String {
 }
 
 fn render_tuple_type(tuple_type: &TupleType) -> String {
-    let name = tuple_type.name.clone().unwrap_or_default();
+    // A lowercase name is the alias-applied spread form (`'v1[..., id: 'bin]`): the parser
+    // stores the alias as the name and rewrites its bare spreads to `...v1`. Render it back
+    // in source form — the name takes its `'` prefix, and a spread of the alias itself
+    // (without type arguments) collapses to a bare `...`.
+    let alias = tuple_type
+        .name
+        .as_deref()
+        .filter(|name| name.starts_with(char::is_lowercase));
+    let name = match alias {
+        Some(alias) => format!("'{}", alias),
+        None => tuple_type.name.clone().unwrap_or_default(),
+    };
     if tuple_type.fields.is_empty() {
         return if tuple_type.is_partial {
             format!("{}()", name)
@@ -1459,7 +1538,16 @@ fn render_tuple_type(tuple_type: &TupleType) -> String {
     let fields = tuple_type
         .fields
         .iter()
-        .map(render_field_type)
+        .map(|field| match (alias, field) {
+            (
+                Some(alias),
+                FieldType::Spread {
+                    identifier: Some(identifier),
+                    type_arguments,
+                },
+            ) if identifier == alias && type_arguments.is_empty() => "...".to_string(),
+            _ => render_field_type(field),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let (open, close) = if tuple_type.is_partial {
@@ -1968,6 +2056,21 @@ mod tests {
             // --- select / process / references ---
             "!'int",
             "!'int ~> { =0 => Ok | [] }",
+            "!'%proc.changed",
+            "!'%list<'int>",
+            "!'int { =42 => Ok | [] }",
+            "!('int | 'bin)",
+            "!(x: 'int)",
+            "!Done",
+            "!Reply['ref, 'bin]",
+            "!Reply['ref, 'bin] { =Reply[&id, _]; Ok }",
+            "!#['int, 'int]",
+            "@'%proc.changed { $ }",
+            "@Done { $ }",
+            "@Reply['int] { $ }",
+            "@['int, 'int] { $ }",
+            "@[] { $ }",
+            "@((x: 'int)) { $ }",
             "![p, 1000]",
             "!p",
             "![]",
@@ -1997,6 +2100,10 @@ mod tests {
             "=_",
             "=&y",
             "=('int)n",
+            "=('int | 'bin)v",
+            "=(x: 'int)p",
+            "=(Point(x: 'int))p",
+            "('bin)ip = f x; ip",
             "=([a] | [b])",
             "='int",
             "=Circle[radius: r]",
@@ -2027,6 +2134,10 @@ mod tests {
             "'rw = 'readable & 'writable",
             "'inter = 'a & 'b | 'c",
             "'list<'t> = Nil | Cons['t, ^]",
+            "'v2 = 'v1[..., id: 'bin]",
+            "'v3 = 'v1[...'other, id: 'bin]",
+            "'post = Post[...'entity, title: 'int, ...'updateable]",
+            "'pairs = 'wrap[...'pair<'int>, tag: 'bin]",
             "'tree<'t> = Leaf['t] | Node[^, ^]",
             "'json = Null | 'bool | 'int | Str['bin] | Array[(Nil | Cons[^, ^1])]",
             "'pair<'a, 'b> = Pair[first: 'a, second: 'b]",

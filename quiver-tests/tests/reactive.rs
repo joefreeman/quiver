@@ -40,7 +40,7 @@ fn wakeup_on_dependency_change() {
             store = 5 ~> @'int { !'int ~> { =n => ^ n } }
             s1 = %proc.track #{ ?store }
             10 ~> store
-            w = !#'%proc.changed
+            w = !'%proc.changed
             s2 = ?store
             [s1, s2]
             "#,

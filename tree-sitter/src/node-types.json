@@ -158,6 +158,10 @@
             "named": true
           },
           {
+            "type": "state",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -362,6 +366,10 @@
             "named": true
           },
           {
+            "type": "pattern_ascription",
+            "named": true
+          },
+          {
             "type": "pattern_partial",
             "named": true
           },
@@ -454,6 +462,10 @@
         },
         {
           "type": "spread_update",
+          "named": true
+        },
+        {
+          "type": "state",
           "named": true
         },
         {
@@ -868,6 +880,122 @@
             "named": true
           }
         ]
+      },
+      "receive": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
+      },
+      "states": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
@@ -990,6 +1118,26 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "parameter",
+    "named": true,
+    "fields": {
+      "field": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -1484,52 +1632,181 @@
   {
     "type": "process_type",
     "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": false,
-      "types": [
-        {
-          "type": "cycle_type",
-          "named": true
-        },
-        {
-          "type": "function_type",
-          "named": true
-        },
-        {
-          "type": "module_type",
-          "named": true
-        },
-        {
-          "type": "partial_type",
-          "named": true
-        },
-        {
-          "type": "process_type",
-          "named": true
-        },
-        {
-          "type": "resource_type",
-          "named": true
-        },
-        {
-          "type": "self_default_type",
-          "named": true
-        },
-        {
-          "type": "tuple_type",
-          "named": true
-        },
-        {
-          "type": "type_identifier",
-          "named": true
-        },
-        {
-          "type": "union_type",
-          "named": true
-        }
-      ]
+    "fields": {
+      "message": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
+      },
+      "result": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
+      },
+      "state": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -1540,6 +1817,14 @@
       "multiple": false,
       "required": true,
       "types": [
+        {
+          "type": "module_type",
+          "named": true
+        },
+        {
+          "type": "tuple_type",
+          "named": true
+        },
         {
           "type": "type_identifier",
           "named": true
@@ -1894,6 +2179,22 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "state",
+    "named": true,
+    "fields": {
+      "target": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "access",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -2348,6 +2649,10 @@
     "named": false
   },
   {
+    "type": "$",
+    "named": false
+  },
+  {
     "type": "%",
     "named": false
   },
@@ -2416,6 +2721,10 @@
     "named": false
   },
   {
+    "type": "?",
+    "named": false
+  },
+  {
     "type": "@",
     "named": false
   },
@@ -2473,10 +2782,6 @@
   },
   {
     "type": "not",
-    "named": true
-  },
-  {
-    "type": "parameter",
     "named": true
   },
   {

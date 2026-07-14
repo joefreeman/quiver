@@ -98,7 +98,6 @@ module.exports = grammar({
     // A function/function-type may have optional trailing parts (return type, body); a
     // newline after a complete one ends the chain rather than extending it.
     [$.function],
-    [$.function_type],
     // After a chain, a separator (semicolon/newline) may continue the current sequence
     // (another chain) or end it so the surrounding construct can take a trailing separator.
     [$.expression],
@@ -240,12 +239,15 @@ module.exports = grammar({
     ),
 
     // The forms valid as the target of a chain binding (`x = ...`, `[a, b] = ...`,
-    // `(add, mul) = ...`, `* = ...`). A bare type or literal is never a binding target,
-    // which keeps bindings distinct from type aliases.
+    // `(add, mul) = ...`, `('bin)ip = ...`, `* = ...`). A bare type or literal is never a
+    // binding target, which keeps bindings distinct from type aliases. (Ascribed targets
+    // once mis-resolved `$N` accesses via GLR — that was the missing dotless-`$`-sugar
+    // rule, fixed alongside it.)
     _binding_target: $ => choice(
       $.identifier,
       $.pattern_tuple,
       $.pattern_partial,
+      $.pattern_ascription,
       $.star,
       $.placeholder,
     ),
@@ -262,6 +264,7 @@ module.exports = grammar({
       $.bind_match,
       $.reference,
       $.select,
+      $.state,
       $.tail_call,
       $.equality,
       $.not,
@@ -316,7 +319,14 @@ module.exports = grammar({
       $.import,
     ),
 
-    parameter: _ => '$',
+    // `$`, with the dotless single-accessor sugar: `$x` ≡ `$.x`, `$0` ≡ `$.0` (further
+    // accessors are dotted: `$0.pos`). The sugar is glued — a spaced `$ x` is an
+    // application of the parameter to an argument, never the sugar.
+    parameter: $ => seq('$', optional(field('field', choice(
+      alias($._identifier_immediate, $.identifier),
+      alias($._index_immediate, $.index),
+    )))),
+    _index_immediate: _ => token.immediate(/\d+/),
     ripple: _ => '~',
 
     _accessor: $ => choice(
@@ -419,7 +429,8 @@ module.exports = grammar({
 
     // The select operator, `!`:
     //   - `![a, b]`   general race/await form: a tuple of sources (each a chain)
-    //   - `!'int`      body-less identity receive on a named type
+    //   - `!'int`      body-less identity receive on a named type (module types too:
+    //                  `!'%proc.changed`; named tuple types: `!Done`, `!Reply['ref, 'bin]`)
     //   - `!#'int`     body-less identity receive on a `#`-type
     //   - `!(type)`    body-less identity receive on a parenthesised or partial type
     //   - `!p` / `!f`  single source (process to await, or function to receive on)
@@ -445,19 +456,39 @@ module.exports = grammar({
       )),
     )),
 
-    receive_type: $ => $.type_identifier,
+    receive_type: $ => choice(
+      $.module_type,
+      $.type_identifier,
+      alias($._named_tuple_type, $.tuple_type),
+    ),
+
+    // A *named* tuple type (`Done`, `Reply['ref, 'bin]`), for the receive shorthand —
+    // the unnamed `[…]` form would collide with the select's source-list brackets.
+    _named_tuple_type: $ => prec.right(choice(
+      seq(field('name', $.tuple_name), immBracketed($, '[', $._field_type, ']')),
+      field('name', $.tuple_name),
+    )),
+
+    // The state-sample operator, `?`: `?p` samples the target process's state (a snapshot,
+    // never a wait). A trailing `?` on an identifier (`empty?`) is part of the identifier,
+    // never this.
+    state: $ => seq(
+      '?',
+      field('target', $.access),
+    ),
 
     // `@N` process reference.
     process_ref: $ => seq('@', $.index),
 
     // `@f`/`@~` (spawn a function value), and the spawn shorthands `@{ ... }`,
-    // `@'int { ... }`, `@(type) { ... }`, `@[...] { ... }`, `@Name { ... }`. The spawn
-    // sugar keeps its body. The operand is restricted (no value tuples/literals) so a
-    // `[`/`Name` after `@` is unambiguously a type parameter rather than a value.
+    // `@'int { ... }` (module types too: `@'%mod.event { ... }`), `@(type) { ... }`,
+    // `@[...] { ... }`, `@Name { ... }`. The spawn sugar keeps its body. The operand is
+    // restricted (no value tuples/literals) so a `[`/`Name` after `@` is unambiguously a
+    // type parameter rather than a value.
     spawn: $ => prec.right(seq(
       '@',
       optional(choice(
-        seq(field('parameter', choice($.type_identifier, $.tuple_type, $._paren_type)), $.block),
+        seq(field('parameter', choice($.module_type, $.type_identifier, $.tuple_type, $._paren_type)), $.block),
         $.block,
         $.access,
         $.reference,
@@ -607,12 +638,17 @@ module.exports = grammar({
       $._type_atom,
     ),
 
-    function_type: $ => seq(
+    // Callable type, with the optional clauses ` !'c` (receive) and ` ?'d` (states
+    // beyond the parameter): `#'a -> 'b !'c ?'d`. Clause sigils are preceded by
+    // whitespace (type names may end in `?`/`!`) and glued to their clause type.
+    function_type: $ => prec.right(seq(
       '#',
       optional($.type_parameters),
       field('input', $._type_atom),
       optional(seq(optional($._nl), '->', optional($._nl), field('output', $._type_atom))),
-    ),
+      optional(seq('!', field('receive', $._type_atom))),
+      optional(seq('?', field('states', $._type_atom))),
+    )),
 
     union_type: $ => seq(
       optional(seq('|', optional($._nl))),
@@ -686,9 +722,17 @@ module.exports = grammar({
     resource_type: $ => /\\[A-Z][a-zA-Z0-9_]*/,
     cycle_type: $ => prec.right(seq('^', optional($.index))),
 
+    // Process type: bare `@'msg`, or the parenthesized clause forms
+    // `(@['msg] [-> 'r] [?'s])` (e.g. `(@'evt ?'status)`, `(@?'s)`).
     process_type: $ => choice(
-      seq('(', optional($._nl), '@', optional($._type_atom), optional($._nl), '->', optional($._nl), $._type_atom, optional($._nl), ')'),
-      prec.right(seq('@', optional($._type_atom))),
+      seq(
+        '(', optional($._nl), '@',
+        optional(field('message', $._type_atom)),
+        optional(seq(optional($._nl), '->', optional($._nl), field('result', $._type_atom))),
+        optional(seq(optional($._nl), '?', field('state', $._type_atom))),
+        optional($._nl), ')',
+      ),
+      prec.right(seq('@', optional(field('message', $._type_atom)))),
     ),
 
     // ------------------------------------------------------------------- terminals

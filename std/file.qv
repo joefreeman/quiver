@@ -12,7 +12,7 @@
 // The file process loop. The descriptor is held as the parameter (rather than reopened) and
 // threaded through each tail call, so the file is opened exactly once.
 serve = #\File {
-  !#'command ~> {
+  !'command ~> {
     | =Read[offset, length, reply, id] => {
       __file_read__ [$, offset, length] ~> Reply[id, ~] ~> reply
 
@@ -33,7 +33,7 @@ do_read = #[', 'int, 'int] {
   =[f, offset, length]
   id = %ref
   Read[offset, length, &., id] ~> f.0
-  !#Reply['ref, 'bin] { =Reply[&id, _]; Ok } ~> { =Reply[_, data] => data }
+  !Reply['ref, 'bin] { =Reply[&id, _]; Ok } ~> { =Reply[_, data] => data }
 }
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
@@ -111,7 +111,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     =[f, offset, data]
     id = %ref
     Write[offset, data, &., id] ~> f.0
-    !#Reply['ref, 'int] { =Reply[&id, _]; Ok } ~> { =Reply[_, written] => written }
+    !Reply['ref, 'int] { =Reply[&id, _]; Ok } ~> { =Reply[_, written] => written }
   },
 
   flush: #' {
@@ -119,7 +119,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     =f
     id = %ref
     Flush[&., id] ~> f.0
-    !#Reply['ref, Ok] { =Reply[&id, _]; Ok } ~> { =Reply[_, ok] => ok }
+    !Reply['ref, Ok] { =Reply[&id, _]; Ok } ~> { =Reply[_, ok] => ok }
   },
 
   close: #' {

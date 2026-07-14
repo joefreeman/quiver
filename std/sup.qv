@@ -107,7 +107,7 @@ restart? = #['row, 'outcome] {
 
 loop = #'state {
   =[table: t, max: m, window: w]
-  !#'down ~> =Down[id: i, outcome: o]
+  !'down ~> =Down[id: i, outcome: o]
   {
     | find [t, i] ~> =('row)r => {
       | restart? [r, o] => {

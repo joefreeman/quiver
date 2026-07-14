@@ -138,3 +138,87 @@ g = #{ 10 }; f = #'int { &g ~> ^~ 5 }
                   function: (tail_call
                     (ripple))
                   argument: (integer))))))))))
+
+==================
+dollar accessor sugar
+==================
+
+sum = #['int, 'int] { add [$0, $1] }
+name = #(name: Str['bin]) { $name }
+pos = #' { %path.to_string $0 ~> .0 }
+"x" ~> $0.pos
+$ 0
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (tuple_type
+          (type_identifier
+            name: (type_name))
+          (type_identifier
+            name: (type_name)))
+        (block
+          (branch
+            (expression
+              (chain
+                (application
+                  function: (access
+                    source: (identifier))
+                  argument: (tuple
+                    (chain
+                      (access
+                        source: (parameter
+                          field: (index))))
+                    (chain
+                      (access
+                        source: (parameter
+                          field: (index))))))))))))
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (partial_type
+          name: (identifier)
+          (tuple_type
+            name: (tuple_name)
+            (type_identifier
+              name: (type_name))))
+        (block
+          (branch
+            (expression
+              (chain
+                (access
+                  source: (parameter
+                    field: (identifier)))))))))
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (self_default_type)
+        (block
+          (branch
+            (expression
+              (chain
+                (application
+                  function: (access
+                    source: (import
+                      (identifier))
+                    field: (identifier))
+                  argument: (access
+                    source: (parameter
+                      field: (index))))
+                (access
+                  field: (index))))))))
+    (chain
+      (string)
+      (access
+        source: (parameter
+          field: (index))
+        field: (identifier)))
+    (chain
+      (application
+        function: (access
+          source: (parameter))
+        argument: (integer)))))

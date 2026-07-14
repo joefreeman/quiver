@@ -73,6 +73,7 @@
 (named_field name: (identifier) @property)
 (access field: (identifier) @property)
 (tail_call field: (identifier) @property)
+(parameter field: (identifier) @property)  ; the dotless sugar: `$name` ≡ `$.name`
 
 ; ---------------------------------------------------------------- annotations
 
