@@ -1024,3 +1024,48 @@ fn test_field_complement_only_for_single_tuple_scrutinees() {
         )
         .expect("Cons[7, Nil]");
 }
+
+#[test]
+fn test_guarded_branch_complement_not_applied_to_later_branches() {
+    // A `; guard` condition can fall through with its pattern MATCHED (the guard
+    // failed), so its pattern's complement must not narrow subsequent branches:
+    // a guard-failed T[5] must still take the `=T[x]` arm — not have it folded away
+    // as impossible and land on the M arm.
+    quiver()
+        .evaluate(
+            r#"
+            'g = T['int] | M['int];
+            f = #'g {
+              $ ~> {
+                | =T[x]; %num.gt? [x, 10] => Big[x]
+                | =T[x] => SmallT[x]
+                | =M[x] => IsM[x]
+              }
+            };
+            [f T[5], f T[20], f M[1]]
+            "#,
+        )
+        .expect("[SmallT[5], Big[20], IsM[1]]");
+}
+
+#[test]
+fn test_guarded_branch_does_not_count_as_coverage() {
+    // Nor may a guarded branch count as covering its variant: with T "covered" only
+    // by a guarded branch, a guard-failed T must fall through a still-checked `=M`
+    // arm to the fallback — not have the M test elided as "the only variant left".
+    quiver()
+        .evaluate(
+            r#"
+            'g = T['int] | M['int];
+            f = #'g {
+              $ ~> {
+                | =T[x]; %num.gt? [x, 10] => Big
+                | =M[_] => IsM
+                | Fallthrough
+              }
+            };
+            [f T[5], f M[1]]
+            "#,
+        )
+        .expect("[Fallthrough, IsM]");
+}

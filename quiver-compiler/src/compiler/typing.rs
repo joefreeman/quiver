@@ -1309,6 +1309,8 @@ pub fn unify(
         // Both are basic types - must match
         (Type::Integer, Type::Integer) => Ok(()),
         (Type::Binary, Type::Binary) => Ok(()),
+        (Type::Reference, Type::Reference) => Ok(()),
+        (Type::Resource(a), Type::Resource(b)) if a == b => Ok(()),
 
         // Process types must match in structure
         (
@@ -1332,9 +1334,11 @@ pub fn unify(
             // param like `(@ -> 'r)` accepts any pid whose receive pins 'r — the
             // send grant is simply dropped, exactly as the covariant subtype allows
             // (a declared clause grants a capability; omitting one never demands
-            // the value lack it).
+            // the value lack it). Send is contravariant (the message set the handle
+            // accepts may be wider than the declared promise), so it unifies swapped,
+            // as the callable arm does for parameters.
             if let (Some(s1), Some(s2)) = (send1, send2) {
-                unify(bindings, *s1, *s2, program)?;
+                unify(bindings, *s2, *s1, program)?;
             }
             if let (Some(ret1), Some(ret2)) = (receive1, receive2) {
                 unify(bindings, *ret1, *ret2, program)?;

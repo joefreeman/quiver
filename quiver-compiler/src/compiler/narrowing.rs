@@ -8,7 +8,7 @@ use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup, is_compatible, types_overlap};
 
 use super::provenance::Provenance;
-use super::scopes::{Binding, Scope, lookup_variable};
+use super::scopes::{Scope, lookup_variable};
 use super::typing::union_type_ids;
 
 /// Narrowing information recorded during condition compilation.
@@ -193,16 +193,16 @@ pub fn apply_narrowing(
         // Collect bindings to narrow first to avoid borrow conflicts
         let bindings_to_narrow: Vec<(String, usize)> = scope
             .bindings
+            .variables
             .iter()
-            .filter_map(|(name, binding)| {
-                if let Binding::Variable {
-                    ty,
-                    provenance: prov,
-                    ..
-                } = binding
-                    && prov == provenance
-                {
-                    let current = scope.narrowings.variables.get(name).copied().unwrap_or(*ty);
+            .filter_map(|(name, variable)| {
+                if &variable.provenance == provenance {
+                    let current = scope
+                        .narrowings
+                        .variables
+                        .get(name)
+                        .copied()
+                        .unwrap_or(variable.ty);
                     let intersection = intersect_types(current, narrowed_to_id, program);
                     // Only narrow if not never type
                     if intersection != never_id {

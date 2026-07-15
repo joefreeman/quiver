@@ -2,7 +2,7 @@ use crate::WorkerId;
 use crate::messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 use crate::transport::WorkerHandle;
 use quiver_compiler::compiler::{
-    Binding, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
+    Bindings, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
 };
 use quiver_core::bytecode::{Bytecode, Constant, Function, Instruction};
 use quiver_core::compatibility::{
@@ -2115,10 +2115,10 @@ impl<E: Effect> Environment<E> {
         alias_name: &str,
     ) -> Result<usize, String> {
         // Convert type_aliases HashMap to a single scope for resolution
-        let mut bindings = std::collections::HashMap::new();
-        for (name, type_alias) in type_aliases {
-            bindings.insert(name.clone(), Binding::TypeAlias(type_alias.clone()));
-        }
+        let bindings = Bindings {
+            variables: std::collections::HashMap::new(),
+            type_aliases: type_aliases.clone(),
+        };
         let scope = Scope::new(bindings, None, ScopeKind::Root);
         let scopes = vec![scope];
 

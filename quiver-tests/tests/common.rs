@@ -15,6 +15,7 @@ fn evaluate(
     mut repl: Repl<NativeEffect>,
     virtual_time: Arc<AtomicU64>,
     source: &str,
+    timeout: std::time::Duration,
 ) -> TestResult {
     // Fetch process types
     let types_request_id = environment
@@ -35,7 +36,6 @@ fn evaluate(
     let result = match repl.evaluate(&mut environment, source, process_types) {
         Ok(Some(request_id)) => {
             let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(5);
 
             loop {
                 let did_work = environment.step().unwrap_or(false);
@@ -93,6 +93,8 @@ pub struct TestBuilder {
     scoped_no_io: bool,
     debug: bool,
     collection_threshold: Option<usize>,
+    timeout: Option<std::time::Duration>,
+    real_time: bool,
 }
 
 #[allow(dead_code)]
@@ -131,6 +133,24 @@ impl TestBuilder {
         self
     }
 
+    /// Raise the evaluation timeout (default 5s) for tests with real waits — wall-clock
+    /// sleeps, socket round-trips — that can exceed it under a loaded test machine.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Run on the real clock instead of the free-running virtual one. The virtual
+    /// clock advances ~1 virtual ms per idle step (orders of magnitude faster than
+    /// wall time), which turns every timed wait in a test doing REAL I/O into a race
+    /// between two clocks — a `![100]` drop-observation wait elapses in ~1ms of real
+    /// time. Real-I/O integration tests should use this; pure tests keep the virtual
+    /// clock (it is what makes timeout-heavy tests instant).
+    pub fn with_real_time(mut self) -> Self {
+        self.real_time = true;
+        self
+    }
+
     pub fn evaluate(self, source: &str) -> TestResult {
         // Initialize virtual time for testing
         let virtual_time_ms = Arc::new(AtomicU64::new(0));
@@ -158,15 +178,25 @@ impl TestBuilder {
         let num_workers = 2;
         let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
         for i in 0..num_workers {
-            let time = virtual_time_ms.clone();
             let builtins_clone = builtins.clone();
 
-            workers.push(Box::new(spawn_worker(
-                move || time.load(Ordering::Relaxed),
-                builtins_clone,
-                false, // Don't enable profiling in tests
-                i as u16,
-            )));
+            if self.real_time {
+                let t0 = std::time::Instant::now();
+                workers.push(Box::new(spawn_worker(
+                    move || t0.elapsed().as_millis() as u64,
+                    builtins_clone,
+                    false, // Don't enable profiling in tests
+                    i as u16,
+                )));
+            } else {
+                let time = virtual_time_ms.clone();
+                workers.push(Box::new(spawn_worker(
+                    move || time.load(Ordering::Relaxed),
+                    builtins_clone,
+                    false, // Don't enable profiling in tests
+                    i as u16,
+                )));
+            }
         }
 
         // Create shared effect backend if enabled
@@ -203,7 +233,10 @@ impl TestBuilder {
             });
         }
 
-        evaluate(environment, repl, virtual_time_ms, source)
+        let timeout = self
+            .timeout
+            .unwrap_or_else(|| std::time::Duration::from_secs(5));
+        evaluate(environment, repl, virtual_time_ms, source, timeout)
     }
 }
 
@@ -514,7 +547,13 @@ impl TestResult {
 
     /// Evaluate another expression, chaining from the previous evaluation
     pub fn then_evaluate(self, source: &str) -> Self {
-        evaluate(self.environment, self.repl, self.virtual_time, source)
+        evaluate(
+            self.environment,
+            self.repl,
+            self.virtual_time,
+            source,
+            std::time::Duration::from_secs(5),
+        )
     }
 
     /// Run a full process-reclamation round to completion. Drives

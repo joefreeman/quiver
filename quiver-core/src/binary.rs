@@ -168,8 +168,12 @@ impl BinaryData {
                     offset,
                     length,
                 } => {
-                    let parent_vec = parent.to_vec();
-                    out.extend_from_slice(&parent_vec[*offset..*offset + *length]);
+                    // Emit only the slice's range, descending into the parent's overlapping
+                    // nodes — a small slice of a large binary must cost the slice, not the
+                    // whole parent. (Materializing the parent here made `to_vec` O(parent)
+                    // per call, so scanning with per-position slices — `str.find_index`,
+                    // used by `contains?`/`index_of` — was O(n²).)
+                    parent.append_range(out, *offset, *length);
                 }
                 BinaryData::Concat { left, right, .. } => {
                     // Emit left before right: push right first so left pops next.
@@ -181,6 +185,56 @@ impl BinaryData {
                     out.reserve(unit_bytes.len() * count);
                     for _ in 0..*count {
                         out.extend_from_slice(&unit_bytes);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Append bytes `[start, start + length)` of this binary to `out`, descending only into
+    /// the rope nodes that overlap the range. Cost is proportional to the range (plus the
+    /// depth traversed), not the whole binary — so extracting a small slice of a large binary
+    /// is cheap. Iterative (an explicit work-list) so a deep `Concat` spine can't overflow the
+    /// stack, mirroring [`write_to_vec`].
+    fn append_range(&self, out: &mut Vec<u8>, start: usize, length: usize) {
+        // Each work item is (node, start-within-node, len). For a `Concat` we push the right
+        // child before the left so the left pops (and emits) first — preserving byte order.
+        let mut stack: Vec<(&BinaryData, usize, usize)> = vec![(self, start, length)];
+        while let Some((node, s, l)) = stack.pop() {
+            if l == 0 {
+                continue;
+            }
+            match node {
+                BinaryData::Owned(bytes) => out.extend_from_slice(&bytes[s..s + l]),
+                BinaryData::Zeroed(_) => out.resize(out.len() + l, 0),
+                BinaryData::Slice { parent, offset, .. } => {
+                    stack.push((parent, offset + s, l));
+                }
+                BinaryData::Concat { left, right, .. } => {
+                    let left_len = left.len();
+                    if s >= left_len {
+                        stack.push((right, s - left_len, l));
+                    } else if s + l <= left_len {
+                        stack.push((left, s, l));
+                    } else {
+                        let left_take = left_len - s;
+                        stack.push((right, 0, l - left_take));
+                        stack.push((left, s, left_take));
+                    }
+                }
+                BinaryData::Tiled { unit, .. } => {
+                    // The unit is shallow; emit the requested range against the repeated
+                    // sequence directly so this leaf stays in order.
+                    let unit_bytes = unit.to_vec();
+                    let unit_len = unit_bytes.len();
+                    let mut pos = s;
+                    let mut rem = l;
+                    while rem > 0 {
+                        let within = pos % unit_len;
+                        let take = rem.min(unit_len - within);
+                        out.extend_from_slice(&unit_bytes[within..within + take]);
+                        pos += take;
+                        rem -= take;
                     }
                 }
             }

@@ -42,6 +42,82 @@ fn test_process_type_checking_send() {
 }
 
 #[test]
+fn test_send_through_all_process_union() {
+    // Two process types that differ (here in result type) widen to a union rather than
+    // folding by subsumption. A pipe into the union must still compile as a send — it
+    // used to fall through to the non-applicable path and silently replace, discarding
+    // the message.
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { !'int };
+            g = #'int { !'int ~> "hi" };
+            a = 0 ~> @f;
+            p = Ok ~> { | =Ok => &a | 0 ~> @g };
+            42 ~> p;
+            !a
+        "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_union_send_checks_every_member() {
+    // The message must fit every member's send type: whichever member the handle
+    // turns out to be at runtime has to accept it.
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { !'int };
+            h = #'int { !Str['bin] ~> $ };
+            p = Ok ~> { | =Ok => 0 ~> @f | 0 ~> @h };
+            42 ~> p
+        "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "Str['bin]".to_string(),
+            found: "'int".to_string(),
+        });
+}
+
+#[test]
+fn test_pipe_into_mixed_union_is_error() {
+    // A union mixing a process with plain values is neither sendable nor clearly a
+    // replace — rejected rather than silently discarding the flowing value.
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { !'int };
+            p = Ok ~> { | =Ok => 0 ~> @f | 5 };
+            42 ~> p
+        "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::UnionApplication {
+            union: "'int | (@'int -> 'int ?'int)".to_string(),
+            all_functions: false,
+        });
+}
+
+#[test]
+fn test_pipe_into_function_union_is_error() {
+    // A union of function types cannot be applied (the members are separate
+    // functions); rejected rather than silently replacing.
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { $ };
+            g = #'int { "hi" };
+            u = Ok ~> { | =Ok => &f | &g };
+            42 ~> u
+        "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::UnionApplication {
+            union: "(#'int -> 'int) | (#'int -> Str['bin])".to_string(),
+            all_functions: true,
+        });
+}
+
+#[test]
 fn test_spawn_with_argument() {
     quiver().evaluate("p = 42 ~> @#'int { $ }; !p").expect("42");
 }

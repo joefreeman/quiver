@@ -1329,3 +1329,88 @@ fn test_union_folds_members_differing_only_by_annotation_row() {
             "#P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])] -> ([(Cons['int, μ1] | Nil), P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])]] | [])",
         );
 }
+
+#[test]
+fn test_type_alias_then_same_named_binding() {
+    // Types and values are separate namespaces: a value binding must not clobber a
+    // same-named type alias defined earlier in the same (top-level) scope.
+    quiver()
+        .evaluate(
+            r#"
+            'room = Str['bin]
+            room = #'int { $ }
+            f = #'room { Ok }
+            ["hi" ~> f, 7 ~> room]
+            "#,
+        )
+        .expect("[Ok, 7]");
+}
+
+#[test]
+fn test_binding_then_same_named_type_alias() {
+    // ... and in the other order: a type alias must not clobber a same-named
+    // value binding defined earlier in the same scope.
+    quiver()
+        .evaluate(
+            r#"
+            room = 42
+            'room = Str['bin]
+            f = #'room { Ok }
+            ["hi" ~> f, room]
+            "#,
+        )
+        .expect("[Ok, 42]");
+}
+
+#[test]
+fn test_same_named_alias_and_binding_in_function_body() {
+    // A binding inside a function body must not shadow out an outer type alias of
+    // the same name: the alias stays usable after the binding.
+    quiver()
+        .evaluate(
+            r#"
+            'room = Str['bin]
+            main = #{
+              room = #'int { $ }
+              g = #'room { Ok }
+              ["hi" ~> g, 7 ~> room]
+            }
+            main
+            "#,
+        )
+        .expect("[Ok, 7]");
+}
+
+#[test]
+fn test_module_alias_and_binding_share_name() {
+    // Module top level: a module may export a function under the same name as one of
+    // its type aliases, with the alias still usable after the binding.
+    let mut modules = std::collections::HashMap::new();
+    modules.insert(
+        vec!["frames".to_string()],
+        r#"
+        'frame = Frame['int]
+        frame = #'int { Frame[$] }
+        unwrap = #'frame { =Frame[n] => n }
+        [frame: &frame, unwrap: &unwrap]
+        "#
+        .to_string(),
+    );
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("5 ~> %frames.frame ~> %frames.unwrap")
+        .expect("5");
+}
+
+#[test]
+fn test_alias_and_binding_share_name_across_repl_lines() {
+    // The REPL persists bindings between lines: a variable defined on a later line
+    // must not clobber the persisted same-named type alias, or vice versa.
+    quiver()
+        .evaluate("'room = Str['bin]")
+        .then_evaluate("room = 42")
+        .then_evaluate("f = #'room { Ok }")
+        .then_evaluate(r#"["hi" ~> f, room]"#)
+        .expect("[Ok, 42]");
+}

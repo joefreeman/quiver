@@ -37,7 +37,7 @@ fn run(source: &str) -> Executor<NativeEffect> {
 
     let compiled = Compiler::compile(
         ast,
-        &HashMap::new(),
+        &quiver_compiler::compiler::Bindings::default(),
         &mut module_cache,
         &resolver,
         &mut program,

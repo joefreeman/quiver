@@ -1,0 +1,1811 @@
+// Live-view frames and patches over `%html` template provenance.
+//
+// A **frame** is the diffable shape of one render: derived from a node tree by reading
+// the `:template` annotation `%html{ … }` expansions attach. A template instance becomes
+// `Tmpl` (its statics list doubles as its identity — equal statics, same template); its
+// hole values become child slots. A `Text` node in a child slot is a `Leaf` (compared by
+// value, patched as text); an attribute hole is an `ALeaf` (its element anchor and name
+// carried statically); anything without provenance — `raw` markup, hand-built trees,
+// node lists — is `Opaque`: rendered whole, compared whole, replaced whole.
+//
+// `diff [prev, next]` walks two frames depth-first and answers the patches that turn one
+// into the other, most-enclosing first. A changed slot subsumes its descendants: same
+// statics recurse slot-by-slot; anything else — a differing leaf, a switched template, a
+// kind change — emits one patch at that slot's path and stops. A `path` is the hole
+// indices from the root; `Nil` addresses the root itself.
+//
+// `render` serializes a frame to *instrumented* HTML — statics interleaved with slot
+// values, so child-hole markers (`<!--q:i-->`/`<!--/q:i-->`) and `data-q` element
+// anchors are included: the form a patch applier needs for `SetHtml` payloads and the
+// initial region render. (`%html.render` on the tree stays clean of instrumentation.)
+
+'attr_val = '%html.attr_val
+'statics = '%html.statics
+'holes = '%html.holes
+
+// === Session messages ===================================================================
+// Declared up front: boundary frames carry a view-spawning thunk typed against them.
+
+// What a view receives: a client event (already unpacked from the wire envelope by
+// the app), park/wake control, and the reactive wakeups its renders subscribe it to.
+// `Park` stops rendering (wakeups are absorbed — the app's buffer, not the view, is
+// what keeps late frames correct); `Wake` drains and re-renders once against the held
+// frame, so a warm attach diffs to silence.
+'view_msg = Event['%json, '%http.pairs] | Park | Wake | '%sup.down | '%proc.changed
+
+// What the app receives: the socket from a successful claim, encoded frame messages
+// from its views, and route (dis)registrations as views spawn and kill children.
+'app_msg =
+  | Attach['%http/websocket]
+  | Frame[Str['bin]]
+  | Region[Str['bin]]
+  | Route[Str['bin], @'view_msg]
+  | Unroute[Str['bin]]
+
+// How a freshly mounted view announces itself: `Reply` sends the settled region
+// HTML to the app as a `Region` (the GET path — the app composes the dead render
+// from it and the children's first frames, then parks); `Replace` sends the app
+// one root-replacing frame (the cold join path, and every placed view's first
+// frame). Every boot settles first: after mount + render + reconcile, the view
+// drains `Changed` on a quiet-window/deadline loop and re-renders, so the
+// announcement never ships an unresolved state (a `Loading` a sampled fetcher is
+// about to step past, say).
+'vboot = Reply[@'app_msg] | Replace
+
+// A boundary's closure-packed spawn: called with the view's assigned vid, the app
+// to send frames to, and the boot mode — by the placing view's loop at boundary
+// reconcile (`Replace`), or by the app itself for the root (never inside a tracked
+// render); answers the spawned view. The heterogeneous component (its
+// init/state/event types) hides inside the closure — every view handle is the same
+// declared process type, and the app consumes the root through the same door. The
+// handle grants await too, so the placer's watcher can observe a crash; it narrows
+// to the send-only `@'view_msg` everywhere else.
+'vstart = #[Str['bin], @'app_msg, 'vboot] -> (@'view_msg -> [])
+
+// A placement argument: what a placeable component is called with.
+'place<'i> = [init: 'i, key: Str['bin]]
+
+// The `:boundary` annotation a placeable component attaches (to an empty Fragment).
+'bnd = [key: Str['bin], start: 'vstart]
+
+'frame =
+  | Leaf[Str['bin]]
+  | ALeaf[elem: 'int, name: Str['bin], value: 'attr_val]
+  | Opaque[Str['bin]]
+  | Tmpl[statics: 'statics, slots: (Nil | Cons[^, ^1])]
+  | Many[(Nil | Cons[[key: (Str['bin] | []), row: ^], ^1])]
+  | Boundary[key: Str['bin], vid: (Str['bin] | []), start: 'vstart]
+
+'frames = Nil | Cons['frame, ^]
+
+// A Many's rows: each an optional identity (the item node's `:key` annotation — unused
+// by the positional diff, carried for the keyed one) and the row's own frame.
+'rows = Nil | Cons[[key: (Str['bin] | []), row: 'frame], ^]
+
+'path = Nil | Cons['int, ^]
+
+'patch =
+  | SetText[path: 'path, value: Str['bin]]
+  | SetAttr[path: 'path, elem: 'int, name: Str['bin], value: 'attr_val]
+  | SetHtml[path: 'path, html: Str['bin]]
+  | InsRow[path: 'path, at: 'int, html: Str['bin]]
+  | DelRow[path: 'path, at: 'int]
+  | MovRow[path: 'path, from: 'int, to: 'int]
+
+'patches = Nil | Cons['patch, ^]
+
+'items<'t> = Nil | Cons['t, ^]
+
+rev = #<'t>['items<'t>, 'items<'t>] {
+  =[items, acc]
+  items ~> {
+    | =Nil => acc
+    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+  }
+}
+
+// A node's frame; self-passed to recurse into template slots.
+frame_of = #[#^ -> 'frame, '%html] {
+  =[self, node]
+  {
+    | node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: &st]
+    | node:('%html.tmpl)template
+      ~> =(statics: s, holes: h) => {
+        slots = #['holes, 'frames] {
+          =[items, acc]
+          items ~> {
+            | =Nil => rev [acc, Nil]
+            | =Cons[hd, t] => {
+              f = hd ~> {
+                | =Child[n] => self [&self, n]
+                | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: v]
+              }
+              ^ [t, Cons[f, acc]]
+            }
+          }
+        }
+        Tmpl[statics: s, slots: slots [h, Nil]]
+      }
+    | node ~> =Text[str] => Leaf[str]
+    | node ~> =Fragment[items] => {
+      // An un-annotated Fragment in a child slot is a node list: a Many of per-item
+      // frames (chat items being their own templates diff granularly), each carrying
+      // its optional `:key`.
+      row_frames = #['%html.nodes, 'rows] {
+        =[ns, acc]
+        ns ~> {
+          | =Nil => rev [acc, Nil]
+          | =Cons[n, t] => {
+            k = n:(Str['bin])key; ^ [t, Cons[[key: k, row: self [&self, n]], acc]]
+          }
+        }
+      }
+      Many[row_frames [items, Nil]]
+    }
+    | Opaque[%html.render node]
+  }
+}
+
+frame = #'%html {
+  :doc "Derives a node tree's frame — the diffable shape of one render — from the :template provenance %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole)."
+  frame_of [&frame_of, $]
+}
+
+// Render a frame onto `acc`; self-passed to recurse into template slots.
+render_of = #[#^ -> 'bin, 'frame, 'bin] {
+  =[self, f, acc]
+  f ~> {
+    | =Leaf[s] => { et = %html.escape_text s ~> .0; %bin.concat [acc, et] }
+    | =ALeaf[elem: _, name: Str[n], value: v] => v ~> {
+      | =[] => acc
+      | =Ok => %bin.concat [%bin.append [acc, 32, 1], n]
+      | =Str[vb] => {
+        ev = %html.escape_attr Str[vb] ~> .0
+        %bin.concat [%bin.append [acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> %bin.concat [~, ev] ~> %bin.append [
+          ~,
+          34,
+          1,
+        ]
+      }
+    }
+    | =Opaque[Str[h]] => %bin.concat [acc, h]
+    | =Tmpl[statics: ss, slots: sl] => {
+      weave = #['statics, 'frames, 'bin] {
+        =[statics, slots, a]
+        statics ~> {
+          | =Cons[Str[st], srest] => {
+            a2 = %bin.concat [a, st]
+            slots ~> {
+              | =Cons[fr, frest] => ^ [srest, frest, self [&self, fr, a2]]
+              | a2
+            }
+          }
+          | a
+        }
+      }
+      weave [ss, sl, acc]
+    }
+    | =Many[rows] => {
+      // Each row is delimited by anonymous `<!--r-->`/`<!--/r-->` markers — the client
+      // indexes rows positionally at apply time, so the markers carry no numbers and
+      // never need renumbering.
+      render_rows = #['rows, 'bin] {
+        =[rs, a]
+        rs ~> {
+          | =Nil => a
+          | =Cons[[key: _, row: r], t] => {
+            a2 = %bin.concat [a, "<!--r-->" ~> .0]
+            a3 = self [&self, r, a2]
+            ^ [t, %bin.concat [a3, "<!--/r-->" ~> .0]]
+          }
+        }
+      }
+      render_rows [rows, acc]
+    }
+    // A boundary renders as its empty vid markers — the child's own first frame
+    // message fills the interior. An unresolved boundary (nil vid — a frame that
+    // never went through reconcile, e.g. under the sim) renders nothing.
+    | =Boundary[key: _, vid: v, start: _] => v ~> {
+      | =Str[vb] => %bin.concat [acc, "<!--v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [~, "--><!--/v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [
+        ~,
+        "-->" ~> .0,
+      ]
+      | acc
+    }
+    // Unreachable: the arms above cover every variant, but exhaustiveness can't see
+    // through the inner recursive union.
+    | acc
+  }
+}
+
+render = #'frame {
+  :doc "Renders a frame to instrumented HTML — statics interleaved with slot values, child-hole markers and data-q anchors included — for the initial region render and SetHtml patch payloads."
+  render_of [&render_of, $, 0x] ~> Str[~]
+}
+
+// An inserted row's payload: the row rendered inside its own markers.
+render_row = #'frame { "<!--r-->" ~> %str.concat [~, render $] ~> %str.concat [~, "<!--/r-->"] }
+
+// === Keyed rows =========================================================================
+// When every row on BOTH sides carries a `:key`, the diff matches rows by identity
+// instead of position: a middle removal is one DelRow, a middle insertion one InsRow,
+// and a reorder a MovRow — the moved DOM nodes are reused, preserving their state.
+// Keys are a server-side hint only; the wire ops stay positional and the markers
+// anonymous. Any unkeyed row drops the whole list to the positional diff. Duplicate
+// keys are safe but suboptimal (first match wins; content still converges).
+
+// Whether every row carries a key.
+keyed_rows? = #'rows {
+  | =Nil => Ok
+  | =Cons[[key: Str[_], row: _], t] => ^ t
+  | []
+}
+
+key_in? = #['rows, Str['bin]] {
+  =[rs, k]
+  rs ~> {
+    | =Nil => []
+    | =Cons[r, t] => { r ~> =(key: rk); { rk ~> =&k => Ok | ^ [t, k] } }
+  }
+}
+
+cat_rows = #['rows, 'rows] {
+  =[a, b]
+  a ~> {
+    | =Nil => b
+    | =Cons[h, t] => ^ [t, Cons[h, b]]
+  }
+}
+
+'taken = RHit[[key: (Str['bin] | []), row: 'frame], 'int] | RMiss
+
+// Remove the first row keyed `k`, answering it with its absolute index:
+// [RHit[row, index] | RMiss, the remaining rows]. `j` is the first row's index.
+take_row = #['rows, Str['bin], 'rows, 'int] -> ['taken, 'rows] {
+  =[rs, k, acc, j]
+  rs ~> {
+    | =Nil => [RMiss, rev [acc, Nil]]
+    | =Cons[r, t] => {
+      r ~> =(key: rk)
+      {
+        | rk ~> =&k => [RHit[r, j], cat_rows [acc, t]]
+        | ^ [t, k, Cons[r, acc], __integer_add__ [j, 1]]
+      }
+    }
+  }
+}
+
+// Phase A of the keyed diff: every old key absent from the new list is removed at its
+// survivor-relative index (the count of kept rows before it — each applied removal
+// shifts the rest down, so the indices are sequential-apply-correct). Answers
+// [the survivors in order, the patch accumulator].
+prune_rows = #['rows, 'rows, 'int, 'rows, 'patches, 'path] -> ['rows, 'patches] {
+  =[old, new, idx, keep, acc, rpath]
+  old ~> {
+    | =Nil => [rev [keep, Nil], acc]
+    | =Cons[r, t] => {
+      r ~> =(key: rk)
+      {
+        | rk ~> =Str[kb]; key_in? [new, Str[kb]] => ^ [
+          t,
+          new,
+          __integer_add__ [idx, 1],
+          Cons[r, keep],
+          acc,
+          rpath,
+        ]
+        | ^ [t, new, idx, keep, Cons[DelRow[path: rev [rpath, Nil], at: idx], acc], rpath]
+      }
+    }
+  }
+}
+
+// The patches turning `prev` into `next` at one slot, prepended (reversed) onto `acc`.
+// `rpath` is the reversed path to the slot. Self-passed to recurse into template slots.
+diff_of = #[#^ -> 'patches, 'frame, 'frame, 'path, 'patches] {
+  =[self, prev, next, rpath, acc]
+  [prev, next] ~> {
+    | =[Leaf[a], Leaf[b]] => {
+      | a ~> =&b => acc
+      | Cons[SetText[path: rev [rpath, Nil], value: b], acc]
+    }
+    | =[ALeaf[elem: e, name: n, value: a], ALeaf[elem: _, name: _, value: b]] => {
+        | a ~> =&b => acc
+        | Cons[
+          SetAttr[path: rev [rpath, Nil], elem: e, name: n, value: b],
+          acc,
+        ]
+      }
+    | =[Opaque[a], Opaque[b]] => {
+      | a ~> =&b => acc
+      | Cons[SetHtml[path: rev [rpath, Nil], html: b], acc]
+    }
+    // Matching statics recurse slot-by-slot; mismatched statics fall through to the
+    // final replacement arm. The statics test is a guard *step* (`;`): a chain never
+    // short-circuits on a failed match, so a `~>`-joined guard would run
+    // unconditionally, reading nil-filled bindings.
+    | =[Tmpl[statics: s1, slots: sl1], Tmpl[statics: s2, slots: sl2]]
+      s2 ~> =&s1 => {
+      walk = #['frames, 'frames, 'int, 'patches] {
+        =[ps, ns, i, a]
+        [ps, ns] ~> {
+          | =[Cons[p, pt], Cons[nx, nt]] => ^ [
+            pt,
+            nt,
+            __integer_add__ [i, 1],
+            self [&self, p, nx, Cons[i, rpath], a],
+          ]
+          | a
+        }
+      }
+      walk [sl1, sl2, 0, acc]
+    }
+    | =[Many[pr], Many[nr]] => {
+      // Positional row diff: pairwise recursion over the shared prefix, then the tail
+      // is pure structure. Inserts advance the index (each lands after the previous);
+      // deletions DON'T — removing row i shifts the rest down, so "delete the tail"
+      // is `DelRow[at: i]` repeated. In-row patches use pre-structural indices, which
+      // stay valid because all structural ops are at the tail.
+      walk_rows = #['rows, 'rows, 'int, 'patches] {
+        =[ps, ns, i, a]
+        [ps, ns] ~> {
+          | =[Cons[[key: _, row: p], pt], Cons[[key: _, row: nx], nt]] => ^ [
+              pt,
+              nt,
+              __integer_add__ [i, 1],
+              self [&self, p, nx, Cons[i, rpath], a],
+            ]
+          | =[Nil, Cons[[key: _, row: nx], nt]] => ^ [
+            Nil,
+            nt,
+            __integer_add__ [i, 1],
+            Cons[
+              InsRow[path: rev [rpath, Nil], at: i, html: render_row nx],
+              a,
+            ],
+          ]
+          | =[Cons[_, pt], Nil] => ^ [pt, Nil, i, Cons[DelRow[path: rev [rpath, Nil], at: i], a]]
+          | a
+        }
+      }
+      // Phase B of the keyed diff: walk the new rows with the surviving old rows as
+      // the working list (mirroring the client's DOM after phase A). In place →
+      // recurse; found later → move it here (backward moves only, so `to` is stable
+      // across the extraction) and recurse; absent → insert. Leftover working rows
+      // (duplicate keys) are removed at the fixed index.
+      keyed_walk = #['rows, 'rows, 'int, 'patches] {
+        =[working, new, i, a]
+        new ~> {
+          | =Nil => working ~> {
+            | =Nil => a
+            | =Cons[_, wt] => ^ [wt, Nil, i, Cons[DelRow[path: rev [rpath, Nil], at: i], a]]
+          }
+          | =Cons[nr, nt] => {
+            nr ~> =(key: nk, row: nf)
+            nkb = nk ~> { =Str[b] => Str[b] | "" }
+            working ~> {
+              | =Cons[wr, wt] => {
+                wr ~> =(key: wk, row: wf)
+                {
+                  | wk ~> =&nk => {
+                    a2 = self [&self, wf, nf, Cons[i, rpath], a]
+                    ^ [wt, nt, __integer_add__ [i, 1], a2]
+                  }
+                  | {
+                    tw = take_row [wt, nkb, Nil, __integer_add__ [i, 1]]
+                    wrest = tw.1
+                    tw.0 ~> {
+                      | =RHit[mr, j] => {
+                        mr ~> =(row: mf)
+                        a2 = Cons[MovRow[path: rev [rpath, Nil], from: j, to: i], a]
+                        a3 = self [&self, mf, nf, Cons[i, rpath], a2]
+                        ^ [Cons[wr, wrest], nt, __integer_add__ [i, 1], a3]
+                      }
+                      | {
+                        a2 = Cons[
+                          InsRow[path: rev [rpath, Nil], at: i, html: render_row nf],
+                          a,
+                        ]
+                        ^ [Cons[wr, wt], nt, __integer_add__ [i, 1], a2]
+                      }
+                    }
+                  }
+                }
+              }
+              | =Nil => {
+                a2 = Cons[
+                  InsRow[path: rev [rpath, Nil], at: i, html: render_row nf],
+                  a,
+                ]
+                ^ [Nil, nt, __integer_add__ [i, 1], a2]
+              }
+            }
+          }
+        }
+      }
+      {
+        | keyed_rows? pr; keyed_rows? nr => {
+          // Field access rather than destructuring: a tuple-shape pattern types
+          // fallibly, and diff_of's self-type requires a nil-free 'patches result.
+          pruned = prune_rows [pr, nr, 0, Nil, acc, rpath]
+          keyed_walk [pruned.0, nr, 0, pruned.1]
+        }
+        | walk_rows [pr, nr, 0, acc]
+      }
+    }
+    // Boundaries compare by key and the differ NEVER descends: the interior is the
+    // child view's own. A changed key falls through to the replacement arm — the
+    // parent re-renders fresh (empty) markers and the new child's first frame fills
+    // them.
+    | =[Boundary(key: k1), Boundary(key: k2)]; k2 ~> =&k1 => acc
+    // A differing kind, a switched template (statics mismatch), or an Opaque next to
+    // anything else: one replacement patch, subsuming the slot's descendants.
+    | Cons[SetHtml[path: rev [rpath, Nil], html: render next], acc]
+  }
+}
+
+diff = #['frame, 'frame] {
+  :doc "The patch list turning the first frame into the second, in document order: recursing where statics match, and emitting one subsuming patch where a slot's kind, template, or opaque content changed. Equal frames answer Nil. A Nil path addresses the root."
+  =[prev, next]; diff_of [&diff_of, prev, next, Nil, Nil] ~> rev [~, Nil]
+}
+
+// === The wire ===========================================================================
+// A frame message is JSON text: `[1, vid, [patch, …]]` — a protocol version, the view
+// id the patches belong to (the root view is vid 0; ids are app-assigned), and the
+// patches of one render, applied as one batch. Patches: `["t", path, text]` (replace a
+// child slot's contents with text), `["h", path, html]` (replace with parsed markup),
+// `["a", path, elem, name, value]` (set/remove an attribute; the client resolves the
+// *parent* of an attr slot's path — attr holes have no markers of their own — then finds
+// the `data-q` anchor), `["r+", path, i, html]` (insert a row at index i of the Many at
+// `path`), and `["r-", path, i]` (remove row i). `value` is a string, `true` (bare), or
+// `null` (removed). Path segments are plain indices: the client tells row steps from
+// slot steps by which markers it finds in the range (`r` vs `q:`) — the two never mix
+// at one level. Upstream, a client event is the envelope `[vid, payload, [[name,
+// value], …]]` — the vid of the nearest enclosing view boundary (0 until boundaries
+// land), the event payload, and the form's fields (empty for clicks).
+
+'jsons = Nil | Cons['%json, ^]
+
+enc_path = #['path, 'jsons] {
+  =[p, acc]
+  p ~> {
+    | =Nil => Array[rev [acc, Nil]]
+    | =Cons[i, t] => ^ [t, Cons[i, acc]]
+  }
+}
+
+enc_attr_val = #'attr_val {
+  | =Str[b] => Str[b]
+  | =Ok => True
+  | =[] => Null
+}
+
+enc_patch = #'patch {
+  | =SetText[path: p, value: v] => Array[Cons["t", Cons[enc_path [p, Nil], Cons[v, Nil]]]]
+  | =SetHtml[path: p, html: h] => Array[Cons["h", Cons[enc_path [p, Nil], Cons[h, Nil]]]]
+  | =SetAttr[path: p, elem: e, name: n, value: v] => Array[
+    Cons[
+      "a",
+      Cons[enc_path [p, Nil], Cons[e, Cons[n, Cons[enc_attr_val v, Nil]]]],
+    ],
+  ]
+  | =InsRow[path: p, at: i, html: h] => Array[
+    Cons["r+", Cons[enc_path [p, Nil], Cons[i, Cons[h, Nil]]]],
+  ]
+  | =DelRow[path: p, at: i] => Array[Cons["r-", Cons[enc_path [p, Nil], Cons[i, Nil]]]]
+  | =MovRow[path: p, from: f, to: t] => Array[
+    Cons["r>", Cons[enc_path [p, Nil], Cons[f, Cons[t, Nil]]]],
+  ]
+}
+
+enc_patches = #['patches, 'jsons] {
+  =[items, acc]
+  items ~> {
+    | =Nil => rev [acc, Nil]
+    | =Cons[p, t] => ^ [t, Cons[enc_patch p, acc]]
+  }
+}
+
+encode = #[Str['bin], 'patches] {
+  :doc "A frame message: one view's patches for one render as JSON text, `[1, vid, [patch, …]]`. Vids are hierarchical strings — the root view is \"0\", its children \"0.1\", \"0.2\", … — minted locally by each view, so no allocation is coordinated."
+  =[vid, ps]
+  Array[
+    Cons[1, Cons[vid, Cons[Array[enc_patches [ps, Nil]], Nil]]],
+  ] ~> %json.stringify
+}
+
+// === The session ========================================================================
+// A live session is an **app** process and (until boundaries land, exactly one)
+// **view** process. The app owns the connection-facing half: the socket, the parking
+// token, the buffer of frames that arrive while parked, and the wire — it forwards
+// `[vid, payload, pairs]` envelopes to the view and the view's frame messages to the
+// socket, and it renders and decodes nothing. The view owns the component half:
+// mount/decode/update/view run in it, its tracked renders subscribe it to the stores
+// the view samples, and its spawns (fetchers) are its owned children. Events land on
+// `update` and nowhere else; stores are reached by ordinary sends inside it, and
+// propagation back out rides the dependency graph (an empty diff sends nothing).
+
+// A view definition. `'i` is the mount init: the root view mounts from the HTTP
+// request; a child view mounts from whatever its parent's `child [comp, init, key]`
+// passes. `decode` receives the event payload and the form pairs (empty for clicks;
+// a submit's named fields, in the shape `%http`'s form helpers read).
+'component<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #['%json, '%http.pairs] -> (Ev['e] | [])]
+
+// Render inside a tracked region: the process re-subscribes to exactly the stores the
+// view sampled, and their next state change delivers a `Changed` wakeup.
+render_view = #<'i, 's, 'e>['s, 'component<'i, 's, 'e>] {
+  =[state, comp]; %proc.track #{ state ~> comp.view } ~> frame
+}
+
+// Re-root a value bound out of a '%json recursive position at the union's root: the
+// matcher cannot unfold a pattern against the inner recursive reference, but a
+// declared-parameter boundary restores the full type. (An identity function.)
+jval = #'%json
+
+// A form field from its wire pair `[name, value]`; nil (skipped) for anything else.
+pair_of = #'%json {
+  =Array[ps]
+  ps ~> =Cons[nj, rest]
+  nj ~> jval ~> =Str[n]
+  rest ~> =Cons[vj, Nil]
+  vj ~> jval ~> =Str[v]
+  [Str[n], Str[v]]
+}
+
+pairs_of = #['jsons, '%http.pairs] {
+  =[items, acc]
+  items ~> {
+    | =Nil => rev [acc, Nil]
+    | =Cons[pj, t] => {
+      acc2 = {
+        | pair_of pj ~> =[n, v] => Cons[[n, v], acc]
+        | acc
+      }
+      ^ [t, acc2]
+    }
+  }
+}
+
+// A wire event is the envelope `[vid, payload, [[name, value], …]]` — the target
+// view's id, then the payload (a click sends an empty pair list, a submit its form's
+// fields). Answers `[vid, payload, pairs]`, or nil for anything malformed.
+env_of = #Str['bin] {
+  %json.parse $ ~> =('%json)env
+  env ~> =Array[es]
+  es ~> =Cons[vidj, r1]
+  vidj ~> jval ~> =Str[vb]
+  r1 ~> =Cons[payloadj, r2]
+  payload = payloadj ~> jval
+  r2 ~> =Cons[formj, Nil]
+  formj ~> jval ~> =Array[fs]
+  [Str[vb], payload, pairs_of [fs, Nil]]
+}
+
+// Decode and fold one client event through `update`: a decode answering nil drops
+// the event (stale or forged — `update` never sees it) and answers the state
+// unchanged.
+fold_event = #<'i, 's, 'e>['s, 'component<'i, 's, 'e>, '%json, '%http.pairs] {
+  =[state, comp, payload, pairs]
+  {
+    | comp.decode [payload, pairs] ~> =Ev[ev] => comp.update [state, ev]
+    | state
+  }
+}
+
+// Absorb any further queued wakeups before re-rendering, so a burst of store steps
+// costs one render.
+drain_changed = #[] { ![#'%proc.changed, 0] ~> { ='%proc.changed => ^ [] | Ok } }
+
+// === Views ==============================================================================
+
+'vmode = Live | Idle
+
+// === Boundary reconcile =================================================================
+// After each render, the view matches its frame's boundary keys against its live
+// children: a kept key keeps its vid and child untouched; a new key mints the next
+// hierarchical vid and spawns; a dropped key kills its child and announces
+// `Unroute`. Spawns and kills execute strictly AFTER the view's own frame message is
+// sent, so a child's first frame can never precede the boundary markers it fills.
+//
+// Each placed view runs under its own `%sup` supervisor (spawned by and owned by
+// the placing view; the child is spawned inside the supervisor's process, so the
+// ownership cascade is view → supervisor → child). The spec's start closure does
+// spawn + watch + `Route`-announce, so a crash within the intensity budget restarts
+// IN PLACE — same vid, re-routed, the fresh instance's first frame replacing the
+// boundary interior — without the placing view hearing about it at all. Past the
+// budget the supervisor gives up (its panic is `%sup`'s escalation), which the view
+// observes through its own watcher on the supervisor: it renders the crash fallback
+// into the boundary and keeps the kids entry pointing at the corpse, so reconcile
+// won't quietly respawn a repeat offender (drop and re-add the key to reset).
+
+// `pid` is the child's SUPERVISOR — never sent to (events route to the child
+// itself via the app), only killed on drop — so it stays an inert handle.
+'kid = [key: Str['bin], vid: Str['bin], pid: @]
+'kids = Nil | Cons['kid, ^]
+'bounds = Nil | Cons[[key: Str['bin], start: 'vstart], ^]
+'assign =
+  | AOld[key: Str['bin], vid: Str['bin], pid: @]
+  | ANew[key: Str['bin], vid: Str['bin], start: 'vstart]
+'assigns = Nil | Cons['assign, ^]
+
+// The per-child intensity budget: this many restarts within the window, then the
+// supervisor gives up and the boundary falls back. A slow trickle of crashes never
+// exhausts it; a crash loop does.
+restart_budget = 3
+restart_window = 30000
+
+crash_html = "<em>view crashed</em>"
+
+// Settle-wait: before announcing, a booting view drains `Changed` in quiet-window
+// steps (re-rendering after each burst) so sampled stores that are about to step —
+// a fetcher's `Loading` — resolve into the announced HTML; the deadline bounds a
+// store that never settles. Applied on every boot (constants for now; an app-level
+// knob when the config next grows).
+settle_quiet = 100
+settle_deadline = 3000
+
+// The boundaries of a frame; self-passed to recurse into slots and rows.
+collect_of = #[#^ -> 'bounds, 'frame, 'bounds] {
+  =[self, f, acc]
+  f ~> {
+    | =Boundary[key: k, vid: _, start: st] => Cons[[key: k, start: &st], acc]
+    | =Tmpl[statics: _, slots: sl] => {
+      walk = #['frames, 'bounds] {
+        =[items, a]
+        items ~> {
+          | =Nil => a
+          | =Cons[h, t] => ^ [t, self [&self, h, a]]
+        }
+      }
+      walk [sl, acc]
+    }
+    | =Many[rows] => {
+      walkr = #['rows, 'bounds] {
+        =[items, a]
+        items ~> {
+          | =Nil => a
+          | =Cons[[key: _, row: r], t] => ^ [t, self [&self, r, a]]
+        }
+      }
+      walkr [rows, acc]
+    }
+    | acc
+  }
+}
+
+// Whether a key is already assigned (duplicate keys: first wins; the duplicate
+// boundary shares the vid, which the client resolves to the first marker).
+key_assigned? = #['assigns, Str['bin]] {
+  =[items, k]
+  items ~> {
+    | =Nil => []
+    | =Cons[a, t] => { a ~> =(key: ak); { ak ~> =&k => Ok | ^ [t, k] } }
+  }
+}
+
+'kid_hit = KFound['kid] | KMissing
+
+// A kid by key (reconcile) or by vid (crash reports).
+kid_of = #['kids, Str['bin]] -> 'kid_hit {
+  =[items, k]
+  items ~> {
+    | =Nil => KMissing
+    | =Cons[kd, t] => { kd ~> =(key: kk); { kk ~> =&k => KFound[kd] | ^ [t, k] } }
+  }
+}
+
+kid_by_vid = #['kids, Str['bin]] -> 'kid_hit {
+  =[items, v]
+  items ~> {
+    | =Nil => KMissing
+    | =Cons[kd, t] => { kd ~> =(vid: kv); { kv ~> =&v => KFound[kd] | ^ [t, v] } }
+  }
+}
+
+// Assign a vid to every distinct boundary key. Answers [assigns, next-ordinal].
+assign_bounds = #['bounds, 'kids, Str['bin], 'int, 'assigns] -> ['assigns, 'int] {
+  =[bs, kids, vid, n, acc]
+  bs ~> {
+    | =Nil => [acc, n]
+    | =Cons[b, t] => {
+      b ~> =(key: k, start: st)
+      {
+        | key_assigned? [acc, k] => ^ [t, kids, vid, n, acc]
+        | kid_of [kids, k] ~> =KFound[kd] => {
+          kd ~> =(vid: v, pid: p)
+          ^ [t, kids, vid, n, Cons[AOld[key: k, vid: v, pid: &p], acc]]
+        }
+        | {
+          v = %str.concat [vid, %str.concat [".", %str.from_int n]]
+          ^ [t, kids, vid, __integer_add__ [n, 1], Cons[ANew[key: k, vid: v, start: &st], acc]]
+        }
+      }
+    }
+  }
+}
+
+// The assigned vid for a key, or nil for a boundary the assignment somehow missed.
+assigned_vid = #['assigns, Str['bin]] {
+  =[items, k]
+  items ~> {
+    | =Nil => []
+    | =Cons[a, t] => { a ~> =(key: ak, vid: av); { ak ~> =&k => Str[av ~> .0] | ^ [t, k] } }
+  }
+}
+
+// Rebuild a frame with its boundary vids assigned; other nodes pass through.
+resolve_of = #[#^ -> 'frame, 'frame, 'assigns] {
+  =[self, f, assigns]
+  f ~> {
+    | =Boundary[key: k, vid: _, start: st] => Boundary[
+      key: k,
+      vid: assigned_vid [assigns, k],
+      start: &st,
+    ]
+    | =Tmpl[statics: ss, slots: sl] => {
+      walk = #['frames, 'frames] {
+        =[items, acc]
+        items ~> {
+          | =Nil => rev [acc, Nil]
+          | =Cons[h, t] => ^ [t, Cons[self [&self, h, assigns], acc]]
+        }
+      }
+      Tmpl[statics: ss, slots: walk [sl, Nil]]
+    }
+    | =Many[rows] => {
+      walkr = #['rows, 'rows] {
+        =[items, acc]
+        items ~> {
+          | =Nil => rev [acc, Nil]
+          | =Cons[[key: rk, row: r], t] => ^ [
+            t,
+            Cons[[key: rk, row: self [&self, r, assigns]], acc],
+          ]
+        }
+      }
+      Many[walkr [rows, Nil]]
+    }
+    | f
+  }
+}
+
+// The previous kids whose keys the new render dropped.
+dropped_kids = #['kids, 'assigns, 'kids] {
+  =[kids, assigns, acc]
+  kids ~> {
+    | =Nil => acc
+    | =Cons[kd, t] => {
+      kd ~> =(key: k)
+      {
+        | key_assigned? [assigns, k] => ^ [t, assigns, acc]
+        | ^ [t, assigns, Cons[kd, acc]]
+      }
+    }
+  }
+}
+
+// Execute a reconcile: kill dropped children's supervisors (ownership tears down
+// supervisor and child alike; the entry is removed BEFORE the kill, so the
+// watcher's report finds no kid and is ignored) and start new ones — each under
+// its own `%sup` supervisor whose start closure does spawn + watch + `Route`, so
+// restarts within the intensity budget re-route and refill the boundary without
+// this view's involvement. The view watches the SUPERVISOR: its death is the
+// budget giving up (or a bug), and the only crash signal the view handles.
+// Answers the new kids list (each pid the child's supervisor).
+exec_bounds = #['assigns, 'kids, @'app_msg, @'view_msg, 'kids] -> 'kids {
+  =[assigns, drops, app, me, acc]
+  drops ~> {
+    | =Cons[kd, t] => {
+      kd ~> =(vid: v, pid: p)
+      %proc.kill &p
+      Unroute[Str[v ~> .0]] ~> app
+      ^ [assigns, t, &app, &me, acc]
+    }
+    | assigns ~> {
+      | =Nil => acc
+      | =Cons[AOld[key: k, vid: v, pid: p], t] => ^ [
+        t,
+        Nil,
+        &app,
+        &me,
+        Cons[[key: k, vid: v, pid: &p], acc],
+      ]
+      | =Cons[ANew[key: k, vid: v, start: st], t] => {
+        cs = #[Str['bin], @'%sup.down] {
+          =[id, supref]
+          p = st [v, &app, Replace]
+          %sup.watch [id, &p, &supref]
+          Route[Str[v ~> .0], &p] ~> app
+          &p
+        }
+
+        csup =
+          [
+            children: Cons[[id: Str[v ~> .0], restart: Permanent, start: &cs], Nil],
+            max_restarts: restart_budget,
+            window: restart_window,
+          ] ~> %sup.start
+
+        %sup.watch [Str[v ~> .0], &csup, &me]
+        ^ [t, Nil, &app, &me, Cons[[key: k, vid: v, pid: &csup], acc]]
+      }
+    }
+  }
+}
+
+// Re-root a rebuilt frame at the union's root: `resolve_of` reconstructs Tmpl/Many
+// nodes, so its result infers as the frame union unrolled one level; a declared
+// parameter restores the rolled type. (An identity function.)
+as_frame = #'frame
+
+// One render step of a view: render, assign boundary vids, diff against the frame
+// the client holds, send the delta (an empty diff sends nothing), then execute the
+// reconcile. Answers [the new frame, the new kids, the next child ordinal].
+step_view = #<'i, 's, 'e>['s, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_msg, @'view_msg, 'kids, 'int] {
+  =[state, prev, comp, vid, app, me, kids, n]
+  f2 = render_view [state, comp]
+  ar = assign_bounds [collect_of [&collect_of, f2, Nil], kids, vid, n, Nil]
+  rf = resolve_of [&resolve_of, f2, ar.0] ~> as_frame
+  diff [prev, rf] ~> {
+    | =Nil => Ok
+    | =ps => { Frame[encode [vid, ps]] ~> app; Ok }
+  }
+  kids2 = exec_bounds [ar.0, dropped_kids [kids, ar.0, Nil], &app, &me, Nil]
+  [rf, kids2, ar.1]
+}
+
+// The view's whole life: fold events, re-render on wakeups (unless parked), send
+// deltas up, reconcile children, and supervise them. `f` is the frame the client's
+// DOM shows; `kids` the live children; `n` the next child ordinal (monotonic —
+// vids never reused). Restarts within the budget happen inside each child's `%sup`
+// supervisor, invisibly; a supervisor's death IS the budget exhausting — the
+// boundary renders the crash fallback, and the kids entry stays pointing at the
+// corpse so reconcile won't quietly respawn a repeat offender. (A deliberate
+// kill's Down finds no tracked vid — the entry is removed before the kill — and
+// is dropped.)
+vlife = #<'i, 's, 'e>['vmode, 's, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'kids, 'int] {
+  =[mode, state, f, comp, vid, app, kids, n]
+  me = &.
+  !'view_msg ~> {
+    | =Event[payload, pairs] => {
+      s2 = fold_event [state, comp, payload, pairs]
+      r = step_view [s2, f, comp, vid, &app, &me, kids, n]
+      ^ [mode, s2, r.0, comp, vid, &app, r.1, r.2]
+    }
+    | =Park => ^ [Idle, state, f, comp, vid, &app, kids, n]
+    | =Wake => {
+      drain_changed []
+      r = step_view [state, f, comp, vid, &app, &me, kids, n]
+      ^ [Live, state, r.0, comp, vid, &app, r.1, r.2]
+    }
+    | =Down(id: dv) => kid_by_vid [kids, dv] ~> {
+      | =KFound[_] => {
+        Frame[
+          encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]],
+        ] ~> app
+        Unroute[dv] ~> app
+        ^ [mode, state, f, comp, vid, &app, kids, n]
+      }
+      | ^ [mode, state, f, comp, vid, &app, kids, n]
+    }
+    | ='%proc.changed => mode ~> {
+      | =Live => {
+        drain_changed []
+        r = step_view [state, f, comp, vid, &app, &me, kids, n]
+        ^ [Live, state, r.0, comp, vid, &app, r.1, r.2]
+      }
+      | ^ [Idle, state, f, comp, vid, &app, kids, n]
+    }
+  }
+}
+
+// Settle: drain `Changed` in quiet-window steps, re-rendering after each burst,
+// until a window passes silently (or the deadline lapses). Answers the settled
+// frame. `left` is the remaining deadline budget.
+settle = #<'i, 's, 'e>['s, 'frame, 'component<'i, 's, 'e>, 'int] {
+  =[state, f, comp, left]
+  {
+    | %num.lt? [0, left] => ![#'%proc.changed, settle_quiet] ~> {
+      | ='%proc.changed => {
+        drain_changed []
+        ^ [state, render_view [state, comp], comp, %num.sub [left, settle_quiet]]
+      }
+      | f
+    }
+    | f
+  }
+}
+
+// A view: mount (once — its spawns become this process's owned children), render
+// frame 0, settle, reconcile its boundaries, announce per the boot mode, and loop.
+// `'i` is the mount init — the request for the root view, the parent-supplied init
+// for a child. Children spawn strictly after the announcement, so their first
+// frames arrive behind the markup that holds their markers (or, at a dead render,
+// splice into it at the app).
+view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'vboot] {
+  =[init, comp, vid, app, boot]
+  // `&.` before any receiving call: taken later, its inferred send would be the
+  // partially-widened receive (just the settle drain's `Changed`), which no longer
+  // narrows into `@'view_msg` params. Taken here it is still the unknown-send
+  // handle, which does.
+  me = &.
+  state = comp.mount init
+  f = settle [state, render_view [state, comp], comp, settle_deadline]
+  ar = assign_bounds [collect_of [&collect_of, f, Nil], Nil, vid, 1, Nil]
+  rf = resolve_of [&resolve_of, f, ar.0] ~> as_frame
+  boot ~> {
+    | =Reply[reply] => { Region[render rf] ~> reply; Ok }
+    | =Replace => {
+      Frame[
+        encode [vid, Cons[SetHtml[path: Nil, html: render rf], Nil]],
+      ] ~> app
+      Ok
+    }
+  }
+  kids = exec_bounds [ar.0, Nil, &app, &me, Nil]
+  mode = boot ~> { =Reply[_] => Idle | Live }
+  vlife [mode, state, rf, comp, vid, &app, kids, ar.1]
+}
+
+// Define a component from its record: answers the **placeable component** — a
+// function called `[init: …, key: …]` in markup to place the view as a boundary
+// node the differ never descends into. The placed view mounts from `init` in its
+// own process — spawned by the placing view's loop at reconcile, owned by it,
+// decoding its own events — and patches its own interior under its own vid. `key`
+// is the boundary's identity across renders: a stable key keeps the view (and all
+// its state); a dropped key kills it. The app's root is the same shape — the app
+// runs it against the HTTP request instead of placing it. (The inner literal
+// re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
+// re-declaration — suffix inheritance makes it the same variable.)
+component = #<'i, 's, 'e>'component<'i, 's, 'e> {
+  :doc "Defines a component from its `[mount, update, view, decode]` record: answers the placeable component, a function called `[init: …, key: …]` in markup. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+  comp = $
+  #<'i>'place<'i> {
+    i = $init
+    k = $key
+    st = #[Str['bin], @'app_msg, 'vboot] { =[v, a, boot]; [i, comp, v, &a, boot] ~> @view_run }
+    Fragment[Nil] ~> { :boundary [key: k, start: &st] }
+  }
+}
+
+// === Parking ============================================================================
+// An **app** — the server side of one page load — is a detached process that
+// alternates between *attached* (holds the socket) and *parked* (no socket, awaiting
+// a claim by token, on a timeout). The dead render and the upgrade remain two
+// separate requests; what crosses between them is the socket, sent to the app as an
+// ordinary resource transfer. A TCP drop re-registers the token and parks — a
+// reconnecting client re-attaches with all state intact — while a clean client Close
+// (navigation, tab close) terminates the app. An app nobody claims dies with its
+// park timeout, and containment reaps its view (and the view's fetchers). While
+// parked, frames from the view are buffered in arrival order and flushed on attach —
+// each diffs against the frame the client still holds, so late delivery stays
+// correct; the view is also told to `Park` (stop rendering) as an economy, and its
+// `Wake` re-render usually diffs to silence — no join flash.
+
+'app_pid = @'app_msg
+'claim = Found['app_pid] | Missing
+'reg_entry = [token: Str['bin], pid: 'app_pid, at: 'int]
+'reg_entries = Nil | Cons['reg_entry, ^]
+'reg_msg = Register[Str['bin], 'app_pid] | Claim[Str['bin], @'claim]
+
+// The registry prune horizon is deliberately SHORTER than the park timeout: a stale
+// token then answers `Missing` (a clean cold join) while its app is still alive,
+// rather than `Found` a tombstone — sending the socket to a dead app would drop
+// and close it, costing the client a retry. The window where that can still happen is
+// an app *crashing* while parked.
+park_ms = 60000
+prune_ms = 45000
+
+// The entries younger than the cutoff (order irrelevant).
+prune_entries = #['reg_entries, 'int, 'reg_entries] {
+  =[items, cutoff, acc]
+  items ~> {
+    | =Nil => acc
+    | =Cons[e, t] => {
+      | __integer_compare__ [e.at, cutoff] ~> =(0 | 1) => ^ [t, cutoff, Cons[e, acc]]
+      | ^ [t, cutoff, acc]
+    }
+  }
+}
+
+cat_entries = #['reg_entries, 'reg_entries] {
+  =[a, b]
+  a ~> {
+    | =Nil => b
+    | =Cons[h, t] => ^ [t, Cons[h, b]]
+  }
+}
+
+// Remove and answer a token's entry: [Found[pid] | Missing, the remaining entries].
+// The pid is extracted by *pattern* and passed by reference — a pid reached through
+// an access in flow position, or bare in a field, would be *sent* the flowing value.
+take_entry = #['reg_entries, Str['bin], 'reg_entries] {
+  =[items, token, acc]
+  items ~> {
+    | =Nil => [Missing, acc]
+    | =Cons[e, t] => {
+      e ~> =(token: et, pid: ep)
+      {
+        | et ~> =&token => [Found[&ep], cat_entries [acc, t]]
+        | ^ [t, token, Cons[e, acc]]
+      }
+    }
+  }
+}
+
+// The registry store: token → parked app. Claims are one-shot (an attached app is
+// unclaimable until it re-registers), and stale entries are pruned on every message,
+// so unclaimed tokens cannot accumulate.
+registry_loop = #'reg_entries {
+  !'reg_msg ~> =msg
+  now = %time.monotonic
+  live = prune_entries [$, __integer_subtract__ [now, prune_ms], Nil]
+  msg ~> {
+    | =Register[t, p] => ^ Cons[[token: t, pid: &p, at: now], live]
+    | =Claim[t, reply] => { take_entry [live, t, Nil]; =[found, rest]; found ~> reply; ^ rest }
+  }
+}
+
+// The app registry: token → parked app, one-shot claims, stale entries pruned.
+registry = #[] { Nil ~> @registry_loop }
+
+// The root the app machinery runs: a placeable component whose init is the HTTP
+// request. The constructor below composes every accepted config into this shape —
+// the app consumes it through the boundary door (call it, take the spawn thunk off
+// the node, run it with the `Reply` boot), so components are one uniform currency,
+// root included, and the app record needs no type parameters.
+'root_view = #'place<'%http> -> '%html
+
+// An app: the server side of one page load. Further views are placed in view
+// markup, never declared here. The record carries the app's own registry (spawned
+// by the constructor, owned by its caller); future app-level knobs (routes, settle
+// window, park timeout) land here.
+'app = [root: 'root_view, reg: @'reg_msg]
+
+// The two accepted configs: a request-free root (it mounts from nil — the common
+// case), or a root plus an `init` mapping deriving its mount init from the request
+// (the door to per-request state: the session cookie, query params, the path —
+// `init: #'%http { $ }` passes the request itself).
+'root_free = [root: #'place<[]> -> '%html]
+'root_mapped<'i> = [root: #'place<'i> -> '%html, init: #'%http -> 'i]
+
+app = #<'i>('root_free | 'root_mapped<'i>) {
+  :doc "Declares an app — the unit `handle` serves. `[root: &comp]` names the root view (a placeable component from `component`, referenced with `&`), which mounts from nil; add `init: #'%http -> 'i` to derive the root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself). Further views are placed in view markup, not declared here. Spawns the app's parking registry, so create once at startup — the calling process owns it — and share the record with every `handle` call."
+  cfg = $
+  {
+    | cfg ~> =(init: f, root: r) => {
+      rooted = #'place<'%http> { k = $key; r [init: f $init, key: k] }
+      [root: &rooted, reg: registry]
+    }
+    | {
+      cfg ~> =(root: r)
+      rooted = #'place<'%http> { k = $key; r [init: [], key: k] }
+      [root: &rooted, reg: registry]
+    }
+  }
+}
+
+// === The app ============================================================================
+
+'amode = Parked | Attached['%http/websocket]
+
+'strs = Nil | Cons[Str['bin], ^]
+
+// Send a list of encoded frame messages down the socket, in order.
+flush_frames = #['strs, '%http/websocket] {
+  =[items, conn]
+  items ~> {
+    | =Nil => Ok
+    | =Cons[s, t] => { %http/websocket.send_text [conn, s]; ^ [t, conn] }
+  }
+}
+
+// The app's routing map: vid → view. The root registers at spawn as "0"; views
+// announce their children with `Route`/`Unroute` as they reconcile.
+'routes = Nil | Cons[[vid: Str['bin], pid: @'view_msg], ^]
+
+'route_hit = RFound[@'view_msg] | RMissing
+
+route_of = #['routes, Str['bin]] -> 'route_hit {
+  =[rs, v]
+  rs ~> {
+    | =Nil => RMissing
+    | =Cons[r, t] => { r ~> =(vid: rv, pid: rp); { rv ~> =&v => RFound[&rp] | ^ [t, v] } }
+  }
+}
+
+del_route = #['routes, Str['bin], 'routes] {
+  =[rs, v, acc]
+  rs ~> {
+    | =Nil => acc
+    | =Cons[r, t] => {
+      r ~> =(vid: rv)
+      {
+        | rv ~> =&v => ^ [t, v, acc]
+        | ^ [t, v, Cons[r, acc]]
+      }
+    }
+  }
+}
+
+// Fan a park/wake signal out to every routed view.
+tell_views = #['routes, (Park | Wake)] {
+  =[rs, m]
+  rs ~> {
+    | =Nil => Ok
+    | =Cons[r, t] => { r ~> =(pid: p); m ~> p; ^ [t, m] }
+  }
+}
+
+// Unpack a batch of socket messages and forward each event to its vid's view; an
+// unknown vid (a just-killed child; a forged id) or a malformed envelope is dropped.
+// A ws Close answers `Halt` (the app terminates, and ownership tears the views down).
+route_events = #['%http/websocket.messages, 'routes] {
+  =[msgs, routes]
+  msgs ~> {
+    | =Nil => Go
+    | =Cons[Text[t], rest] => {
+      {
+        | env_of t ~> =[v, payload, pairs]; route_of [routes, v] ~> =RFound[p] => {
+          Event[payload, pairs] ~> p; Ok
+        }
+        | Ok
+      }
+      ^ [rest, routes]
+    }
+    | =Cons[Close[code: _, reason: _], _] => Halt
+    | =Cons[Binary[_], rest] => ^ [rest, routes]
+  }
+}
+
+// The app's whole life: one tail-recursive loop over its mode. `buf` holds frames
+// (newest first) that arrived while parked. On attach: flush the buffer oldest-first,
+// wake the views, and pump any whole messages the join already buffered on the conn —
+// the token recv can read past the first frame, and the socket select only fires on
+// NEW bytes, so without the pump a pipelined event stalls until the client's next
+// bytes. The attached select receives frames and route changes from the mailbox (an
+// `Attach` cannot arrive while attached — the registry claim is one-shot — and would
+// wait queued regardless).
+alife = #['amode, 'strs, (Str['bin] | []), @'reg_msg, 'routes] {
+  =[mode, buf, token, reg, routes]
+  mode ~> {
+    | =Parked => ![#'app_msg, park_ms] ~> {
+      | =Attach[conn] => {
+        flush_frames [rev [buf, Nil], conn]
+        tell_views [routes, Wake]
+        %http/websocket.on_data [conn, 0x]
+        =[msgs, c2]
+        route_events [msgs, routes] ~> {
+          | =Go => ^ [Attached[c2], Nil, token, &reg, routes]
+          | Ok
+        }
+      }
+      | =Frame[s] => ^ [Parked, Cons[s, buf], token, &reg, routes]
+      | =Route[v, p] => ^ [
+        Parked,
+        buf,
+        token,
+        &reg,
+        Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
+      ]
+      | =Unroute[v] => ^ [Parked, buf, token, &reg, del_route [routes, v, Nil]]
+      | Ok
+    }
+    | =Attached[conn] => ![
+      conn.sock,
+      #(Frame[Str['bin]] | Route[Str['bin], @'view_msg] | Unroute[Str['bin]])
+    ] ~> {
+      | =Data[sock: _, data: d] => {
+        %http/websocket.on_data [conn, d]
+        =[msgs, c2]
+        route_events [msgs, routes] ~> {
+          | =Go => ^ [Attached[c2], Nil, token, &reg, routes]
+          | Ok
+        }
+      }
+      | =Frame[s] => {
+        %http/websocket.send_text [conn, s]; ^ [Attached[conn], Nil, token, &reg, routes]
+      }
+      | =Route[v, p] => ^ [
+        Attached[conn],
+        Nil,
+        token,
+        &reg,
+        Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
+      ]
+      | =Unroute[v] => ^ [Attached[conn], Nil, token, &reg, del_route [routes, v, Nil]]
+      | =Closed[sock: _] => token ~> {
+        | =Str[tb] => {
+          tell_views [routes, Park]
+          Register[Str[tb], &.] ~> reg
+          ^ [Parked, Nil, Str[tb], &reg, routes]
+        }
+        | Ok
+      }
+    }
+  }
+}
+
+// === Dead-render composition ============================================================
+// At a GET, the app assembles the COMPLETE page before answering: the root's
+// settled region arrives as `Region`, and each placed view's settled first frame —
+// a single root-replacing "h" patch under its vid — is spliced into its (empty)
+// `<!--v:vid-->` markers instead of buffered. The page's own text says when it is
+// done: while any empty marker pair remains, a placed view's content is still
+// coming (a parent's markup always precedes its children's frames, so markers are
+// always in the page before the content that fills them). Ordinary patch frames
+// (a store stepping after a view announced) buffer as usual and apply at attach.
+
+// Classify an encoded frame: is it a view's first frame?
+'fclass = FirstFrame[vid: Str['bin], html: Str['bin]] | OtherFrame
+
+classify_frame = #Str['bin] -> 'fclass {
+  fs = $
+  {
+    | {
+      %json.parse fs ~> =('%json)env
+      env ~> =Array[es]
+      es ~> =Cons[_, r1]
+      r1 ~> =Cons[vidj, r2]
+      vidj ~> jval ~> =Str[vb]
+      r2 ~> =Cons[patchesj, Nil]
+      patchesj ~> jval ~> =Array[Cons[pj, Nil]]
+
+      pj
+      ~> jval
+      ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
+
+      tagj ~> jval ~> ="h"
+      pathj ~> jval ~> =Array[Nil]
+      htmlj ~> jval ~> =Str[hb]
+      FirstFrame[vid: Str[vb], html: Str[hb]]
+    }
+    | OtherFrame
+  }
+}
+
+// Insert a view's HTML between its empty boundary markers; a page without the
+// markers (a raced unroute) passes through unchanged.
+splice = #[Str['bin], Str['bin], Str['bin]] {
+  =[page, vid, html]
+  page ~> =Str[pgb]
+  open = %str.concat ["<!--v:", %str.concat [vid, "-->"]]
+  open ~> =Str[ob]
+  {
+    | %str.index_of [page, open] ~> =('int)i => {
+      cut = %num.add [i, %bin.length ob]
+      pre = %str.slice [page, 0, cut]
+      post = %str.slice [page, cut, %bin.length pgb]
+      %str.concat [pre, %str.concat [html, post]]
+    }
+    | page
+  }
+}
+
+// Whether the page still holds an EMPTY boundary marker pair — `<!--v:ID-->`
+// immediately followed by `<!--/v:ID-->` — i.e. a placed view whose first frame
+// hasn't arrived. Walks every open marker.
+unfilled_from = #[Str['bin], 'int] {
+  =[page, from]
+  page ~> =Str[pgb]
+  plen = %bin.length pgb
+  rest = %str.slice [page, from, plen]
+  {
+    | %str.index_of [rest, "<!--v:"] ~> =('int)i => {
+      idstart = %num.add [from, %num.add [i, 6]]
+      tail1 = %str.slice [page, idstart, plen]
+      {
+        | %str.index_of [tail1, "-->"] ~> =('int)j => {
+          id = %str.slice [page, idstart, %num.add [idstart, j]]
+          closepos = %num.add [idstart, %num.add [j, 3]]
+          needle = %str.concat ["<!--/v:", %str.concat [id, "-->"]]
+          needle ~> =Str[nb]
+          nend = %num.add [closepos, %bin.length nb]
+          {
+            | %num.lt? [plen, nend] => ^ [page, closepos]
+            | {
+              seg = %str.slice [page, closepos, nend]
+              {
+                | seg ~> =&needle => Ok
+                | ^ [page, closepos]
+              }
+            }
+          }
+        }
+        | []
+      }
+    }
+    | []
+  }
+}
+
+unfilled? = #Str['bin] { unfilled_from [$, 0] }
+
+// Whether the composed page is complete: the root announced, and no empty
+// boundary pair remains.
+composed? = #(Str['bin] | []) {
+  | =Str[pb]; { unfilled? Str[pb] => [] | Ok } => Ok
+  | []
+}
+
+// Reclassify frames that raced ahead of the root's `Region` (cross-process
+// delivery order is not guaranteed): walk the pending frames oldest-first,
+// splicing first frames into the page and keeping the rest buffered.
+reprocess = #[Str['bin], 'strs, 'strs] -> [Str['bin], 'strs] {
+  =[page, pending, keep]
+  pending ~> {
+    | =Nil => [page, keep]
+    | =Cons[fs, t] => classify_frame fs ~> {
+      | =FirstFrame[vid: Str[vb], html: Str[hb]] => ^ [splice [page, Str[vb], Str[hb]], t, keep]
+      | ^ [page, t, Cons[fs, keep]]
+    }
+  }
+}
+
+// The composition loop: collect the root's `Region` and the views' first frames
+// (splicing as they arrive), buffer everything else, and answer the handler the
+// complete page — or whatever assembled by the deadline. Then park.
+compose = #[@Str['bin], (Str['bin] | []), 'strs, (Str['bin] | []), @'reg_msg, 'routes, 'int] {
+  =[handler, page, buf, token, reg, routes, end]
+  {
+    | composed? page => {
+      page ~> =Str[pb]
+      Str[pb] ~> handler
+      alife [Parked, buf, token, &reg, routes]
+    }
+    | %num.lt? [%time.monotonic, end] => ![#'app_msg, settle_quiet] ~> {
+      | =Region[h] => {
+        r = reprocess [h, rev [buf, Nil], Nil]
+        ^ [&handler, r.0, r.1, token, &reg, routes, end]
+      }
+      | =Frame[s] => page ~> {
+        | =Str[pb] => classify_frame s ~> {
+          | =FirstFrame[vid: Str[vb], html: Str[hb]] => ^ [
+            &handler,
+            splice [Str[pb], Str[vb], Str[hb]],
+            buf,
+            token,
+            &reg,
+            routes,
+            end,
+          ]
+          | ^ [&handler, Str[pb], Cons[s, buf], token, &reg, routes, end]
+        }
+        | ^ [&handler, [], Cons[s, buf], token, &reg, routes, end]
+      }
+      | =Route[v, p] => ^ [
+        &handler,
+        page,
+        buf,
+        token,
+        &reg,
+        Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
+        end,
+      ]
+      | =Unroute[v] => ^ [&handler, page, buf, token, &reg, del_route [routes, v, Nil], end]
+      // An Attach cannot arrive before the page (the token is in it); dropping the
+      // impossible conn closes it and the client retries cold.
+      | =Attach[_] => ^ [&handler, page, buf, token, &reg, routes, end]
+      | ^ [&handler, page, buf, token, &reg, routes, end]
+    }
+    // Deadline: answer with what assembled (a stuck view's boundary stays empty).
+    | {
+      page ~> { | =Str[pb] => Str[pb] ~> handler | Ok }
+      alife [Parked, buf, token, &reg, routes]
+    }
+  }
+}
+
+// An app: register (when it has a token — the cold path has none and terminates on
+// disconnect instead of parking), spawn-and-link its root view, and run. Linking
+// makes a root-view crash kill the app — closing the socket, exactly as a crash of
+// the old fused loop did — while the app's own (normal) park-timeout death still
+// tears the view tree down by ownership.
+'aboot = Dead[@Str['bin]] | Cold
+
+app_run = #['%http, 'root_view, @'reg_msg, (Str['bin] | []), 'aboot] {
+  =[req, root, reg, token, boot]
+  {
+    | token ~> =Str[tb] => { Register[Str[tb], &.] ~> reg; Ok }
+    | Ok
+  }
+  me = &.
+  // The root is consumed through the boundary door: place it against the request,
+  // take the spawn thunk off the node, and run it as vid "0" with the app's boot.
+  // (A root that didn't come from `view` carries no :boundary — the retrieval
+  // fails and the app ends, so the GET times out. Fail fast.)
+  node = root [init: req, key: "root"]
+  node:('bnd)boundary ~> =(start: st)
+  boot ~> {
+    | =Dead[handler] => {
+      v = st ["0", &me, Reply[&me]]
+      %proc.link &v
+      end = %num.add [%time.monotonic, settle_deadline]
+      compose [&handler, [], Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil], end]
+    }
+    | =Cold => {
+      v = st ["0", &me, Replace]
+      %proc.link &v
+      alife [Parked, Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil]]
+    }
+  }
+}
+
+// The COLD path: an unknown or expired token gets a fresh app and view (a fresh
+// mount) whose first frame replaces the live region. The app is spawned tokenless,
+// so it terminates on disconnect instead of parking, and detached, so it survives
+// this connection process ending.
+run_cold = #['%http/websocket, '%http, 'root_view, @'reg_msg] {
+  =[conn, req, root, reg]
+  a = [req, &root, &reg, [], Cold] ~> @app_run
+  %proc.detach &a
+  Attach[conn] ~> a
+  Ok
+}
+
+// The upgrade side: the client's first frame is its token. A claimed app is sent
+// the connection — socket ownership rides the message, and this connection process
+// then ends owning nothing. Anything else falls back to the cold path.
+join = #['%http/websocket, '%http, 'root_view, @'reg_msg] {
+  =[conn, req, root, reg]
+  %http/websocket.recv conn
+  =[first, c2]
+  first ~> {
+    | =Text[tok] => {
+      Claim[tok, &.] ~> reg
+      !'claim ~> {
+        | =Found[p] => { Attach[c2] ~> p; Ok }
+        | run_cold [c2, req, &root, &reg]
+      }
+    }
+    | Ok
+  }
+}
+
+// === The test harness ===================================================================
+// Drive a component with no socket and no browser. `sim` mounts it (request → state →
+// frame 0); each step answers `[sim2, patches]` — the patch list a connected client
+// would have been sent (`Nil` where the view sends nothing: an empty diff, or a
+// dropped event). The steps run the same seams the view process runs, minus the
+// wire: `sim_text` feeds one wire envelope exactly as a socket Text frame carries it
+// (parse → decode → update → render → diff); `sim_event` feeds an already-decoded
+// event straight to `update`; `sim_changed` is the wakeup path — re-render and diff,
+// as the view does when a sampled store steps. Tracked renders subscribe the *calling*
+// process, so after stepping a store a test receives the wakeup itself
+// (`!'%proc.changed`) and then applies `sim_changed`, mirroring the view's select.
+
+'sim<'i, 's, 'e> = Sim[comp: 'component<'i, 's, 'e>, state: 's, frame: 'frame]
+
+sim = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>] {
+  :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`."
+  =[init, comp]
+  state = comp.mount init
+  Sim[comp: comp, state: state, frame: render_view [state, comp]]
+}
+
+sim_text = #<'i, 's, 'e>['sim<'i, 's, 'e>, Str['bin]] {
+  :doc "Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, [[name, value], …]]` — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the state untouched, exactly as the live path drops them."
+  =[s, text]
+  s ~> =Sim(comp: comp, state: state, frame: prev)
+  {
+    | env_of text ~> =[_, payload, pairs] => {
+      s2 = fold_event [state, comp, payload, pairs]
+      f2 = render_view [s2, comp]
+      [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
+    }
+    | [s, Nil]
+  }
+}
+
+sim_event = #<'i, 's, 'e>['sim<'i, 's, 'e>, 'e] {
+  :doc "Feeds a sim one already-decoded event, straight to `update` — the app-level step, for asserting `update`/`view` behavior without wire shapes. Answers `[sim2, patches]` (`Nil` when the render's diff is empty — the empty-frame suppression seam)."
+  =[s, ev]
+  s ~> =Sim(comp: comp, state: state, frame: prev)
+  s2 = comp.update [state, ev]
+  f2 = render_view [s2, comp]
+  [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
+}
+
+sim_changed = #<'i, 's, 'e>'sim<'i, 's, 'e> {
+  :doc "The wakeup path: re-render and diff against the sim's frame, as the loop does after a `'%proc.changed` wakeup from a sampled store. Answers `[sim2, patches]`. The wakeup itself is the caller's to receive (`!'%proc.changed`) — the sim's tracked renders subscribed the calling process."
+  =Sim(comp: comp, state: state, frame: prev)
+  f2 = render_view [state, comp]
+  [Sim[comp: comp, state: state, frame: f2], diff [prev, f2]]
+}
+
+sim_html = #<'i, 's, 'e>'sim<'i, 's, 'e> {
+  :doc "The sim's current region HTML (instrumented, as a live client's DOM shows it)."
+  =Sim(frame: f); render f
+}
+
+// The generic client: resolves marker paths, applies patch frames, echoes event
+// payloads (vid 0 — one region, one view, until boundaries), reconnects with backoff
+// (a token the server still holds re-attaches silently; otherwise the cold join
+// replaces the region). (`\{` is a literal brace in a Quiver string.)
+client_js = """
+<script>
+(() => \{
+  const root = document.getElementById('q-root');
+  const token = root.getAttribute('data-q-token') || '';
+  const nextNode = (n) => \{
+    if (n.firstChild) return n.firstChild;
+    while (n && n !== root) \{
+      if (n.nextSibling) return n.nextSibling;
+      n = n.parentNode;
+    }
+    return null;
+  };
+  const scan = (a, b, visit) => \{
+    let n = a ? nextNode(a) : root.firstChild;
+    while (n && n !== b) \{
+      if (visit(n)) return;
+      n = nextNode(n);
+    }
+  };
+  const mopen = (n) => \{
+    if (n.nodeType !== 8) return null;
+    if (n.data.startsWith('q:')) return \{ slot: parseInt(n.data.slice(2)) };
+    if (n.data === 'r') return \{ row: true };
+    if (n.data.startsWith('v:')) return \{ bnd: n.data.slice(2) };
+    return null;
+  };
+  const mclose = (n) =>
+    n.nodeType === 8 &&
+    (n.data.startsWith('/q:') || n.data === '/r' || n.data.startsWith('/v:'));
+  // A view's boundary range: the root view (\"0\") is the whole region; a child's is
+  // its v: marker pair (ids are unique, so no depth counting is needed).
+  const boundary = (vid) => \{
+    if (vid === '0') return \{ open: null, close: null };
+    let open = null, close = null;
+    scan(null, null, (n) => \{
+      if (n.nodeType !== 8) return false;
+      if (n.data === 'v:' + vid) open = n;
+      else if (n.data === '/v:' + vid) \{ close = n; return true; }
+      return false;
+    });
+    return open && close ? \{ open: open, close: close } : null;
+  };
+  const resolve = (path, from) => \{
+    let open = from.open, close = from.close;
+    for (const idx of path) \{
+      // A segment indexes whatever the range holds: numbered slot markers (q:idx) or
+      // anonymous row markers (the idx-th r) — the two never mix at one level.
+      let found = null, depth = 0, rows = 0;
+      scan(open, close, (n) => \{
+        const o = mopen(n);
+        if (o) \{
+          if (depth === 0) \{
+            if (o.row) \{
+              if (rows === idx) \{ found = n; return true; }
+              rows++;
+            } else if (o.slot === idx) \{ found = n; return true; }
+          }
+          depth++;
+        } else if (mclose(n)) depth--;
+        return false;
+      });
+      if (!found) return null;
+      let end = null, d = 0;
+      scan(found, close, (n) => \{
+        if (mopen(n)) d++;
+        else if (mclose(n)) \{
+          if (d === 0) \{ end = n; return true; }
+          d--;
+        }
+        return false;
+      });
+      if (!end) return null;
+      open = found;
+      close = end;
+    }
+    return \{ open: open, close: close };
+  };
+  const setNodes = (r, frag) => \{
+    if (!r.open) \{ root.replaceChildren(frag); return; }
+    while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
+    r.close.parentNode.insertBefore(frag, r.close);
+  };
+  const parseHtml = (h) => \{
+    const t = document.createElement('template');
+    t.innerHTML = h;
+    return t.content;
+  };
+  const apply = (b, p) => \{
+    if (p[0] === 'a') \{
+      const r = resolve(p[1].slice(0, -1), b);
+      if (!r) return;
+      const elem = String(p[2]), name = p[3], v = p[4];
+      let target = null, depth = 0;
+      scan(r.open, r.close, (n) => \{
+        if (mopen(n)) depth++;
+        else if (mclose(n)) depth--;
+        else if (n.nodeType === 1 && depth === 0 && n.getAttribute('data-q') === elem) \{
+          target = n;
+          return true;
+        }
+        return false;
+      });
+      if (!target) return;
+      if (v === null) target.removeAttribute(name);
+      else if (v === true) target.setAttribute(name, '');
+      else target.setAttribute(name, v);
+      if (name === 'value' && 'value' in target) target.value = v === null ? '' : v;
+      if (name === 'checked' && 'checked' in target) target.checked = v !== null;
+    } else if (p[0] === 'r-') \{
+      const r = resolve(p[1].concat([p[2]]), b);
+      if (!r || !r.open) return;
+      while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
+      r.close.remove();
+      r.open.remove();
+    } else if (p[0] === 'r>') \{
+      const src = resolve(p[1].concat([p[2]]), b);
+      if (!src || !src.open) return;
+      const frag = document.createDocumentFragment();
+      const stop = src.close.nextSibling;
+      let n = src.open;
+      while (n && n !== stop) \{
+        const nx = n.nextSibling;
+        frag.appendChild(n);
+        n = nx;
+      }
+      const dst = resolve(p[1].concat([p[3]]), b);
+      if (dst && dst.open) dst.open.parentNode.insertBefore(frag, dst.open);
+      else \{
+        const r = resolve(p[1], b);
+        if (r && r.close) r.close.parentNode.insertBefore(frag, r.close);
+        else root.appendChild(frag);
+      }
+    } else if (p[0] === 'r+') \{
+      const r = resolve(p[1], b);
+      if (!r) return;
+      let before = null, depth = 0, rows = 0;
+      scan(r.open, r.close, (n) => \{
+        const o = mopen(n);
+        if (o) \{
+          if (depth === 0 && o.row) \{
+            if (rows === p[2]) \{ before = n; return true; }
+            rows++;
+          }
+          depth++;
+        } else if (mclose(n)) depth--;
+        return false;
+      });
+      const frag = parseHtml(p[3]);
+      if (before) before.parentNode.insertBefore(frag, before);
+      else if (r.close) r.close.parentNode.insertBefore(frag, r.close);
+      else root.appendChild(frag);
+    } else \{
+      const r = resolve(p[1], b);
+      if (!r) return;
+      setNodes(r, p[0] === 't' ? document.createTextNode(p[2]) : parseHtml(p[2]));
+    }
+  };
+  let ws = null, delay = 500;
+  const connect = () => \{
+    const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    ws = new WebSocket(proto + location.host + location.pathname + location.search);
+    ws.onopen = () => \{
+      delay = 500;
+      ws.send(token);
+    };
+    ws.onmessage = (e) => \{
+      const m = JSON.parse(e.data);
+      if (m[0] !== 1) \{ location.reload(); return; }
+      // m[1] is the frame's view id; a vid whose markers are gone (a just-removed
+      // child) drops the whole frame.
+      const b = boundary(m[1]);
+      if (b) for (const p of m[2]) apply(b, p);
+    };
+    ws.onclose = () => \{
+      setTimeout(connect, delay);
+      delay = Math.min(delay * 2, 15000);
+    };
+  };
+  connect();
+  // On navigation the browser may keep this document alive (back/forward cache) —
+  // WITH its socket, leaving a zombie connection attached server-side. Close it on
+  // pagehide (which also makes the page bfcache-eligible), without triggering the
+  // reconnect; a restore from the cache reconnects, and the server treats the join
+  // as any other (a fresh mount — a clean close ends the server-side app).
+  addEventListener('pagehide', () => \{
+    if (ws) \{
+      ws.onclose = null;
+      ws.close();
+    }
+  });
+  addEventListener('pageshow', (e) => \{
+    if (e.persisted) connect();
+  });
+  const live = (e, attr) => \{
+    const el = e.target.closest('[' + attr + ']');
+    if (!el || !root.contains(el)) return null;
+    e.preventDefault();
+    return ws && ws.readyState === 1 ? el : null;
+  };
+  // The event's view: the nearest enclosing v: boundary, or the root (\"0\").
+  const vidOf = (el) => \{
+    let stack = [], found = '0';
+    scan(null, null, (n) => \{
+      if (n.nodeType === 8) \{
+        if (n.data.startsWith('v:')) stack.push(n.data.slice(2));
+        else if (n.data.startsWith('/v:')) stack.pop();
+      }
+      if (n === el) \{
+        if (stack.length) found = stack[stack.length - 1];
+        return true;
+      }
+      return false;
+    });
+    return found;
+  };
+  document.addEventListener('click', (e) => \{
+    const el = live(e, 'data-q-click');
+    if (el) ws.send('[' + JSON.stringify(vidOf(el)) + ',' + el.getAttribute('data-q-click') + ',[]]');
+  });
+  document.addEventListener('submit', (e) => \{
+    const el = live(e, 'data-q-submit');
+    if (!el) return;
+    const pairs = [];
+    new FormData(el).forEach((v, k) => \{
+      if (typeof v === 'string') pairs.push([k, v]);
+    });
+    ws.send('[' + JSON.stringify(vidOf(el)) + ',' + el.getAttribute('data-q-submit') + ',' + JSON.stringify(pairs) + ']');
+    el.reset();
+  });
+})();
+</script>
+"""
+
+// The dead render's page shell: the instrumented region in a container the client owns,
+// plus the client script. Whole-page concerns (title, head) are the caller's, later.
+page_shell = #[Str['bin], Str['bin]] {
+  =[Str[region], Str[token]]
+  "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"q-root\" data-q-token=\"" ~> %str.concat [~, Str[token]] ~> %str.concat [~, "\">"] ~> %str.concat [~, Str[region]] ~> %str.concat [~, "</div>"] ~> %str.concat [~, client_js] ~> %str.concat [
+    ~,
+    "</body></html>",
+  ]
+}
+
+handle = #['%http, 'app] {
+  :doc "The app's HTTP handler body. A plain GET spawns a detached app process whose root view mounts once; the view answers the region HTML and the app parks behind the page's claim token. A websocket-upgrade request reads the token from the client's first frame and hands the claimed app the socket (an unknown token falls back to a cold fresh mount). Wire it as `#'%http \{ %html/live.handle [$, app] }` with an `%html/live.app [root: &comp]` created once at startup."
+  =[req, a]
+  a ~> =(root: rt, reg: rg)
+  {
+    | %http.header [req.headers, "sec-websocket-key"] => Upgrade[
+      handler: #'%http/websocket { join [$, req, &rt, &rg] },
+    ]
+    | {
+      token = %random.hex 16
+      me = &.
+      ap = [req, &rt, &rg, token, Dead[&me]] ~> @app_run
+      %proc.detach &ap
+      ![#Str['bin], 5000] ~> {
+        | =Str[region] => {
+          page_shell [Str[region], token]
+          =Str[b]
+          Response[
+            status: 200,
+            headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],
+            body: b,
+          ]
+        }
+        | []
+      }
+    }
+  }
+}
+
+[
+  frame: &frame,
+  render: &render,
+  diff: &diff,
+  encode: &encode,
+  app: &app,
+  component: &component,
+  handle: &handle,
+  sim: &sim,
+  sim_text: &sim_text,
+  sim_event: &sim_event,
+  sim_changed: &sim_changed,
+  sim_html: &sim_html,
+]

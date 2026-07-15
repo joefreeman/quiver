@@ -277,9 +277,18 @@ fn test_same_key_with_different_value_types_unions_at_retrieval() {
     quiver()
         .evaluate(
             "x = A[c: 1] ~> { =A(c) => [] ~> { :foo 1 } | [] ~> { :foo Bar } };
-             [] ~> { =&x => 0 | x:foo ~> { =Bar => 111 | 222 } }",
+             x:foo ~> { =Bar => 111 | 222 }",
         )
         .expect("222");
+}
+
+#[test]
+fn test_annotations_are_invisible_to_pin_equality() {
+    // An annotated nil pinned against a plain nil matches — equality ignores
+    // annotations, and a pin of a nil-valued variable is an ordinary equality test.
+    quiver()
+        .evaluate("x = [] ~> { :foo 1 }; [] ~> { =&x => Same | Different }")
+        .expect("Same");
 }
 
 #[test]

@@ -14,15 +14,19 @@ skip_continuation = #['bin, 'int, 'int] {
   }
 }
 
+// The byte index in [offset, end] where `needle` first occurs, or nil. Rather than
+// slice-and-compare at every position, jump straight to each occurrence of the needle's
+// first byte (a native rope scan) and verify the rest there — so a scan skips the runs
+// between candidates instead of stepping a byte at a time.
 find_index = #['bin, 'bin, 'int, 'int] {
   =[haystack, needle, offset, end]
-  %num.le? [offset, end]
   {
-    | %bin.length needle ~> %num.add [
-        offset,
-        ~,
-      ] ~> %bin.slice [haystack, offset, ~] ~> =&needle => offset
-    | offset ~> %num.add [~, 1] ~> ^ [haystack, needle, ~, end]
+    | %bin.length needle ~> =0 => offset
+    | %bin.index [haystack, %bin.get_byte [needle, 0], offset] ~> =('int)pos; %num.le? [pos, end] => {
+      | %bin.length needle ~> %num.add [pos, ~] ~> %bin.slice [haystack, pos, ~] ~> =&needle => pos
+      | %num.add [pos, 1] ~> ^ [haystack, needle, ~, end]
+    }
+    | []
   }
 }
 

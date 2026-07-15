@@ -4,17 +4,31 @@ use crate::{
 };
 use std::collections::HashMap;
 
-/// A binding can be either a variable or a type alias
+/// A variable binding: its type, stack slot, and value provenance.
 #[derive(Debug, Clone)]
-pub enum Binding {
-    Variable {
-        /// Type ID referencing the Program's type registry.
-        ty: usize,
-        index: usize,
-        /// Provenance of the value stored in this variable (for tuple field resolution).
-        provenance: super::Provenance,
-    },
-    TypeAlias(TypeAliasDef),
+pub struct Variable {
+    /// Type ID referencing the Program's type registry.
+    pub ty: usize,
+    /// Stack index for the variable.
+    pub index: usize,
+    /// Provenance of the value stored in this variable (for tuple field resolution).
+    pub provenance: super::Provenance,
+}
+
+/// Named bindings in a scope. Variables and type aliases are separate namespaces —
+/// `name` (a value) and `'name` (a type) may coexist — so they live in separate maps.
+#[derive(Debug, Clone, Default)]
+pub struct Bindings {
+    pub variables: HashMap<String, Variable>,
+    pub type_aliases: HashMap<String, TypeAliasDef>,
+}
+
+impl Bindings {
+    /// Remove all variables and type aliases.
+    pub fn clear(&mut self) {
+        self.variables.clear();
+        self.type_aliases.clear();
+    }
 }
 
 /// The kind of scope, used to distinguish function scopes from block scopes
@@ -48,7 +62,7 @@ pub struct Parameter {
 /// and any type narrowings in effect for this scope.
 pub struct Scope {
     /// Variable and type alias bindings.
-    pub bindings: HashMap<String, Binding>,
+    pub bindings: Bindings,
     /// Type narrowings that overlay bindings (from type checks). Values are type IDs.
     pub narrowings: Narrowings,
     /// Block/function parameter.
@@ -59,26 +73,12 @@ pub struct Scope {
 
 impl Scope {
     /// Create a new scope with the given bindings, parameter, and kind.
-    pub fn new(
-        bindings: HashMap<String, Binding>,
-        parameter: Option<Parameter>,
-        kind: ScopeKind,
-    ) -> Self {
+    pub fn new(bindings: Bindings, parameter: Option<Parameter>, kind: ScopeKind) -> Self {
         Self {
             bindings,
             narrowings: Narrowings::default(),
             parameter,
             kind,
-        }
-    }
-
-    /// Create a new empty scope.
-    pub fn empty() -> Self {
-        Self {
-            bindings: HashMap::new(),
-            narrowings: Narrowings::default(),
-            parameter: None,
-            kind: ScopeKind::Root,
         }
     }
 }
@@ -97,9 +97,9 @@ pub fn define_variable(
     let index = *local_count;
     *local_count += 1;
     if let Some(scope) = scopes.last_mut() {
-        scope.bindings.insert(
+        scope.bindings.variables.insert(
             full_name,
-            Binding::Variable {
+            Variable {
                 ty: var_type_id,
                 index,
                 provenance,
@@ -112,7 +112,7 @@ pub fn define_variable(
 /// Define a new type alias in the current scope
 pub fn define_type_alias(scopes: &mut [Scope], name: String, type_alias: TypeAliasDef) {
     if let Some(scope) = scopes.last_mut() {
-        scope.bindings.insert(name, Binding::TypeAlias(type_alias));
+        scope.bindings.type_aliases.insert(name, type_alias);
     }
 }
 
@@ -129,26 +129,22 @@ pub fn lookup_variable(
     let full_name = helpers::make_capture_name(name, accessors);
 
     // Find the scope containing the binding
-    let (binding_scope_idx, binding) = scopes
+    let (binding_scope_idx, variable) = scopes
         .iter()
         .enumerate()
         .rev()
-        .find_map(|(i, s)| s.bindings.get(&full_name).map(|b| (i, b)))?;
-
-    let Binding::Variable { ty, index, .. } = binding else {
-        return None;
-    };
+        .find_map(|(i, s)| s.bindings.variables.get(&full_name).map(|v| (i, v)))?;
 
     // Check for narrowings from current scope back to binding scope
     // (innermost narrowing takes precedence)
     for scope in scopes[binding_scope_idx..].iter().rev() {
         if let Some(narrowed) = scope.narrowings.variables.get(&full_name) {
-            return Some((*narrowed, *index));
+            return Some((*narrowed, variable.index));
         }
     }
 
     // No narrowing, return original type
-    Some((*ty, *index))
+    Some((variable.ty, variable.index))
 }
 
 /// Look up a variable's *declared* type, ignoring any runtime narrowings.
@@ -158,34 +154,27 @@ pub fn lookup_declared_variable_type(scopes: &[Scope], name: &str) -> Option<usi
     scopes
         .iter()
         .rev()
-        .find_map(|s| match s.bindings.get(&full_name) {
-            Some(Binding::Variable { ty, .. }) => Some(*ty),
-            _ => None,
-        })
+        .find_map(|s| s.bindings.variables.get(&full_name).map(|v| v.ty))
 }
 
 /// Look up the provenance stored for a variable.
 /// Returns the provenance that was stored when the variable was defined.
 pub fn lookup_variable_provenance(scopes: &[Scope], name: &str) -> Option<super::Provenance> {
     let full_name = helpers::make_capture_name(name, &[]);
-
-    for scope in scopes.iter().rev() {
-        if let Some(Binding::Variable { provenance, .. }) = scope.bindings.get(&full_name) {
-            return Some(provenance.clone());
-        }
-    }
-    None
+    scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.bindings.variables.get(&full_name))
+        .map(|v| v.provenance.clone())
 }
 
 /// Look up a type alias in the scope stack
 /// Searches from innermost to outermost scope
 pub fn lookup_type_alias(scopes: &[Scope], name: &str) -> Option<TypeAliasDef> {
-    for scope in scopes.iter().rev() {
-        if let Some(Binding::TypeAlias(type_alias)) = scope.bindings.get(name) {
-            return Some(type_alias.clone());
-        }
-    }
-    None
+    scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.bindings.type_aliases.get(name).cloned())
 }
 
 /// Get the parameter from the current (innermost) scope.

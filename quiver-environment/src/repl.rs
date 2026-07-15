@@ -2,7 +2,7 @@ use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
 use quiver_compiler::ModuleResolver;
 use quiver_compiler::compiler::{
-    Binding, ModuleCache, Scope, ScopeKind, resolve_type_alias_for_display,
+    Bindings, ModuleCache, Scope, ScopeKind, resolve_type_alias_for_display,
 };
 use quiver_core::bytecode::Function;
 use quiver_core::effects::Effect;
@@ -33,7 +33,7 @@ impl std::fmt::Display for ReplError {
 pub struct Repl<E: Effect> {
     repl_process_id: Option<ProcessId>,
     program: Program, // Accumulated program state across evaluations (needed for module caching)
-    bindings: HashMap<String, Binding>, // variables and type aliases persisted across sessions
+    bindings: Bindings, // variables and type aliases persisted across sessions
     module_cache: ModuleCache, // persistent module cache across evaluations
     last_result_type: Type, // Type of the last evaluated result, for continuations
     resolver: Box<dyn ModuleResolver>,
@@ -53,7 +53,7 @@ impl<E: Effect> Repl<E> {
         Ok(Self {
             repl_process_id: Some(pid),
             program: Program::new(),
-            bindings: HashMap::new(),
+            bindings: Bindings::default(),
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
             resolver,
@@ -222,20 +222,21 @@ impl<E: Effect> Repl<E> {
         env: &mut Environment<E>,
         name: &str,
     ) -> Result<u64, EnvironmentError> {
-        let binding = self
+        let local_index = self
             .bindings
+            .variables
             .get(name)
-            .ok_or_else(|| EnvironmentError::VariableNotFound(name.to_string()))?;
-
-        let local_index = match binding {
-            Binding::Variable { index, .. } => *index,
-            Binding::TypeAlias(_) => {
-                return Err(EnvironmentError::VariableNotFound(format!(
-                    "'{}' is a type alias, not a variable",
-                    name
-                )));
-            }
-        };
+            .map(|variable| variable.index)
+            .ok_or_else(|| {
+                if self.bindings.type_aliases.contains_key(name) {
+                    EnvironmentError::VariableNotFound(format!(
+                        "'{}' is a type alias, not a variable",
+                        name
+                    ))
+                } else {
+                    EnvironmentError::VariableNotFound(name.to_string())
+                }
+            })?;
 
         let repl_process_id = self
             .repl_process_id
@@ -248,15 +249,13 @@ impl<E: Effect> Repl<E> {
     pub fn get_variables(&self) -> Vec<(String, String)> {
         let mut vars: Vec<_> = self
             .bindings
+            .variables
             .iter()
-            .filter_map(|(name, binding)| {
-                if let Binding::Variable { ty, index, .. } = binding {
-                    // Format the type using the Repl's own program
-                    let formatted_type = quiver_core::format::format_type_by_id(&self.program, *ty);
-                    Some((name.clone(), formatted_type, *index))
-                } else {
-                    None
-                }
+            .map(|(name, variable)| {
+                // Format the type using the Repl's own program
+                let formatted_type =
+                    quiver_core::format::format_type_by_id(&self.program, variable.ty);
+                (name.clone(), formatted_type, variable.index)
             })
             .collect();
 
@@ -273,11 +272,9 @@ impl<E: Effect> Repl<E> {
     fn keep_indices(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = self
             .bindings
+            .variables
             .values()
-            .filter_map(|binding| match binding {
-                Binding::Variable { index, .. } => Some(*index),
-                _ => None,
-            })
+            .map(|variable| variable.index)
             .collect();
         indices.sort();
         indices
@@ -304,13 +301,11 @@ impl<E: Effect> Repl<E> {
         }
 
         // Update bindings with new indices
-        for binding in self.bindings.values_mut() {
-            if let Binding::Variable { index, .. } = binding {
-                *index = index_mapping
-                    .get(index)
-                    .copied()
-                    .expect("Invalid variable index");
-            }
+        for variable in self.bindings.variables.values_mut() {
+            variable.index = index_mapping
+                .get(&variable.index)
+                .copied()
+                .expect("Invalid variable index");
         }
 
         // Compact the locals on the worker (ignore errors - this is just an optimization)
@@ -325,24 +320,11 @@ impl<E: Effect> Repl<E> {
         _env: &mut Environment<E>,
         alias_name: &str,
     ) -> Result<usize, String> {
-        // Extract type aliases from bindings
-        let type_aliases: HashMap<String, quiver_compiler::compiler::TypeAliasDef> = self
-            .bindings
-            .iter()
-            .filter_map(|(name, binding)| {
-                if let Binding::TypeAlias(type_alias) = binding {
-                    Some((name.clone(), type_alias.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Convert type_aliases HashMap to a single scope for resolution
-        let mut bindings = std::collections::HashMap::new();
-        for (name, type_alias) in type_aliases {
-            bindings.insert(name, Binding::TypeAlias(type_alias));
-        }
+        // Only the type aliases matter for resolution; variables are irrelevant here
+        let bindings = Bindings {
+            variables: HashMap::new(),
+            type_aliases: self.bindings.type_aliases.clone(),
+        };
         let scope = Scope::new(bindings, None, ScopeKind::Root);
         let scopes = vec![scope];
 

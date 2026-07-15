@@ -277,3 +277,25 @@ fn test_rigid_type_variable_rejects_concrete_requirement() {
             "Cannot unify rigid type variable 'u with expected type 'int".to_string(),
         ));
 }
+
+#[test]
+fn test_generic_unification_of_resource_and_reference_types() {
+    // Unifying Resource with Resource (and Reference with Reference) used to fall
+    // through to unify's catch-all and fail — resource-bearing types could not flow
+    // through generic parameters.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"pick = #<'t>['t, 't] { $0 }
+               f = ["/tmp/quiver-generic-res-test" ~> .0, 577, 420] ~> __file_open__
+               pick [f, f]"#,
+        )
+        .expect_type("\\File");
+    quiver()
+        .evaluate(
+            r#"pick = #<'t>['t, 't] { $0 }
+               r = %ref
+               pick [r, r] ~> =&r"#,
+        )
+        .expect("Ok");
+}

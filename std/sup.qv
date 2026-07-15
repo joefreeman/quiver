@@ -2,9 +2,12 @@
 // on the step-2 primitives. A supervisor is a state loop whose table maps child ids
 // to pids and restart recipes; every child gets a *watcher* — a tiny process that
 // awaits it (never-lethal `!`), classifies the outcome, and reports
-// `Down[id, outcome]` to the supervisor's mailbox. The mailbox multiplexes, so the
-// child set may be dynamic; identity comes from the watcher's creation-time
-// knowledge, never from the await.
+// `Down[id, pid, outcome]` to the supervisor's mailbox. The mailbox multiplexes, so
+// the child set is dynamic: `add` puts a child under a running supervisor and
+// `drop` kills one (its id may be reused). Identity comes from the
+// watcher's creation-time knowledge, never from the await — the pid in the report
+// is what makes a late report for a reused id harmless (the supervisor pin-compares
+// it against the row before acting, the message-passing analogue of a monitor ref).
 //
 // Ownership does the rest: children and watchers are spawned in the supervisor's
 // process, so stopping the supervisor — or its own crash, e.g. giving up past the
@@ -26,9 +29,16 @@
 
 'restart = Permanent | Transient | Temporary
 'outcome = Done | Crashed['%proc.crash]
-'down = Down[id: Str['bin], outcome: 'outcome]
+'down = Down[id: Str['bin], pid: @, outcome: 'outcome]
+
 'start = #[Str['bin], @'down] -> @
 'spec = [id: Str['bin], restart: 'restart, start: 'start]
+// A dynamic start's verdict: the child's pid (widened to an inert `(@)`), or a
+// rejection for an id the table already holds.
+'started = Started[@] | Duplicate
+
+// What a supervisor receives: watcher reports, and the dynamic-children requests.
+'msg = 'down | Add['spec, @'started] | Drop[Str['bin]]
 'specs = Nil | Cons['spec, ^]
 
 'stamps = Nil | Cons['int, ^]
@@ -37,7 +47,7 @@
 'state = [table: 'table, max: 'int, window: 'int]
 
 watch = #<'r>[Str['bin], (@-> 'r), @'down] {
-  :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, outcome] to the supervisor. Call from a start closure, passing the child and supervisor by reference."
+  :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start closure, passing the child and supervisor by reference."
   =[i, c, s]
   @{
     r = !c
@@ -45,7 +55,7 @@ watch = #<'r>[Str['bin], (@-> 'r), @'down] {
       | r:('%proc.crash)crash ~> =('%proc.crash)e => Crashed[e]
       | Done
     }
-    Down[id: i, outcome: o] ~> s
+    Down[id: i, pid: &c, outcome: o] ~> s
   }
   Ok
 }
@@ -93,6 +103,21 @@ len = #['stamps, 'int] {
   | =[Cons[_, rest], n] => ^ [rest, __integer_add__ [n, 1]]
 }
 
+'verdict = Allowed['stamps] | Exceeded
+
+// The sliding-window restart policy: stamp `now`, prune stamps older than the
+// window, and allow while at most `max` remain. `Allowed` carries the pruned
+// stamps to store back. (Internal; exportable if an embedded supervisor — a
+// live-view boundary, say — ever wants to share the policy.)
+allow? = #[stamps: 'stamps, now: 'int, max: 'int, window: 'int] -> 'verdict {
+  =[stamps: ts, now: now, max: m, window: w]
+  recent = Cons[now, prune [ts, __integer_subtract__ [now, w]]]
+  {
+    | __integer_compare__ [len [recent, 0], m] ~> =1 => Exceeded
+    | Allowed[recent]
+  }
+}
+
 // Whether the child's restart type wants a restart for this outcome: Permanent
 // always, Temporary never, Transient only after a crash.
 restart? = #['row, 'outcome] {
@@ -107,30 +132,49 @@ restart? = #['row, 'outcome] {
 
 loop = #'state {
   =[table: t, max: m, window: w]
-  !'down ~> =Down[id: i, outcome: o]
-  {
-    | find [t, i] ~> =('row)r => {
-      | restart? [r, o] => {
-        now = %time.monotonic
-        recent = Cons[now, prune [r.restarts, __integer_subtract__ [now, w]]]
-        {
-          | __integer_compare__ [len [recent, 0], m] ~> =1 => "%sup: restart intensity exceeded" ~> __panic__
-          | {
-            p = r.spec ~> ~.start [i, &.]
-            ^ [
-              table: Cons[[id: i, pid: &p, spec: r.spec, restarts: recent], remove [t, i]],
-              max: m,
-              window: w,
-            ]
+  !'msg ~> {
+    | =Down[id: i, pid: dp, outcome: o] => {
+      // The row must hold the SAME incarnation the watcher awaited — a late report
+      // for a reused id (drop, then add again) pin-fails and is dropped.
+      | find [t, i] ~> =('row)r; r ~> =(pid: &dp) => {
+        | restart? [r, o] => {
+          now = %time.monotonic
+          allow? [stamps: r.restarts, now: now, max: m, window: w] ~> {
+            | =Allowed[recent] => {
+              p = r.spec ~> ~.start [i, &.]
+              ^ [
+                table: Cons[[id: i, pid: &p, spec: r.spec, restarts: recent], remove [t, i]],
+                max: m,
+                window: w,
+              ]
+            }
+            | "%sup: restart intensity exceeded" ~> __panic__
           }
         }
+        // No restart wanted: the child is done — drop its row.
+        | ^ [table: remove [t, i], max: m, window: w]
       }
-      // No restart wanted: the child is done — drop its row.
-      | ^ [table: remove [t, i], max: m, window: w]
+      // A Down for an id no longer in the table (e.g. a deliberately dropped
+      // child's watcher reporting the kill), or for a previous incarnation of a
+      // reused id, is silently dropped.
+      | ^ [table: t, max: m, window: w]
     }
-    // A Down for an id no longer in the table (e.g. a deliberately stopped child's
-    // watcher reporting the kill) is silently dropped.
-    | ^ [table: t, max: m, window: w]
+    | =Add[s, reply] => {
+      | find [t, s.id] ~> =('row)dup => { Duplicate ~> reply; ^ [table: t, max: m, window: w] }
+      | {
+        row = start_row [s, &.]
+        row ~> =(pid: p)
+        Started[&p] ~> reply
+        ^ [table: Cons[row, t], max: m, window: w]
+      }
+    }
+    | =Drop[i] => {
+      // Remove the row BEFORE the kill, so the watcher's report finds nothing.
+      | find [t, i] ~> =('row)r => {
+        t2 = remove [t, i]; r ~> =(pid: p); %proc.kill &p; ^ [table: t2, max: m, window: w]
+      }
+      | ^ [table: t, max: m, window: w]
+    }
   }
 }
 
@@ -140,8 +184,18 @@ run = #[specs: 'specs, max: 'int, window: 'int] {
 }
 
 start = #[children: 'specs, max_restarts: 'int, window: 'int] {
-  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times within window ms — beyond that the supervisor gives up and crashes, tearing down its subtree. Answers the supervisor's pid, owned by the caller."
+  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times within window ms — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
   =[children: ss, max_restarts: m, window: w]; [specs: ss, max: m, window: w] ~> @run
 }
 
-[start: &start, watch: &watch]
+add = #[@'msg, 'spec] {
+  :doc "Adds a child to a running supervisor and awaits the verdict: Started[pid] (widened to an inert `(@)`), or Duplicate for an id the table already holds. The child is spawned in the supervisor's process — owned by it, supervised like any startup spec."
+  =[sup, spec]; Add[spec, &.] ~> sup; !'started
+}
+
+drop = #[@'msg, Str['bin]] {
+  :doc "Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its watcher's report is disregarded, and the id may be supervised again. Asynchronous: the supervisor applies it in mailbox order."
+  =[sup, id]; Drop[id] ~> sup; Ok
+}
+
+[start: &start, add: &add, drop: &drop, watch: &watch]

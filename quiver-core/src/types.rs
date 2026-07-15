@@ -633,13 +633,24 @@ fn check_type_relation<T: TypeLookup>(
                 state: state2,
             },
         ) => {
+            // Send is CONTRAVARIANT: the declared type promises what may be sent
+            // through the handle, so the actual process must accept at least that —
+            // a handle that receives MORE is safe wherever fewer sends are promised
+            // (e.g. a supervisor's self-handle, whose inferred receive is its whole
+            // message union, flowing into a `@'down` report parameter). An EMPTY
+            // actual send is treated as unknown rather than rejected: it arises as
+            // an inference artifact when `&.` is taken before the enclosing
+            // function's receive has been widened by its calls (the receive
+            // pre-pass only sees syntactic selects).
             let send_ok = match (send1, send2) {
                 (Some(s1), Some(s2)) => {
-                    check_type_relation(*s1, *s2, lookup, mode, assumptions, type_stack)
+                    lookup.lookup_type(*s1).is_some_and(|t| t.is_never())
+                        || check_type_relation(*s2, *s1, lookup, mode, assumptions, type_stack)
                 }
                 (None, _) | (_, None) => true,
             };
 
+            // Receive is the AWAIT RESULT (`-> 'r`), covariant like any result.
             let receive_ok = match (receive1, receive2) {
                 (Some(r1), Some(r2)) => {
                     check_type_relation(*r1, *r2, lookup, mode, assumptions, type_stack)

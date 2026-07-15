@@ -52,7 +52,7 @@ fn test_take_while() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~> [~, #'int { =3 ~> =[] }] ~> %iter.take_while ~> %list.collect
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~> [~, #'int { | =3 => [] | Ok }] ~> %iter.take_while ~> %list.collect
             "#,
         )
         .expect("Cons[1, Cons[2, Nil]]");
@@ -63,7 +63,7 @@ fn test_drop_while() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~> [~, #'int { =2 ~> =[] }] ~> %iter.drop_while ~> %list.collect
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~> [~, #'int { | =2 => [] | Ok }] ~> %iter.drop_while ~> %list.collect
             "#,
         )
         .expect("Cons[2, Cons[3, Cons[4, Nil]]]");
@@ -266,6 +266,9 @@ fn test_filter_long_skip_run_is_tail_recursive() {
     // loop. That loop tail-calls the next iterator via `^~`, so it runs in constant stack; without
     // tail-call optimization this would overflow.
     quiver()
+        // ~3s of pure compute standalone: headroom for a loaded machine, where the
+        // default 5s has flaked under a full parallel suite run.
+        .with_timeout(std::time::Duration::from_secs(20))
         .evaluate(
             r#"
             50000 ~> %range.to ~> %range.iter ~> [~, #'int { =49999 }] ~> %iter.filter ~> [~, 0] ~> %iter.nth

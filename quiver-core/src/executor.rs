@@ -1743,7 +1743,21 @@ impl<E: Effect> Executor<E> {
         // Execute instructions for current process
         while units_executed < max_units {
             let Some(instruction) = Self::current_instruction(&proc, &self.functions) else {
-                break; // Process finished or no more instructions in current frame
+                // The current frame is exhausted. Returning into the caller ends the
+                // time-slice only at the root frame (process completion, handled below);
+                // an inner return pops inline so call-heavy code isn't throttled to one
+                // return per slice.
+                if proc.frames.len() <= 1 {
+                    break; // Root frame: process finished
+                }
+                self.processes.insert(current_pid, proc);
+                self.pop_exhausted_frame(current_pid);
+                proc = self
+                    .processes
+                    .remove(&current_pid)
+                    .expect("process should remain in map after a frame pop");
+                units_executed += 1;
+                continue;
             };
 
             let step_result = if Self::is_cold(instruction) {
@@ -1805,57 +1819,7 @@ impl<E: Effect> Executor<E> {
                 break; // No frames to pop
             }
 
-            // Pop the exhausted frame and decide what to release; the local-release happens after
-            // the process borrow ends, since it needs `&mut self`.
-            let (clear_base, is_track_boundary) = {
-                let process = self
-                    .get_process_mut(current_pid)
-                    .expect("Process should exist");
-
-                // A returning tracked-render thunk is the frame whose
-                // pre-pop depth matches the recorded boundary; its return reconciles the
-                // caller's reactive subscriptions.
-                let pre_pop_len = process.frames.len();
-                let is_track_boundary = process
-                    .tracking
-                    .as_ref()
-                    .is_some_and(|t| t.boundary_len == pre_pop_len);
-
-                // Frame exhausted - pop it without stack manipulation
-                // (the result is already on the stack from the last instruction)
-                let frame = process.frames.pop().unwrap();
-                let is_last_frame = process.frames.is_empty();
-
-                // Clear locals from the popped frame (including captures). For persistent
-                // processes, only keep locals if this was the last (top-level) frame.
-                let should_clear_locals = !process.persistent || !is_last_frame;
-
-                // Check if we're in an active select and returning to the select instruction
-                let should_skip_increment = if let Some(ref select_state) = process.select_state {
-                    let current_frame = process.frames.len().saturating_sub(1);
-                    let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
-                    select_state.frame == current_frame
-                        && select_state.instruction == current_instruction
-                } else {
-                    false
-                };
-
-                // Increment counter of calling frame unless we're in an active select
-                if !should_skip_increment && let Some(calling_frame) = process.frames.last_mut() {
-                    calling_frame.counter += 1;
-                }
-
-                (
-                    should_clear_locals.then_some(frame.locals_base),
-                    is_track_boundary,
-                )
-            };
-            if let Some(base) = clear_base {
-                self.truncate_locals_pid(current_pid, base);
-            }
-            if is_track_boundary {
-                self.reconcile_tracking(current_pid);
-            }
+            self.pop_exhausted_frame(current_pid);
         }
 
         let process = self.get_process(current_pid);
@@ -1901,6 +1865,61 @@ impl<E: Effect> Executor<E> {
 
         // Return (did_work=true, pending_request) - we always do work if we got here
         (true, pending_request)
+    }
+
+    /// Pop one exhausted frame: return into the caller (or a re-entered select),
+    /// release the frame's locals, and reconcile a returning tracked-render thunk's
+    /// reactive subscriptions. The callee's result is already on the stack.
+    fn pop_exhausted_frame(&mut self, pid: ProcessId) {
+        // Pop the exhausted frame and decide what to release; the local-release happens after
+        // the process borrow ends, since it needs `&mut self`.
+        let (clear_base, is_track_boundary) = {
+            let process = self.get_process_mut(pid).expect("Process should exist");
+
+            // A returning tracked-render thunk is the frame whose
+            // pre-pop depth matches the recorded boundary; its return reconciles the
+            // caller's reactive subscriptions.
+            let pre_pop_len = process.frames.len();
+            let is_track_boundary = process
+                .tracking
+                .as_ref()
+                .is_some_and(|t| t.boundary_len == pre_pop_len);
+
+            // Frame exhausted - pop it without stack manipulation
+            // (the result is already on the stack from the last instruction)
+            let frame = process.frames.pop().unwrap();
+            let is_last_frame = process.frames.is_empty();
+
+            // Clear locals from the popped frame (including captures). For persistent
+            // processes, only keep locals if this was the last (top-level) frame.
+            let should_clear_locals = !process.persistent || !is_last_frame;
+
+            // Check if we're in an active select and returning to the select instruction
+            let should_skip_increment = if let Some(ref select_state) = process.select_state {
+                let current_frame = process.frames.len().saturating_sub(1);
+                let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+                select_state.frame == current_frame
+                    && select_state.instruction == current_instruction
+            } else {
+                false
+            };
+
+            // Increment counter of calling frame unless we're in an active select
+            if !should_skip_increment && let Some(calling_frame) = process.frames.last_mut() {
+                calling_frame.counter += 1;
+            }
+
+            (
+                should_clear_locals.then_some(frame.locals_base),
+                is_track_boundary,
+            )
+        };
+        if let Some(base) = clear_base {
+            self.truncate_locals_pid(pid, base);
+        }
+        if is_track_boundary {
+            self.reconcile_tracking(pid);
+        }
     }
 
     /// Whether an instruction is a "cold" control/concurrency op handled via the process map
@@ -2823,11 +2842,11 @@ impl<E: Effect> Executor<E> {
         let first = &values[0];
         let all_equal = values.iter().all(|value| self.values_equal(first, value));
 
-        let result = if all_equal {
-            first.clone()
-        } else {
-            Value::nil()
-        };
+        // The result is a truth flag (the pattern compiler follows every Equal with
+        // Not + a conditional jump), so success must be Ok even when the compared
+        // values are themselves nil — pushing the compared value would make "equal
+        // nils" indistinguishable from "not equal".
+        let result = if all_equal { Value::ok() } else { Value::nil() };
 
         self.push_value(proc, result);
 

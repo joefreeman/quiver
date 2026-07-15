@@ -21,7 +21,7 @@ mod variables;
 pub use codegen::InstructionBuilder;
 pub use modules::ModuleCache;
 pub use provenance::{Narrowings, Provenance};
-pub use scopes::{Binding, Parameter, Scope, ScopeKind};
+pub use scopes::{Bindings, Parameter, Scope, ScopeKind, Variable};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_type_ids};
 
 use crate::{
@@ -157,6 +157,28 @@ pub enum Error {
     // Pattern matching errors
     PatternNoMatchingTypes {
         pattern: String,
+    },
+    /// A fallible match is followed by further terms in its chain. Nothing
+    /// short-circuits within a chain, so the continuation would run whether or not the
+    /// match succeeded — which would make the pattern's narrowing (its bindings and the
+    /// scrutinee's refinement) unsound. A fallible match must end its chain, so that
+    /// its verdict directly gates a step boundary (`=P; …`) or a branch (`=P => …`).
+    FallibleMatchNotChainFinal,
+    /// A fallible match that binds variables appears in a value chain — a tuple field,
+    /// an argument, an annotation value — where its verdict is data and gates nothing:
+    /// the surrounding code runs whether or not it matched, so the bindings cannot be
+    /// relied on.
+    FallibleMatchBindingsInValueChain {
+        bindings: Vec<String>,
+    },
+
+    /// A value flows into a union whose members include functions or processes, and the
+    /// union is not sendable (a union of only process types is — the message is checked
+    /// against every member's send type). Rejected rather than silently compiled as a
+    /// replace, which would discard the flowing value.
+    UnionApplication {
+        union: String,
+        all_functions: bool,
     },
 
     // Internal consistency errors
@@ -335,6 +357,52 @@ impl std::fmt::Display for Error {
             Error::PatternNoMatchingTypes { pattern } => {
                 write!(f, "Pattern '{pattern}' matches no possible type")
             }
+            Error::FallibleMatchNotChainFinal => {
+                write!(
+                    f,
+                    "A fallible match must be the last term of its chain: nothing \
+                     short-circuits within a chain, so a following term would run \
+                     whether or not the match succeeded. Separate the steps (`=P; ...`) \
+                     so the match gates what follows, or test for a failed match with a \
+                     block (`{{ =P => [] | Ok }}`)"
+                )
+            }
+            Error::FallibleMatchBindingsInValueChain { bindings } => {
+                write!(
+                    f,
+                    "A fallible match binding {} cannot appear in a value position (a \
+                     tuple field, an argument, an annotation value): nothing gates on \
+                     its verdict there, so the bindings cannot be relied on. Bind in a \
+                     preceding step instead",
+                    bindings
+                        .iter()
+                        .map(|b| format!("'{b}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            Error::UnionApplication {
+                union,
+                all_functions,
+            } => {
+                if *all_functions {
+                    write!(
+                        f,
+                        "Cannot call {union}: a union of function types cannot be \
+                         applied (the members are separate functions). Narrow the union \
+                         first, or reference the value with '&'"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Cannot pipe a value into {union}: the union mixes process or \
+                         function members with other values, so the pipe would be a \
+                         send for some members and a replace for others. Narrow the \
+                         union first, or reference the value with '&' (a union of only \
+                         process types is sendable)"
+                    )
+                }
+            }
             Error::InternalError { message } => write!(f, "Internal compiler error: {message}"),
         }
     }
@@ -379,7 +447,7 @@ pub struct Compiled {
     pub instructions: Vec<Instruction>,
     pub result_type: usize,
     pub receive_type: usize,
-    pub bindings: HashMap<String, Binding>,
+    pub bindings: Bindings,
 }
 
 /// Compilation mode options.
@@ -442,6 +510,31 @@ fn branch_is_parameter_dispatch(branch: &ast::Branch) -> bool {
             .terms
             .iter()
             .all(|t| matches!(t, ast::Term::Match(_)))
+}
+
+/// Whether falling through this branch PROVES its pattern didn't match — the soundness
+/// condition for recording the pattern's complement (and its coverage) for subsequent
+/// branches. That holds only when the condition is a single chain whose final failable
+/// element is the pattern itself: a guard step after the match (`=P; G => …`) can fail
+/// with the pattern matched, and a step before it (`G; =P => …`) can short-circuit
+/// without the pattern ever being tested — either way the fall-through says nothing
+/// about the pattern, so no complement may be recorded. A `~>`-joined term after a
+/// match (`=P ~> G`) likewise makes the condition's verdict G's, not the pattern's.
+fn condition_complement_faithful(condition: &ast::Sequence) -> bool {
+    let [chain] = condition.chains.as_slice() else {
+        return false;
+    };
+    let match_terms = chain
+        .terms
+        .iter()
+        .filter(|t| matches!(t, ast::Term::Match(_)))
+        .count();
+    if chain.match_pattern.is_some() {
+        match_terms == 0
+    } else {
+        match_terms == 0
+            || (match_terms == 1 && matches!(chain.terms.last(), Some(ast::Term::Match(_))))
+    }
 }
 
 /// The function index of a resolved value, when it is (directly) a function. Used at a call
@@ -629,7 +722,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     #[allow(clippy::too_many_arguments)]
     pub fn compile(
         ast_program: ast::Program,
-        existing_bindings: &HashMap<String, Binding>,
+        existing_bindings: &Bindings,
         module_cache: &'a mut ModuleCache,
         resolver: &'a dyn ModuleResolver,
         program: &'a mut Program,
@@ -668,25 +761,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Prepare scope bindings from existing bindings
-        let mut scope_bindings = HashMap::new();
-
-        // Clone all existing bindings
-        for (name, binding) in existing_bindings {
-            scope_bindings.insert(name.clone(), binding.clone());
-        }
+        let scope_bindings = existing_bindings.clone();
 
         // Calculate local_count from variables
         compiler.local_count = existing_bindings
+            .variables
             .values()
-            .filter_map(|binding| {
-                if let Binding::Variable { index, .. } = binding {
-                    Some(*index)
-                } else {
-                    None
-                }
-            })
+            .map(|variable| variable.index + 1)
             .max()
-            .map(|max_index| max_index + 1)
             .unwrap_or(0);
 
         // Drop blocks that carry no runtime meaning before codegen: a single branchless branch with
@@ -749,12 +831,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Extract bindings from the global scope
-        let bindings: HashMap<String, Binding> = compiler.scopes[0]
-            .bindings
-            .iter()
-            .filter(|(name, _)| !name.starts_with('~')) // Exclude internal variables
-            .map(|(name, binding)| (name.clone(), binding.clone()))
-            .collect();
+        let bindings = Bindings {
+            variables: compiler.scopes[0]
+                .bindings
+                .variables
+                .iter()
+                .filter(|(name, _)| !name.starts_with('~')) // Exclude internal variables
+                .map(|(name, variable)| (name.clone(), variable.clone()))
+                .collect(),
+            type_aliases: compiler.scopes[0].bindings.type_aliases.clone(),
+        };
 
         Ok(Compiled {
             instructions: compiler.codegen.instructions,
@@ -1006,6 +1092,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 None,
                 false,
                 expected,
+                false, // an annotation value is data; nothing gates on it
             )?;
             if let Some(expected) = expected
                 && !quiver_core::types::is_compatible(value_type, expected, &*self.program)
@@ -1231,6 +1318,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         None,
                         false,
                         field_expected,
+                        false, // a field's value is data; nothing gates on it
                     )?
                 }
                 ast::FieldValue::Spread(_) => {
@@ -1761,12 +1849,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_states = self.current_states;
 
         // Extract type aliases from parent scopes to preserve in function scope
-        let mut function_scope_bindings = HashMap::new();
+        // (inner scopes' definitions win)
+        let mut function_scope_bindings = Bindings::default();
         for scope in &saved_scopes {
-            for (name, binding) in &scope.bindings {
-                if let Binding::TypeAlias(_) = binding {
-                    function_scope_bindings.insert(name.clone(), binding.clone());
-                }
+            for (name, alias) in &scope.bindings.type_aliases {
+                function_scope_bindings
+                    .type_aliases
+                    .insert(name.clone(), alias.clone());
             }
         }
 
@@ -2095,6 +2184,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    #[allow(clippy::too_many_arguments)]
     fn compile_match(
         &mut self,
         pattern: ast::Match,
@@ -2103,6 +2193,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         on_no_match: Option<usize>,
         return_ok: bool,
         mut narrowing: Option<&mut Narrowing>,
+        // Whether the enclosing chain gates control flow on this match's verdict. In a
+        // value chain (a tuple field, an argument) the surrounding code runs whether or
+        // not the match succeeded, so the scrutinee must not be narrowed there.
+        gating: bool,
     ) -> Result<usize, Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
@@ -2183,9 +2277,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
 
             if let Some(scope) = self.scopes.last_mut() {
-                scope.bindings.insert(
+                scope.bindings.variables.insert(
                     variable_name.clone(),
-                    Binding::Variable {
+                    Variable {
                         ty: *variable_type,
                         index: local_index,
                         provenance: var_provenance,
@@ -2209,7 +2303,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // This is done here on the success path - the type has been narrowed by the pattern.
         // Note: narrowed_type is the success-narrowed type from analyze_pattern — without the
         // failure nil that widens result_type for fallible patterns.
-        if !self.is_never(narrowed_type) && !self.is_nil(narrowed_type) {
+        // Only where the verdict gates control flow: in a value chain (a tuple field)
+        // the code after the match runs on failure too, so the narrowed fact doesn't
+        // hold there — `[x ~> =T[_], x ~> f]` must compile `f` against x's full type.
+        if gating && !self.is_never(narrowed_type) && !self.is_nil(narrowed_type) {
             apply_narrowing(
                 &mut self.scopes,
                 &value_provenance,
@@ -2377,7 +2474,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Push new scope with parameter
         self.scopes.push(Scope::new(
-            HashMap::new(),
+            Bindings::default(),
             Some(scopes::Parameter {
                 ty: parameter_type,
                 index: param_local,
@@ -2444,8 +2541,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
             }
 
-            // Create a narrowing instance for this branch's condition
+            // Create a narrowing instance for this branch's condition. Only a condition
+            // whose fall-through proves its pattern didn't match may record a complement
+            // (see `condition_complement_faithful`) — a guarded condition falls through
+            // on a failed *guard* too, so its pattern's complement (and coverage) must
+            // not narrow subsequent branches.
             let mut narrowing = Narrowing::new();
+            let complement_faithful = condition_complement_faithful(&branch.condition);
 
             // Compile the condition expression - it can use ~> to access the parameter
             // We need both the type and provenance for forward narrowing
@@ -2453,7 +2555,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 branch.condition.clone(),
                 on_no_match,
                 None,
-                Some(&mut narrowing),
+                complement_faithful.then_some(&mut narrowing),
             )?;
 
             if is_last_branch {
@@ -3017,6 +3119,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 narrowing.as_deref_mut(),
                 true, // implicit_continuation: only consulted for the first chain (no threaded input)
                 None,
+                true, // a step's nil short-circuits the sequence: its result gates
             )?;
 
             // Debug builds: a nil step result is a failure — stamp it with this step's
@@ -3127,8 +3230,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         on_no_match: Option<usize>,
         ripple_context: Option<&RippleContext>,
     ) -> Result<(usize, Provenance), Error> {
-        // Tuple fields don't have implicit continuation - they start with no input
-        self.compile_chain_with_input(chain, on_no_match, ripple_context, None, None, false, None)
+        // Tuple fields don't have implicit continuation - they start with no input.
+        // Their result is data (nothing gates on it), so matches there don't narrow.
+        self.compile_chain_with_input(
+            chain,
+            on_no_match,
+            ripple_context,
+            None,
+            None,
+            false,
+            None,
+            false,
+        )
     }
 
     /// The type a chain term is expected to produce — the parameter type of whatever consumes its
@@ -3154,6 +3267,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // The type the chain is expected to produce; flows to the final term (the chain's result)
         // so an un-annotated function-literal at the chain's tail can infer its parameter.
         expected: Option<usize>,
+        // Whether this chain's result gates control flow — true for a sequence step
+        // (its nil short-circuits the sequence, and as a branch condition it selects
+        // the branch), false for a value chain (a tuple field, an argument, an
+        // annotation value), whose result is data. A match's narrowing (bindings at
+        // their success types, scrutinee refinement) is justified only where a failed
+        // match prevents the downstream code from running, so it applies only in
+        // gating chains; see the fallible-match checks in the term loop.
+        gating: bool,
     ) -> Result<(usize, Provenance), Error> {
         // Determine initial value:
         // - If input_type is provided, use it (value already on stack)
@@ -3190,12 +3311,44 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 ripple_context,
                 narrowing.as_deref_mut(),
                 term_expected,
+                gating,
             )?;
+            // A fallible match's narrowing is sound only where a failed match prevents
+            // the downstream code from running, so:
+            // - it must be the LAST term of its chain — its verdict then directly gates
+            //   the step boundary (`=P; …`) or branch (`=P => …`). Nothing
+            //   short-circuits within a chain, so a following term would run whether or
+            //   not the match succeeded, observing narrowed facts that don't hold.
+            // - in a value chain (gating == false) it must bind nothing — the verdict
+            //   is data there (`[ok?: x ~> =T[_]]` is fine) and gates nothing, so its
+            //   bindings could never be relied on. (`compile_match` also skips scrutinee
+            //   narrowing for these.)
+            // A receive filter (`on_no_match`) is exempt: its failure jumps out of the
+            // chain entirely, so the continuation runs only on success.
+            if on_no_match.is_none()
+                && self.contains_nil(term_type)
+                && let ast::Term::Match(m) = term
+            {
+                if i < last_index {
+                    return Err(Error::FallibleMatchNotChainFinal);
+                }
+                if !gating {
+                    let mut names = Vec::new();
+                    collect_binding_spans(m, &mut names);
+                    if !names.is_empty() {
+                        return Err(Error::FallibleMatchBindingsInValueChain {
+                            bindings: names.into_iter().map(|(n, _)| n).collect(),
+                        });
+                    }
+                }
+            }
+
             // Nil flows through a chain like any other value: within a chain, no term
-            // short-circuits on nil (a failed mid-chain match yields nil that flows into
-            // the next term; the only short-circuit is between `,`-separated chains, handled
-            // in `compile_sequence`). So a term's full type — nil included — flows onward, and
-            // a subsequent term that cannot accept nil is a genuine type error.
+            // short-circuits on nil (nil as *data* — e.g. an optional field — passes
+            // unremarked; the only short-circuit is between `,`-separated chains,
+            // handled in `compile_sequence`). So a term's full type — nil included —
+            // flows onward, and a subsequent term that cannot accept nil is a genuine
+            // type error.
             current_type = Some(term_type);
             current_prov = term_prov;
         }
@@ -3220,6 +3373,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 on_no_match,
                 true, // Direct assignment returns Ok
                 narrowing,
+                gating,
             )?;
             Ok((ty, current_prov))
         } else {
@@ -3413,7 +3567,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             None
         };
 
-        self.scopes = vec![Scope::new(HashMap::new(), scope_parameter, ScopeKind::Root)];
+        self.scopes = vec![Scope::new(
+            Bindings::default(),
+            scope_parameter,
+            ScopeKind::Root,
+        )];
 
         // Compile the module body as one threaded sequence; the final value is the module value.
         // On failure, restore the saved compiler state before propagating. This is not just
@@ -4203,6 +4361,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             None,
             None,
             None,
+            false,
         )?;
 
         let param_is_nil = matches!(
@@ -4510,17 +4669,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // $ accesses the function parameter.
                 let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
 
-                // Peek at the accessed type to determine if callable (without emitting code).
+                // Peek at the accessed type to determine if applicable (without emitting code).
                 let peeked_type = self.peek_accessor_type(param_type, &access.accessors, "$");
-                let is_callable = peeked_type.is_ok_and(|ty| {
-                    matches!(
-                        self.program.lookup_base(ty),
-                        Some(Type::Callable { .. }) | Some(Type::Process { .. })
-                    )
-                });
+                let is_applicable = peeked_type.is_ok_and(|ty| self.is_applicable_type(ty));
 
-                // Non-callable accessed with a flowing value: drop the value before loading.
-                if !is_callable && value_type.is_some() {
+                // Non-applicable accessed with a flowing value: drop the value before loading.
+                if !is_applicable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
                 self.codegen.add_instruction(Instruction::Load(param_local));
@@ -4531,7 +4685,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Provenance::Parameter,
                 )?;
 
-                if let (true, Some(val_type)) = (is_callable, value_type) {
+                if let (true, Some(val_type)) = (is_applicable, value_type) {
                     let ty =
                         self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
                     Ok((ty, Provenance::Unknown))
@@ -4549,21 +4703,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         self.peek_accessor_type(base_type, &access.accessors, &name)
                             .ok()
                     });
-                let is_callable = peeked_type.is_some_and(|ty| {
-                    matches!(
-                        self.program.lookup_base(ty),
-                        Some(Type::Callable { .. }) | Some(Type::Process { .. })
-                    )
-                });
+                let is_applicable = peeked_type.is_some_and(|ty| self.is_applicable_type(ty));
 
-                // Non-callable accessed with a flowing value: drop the value before loading.
-                if !is_callable && value_type.is_some() {
+                // Non-applicable accessed with a flowing value: drop the value before loading.
+                if !is_applicable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
 
-                if let (true, Some(val_type)) = (is_callable, value_type) {
+                if let (true, Some(val_type)) = (is_applicable, value_type) {
                     let ty =
                         self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
                     Ok((ty, Provenance::Unknown))
@@ -4606,13 +4755,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let (cached, resolved_value, accessed_type, _origin) =
                     self.resolve_import(&module, &access.accessors)?;
 
-                let is_callable = matches!(
-                    self.program.lookup_base(accessed_type),
-                    Some(Type::Callable { .. }) | Some(Type::Process { .. })
-                );
+                let is_applicable = self.is_applicable_type(accessed_type);
 
-                // Non-callable accessed with a flowing value: drop the value before loading.
-                if !is_callable && value_type.is_some() {
+                // Non-applicable accessed with a flowing value: drop the value before loading.
+                if !is_applicable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
                 let (instructions, _) =
@@ -4621,7 +4767,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.codegen.add_instruction(instruction);
                 }
 
-                if let (true, Some(val_type)) = (is_callable, value_type) {
+                if let (true, Some(val_type)) = (is_applicable, value_type) {
                     // The resolved member is a concrete function value, so its dispatch table can
                     // be selected exactly by index — vital when its type is shared with another
                     // dispatch function (e.g. `%num.add` vs `%num.div`).
@@ -4924,6 +5070,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok((str_type, Provenance::Unknown))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_term(
         &mut self,
         term: ast::Term,
@@ -4934,6 +5081,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // The type this term is expected to produce (from a call argument's callee). Only used to
         // infer un-annotated function-literal parameters; ignored by every other term.
         expected: Option<usize>,
+        // Whether the enclosing chain's result gates control flow (see
+        // `compile_chain_with_input`); consulted only by `Match` terms, whose
+        // narrowing is unsound where nothing gates on the verdict.
+        gating: bool,
     ) -> Result<(usize, Provenance), Error> {
         let FlowingValue {
             ty: value_type,
@@ -5089,6 +5240,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     on_no_match,
                     true,
                     narrowing,
+                    gating,
                 )?;
                 // Preserve the matched value's provenance: a chain/branch that follows a
                 // `=PATTERN` still narrows the original value (the match recorded its structural
@@ -5119,6 +5271,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             None,
                             None,
                             None,
+                            false,
                         )?;
                         self.codegen.add_instruction(Instruction::Rotate(2));
                         self.emit_arg_spawn(fn_type, arg_type)?
@@ -5140,6 +5293,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                     ripple_context,
                                     None,
                                     None,
+                                    false,
                                 )?
                                 .0,
                             ),
@@ -5185,6 +5339,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     None,
                     None,
                     None,
+                    false,
                 )?;
                 // The callable is below the argument on the stack; swap so the call sees it on
                 // top. An explicit argument is type-checked, not an implicit flow.
@@ -5209,6 +5364,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     ripple_context,
                     None,
                     expected_arg,
+                    false,
                 )?;
                 // A builtin/tail call can fail for non-type reasons, so disable complement
                 // narrowing.
@@ -5287,6 +5443,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     ripple_context,
                     narrowing,
                     expected,
+                    gating, // the expansion stands in the original term's chain position
                 )
             }
             ast::Term::State(access, span) => {
@@ -5311,6 +5468,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     None,
                     None,
                     None,
+                    false,
                 )?;
                 let Some(Type::Process { state, .. }) = self.program.lookup_base(target_type)
                 else {
@@ -5691,6 +5849,25 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Whether a flowing value *applies* to a value of this type (a call or a send)
+    /// rather than replacing it. Callables and processes apply — and so does a union
+    /// with any callable or process member: `apply_value_to_type` then either compiles
+    /// the send (a union of only process types) or rejects the application, so a handle
+    /// hidden in a union can never silently compile as a replace that discards the
+    /// flowing value.
+    fn is_applicable_type(&self, type_id: usize) -> bool {
+        match self.program.lookup_base(type_id) {
+            Some(Type::Callable { .. }) | Some(Type::Process { .. }) => true,
+            Some(Type::Union(members)) => members.iter().any(|&member| {
+                matches!(
+                    self.program.lookup_base(member),
+                    Some(Type::Callable { .. }) | Some(Type::Process { .. })
+                )
+            }),
+            _ => false,
+        }
+    }
+
     fn apply_value_to_type(
         &mut self,
         target_type_id: usize,
@@ -5818,6 +5995,76 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.add_instruction(Instruction::Send);
 
             Ok(target_type_id)
+        } else if let Type::Union(members) = target_type {
+            // A union of only process types compiles as a send, checked against every
+            // member's send type — whichever member the value turns out to be at
+            // runtime must accept the message. Any other function/process-bearing union
+            // is an error: applying to it would be a send or call for some members and
+            // a replace for others, and a silent replace discards the flowing value.
+            let members = members.clone();
+            let mut send_ids = Vec::with_capacity(members.len());
+            let mut all_processes = !members.is_empty();
+            let mut all_functions = !members.is_empty();
+            for &member in &members {
+                match self.program.lookup_base(member) {
+                    Some(Type::Process { send, .. }) => {
+                        all_functions = false;
+                        send_ids.push(*send);
+                    }
+                    Some(Type::Callable { .. }) => all_processes = false,
+                    _ => {
+                        all_processes = false;
+                        all_functions = false;
+                    }
+                }
+            }
+            if all_processes {
+                for send in send_ids {
+                    let Some(send_id) = send else {
+                        return Err(Error::TypeMismatch {
+                            expected: "process with known send type".to_string(),
+                            found: format!(
+                                "union member with unknown send type in {}",
+                                quiver_core::format::format_type_by_id(
+                                    &*self.program,
+                                    target_type_id
+                                )
+                            ),
+                        });
+                    };
+                    if self.is_never(send_id) {
+                        return Err(Error::TypeMismatch {
+                            expected: "process with send type".to_string(),
+                            found: format!(
+                                "union member without send type (cannot send to it) in {}",
+                                quiver_core::format::format_type_by_id(
+                                    &*self.program,
+                                    target_type_id
+                                )
+                            ),
+                        });
+                    }
+                    if !quiver_core::types::is_compatible(value_type, send_id, &*self.program) {
+                        return Err(Error::TypeMismatch {
+                            expected: quiver_core::format::format_type_by_id(
+                                &*self.program,
+                                send_id,
+                            ),
+                            found: quiver_core::format::format_type_by_id(
+                                &*self.program,
+                                value_type,
+                            ),
+                        });
+                    }
+                }
+                self.codegen.add_instruction(Instruction::Send);
+                Ok(target_type_id)
+            } else {
+                Err(Error::UnionApplication {
+                    union: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
+                    all_functions,
+                })
+            }
         } else {
             Err(Error::TypeMismatch {
                 expected: "function, process, or resource".to_string(),
@@ -6019,6 +6266,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     None,
                     None,
                     None,
+                    false,
                 )?;
                 if !quiver_core::types::is_compatible(arg_type, parameter, &*self.program) {
                     return Err(Error::TypeMismatch {

@@ -183,7 +183,7 @@ fn compile_and_extract_entry(
     let mut module_cache = ModuleCache::new();
     let compilation_result = Compiler::compile(
         ast,
-        &HashMap::new(),
+        &quiver_compiler::compiler::Bindings::default(),
         &mut module_cache,
         resolver,
         &mut program,
@@ -286,7 +286,7 @@ fn compile_command(
                 let mut module_cache = ModuleCache::new();
                 Compiler::compile(
                     ast,
-                    &HashMap::new(),
+                    &quiver_compiler::compiler::Bindings::default(),
                     &mut module_cache,
                     &resolver,
                     &mut program,

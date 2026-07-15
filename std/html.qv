@@ -11,10 +11,24 @@
 // entities like `&amp;` pass through untouched); hole values are data, HTML-escaped at
 // render (`Text`). Unescaped dynamic markup is the explicit opt-in `raw`.
 //
+// Provenance: every expansion also attaches a `:template` annotation to its tree —
+// `[statics: …, holes: …]`, the pre-rendered static byte runs interleaving with the
+// normalized hole values (statics has exactly one more entry than holes). The statics
+// are instrumented for live updates: child holes are delimited by `<!--q:i-->`/
+// `<!--/q:i-->` comment markers, and an element owning attribute holes carries a
+// `data-q="j"` anchor (the `data-q*` attribute namespace is reserved). An attribute
+// hole's run cut excludes the whole attribute — its rendered form (` name="v"`, bare
+// ` name`, or nothing) is the hole's to produce. The annotation is invisible to
+// matching, equality, and `render`; the statics list doubles as the template's
+// identity (two expansions with equal statics are the same template). Hole values are
+// shared with the tree (spans bind once), so attaching costs no extra evaluation.
+//
 // Notes:
 //   - `{` always opens a hole; a literal brace in text is an entity (`&#123;`/`&#125;`).
 //   - Attribute values: `name` (boolean), `name="literal"` (verbatim bytes), or
 //     `name={ … }` (a hole; nil omits the attribute, `Ok` renders it bare).
+//   - `on:NAME={ … }` is an event attribute: the hole is a '%json payload, serialized
+//     into an emitted `data-q-NAME` attribute for the live layer's client to echo back.
 //   - Void elements (`br`, `img`, …) take no close tag; `<div/>` self-closes any element.
 //   - Comments (`<!-- … -->`) are skipped. The doctype comes from `page`, not the template.
 //   - Inline `<script>`/`<style>` bodies are not supported (v1); link external assets.
@@ -34,15 +48,37 @@
 'nodes = Nil | Cons['node, ^]
 'attrs = Nil | Cons[[Str['bin], 'attr_val], ^]
 
-'apair = [Str['bin], 'expr]
-'alist = Nil | Cons['apair, ^]
-'xs = Nil | Cons['expr, ^]
+// Template provenance: the instrumented static runs and the normalized hole values they
+// interleave with, in document order. A `Child` hole is a node in child position; an
+// `Attr` hole is one attribute's value, with its owning element's `data-q` anchor and
+// the attribute name carried statically.
+'statics = Nil | Cons[Str['bin], ^]
+'hole = Child['node] | Attr[elem: 'int, name: Str['bin], value: 'attr_val]
+'holes = Nil | Cons['hole, ^]
+'tmpl = [statics: 'statics, holes: 'holes]
 
-// Parsed nodes carry a whitespace-only flag (computed at construction — the emitted IR
-// can't be re-inspected: matching through its recursive field unions is not supported),
-// so the root can trim whitespace-only text at its edges.
-'fx = ['expr, (Ok | [])]
-'fxs = Nil | Cons['fx, ^]
+// The dialect's parse tree: static text runs, holes as content spans, and elements.
+// Emission (the tree expression, and the instrumented statics/holes) walks it separately.
+'pattr_val =
+  | Lit[Str['bin]]
+  | Flag
+  | AHole[offset: 'int, length: 'int]
+  | EHole[offset: 'int, length: 'int]
+'pattr = [Str['bin], 'pattr_val]
+'pattrs = Nil | Cons['pattr, ^]
+'pnode =
+  | PText['bin]
+  | PHole[offset: 'int, length: 'int]
+  | PElem[tag: Str['bin], attrs: 'pattrs, children: (Nil | Cons[^, ^1])]
+'pnodes = Nil | Cons['pnode, ^]
+
+// Root-level parsed nodes carry a whitespace-only flag (computed at construction), so
+// the root can trim whitespace-only text at its edges.
+'pfx = ['pnode, (Ok | [])]
+'pfxs = Nil | Cons['pfx, ^]
+
+'xs = Nil | Cons['expr, ^]
+'bins = Nil | Cons['bin, ^]
 
 'items<'t> = Nil | Cons['t, ^]
 
@@ -51,6 +87,43 @@ rev = #<'t>['items<'t>, 'items<'t>] {
   items ~> {
     | =Nil => acc
     | =Cons[h, t] => ^ [t, Cons[h, acc]]
+  }
+}
+
+// === Escaping ===========================================================================
+
+// Append text bytes onto `acc`, escaping `&`, `<`, `>`.
+esc_text = #['bin, 'int, 'int, 'bin] {
+  =[data, pos, len, acc]
+  {
+    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | {
+      b = %bin.get_byte [data, pos]
+      acc2 = b ~> {
+        | =38 => %bin.concat [acc, "&amp;" ~> .0]
+        | =60 => %bin.concat [acc, "&lt;" ~> .0]
+        | =62 => %bin.concat [acc, "&gt;" ~> .0]
+        | %bin.append [acc, b, 1]
+      }
+      ^ [data, __integer_add__ [pos, 1], len, acc2]
+    }
+  }
+}
+
+// Append attribute-value bytes onto `acc`, escaping `&` and `"`.
+esc_attr = #['bin, 'int, 'int, 'bin] {
+  =[data, pos, len, acc]
+  {
+    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | {
+      b = %bin.get_byte [data, pos]
+      acc2 = b ~> {
+        | =38 => %bin.concat [acc, "&amp;" ~> .0]
+        | =34 => %bin.concat [acc, "&quot;" ~> .0]
+        | %bin.append [acc, b, 1]
+      }
+      ^ [data, __integer_add__ [pos, 1], len, acc2]
+    }
   }
 }
 
@@ -158,13 +231,30 @@ tag_name = #'%parse {
 }
 
 // Whether an attribute name already occurs in the accumulated list.
-seen? = #['alist, Str['bin]] {
+seen? = #['pattrs, Str['bin]] {
   | =[Nil, _] => []
   | =[Cons[[n, _], rest], name] => { n ~> =&name => Ok | ^ [rest, name] }
 }
 
-// An attribute value after its `=`: a `"…"` literal (spliced as the string itself) or a
-// `{ … }` hole (spliced as an `attr_value` normalization of the block).
+// Whether an attribute name starts with `data-q` — reserved for template instrumentation.
+reserved? = #Str['bin] {
+  =Str[b]
+  __integer_compare__ [%bin.length b, 6] ~> =(0 | 1)
+  Str[%bin.slice [b, 0, 6]] ~> ="data-q"
+}
+
+// An `on:NAME` event attribute's emitted name — `data-q-NAME` — or nil for ordinary
+// names. Event payloads are data ('%json), serialized into the attribute at tree
+// construction; the client echoes the attribute text verbatim.
+event_name? = #Str['bin] {
+  =Str[b]
+  __integer_compare__ [%bin.length b, 4] ~> =(0 | 1)
+  Str[%bin.slice [b, 0, 3]] ~> ="on:"
+  Str[%bin.slice [b, 3, %bin.length b]] ~> %str.concat ["data-q-", ~]
+}
+
+// An attribute value after its `=`: a `"…"` literal (verbatim bytes) or a `{ … }` hole
+// (recorded as its content span).
 attr_value_p = #['%meta.cb, '%parse] {
   =[cb, st0]
   %parse.ws st0
@@ -174,7 +264,7 @@ attr_value_p = #['%meta.cb, '%parse] {
       qstart = __integer_add__ [st.pos, 1]
       {
         | lit_end [st.data, qstart, st.len] ~> =('int)endq => [
-          Str[%bin.slice [st.data, qstart, endq]],
+          Lit[Str[%bin.slice [st.data, qstart, endq]]],
           st ~> ~[..., pos: __integer_add__ [endq, 1]],
         ]
         | %parse.fail_in [st, "'\"' (unterminated attribute value)"]
@@ -182,10 +272,7 @@ attr_value_p = #['%meta.cb, '%parse] {
     }
     | peek_at st ~> =123 => cb [st.data, st.pos] ~> {
       | =('int)end => [
-        Call[
-          member: "attr_value",
-          arg: Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-        ],
+        AHole[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
         st ~> ~[..., pos: end],
       ]
       | %parse.fail [st.pos, "an expression"]
@@ -195,7 +282,7 @@ attr_value_p = #['%meta.cb, '%parse] {
 }
 
 // Zero or more attributes, in source order: `name`, `name="literal"`, or `name={ … }`.
-attrs_loop = #['%meta.cb, '%parse, 'alist] {
+attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
   =[cb, st0, acc]
   %parse.ws st0
   =[_, st]
@@ -204,19 +291,50 @@ attrs_loop = #['%meta.cb, '%parse, 'alist] {
       attr_rest st
       =[nb, st2]
       name = Str[nb]
+      // An `on:NAME` event attribute is stored (and deduplicated) under its emitted
+      // `data-q-NAME`; `ev` is nil for ordinary attributes.
+      ev = event_name? name
+      stored = ev ~> { =Str[s] => Str[s] | name }
       {
-        | seen? [acc, name] => %parse.fail [st.pos, "a unique attribute name"]
+        | seen? [acc, stored] => %parse.fail [st.pos, "a unique attribute name"]
+        | reserved? name => %parse.fail [
+          st.pos,
+          "an attribute name ('data-q' is reserved for template instrumentation)",
+        ]
         | Ok
       }
       %parse.ws st2
       =[_, st3]
       {
+        | ev ~> =Str[_] => {
+          // Event attributes take exactly `={ … }` — the payload is a '%json hole.
+          {
+            | peek_at st3 ~> =61 => Ok
+            | %parse.fail_in [
+              st3,
+              "'=' (an event attribute takes a '\{ … }' payload)",
+            ]
+          }
+          attr_value_p [&cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
+          =[v, st4]
+          v ~> {
+            | =AHole[offset: o, length: l] => ^ [
+              &cb,
+              st4,
+              Cons[[stored, EHole[offset: o, length: l]], acc],
+            ]
+            | %parse.fail [
+              st3.pos,
+              "'\{ … }' (an event attribute's payload is a hole)",
+            ]
+          }
+        }
         | peek_at st3 ~> =61 => {
           attr_value_p [&cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
-          =[vexpr, st4]
-          ^ [&cb, st4, Cons[[name, vexpr], acc]]
+          =[v, st4]
+          ^ [&cb, st4, Cons[[name, v], acc]]
         }
-        | ^ [&cb, st3, Cons[[name, Tuple[name: "Ok", fields: Nil]], acc]]
+        | ^ [&cb, st3, Cons[[name, Flag], acc]]
       }
     }
     | [rev [acc, Nil], st]
@@ -239,57 +357,24 @@ void? = #Str['bin] {
   | ="wbr" => Ok
 }
 
-// Attribute pairs as a list expression of `[name, value]` tuple expressions.
-attr_exprs = #['alist, 'xs] {
-  =[items, acc]
-  items ~> {
-    | =Nil => rev [acc, Nil]
-    | =Cons[[n, v], t] => ^ [t, Cons[%meta.pair2 [n, v], acc]]
-  }
-}
-
-// An `Element[tag: …, attrs: …, children: …]` construction expression.
-el_expr = #[Str['bin], 'alist, 'xs] {
-  =[tag, alist, kids]
-  Tuple[
-    name: "Element",
-    fields: Cons[
-      Labeled[label: "tag", value: tag],
-      Cons[
-        Labeled[label: "attrs", value: attr_exprs [alist, Nil] ~> %meta.list_expr],
-        Cons[
-          Labeled[label: "children", value: %meta.list_expr kids],
-          Nil,
-        ],
-      ],
-    ],
-  ]
-}
-
 // Drop leading whitespace-only text nodes.
-drop_ws = #'fxs { =Cons[[_, Ok], t] => ^ t | $ }
+drop_ws = #'pfxs { =Cons[[_, Ok], t] => ^ t | $ }
 
 // Trim whitespace-only text nodes from both ends of the root node list.
-trim_root = #'fxs { drop_ws ~> rev [~, Nil] ~> drop_ws ~> rev [~, Nil] }
+trim_root = #'pfxs { drop_ws ~> rev [~, Nil] ~> drop_ws ~> rev [~, Nil] }
 
-// The expressions of a flagged node list, in order.
-strip = #['fxs, 'xs] {
+// The nodes of a flagged node list, in order.
+strip = #['pfxs, 'pnodes] {
   =[items, acc]
   items ~> {
     | =Nil => rev [acc, Nil]
-    | =Cons[[e, _], t] => ^ [t, Cons[e, acc]]
+    | =Cons[[n, _], t] => ^ [t, Cons[n, acc]]
   }
-}
-
-// A single root splices bare; zero or several splice as a `Fragment`.
-root_expr = #'xs {
-  | =Cons[e, Nil] => e
-  | =items => Tuple[name: "Fragment", fields: Cons[%meta.list_expr items, Nil]]
 }
 
 // The node-list loop: elements, holes, and text runs, in source order, stopping before a
 // close tag (`</`) or end of input. Self-passed to tie the element↔children recursion.
-nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
+nodes_loop = #[#^ -> (['pfxs, '%parse] | []), '%meta.cb, '%parse, 'pfxs] {
   =[self, cb, st, acc]
   {
     | peek_at st ~> =('int)b => {
@@ -322,7 +407,7 @@ nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
           {
             | peek_at st3 ~> =47 => {
               | peek_at2 st3 ~> =62 => [
-                el_expr [tag, alist, Nil],
+                PElem[tag: tag, attrs: alist, children: Nil],
                 st3 ~> ~[..., pos: __integer_add__ [st3.pos, 2]],
               ]
               | %parse.fail_in [st3, "'/>'"]
@@ -330,7 +415,7 @@ nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
             | peek_at st3 ~> =62 => {
               st4 = st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]
               {
-                | void? tag => [el_expr [tag, alist, Nil], st4]
+                | void? tag => [PElem[tag: tag, attrs: alist, children: Nil], st4]
                 | {
                   self [&self, &cb, st4, Nil]
                   =[fkids, st5]
@@ -352,7 +437,7 @@ nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
                       =[_, st8]
                       {
                         | peek_at st8 ~> =62 => [
-                          el_expr [tag, alist, kids],
+                          PElem[tag: tag, attrs: alist, children: kids],
                           st8 ~> ~[..., pos: __integer_add__ [st8.pos, 1]],
                         ]
                         | %parse.fail_in [st8, "'>'"]
@@ -375,10 +460,7 @@ nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
       }
       | b ~> =123 => cb [st.data, st.pos] ~> {
         | =('int)end => {
-          hole = Call[
-            member: "child",
-            arg: Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-          ]
+          hole = PHole[offset: st.pos, length: __integer_subtract__ [end, st.pos]]
           ^ [&self, &cb, st ~> ~[..., pos: end], Cons[[hole, []], acc]]
         }
         | %parse.fail [st.pos, "an expression"]
@@ -386,12 +468,236 @@ nodes_loop = #[#^ -> (['fxs, '%parse] | []), '%meta.cb, '%parse, 'fxs] {
       | {
         end = text_end [st.data, st.pos, st.len]
         bytes = %bin.slice [st.data, st.pos, end]
-        node = Tuple[name: "Raw", fields: Cons[Str[bytes], Nil]]
         ws = ws_only_from [bytes, 0]
-        ^ [&self, &cb, st ~> ~[..., pos: end], Cons[[node, ws], acc]]
+        ^ [&self, &cb, st ~> ~[..., pos: end], Cons[[PText[bytes], ws], acc]]
       }
     }
     | [rev [acc, Nil], st]
+  }
+}
+
+// === Emission ===========================================================================
+
+// An attribute value's construction expression.
+emit_attr_val = #'pattr_val {
+  | =Lit[s] => s
+  | =Flag => Tuple[name: "Ok", fields: Nil]
+  | =AHole[offset: o, length: l] => Call[member: "attr_value", arg: Unquote[offset: o, length: l]]
+  | =EHole[offset: o, length: l] => Call[member: "event_value", arg: Unquote[offset: o, length: l]]
+}
+
+// Attribute pairs as a list of `[name, value]` tuple expressions.
+emit_attrs = #['pattrs, 'xs] {
+  =[items, acc]
+  items ~> {
+    | =Nil => rev [acc, Nil]
+    | =Cons[[n, v], t] => ^ [t, Cons[%meta.pair2 [n, emit_attr_val v], acc]]
+  }
+}
+
+// Node-list expressions, in order; self-passed to recurse into element children.
+emit_list = #[#^ -> 'xs, 'pnodes, 'xs] {
+  =[self, items, acc]
+  items ~> {
+    | =Nil => rev [acc, Nil]
+    | =Cons[node, rest] => {
+      e = node ~> {
+        | =PText[b] => Tuple[name: "Raw", fields: Cons[Str[b], Nil]]
+        | =PHole[offset: o, length: l] => Call[member: "child", arg: Unquote[offset: o, length: l]]
+        | =PElem[tag: t, attrs: alist, children: kids] => Tuple[
+          name: "Element",
+          fields: Cons[
+            Labeled[label: "tag", value: t],
+            Cons[
+              Labeled[label: "attrs", value: emit_attrs [alist, Nil] ~> %meta.list_expr],
+              Cons[
+                Labeled[label: "children", value: self [&self, kids, Nil] ~> %meta.list_expr],
+                Nil,
+              ],
+            ],
+          ],
+        ]
+        // Unreachable: the arms above cover every variant, but exhaustiveness can't see
+        // through the inner recursive union (see render_list).
+        | Tuple[name: Nil, fields: Nil]
+      }
+      ^ [&self, rest, Cons[e, acc]]
+    }
+  }
+}
+
+// A single root splices bare; zero or several splice as a `Fragment`.
+root_expr = #'xs {
+  | =Cons[e, Nil] => e
+  | =items => Tuple[name: "Fragment", fields: Cons[%meta.list_expr items, Nil]]
+}
+
+// === Instrumentation ====================================================================
+// The statics/holes walk mirrors `render` over the static parts, cutting a run at every
+// hole: child holes leave `<!--q:i-->`/`<!--/q:i-->` markers in the surrounding runs, and
+// an attribute hole's cut excludes the whole attribute. An element owning attribute holes
+// gets a `data-q="j"` anchor. `i` is the hole's index among ALL the template's holes in
+// document order — attribute holes consume an index without leaving a marker — so a
+// marker's number equals the hole's position in the `:template` holes list (a live
+// patch path's slot index). Hole entries re-splice the same spans the tree uses, so
+// each hole still evaluates once (spans bind once, deduplicated).
+
+// Whether any attribute value is a hole.
+has_hole? = #'pattrs {
+  | =Nil => []
+  | =Cons[[_, AHole()], t] => Ok
+  | =Cons[[_, EHole()], t] => Ok
+  | =Cons[_, t] => ^ t
+}
+
+// The walk state: the current run's bytes, completed runs (reversed), hole entry
+// expressions (reversed), and the hole / element counters.
+'ist = [cur: 'bin, runs: 'bins, holes: 'xs, ci: 'int, ei: 'int]
+
+// Instrument one element's attributes: statics append ` name` / ` name="escaped"`; a
+// hole cuts the run and records an `Attr[elem, name, value]` entry.
+instrument_attrs = #['pattrs, 'ist, 'int] {
+  =[items, ist, elem]
+  items ~> {
+    | =Nil => ist
+    | =Cons[[Str[n], v], rest] => {
+      ist2 = v ~> {
+        | =Lit[Str[lv]] => ist ~> ~[
+          ...,
+          cur: %bin.concat [%bin.append [ist.cur, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [lv, 0, %bin.length lv, ~] ~> %bin.append [
+            ~,
+            34,
+            1,
+          ],
+        ]
+        | =Flag => ist ~> ~[..., cur: %bin.concat [%bin.append [ist.cur, 32, 1], n]]
+        | =AHole[offset: o, length: l] => {
+          entry = Tuple[
+            name: "Attr",
+            fields: Cons[
+              Labeled[label: "elem", value: elem],
+              Cons[
+                Labeled[label: "name", value: Str[n]],
+                Cons[
+                  Labeled[
+                    label: "value",
+                    value: Call[member: "attr_value", arg: Unquote[offset: o, length: l]],
+                  ],
+                  Nil,
+                ],
+              ],
+            ],
+          ]
+          ist ~> ~[
+            ...,
+            cur: 0x,
+            runs: Cons[ist.cur, ist.runs],
+            holes: Cons[entry, ist.holes],
+            ci: __integer_add__ [ist.ci, 1],
+          ]
+        }
+        | =EHole[offset: o, length: l] => {
+          entry = Tuple[
+            name: "Attr",
+            fields: Cons[
+              Labeled[label: "elem", value: elem],
+              Cons[
+                Labeled[label: "name", value: Str[n]],
+                Cons[
+                  Labeled[
+                    label: "value",
+                    value: Call[member: "event_value", arg: Unquote[offset: o, length: l]],
+                  ],
+                  Nil,
+                ],
+              ],
+            ],
+          ]
+          ist ~> ~[
+            ...,
+            cur: 0x,
+            runs: Cons[ist.cur, ist.runs],
+            holes: Cons[entry, ist.holes],
+            ci: __integer_add__ [ist.ci, 1],
+          ]
+        }
+      }
+      ^ [rest, ist2, elem]
+    }
+  }
+}
+
+// Instrument a node list; self-passed to recurse into element children.
+instrument_list = #[#^ -> 'ist, 'pnodes, 'ist] {
+  =[self, items, ist]
+  items ~> {
+    | =Nil => ist
+    | =Cons[node, rest] => {
+      ist2 = node ~> {
+        | =PText[b] => ist ~> ~[..., cur: %bin.concat [ist.cur, b]]
+        | =PHole[offset: o, length: l] => {
+          i = %str.from_int ist.ci ~> .0
+          opened = %bin.concat [ist.cur, "<!--q:" ~> .0] ~> %bin.concat [~, i] ~> %bin.concat [
+            ~,
+            "-->" ~> .0,
+          ]
+          entry = Tuple[
+            name: "Child",
+            fields: Cons[
+              Call[member: "child", arg: Unquote[offset: o, length: l]],
+              Nil,
+            ],
+          ]
+          ist ~> ~[
+            ...,
+            cur: %bin.concat ["<!--/q:" ~> .0, i] ~> %bin.concat [~, "-->" ~> .0],
+            runs: Cons[opened, ist.runs],
+            holes: Cons[entry, ist.holes],
+            ci: __integer_add__ [ist.ci, 1],
+          ]
+        }
+        | =PElem[tag: Str[t], attrs: alist, children: kids] => {
+          e_ix = ist.ei
+          open0 = %bin.concat [%bin.append [ist.cur, 60, 1], t]
+          opened = {
+            | has_hole? alist => %bin.concat [open0, " data-q=\"" ~> .0] ~> %bin.concat [~, %str.from_int e_ix ~> .0] ~> %bin.append [
+              ~,
+              34,
+              1,
+            ]
+            | open0
+          }
+          ist1 = instrument_attrs [
+            alist,
+            ist ~> ~[..., cur: opened, ei: __integer_add__ [e_ix, 1]],
+            e_ix,
+          ]
+          ist2 = ist1 ~> ~[..., cur: %bin.append [ist1.cur, 62, 1]]
+          {
+            | void? Str[t] => ist2
+            | {
+              ist3 = self [&self, kids, ist2]
+              ist3 ~> ~[
+                ...,
+                cur: %bin.concat [ist3.cur, 0x3c2f] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1],
+              ]
+            }
+          }
+        }
+        // Unreachable: the arms above cover every variant (see render_list).
+        | ist
+      }
+      ^ [&self, rest, ist2]
+    }
+  }
+}
+
+// Completed static runs arrive reversed; emit them as `Str` expressions in order.
+statics_exprs = #['bins, 'xs] {
+  =[items, acc]
+  items ~> {
+    | =Nil => acc
+    | =Cons[b, t] => ^ [t, Cons[Str[b], acc]]
   }
 }
 
@@ -402,10 +708,30 @@ html_dialect = #(content: Str['bin], term: '%meta.cb) {
     nodes_loop [&nodes_loop, &cb, $, Nil]
     =[items, st]
     {
-      | __integer_compare__ [st.pos, st.len] ~> =(0 | 1) => [
-        strip [trim_root items, Nil] ~> root_expr,
-        st,
-      ]
+      | __integer_compare__ [st.pos, st.len] ~> =(0 | 1) => {
+        roots = strip [trim_root items, Nil]
+        ist = instrument_list [
+          &instrument_list,
+          roots,
+          [cur: 0x, runs: Nil, holes: Nil, ci: 0, ei: 0],
+        ]
+        [
+          Call[
+            member: "with_template",
+            arg: Tuple[
+              name: Nil,
+              fields: Cons[
+                emit_list [&emit_list, roots, Nil] ~> root_expr,
+                Cons[
+                  statics_exprs [Cons[ist.cur, ist.runs], Nil] ~> %meta.list_expr,
+                  Cons[rev [ist.holes, Nil] ~> %meta.list_expr, Nil],
+                ],
+              ],
+            ],
+          ],
+          st,
+        ]
+      }
       | %parse.fail_in [st, "end of input (unmatched close tag?)"]
     }
   }
@@ -413,41 +739,6 @@ html_dialect = #(content: Str['bin], term: '%meta.cb) {
 }
 
 // === Rendering ==========================================================================
-
-// Append text bytes onto `acc`, escaping `&`, `<`, `>`.
-esc_text = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
-    | {
-      b = %bin.get_byte [data, pos]
-      acc2 = b ~> {
-        | =38 => %bin.concat [acc, "&amp;" ~> .0]
-        | =60 => %bin.concat [acc, "&lt;" ~> .0]
-        | =62 => %bin.concat [acc, "&gt;" ~> .0]
-        | %bin.append [acc, b, 1]
-      }
-      ^ [data, __integer_add__ [pos, 1], len, acc2]
-    }
-  }
-}
-
-// Append attribute-value bytes onto `acc`, escaping `&` and `"`.
-esc_attr = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
-    | {
-      b = %bin.get_byte [data, pos]
-      acc2 = b ~> {
-        | =38 => %bin.concat [acc, "&amp;" ~> .0]
-        | =34 => %bin.concat [acc, "&quot;" ~> .0]
-        | %bin.append [acc, b, 1]
-      }
-      ^ [data, __integer_add__ [pos, 1], len, acc2]
-    }
-  }
-}
 
 // Append rendered attributes onto `acc`: ` name`, ` name="escaped value"`; nil omits.
 render_attrs = #['attrs, 'bin] {
@@ -541,7 +832,40 @@ attr_value = #(Str['bin] | 'int | Ok | []) {
   | =[] => []
 }
 
+// Normalizes an event attribute's payload (`on:NAME={ … }`): a '%json value, serialized
+// into the emitted `data-q-NAME` attribute. The client echoes the attribute text back
+// verbatim, so the payload round-trips as data — events are data, never callbacks.
+event_value = #'%json { %json.stringify $ }
+
+// Attaches the template provenance to an expansion's tree (dialect plumbing): the
+// instrumented statics and the normalized hole values, as the `:template` annotation.
+// Identity on the tree; the annotation is invisible to matching, equality, and render.
+with_template = #['node, 'statics, 'holes] {
+  =[tree, statics, holes]; tree ~> { :template [statics: statics, holes: holes] }
+}
+
+escape_text = #Str['bin] {
+  :doc "Escapes a string for HTML text content: `&`, `<`, `>`."
+  =Str[b]; esc_text [b, 0, %bin.length b, 0x] ~> Str[~]
+}
+
+escape_attr = #Str['bin] {
+  :doc "Escapes a string for a double-quoted attribute value: `&` and the quote."
+  =Str[b]; esc_attr [b, 0, %bin.length b, 0x] ~> Str[~]
+}
+
 {
   :dialect &html_dialect
-  [render: &render, page: &page, raw: &raw, text: &text, child: &child, attr_value: &attr_value]
+  [
+    render: &render,
+    page: &page,
+    raw: &raw,
+    text: &text,
+    child: &child,
+    attr_value: &attr_value,
+    event_value: &event_value,
+    with_template: &with_template,
+    escape_text: &escape_text,
+    escape_attr: &escape_attr,
+  ]
 }

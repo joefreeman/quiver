@@ -196,7 +196,11 @@ fn build_type_namespace(
 ) -> Result<ModuleTypeNamespace, Error> {
     // A module-local scope holding the aliases resolved so far, so they can reference
     // each other during resolution.
-    let mut module_scope = vec![Scope::new(HashMap::new(), None, ScopeKind::Root)];
+    let mut module_scope = vec![Scope::new(
+        scopes::Bindings::default(),
+        None,
+        ScopeKind::Root,
+    )];
     let mut default: Option<TypeAliasDef> = None;
     let mut named: HashMap<String, TypeAliasDef> = HashMap::new();
 
