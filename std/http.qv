@@ -343,6 +343,7 @@ parse_request_line = #'bin {
 
 // The request-target split into decoded path segments and query pairs.
 split_target = #Str['bin] {
+  :doc "Splits a request target into `[path segments, query pairs]` — the same split `parse_request` applies, exposed for deriving a request from a new URL (live navigation)."
   =Str[t]
   qi = %bin.index [t, 63, 0]
   {
@@ -626,6 +627,7 @@ set_cookie = #[Str['bin], Str['bin], 'attrs] {
   set_cookie: &set_cookie,
   parse_request: &parse_request,
   parse_request_with: &parse_request_with,
+  split_target: &split_target,
   serialize_response: &serialize_response,
   reason: &reason,
 ]

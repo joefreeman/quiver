@@ -27,11 +27,12 @@
 // Declared up front: boundary frames carry a view-spawning thunk typed against them.
 
 // What a view receives: a client event (already unpacked from the wire envelope by
-// the app), park/wake control, and the reactive wakeups its renders subscribe it to.
-// `Park` stops rendering (wakeups are absorbed — the app's buffer, not the view, is
-// what keeps late frames correct); `Wake` drains and re-renders once against the held
-// frame, so a warm attach diffs to silence.
-'view_msg = Event['%json, '%http.pairs] | Park | Wake | '%sup.down | '%proc.changed
+// the app), a URL change (`Nav`, carrying the request the app synthesized for the new
+// target — the root view re-derives via `nav`), park/wake control, and the reactive
+// wakeups its renders subscribe it to. `Park` stops rendering (wakeups are absorbed —
+// the app's buffer, not the view, is what keeps late frames correct); `Wake` drains and
+// re-renders once against the held frame, so a warm attach diffs to silence.
+'view_msg = Event['%json, '%http.pairs] | Nav['%http] | Park | Wake | '%sup.down | '%proc.changed
 
 // What the app receives: the socket from a successful claim, encoded frame messages
 // from its views, and route (dis)registrations as views spawn and kill children.
@@ -528,8 +529,34 @@ encode = #[Str['bin], 'patches] {
 // A view definition. `'i` is the mount init: the root view mounts from the HTTP
 // request; a child view mounts from whatever its parent's `child [comp, init, key]`
 // passes. `decode` receives the event payload and the form pairs (empty for clicks;
-// a submit's named fields, in the shape `%http`'s form helpers read).
-'component<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #['%json, '%http.pairs] -> (Ev['e] | [])]
+// a submit's named fields, in the shape `%http`'s form helpers read). `nav` re-derives
+// state from a new URL without remounting — the root view's live-navigation hook,
+// receiving the raw request the app synthesized for the target; a component that
+// doesn't navigate omits it (the `_base` record) and gets an identity `nav`.
+'component<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #['%json, '%http.pairs] -> (Ev['e] | []), nav: #['s, '%http] -> 's]
+'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #['%json, '%http.pairs] -> (Ev['e] | [])]
+
+// Fill in a default (identity) `nav` when the record omits it, so most components —
+// which never navigate — stay four fields. Both the `component` constructor and the
+// `sim` harness normalize through this, so a `_base` record is accepted everywhere a
+// full one is.
+with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
+  c = $
+  {
+    | c
+      ~> =(mount: m, update: u, view: v, decode: d, nav: n) => [
+        mount: &m,
+        update: &u,
+        view: &v,
+        decode: &d,
+        nav: &n,
+      ]
+    | {
+      c ~> =(mount: m, update: u, view: v, decode: d)
+      [mount: &m, update: &u, view: &v, decode: &d, nav: #<'s>['s, '%http] { $0 }]
+    }
+  }
+}
 
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
@@ -581,6 +608,19 @@ env_of = #Str['bin] {
   [Str[vb], payload, pairs_of [fs, Nil]]
 }
 
+// A live-navigation message is `["nav", "/path?query"]` — the two-element shape the
+// client sends for a live link or a back/forward step. Answers the target string, or
+// nil for anything else (a three-element event envelope naturally fails to match).
+nav_of = #Str['bin] {
+  %json.parse $ ~> =('%json)env
+  env ~> =Array[es]
+  es ~> =Cons[tagj, r1]
+  tagj ~> jval ~> ="nav"
+  r1 ~> =Cons[targetj, Nil]
+  targetj ~> jval ~> =Str[tb]
+  Str[tb]
+}
+
 // Decode and fold one client event through `update`: a decode answering nil drops
 // the event (stale or forged — `update` never sees it) and answers the state
 // unchanged.
@@ -589,6 +629,32 @@ fold_event = #<'i, 's, 'e>['s, 'component<'i, 's, 'e>, '%json, '%http.pairs] {
   {
     | comp.decode [payload, pairs] ~> =Ev[ev] => comp.update [state, ev]
     | state
+  }
+}
+
+// The wire frame for a URL sync: `[2, "/path"]` (the client `pushState`s to it). An
+// `update` marks the state it returns with a `:redirect "/path"` annotation to ask for
+// one — server-initiated navigation. The mark is invisible to the data plane (the
+// state's value is unchanged), and the view reads it off the update result (below).
+// The mark is attached inline where the state's concrete (tuple) type is known —
+// `new_state ~> \{ :redirect "/posts/123" }` — since a generic helper can't prove an
+// arbitrary state is an annotatable carrier. Set the page for that URL in the same
+// `update`, so the view is patched and the address bar synced with no page reload.
+url_sync = #Str['bin] { "[2," ~> %str.concat [~, %json.stringify $] ~> %str.concat [~, "]"] }
+
+// Emit the URL-sync frame for a step's `redirect` mark, deduplicated: annotations ride
+// the value, so a later update that answers the state unchanged still carries the old
+// mark — and a kept mark is indistinguishable from a re-asserted one. The tracker
+// (`synced`, the path last emitted) resolves it: only a mark that CHANGED since the
+// last sync emits, and an absent mark resets the tracker so a later redirect to the
+// same path fires again. Answers the new tracker.
+sync_redirect = #<'s>['s, (Str['bin] | []), @'app_msg] {
+  =[s, synced, app]
+  m = s:(Str['bin])redirect
+  {
+    | m ~> =&synced => synced
+    | m ~> =Str[p] => { Frame[url_sync Str[p]] ~> app; Str[p] }
+    | []
   }
 }
 
@@ -857,26 +923,39 @@ step_view = #<'i, 's, 'e>['s, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_m
 // The view's whole life: fold events, re-render on wakeups (unless parked), send
 // deltas up, reconcile children, and supervise them. `f` is the frame the client's
 // DOM shows; `kids` the live children; `n` the next child ordinal (monotonic —
-// vids never reused). Restarts within the budget happen inside each child's `%sup`
-// supervisor, invisibly; a supervisor's death IS the budget exhausting — the
+// vids never reused); `synced` the redirect path last synced to the address bar.
+// Restarts within the budget happen inside each child's `%sup` supervisor,
+// invisibly; a supervisor's death IS the budget exhausting — the
 // boundary renders the crash fallback, and the kids entry stays pointing at the
 // corpse so reconcile won't quietly respawn a repeat offender. (A deliberate
 // kill's Down finds no tracked vid — the entry is removed before the kill — and
 // is dropped.)
-vlife = #<'i, 's, 'e>['vmode, 's, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'kids, 'int] {
-  =[mode, state, f, comp, vid, app, kids, n]
+vlife = #<'i, 's, 'e>['vmode, 's, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'kids, 'int, (Str['bin] | [])] {
+  =[mode, state, f, comp, vid, app, kids, n, synced]
   me = &.
   !'view_msg ~> {
     | =Event[payload, pairs] => {
       s2 = fold_event [state, comp, payload, pairs]
+      // A `redirect` mark on the update result moves the client's address bar to match
+      // the page this same update set — server-initiated navigation.
+      sy2 = sync_redirect [s2, synced, &app]
       r = step_view [s2, f, comp, vid, &app, &me, kids, n]
-      ^ [mode, s2, r.0, comp, vid, &app, r.1, r.2]
+      ^ [mode, s2, r.0, comp, vid, &app, r.1, r.2, sy2]
     }
-    | =Park => ^ [Idle, state, f, comp, vid, &app, kids, n]
+    // A URL change: re-derive state from the new request (no remount — local state
+    // survives), then re-render and patch like any other step. A `nav` may itself mark
+    // its result with `:redirect` (URL canonicalization) — synced like an update's.
+    | =Nav[req] => {
+      s2 = comp.nav [state, req]
+      sy2 = sync_redirect [s2, synced, &app]
+      r = step_view [s2, f, comp, vid, &app, &me, kids, n]
+      ^ [mode, s2, r.0, comp, vid, &app, r.1, r.2, sy2]
+    }
+    | =Park => ^ [Idle, state, f, comp, vid, &app, kids, n, synced]
     | =Wake => {
       drain_changed []
       r = step_view [state, f, comp, vid, &app, &me, kids, n]
-      ^ [Live, state, r.0, comp, vid, &app, r.1, r.2]
+      ^ [Live, state, r.0, comp, vid, &app, r.1, r.2, synced]
     }
     | =Down(id: dv) => kid_by_vid [kids, dv] ~> {
       | =KFound[_] => {
@@ -884,17 +963,17 @@ vlife = #<'i, 's, 'e>['vmode, 's, 'frame, 'component<'i, 's, 'e>, Str['bin], @'a
           encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]],
         ] ~> app
         Unroute[dv] ~> app
-        ^ [mode, state, f, comp, vid, &app, kids, n]
+        ^ [mode, state, f, comp, vid, &app, kids, n, synced]
       }
-      | ^ [mode, state, f, comp, vid, &app, kids, n]
+      | ^ [mode, state, f, comp, vid, &app, kids, n, synced]
     }
     | ='%proc.changed => mode ~> {
       | =Live => {
         drain_changed []
         r = step_view [state, f, comp, vid, &app, &me, kids, n]
-        ^ [Live, state, r.0, comp, vid, &app, r.1, r.2]
+        ^ [Live, state, r.0, comp, vid, &app, r.1, r.2, synced]
       }
-      | ^ [Idle, state, f, comp, vid, &app, kids, n]
+      | ^ [Idle, state, f, comp, vid, &app, kids, n, synced]
     }
   }
 }
@@ -944,7 +1023,9 @@ view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'vboo
   }
   kids = exec_bounds [ar.0, Nil, &app, &me, Nil]
   mode = boot ~> { =Reply[_] => Idle | Live }
-  vlife [mode, state, rf, comp, vid, &app, kids, ar.1]
+  // The sync tracker starts at the mount state's own mark, if any: the page was served
+  // for the URL that produced this state, so only a mark that changes needs syncing.
+  vlife [mode, state, rf, comp, vid, &app, kids, ar.1, state:(Str['bin])redirect]
 }
 
 // Define a component from its record: answers the **placeable component** — a
@@ -957,9 +1038,9 @@ view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'vboo
 // runs it against the HTTP request instead of placing it. (The inner literal
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
-component = #<'i, 's, 'e>'component<'i, 's, 'e> {
-  :doc "Defines a component from its `[mount, update, view, decode]` record: answers the placeable component, a function called `[init: …, key: …]` in markup. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
-  comp = $
+component = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
+  :doc "Defines a component from its `[mount, update, view, decode]` record (add a `nav: #['s, '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+  comp = with_nav $
   #<'i>'place<'i> {
     i = $init
     k = $key
@@ -1140,21 +1221,33 @@ tell_views = #['routes, (Park | Wake)] {
 // Unpack a batch of socket messages and forward each event to its vid's view; an
 // unknown vid (a just-killed child; a forged id) or a malformed envelope is dropped.
 // A ws Close answers `Halt` (the app terminates, and ownership tears the views down).
-route_events = #['%http/websocket.messages, 'routes] {
-  =[msgs, routes]
+route_events = #['%http, '%http/websocket.messages, 'routes] {
+  =[req, msgs, routes]
   msgs ~> {
     | =Nil => Go
     | =Cons[Text[t], rest] => {
       {
+        // The three-element event envelope first — events dominate, so the common path
+        // parses once (a two-element nav message can't match it).
         | env_of t ~> =[v, payload, pairs]; route_of [routes, v] ~> =RFound[p] => {
           Event[payload, pairs] ~> p; Ok
         }
+        // A live-navigation message re-derives the root: build the request for the new
+        // target (keeping the initial request's method/headers/cookies) and hand it to
+        // the root view, which folds it through `nav`.
+        | nav_of t ~> =Str[tb]; route_of [routes, "0"] ~> =RFound[p] => {
+          %http.split_target Str[tb] ~> =[path, query]
+          Nav[
+            ~[...req, target: Str[tb], path: path, query: query],
+          ] ~> p
+          Ok
+        }
         | Ok
       }
-      ^ [rest, routes]
+      ^ [req, rest, routes]
     }
     | =Cons[Close[code: _, reason: _], _] => Halt
-    | =Cons[Binary[_], rest] => ^ [rest, routes]
+    | =Cons[Binary[_], rest] => ^ [req, rest, routes]
   }
 }
 
@@ -1166,8 +1259,8 @@ route_events = #['%http/websocket.messages, 'routes] {
 // bytes. The attached select receives frames and route changes from the mailbox (an
 // `Attach` cannot arrive while attached — the registry claim is one-shot — and would
 // wait queued regardless).
-alife = #['amode, 'strs, (Str['bin] | []), @'reg_msg, 'routes] {
-  =[mode, buf, token, reg, routes]
+alife = #['%http, 'amode, 'strs, (Str['bin] | []), @'reg_msg, 'routes] {
+  =[req, mode, buf, token, reg, routes]
   mode ~> {
     | =Parked => ![#'app_msg, park_ms] ~> {
       | =Attach[conn] => {
@@ -1175,20 +1268,21 @@ alife = #['amode, 'strs, (Str['bin] | []), @'reg_msg, 'routes] {
         tell_views [routes, Wake]
         %http/websocket.on_data [conn, 0x]
         =[msgs, c2]
-        route_events [msgs, routes] ~> {
-          | =Go => ^ [Attached[c2], Nil, token, &reg, routes]
+        route_events [req, msgs, routes] ~> {
+          | =Go => ^ [req, Attached[c2], Nil, token, &reg, routes]
           | Ok
         }
       }
-      | =Frame[s] => ^ [Parked, Cons[s, buf], token, &reg, routes]
+      | =Frame[s] => ^ [req, Parked, Cons[s, buf], token, &reg, routes]
       | =Route[v, p] => ^ [
+        req,
         Parked,
         buf,
         token,
         &reg,
         Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
       ]
-      | =Unroute[v] => ^ [Parked, buf, token, &reg, del_route [routes, v, Nil]]
+      | =Unroute[v] => ^ [req, Parked, buf, token, &reg, del_route [routes, v, Nil]]
       | Ok
     }
     | =Attached[conn] => ![
@@ -1198,27 +1292,28 @@ alife = #['amode, 'strs, (Str['bin] | []), @'reg_msg, 'routes] {
       | =Data[sock: _, data: d] => {
         %http/websocket.on_data [conn, d]
         =[msgs, c2]
-        route_events [msgs, routes] ~> {
-          | =Go => ^ [Attached[c2], Nil, token, &reg, routes]
+        route_events [req, msgs, routes] ~> {
+          | =Go => ^ [req, Attached[c2], Nil, token, &reg, routes]
           | Ok
         }
       }
       | =Frame[s] => {
-        %http/websocket.send_text [conn, s]; ^ [Attached[conn], Nil, token, &reg, routes]
+        %http/websocket.send_text [conn, s]; ^ [req, Attached[conn], Nil, token, &reg, routes]
       }
       | =Route[v, p] => ^ [
+        req,
         Attached[conn],
         Nil,
         token,
         &reg,
         Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
       ]
-      | =Unroute[v] => ^ [Attached[conn], Nil, token, &reg, del_route [routes, v, Nil]]
+      | =Unroute[v] => ^ [req, Attached[conn], Nil, token, &reg, del_route [routes, v, Nil]]
       | =Closed[sock: _] => token ~> {
         | =Str[tb] => {
           tell_views [routes, Park]
           Register[Str[tb], &.] ~> reg
-          ^ [Parked, Nil, Str[tb], &reg, routes]
+          ^ [req, Parked, Nil, Str[tb], &reg, routes]
         }
         | Ok
       }
@@ -1345,18 +1440,16 @@ reprocess = #[Str['bin], 'strs, 'strs] -> [Str['bin], 'strs] {
 // The composition loop: collect the root's `Region` and the views' first frames
 // (splicing as they arrive), buffer everything else, and answer the handler the
 // complete page — or whatever assembled by the deadline. Then park.
-compose = #[@Str['bin], (Str['bin] | []), 'strs, (Str['bin] | []), @'reg_msg, 'routes, 'int] {
-  =[handler, page, buf, token, reg, routes, end]
+compose = #[@Str['bin], (Str['bin] | []), 'strs, (Str['bin] | []), @'reg_msg, 'routes, 'int, '%http] {
+  =[handler, page, buf, token, reg, routes, end, req]
   {
     | composed? page => {
-      page ~> =Str[pb]
-      Str[pb] ~> handler
-      alife [Parked, buf, token, &reg, routes]
+      page ~> =Str[pb]; Str[pb] ~> handler; alife [req, Parked, buf, token, &reg, routes]
     }
     | %num.lt? [%time.monotonic, end] => ![#'app_msg, settle_quiet] ~> {
       | =Region[h] => {
         r = reprocess [h, rev [buf, Nil], Nil]
-        ^ [&handler, r.0, r.1, token, &reg, routes, end]
+        ^ [&handler, r.0, r.1, token, &reg, routes, end, req]
       }
       | =Frame[s] => page ~> {
         | =Str[pb] => classify_frame s ~> {
@@ -1368,10 +1461,11 @@ compose = #[@Str['bin], (Str['bin] | []), 'strs, (Str['bin] | []), @'reg_msg, 'r
             &reg,
             routes,
             end,
+            req,
           ]
-          | ^ [&handler, Str[pb], Cons[s, buf], token, &reg, routes, end]
+          | ^ [&handler, Str[pb], Cons[s, buf], token, &reg, routes, end, req]
         }
-        | ^ [&handler, [], Cons[s, buf], token, &reg, routes, end]
+        | ^ [&handler, [], Cons[s, buf], token, &reg, routes, end, req]
       }
       | =Route[v, p] => ^ [
         &handler,
@@ -1381,17 +1475,17 @@ compose = #[@Str['bin], (Str['bin] | []), 'strs, (Str['bin] | []), @'reg_msg, 'r
         &reg,
         Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
         end,
+        req,
       ]
-      | =Unroute[v] => ^ [&handler, page, buf, token, &reg, del_route [routes, v, Nil], end]
+      | =Unroute[v] => ^ [&handler, page, buf, token, &reg, del_route [routes, v, Nil], end, req]
       // An Attach cannot arrive before the page (the token is in it); dropping the
       // impossible conn closes it and the client retries cold.
-      | =Attach[_] => ^ [&handler, page, buf, token, &reg, routes, end]
-      | ^ [&handler, page, buf, token, &reg, routes, end]
+      | =Attach[_] => ^ [&handler, page, buf, token, &reg, routes, end, req]
+      | ^ [&handler, page, buf, token, &reg, routes, end, req]
     }
     // Deadline: answer with what assembled (a stuck view's boundary stays empty).
     | {
-      page ~> { | =Str[pb] => Str[pb] ~> handler | Ok }
-      alife [Parked, buf, token, &reg, routes]
+      page ~> { =Str[pb] => Str[pb] ~> handler | Ok }; alife [req, Parked, buf, token, &reg, routes]
     }
   }
 }
@@ -1421,12 +1515,12 @@ app_run = #['%http, 'root_view, @'reg_msg, (Str['bin] | []), 'aboot] {
       v = st ["0", &me, Reply[&me]]
       %proc.link &v
       end = %num.add [%time.monotonic, settle_deadline]
-      compose [&handler, [], Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil], end]
+      compose [&handler, [], Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil], end, req]
     }
     | =Cold => {
       v = st ["0", &me, Replace]
       %proc.link &v
-      alife [Parked, Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil]]
+      alife [req, Parked, Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil]]
     }
   }
 }
@@ -1476,9 +1570,10 @@ join = #['%http/websocket, '%http, 'root_view, @'reg_msg] {
 
 'sim<'i, 's, 'e> = Sim[comp: 'component<'i, 's, 'e>, state: 's, frame: 'frame]
 
-sim = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>] {
+sim = #<'i, 's, 'e>['i, ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>)] {
   :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`."
-  =[init, comp]
+  =[init, cfg]
+  comp = with_nav cfg
   state = comp.mount init
   Sim[comp: comp, state: state, frame: render_view [state, comp]]
 }
@@ -1690,6 +1785,9 @@ client_js = """
     };
     ws.onmessage = (e) => \{
       const m = JSON.parse(e.data);
+      // A `[2, path]` frame is a server-initiated URL change: sync the address bar to
+      // match the view the server already patched, without a full navigation.
+      if (m[0] === 2) \{ history.pushState(\{}, '', new URL(m[1], location.href).href); return; }
       if (m[0] !== 1) \{ location.reload(); return; }
       // m[1] is the frame's view id; a vid whose markers are gone (a just-removed
       // child) drops the whole frame.
@@ -1751,6 +1849,31 @@ client_js = """
     });
     ws.send('[' + JSON.stringify(vidOf(el)) + ',' + el.getAttribute('data-q-submit') + ',' + JSON.stringify(pairs) + ']');
     el.reset();
+  });
+  // Live navigation: a plain left-click on a `data-q-nav` link is sent as a nav
+  // message and the URL is updated in place, instead of a full page load. Modified
+  // clicks, cross-origin links, and (as a fallback) a closed socket keep the
+  // browser's default navigation, so a live link degrades to an ordinary one.
+  const navTo = (href, push) => \{
+    const url = new URL(href, location.href);
+    if (url.origin !== location.origin || !(ws && ws.readyState === 1)) return false;
+    if (push) history.pushState(\{}, '', url.href);
+    ws.send('[\"nav\",' + JSON.stringify(url.pathname + url.search) + ']');
+    return true;
+  };
+  document.addEventListener('click', (e) => \{
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = e.target.closest && e.target.closest('a[data-q-nav]');
+    if (!a || !root.contains(a) || a.target || a.hasAttribute('download')) return;
+    const href = a.getAttribute('href');
+    if (href && navTo(href, true)) e.preventDefault();
+  });
+  // Back/forward: replay the URL the browser restored to the server (no pushState —
+  // the history entry already exists). Unlike a link click there is no default
+  // navigation to fall through to — the browser has already moved the URL — so a
+  // dead socket reloads, keeping the page and the address bar in step.
+  addEventListener('popstate', () => \{
+    if (!navTo(location.pathname + location.search, false)) location.reload();
   });
 })();
 </script>

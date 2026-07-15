@@ -292,9 +292,14 @@ attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
       =[nb, st2]
       name = Str[nb]
       // An `on:NAME` event attribute is stored (and deduplicated) under its emitted
-      // `data-q-NAME`; `ev` is nil for ordinary attributes.
+      // `data-q-NAME`; a bare `nav` (marking a live-navigation link) under `data-q-nav`;
+      // `ev` is nil for ordinary attributes, which store under their own name.
       ev = event_name? name
-      stored = ev ~> { =Str[s] => Str[s] | name }
+      stored = {
+        | name ~> ="nav" => "data-q-nav"
+        | ev ~> =Str[s] => Str[s]
+        | name
+      }
       {
         | seen? [acc, stored] => %parse.fail [st.pos, "a unique attribute name"]
         | reserved? name => %parse.fail [
@@ -332,9 +337,9 @@ attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
         | peek_at st3 ~> =61 => {
           attr_value_p [&cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
           =[v, st4]
-          ^ [&cb, st4, Cons[[name, v], acc]]
+          ^ [&cb, st4, Cons[[stored, v], acc]]
         }
-        | ^ [&cb, st3, Cons[[name, Flag], acc]]
+        | ^ [&cb, st3, Cons[[stored, Flag], acc]]
       }
     }
     | [rev [acc, Nil], st]

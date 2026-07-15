@@ -326,3 +326,234 @@ fn test_child_crash_restart_and_budget() {
         )
         .expect(r#"[Bumped, FellBack, DeadChildSilent]"#);
 }
+
+#[test]
+fn test_live_navigation_patches_root() {
+    // Live navigation (nav-0, params-patch): the root's state is derived from the URL
+    // path, and a `["nav", target]` message re-derives it via the component's `nav`
+    // handler — no remount — patching the view in place over the same socket. The dead
+    // render already routes by path (the GET for /home renders "home"), so nav only adds
+    // the socket-preserving transition: after ["nav","/posts"] the view patches to "posts".
+    quiver()
+        .with_io()
+        .with_real_time()
+        .with_timeout(std::time::Duration::from_secs(20))
+        .evaluate(
+            r#"
+            'cev = Bump
+            seg0 = #'%http { $.path ~> { | =Cons[Str[s], _] => Str[s] | "home" } }
+            root = %html/live.component [
+              mount: #'%http { seg0 $ },
+              update: #[Str['bin], 'cev] { =[s, _]; s },
+              view: #Str['bin] { %html{ <p>{$}</p> } },
+              decode: #['%json, '%http.pairs] { [] },
+              nav: #[Str['bin], '%http] { =[_, req]; seg0 req },
+            ]
+            a = %html/live.app [root: &root, init: #'%http { $ }]
+            handler = #'%http { %html/live.handle [$, a] }
+            @{ [port: 4189, handler: &handler] ~> %http/server.serve }
+            { ![50] | Ok }
+
+            read_to = #[\TcpSocket, 'bin, Str['bin]] {
+              =[sock, acc, needle]
+              {
+                | Str[acc] ~> %str.contains? [~, needle] => acc
+                | {
+                  d = __tcp_socket_read__ [sock, 65536]
+                  {
+                    | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
+                    | ^ [sock, %bin.concat [acc, d], needle]
+                  }
+                }
+              }
+            }
+
+            s1 = [0x7f000001, 4189] ~> __tcp_connect__
+            __tcp_socket_write__ [s1, "GET /home HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            page = read_to [s1, 0x, "</html>"] ~> Str[~]
+            s1 ~> __tcp_socket_close__
+            %str.index_of [page, "data-q-token=\""] ~> =('int)i
+            tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
+
+            up = "GET /home HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, 0x00000000]
+            s2 = [0x7f000001, 4189] ~> __tcp_connect__
+            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+
+            // Navigate to /posts: the root re-derives from the new path and patches "home" -> "posts".
+            ev_nav = %http/websocket.encode_masked_frame [1, "[\"nav\",\"/posts\"]" ~> .0, 0x00000000]
+            __tcp_socket_write__ [s2, ev_nav]
+            r1 = read_to [s2, 0x, "[1,\"0\",[[\"t\",[0],\"posts\"]]]"] ~> Str[~]
+            s2 ~> __tcp_socket_close__
+
+            [
+              page ~> %str.contains? [~, "<p><!--q:0-->home<!--/q:0--></p>"] ~> { =Ok => MountedHome | NoHome },
+              r1 ~> %str.contains? [~, "[1,\"0\",[[\"t\",[0],\"posts\"]]]"] ~> { =Ok => Navigated | NoNav },
+            ]
+            "#,
+        )
+        .expect(r#"[MountedHome, Navigated]"#);
+}
+
+#[test]
+fn test_server_redirect_syncs_url() {
+    // Server-initiated navigation: an `update` marks its result with `:redirect "/path"`.
+    // The view patches the page as usual AND emits a `[2, path]` frame, which the client
+    // applies as a pushState — the address bar follows a view change the server made with
+    // no link click. Here a "jump" event redirects to /posts/7.
+    quiver()
+        .with_io()
+        .with_real_time()
+        .with_timeout(std::time::Duration::from_secs(20))
+        .evaluate(
+            r#"
+            'st = [page: Str['bin]]
+            'ev = Jump
+            root = %html/live.component [
+              mount: #'%http { [page: "home"] },
+              update: #['st, 'ev] { =[s, _]; [page: "seven"] ~> { :redirect "/posts/7" } },
+              view: #'st { %html{ <p>{$.page}</p> } },
+              decode: #['%json, '%http.pairs] { =[j, _]; j ~> { | ="jump" => Ev[Jump] | [] } },
+            ]
+            a = %html/live.app [root: &root, init: #'%http { $ }]
+            handler = #'%http { %html/live.handle [$, a] }
+            @{ [port: 4190, handler: &handler] ~> %http/server.serve }
+            { ![50] | Ok }
+
+            read_to = #[\TcpSocket, 'bin, Str['bin]] {
+              =[sock, acc, needle]
+              {
+                | Str[acc] ~> %str.contains? [~, needle] => acc
+                | {
+                  d = __tcp_socket_read__ [sock, 65536]
+                  {
+                    | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
+                    | ^ [sock, %bin.concat [acc, d], needle]
+                  }
+                }
+              }
+            }
+
+            s1 = [0x7f000001, 4190] ~> __tcp_connect__
+            __tcp_socket_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            page = read_to [s1, 0x, "</html>"] ~> Str[~]
+            s1 ~> __tcp_socket_close__
+            %str.index_of [page, "data-q-token=\""] ~> =('int)i
+            tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
+
+            up = "GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, 0x00000000]
+            s2 = [0x7f000001, 4190] ~> __tcp_connect__
+            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+
+            // The jump event: the server sends a URL-sync frame and patches the view.
+            ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"jump\",[]]" ~> .0, 0x00000000]
+            __tcp_socket_write__ [s2, ev_jump]
+            r1 = read_to [s2, 0x, "[1,\"0\",[[\"t\",[0],\"seven\"]]]"] ~> Str[~]
+            s2 ~> __tcp_socket_close__
+
+            [
+              r1 ~> %str.contains? [~, "[2,\"/posts/7\"]"] ~> { =Ok => UrlSynced | NoSync },
+              r1 ~> %str.contains? [~, "[1,\"0\",[[\"t\",[0],\"seven\"]]]"] ~> { =Ok => Patched | NoPatch },
+            ]
+            "#,
+        )
+        .expect(r#"[UrlSynced, Patched]"#);
+}
+
+#[test]
+fn test_stale_redirect_mark_is_not_resynced() {
+    // A `:redirect` mark rides the state VALUE, so an update that answers the state
+    // unchanged (the framework's own decode-drop path does too) still carries the old
+    // mark — naively re-read, it would re-sync the address bar on every later event
+    // (duplicate history entries; a stale yank after the user navigates away). The view
+    // tracks the last-synced path: an unchanged mark is suppressed, an absent mark
+    // resets the tracker so a later redirect to the same path fires again. Here jump
+    // marks /posts/7 (sync 1), noop answers the state unchanged (suppressed), two
+    // builds fresh state (reset), the second jump legitimately re-redirects (sync 2),
+    // fin bounds the read: exactly two [2,"/posts/7"] frames.
+    quiver()
+        .with_io()
+        .with_real_time()
+        .with_timeout(std::time::Duration::from_secs(20))
+        .evaluate(
+            r#"
+            'st = [page: Str['bin]]
+            'ev = Jump | Noop | Two | Fin
+            root = %html/live.component [
+              mount: #'%http { [page: "home"] },
+              update: #['st, 'ev] {
+                =[s, e]
+                e ~> {
+                  | =Jump => [page: "seven"] ~> { :redirect "/posts/7" }
+                  | =Noop => s
+                  | =Two => [page: "two"]
+                  | [page: "fin"]
+                }
+              },
+              view: #'st { %html{ <p>{$.page}</p> } },
+              decode: #['%json, '%http.pairs] {
+                =[j, _]
+                j ~> { | ="jump" => Ev[Jump] | ="noop" => Ev[Noop] | ="two" => Ev[Two] | ="fin" => Ev[Fin] | [] }
+              },
+            ]
+            a = %html/live.app [root: &root, init: #'%http { $ }]
+            handler = #'%http { %html/live.handle [$, a] }
+            @{ [port: 4191, handler: &handler] ~> %http/server.serve }
+            { ![50] | Ok }
+
+            read_to = #[\TcpSocket, 'bin, Str['bin]] {
+              =[sock, acc, needle]
+              {
+                | Str[acc] ~> %str.contains? [~, needle] => acc
+                | {
+                  d = __tcp_socket_read__ [sock, 65536]
+                  {
+                    | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
+                    | ^ [sock, %bin.concat [acc, d], needle]
+                  }
+                }
+              }
+            }
+
+            count = #[Str['bin], Str['bin], 'int] {
+              =[h, n, acc]
+              %str.index_of [h, n] ~> {
+                | =('int)i => {
+                  h ~> =Str[hb]
+                  ^ [%str.slice [h, %num.add [i, 1], %bin.length hb], n, %num.add [acc, 1]]
+                }
+                | acc
+              }
+            }
+
+            s1 = [0x7f000001, 4191] ~> __tcp_connect__
+            __tcp_socket_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            page = read_to [s1, 0x, "</html>"] ~> Str[~]
+            s1 ~> __tcp_socket_close__
+            %str.index_of [page, "data-q-token=\""] ~> =('int)i
+            tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
+
+            up = "GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, 0x00000000]
+            s2 = [0x7f000001, 4191] ~> __tcp_connect__
+            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+
+            ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"jump\",[]]" ~> .0, 0x00000000]
+            ev_noop = %http/websocket.encode_masked_frame [1, "[\"0\",\"noop\",[]]" ~> .0, 0x00000000]
+            ev_two = %http/websocket.encode_masked_frame [1, "[\"0\",\"two\",[]]" ~> .0, 0x00000000]
+            ev_fin = %http/websocket.encode_masked_frame [1, "[\"0\",\"fin\",[]]" ~> .0, 0x00000000]
+            __tcp_socket_write__ [s2, ev_jump]
+            __tcp_socket_write__ [s2, ev_noop]
+            __tcp_socket_write__ [s2, ev_two]
+            __tcp_socket_write__ [s2, ev_jump]
+            __tcp_socket_write__ [s2, ev_fin]
+
+            stream = read_to [s2, 0x, "[1,\"0\",[[\"t\",[0],\"fin\"]]]"] ~> Str[~]
+            s2 ~> __tcp_socket_close__
+
+            Syncs[count [stream, "[2,\"/posts/7\"]", 0]]
+            "#,
+        )
+        .expect(r#"Syncs[2]"#);
+}
