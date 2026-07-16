@@ -287,6 +287,11 @@ pub enum AccessSource {
 pub struct Access {
     pub source: Option<AccessSource>,
     pub accessors: Vec<AccessPath>,
+    /// Explicit type arguments (`f<'int, 'bin>`, glued `<`): instantiate the accessed
+    /// callable's declared type parameters positionally, pinning them before inference
+    /// (a prefix is allowed — the rest stay inferred). Purely static: generics are
+    /// erased, so instantiation only narrows the type the use site sees.
+    pub type_arguments: Vec<Type>,
     /// Source span of each accessor (the `triple` in `.triple`), parallel to `accessors`, so
     /// the language server can hover/navigate each component of a chain separately. Kept beside
     /// `accessors` rather than inside `AccessPath`, whose identity is the field, not its position.

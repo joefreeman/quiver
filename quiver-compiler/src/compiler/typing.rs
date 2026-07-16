@@ -1082,6 +1082,72 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
     }
 }
 
+/// Collect the distinct type-variable names in a type, in first-occurrence order (the
+/// traversal mirrors `contains_variables`; recursive types terminate through `Cycle`
+/// nodes). Used to order a builtin signature's type parameters for explicit
+/// instantiation — a source definition's declaration order is recorded instead.
+pub fn collect_type_variables(type_id: usize, lookup: &impl TypeLookup, names: &mut Vec<String>) {
+    let Some(typ) = lookup.lookup_type(type_id) else {
+        return;
+    };
+
+    match typ {
+        Type::Variable(name) => {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        Type::Union(variants) => {
+            for v in variants.clone() {
+                collect_type_variables(v, lookup, names);
+            }
+        }
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+            states,
+        } => {
+            let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
+            collect_type_variables(parameter, lookup, names);
+            collect_type_variables(result, lookup, names);
+            collect_type_variables(receive, lookup, names);
+            if let Some(s) = states {
+                collect_type_variables(s, lookup, names);
+            }
+        }
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => {
+            for t in [*send, *receive, *state].into_iter().flatten() {
+                collect_type_variables(t, lookup, names);
+            }
+        }
+        Type::Tuple(tuple_id) => {
+            if let Some(type_info) = lookup.lookup_tuple(*tuple_id) {
+                for (_, field_type_id) in type_info.fields.clone() {
+                    collect_type_variables(field_type_id, lookup, names);
+                }
+            }
+        }
+        Type::Partial { fields, .. } => {
+            for (_, field_type_id) in fields.clone() {
+                collect_type_variables(field_type_id, lookup, names);
+            }
+        }
+        Type::Annotated { base, entries, .. } => {
+            let (base, entries) = (*base, entries.clone());
+            collect_type_variables(base, lookup, names);
+            for (_, value_type) in entries {
+                collect_type_variables(value_type, lookup, names);
+            }
+        }
+        Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Resource(_) => {}
+    }
+}
+
 /// Substitute type variables in a type with their bindings
 pub fn substitute(
     type_id: usize,

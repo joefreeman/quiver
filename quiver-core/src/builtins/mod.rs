@@ -64,6 +64,7 @@ pub fn bigint_from_str(s: &str) -> Result<BigInt, Error> {
 }
 
 pub mod binary;
+pub mod data;
 pub mod integer;
 pub mod io;
 pub mod reference;
@@ -101,6 +102,10 @@ pub struct BuiltinContext<'a, E: Effect> {
     pid: ProcessId,
     process: &'a mut Process,
     action: Option<Action<E>>,
+    /// A type-consuming builtin's explicit type argument (`__type_name__<'t>`), read
+    /// off the called builtin value; `None` for ordinary builtins. Resolve it against
+    /// the executor's `TypeLookup`.
+    type_argument: Option<usize>,
 }
 
 impl<'a, E: Effect> BuiltinContext<'a, E> {
@@ -108,18 +113,26 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         pid: ProcessId,
         process: &'a mut Process,
         executor: &'a mut Executor<E>,
+        type_argument: Option<usize>,
     ) -> Self {
         Self {
             executor,
             pid,
             process,
             action: None,
+            type_argument,
         }
     }
 
     /// The calling process's id.
     pub fn pid(&self) -> ProcessId {
         self.pid
+    }
+
+    /// The explicit type argument the builtin was instantiated with (a type-consuming
+    /// builtin's `<'t>`), or `None` when called without one.
+    pub fn type_argument(&self) -> Option<usize> {
+        self.type_argument
     }
 
     /// Take the routed action a verb queued, for the dispatch site to return from the step.
@@ -429,6 +442,12 @@ pub struct BuiltinEntry<E: Effect> {
     pub purity: Purity,
     pub parameter: TypeSpec,
     pub result: TypeSpec,
+    /// Declared type parameters, for a **type-consuming** builtin: names in declaration
+    /// order (matching any `TypeSpec::Var` occurrences in the signature). Non-empty
+    /// means every call must instantiate explicitly (`__type_name__<'t>`) — the compiler
+    /// resolves the arguments and embeds the (single, for now) type id in the emitted
+    /// instruction for the implementation to read via `BuiltinContext::type_argument`.
+    pub type_parameters: Vec<String>,
 }
 
 /// Registry of all available builtin functions
@@ -472,8 +491,45 @@ impl<E: Effect> BuiltinRegistry<E> {
                 purity,
                 parameter: param,
                 result,
+                type_parameters: vec![],
             },
         );
+    }
+
+    /// Register a **type-consuming** builtin: one whose behavior depends on an explicit
+    /// type argument (`__type_name__<'t>`), declared here in order. Currently limited to
+    /// exactly one parameter — the emitted instruction carries a single type id.
+    pub fn register_generic(
+        &mut self,
+        name: String,
+        impl_fn: BuiltinFn<E>,
+        purity: Purity,
+        param: TypeSpec,
+        result: TypeSpec,
+        type_parameters: Vec<String>,
+    ) {
+        assert_eq!(
+            type_parameters.len(),
+            1,
+            "type-consuming builtins take exactly one type parameter (for now)"
+        );
+        self.functions.insert(
+            name,
+            BuiltinEntry {
+                implementation: impl_fn,
+                purity,
+                parameter: param,
+                result,
+                type_parameters,
+            },
+        );
+    }
+
+    /// A type-consuming builtin's declared type parameters (empty for ordinary builtins).
+    pub fn get_type_parameters(&self, function: &str) -> Option<&[String]> {
+        self.functions
+            .get(function)
+            .map(|entry| entry.type_parameters.as_slice())
     }
 
     /// Attach (replace) the implementation of an already-registered builtin, keeping its
@@ -780,6 +836,57 @@ pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "panic", builtin_panic, str => TypeSpec::Union(vec![]));
 }
 
+/// The formatted form of the builtin's explicit type argument (`__type_name__<'t>`), as
+/// UTF-8 bytes — wrap in `Str[...]` for display. The first **type-consuming** builtin:
+/// its behavior depends on its instantiation (read from the context), not on its (nil)
+/// argument. Deterministic per program, so pure.
+pub fn builtin_type_name<E: Effect>(
+    _arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let type_id = ctx.type_argument().ok_or_else(|| {
+        Error::InvalidArgument(
+            "__type_name__ called without a type argument — a bare reference carries no \
+             instantiation; name it with one (`__type_name__<'t>`) where the type is \
+             concrete"
+                .to_string(),
+        )
+    })?;
+    let formatted = crate::format::format_type_by_id(&*ctx.executor, type_id);
+    let binary = ctx.executor.allocate_binary(formatted.into_bytes())?;
+    Ok(Completion::Value(Value::Binary(binary)))
+}
+
+pub fn register_type_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let nil = TypeSpec::Tuple(None, vec![]);
+    registry.register_generic(
+        "type_name".to_string(),
+        coerce_builtin(builtin_type_name),
+        Purity::Pure,
+        nil,
+        TypeSpec::Binary,
+        vec!["t".to_string()],
+    );
+}
+
+/// The Quiver data notation codec (`%data`): `data_encode` walks any data value into
+/// its textual form; `data_decode` is type-consuming — the expected type drives the
+/// parse and appears as the result (`#Str['bin] -> ('t | [])`), so the declared
+/// parameter list names the same `t` its signature's result carries.
+pub fn register_data_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let str_spec = TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]);
+    let nil = TypeSpec::Tuple(None, vec![]);
+    register_builtin!(registry, "data_encode", data::builtin_data_encode, TypeSpec::Var("t") => TypeSpec::Binary);
+    registry.register_generic(
+        "data_decode".to_string(),
+        coerce_builtin(data::builtin_data_decode),
+        Purity::Pure,
+        str_spec,
+        TypeSpec::Union(vec![TypeSpec::Var("t"), nil]),
+        vec!["t".to_string()],
+    );
+}
+
 /// Detach an owned child from the calling process (the parent-only `%proc.detach`):
 /// the child survives the caller's termination. Errors when the argument is not an
 /// owned child of the caller — ownership is the parent's to relinquish, like operating
@@ -913,6 +1020,8 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_vector_builtins,
         register_reference_builtins,
         register_control_builtins,
+        register_type_builtins,
+        register_data_builtins,
         register_process_builtins,
     ]
 }

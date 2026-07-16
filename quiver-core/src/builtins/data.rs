@@ -1,0 +1,527 @@
+//! Quiver data notation (`%data`): the canonical textual form of Quiver **values**.
+//!
+//! The notation is the language's own literal syntax restricted to data — integers,
+//! binaries (`0x…`), and tuples (with names and field labels), plus the `"…"` string
+//! sugar for `Str` tuples. Encoding is a plain value walk (tuple names come from the
+//! runtime type tables, so names — never ids — cross the program boundary). Decoding is
+//! **type-directed**: the expected type (the builtin's explicit type argument) drives
+//! the parse, tuple names resolve only against the expected type's members, and values
+//! are constructed with those members' tuple ids — hostile text can never mint a shape
+//! the program doesn't already contain. Any mismatch, unknown name, or trailing input
+//! answers nil, like a failed match.
+//!
+//! Strings never interpolate here (data, not code); `{` is escaped on encode so encoded
+//! text also reads as literal *code* unchanged.
+
+use num_bigint::BigInt;
+
+use super::{BuiltinContext, Completion};
+use crate::effects::Effect;
+use crate::error::Error;
+use crate::types::{TupleTypeInfo, Type, TypeLookup};
+use crate::value::Value;
+
+// ===== encode ===========================================================================
+
+/// `__data_encode__`: any data value → its notation as UTF-8 bytes (wrap in `Str[…]`
+/// for display — the runtime cannot mint a `Str` tuple id, so the std wrapper does).
+/// Non-data values (functions, builtins, processes, refs, resources) are a runtime
+/// error: they have no meaning outside this program. Annotations are data *about* the
+/// value and do not survive encoding.
+pub fn builtin_data_encode<E: Effect>(
+    arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let mut out = String::new();
+    encode_value(arg, ctx, &mut out)?;
+    let binary = ctx.executor.allocate_binary(out.into_bytes())?;
+    Ok(Completion::Value(Value::Binary(binary)))
+}
+
+fn encode_value<E: Effect>(
+    value: &Value,
+    ctx: &mut BuiltinContext<E>,
+    out: &mut String,
+) -> Result<(), Error> {
+    match value {
+        Value::Int(n) => {
+            out.push_str(&n.to_string());
+            Ok(())
+        }
+        Value::BigInt(n) => {
+            out.push_str(&n.to_string());
+            Ok(())
+        }
+        Value::Binary(binary) => {
+            let bytes = ctx.executor.get_binary_data(binary)?.to_vec();
+            push_hex(&bytes, out);
+            Ok(())
+        }
+        Value::Tuple(tuple_id, payload) => {
+            let info = TypeLookup::lookup_tuple(&*ctx.executor, *tuple_id)
+                .cloned()
+                .ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "cannot encode: tuple type {tuple_id} is not in the runtime tables"
+                    ))
+                })?;
+
+            // `Str` sugar: quotable text encodes as a string literal. Bytes that no
+            // string literal can carry (invalid UTF-8, unescapable control characters)
+            // fall through to the ordinary tuple form, `Str[0x…]`.
+            if info.name.as_deref() == Some("Str")
+                && let [Value::Binary(binary)] = &payload[..]
+            {
+                let bytes = ctx.executor.get_binary_data(binary)?.to_vec();
+                if let Some(quoted) = quote_string(&bytes) {
+                    out.push_str(&quoted);
+                    return Ok(());
+                }
+            }
+
+            if let Some(name) = &info.name {
+                out.push_str(name);
+                if payload.is_empty() {
+                    return Ok(());
+                }
+            } else if payload.is_empty() {
+                out.push_str("[]");
+                return Ok(());
+            }
+            out.push('[');
+            for (i, field) in payload.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                if let Some((Some(label), _)) = info.fields.get(i) {
+                    out.push_str(label);
+                    out.push_str(": ");
+                }
+                encode_value(field, ctx, out)?;
+            }
+            out.push(']');
+            Ok(())
+        }
+        other => Err(Error::InvalidArgument(format!(
+            "cannot encode a {}: %data notation carries data only (integers, binaries, \
+             and tuples)",
+            other.type_name()
+        ))),
+    }
+}
+
+fn push_hex(bytes: &[u8], out: &mut String) {
+    use std::fmt::Write;
+    out.push_str("0x");
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+}
+
+/// Quote as a `"…"` literal if every character is representable: valid UTF-8 whose
+/// control characters are limited to the escapable `\n`, `\r`, `\t`. `{` is escaped so
+/// the encoded text also reads as literal code (data notation itself never
+/// interpolates).
+fn quote_string(bytes: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    if s.chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '{' => out.push_str("\\{"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    Some(out)
+}
+
+// ===== decode ===========================================================================
+
+/// `__data_decode__<'t>`: notation text → a value of the expected type, or nil. The
+/// expected type is the builtin's explicit type argument, read from the call — a bare
+/// (un-instantiated) reference that ends up called is a runtime error.
+pub fn builtin_data_decode<E: Effect>(
+    arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let expected = ctx.type_argument().ok_or_else(|| {
+        Error::InvalidArgument(
+            "__data_decode__ called without a type argument — a bare reference carries \
+             no instantiation; name it with one (`__data_decode__<'t>`) where the type \
+             is concrete"
+                .to_string(),
+        )
+    })?;
+    let bytes = match arg {
+        Value::Tuple(_, fields) if fields.len() == 1 => match &fields[0] {
+            Value::Binary(binary) => ctx.executor.get_binary_data(binary)?.to_vec(),
+            other => {
+                return Err(Error::TypeMismatch {
+                    expected: "Str[binary]".to_string(),
+                    found: other.type_name().to_string(),
+                });
+            }
+        },
+        other => {
+            return Err(Error::TypeMismatch {
+                expected: "Str[binary]".to_string(),
+                found: other.type_name().to_string(),
+            });
+        }
+    };
+
+    let mut decoder = Decoder {
+        ctx,
+        bytes: &bytes,
+        pos: 0,
+    };
+    let mut stack = Vec::new();
+    let value = decoder.decode_type(expected, &mut stack)?;
+    // The whole input must be one value: trailing non-whitespace fails the decode.
+    decoder.skip_ws();
+    let value = match value {
+        Some(v) if decoder.pos == decoder.bytes.len() => Some(v),
+        _ => None,
+    };
+    Ok(Completion::Value(value.unwrap_or_else(Value::nil)))
+}
+
+/// A type-directed recursive-descent parser over the notation. Unions are ordered
+/// choice with per-member backtracking (reset to the saved position); the two places a
+/// successfully-parsed member could otherwise be a strict prefix of a sibling are
+/// closed by lookahead instead of full backtracking — an integer is never `0x…` (that
+/// is lexically a binary), and a bare named-empty tuple is never followed by a glued
+/// `[` (that is the named-fields form). Recursive types resolve through the same
+/// union-boundary stack the compatibility checker uses: union ids push on descent, and
+/// `Cycle(n)` reads `n` boundaries up.
+struct Decoder<'a, 'b, 'c, E: Effect> {
+    ctx: &'a mut BuiltinContext<'b, E>,
+    bytes: &'c [u8],
+    pos: usize,
+}
+
+impl<E: Effect> Decoder<'_, '_, '_, E> {
+    fn decode_type(
+        &mut self,
+        type_id: usize,
+        stack: &mut Vec<usize>,
+    ) -> Result<Option<Value>, Error> {
+        let Some(typ) = TypeLookup::lookup_type(&*self.ctx.executor, type_id).cloned() else {
+            return Ok(None);
+        };
+        match typ {
+            // Rows are invisible to the data plane: decode as the base shape.
+            Type::Annotated { base, .. } => self.decode_type(base, stack),
+            Type::Union(members) => {
+                let already = stack.contains(&type_id);
+                if !already {
+                    stack.push(type_id);
+                }
+                let start = self.pos;
+                let mut result = None;
+                for member in members {
+                    self.pos = start;
+                    if let Some(value) = self.decode_type(member, stack)? {
+                        result = Some(value);
+                        break;
+                    }
+                }
+                if !already {
+                    stack.pop();
+                }
+                if result.is_none() {
+                    self.pos = start;
+                }
+                Ok(result)
+            }
+            Type::Cycle(depth) => {
+                if stack.len() < depth {
+                    return Ok(None);
+                }
+                let target = stack[stack.len() - depth];
+                self.decode_type(target, stack)
+            }
+            Type::Integer => Ok(self.parse_int()),
+            Type::Binary => self.parse_binary(),
+            Type::Tuple(tuple_id) => self.decode_tuple(tuple_id, stack),
+            // Not data: partials have no layout to construct, and callables, processes,
+            // resources and type variables have no textual form.
+            Type::Partial { .. }
+            | Type::Callable { .. }
+            | Type::Process { .. }
+            | Type::Resource(_)
+            | Type::Reference
+            | Type::Variable(_) => Ok(None),
+        }
+    }
+
+    fn decode_tuple(
+        &mut self,
+        tuple_id: usize,
+        stack: &mut Vec<usize>,
+    ) -> Result<Option<Value>, Error> {
+        let Some(info) = TypeLookup::lookup_tuple(&*self.ctx.executor, tuple_id).cloned() else {
+            return Ok(None);
+        };
+
+        // `Str` sugar: a string literal is a `Str` tuple.
+        if is_str_shape(&info, &*self.ctx.executor) {
+            self.skip_ws();
+            if self.peek() == Some(b'"') {
+                let Some(bytes) = self.parse_string() else {
+                    return Ok(None);
+                };
+                let binary = self.ctx.executor.allocate_binary(bytes)?;
+                return Ok(Some(Value::tuple(tuple_id, vec![Value::Binary(binary)])));
+            }
+        }
+
+        self.skip_ws();
+        if let Some(name) = &info.name {
+            if !self.eat_exact(name.as_bytes()) {
+                return Ok(None);
+            }
+            // The name must end here — `OkThen` must not satisfy `Ok`.
+            if self
+                .peek()
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Ok(None);
+            }
+            if info.fields.is_empty() {
+                // Bare named-empty form — unless a glued `[` follows, which belongs to
+                // a sibling `Name[…]` member (the prefix-lookahead rule).
+                if self.peek() == Some(b'[') {
+                    return Ok(None);
+                }
+                return Ok(Some(Value::tuple(tuple_id, vec![])));
+            }
+            // Named fields open with a *glued* bracket, as in code.
+            if !self.eat(b'[') {
+                return Ok(None);
+            }
+        } else {
+            if !self.eat(b'[') {
+                return Ok(None);
+            }
+            if info.fields.is_empty() {
+                self.skip_ws();
+                if !self.eat(b']') {
+                    return Ok(None);
+                }
+                return Ok(Some(Value::tuple(tuple_id, vec![])));
+            }
+        }
+
+        let mut values = Vec::with_capacity(info.fields.len());
+        for (i, (label, field_type)) in info.fields.iter().enumerate() {
+            self.skip_ws();
+            if i > 0 {
+                if !self.eat(b',') {
+                    return Ok(None);
+                }
+                self.skip_ws();
+            }
+            // An optional field label: a data value never starts with a lowercase
+            // letter, so one unambiguously introduces a label — which must match the
+            // expected field's name.
+            if self.peek().is_some_and(|b| b.is_ascii_lowercase()) {
+                let Some(written) = self.parse_label() else {
+                    return Ok(None);
+                };
+                if label.as_deref() != Some(written.as_str()) {
+                    return Ok(None);
+                }
+                self.skip_ws();
+            }
+            let Some(value) = self.decode_type(*field_type, stack)? else {
+                return Ok(None);
+            };
+            values.push(value);
+        }
+        self.skip_ws();
+        if self.eat(b',') {
+            self.skip_ws();
+        }
+        if !self.eat(b']') {
+            return Ok(None);
+        }
+        Ok(Some(Value::tuple(tuple_id, values)))
+    }
+
+    fn parse_int(&mut self) -> Option<Value> {
+        self.skip_ws();
+        let start = self.pos;
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
+        let digits_start = self.pos;
+        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        if self.pos == digits_start {
+            self.pos = start;
+            return None;
+        }
+        // `0x…` is lexically a binary, never an integer — the lookahead that keeps
+        // ordered choice honest in `'int | 'bin` unions.
+        if &self.bytes[digits_start..self.pos] == b"0" && self.peek() == Some(b'x') {
+            self.pos = start;
+            return None;
+        }
+        let text = std::str::from_utf8(&self.bytes[start..self.pos]).ok()?;
+        match text.parse::<i64>() {
+            Ok(n) => Some(Value::int(n)),
+            // Outside i64: the canonical big form (`Value::integer` re-canonicalises).
+            Err(_) => text.parse::<BigInt>().ok().map(Value::integer),
+        }
+    }
+
+    fn parse_binary(&mut self) -> Result<Option<Value>, Error> {
+        self.skip_ws();
+        let start = self.pos;
+        if !(self.eat(b'0') && self.eat(b'x')) {
+            self.pos = start;
+            return Ok(None);
+        }
+        let hex_start = self.pos;
+        while self.peek().is_some_and(|b| b.is_ascii_hexdigit()) {
+            self.pos += 1;
+        }
+        let hex = &self.bytes[hex_start..self.pos];
+        if !hex.len().is_multiple_of(2) {
+            self.pos = start;
+            return Ok(None);
+        }
+        let bytes: Vec<u8> = hex
+            .chunks(2)
+            .map(|pair| {
+                let hi = (pair[0] as char).to_digit(16).unwrap() as u8;
+                let lo = (pair[1] as char).to_digit(16).unwrap() as u8;
+                (hi << 4) | lo
+            })
+            .collect();
+        let binary = self.ctx.executor.allocate_binary(bytes)?;
+        Ok(Some(Value::Binary(binary)))
+    }
+
+    /// A `"…"` literal's bytes. The recognised escapes are the language's (`\n`, `\r`,
+    /// `\t`, `\\`, `\"`, `\{`); there is no interpolation, so a bare `{` is literal. A
+    /// raw newline fails (single-line literals only).
+    fn parse_string(&mut self) -> Option<Vec<u8>> {
+        let start = self.pos;
+        if !self.eat(b'"') {
+            return None;
+        }
+        let mut out = Vec::new();
+        loop {
+            let b = self.peek()?;
+            self.pos += 1;
+            match b {
+                b'"' => return Some(out),
+                b'\n' | b'\r' => {
+                    self.pos = start;
+                    return None;
+                }
+                b'\\' => {
+                    let escaped = self.peek()?;
+                    self.pos += 1;
+                    match escaped {
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b't' => out.push(b'\t'),
+                        b'\\' => out.push(b'\\'),
+                        b'"' => out.push(b'"'),
+                        b'{' => out.push(b'{'),
+                        _ => {
+                            self.pos = start;
+                            return None;
+                        }
+                    }
+                }
+                b => out.push(b),
+            }
+        }
+    }
+
+    /// A field label: `ident:` (with the identifier's optional `?`/`!` suffixes),
+    /// answering the identifier text.
+    fn parse_label(&mut self) -> Option<String> {
+        let start = self.pos;
+        if !self.peek().is_some_and(|b| b.is_ascii_lowercase()) {
+            return None;
+        }
+        self.pos += 1;
+        while self
+            .peek()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            self.pos += 1;
+        }
+        if self.peek() == Some(b'?') {
+            self.pos += 1;
+        }
+        if self.peek() == Some(b'!') {
+            self.pos += 1;
+        }
+        let name = std::str::from_utf8(&self.bytes[start..self.pos])
+            .ok()?
+            .to_string();
+        if !self.eat(b':') {
+            self.pos = start;
+            return None;
+        }
+        Some(name)
+    }
+
+    fn skip_ws(&mut self) {
+        while self
+            .peek()
+            .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn eat(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn eat_exact(&mut self, expected: &[u8]) -> bool {
+        if self.bytes[self.pos..].starts_with(expected) {
+            self.pos += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Whether a tuple shape is the `Str` sugar's: named `Str`, one unnamed binary field.
+fn is_str_shape(info: &TupleTypeInfo, lookup: &impl TypeLookup) -> bool {
+    info.name.as_deref() == Some("Str")
+        && matches!(
+            info.fields.as_slice(),
+            [(None, field_type)] if matches!(lookup.lookup_type(*field_type), Some(Type::Binary))
+        )
+}

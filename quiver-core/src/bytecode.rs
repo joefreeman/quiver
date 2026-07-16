@@ -228,7 +228,10 @@ pub enum Instruction {
     Call,
     TailCall(bool),
     Function(usize),
-    Builtin(usize),
+    /// Push a builtin value by id. The optional type id is a type-consuming builtin's
+    /// explicit type argument (`__type_name__<'t>`), resolved to a concrete type at
+    /// compile time and carried on the pushed value for the implementation to read.
+    Builtin(usize, Option<usize>),
     Equal(usize),
     Not,
     /// Pop an annotation value, then a tuple/function carrier; push the carrier with the

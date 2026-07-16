@@ -299,8 +299,8 @@ module.exports = grammar({
       $._leading_access,
     ),
 
-    _sourced_access: $ => seq(field('source', $._access_source), repeat($._accessor)),
-    _leading_access: $ => seq($._leading_accessor, repeat($._accessor)),
+    _sourced_access: $ => seq(field('source', $._access_source), repeat($._accessor), optional($.type_arguments)),
+    _leading_access: $ => seq($._leading_accessor, repeat($._accessor), optional($.type_arguments)),
 
     // A source-less access reads off the flowing value (`.name`, `:key` as a chain step).
     // The leading annotation sigil is an ordinary token; *trailing* annotation accessors
@@ -396,7 +396,7 @@ module.exports = grammar({
 
     // ------------------------------------------------------------------- operations
 
-    builtin: _ => token(/__[a-z][a-zA-Z0-9_]*__/),
+    builtin: $ => prec.right(seq(token(/__[a-z][a-zA-Z0-9_]*__/), optional($.type_arguments))),
 
     equality: _ => '==',
     not: _ => '<>',

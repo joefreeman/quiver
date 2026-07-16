@@ -53,6 +53,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "type_arguments",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -348,6 +358,21 @@
       "types": [
         {
           "type": "expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "builtin",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "type_arguments",
           "named": true
         }
       ]
@@ -2750,10 +2775,6 @@
   },
   {
     "type": "binary",
-    "named": true
-  },
-  {
-    "type": "builtin",
     "named": true
   },
   {

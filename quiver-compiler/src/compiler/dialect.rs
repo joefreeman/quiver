@@ -229,6 +229,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                     source: Some(ast::AccessSource::Import(self.path.clone())),
                     accessors: vec![ast::AccessPath::Field(member)],
                     accessor_spans: vec![ast::Spanned::default()],
+                    type_arguments: vec![],
                     base_span: self.dialect.span,
                     span: self.dialect.span,
                 }));
@@ -427,6 +428,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
             source: Some(ast::AccessSource::Identifier(name)),
             accessors: vec![],
             accessor_spans: vec![],
+            type_arguments: vec![],
             base_span: self.dialect.span,
             span: self.dialect.span,
         })

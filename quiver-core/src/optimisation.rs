@@ -279,8 +279,20 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                         &mut used_resources,
                     );
                 }
-                Instruction::Builtin(id) => {
+                Instruction::Builtin(id, type_argument) => {
                     used_builtins.insert(*id);
+                    // A type-consuming builtin's explicit type argument is a type
+                    // reference like IsType's: keep its closure alive through stripping.
+                    if let Some(type_id) = type_argument {
+                        collect_type_refs(
+                            *type_id,
+                            &bytecode.types,
+                            &bytecode.tuples,
+                            &mut used_types,
+                            &mut used_tuples,
+                            &mut used_resources,
+                        );
+                    }
                 }
                 Instruction::Process(_, func_id) => {
                     queue.push_back(*func_id);
@@ -439,9 +451,10 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     Instruction::GetAnnotation(key, Some(id)) => {
                         Instruction::GetAnnotation(*key, Some(*type_remap.get(id).unwrap()))
                     }
-                    Instruction::Builtin(id) => {
-                        Instruction::Builtin(*builtin_remap.get(id).unwrap())
-                    }
+                    Instruction::Builtin(id, type_argument) => Instruction::Builtin(
+                        *builtin_remap.get(id).unwrap(),
+                        type_argument.map(|t| *type_remap.get(&t).unwrap()),
+                    ),
                     Instruction::Process(pid, fid) => {
                         Instruction::Process(*pid, *function_remap.get(fid).unwrap())
                     }

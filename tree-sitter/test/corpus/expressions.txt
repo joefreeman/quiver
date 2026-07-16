@@ -385,3 +385,62 @@ f x y
 ---
 
 (source_file)
+
+==================
+explicit type application
+==================
+
+id<'int> 42
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (identifier)
+          (type_arguments
+            (type_identifier
+              name: (type_name))))
+        argument: (integer)))))
+
+==================
+explicit type application on an import member and a reference
+==================
+
+%iter.fold<'int, Str['bin]> [xs, 0, f]
+~> &id<'int>
+
+---
+
+(source_file
+  (expression
+    (chain
+      (application
+        function: (access
+          source: (import
+            (identifier))
+          field: (identifier)
+          (type_arguments
+            (type_identifier
+              name: (type_name))
+            (tuple_type
+              name: (tuple_name)
+              (type_identifier
+                name: (type_name)))))
+        argument: (tuple
+          (chain
+            (access
+              source: (identifier)))
+          (chain
+            (integer))
+          (chain
+            (access
+              source: (identifier)))))
+      (reference
+        (access
+          source: (identifier)
+          (type_arguments
+            (type_identifier
+              name: (type_name))))))))

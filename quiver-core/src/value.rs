@@ -36,6 +36,13 @@ pub struct Payload {
     #[allow(clippy::box_collection)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     annotations: Option<Box<Vec<(usize, Value)>>>,
+    /// A type-consuming builtin's explicit type argument (`__type_name__<'t>` → the
+    /// resolved type id), carried on the *value* so an instantiated builtin flows
+    /// through bindings and generic code intact. Unlike annotations it is operational
+    /// (the implementation reads it), so equality compares it. Always `None` on tuple
+    /// and function payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    type_argument: Option<usize>,
 }
 
 impl Payload {
@@ -45,6 +52,7 @@ impl Payload {
             has_heap_refs,
             elements,
             annotations: None,
+            type_argument: None,
         }
     }
 
@@ -66,7 +74,21 @@ impl Payload {
             has_heap_refs,
             elements,
             annotations: Some(Box::new(annotations)),
+            type_argument: None,
         }
+    }
+
+    /// The same payload carrying a type argument (see the field). Builder-style, used
+    /// when constructing an instantiated builtin value or re-attaching annotations to
+    /// one.
+    pub fn with_type_argument(mut self, type_argument: Option<usize>) -> Self {
+        self.type_argument = type_argument;
+        self
+    }
+
+    /// A type-consuming builtin's explicit type argument, if the owning value carries one.
+    pub fn type_argument(&self) -> Option<usize> {
+        self.type_argument
     }
 
     /// True if any element or annotation may (transitively) reference an executor-heap binary.
@@ -233,7 +255,13 @@ impl PartialEq for Value {
             (Value::Reference(a), Value::Reference(b)) => a == b,
             (Value::Tuple(a, p), Value::Tuple(b, q)) => a == b && p == q,
             (Value::Function(a, p), Value::Function(b, q)) => a == b && p == q,
-            (Value::Builtin(a, _), Value::Builtin(b, _)) => a == b,
+            // The type argument is operational (a differently-instantiated builtin
+            // behaves differently), so it participates; annotations stay invisible.
+            (Value::Builtin(a, p), Value::Builtin(b, q)) => {
+                a == b
+                    && p.as_deref().and_then(Payload::type_argument)
+                        == q.as_deref().and_then(Payload::type_argument)
+            }
             (Value::Process(a, x), Value::Process(b, y)) => a == b && x == y,
             (Value::Resource(a, x), Value::Resource(b, y)) => a == b && x == y,
             _ => false,
@@ -267,6 +295,28 @@ impl Value {
         Value::Builtin(builtin_id, None)
     }
 
+    /// Construct a builtin value carrying an explicit type argument (a type-consuming
+    /// builtin's instantiation), or the bare form when there is none.
+    pub fn builtin_typed(builtin_id: usize, type_argument: Option<usize>) -> Self {
+        match type_argument {
+            None => Value::Builtin(builtin_id, None),
+            Some(_) => Value::Builtin(
+                builtin_id,
+                Some(Arc::new(
+                    Payload::new(vec![]).with_type_argument(type_argument),
+                )),
+            ),
+        }
+    }
+
+    /// A type-consuming builtin's explicit type argument, if this value carries one.
+    pub fn type_argument(&self) -> Option<usize> {
+        match self {
+            Value::Builtin(_, Some(payload)) => payload.type_argument(),
+            _ => None,
+        }
+    }
+
     /// True if this value may (transitively) reference an executor-heap binary and thus
     /// needs retain/release accounting. O(1): composite values cache the answer.
     pub fn has_heap_refs(&self) -> bool {
@@ -297,7 +347,11 @@ impl Value {
             .collect();
         annotations.push((key, annotation));
         let elements = payload.map(|p| p.elements.clone()).unwrap_or_default();
-        let payload = Arc::new(Payload::with_annotations(elements, annotations));
+        // Re-attach preserves a builtin's type argument — it is operational, not metadata.
+        let type_argument = payload.and_then(Payload::type_argument);
+        let payload = Arc::new(
+            Payload::with_annotations(elements, annotations).with_type_argument(type_argument),
+        );
         Some(match self {
             Value::Tuple(id, _) => Value::Tuple(*id, payload),
             Value::Function(id, _) => Value::Function(*id, payload),

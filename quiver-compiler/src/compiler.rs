@@ -35,7 +35,7 @@ use quiver_core::{
     bytecode::{Constant, Function, Instruction},
     program::Program,
     types::{NIL, OK, Type, TypeLookup},
-    value::{Binary, Value},
+    value::{Binary, Payload, Value},
 };
 
 #[derive(Debug, PartialEq)]
@@ -57,6 +57,30 @@ pub enum Error {
     NonExhaustiveReturn {
         unhandled: String,
         declared: String,
+    },
+    /// Explicit type arguments (`f<'t>`) on something that can't take them: a non-callable
+    /// value, a callable with no declared type parameters, or a callable whose parameter
+    /// list isn't statically known (a declared boundary — a function parameter's written
+    /// type — sheds it, as it does other capabilities).
+    TypeArgumentsNotApplicable {
+        target: String,
+    },
+    /// More explicit type arguments than the callable declares.
+    TypeArgumentsTooMany {
+        declared: usize,
+        given: usize,
+    },
+    /// A type-consuming builtin (`__type_name__`) called without its explicit type
+    /// argument(s): the implementation reads the type at runtime, so the call site must
+    /// instantiate (`__type_name__<'t>`).
+    TypeArgumentsRequired {
+        builtin: String,
+        declared: usize,
+    },
+    /// A type-consuming builtin's type argument resolved to a type still containing
+    /// type variables — there is no concrete type id to embed at the call site.
+    TypeArgumentNotConcrete {
+        builtin: String,
     },
     TupleNotInRegistry {
         tuple_id: usize,
@@ -271,6 +295,38 @@ impl std::fmt::Display for Error {
                     f,
                     "Match is not exhaustive: {unhandled} is unhandled, but the return type \
                      {declared} does not allow []. Handle it, or declare -> ({declared} | [])."
+                )
+            }
+            Error::TypeArgumentsNotApplicable { target } => {
+                write!(
+                    f,
+                    "Explicit type arguments need a function with declared type parameters \
+                     (`#<'t, …>`) whose definition is statically known — a declared boundary \
+                     (e.g. a parameter's written type) sheds them; found {target}"
+                )
+            }
+            Error::TypeArgumentsTooMany { declared, given } => {
+                write!(
+                    f,
+                    "Too many type arguments: the function declares {declared} type \
+                     parameter{}, but {given} were given",
+                    if *declared == 1 { "" } else { "s" }
+                )
+            }
+            Error::TypeArgumentsRequired { builtin, declared } => {
+                write!(
+                    f,
+                    "`__{builtin}__` consumes its type argument{} at runtime, so the call \
+                     must instantiate it explicitly: `__{builtin}__<'t>`  ({declared} \
+                     declared)",
+                    if *declared == 1 { "" } else { "s" }
+                )
+            }
+            Error::TypeArgumentNotConcrete { builtin } => {
+                write!(
+                    f,
+                    "`__{builtin}__` needs a concrete type argument — one still containing \
+                     type variables has no runtime representation to embed"
                 )
             }
             Error::TupleNotInRegistry { tuple_id } => {
@@ -613,6 +669,14 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Both survive across module compilation (same Compiler instance).
     case_tables: HashMap<usize, usize>,
 
+    // The declared type parameters of each generic callable type, as its uniquified variable
+    // names in declaration order — what an explicit instantiation (`f<'int>`) binds
+    // positionally. Keyed by callable type id: distinct definitions mint distinct variable
+    // names (per-definition suffix), so an id collision implies an identical entry. Populated
+    // at function-literal compilation (declaration order) and builtin resolution
+    // (first-occurrence order); cached/restored across modules like the dispatch tables.
+    callable_type_params: HashMap<usize, Vec<String>>,
+
     // Span of the term currently being compiled, so an error can be located in source.
     // Only set when a recorder is interested (LSP); harmless otherwise.
     current_span: Option<SourceSpan>,
@@ -751,6 +815,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             last_uncovered: None,
             fn_case_tables: HashMap::new(),
             case_tables: HashMap::new(),
+            callable_type_params: HashMap::new(),
             current_span: None,
             type_param_suffix: None,
             function_depth: 0,
@@ -1414,9 +1479,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             Some(ast::AccessSource::Builtin(name)) => {
                 // A builtin's signature gives its parameter directly — no need to assemble a
-                // Callable just to take it apart again below.
-                let (param, _) = self.builtins.resolve_signature(name, self.program)?;
-                return Some(self.program.register_type(param));
+                // Callable just to take it apart again below — unless explicit type
+                // arguments must instantiate the callable first.
+                let (param, result) = self.builtins.resolve_signature(name, self.program)?;
+                if access.type_arguments.is_empty() {
+                    return Some(self.program.register_type(param));
+                }
+                let parameter = self.program.register_type(param);
+                let result = self.program.register_type(result);
+                let receive = self.program.never();
+                let callable = self.program.register_type(Type::Callable {
+                    parameter,
+                    result,
+                    receive,
+                    states: Some(parameter),
+                });
+                self.record_builtin_type_params(name, callable, parameter, result);
+                callable
             }
             Some(ast::AccessSource::Parameter) => {
                 let base = scopes::get_function_parameter(&self.scopes)
@@ -1426,6 +1505,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             _ => return None,
         };
+        // Explicit type arguments pin the callable's parameters before the argument
+        // compiles, so the inference literal sees the instantiated types. Errors are
+        // ignored here — this is a speculative peek, and the real compile reports them.
+        let callable = self
+            .instantiate_type_arguments(callable, &access.type_arguments)
+            .ok()?;
         let callable = Type::strip_annotations(callable, &*self.program);
         match self.program.lookup_type(callable)? {
             Type::Callable { parameter, .. } => Some(*parameter),
@@ -2104,6 +2189,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             receive: self.current_receive_type_id,
             states: self.current_states,
         });
+
+        // Record the declared type parameters (as their uniquified variable names, in
+        // declaration order) so an explicit instantiation (`f<'int>`) can bind them
+        // positionally.
+        if !function.type_parameters.is_empty() {
+            self.callable_type_params.insert(
+                callable_type_id,
+                function
+                    .type_parameters
+                    .iter()
+                    .map(|p| format!("{p}#{type_param_suffix}"))
+                    .collect(),
+            );
+        }
 
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
@@ -3081,7 +3180,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .program
             .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
         self.codegen.add_instruction(Instruction::Tuple(str_tuple));
-        self.compile_builtin("panic")?;
+        self.compile_builtin("panic", &[], true)?;
         self.codegen.add_instruction(Instruction::Call);
         Ok(())
     }
@@ -3455,6 +3554,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             for (k, v) in &cached.case_tables {
                 self.case_tables.entry(*k).or_insert(*v);
             }
+            for (k, v) in &cached.callable_type_params {
+                self.callable_type_params
+                    .entry(*k)
+                    .or_insert_with(|| v.clone());
+            }
             cached
         } else {
             self.module_cache.import_stack.push(id.clone());
@@ -3478,14 +3582,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     /// Compile an import with optional accessor chain.
     /// Resolves accessors statically on the cached module value, emitting only
-    /// instructions needed for the resolved value.
+    /// instructions needed for the resolved value. Explicit type arguments instantiate
+    /// a type-consuming builtin member (`&%data.decode<'ev>`).
     fn compile_import(
         &mut self,
         module: &[String],
         accessors: &[ast::AccessPath],
+        type_arguments: &[ast::Type],
     ) -> Result<(usize, ModuleOrigin), Error> {
         let (cached, resolved_value, resolved_type, origin) =
             self.resolve_import(module, accessors)?;
+        let resolved_value =
+            self.instantiate_builtin_member(resolved_value, type_arguments, false)?;
 
         // Emit instructions for just the resolved value
         let (instructions, _) =
@@ -3543,6 +3651,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // is what distinguishes this module's contribution.
         let dispatch_fn_before = self.fn_case_tables.clone();
         let dispatch_case_before = self.case_tables.clone();
+        let type_params_before = self.callable_type_params.clone();
 
         // Reset to clean state for module compilation
         self.local_count = 0;
@@ -3661,6 +3770,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .filter(|(k, v)| dispatch_case_before.get(*k) != Some(*v))
             .map(|(k, v)| (*k, *v))
             .collect();
+        let callable_type_params: HashMap<usize, Vec<String>> = self
+            .callable_type_params
+            .iter()
+            .filter(|(k, v)| type_params_before.get(*k) != Some(*v))
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
 
         let cached = modules::CachedModule {
             value: module_value,
@@ -3668,6 +3783,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             binary_data,
             fn_case_tables,
             case_tables,
+            callable_type_params,
         };
 
         // Cache the module
@@ -3784,8 +3900,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut instructions = vec![
             Instruction::Constant(constant),
             Instruction::Tuple(str_tuple),
-            Instruction::Builtin(term_builtin),
-            Instruction::Builtin(chain_builtin),
+            Instruction::Builtin(term_builtin, None),
+            Instruction::Builtin(chain_builtin, None),
             Instruction::Tuple(context_tuple),
         ];
         instructions.extend(function_instructions);
@@ -4154,7 +4270,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     states: Some(param_type),
                 });
 
-                let mut instructions = vec![Instruction::Builtin(*builtin_id)];
+                // A module-cached instantiated builtin re-emits its type argument (the
+                // static type above stays the generic signature — acceptable while no
+                // module exports an instantiated builtin whose *result* depends on it).
+                let type_argument = payload.as_deref().and_then(Payload::type_argument);
+                let mut instructions = vec![Instruction::Builtin(*builtin_id, type_argument)];
                 if let Some(payload) = payload {
                     self.annotations_to_instructions_from_cache(
                         &mut instructions,
@@ -4649,6 +4769,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         ripple_context: Option<&RippleContext>,
         implicit_flow: bool,
     ) -> Result<(usize, Provenance), Error> {
+        // Explicit type arguments (`f<'int>`) instantiate the accessed callable's type —
+        // applied once the accessed type is known, before any application, so the pinned
+        // parameters are what unification checks the argument against.
+        let type_args = access.type_arguments;
         // An access produces a value (a variable, parameter, import member, builtin, or a field
         // of the flowing value). When that value is callable and a flowing value is present
         // (the chained value of the surrounding step), it is invoked with it. The flowing value
@@ -4663,6 +4787,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 })?;
                 let (accessed_type, accessed_prov) =
                     self.compile_accessor(val_type, access.accessors, "value", value_provenance)?;
+                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
                 Ok((accessed_type, accessed_prov))
             }
             Some(ast::AccessSource::Parameter) => {
@@ -4684,6 +4809,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     "$",
                     Provenance::Parameter,
                 )?;
+                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
                     let ty =
@@ -4711,6 +4837,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
+                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
                     let ty =
@@ -4725,12 +4852,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Bare ~ - the flowing value itself.
                     if let Some(val_type) = value_type {
                         // Already on the stack as the chained value.
+                        let val_type = self.instantiate_type_arguments(val_type, &type_args)?;
                         Ok((val_type, value_provenance))
                     } else if let Some(ctx) = ripple_context {
                         // Inherit the ripple context from the enclosing tuple.
                         self.codegen
                             .add_instruction(Instruction::Pick(ctx.stack_offset));
-                        Ok((ctx.value_type_id, ctx.provenance.clone()))
+                        let ty = self.instantiate_type_arguments(ctx.value_type_id, &type_args)?;
+                        Ok((ty, ctx.provenance.clone()))
                     } else {
                         Err(Error::FeatureUnsupported(
                             "Ripple placeholder (~) can only be used when a value is being chained"
@@ -4746,6 +4875,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     })?;
                     let (accessed_type, accessed_prov) =
                         self.compile_accessor(piped_type, access.accessors, "~", value_provenance)?;
+                    let accessed_type =
+                        self.instantiate_type_arguments(accessed_type, &type_args)?;
                     Ok((accessed_type, accessed_prov))
                 }
             }
@@ -4754,6 +4885,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // / go-to-definition entries are recorded per component by `record_access_components`.
                 let (cached, resolved_value, accessed_type, _origin) =
                     self.resolve_import(&module, &access.accessors)?;
+                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                // A member holding a type-consuming builtin instantiates here
+                // (`%data.decode<'ev>`), so the emitted value carries the type id.
+                let resolved_value = self.instantiate_builtin_member(
+                    resolved_value,
+                    &type_args,
+                    value_type.is_some(),
+                )?;
 
                 let is_applicable = self.is_applicable_type(accessed_type);
 
@@ -4789,7 +4928,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if let Some(span) = access.base_span.get() {
                     self.current_span = Some(span);
                 }
-                let builtin_type = self.compile_builtin(&name)?;
+                let builtin_type = self.compile_builtin(&name, &type_args, value_type.is_some())?;
                 // A builtin has no fields, so accessors (`__x__.field`) fail here as a non-tuple.
                 let (callable_type, _) = self.compile_accessor(
                     builtin_type,
@@ -4797,6 +4936,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     "__builtin__",
                     Provenance::Unknown,
                 )?;
+                let callable_type = self.instantiate_type_arguments(callable_type, &type_args)?;
 
                 if let Some(val_type) = value_type {
                     let ty =
@@ -5056,7 +5196,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             if i > 0 {
                 self.codegen.add_instruction(Instruction::Tuple(pair_tuple));
                 // Push and apply the concat builtin, exactly as a `[a, b] __binary_concat__` call.
-                self.compile_builtin("binary_concat")?;
+                self.compile_builtin("binary_concat", &[], true)?;
                 self.codegen.add_instruction(Instruction::Call);
             }
         }
@@ -5501,8 +5641,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // hover and go-to-definition on the referenced symbol.
                 let ref_span = access.span.get();
 
+                // Explicit type arguments (`&f<'int>`): instantiate the referenced
+                // callable's type after loading — the value is untouched.
+                let type_args = access.type_arguments;
+
                 // Load the referenced value
-                match access.source {
+                let (ty, prov) = match access.source {
                     Some(ast::AccessSource::Identifier(ref name)) => {
                         let label = accessors_label(name, &access.accessors);
                         let (accessed_type, accessed_prov) =
@@ -5532,7 +5676,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Some(ast::AccessSource::Import(ref module)) => {
                         let label =
                             accessors_label(&format!("%{}", module.join("/")), &access.accessors);
-                        let (ty, origin) = self.compile_import(module, &access.accessors)?;
+                        let (ty, origin) =
+                            self.compile_import(module, &access.accessors, &type_args)?;
                         self.record_import(
                             ref_span,
                             ty,
@@ -5555,8 +5700,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         Ok((self_type, Provenance::Unknown))
                     }
                     Some(ast::AccessSource::Builtin(ref name)) => {
-                        // &__builtin__ - the builtin function value, without applying it.
-                        let builtin_type = self.compile_builtin(name)?;
+                        // &__builtin__ - the builtin function value, without applying it. A
+                        // type-consuming builtin may be referenced un-instantiated (this is
+                        // how a module exports one).
+                        let builtin_type = self.compile_builtin(name, &type_args, false)?;
                         self.record_typed(
                             ref_span,
                             builtin_type,
@@ -5577,7 +5724,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     None => Err(Error::FeatureUnsupported(
                         "Reference requires an identifier (e.g., &f)".to_string(),
                     )),
-                }
+                }?;
+                let ty = self.instantiate_type_arguments(ty, &type_args)?;
+                Ok((ty, prov))
             }
         }
     }
@@ -5866,6 +6015,78 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }),
             _ => false,
         }
+    }
+
+    /// Instantiate a callable type's declared type parameters with explicit type
+    /// arguments (`f<'int>`): resolve each written argument, bind it to the callable's
+    /// corresponding declared parameter (positionally — a prefix is allowed, the rest
+    /// stay inferred), and substitute. Purely static: the value is untouched, only the
+    /// type the use site sees narrows, so unification then *checks* the pinned
+    /// parameters instead of inferring them. An annotation row on the callable rides
+    /// through. The declared-parameter list comes from `callable_type_params`, recorded
+    /// at the definition — a callable reached through a declared boundary (a written
+    /// parameter type) has no entry and cannot be instantiated, like other
+    /// definition-carried capabilities.
+    fn instantiate_type_arguments(
+        &mut self,
+        type_id: usize,
+        type_arguments: &[ast::Type],
+    ) -> Result<usize, Error> {
+        if type_arguments.is_empty() {
+            return Ok(type_id);
+        }
+
+        // An annotation row rides through instantiation: unwrap, substitute, re-wrap.
+        let (base_id, row) = match self.program.lookup_type(type_id) {
+            Some(Type::Annotated {
+                base,
+                exact,
+                entries,
+            }) => (*base, Some((*exact, entries.clone()))),
+            _ => (type_id, None),
+        };
+
+        let not_applicable = |program: &Program| Error::TypeArgumentsNotApplicable {
+            target: quiver_core::format::format_type_by_id(program, type_id),
+        };
+
+        if !matches!(
+            self.program.lookup_type(base_id),
+            Some(Type::Callable { .. })
+        ) {
+            return Err(not_applicable(self.program));
+        }
+        let Some(params) = self.callable_type_params.get(&base_id).cloned() else {
+            return Err(not_applicable(self.program));
+        };
+        if type_arguments.len() > params.len() {
+            return Err(Error::TypeArgumentsTooMany {
+                declared: params.len(),
+                given: type_arguments.len(),
+            });
+        }
+
+        let mut bindings = HashMap::new();
+        for (param, argument) in params.iter().zip(type_arguments) {
+            let mut env = typing::TypeEnv {
+                resolver: self.resolver,
+                module_cache: &mut *self.module_cache,
+                package: &self.current_package,
+            };
+            let resolved =
+                typing::resolve_ast_type(&mut env, &self.scopes, argument.clone(), self.program)?;
+            bindings.insert(param.clone(), resolved);
+        }
+
+        let instantiated = typing::substitute(base_id, &bindings, self.program);
+        Ok(match row {
+            Some((exact, entries)) => self.program.register_type(Type::Annotated {
+                base: instantiated,
+                exact,
+                entries,
+            }),
+            None => instantiated,
+        })
     }
 
     fn apply_value_to_type(
@@ -6296,7 +6517,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(result)
     }
 
-    fn compile_builtin(&mut self, name: &str) -> Result<usize, Error> {
+    fn compile_builtin(
+        &mut self,
+        name: &str,
+        type_arguments: &[ast::Type],
+        applied: bool,
+    ) -> Result<usize, Error> {
         let (param_type, result_type) = self
             .builtins
             .resolve_signature(name, self.program)
@@ -6310,17 +6536,148 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .program
             .register_builtin(name.to_string(), self.builtins);
 
+        // A **type-consuming** builtin (declared type parameters in the registry) needs
+        // its type argument at runtime, so a direct *application* must instantiate
+        // explicitly with a concrete type; the resolved id rides the emitted
+        // instruction. A bare *reference* (`&__data_decode__`, a module export) may
+        // stay un-instantiated — the requirement then falls to whichever site names it
+        // with type arguments, and calling a never-instantiated one is a runtime error.
+        // Static instantiation of the signature happens separately, through the same
+        // `instantiate_type_arguments` every access head gets.
+        let type_argument = self.resolve_builtin_type_argument(name, type_arguments, applied)?;
+
         self.codegen
-            .add_instruction(Instruction::Builtin(builtin_index));
+            .add_instruction(Instruction::Builtin(builtin_index, type_argument));
 
         let never_id = self.program.never();
-        Ok(self.program.register_type(Type::Callable {
+        let callable_type_id = self.program.register_type(Type::Callable {
             parameter: param_type_id,
             result: result_type_id,
             receive: never_id,
             // Builtins never tail-call: their states are their parameter.
             states: Some(param_type_id),
-        }))
+        });
+
+        self.record_builtin_type_params(name, callable_type_id, param_type_id, result_type_id);
+
+        Ok(callable_type_id)
+    }
+
+    /// Resolve a type-consuming builtin's explicit type argument to the concrete type
+    /// id its emitted instruction carries — `None` for ordinary builtins, and for a
+    /// bare (un-applied) reference given no arguments. Shared between direct builtin
+    /// accesses and import members holding a builtin value.
+    fn resolve_builtin_type_argument(
+        &mut self,
+        name: &str,
+        type_arguments: &[ast::Type],
+        applied: bool,
+    ) -> Result<Option<usize>, Error> {
+        let declared = self
+            .builtins
+            .get_type_parameters(name)
+            .unwrap_or_default()
+            .len();
+        if declared == 0 {
+            return Ok(None);
+        }
+        if type_arguments.is_empty() && !applied {
+            return Ok(None);
+        }
+        if type_arguments.len() < declared {
+            return Err(Error::TypeArgumentsRequired {
+                builtin: name.to_string(),
+                declared,
+            });
+        }
+        let mut env = typing::TypeEnv {
+            resolver: self.resolver,
+            module_cache: &mut *self.module_cache,
+            package: &self.current_package,
+        };
+        let resolved = typing::resolve_ast_type(
+            &mut env,
+            &self.scopes,
+            type_arguments[0].clone(),
+            self.program,
+        )?;
+        if typing::contains_variables(resolved, &*self.program) {
+            return Err(Error::TypeArgumentNotConcrete {
+                builtin: name.to_string(),
+            });
+        }
+        Ok(Some(resolved))
+    }
+
+    /// An import member holding a **type-consuming builtin** value (a module export
+    /// like `%data.decode`): explicit type arguments instantiate it at the naming site
+    /// — the rebuilt value carries the resolved type id into the emitted push — while
+    /// an *applied* member without them errors exactly as a direct application does. A
+    /// bare reference passes through un-instantiated. Ordinary members are untouched.
+    fn instantiate_builtin_member(
+        &mut self,
+        value: Value,
+        type_arguments: &[ast::Type],
+        applied: bool,
+    ) -> Result<Value, Error> {
+        let Value::Builtin(builtin_id, ref payload) = value else {
+            return Ok(value);
+        };
+        let Some(name) = self
+            .program
+            .get_builtins()
+            .get(builtin_id)
+            .map(|b| b.name.clone())
+        else {
+            return Ok(value);
+        };
+        let Some(type_argument) =
+            self.resolve_builtin_type_argument(&name, type_arguments, applied)?
+        else {
+            return Ok(value);
+        };
+        // Rebuild the value carrying the argument, preserving any annotations the
+        // module attached (e.g. a `:doc`).
+        let annotations = payload
+            .as_deref()
+            .map(|p| p.annotations().to_vec())
+            .unwrap_or_default();
+        Ok(Value::Builtin(
+            builtin_id,
+            Some(std::sync::Arc::new(
+                Payload::with_annotations(vec![], annotations)
+                    .with_type_argument(Some(type_argument)),
+            )),
+        ))
+    }
+
+    /// Record a builtin callable's type parameters for explicit instantiation: the
+    /// registry-declared list for a type-consuming builtin (which may not mention them
+    /// in its signature at all), else the signature's variables in first-occurrence
+    /// order (parameter, then result) — for the current generic builtins these coincide
+    /// with declaration order.
+    fn record_builtin_type_params(
+        &mut self,
+        name: &str,
+        callable_type_id: usize,
+        param: usize,
+        result: usize,
+    ) {
+        if self.callable_type_params.contains_key(&callable_type_id) {
+            return;
+        }
+        let declared = self.builtins.get_type_parameters(name).unwrap_or_default();
+        let names = if !declared.is_empty() {
+            declared.to_vec()
+        } else {
+            let mut names = Vec::new();
+            typing::collect_type_variables(param, &*self.program, &mut names);
+            typing::collect_type_variables(result, &*self.program, &mut names);
+            names
+        };
+        if !names.is_empty() {
+            self.callable_type_params.insert(callable_type_id, names);
+        }
     }
 
     /// Compiles accessor chain and tracks field provenance.

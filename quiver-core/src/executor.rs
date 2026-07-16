@@ -104,7 +104,7 @@ impl InstructionType {
             Instruction::Call => InstructionType::Call,
             Instruction::TailCall(_) => InstructionType::TailCall,
             Instruction::Function(_) => InstructionType::Function,
-            Instruction::Builtin(_) => InstructionType::Builtin,
+            Instruction::Builtin(..) => InstructionType::Builtin,
             Instruction::Equal(_) => InstructionType::Equal,
             Instruction::Not => InstructionType::Not,
             Instruction::Annotate(_) => InstructionType::Annotate,
@@ -254,7 +254,12 @@ pub struct Executor<E: Effect> {
     /// module bodies), which must be deterministic: `Purity::HostRead` builtins are
     /// rejected. Set only by the sync driver; runtime workers leave it false.
     pub(crate) compile_time: bool,
-    tuples: Vec<usize>,     // Tuple arities
+    tuples: Vec<usize>, // Tuple arities
+    /// The full type and tuple tables (what the program serializes), so type-consuming
+    /// builtins (`__type_name__<'t>`) can read their type argument's structure at
+    /// runtime — exposed to implementations through the executor's `TypeLookup`.
+    types: Vec<Type>,
+    tuple_infos: Vec<TupleTypeInfo>,
     resources: Vec<String>, // Resource type names
     /// For each tuple_id, a canonical value-shape id (same name + field labels) — used by `==`
     /// so structurally-identical tuples built via different paths compare equal.
@@ -1043,6 +1048,19 @@ impl<E: Effect> Executor<E> {
             builtin_purities: vec![],
             compile_time: false,
             tuples: vec![0, 0], // NIL and OK have 0 fields
+            // Full infos for the same two pre-seeded tuples (updates skip them), keeping
+            // `tuple_infos` index-aligned with the arity table.
+            tuple_infos: vec![
+                TupleTypeInfo {
+                    name: None,
+                    fields: vec![],
+                },
+                TupleTypeInfo {
+                    name: Some("Ok".to_string()),
+                    fields: vec![],
+                },
+            ],
+            types: vec![],
             // NIL (id 0) and OK (id 1) are each their own canonical shape; replaced on first update.
             canonical_tuples: vec![0, 1],
             resources: vec![],
@@ -1646,9 +1664,12 @@ impl<E: Effect> Executor<E> {
     pub fn update_program(&mut self, update: ProgramUpdate) {
         self.constants.extend(update.constants);
         self.functions.extend(update.functions);
-        // Extract arities from TupleTypeInfo - executor only needs arities at runtime
+        // Extract arities from TupleTypeInfo (the hot-path table), and keep the full
+        // type/tuple info for type-consuming builtins' `TypeLookup`.
         self.tuples
             .extend(update.tuples.iter().map(|t| t.fields.len()));
+        self.tuple_infos.extend(update.tuples);
+        self.types.extend(update.types);
         for b in &update.builtins {
             self.builtin_impls
                 .push(self.builtins_registry.get_implementation(&b.name));
@@ -1977,7 +1998,9 @@ impl<E: Effect> Executor<E> {
             Instruction::TailCall(recurse) => self.handle_tail_call(proc, recurse),
             Instruction::Function(function_index) => self.handle_function(proc, function_index),
             Instruction::Reset(index) => self.handle_reset(proc, index),
-            Instruction::Builtin(index) => self.handle_builtin(proc, index),
+            Instruction::Builtin(index, type_argument) => {
+                self.handle_builtin(proc, index, type_argument)
+            }
             Instruction::Equal(count) => self.handle_equal(proc, count),
             Instruction::Not => self.handle_not(proc),
             Instruction::Annotate(key) => self.handle_annotate(proc, key),
@@ -2506,10 +2529,12 @@ impl<E: Effect> Executor<E> {
                 // Don't increment counter - new frame starts at 0
                 Ok(None)
             }
-            Value::Builtin(builtin_id, _) => {
+            Value::Builtin(builtin_id, payload) => {
                 // Pop function (discarded) and parameter (consumed by the builtin).
                 self.pop_value(proc); // function
                 let parameter = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+                // A type-consuming builtin's explicit type argument, for the context.
+                let type_argument = payload.as_deref().and_then(Payload::type_argument);
 
                 // Resolve the implementation directly by id (no String clone / HashMap lookup).
                 let builtin = self
@@ -2561,7 +2586,8 @@ impl<E: Effect> Executor<E> {
                 // slice) and the executor; its verbs mutate the caller's record and
                 // queue at most one routed action.
                 let (result, action) = {
-                    let mut ctx = crate::builtins::BuiltinContext::new(pid, proc, self);
+                    let mut ctx =
+                        crate::builtins::BuiltinContext::new(pid, proc, self, type_argument);
                     let result = builtin(&parameter, &mut ctx);
                     let action = ctx.take_action();
                     (result, action)
@@ -2811,13 +2837,15 @@ impl<E: Effect> Executor<E> {
         &mut self,
         proc: &mut Process,
         index: usize,
+        type_argument: Option<usize>,
     ) -> Result<Option<Action<E>>, Error> {
         // Verify builtin exists
         if index >= self.builtins.len() {
             return Err(Error::BuiltinUndefined(index));
         }
-        // Push builtin by index (no heap references).
-        self.push_value(proc, Value::builtin(index));
+        // Push builtin by index (no heap references); a type-consuming builtin's
+        // explicit type argument rides the value to its eventual call.
+        self.push_value(proc, Value::builtin_typed(index, type_argument));
 
         if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;
@@ -3770,7 +3798,13 @@ impl<E: Effect> Executor<E> {
                         .zip(caps_b.iter())
                         .all(|(a, b)| self.values_equal(a, b))
             }
-            (Value::Builtin(a, _), Value::Builtin(b, _)) => a == b,
+            // The type argument is operational (a differently-instantiated builtin
+            // behaves differently), so it participates; annotations stay invisible.
+            (Value::Builtin(a, p), Value::Builtin(b, q)) => {
+                a == b
+                    && p.as_deref().and_then(Payload::type_argument)
+                        == q.as_deref().and_then(Payload::type_argument)
+            }
             (Value::Process(a, func_a), Value::Process(b, func_b)) => a == b && func_a == func_b,
             (Value::Reference(a), Value::Reference(b)) => a == b,
             _ => false,
@@ -3953,10 +3987,12 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
             let payload = payload
                 .as_ref()
                 .map(|payload| {
-                    Ok::<_, Error>(Arc::new(Payload::with_annotations(
-                        vec![],
-                        remap_annotations(payload, index_map)?,
-                    )))
+                    // Type ids are program-global across workers (like tuple ids), so a
+                    // type-consuming builtin's argument crosses unchanged.
+                    Ok::<_, Error>(Arc::new(
+                        Payload::with_annotations(vec![], remap_annotations(payload, index_map)?)
+                            .with_type_argument(payload.type_argument()),
+                    ))
                 })
                 .transpose()?;
             Ok(Value::Builtin(*builtin_id, payload))
@@ -3964,6 +4000,19 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
         Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
         Value::Resource(id, type_name) => Ok(Value::Resource(*id, *type_name)),
         Value::Reference(r) => Ok(Value::Reference(*r)),
+    }
+}
+
+// The executor carries the program's full type/tuple tables (shipped in every build),
+// so a type-consuming builtin can resolve its type argument's structure at runtime —
+// `format_type_by_id`, and eventually type-directed decoding, read through this.
+impl<E: Effect> crate::types::TypeLookup for Executor<E> {
+    fn lookup_type(&self, type_id: usize) -> Option<&Type> {
+        self.types.get(type_id)
+    }
+
+    fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {
+        self.tuple_infos.get(tuple_id)
     }
 }
 

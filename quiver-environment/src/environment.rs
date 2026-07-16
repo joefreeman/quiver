@@ -283,9 +283,12 @@ fn remap_function(function: Function, remaps: &MergeRemaps) -> Function {
             Instruction::Function(idx) => {
                 Instruction::Function(*remaps.functions.get(&idx).unwrap_or(&idx))
             }
-            Instruction::Builtin(idx) => {
-                Instruction::Builtin(*remaps.builtins.get(&idx).unwrap_or(&idx))
-            }
+            Instruction::Builtin(idx, type_argument) => Instruction::Builtin(
+                *remaps.builtins.get(&idx).unwrap_or(&idx),
+                // A type-consuming builtin's type argument is a type reference like
+                // GetAnnotation's check: remap it with the type table.
+                type_argument.map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
+            ),
             Instruction::Tuple(type_id) => {
                 Instruction::Tuple(*remaps.tuples.get(&type_id).unwrap_or(&type_id))
             }

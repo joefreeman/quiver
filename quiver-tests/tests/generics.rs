@@ -299,3 +299,116 @@ fn test_generic_unification_of_resource_and_reference_types() {
         )
         .expect("Ok");
 }
+
+// === Explicit type application (`f<'t>`) ================================================
+// A glued `<…>` suffix on an access head instantiates the callable's declared type
+// parameters positionally, pinning them before inference. Purely static: generics are
+// erased, so instantiation only narrows the type the use site sees — a pinned parameter
+// turns what inference would have widened into a checked assertion.
+
+#[test]
+fn test_explicit_type_application_pins_and_checks() {
+    // Pinned and compatible: behaves like the inferred call.
+    quiver()
+        .evaluate(r#"id = #<'t>'t { $ }; id<'int> 42"#)
+        .expect("42");
+    // Pinned and incompatible: the pin is an assertion, so the call errors instead of
+    // inferring 't = 'int.
+    quiver()
+        .evaluate(r#"id = #<'t>'t { $ }; id<'bin> 42"#)
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with 'bin".to_string(),
+            found: "'int".to_string(),
+        });
+}
+
+#[test]
+fn test_explicit_type_application_prefix_partial() {
+    // A prefix of the declared parameters may be pinned; the rest stay inferred.
+    quiver()
+        .evaluate(r#"pair = #<'t, 'u>['t, 'u] { $ }; pair<'int> [1, 0x0a]"#)
+        .expect("[1, 0x0a]");
+}
+
+#[test]
+fn test_explicit_type_application_arity_and_target_errors() {
+    quiver()
+        .evaluate(r#"id = #<'t>'t { $ }; id<'int, 'bin> 42"#)
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeArgumentsTooMany {
+            declared: 1,
+            given: 2,
+        });
+    // A non-generic function has nothing to instantiate.
+    quiver()
+        .evaluate(r#"f = #'int { $ }; f<'int> 42"#)
+        .expect_compile_error(
+            quiver_compiler::compiler::Error::TypeArgumentsNotApplicable {
+                target: "#'int -> 'int".to_string(),
+            },
+        );
+    // A non-callable value can't take type arguments at all.
+    quiver().evaluate(r#"x = 5; x<'int>"#).expect_compile_error(
+        quiver_compiler::compiler::Error::TypeArgumentsNotApplicable {
+            target: "'int".to_string(),
+        },
+    );
+}
+
+#[test]
+fn test_explicit_type_application_declared_boundary_sheds_parameters() {
+    // A callable reached through a *written* parameter type has no statically-known
+    // declaration, so it cannot be explicitly instantiated — the boundary sheds the
+    // type-parameter list exactly as it sheds other definition-carried capabilities.
+    quiver()
+        .evaluate(r#"h = #<'t>[#'t -> 't] { $0<'int> 5 }"#)
+        .expect_compile_error(
+            quiver_compiler::compiler::Error::TypeArgumentsNotApplicable {
+                target: "#'t -> 't".to_string(),
+            },
+        );
+}
+
+#[test]
+fn test_explicit_type_application_reference_and_spawn() {
+    // `&f<'int>` instantiates without applying: the loaded value's type is pinned.
+    quiver()
+        .evaluate(r#"id = #<'t>'t { $ }; f = &id<'int>; f 7"#)
+        .expect("7");
+    // A spawn target takes the suffix; the init argument checks against the pin.
+    quiver()
+        .evaluate(r#"w = #<'t>'t { $ }; p = 5 ~> @w<'int>; !p"#)
+        .expect("5");
+}
+
+#[test]
+fn test_explicit_type_application_pins_literal_inference() {
+    // The pinned parameter reaches a `#{…}` literal argument through the Apply-site
+    // expected type, exactly as sibling-argument inference does.
+    quiver()
+        .evaluate(
+            r#"ap = #<'t, 'u>['t, #'t -> 'u] { $.1 $.0 }
+               ap<'int, 'int> [5, #{ __integer_add__ [$, 1] }]"#,
+        )
+        .expect("6");
+}
+
+#[test]
+fn test_explicit_type_application_imported_generic() {
+    // An imported generic's declared parameters survive module caching (restored like
+    // the dispatch tables), so explicit instantiation works on module members.
+    quiver()
+        .evaluate(
+            r#"0 ~> %iter.unfold [~, #{ [$, __integer_add__ [$, 1]] }]
+               ~> %iter.take [~, 3]
+               ~> %iter.fold<'int, 'int> [~, 0, #{ __integer_add__ [$0, $1] }]"#,
+        )
+        .expect("3");
+}
+
+#[test]
+fn test_explicit_type_application_alias_argument() {
+    // Type arguments are ordinary written types: aliases resolve through scope.
+    quiver()
+        .evaluate(r#"'pt = P[x: 'int]; id = #<'t>'t { $ }; id<'pt> P[x: 1]"#)
+        .expect("P[x: 1]");
+}

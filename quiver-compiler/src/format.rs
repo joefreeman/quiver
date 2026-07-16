@@ -1307,6 +1307,8 @@ fn render_access(access: &Access) -> String {
             }
         }
     }
+    // Explicit type arguments (`f<'int>`) — always last, glued like every access suffix.
+    out.push_str(&render_type_arguments(&access.type_arguments));
     out
 }
 

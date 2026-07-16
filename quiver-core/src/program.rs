@@ -1,6 +1,6 @@
 use crate::executor::Executor;
 use crate::types::{BuiltinInfo, NIL, OK, TupleTypeInfo, Type, TypeLookup};
-use crate::value::{Binary, Value};
+use crate::value::{Binary, Payload, Value};
 use serde::{Deserialize, Serialize};
 
 // Re-export bytecode types
@@ -634,7 +634,9 @@ impl Program {
                 instrs
             }
             Value::Builtin(builtin_id, payload) => {
-                let mut instrs = vec![Instruction::Builtin(*builtin_id)];
+                // An instantiated builtin re-emits its type argument on the push.
+                let type_argument = payload.as_deref().and_then(Payload::type_argument);
+                let mut instrs = vec![Instruction::Builtin(*builtin_id, type_argument)];
                 if let Some(payload) = payload {
                     self.annotations_to_instructions(&mut instrs, payload, executor);
                 }

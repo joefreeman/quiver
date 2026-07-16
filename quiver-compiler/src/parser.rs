@@ -1691,6 +1691,15 @@ fn access(input: Span) -> IResult<Span, Access> {
     // argument, so hover and go-to-definition land precisely on the referenced symbol.
     let ref_span = span_between(start, after_ref);
 
+    // Explicit type arguments (`f<'int>`, glued `<` like every access suffix): instantiate
+    // the accessed callable's declared type parameters. Last — nothing follows them in an
+    // access. There is no term-level `<` operator, so the glued list is unambiguous.
+    let (after_ref, type_arguments) = opt(delimited(
+        char('<'),
+        separated_list1(tuple((ws0, char(','), ws0)), type_definition),
+        char('>'),
+    ))(after_ref)?;
+
     // An access must have a source or at least one accessor.
     if source.is_none() && accessors.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -1705,6 +1714,7 @@ fn access(input: Span) -> IResult<Span, Access> {
             source,
             accessors,
             accessor_spans,
+            type_arguments: type_arguments.unwrap_or_default(),
             base_span: Spanned(Some(base_span)),
             span: Spanned(Some(ref_span)),
         },
@@ -2144,6 +2154,7 @@ fn tail_call(input: Span) -> IResult<Span, Term> {
                 source: Some(AccessSource::TailCallRipple),
                 accessors: vec![],
                 accessor_spans: vec![],
+                type_arguments: vec![],
                 base_span: Spanned(Some(span)),
                 span: Spanned(Some(span)),
             }),
@@ -2172,6 +2183,7 @@ fn tail_call(input: Span) -> IResult<Span, Term> {
             source: Some(AccessSource::TailCall(ident)),
             accessors,
             accessor_spans,
+            type_arguments: vec![],
             base_span: Spanned(Some(base_span)),
             span: Spanned(Some(span_between(start, after_ref))),
         }),
@@ -2258,6 +2270,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                     source: Some(AccessSource::Ripple),
                     accessors: vec![],
                     accessor_spans: vec![],
+                    type_arguments: vec![],
                     base_span: Spanned::default(),
                     span: Spanned::default(),
                 }))),
@@ -2481,6 +2494,7 @@ fn reference_term(input: Span) -> IResult<Span, Term> {
                     source: Some(AccessSource::Self_),
                     accessors: vec![],
                     accessor_spans: vec![],
+                    type_arguments: vec![],
                     base_span: Spanned::default(),
                     span: Spanned::default(),
                 })
@@ -2833,6 +2847,32 @@ mod tests {
             panic!("expected access term");
         };
         assert_eq!(slice(source, a1.span.get().unwrap()), "double");
+    }
+
+    #[test]
+    fn parse_access_type_arguments() {
+        // A glued `<…>` suffix on an access head carries explicit type arguments; the
+        // juxtaposed argument stays a separate application argument.
+        let source = "map<'int, Str['bin]> [xs, f]";
+        let program = parse(source).unwrap();
+        let Statement::Expression(expr) = &program.statements[0] else {
+            panic!("expected expression statement");
+        };
+        let Term::Apply(access, _) = &expr.chains[0].terms[0] else {
+            panic!("expected apply term");
+        };
+        assert_eq!(access.type_arguments.len(), 2);
+        assert_eq!(slice(source, access.span.get().unwrap()), "map");
+
+        // Reference and import-member heads take the suffix too.
+        let program = parse("&%iter.fold<'int>").unwrap();
+        let Statement::Expression(expr) = &program.statements[0] else {
+            panic!("expected expression statement");
+        };
+        let Term::Reference(access) = &expr.chains[0].terms[0] else {
+            panic!("expected reference term");
+        };
+        assert_eq!(access.type_arguments.len(), 1);
     }
 
     #[test]

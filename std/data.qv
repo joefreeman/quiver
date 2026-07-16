@@ -1,0 +1,20 @@
+// Quiver data notation: the language's literal syntax restricted to data — integers,
+// binaries (`0x…`), and tuples (with names and field labels), plus the `"…"` string
+// sugar for `Str` values. Strings never interpolate here (data, not code), and encoded
+// text reads back as literal code unchanged (`{` is escaped).
+//
+// `decode` is *type-consuming*: the expected type drives the parse — tuple names
+// resolve only against its members, so text can never produce a shape the program
+// doesn't already know — and it must be instantiated explicitly where the type is
+// concrete: `%data.decode<'event> text`. Anything that doesn't fit answers nil, like a
+// failed match.
+
+[
+  encode: #<'t>'t {
+    :doc "Encodes a data value (integers, binaries, tuples — no refs, pids, functions, or resources, which are runtime errors) as Quiver data notation. `decode` reads it back."
+    __data_encode__ $ ~> Str[~]
+  },
+  decode: &__data_decode__ ~> {
+    :doc "Decodes Quiver data notation as the explicitly-given expected type — `%data.decode<'event> text` answers `'event | []`, nil for anything malformed, mismatched, or trailing. The expected type must be concrete at the naming site."
+  },
+]

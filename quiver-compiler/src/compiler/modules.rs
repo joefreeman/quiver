@@ -28,6 +28,10 @@ pub struct CachedModule {
     /// Companion to [`Self::fn_case_tables`]: maps a callable *type* ID to the dispatch function
     /// to use when a call's callee isn't statically known.
     pub case_tables: HashMap<usize, usize>,
+    /// Declared type parameters of the module's generic callables (uniquified variable names,
+    /// declaration order), restored like the dispatch tables so a caller can explicitly
+    /// instantiate an imported generic (`%list.map<'int>`) without recompiling the module.
+    pub callable_type_params: HashMap<usize, Vec<String>>,
 }
 
 #[derive(Clone)]
