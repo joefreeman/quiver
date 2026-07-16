@@ -27,36 +27,40 @@
 //   - `{` always opens a hole; a literal brace in text is an entity (`&#123;`/`&#125;`).
 //   - Attribute values: `name` (boolean), `name="literal"` (verbatim bytes), or
 //     `name={ … }` (a hole; nil omits the attribute, `Ok` renders it bare).
-//   - `on:NAME={ … }` is an event attribute: the hole is a typed event payload, encoded
-//     (%data notation, in the `Ev` envelope) into an emitted `data-q-NAME` attribute for
-//     the live layer's client to echo back.
+//   - `on:NAME={ … }` is an event attribute: the hole is a typed event payload, carried
+//     in the tree as `Ev[payload]` (typing the tree's event parameter) and emitted as a
+//     `data-q-NAME` attribute (%data notation) for the live layer's client to echo back.
 //   - Void elements (`br`, `img`, …) take no close tag; `<div/>` self-closes any element.
 //   - Comments (`<!-- … -->`) are skipped. The doctype comes from `page`, not the template.
 //   - Inline `<script>`/`<style>` bodies are not supported (v1); link external assets.
 
 'expr = '%meta.expr
 
-'attr_val = Str['bin] | Ok | []
+// The tree is parameterized by its event type: `'e` is the union of the payloads the
+// tree's `on:*` holes carry (in the `Ev` envelope, joining the attribute-value union).
+// An event-free tree is generic in `'e` and embeds anywhere; a component pins `'e` to
+// its own event union so a stray payload is a compile error.
+'attr_val<'e> = Str['bin] | Ok | [] | Ev['e]
 
-'node =
+'node<'e> =
   | Raw[Str['bin]]
   | Text[Str['bin]]
-  | Element[tag: Str['bin], attrs: (Nil | Cons[[Str['bin], 'attr_val], ^1]), children: (Nil | Cons[^, ^1])]
+  | Element[tag: Str['bin], attrs: (Nil | Cons[[Str['bin], 'attr_val<'e>], ^1]), children: (Nil | Cons[^, ^1])]
   | Fragment[(Nil | Cons[^, ^1])]
 
-' = 'node
+'<'e> = 'node<'e>
 
-'nodes = Nil | Cons['node, ^]
-'attrs = Nil | Cons[[Str['bin], 'attr_val], ^]
+'nodes<'e> = Nil | Cons['node<'e>, ^]
+'attrs<'e> = Nil | Cons[[Str['bin], 'attr_val<'e>], ^]
 
 // Template provenance: the instrumented static runs and the normalized hole values they
 // interleave with, in document order. A `Child` hole is a node in child position; an
 // `Attr` hole is one attribute's value, with its owning element's `data-q` anchor and
 // the attribute name carried statically.
 'statics = Nil | Cons[Str['bin], ^]
-'hole = Child['node] | Attr[elem: 'int, name: Str['bin], value: 'attr_val]
-'holes = Nil | Cons['hole, ^]
-'tmpl = [statics: 'statics, holes: 'holes]
+'hole<'e> = Child['node<'e>] | Attr[elem: 'int, name: Str['bin], value: 'attr_val<'e>]
+'holes<'e> = Nil | Cons['hole<'e>, ^]
+'tmpl<'e> = [statics: 'statics, holes: 'holes<'e>]
 
 // The dialect's parse tree: static text runs, holes as content spans, and elements.
 // Emission (the tree expression, and the instrumented statics/holes) walks it separately.
@@ -245,8 +249,8 @@ reserved? = #Str['bin] {
 }
 
 // An `on:NAME` event attribute's emitted name — `data-q-NAME` — or nil for ordinary
-// names. Event payloads are typed data, encoded into the attribute at tree
-// construction; the client echoes the attribute text verbatim.
+// names. Event payloads are typed data, carried in the tree as `Ev` values and
+// encoded at render; the client echoes the attribute text verbatim.
 event_name? = #Str['bin] {
   =Str[b]
   __integer_compare__ [%bin.length b, 4] ~> =(0 | 1)
@@ -747,7 +751,9 @@ html_dialect = #(content: Str['bin], term: '%meta.cb) {
 // === Rendering ==========================================================================
 
 // Append rendered attributes onto `acc`: ` name`, ` name="escaped value"`; nil omits.
-render_attrs = #['attrs, 'bin] {
+// An event value renders as its %data notation (in the `Ev` envelope) — the attribute
+// text the live client echoes back.
+render_attrs = #<'e>['attrs<'e>, 'bin] {
   =[items, acc]
   items ~> {
     | =Nil => acc
@@ -760,6 +766,14 @@ render_attrs = #['attrs, 'bin] {
           34,
           1,
         ]
+        | =Ev[_] => {
+          %data.encode v ~> =Str[eb]
+          %bin.concat [%bin.append [acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [eb, 0, %bin.length eb, ~] ~> %bin.append [
+            ~,
+            34,
+            1,
+          ]
+        }
       }
       ^ [rest, acc2]
     }
@@ -767,7 +781,7 @@ render_attrs = #['attrs, 'bin] {
 }
 
 // Render a list of nodes onto `acc`, self-passed to recurse into children.
-render_list = #[#^ -> 'bin, 'nodes, 'bin] {
+render_list = #<'e>[#^ -> 'bin, 'nodes<'e>, 'bin] {
   =[self, items, acc]
   items ~> {
     | =Nil => acc
@@ -798,12 +812,12 @@ render_list = #[#^ -> 'bin, 'nodes, 'bin] {
   }
 }
 
-render = #' {
-  :doc "Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes are emitted verbatim, nil-valued attributes are omitted, and Ok-valued attributes render bare."
+render = #<'e>'<'e> {
+  :doc "Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes are emitted verbatim, nil-valued attributes are omitted, Ok-valued attributes render bare, and event values render as their %data notation."
   render_list [&render_list, Cons[$, Nil], 0x] ~> Str[~]
 }
 
-page = #' {
+page = #<'e>'<'e> {
   :doc "Renders a node tree as a whole page: the doctype followed by the rendered tree."
   %str.concat ["<!doctype html>", render $]
 }
@@ -821,12 +835,12 @@ text = #Str['bin] {
 // Normalizes a child hole's value to a node: a node splices as itself, a Str becomes
 // escaped text, an int renders as digits, a list of nodes becomes a Fragment, and nil
 // renders nothing.
-child = #('node | Str['bin] | 'int | 'nodes | []) {
+child = #<'e>('node<'e> | Str['bin] | 'int | 'nodes<'e> | []) {
   | =Str[b] => Text[Str[b]]
   | =('int)i => %str.from_int i ~> Text[~]
   | =[] => Fragment[Nil]
-  | =('nodes)items => Fragment[items]
-  | =('node)n => n
+  | =('nodes<'e>)items => Fragment[items]
+  | =('node<'e>)n => n
 }
 
 // Normalizes an attribute hole's value: a Str renders as the attribute's value, an int as
@@ -838,18 +852,20 @@ attr_value = #(Str['bin] | 'int | Ok | []) {
   | =[] => []
 }
 
-// Normalizes an event attribute's payload (`on:NAME={ … }`): any data value, wrapped in
-// the `Ev` envelope and encoded as %data notation into the emitted `data-q-NAME`
-// attribute. The client echoes the attribute text back verbatim, so the payload
-// round-trips as *typed* data — events are data, never callbacks — and a live component
-// decodes it with `%data.decode<Ev['ev]>`, the wrapper discriminating a decoded event
-// from a dropped one.
-event_value = #<'t>'t { %data.encode Ev[$] }
+// Normalizes an event attribute's payload (`on:NAME={ … }`): any data value, wrapped
+// in the `Ev` envelope — the typed value the tree carries, and the payload's entry in
+// the tree's event parameter. Encoding to %data notation happens where the attribute
+// leaves the data plane: `render` (the emitted `data-q-NAME` text) and the live
+// layer's frame derivation. The client echoes the attribute text back verbatim, so
+// the payload round-trips as *typed* data — events are data, never callbacks — and a
+// live component decodes it with `%data.decode<Ev['ev]>`, the wrapper discriminating
+// a decoded event from a dropped one.
+event_value = #<'t>'t { Ev[$] }
 
 // Attaches the template provenance to an expansion's tree (dialect plumbing): the
 // instrumented statics and the normalized hole values, as the `:template` annotation.
 // Identity on the tree; the annotation is invisible to matching, equality, and render.
-with_template = #['node, 'statics, 'holes] {
+with_template = #<'e>['node<'e>, 'statics, 'holes<'e>] {
   =[tree, statics, holes]; tree ~> { :template [statics: statics, holes: holes] }
 }
 

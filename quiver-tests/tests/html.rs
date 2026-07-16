@@ -131,7 +131,7 @@ fn test_components_are_functions() {
     quiver()
         .evaluate(
             r#"
-            card = #[title: Str['bin], children: '%html] {
+            card = #<'e>[title: Str['bin], children: '%html<'e>] {
               %html{ <section><h2>{$title}</h2>{$children}</section> }
             };
             %html{ <main>{ [title: "T", children: %html{ <p>b</p> }] ~> card }</main> } ~> %html.render
@@ -212,8 +212,9 @@ fn test_duplicate_attribute_is_rejected() {
 #[test]
 fn test_hole_type_errors_cite_the_hole() {
     // A hole value outside the child union ('%html node, Str, int, node list, nil) is a
-    // type error at the splice.
+    // type error at the splice (the `child` normalizer is generic, so the failure is a
+    // unification error naming the offending value).
     quiver()
         .evaluate(r#"%html{ <p>{ [1, 2] }</p> }"#)
-        .expect_type_mismatch();
+        .expect_error_containing("['int, 'int] does not fit");
 }

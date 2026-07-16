@@ -125,7 +125,7 @@ serve = #[port: 'int, handler: 'handler] {
   p ~> __tcp_listen__ [~, 128] ~> accept_loop [~, &h]
 }
 
-html = #'%html {
+html = #<'e>'%html<'e> {
   :doc "A 200 text/html response of the rendered tree (no doctype — see `page`)."
   %html.render $ ~> =Str[b]
   Response[
@@ -135,7 +135,7 @@ html = #'%html {
   ]
 }
 
-page = #'%html {
+page = #<'e>'%html<'e> {
   :doc "A 200 text/html response of the doctype-prefixed rendered tree — a whole page."
   %html.page $ ~> =Str[b]
   Response[

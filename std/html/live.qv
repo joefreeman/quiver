@@ -19,9 +19,10 @@
 // anchors are included: the form a patch applier needs for `SetHtml` payloads and the
 // initial region render. (`%html.render` on the tree stays clean of instrumentation.)
 
-'attr_val = '%html.attr_val
+// The frame-side attribute value: the tree's `'%html.attr_val<'e>` with events already
+// encoded to their %data notation — frames (and the wire) are event-type-erased.
+'attr_val = Str['bin] | Ok | []
 'statics = '%html.statics
-'holes = '%html.holes
 
 // === Session messages ===================================================================
 // Declared up front: boundary frames carry a view-spawning thunk typed against them.
@@ -105,21 +106,30 @@ rev = #<'t>['items<'t>, 'items<'t>] {
   }
 }
 
+// Encode an attribute value for its frame slot: an event becomes its %data notation —
+// the string the client echoes back — and literal values pass through.
+enc_attr = #<'e>'%html.attr_val<'e> {
+  | =Str[b] => Str[b]
+  | =Ok => Ok
+  | =Ev[_] => %data.encode $
+  | []
+}
+
 // A node's frame; self-passed to recurse into template slots.
-frame_of = #[#^ -> 'frame, '%html] {
+frame_of = #<'e>[#^ -> 'frame, '%html<'e>] {
   =[self, node]
   {
     | node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: &st]
-    | node:('%html.tmpl)template
+    | node:('%html.tmpl<'e>)template
       ~> =(statics: s, holes: h) => {
-        slots = #['holes, 'frames] {
+        slots = #['%html.holes<'e>, 'frames] {
           =[items, acc]
           items ~> {
             | =Nil => rev [acc, Nil]
             | =Cons[hd, t] => {
               f = hd ~> {
                 | =Child[n] => self [&self, n]
-                | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: v]
+                | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
               }
               ^ [t, Cons[f, acc]]
             }
@@ -132,7 +142,7 @@ frame_of = #[#^ -> 'frame, '%html] {
       // An un-annotated Fragment in a child slot is a node list: a Many of per-item
       // frames (chat items being their own templates diff granularly), each carrying
       // its optional `:key`.
-      row_frames = #['%html.nodes, 'rows] {
+      row_frames = #['%html.nodes<'e>, 'rows] {
         =[ns, acc]
         ns ~> {
           | =Nil => rev [acc, Nil]
@@ -147,8 +157,8 @@ frame_of = #[#^ -> 'frame, '%html] {
   }
 }
 
-frame = #'%html {
-  :doc "Derives a node tree's frame — the diffable shape of one render — from the :template provenance %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole)."
+frame = #<'e>'%html<'e> {
+  :doc "Derives a node tree's frame — the diffable shape of one render — from the :template provenance %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole); event attribute values are encoded to their %data notation, so frames are event-type-erased."
   frame_of [&frame_of, $]
 }
 
@@ -528,22 +538,26 @@ encode = #[Str['bin], 'patches] {
 
 // A view definition. `'i` is the mount init: the root view mounts from the HTTP
 // request; a child view mounts from whatever its parent's `child [comp, init, key]`
-// passes. `decode` receives the event payload — %data notation in the `Ev` envelope,
-// exactly as `on:*` holes encode it, so the common form is one line,
+// passes. Two event types: `'w` is the **wire** union — the `on:*` payloads the view's
+// markup carries (and the client echoes back) — and `'e` the **decoded** union `update`
+// folds. They usually coincide; they split when `decode` maps wire markers to richer
+// events (a form's `Submit` becoming `Add[text]` from the form pairs). `decode`
+// receives the wire payload — %data notation in the `Ev` envelope, exactly as `on:*`
+// holes encode it, so the common form is one line,
 // `decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 }` — and the form
 // pairs (empty for clicks; a submit's named fields, in the shape `%http`'s form helpers
 // read). `nav` re-derives state from a new URL without remounting — the root view's
 // live-navigation hook, receiving the raw request the app synthesized for the target; a
 // component that doesn't navigate omits it (the `_base` record) and gets an identity
 // `nav`.
-'component<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #[Str['bin], '%http.pairs] -> (Ev['e] | []), nav: #['s, '%http] -> 's]
-'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #[Str['bin], '%http.pairs] -> (Ev['e] | [])]
+'component<'i, 's, 'e, 'w> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html<'w>, decode: #[Str['bin], '%http.pairs] -> (Ev['e] | []), nav: #['s, '%http] -> 's]
+'component_base<'i, 's, 'e, 'w> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html<'w>, decode: #[Str['bin], '%http.pairs] -> (Ev['e] | [])]
 
 // Fill in a default (identity) `nav` when the record omits it, so most components —
 // which never navigate — stay four fields. Both the `component` constructor and the
 // `sim` harness normalize through this, so a `_base` record is accepted everywhere a
 // full one is.
-with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
+with_nav = #<'i, 's, 'e, 'w>('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>) {
   c = $
   {
     | c
@@ -563,7 +577,7 @@ with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
 
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
-render_view = #<'i, 's, 'e>['s, 'component<'i, 's, 'e>] {
+render_view = #<'i, 's, 'e, 'w>['s, 'component<'i, 's, 'e, 'w>] {
   =[state, comp]; %proc.track #{ state ~> comp.view } ~> frame
 }
 
@@ -628,7 +642,7 @@ nav_of = #Str['bin] {
 // Decode and fold one client event through `update`: a decode answering nil drops
 // the event (stale or forged — `update` never sees it) and answers the state
 // unchanged.
-fold_event = #<'i, 's, 'e>['s, 'component<'i, 's, 'e>, Str['bin], '%http.pairs] {
+fold_event = #<'i, 's, 'e, 'w>['s, 'component<'i, 's, 'e, 'w>, Str['bin], '%http.pairs] {
   =[state, comp, payload, pairs]
   {
     | comp.decode [payload, pairs] ~> =Ev[ev] => comp.update [state, ev]
@@ -911,7 +925,7 @@ as_frame = #'frame
 // One render step of a view: render, assign boundary vids, diff against the frame
 // the client holds, send the delta (an empty diff sends nothing), then execute the
 // reconcile. Answers [the new frame, the new kids, the next child ordinal].
-step_view = #<'i, 's, 'e>['s, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_msg, @'view_msg, 'kids, 'int] {
+step_view = #<'i, 's, 'e, 'w>['s, 'frame, 'component<'i, 's, 'e, 'w>, Str['bin], @'app_msg, @'view_msg, 'kids, 'int] {
   =[state, prev, comp, vid, app, me, kids, n]
   f2 = render_view [state, comp]
   ar = assign_bounds [collect_of [&collect_of, f2, Nil], kids, vid, n, Nil]
@@ -934,7 +948,7 @@ step_view = #<'i, 's, 'e>['s, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_m
 // corpse so reconcile won't quietly respawn a repeat offender. (A deliberate
 // kill's Down finds no tracked vid — the entry is removed before the kill — and
 // is dropped.)
-vlife = #<'i, 's, 'e>['vmode, 's, 'frame, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'kids, 'int, (Str['bin] | [])] {
+vlife = #<'i, 's, 'e, 'w>['vmode, 's, 'frame, 'component<'i, 's, 'e, 'w>, Str['bin], @'app_msg, 'kids, 'int, (Str['bin] | [])] {
   =[mode, state, f, comp, vid, app, kids, n, synced]
   me = &.
   !'view_msg ~> {
@@ -985,7 +999,7 @@ vlife = #<'i, 's, 'e>['vmode, 's, 'frame, 'component<'i, 's, 'e>, Str['bin], @'a
 // Settle: drain `Changed` in quiet-window steps, re-rendering after each burst,
 // until a window passes silently (or the deadline lapses). Answers the settled
 // frame. `left` is the remaining deadline budget.
-settle = #<'i, 's, 'e>['s, 'frame, 'component<'i, 's, 'e>, 'int] {
+settle = #<'i, 's, 'e, 'w>['s, 'frame, 'component<'i, 's, 'e, 'w>, 'int] {
   =[state, f, comp, left]
   {
     | %num.lt? [0, left] => ![#'%proc.changed, settle_quiet] ~> {
@@ -1005,7 +1019,7 @@ settle = #<'i, 's, 'e>['s, 'frame, 'component<'i, 's, 'e>, 'int] {
 // for a child. Children spawn strictly after the announcement, so their first
 // frames arrive behind the markup that holds their markers (or, at a dead render,
 // splice into it at the app).
-view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'vboot] {
+view_run = #<'i, 's, 'e, 'w>['i, 'component<'i, 's, 'e, 'w>, Str['bin], @'app_msg, 'vboot] {
   =[init, comp, vid, app, boot]
   // `&.` before any receiving call: taken later, its inferred send would be the
   // partially-widened receive (just the settle drain's `Changed`), which no longer
@@ -1042,8 +1056,8 @@ view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'vboo
 // runs it against the HTTP request instead of placing it. (The inner literal
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
-component = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
-  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` receives the `on:*` payload as %data notation in the `Ev` envelope, so the common form is `decode: #[Str['bin], '%http.pairs] \{ %data.decode<Ev['ev]> $0 }` (add a `nav: #['s, '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+component = #<'w, 'i, 's, 'e>('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>) {
+  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` receives the `on:*` payload as %data notation in the `Ev` envelope, so the common form is `decode: #[Str['bin], '%http.pairs] \{ %data.decode<Ev['ev]> $0 }` (add a `nav: #['s, '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the wire-event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode); pin the union `decode` reads when it maps wire markers to richer events. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
   comp = with_nav $
   #<'i>'place<'i> {
     i = $init
@@ -1139,7 +1153,7 @@ registry = #[] { Nil ~> @registry_loop }
 // the app consumes it through the boundary door (call it, take the spawn thunk off
 // the node, run it with the `Reply` boot), so components are one uniform currency,
 // root included, and the app record needs no type parameters.
-'root_view = #'place<'%http> -> '%html
+'root_view = #'place<'%http> -> '%html<[]>
 
 // An app: the server side of one page load. Further views are placed in view
 // markup, never declared here. The record carries the app's own registry (spawned
@@ -1151,8 +1165,8 @@ registry = #[] { Nil ~> @registry_loop }
 // case), or a root plus an `init` mapping deriving its mount init from the request
 // (the door to per-request state: the session cookie, query params, the path —
 // `init: #'%http { $ }` passes the request itself).
-'root_free = [root: #'place<[]> -> '%html]
-'root_mapped<'i> = [root: #'place<'i> -> '%html, init: #'%http -> 'i]
+'root_free = [root: #'place<[]> -> '%html<[]>]
+'root_mapped<'i> = [root: #'place<'i> -> '%html<[]>, init: #'%http -> 'i]
 
 app = #<'i>('root_free | 'root_mapped<'i>) {
   :doc "Declares an app — the unit `handle` serves. `[root: &comp]` names the root view (a placeable component from `component`, referenced with `&`), which mounts from nil; add `init: #'%http -> 'i` to derive the root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself). Further views are placed in view markup, not declared here. Spawns the app's parking registry, so create once at startup — the calling process owns it — and share the record with every `handle` call."
@@ -1572,17 +1586,17 @@ join = #['%http/websocket, '%http, 'root_view, @'reg_msg] {
 // process, so after stepping a store a test receives the wakeup itself
 // (`!'%proc.changed`) and then applies `sim_changed`, mirroring the view's select.
 
-'sim<'i, 's, 'e> = Sim[comp: 'component<'i, 's, 'e>, state: 's, frame: 'frame]
+'sim<'i, 's, 'e, 'w> = Sim[comp: 'component<'i, 's, 'e, 'w>, state: 's, frame: 'frame]
 
-sim = #<'i, 's, 'e>['i, ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>)] {
-  :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`."
+sim = #<'w, 'i, 's, 'e>['i, ('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>)] {
+  :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`. Pin the wire-event type — `sim<'ev> [...]` — to compile-check the view's `on:*` payloads."
   =[init, cfg]
   comp = with_nav cfg
   state = comp.mount init
   Sim[comp: comp, state: state, frame: render_view [state, comp]]
 }
 
-sim_text = #<'i, 's, 'e>['sim<'i, 's, 'e>, Str['bin]] {
+sim_text = #<'i, 's, 'e, 'w>['sim<'i, 's, 'e, 'w>, Str['bin]] {
   :doc "Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, [[name, value], …]]` — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the state untouched, exactly as the live path drops them."
   =[s, text]
   s ~> =Sim(comp: comp, state: state, frame: prev)
@@ -1596,7 +1610,7 @@ sim_text = #<'i, 's, 'e>['sim<'i, 's, 'e>, Str['bin]] {
   }
 }
 
-sim_event = #<'i, 's, 'e>['sim<'i, 's, 'e>, 'e] {
+sim_event = #<'i, 's, 'e, 'w>['sim<'i, 's, 'e, 'w>, 'e] {
   :doc "Feeds a sim one already-decoded event, straight to `update` — the app-level step, for asserting `update`/`view` behavior without wire shapes. Answers `[sim2, patches]` (`Nil` when the render's diff is empty — the empty-frame suppression seam)."
   =[s, ev]
   s ~> =Sim(comp: comp, state: state, frame: prev)
@@ -1605,14 +1619,14 @@ sim_event = #<'i, 's, 'e>['sim<'i, 's, 'e>, 'e] {
   [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
 }
 
-sim_changed = #<'i, 's, 'e>'sim<'i, 's, 'e> {
+sim_changed = #<'i, 's, 'e, 'w>'sim<'i, 's, 'e, 'w> {
   :doc "The wakeup path: re-render and diff against the sim's frame, as the loop does after a `'%proc.changed` wakeup from a sampled store. Answers `[sim2, patches]`. The wakeup itself is the caller's to receive (`!'%proc.changed`) — the sim's tracked renders subscribed the calling process."
   =Sim(comp: comp, state: state, frame: prev)
   f2 = render_view [state, comp]
   [Sim[comp: comp, state: state, frame: f2], diff [prev, f2]]
 }
 
-sim_html = #<'i, 's, 'e>'sim<'i, 's, 'e> {
+sim_html = #<'i, 's, 'e, 'w>'sim<'i, 's, 'e, 'w> {
   :doc "The sim's current region HTML (instrumented, as a live client's DOM shows it)."
   =Sim(frame: f); render f
 }

@@ -16,7 +16,7 @@ fn test_template_provenance_is_attached() {
         .evaluate(
             r#"u = [name: "Ada", on?: Ok]
                t = u ~> %html{ <div class="x" hidden={~.on?}>Hi {~.name}!</div> }
-               t:('%html.tmpl)template"#,
+               t:('%html.tmpl<[]>)template"#,
         )
         .expect(
             r#"[statics: Cons["<div data-q=\"0\" class=\"x\"", Cons[">Hi <!--q:1-->", Cons["<!--/q:1-->!</div>", Nil]]], holes: Cons[Attr[elem: 0, name: "hidden", value: Ok], Cons[Child[Text["Ada"]], Nil]]]"#,
@@ -151,7 +151,7 @@ fn test_diff_list_append_emits_one_ins_row() {
     quiver()
         .evaluate(
             r#"item = #Str['bin] { %html{ <li>{$}</li> } }
-               view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[item "a", Cons[item "b", Nil]] ~> view ~> %html/live.frame
                f2 = Cons[item "a", Cons[item "b", Cons[item "c", Nil]]] ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -167,7 +167,7 @@ fn test_diff_list_truncate_emits_del_rows_at_fixed_index() {
     // the rest down, so sequential application is correct.
     quiver()
         .evaluate(
-            r#"view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+            r#"view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[%html.text "a", Cons[%html.text "b", Cons[%html.text "c", Nil]]] ~> view ~> %html/live.frame
                f2 = Cons[%html.text "a", Nil] ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -194,7 +194,7 @@ fn test_row_frames_carry_key_annotations() {
 fn test_encode_row_ops() {
     quiver()
         .evaluate(
-            r#"view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+            r#"view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[%html.text "a", Nil] ~> view ~> %html/live.frame
                f2 = Cons[%html.text "a", Cons[%html.text "b", Nil]] ~> view ~> %html/live.frame
                f3 = Cons[%html.text "a", Nil] ~> view ~> %html/live.frame
@@ -363,7 +363,7 @@ fn test_keyed_reorder_emits_one_move() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[it ["b", "b"], Cons[it ["c", "c"], Nil]]] ~> view ~> %html/live.frame
                f2 = Cons[it ["c", "c"], Cons[it ["a", "a"], Cons[it ["b", "b"], Nil]]] ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -376,7 +376,7 @@ fn test_keyed_middle_removal_is_one_del() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[it ["b", "b"], Cons[it ["c", "c"], Nil]]] ~> view ~> %html/live.frame
                f2 = Cons[it ["a", "a"], Cons[it ["c", "c"], Nil]] ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -389,7 +389,7 @@ fn test_keyed_middle_insert_is_one_ins() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[it ["c", "c"], Nil]] ~> view ~> %html/live.frame
                f2 = Cons[it ["a", "a"], Cons[it ["b", "b"], Cons[it ["c", "c"], Nil]]] ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -405,7 +405,7 @@ fn test_keyed_kept_row_patches_in_place() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "old"], Nil] ~> view ~> %html/live.frame
                f2 = Cons[it ["a", "new"], Nil] ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -421,7 +421,7 @@ fn test_mixed_keys_fall_back_to_positional() {
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
                un = #Str['bin] { %html{ <li>{$}</li> } }
-               view = #'%html.nodes { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[un "b", Nil]] ~> view ~> %html/live.frame
                f2 = Cons[un "b", Cons[it ["a", "a"], Nil]] ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -591,4 +591,87 @@ fn test_sim_changed_rerenders_after_store_step() {
                [w, ps]"#,
         )
         .expect(r#"[Woke, Cons[SetText[path: Cons[0, Nil], value: "7"], Nil]]"#);
+}
+
+#[test]
+fn test_pinned_component_rejects_stray_event_payload() {
+    // `component<'ev>` pins the wire-event type: a view emitting a payload outside the
+    // pinned union is a compile error naming the offending event (unpinned, the
+    // inferred union would silently widen and the payload only be dropped at decode).
+    quiver()
+        .evaluate(
+            r#"'ev = Inc | Dec
+               bad = %html/live.component<'ev> [
+                 mount: #[] { 0 },
+                 update: #['int, 'ev] { $0 },
+                 view: #'int { %html{ <button on:click={Bogus}>+</button> } },
+                 decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
+               ]
+               Ok"#,
+        )
+        .expect_error_containing("Bogus does not fit Dec | Inc");
+}
+
+#[test]
+fn test_pinned_component_accepts_matching_events() {
+    // The positive half: a pinned component whose payloads all fit compiles, and the
+    // sim round-trips an event through the same seams.
+    quiver()
+        .evaluate(
+            r#"'ev = Inc | Dec
+               c = %html/live.component<'ev> [
+                 mount: #[] { 0 },
+                 update: #['int, 'ev] { =[n, e]; e ~> { | =Inc => %num.add [n, 1] | %num.sub [n, 1] } },
+                 view: #'int { %html{ <button on:click={Inc}>{$}</button> } },
+                 decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
+               ]
+               Ok"#,
+        )
+        .expect("Ok");
+}
+
+#[test]
+fn test_wire_and_decoded_event_types_may_differ() {
+    // The two event parameters split when decode maps wire markers to richer events:
+    // the view's payloads check against the pinned *wire* union, while `update` folds
+    // the decoded one (a submit's text arrives in the form pairs, so only decode can
+    // build `Add`).
+    quiver()
+        .evaluate(
+            r#"'wire = Submit | Del['int]
+               'cmd = Add[Str['bin]] | Del['int]
+               s = %html/live.sim [[], [
+                 mount: #[] { "start" },
+                 update: #[Str['bin], 'cmd] { =[_, c]; c ~> { | =Add[Str[t]] => Str[t] | "deleted" } },
+                 view: #Str['bin] { %html{ <form on:submit={Submit}><b>{$}</b></form> } },
+                 decode: #[Str['bin], '%http.pairs] {
+                   =[t, form]
+                   %data.decode<Ev['wire]> t ~> =Ev[w]
+                   w ~> {
+                     | =Submit => { %http.get [form, "t"] ~> =Str[x]; Ev[Add[Str[x]]] }
+                     | =Del[id] => Ev[Del[id]]
+                   }
+                 },
+               ]]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Submit]\", [[\"t\", \"typed\"]]]"] ~> =[_, ps]
+               ps"#,
+        )
+        .expect(r#"Cons[SetText[path: Cons[1, Nil], value: "typed"], Nil]"#);
+}
+
+#[test]
+fn test_event_attribute_frames_encode_to_data_notation() {
+    // Frames are event-type-erased: an `on:*` hole's `Ev` value is encoded to its
+    // %data notation at frame derivation, so an event change patches as a plain
+    // attribute string.
+    quiver()
+        .evaluate(
+            r#"view = #'int { %html{ <button on:click={Del[$]}>x</button> } }
+               f1 = 1 ~> view ~> %html/live.frame
+               f2 = 2 ~> view ~> %html/live.frame
+               %html/live.diff [f1, f2]"#,
+        )
+        .expect(
+            r#"Cons[SetAttr[path: Cons[0, Nil], elem: 0, name: "data-q-click", value: "Ev[Del[2]]"], Nil]"#,
+        );
 }
