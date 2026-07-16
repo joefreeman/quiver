@@ -152,3 +152,21 @@ fn test_self_tail_call_checks_declared_parameter_not_narrowed() {
         )
         .expect("6");
 }
+
+#[test]
+fn test_bare_tail_call_checks_argument_arity() {
+    // A bare `^` self tail-call's argument is checked against the function's own
+    // parameter: a wrong-arity tuple is a compile error, not a runtime field fault.
+    quiver()
+        .evaluate(
+            r#"f = #['int, 'int] {
+                 =[a, b]
+                 { | a ~> =0 => b | ^ [a] }
+               }
+               f [2, 5]"#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "function parameter compatible with ['int, 'int]".to_string(),
+            found: "['int]".to_string(),
+        });
+}

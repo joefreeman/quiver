@@ -509,7 +509,19 @@ fn type_check_requirements(
     for member in members {
         let resolved = super::typing::resolve_ast_type(env, scopes, member.clone(), program)?;
         let next = intersect_types(narrowed, resolved, program);
-        if !(is_compatible(narrowed, resolved, program) && next == narrowed) {
+        // Elide the runtime check only when the scrutinee *provably* fits: identical
+        // ids always do, and otherwise `is_compatible` can vouch only for cycle-free
+        // operands — it traverses a `Cycle` optimistically, so trusting it on a
+        // recursive scrutinee elided load-bearing checks (an `=(I['int])s` ascription
+        // on a `(^ | Lb['int])`-typed binding matched an `Lb`). The emitted `IsType`'s
+        // runtime set is computed with the full cycle-aware machinery, so keeping the
+        // check is exact, merely occasionally redundant.
+        let provable = narrowed == resolved
+            || (!super::narrowing::has_cycles(narrowed, program)
+                && !super::narrowing::has_cycles(resolved, program)
+                && is_compatible(narrowed, resolved, program)
+                && next == narrowed);
+        if !provable {
             requirements.push(Requirement {
                 path: path.clone(),
                 check: RuntimeCheck::TypeId(resolved),
@@ -636,8 +648,19 @@ fn analyze_match_tuple_pattern(
         // We need a runtime check if value_type is a union (even if it contains only one tuple type)
         // because the value could be a non-tuple type (like int or bin)
         if is_union(value_type_id, program) || matching_types.len() > 1 {
-            // Need to check the type at runtime since value could be one of multiple types
-            let tuple_type_id = program.register_type(Type::Tuple(*tuple_id));
+            // Need to check the type at runtime since value could be one of multiple
+            // types. Test against the *declared* scrutinee's same-shaped member where
+            // one exists: a complement-narrowed member's field types would wrongly
+            // reject a value whose tuple id carries the declared (wider) field type
+            // (see `declared_shape_witness`).
+            let check_tuple_id = super::narrowing::declared_shape_witness(
+                scopes,
+                value_provenance,
+                *tuple_id,
+                program,
+            )
+            .unwrap_or(*tuple_id);
+            let tuple_type_id = program.register_type(Type::Tuple(check_tuple_id));
             base_requirements.push(Requirement {
                 path: path.clone(),
                 check: RuntimeCheck::TypeId(tuple_type_id),
@@ -654,10 +677,14 @@ fn analyze_match_tuple_pattern(
             let field = &tuple.fields[*pattern_idx];
             let raw_field_type_id = tuple_fields[*actual_idx];
 
-            // Resolve Type::Cycle references to the actual type.
-            // Only Cycle(1) points to the immediate boundary (the scrutinee's union).
-            // Higher depths point to outer boundaries (e.g., enclosing function types)
-            // and should be kept as-is since they refer to types outside this tuple.
+            // Close the field type's `Cycle` references against the scrutinee boundary,
+            // so a binding (or sub-pattern) taken from a recursive position carries a
+            // self-contained type: `Cycle(1)` is the scrutinee's own union, and deeper
+            // references *through* a nested union field (e.g. a list element's `^`
+            // reaching the enclosing definition's root) close one boundary further out.
+            // A dangling cycle would make every later match on the binding statically
+            // dead — the recorded inner-recursive-union bug. Cycles beyond the known
+            // context (enclosing function boundaries) are kept as-is.
             //
             // Resolve against the scrutinee's *declared* type rather than `value_type_id`: the
             // field's type is the recursion boundary fixed by the type definition, but
@@ -669,21 +696,18 @@ fn analyze_match_tuple_pattern(
             // Only the top-level scrutinee (`path` empty) can be complement-narrowed; at nested
             // depths `value_type_id` is the already-resolved field type, which is the correct
             // boundary. So consult the declared type only at the top level.
+            let boundary = if path.is_empty() {
+                super::narrowing::get_declared_type_for_provenance(
+                    scopes,
+                    value_provenance,
+                    program,
+                )
+                .unwrap_or(value_type_id)
+            } else {
+                value_type_id
+            };
             let mut field_type_id =
-                if let Some(Type::Cycle(1)) = program.lookup_type(raw_field_type_id) {
-                    if path.is_empty() {
-                        super::narrowing::get_declared_type_for_provenance(
-                            scopes,
-                            value_provenance,
-                            program,
-                        )
-                        .unwrap_or(value_type_id)
-                    } else {
-                        value_type_id
-                    }
-                } else {
-                    raw_field_type_id
-                };
+                super::narrowing::close_cycles(raw_field_type_id, boundary, program);
 
             let mut field_path = path.clone();
             field_path.push(Access::Position(*actual_idx));
@@ -719,10 +743,13 @@ fn analyze_match_tuple_pattern(
                 break;
             }
 
-            // Record the field's narrowed type for the reconstructed tuple. Recursive `Cycle(1)`
-            // fields keep their original reference rather than the resolved value type, to avoid
-            // materializing an infinite type.
-            if !matches!(program.lookup_type(raw_field_type_id), Some(Type::Cycle(1))) {
+            // Record the field's narrowed type for the reconstructed tuple. Cycle-bearing
+            // fields keep their original reference rather than the resolved (closed)
+            // type: the reconstructed type feeds coverage/complement computation, which
+            // must recognize the branch as covering the original member — a closed
+            // field would read as a *different* recursive type and break exhaustiveness
+            // (and a direct `Cycle(1)` would materialize an infinite type).
+            if !super::narrowing::has_cycles(raw_field_type_id, program) {
                 narrowed_fields[*actual_idx].1 = field_narrowed_type_id;
             }
 
@@ -954,9 +981,19 @@ fn analyze_partial_pattern(
                 tuple_id,
                 field_indices,
             } => {
-                // Add type check if the value could be multiple types
+                // Add type check if the value could be multiple types. As in the tuple
+                // pattern above, a complement-narrowed member's id would wrongly reject
+                // values carrying the declared field types, so the declared same-shaped
+                // member is the test's witness where one exists.
                 if needs_type_check {
-                    let tuple_type_id = program.register_type(Type::Tuple(*tuple_id));
+                    let check_tuple_id = super::narrowing::declared_shape_witness(
+                        scopes,
+                        value_provenance,
+                        *tuple_id,
+                        program,
+                    )
+                    .unwrap_or(*tuple_id);
+                    let tuple_type_id = program.register_type(Type::Tuple(check_tuple_id));
                     requirements.push(Requirement {
                         path: path.clone(),
                         check: RuntimeCheck::TypeId(tuple_type_id),
@@ -1050,9 +1087,11 @@ fn analyze_partial_pattern(
                     break;
                 }
 
-                // Record the field's narrowed type for the reconstructed variant. Leave recursive
-                // `Cycle(1)` fields alone to avoid materializing an infinite type.
-                if !matches!(program.lookup_type(field_type_id), Some(Type::Cycle(1))) {
+                // Record the field's narrowed type for the reconstructed variant. Leave
+                // cycle-bearing fields alone: the reconstruction feeds coverage/
+                // complement computation, which must recognize the original member
+                // (and a direct `Cycle(1)` would materialize an infinite type).
+                if !super::narrowing::has_cycles(field_type_id, program) {
                     fields[idx].1 = field_narrowed_type_id;
                 }
 

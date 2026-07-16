@@ -1309,14 +1309,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(var) => scopes::lookup_variable(&self.scopes, var, &[]).map(|(ty, _)| ty)?,
             None => ripple_context?.value_type_id,
         };
+        // The source may be a union — e.g. an ascribed response alongside a fallback,
+        // whose constructions intern as distinct tuple ids: every member sharing one
+        // name inherits it; mixed (or missing) names inherit none.
         let source_type = Type::strip_annotations(source_type, &*self.program);
-        match self.program.lookup_type(source_type) {
-            Some(Type::Tuple(tuple_id)) => self
-                .program
-                .lookup_tuple(*tuple_id)
-                .and_then(|t| t.name.clone()),
-            _ => None,
+        let members = match self.program.lookup_type(source_type) {
+            Some(Type::Union(members)) => members.clone(),
+            _ => vec![source_type],
+        };
+        let mut name: Option<String> = None;
+        for member in members {
+            let stripped = Type::strip_annotations(member, &*self.program);
+            let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(stripped) else {
+                return None;
+            };
+            let member_name = self.program.lookup_tuple(*tuple_id)?.name.clone()?;
+            match &name {
+                None => name = Some(member_name),
+                Some(existing) if *existing == member_name => {}
+                _ => return None,
+            }
         }
+        name
     }
 
     fn compile_tuple(
@@ -5373,6 +5387,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Match requires a value".to_string())
                 })?;
+                // In a value position (gating == false) a fallible match's verdict is
+                // data and gates nothing, so its bindings could never be relied on.
+                // The chain loop enforces this for chain terms; this covers a match
+                // reaching here as a bare term — e.g. an application argument
+                // (`f =(T)x`), where the silent alternative was a nil-filled binding.
+                let mut value_position_bindings = Vec::new();
+                if on_no_match.is_none() && !gating {
+                    collect_binding_spans(&pattern, &mut value_position_bindings);
+                }
                 let ty = self.compile_match(
                     pattern,
                     val_type,
@@ -5382,6 +5405,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     narrowing,
                     gating,
                 )?;
+                if !value_position_bindings.is_empty() && self.contains_nil(ty) {
+                    return Err(Error::FallibleMatchBindingsInValueChain {
+                        bindings: value_position_bindings
+                            .into_iter()
+                            .map(|(n, _)| n)
+                            .collect(),
+                    });
+                }
                 // Preserve the matched value's provenance: a chain/branch that follows a
                 // `=PATTERN` still narrows the original value (the match recorded its structural
                 // narrowing against this provenance inside `compile_match`). The term now yields

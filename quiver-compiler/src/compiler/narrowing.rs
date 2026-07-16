@@ -270,6 +270,142 @@ pub fn get_declared_type_for_provenance(
     }
 }
 
+/// Whether a type transitively contains a `Cycle` node (i.e. is recursive) — the public
+/// guard for every compile-time decision that trusts `is_compatible`/`types_overlap`:
+/// those traverse a `Cycle` optimistically, so a verdict over a cycle-bearing type must
+/// not elide a runtime check or subtract from a complement.
+pub fn has_cycles(type_id: usize, program: &Program) -> bool {
+    contains_cycle(type_id, program, &mut Vec::new())
+}
+
+/// Re-root a type that is escaping its boundary context: `Cycle` references pointing
+/// *above* the type's own root are replaced with the enclosing boundary types they
+/// referred to (innermost last in `enclosing`), so the type stays meaningful on its
+/// own. This is what keeps a binding taken from a recursive position matchable later:
+/// a list element's `^` (the enclosing definition's root) would otherwise dangle once
+/// the binding leaves the match that knew the root, and every later pattern against it
+/// would be statically dead. Internal cycles (resolving within the walked type) are
+/// kept, as are ones reaching beyond the provided context and anything inside callable
+/// or process types (function-boundary cycles are a different numbering).
+pub fn close_cycles(type_id: usize, boundary: usize, program: &mut Program) -> usize {
+    // A *top-level* `Cycle(1)` is the immediate self-reference and resolves to the
+    // scrutinee root whatever its kind — including the `#[&f, …]` self-recursion
+    // tuples, whose fields refer to the (non-union) parameter tuple itself.
+    if let Some(Type::Cycle(1)) = program.lookup_type(type_id) {
+        return boundary;
+    }
+    // Descending, only a *union* root is a boundary the registered depths count
+    // (parameter-position types register cycles one boundary further out, so a
+    // non-union root would mis-close references that actually target the enclosing
+    // function boundary — those stay dangling, as before).
+    if matches!(program.lookup_type(boundary), Some(Type::Union(_))) {
+        close_cycles_at(type_id, &[boundary], 0, program)
+    } else {
+        type_id
+    }
+}
+
+fn close_cycles_at(
+    type_id: usize,
+    enclosing: &[usize],
+    self_depth: usize,
+    program: &mut Program,
+) -> usize {
+    let Some(typ) = program.lookup_type(type_id).cloned() else {
+        return type_id;
+    };
+    match typ {
+        Type::Cycle(n) => {
+            if n <= self_depth {
+                // Resolves within the walked type: still meaningful, keep.
+                type_id
+            } else {
+                let outer = n - self_depth;
+                if outer <= enclosing.len() {
+                    enclosing[enclosing.len() - outer]
+                } else {
+                    // Beyond the known context (e.g. an enclosing function boundary).
+                    type_id
+                }
+            }
+        }
+        // Unions are the boundaries cycles count.
+        Type::Union(members) => {
+            let new_members: Vec<usize> = members
+                .iter()
+                .map(|&m| close_cycles_at(m, enclosing, self_depth + 1, program))
+                .collect();
+            if new_members == members {
+                type_id
+            } else {
+                // Register structurally (no flatten/dedup): nested unions are the
+                // boundaries inner cycles count, so canonicalization would corrupt
+                // their depths.
+                program.register_type(Type::Union(new_members))
+            }
+        }
+        Type::Tuple(tuple_id) => {
+            let Some(info) = program.lookup_tuple(tuple_id).cloned() else {
+                return type_id;
+            };
+            let new_fields: Vec<(Option<String>, usize)> = info
+                .fields
+                .iter()
+                .map(|(label, field)| {
+                    (
+                        label.clone(),
+                        close_cycles_at(*field, enclosing, self_depth, program),
+                    )
+                })
+                .collect();
+            if new_fields == info.fields {
+                type_id
+            } else {
+                let new_tuple = program.register_tuple(info.name.clone(), new_fields);
+                program.register_type(Type::Tuple(new_tuple))
+            }
+        }
+        Type::Partial { name, fields } => {
+            let new_fields: Vec<(String, usize)> = fields
+                .iter()
+                .map(|(label, field)| {
+                    (
+                        label.clone(),
+                        close_cycles_at(*field, enclosing, self_depth, program),
+                    )
+                })
+                .collect();
+            if new_fields == fields {
+                type_id
+            } else {
+                program.register_type(Type::Partial {
+                    name,
+                    fields: new_fields,
+                })
+            }
+        }
+        Type::Annotated {
+            base,
+            exact,
+            entries,
+        } => {
+            let new_base = close_cycles_at(base, enclosing, self_depth, program);
+            if new_base == base {
+                type_id
+            } else {
+                program.register_type(Type::Annotated {
+                    base: new_base,
+                    exact,
+                    entries,
+                })
+            }
+        }
+        // Function-boundary cycles inside callables/processes use their own numbering;
+        // primitives carry nothing to close.
+        _ => type_id,
+    }
+}
+
 /// Whether a type transitively contains a `Cycle` node (i.e. is recursive). Used to gate the
 /// structural narrowing operations, which would otherwise call `is_compatible`/`types_overlap`
 /// on a bare `Cycle` — those answer optimistically without the enclosing `type_stack`, which is
@@ -747,6 +883,70 @@ pub fn get_field_narrowing(
             .find(|(prov, idx, _)| prov == provenance && *idx == field_idx)
             .map(|(_, _, ty)| *ty)
     })
+}
+
+/// The **declared** scrutinee's same-shaped tuple member, as the id a union
+/// discriminator's runtime test should use in place of a complement-narrowed one.
+///
+/// A branch's complement refines a wrapped union member's *field types* (`Ev['w]`
+/// minus `Ev[A]` is `Ev[B | C]`), but a runtime value's tuple id still carries the
+/// declared field type (`Ev['w]`), and the id-level `IsType` test computed from the
+/// narrowed member would wrongly reject it — a later sibling pattern then misses
+/// values it must match (the field sub-checks, which do the real member
+/// discrimination, never run). The discriminator's job is only to separate this
+/// member's *shape* from the union's other members, so it tests against the declared
+/// type's member with the same name and field labels. When several declared members
+/// share a shape the deep test is what tells them apart, so only a unique shape
+/// answers; `None` keeps the caller's (narrowed) id and today's behavior.
+pub fn declared_shape_witness(
+    scopes: &[Scope],
+    provenance: &Provenance,
+    tuple_id: usize,
+    program: &mut Program,
+) -> Option<usize> {
+    let declared = get_declared_type_for_provenance(scopes, provenance, program)?;
+    let target = program.lookup_tuple(tuple_id)?.clone();
+    let mut witness = None;
+    for member_tuple_id in tuple_members_of(declared, program) {
+        let Some(info) = program.lookup_tuple(member_tuple_id) else {
+            continue;
+        };
+        let same_shape = info.name == target.name
+            && info.fields.len() == target.fields.len()
+            && info
+                .fields
+                .iter()
+                .zip(&target.fields)
+                .all(|((label, _), (target_label, _))| label == target_label);
+        if same_shape {
+            if witness.is_some() {
+                return None;
+            }
+            witness = Some(member_tuple_id);
+        }
+    }
+    witness
+}
+
+/// The tuple ids a type's values can carry at its top level: union members and
+/// annotation rows are seen through (one flat level — unions intern flattened).
+fn tuple_members_of(type_id: usize, program: &Program) -> Vec<usize> {
+    fn base_tuple(type_id: usize, program: &Program) -> Option<usize> {
+        match program.lookup_type(type_id)? {
+            Type::Tuple(tuple_id) => Some(*tuple_id),
+            Type::Annotated { base, .. } => base_tuple(*base, program),
+            _ => None,
+        }
+    }
+    match program.lookup_type(type_id) {
+        Some(Type::Union(members)) => members
+            .clone()
+            .into_iter()
+            .filter_map(|m| base_tuple(m, program))
+            .collect(),
+        Some(Type::Annotated { base, .. }) => tuple_members_of(*base, program),
+        _ => base_tuple(type_id, program).into_iter().collect(),
+    }
 }
 
 /// Record a field narrowing for a provenance.

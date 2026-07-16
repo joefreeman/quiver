@@ -220,3 +220,34 @@ fn test_identifier_spread_with_ripple_replacing_multiple_fields() {
         .evaluate("a = A[x: 1, y: 2, z: 3]; 99 ~> a[..., y: ~, z: ~]")
         .expect("A[x: 1, y: 99, z: 99]");
 }
+
+#[test]
+fn test_name_inheriting_spread_over_union_source() {
+    // A name-inheriting spread whose source is a *union* — e.g. an ascribed value
+    // alongside a fallback, whose constructions intern as distinct tuple ids — keeps
+    // the shared name in its TYPE (the value always kept it): every member named
+    // `Response` means the result is a `Response`, so name-matched calls compile.
+    quiver()
+        .evaluate(
+            r#"'hdrs = Nil | Cons[Str['bin], ^]
+               'r = Response[status: 'int, headers: 'hdrs]
+               check = #'r { $status }
+               f = #('int | []) {
+                 resp = $ ~> { =('int)s => Response[status: s, headers: Nil] | Response[status: 500, headers: Cons["a", Nil]] }
+                 resp ~> ~[..., status: 201] ~> check
+               }
+               f 200"#,
+        )
+        .expect("201");
+    // Mixed names inherit none: the unnamed result is a type error at a named call.
+    quiver()
+        .evaluate(
+            r#"check = #Response(status: 'int) { $status }
+               f = #('int | []) {
+                 v = $ ~> { =('int)s => Response[status: s] | Other[status: 500] }
+                 v ~> ~[..., status: 201] ~> check
+               }
+               f 200"#,
+        )
+        .expect_type_mismatch();
+}

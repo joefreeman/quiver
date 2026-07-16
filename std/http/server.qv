@@ -90,11 +90,9 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
             | r ~> =('%http.response)ok => ok
             | plain [500, "Internal Server Error"]
           }
-          // (Explicit construction, not `resp ~[..., …]`: ripple-spread currently types its
-          // result as an unnamed tuple even though the value keeps its name — TODO compiler.)
           resp2 = {
-            | req.method ~> =HEAD => Response[
-              status: resp.status,
+            | req.method ~> =HEAD => resp ~> ~[
+              ...,
               headers: Cons[
                 ["content-length", %bin.length resp.body ~> %str.from_int],
                 resp.headers,

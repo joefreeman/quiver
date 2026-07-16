@@ -1069,3 +1069,137 @@ fn test_guarded_branch_does_not_count_as_coverage() {
         )
         .expect("[Fallthrough, IsM]");
 }
+
+#[test]
+fn test_nil_bearing_wrapped_union_sibling_dispatch() {
+    // A nil-bearing scrutinee wrapping a union — `(Ev['w] | [])`, the shape every
+    // `%data`-decoded event has — dispatched by sibling patterns on the wrapped field.
+    // The first branch's complement must not poison the later branches' runtime tests:
+    // a value whose tuple id carries the FULL union field type still holds any member,
+    // so every sibling must stay reachable.
+    quiver()
+        .evaluate(
+            r#"
+            'w = A | B['int] | C['int];
+            mk = #'w { Ev[$] };
+            f = #(Ev['w] | []) {
+              $ ~> {
+                | =Ev[A] => X
+                | =Ev[B[n]] => Y[n]
+                | =Ev[C[n]] => Z[n]
+                | Missed
+              }
+            };
+            [mk A ~> f, mk B[1] ~> f, mk C[2] ~> f, [] ~> f]
+            "#,
+        )
+        .expect("[X, Y[1], Z[2], Missed]");
+}
+
+#[test]
+fn test_nil_bearing_wrapped_union_dispatch_without_empty_member() {
+    // The same shape with no bare-named member and the matching value arriving at the
+    // SECOND branch — the minimal form of the miss (any non-first sibling missed).
+    quiver()
+        .evaluate(
+            r#"
+            'w = B['int] | C['int];
+            mk = #'w { Ev[$] };
+            f = #(Ev['w] | []) {
+              $ ~> {
+                | =Ev[B[n]] => Y[n]
+                | =Ev[C[n]] => Z[n]
+                | Missed
+              }
+            };
+            [mk C[2] ~> f]
+            "#,
+        )
+        .expect("[Z[2]]");
+}
+
+#[test]
+fn test_ascription_through_recursive_union_is_checked() {
+    // The checked ascription `=(T)s` on a binding typed by an inner recursive union
+    // (`^ | Lb['int]`) must keep its runtime test: `is_compatible` traverses a `Cycle`
+    // optimistically, and eliding on its verdict matched an `Lb` value against
+    // `I['int]` (and bound `s`, typed `I['int]`, to it — the recorded over-match).
+    quiver()
+        .evaluate(
+            r#"
+            'e = I['int] | T[(Nil | Cons[(^ | Lb['int]), ^1])]
+            f = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> { =(I['int])s => Matched[s] | Failed } }
+            [f T[Cons[Lb[5], Nil]], f T[Cons[I[9], Nil]]]
+            "#,
+        )
+        .expect("[Failed, Matched[I[9]]]");
+    // The step-position form gates its sequence the same way.
+    quiver()
+        .evaluate(
+            r#"
+            'e = I['int] | T[(Nil | Cons[(^ | Lb['int]), ^1])]
+            g = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> =(I['int])s; Reached[s] }
+            [g T[Cons[Lb[5], Nil]], g T[Cons[I[9], Nil]]]
+            "#,
+        )
+        .expect("[[], Reached[I[9]]]");
+}
+
+#[test]
+fn test_patterns_on_bindings_from_recursive_positions() {
+    // Values bound out of recursive positions (a list element typed by the inner
+    // recursive reference) must match — and NOT over-match — in later patterns,
+    // without the declared-parameter re-rooting idiom.
+    quiver()
+        .evaluate(
+            r#"
+            'j = N | S[Str['bin]] | A[(Nil | Cons[^, ^1])]
+            f = #'j {
+              $ ~> =A[es]
+              es ~> =Cons[el, _]
+              el ~> { =S[s] => Got[s] | Other }
+            }
+            [f A[Cons[S["x"], Nil]], f A[Cons[N, Nil]]]
+            "#,
+        )
+        .expect(r#"[Got["x"], Other]"#);
+    // The nested one-shot form of the same match.
+    quiver()
+        .evaluate(
+            r#"
+            'j = N | S[Str['bin]] | A[(Nil | Cons[^, ^1])]
+            f = #'j { $ ~> { =A[Cons[S[s], Nil]] => Got[s] | Other } }
+            [f A[Cons[S["x"], Nil]], f A[Cons[N, Nil]], f N]
+            "#,
+        )
+        .expect(r#"[Got["x"], Other, Other]"#);
+}
+
+#[test]
+fn test_checked_annotation_gate_on_recursive_entry() {
+    // A checked retrieval whose entry's type is recursive must keep its runtime gate:
+    // an optimistic `is_compatible` would have elided it and answered the entry as the
+    // asked shape.
+    quiver()
+        .evaluate(
+            r#"
+            x = P[v: 1] ~> { :k Cons[1, Nil] }
+            x:(Str['bin])k ~> { =Str[_] => WronglyStr | CorrectNil }
+            "#,
+        )
+        .expect("CorrectNil");
+}
+
+#[test]
+fn test_value_position_match_bindings_rejected_in_apply_argument() {
+    // A fallible match as an *application argument* is a value position: its verdict
+    // is data and gates nothing, so binding through it must be rejected — previously
+    // it compiled silently and the binding came out nil-filled.
+    quiver()
+        .evaluate(r#"v = Lb[5]; x = v =(I['int])s; Got[x, s]"#)
+        .expect_compile_error(
+            quiver_compiler::compiler::Error::FallibleMatchBindingsInValueChain {
+                bindings: vec!["s".to_string()],
+            },
+        );
+}

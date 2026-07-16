@@ -185,3 +185,30 @@ fn test_decode_through_reference_and_binding() {
         .evaluate(r#"d = &%data.decode<('int | Quit)>; d "Quit""#)
         .expect("Quit");
 }
+
+#[test]
+fn test_decoded_values_dispatch_through_sibling_patterns() {
+    // Decoded values are `(Ev['w] | [])`-typed and their tuple ids carry the full
+    // union field type; sibling patterns on the wrapped field must all stay reachable
+    // (regression: the first branch's complement used to poison the later branches'
+    // runtime tests — see tests/narrowing.rs for the code-built form).
+    quiver()
+        .evaluate(
+            r#"'wire = Submit | Toggle['int] | Del['int]
+               f = #(Ev['wire] | []) {
+                 $ ~> {
+                   | =Ev[Submit] => S
+                   | =Ev[Toggle[id]] => T[id]
+                   | =Ev[Del[id]] => D[id]
+                   | Missed
+                 }
+               }
+               [
+                 %data.decode<Ev['wire]> "Ev[Submit]" ~> f,
+                 %data.decode<Ev['wire]> "Ev[Toggle[1]]" ~> f,
+                 %data.decode<Ev['wire]> "Ev[Del[7]]" ~> f,
+                 %data.decode<Ev['wire]> "garbage" ~> f,
+               ]"#,
+        )
+        .expect("[S, T[1], D[7], Missed]");
+}
