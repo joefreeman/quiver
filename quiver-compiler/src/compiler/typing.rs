@@ -1149,6 +1149,123 @@ pub fn collect_type_variables(type_id: usize, lookup: &impl TypeLookup, names: &
 }
 
 /// Substitute type variables in a type with their bindings
+/// Collect the names of type variables occurring in `type_id`, split by variance
+/// relative to the root: a callable's parameter and a process's send clause flip the
+/// polarity; everything else preserves it.
+fn collect_variables_by_variance(
+    type_id: usize,
+    program: &Program,
+    covariant: bool,
+    co: &mut std::collections::HashSet<String>,
+    contra: &mut std::collections::HashSet<String>,
+) {
+    let Some(typ) = program.lookup_type(type_id) else {
+        return;
+    };
+    match typ {
+        Type::Variable(name) => {
+            if covariant {
+                co.insert(name.clone());
+            } else {
+                contra.insert(name.clone());
+            }
+        }
+        Type::Union(members) => {
+            for &member in members.clone().iter() {
+                collect_variables_by_variance(member, program, covariant, co, contra);
+            }
+        }
+        Type::Tuple(id) => {
+            if let Some(info) = program.lookup_tuple(*id) {
+                for (_, field) in info.fields.clone() {
+                    collect_variables_by_variance(field, program, covariant, co, contra);
+                }
+            }
+        }
+        Type::Partial { fields, .. } => {
+            for (_, field) in fields.clone() {
+                collect_variables_by_variance(field, program, covariant, co, contra);
+            }
+        }
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+            states,
+        } => {
+            let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
+            collect_variables_by_variance(parameter, program, !covariant, co, contra);
+            collect_variables_by_variance(result, program, covariant, co, contra);
+            collect_variables_by_variance(receive, program, covariant, co, contra);
+            if let Some(states) = states {
+                collect_variables_by_variance(states, program, covariant, co, contra);
+            }
+        }
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => {
+            let (send, receive, state) = (*send, *receive, *state);
+            if let Some(send) = send {
+                collect_variables_by_variance(send, program, !covariant, co, contra);
+            }
+            if let Some(receive) = receive {
+                collect_variables_by_variance(receive, program, covariant, co, contra);
+            }
+            if let Some(state) = state {
+                collect_variables_by_variance(state, program, covariant, co, contra);
+            }
+        }
+        Type::Annotated { base, entries, .. } => {
+            let base = *base;
+            let entries = entries.clone();
+            collect_variables_by_variance(base, program, covariant, co, contra);
+            for (_, value) in entries {
+                collect_variables_by_variance(value, program, covariant, co, contra);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Close a call result's unpinned type parameters: any variable the unification left
+/// unbound, occurring only covariantly in the result, is bound to the empty union — no
+/// value of that type was supplied, so the result provably can't produce one
+/// (`child "x"` yields a tree that carries no events). Left open instead: a variable
+/// with a contravariant occurrence (a returned function's own parameter must stay
+/// callable), and a variable carrying the enclosing generic's uniquification suffix —
+/// that one is *rigid* here, not the callee's to instantiate (calling a `'p<'t>`-typed
+/// parameter inside a generic body must keep `'t` in the result).
+pub fn close_unpinned_result(
+    result_id: usize,
+    bindings: &mut HashMap<String, usize>,
+    enclosing_suffix: Option<usize>,
+    program: &mut Program,
+) {
+    let mut co = std::collections::HashSet::new();
+    let mut contra = std::collections::HashSet::new();
+    collect_variables_by_variance(result_id, program, true, &mut co, &mut contra);
+    let rigid_marker = enclosing_suffix.map(|suffix| format!("#{suffix}"));
+    let unpinned: Vec<String> = co
+        .into_iter()
+        .filter(|name| {
+            !contra.contains(name)
+                && !bindings.contains_key(name)
+                && rigid_marker
+                    .as_ref()
+                    .is_none_or(|marker| !name.ends_with(marker))
+        })
+        .collect();
+    if unpinned.is_empty() {
+        return;
+    }
+    let never = program.never();
+    for name in unpinned {
+        bindings.insert(name, never);
+    }
+}
+
 pub fn substitute(
     type_id: usize,
     bindings: &HashMap<String, usize>,
@@ -1290,6 +1407,58 @@ pub fn substitute(
     }
 }
 
+/// A tuple's compact one-line description for mismatch messages: its name and field
+/// count (`Ev[…1]`, `[…4]`), not its full field types.
+fn describe_tuple(name: &Option<String>, fields: usize) -> String {
+    match name {
+        Some(n) if fields == 0 => n.clone(),
+        Some(n) => format!("{n}[…{fields}]"),
+        None if fields == 0 => "[]".to_string(),
+        None => format!("[…{fields}]"),
+    }
+}
+
+/// A compact shape description of a type for mismatch messages: tuples by name and
+/// arity, unions as their joined members. Used where a *detail* already locates the
+/// mismatch, so a full format would only repeat it at length.
+fn describe_shape(program: &Program, type_id: usize) -> String {
+    match program.lookup_type(type_id) {
+        Some(Type::Tuple(id)) => match program.lookup_tuple(*id) {
+            Some(info) => describe_tuple(&info.name, info.fields.len()),
+            None => quiver_core::format::format_type_by_id(program, type_id),
+        },
+        Some(Type::Union(members)) => members
+            .clone()
+            .iter()
+            .map(|&member| describe_shape(program, member))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Some(Type::Annotated { base, .. }) => {
+            let base = *base;
+            describe_shape(program, base)
+        }
+        _ => quiver_core::format::format_type_by_id(program, type_id),
+    }
+}
+
+/// A tuple's near-miss signature: its name and field labels. A union variant sharing a
+/// concrete tuple's signature is the member the author meant, so its inner failure is
+/// the message worth surfacing.
+fn tuple_signature(
+    program: &Program,
+    type_id: usize,
+) -> Option<(Option<String>, Vec<Option<String>>)> {
+    match program.lookup_type(type_id) {
+        Some(Type::Tuple(id)) => program.lookup_tuple(*id).map(|info| {
+            (
+                info.name.clone(),
+                info.fields.iter().map(|(label, _)| label.clone()).collect(),
+            )
+        }),
+        _ => None,
+    }
+}
+
 /// Unify a pattern type (containing Type::Variable) with a concrete type.
 /// Builds up a mapping from type variable names to concrete type IDs.
 /// Returns an error if there's a conflict (e.g., variable bound to two different types).
@@ -1428,33 +1597,40 @@ pub fn unify(
             // Names must match
             if info1.name != info2.name {
                 return Err(Error::TypeUnresolved(format!(
-                    "Cannot unify different tuple types: pattern {:?} (id={:?}, {} fields) vs concrete {:?} (id={:?}, {} fields)",
-                    info1.name,
-                    id1,
-                    info1.fields.len(),
-                    info2.name,
-                    id2,
-                    info2.fields.len()
+                    "{} is not {}",
+                    describe_tuple(&info2.name, info2.fields.len()),
+                    describe_tuple(&info1.name, info1.fields.len()),
                 )));
             }
 
             // Same number of fields
             if info1.fields.len() != info2.fields.len() {
-                return Err(Error::TypeUnresolved(
-                    "Tuples have different number of fields".to_string(),
-                ));
+                return Err(Error::TypeUnresolved(format!(
+                    "{} is not {}",
+                    describe_tuple(&info2.name, info2.fields.len()),
+                    describe_tuple(&info1.name, info1.fields.len()),
+                )));
             }
 
-            // Unify each field
+            // Unify each field, wrapping a failure with the field's name — nested
+            // mismatches then read as a breadcrumb path to the offending leaf.
             let fields1 = info1.fields.clone();
             let fields2 = info2.fields.clone();
-            for ((fname1, ftype1_id), (fname2, ftype2_id)) in fields1.iter().zip(fields2.iter()) {
+            for (index, ((fname1, ftype1_id), (fname2, ftype2_id))) in
+                fields1.iter().zip(fields2.iter()).enumerate()
+            {
                 if fname1 != fname2 {
                     return Err(Error::TypeUnresolved(
                         "Tuple fields have different names".to_string(),
                     ));
                 }
-                unify(bindings, *ftype1_id, *ftype2_id, program)?;
+                unify(bindings, *ftype1_id, *ftype2_id, program).map_err(|e| match e {
+                    Error::TypeUnresolved(message) => {
+                        let field = fname1.clone().unwrap_or_else(|| index.to_string());
+                        Error::TypeUnresolved(format!("in `{field}`: {message}"))
+                    }
+                    other => other,
+                })?;
             }
 
             Ok(())
@@ -1624,9 +1800,10 @@ pub fn unify(
                     }
                 }
                 if !found_match {
-                    return Err(Error::TypeUnresolved(
-                        "Cannot unify union variant: concrete has variant that doesn't match any pattern variant".to_string()
-                    ));
+                    // Re-run the lone variant against the whole pattern union: the
+                    // single-variant arm below diagnoses the failure (near-miss detail,
+                    // compact shapes) far better than a canned line.
+                    return unify(bindings, pattern_id, concrete_variant, program);
                 }
             }
             Ok(())
@@ -1635,9 +1812,16 @@ pub fn unify(
         // Pattern union with concrete non-union - try each variant
         (Type::Union(variants), _) => {
             let variants = variants.clone();
-            // Try to unify with at least one variant
-            let mut errors = Vec::new();
-            for (i, &variant) in variants.iter().enumerate() {
+            // Try to unify with at least one variant, remembering the *near miss* — the
+            // variant the author plainly meant, whose inner failure explains the
+            // mismatch far better than an every-variant dump (`Ev[Bogus]` against an
+            // event union should say why the `Ev` member refused it). A variant sharing
+            // the concrete tuple's name *and* field labels is the best witness; one
+            // sharing just the name is kept as a fallback.
+            let mut signature_miss: Option<Error> = None;
+            let mut name_miss: Option<Error> = None;
+            let concrete_signature = tuple_signature(program, concrete_id);
+            for &variant in variants.iter() {
                 let mut temp_bindings = bindings.clone();
                 match unify(&mut temp_bindings, variant, concrete_id, program) {
                     Ok(()) => {
@@ -1645,14 +1829,45 @@ pub fn unify(
                         return Ok(());
                     }
                     Err(e) => {
-                        errors.push(format!("Variant {}: {:?}", i, e));
+                        if let Some(signature) = &concrete_signature {
+                            let variant_signature = tuple_signature(program, variant);
+                            if signature_miss.is_none()
+                                && variant_signature.as_ref() == Some(signature)
+                            {
+                                signature_miss = Some(e);
+                            } else if name_miss.is_none()
+                                && signature.0.is_some()
+                                && variant_signature.is_some_and(|(name, _)| name == signature.0)
+                            {
+                                name_miss = Some(e);
+                            }
+                        }
                     }
                 }
             }
+            let near_miss = signature_miss.or(name_miss);
+            // With a near miss the detail already locates the mismatch, so compact
+            // shape descriptions suffice; without one the full formats are the message.
+            let (found, expected) = if near_miss.is_some() {
+                (
+                    describe_shape(program, concrete_id),
+                    describe_shape(program, pattern_id),
+                )
+            } else {
+                (
+                    quiver_core::format::format_type_by_id(&*program, concrete_id),
+                    quiver_core::format::format_type_by_id(&*program, pattern_id),
+                )
+            };
+            let detail = match near_miss {
+                // Unwrap rather than Debug-format, so nested failures read as one
+                // plain-text chain instead of escaping at every level.
+                Some(Error::TypeUnresolved(message)) => format!(": {message}"),
+                Some(other) => format!(": {other:?}"),
+                None => String::new(),
+            };
             Err(Error::TypeUnresolved(format!(
-                "Cannot unify union pattern ({} variants) with concrete type. Errors: [{}]",
-                variants.len(),
-                errors.join(", ")
+                "{found} does not fit {expected}{detail}"
             )))
         }
 

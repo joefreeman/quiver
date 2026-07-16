@@ -274,7 +274,7 @@ fn test_rigid_type_variable_rejects_concrete_requirement() {
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "Cannot unify rigid type variable 'u with expected type 'int".to_string(),
+            "in `0`: Cannot unify rigid type variable 'u with expected type 'int".to_string(),
         ));
 }
 
@@ -411,4 +411,59 @@ fn test_explicit_type_application_alias_argument() {
     quiver()
         .evaluate(r#"'pt = P[x: 'int]; id = #<'t>'t { $ }; id<'pt> P[x: 1]"#)
         .expect("P[x: 1]");
+}
+
+#[test]
+fn test_type_parameters_visible_in_body_positions() {
+    // A declared type parameter is body-visible as an ordinary alias, so patterns,
+    // ascriptions, and checked retrievals can name it.
+    quiver()
+        .evaluate(
+            r#"'box<'t> = Full['t] | Empty
+               first_full = #<'t>['box<'t>, 'box<'t>] {
+                 | $.0 ~> =('box<'t>)b; b ~> =Full[_] => b
+                 | $.1
+               }
+               first_full [Empty, Full[7]] ~> =Full[x]; x"#,
+        )
+        .expect("7");
+    // A checked annotation retrieval can state a shape mentioning the parameter.
+    quiver()
+        .evaluate(
+            r#"'meta<'t> = [it: 't]
+               tag = #<'t>[Box['t], 't] { =[v, m]; v ~> { :meta [it: m] } }
+               peek = #<'t>Box['t] { $:('meta<'t>)meta ~> =(it: x); x }
+               tag [Box[1], 2] ~> peek"#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_unpinned_result_parameter_closes_to_never() {
+    // A call that pins nothing for a result-side type parameter closes it to the
+    // empty union: `norm "x"` provably carries no `Evt`, so the result fits a sink
+    // whose event union is concrete (a leaked rigid variable would be rejected).
+    quiver()
+        .evaluate(
+            r#"'node<'e> = Leaf[Str['bin]] | Evt['e]
+               norm = #<'e>('node<'e> | Str['bin]) {
+                 | =Str[b] => Leaf[Str[b]]
+                 | =('node<'e>)n => n
+               }
+               sink = #(Leaf[Str['bin]] | Evt[(Inc | Dec)]) { Ok }
+               norm "x" ~> sink"#,
+        )
+        .expect("Ok");
+}
+
+#[test]
+fn test_enclosing_rigid_variable_survives_inner_calls() {
+    // Calling a callable-typed *parameter* inside a generic body leaves the enclosing
+    // `'t` rigid in the inner result — it is not the callee's to close.
+    quiver()
+        .evaluate(
+            r#"apply = #<'t>[#[] -> 't] { =[f]; f [] }
+               apply [#[] { 42 }] ~> __integer_add__ [~, 1]"#,
+        )
+        .expect("43");
 }

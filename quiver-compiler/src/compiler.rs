@@ -1958,6 +1958,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
+        // The declared type parameters are visible in the body as ordinary aliases for
+        // their uniquified variables, so body-position type references — patterns,
+        // ascriptions, checked retrievals, explicit type applications, nested signatures
+        // — can name them.
+        for param in &function.type_parameters {
+            let variable = self
+                .program
+                .register_type(Type::Variable(format!("{param}#{type_param_suffix}")));
+            function_scope_bindings.type_aliases.insert(
+                param.clone(),
+                TypeAliasDef {
+                    parameters: Vec::new(),
+                    type_id: variable,
+                },
+            );
+        }
+
         self.scopes = vec![Scope::new(function_scope_bindings, None, ScopeKind::Root)];
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
@@ -6167,7 +6184,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 typing::unify(&mut bindings, param_id, arg_type, self.program)?;
 
-                // Substitute bindings in the result type
+                // Substitute bindings in the result type, closing unpinned parameters
+                // to the empty union (see close_unpinned_result).
+                typing::close_unpinned_result(
+                    result_id,
+                    &mut bindings,
+                    self.type_param_suffix,
+                    self.program,
+                );
                 typing::substitute(result_id, &bindings, self.program)
             } else {
                 // No type variables - just check compatibility
@@ -6386,6 +6410,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let result_type = if has_vars {
             let mut bindings = HashMap::new();
             typing::unify(&mut bindings, param_id, arg_type, self.program)?;
+            typing::close_unpinned_result(
+                result_id,
+                &mut bindings,
+                self.type_param_suffix,
+                self.program,
+            );
             typing::substitute(result_id, &bindings, self.program)
         } else {
             if !quiver_core::types::is_compatible(arg_type, param_id, &*self.program) {
