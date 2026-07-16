@@ -1889,8 +1889,9 @@ pub fn unify(
 
         // All other combinations are incompatible
         _ => Err(Error::TypeUnresolved(format!(
-            "Cannot unify incompatible types: {:?} and {:?}",
-            pattern, concrete
+            "{} is not {}",
+            quiver_core::format::format_type_by_id(&*program, concrete_id),
+            quiver_core::format::format_type_by_id(&*program, pattern_id),
         ))),
     }
 }

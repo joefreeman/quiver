@@ -300,10 +300,9 @@ fn test_function_with_return_type() {
 fn test_function_return_type_mismatch() {
     quiver()
         .evaluate("f = #'int -> 'bin { [~, 1] ~> __integer_add__ }; 5 ~> f")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "'bin".to_string(),
-            found: "'int".to_string(),
-        });
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "declared result: 'int is not 'bin".to_string(),
+        ));
 }
 
 #[test]
@@ -327,10 +326,9 @@ fn test_function_tuple_return_type_mismatch() {
             [3, 4] ~> f
             "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "'bin".to_string(),
-            found: "'int".to_string(),
-        });
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "declared result: 'int is not 'bin".to_string(),
+        ));
 }
 
 #[test]
@@ -342,10 +340,9 @@ fn test_identity_function_with_return_type() {
 fn test_identity_function_return_type_mismatch() {
     quiver()
         .evaluate("f = #'int -> 'bin; 42 ~> f")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "'bin".to_string(),
-            found: "'int".to_string(),
-        });
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "declared result: 'int is not 'bin".to_string(),
+        ));
 }
 
 #[test]
@@ -408,10 +405,9 @@ fn test_function_named_tuple_return_type_mismatch() {
             3 ~> f
             "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "Point[x: 'int, y: 'int]".to_string(),
-            found: "'int".to_string(),
-        });
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "declared result: 'int is not Point[x: 'int, y: 'int]".to_string(),
+        ));
 }
 
 #[test]
@@ -420,10 +416,10 @@ fn test_generic_function_return_type_mismatch() {
     // Body returns t, which doesn't match bin
     quiver()
         .evaluate("f = #<'t>'t -> 'bin { ~ }; 5 ~> f")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
-            expected: "'bin".to_string(),
-            found: "'t".to_string(),
-        });
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "declared result: Cannot unify rigid type variable 't with expected type 'bin"
+                .to_string(),
+        ));
 }
 
 // A nilary function (parameter `[]`) ignores an implicitly-flowing value: it is called with nil

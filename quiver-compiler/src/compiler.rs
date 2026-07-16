@@ -2192,6 +2192,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         });
                     }
                 }
+                // Diagnose the mismatch through unification: its near-miss/breadcrumb
+                // detail names the offending leaf, where a flat expected/found dump of
+                // two large types explains nothing. If unification can't reproduce the
+                // failure (its semantics differ at the margins), fall back to the dump.
+                let mut diagnostic_bindings = HashMap::new();
+                if let Err(Error::TypeUnresolved(message)) = typing::unify(
+                    &mut diagnostic_bindings,
+                    expected_return_type,
+                    body_type,
+                    self.program,
+                ) {
+                    return Err(Error::TypeUnresolved(format!("declared result: {message}")));
+                }
                 // Get types for error message
                 let expected_type = self.program.lookup_type(expected_return_type).unwrap();
                 let found_type = self.program.lookup_type(body_type).unwrap();
