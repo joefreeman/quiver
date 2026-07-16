@@ -233,11 +233,16 @@ fn test_frame_of_unannotated_tree_is_opaque() {
 
 #[test]
 fn test_event_attributes_serialize_payloads_as_data() {
-    // `on:click={ … }` takes a '%json payload, serialized into an emitted `data-q-click`
-    // attribute (JSON, attr-escaped) — events are data the client echoes back verbatim.
+    // `on:click={ … }` takes a typed event payload, encoded (%data notation, in the
+    // `Ev` envelope) into an emitted `data-q-click` attribute — events are data the
+    // client echoes back verbatim, and the component decodes with `%data.decode`.
+    quiver()
+        .evaluate(r#"%html{ <button on:click={Inc[5]}>+</button> } ~> %html.render"#)
+        .expect(r#""<button data-q-click=\"Ev[Inc[5]]\">+</button>""#);
+    // A string payload is data too, attr-escaped like any attribute value.
     quiver()
         .evaluate(r#"%html{ <button on:click={"inc"}>+</button> } ~> %html.render"#)
-        .expect(r#""<button data-q-click=\"&quot;inc&quot;\">+</button>""#);
+        .expect(r#""<button data-q-click=\"Ev[&quot;inc&quot;]\">+</button>""#);
 }
 
 #[test]
@@ -245,13 +250,13 @@ fn test_event_payload_changes_patch_like_attributes() {
     // A payload that varies with state diffs as an ordinary attribute slot.
     quiver()
         .evaluate(
-            r#"view = #'int { %html{ <button on:click={%json{ ["del", ~] }}>x</button> } }
+            r#"view = #'int { %html{ <button on:click={Del[~]}>x</button> } }
                f1 = 1 ~> view ~> %html/live.frame
                f2 = 2 ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
         )
         .expect(
-            r#"Cons[SetAttr[path: Cons[0, Nil], elem: 0, name: "data-q-click", value: "[\"del\",2]"], Nil]"#,
+            r#"Cons[SetAttr[path: Cons[0, Nil], elem: 0, name: "data-q-click", value: "Ev[Del[2]]"], Nil]"#,
         );
 }
 
@@ -280,7 +285,7 @@ const KID: &str = r#"
       mount: #'int,
       update: #['int, 'cev] { =[n, _]; %num.add [n, 1] },
       view: #'int { %str.from_int $ ~> %html{ <em>{~}</em> } },
-      decode: #['%json, '%http.pairs] { =[j, _]; j ~> { | ="inc" => Ev[Bump] | [] } },
+      decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['cev]> $0 },
     ]
     ccf = %html/live.component cc
 "#;
@@ -438,7 +443,7 @@ const COUNTER: &str = r#"
       mount: #'%http { 0 },
       update: #['int, 'ev] { =[n, e]; e ~> { | =Inc => %num.add [n, 1] | n } },
       view: #'int { %str.from_int $ ~> %html{ <p>Count: {~}</p> } },
-      decode: #['%json, '%http.pairs] { =[j, _]; j ~> { | ="inc" => Ev[Inc] | [] } },
+      decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
     ]
     req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
 "#;
@@ -504,7 +509,7 @@ fn test_sim_text_envelope_decodes_to_patch() {
             &[
                 COUNTER,
                 r#"s = %html/live.sim [req, counter]
-                   %html/live.sim_text [s, "[\"0\", \"inc\", []]"] ~> =[_, ps]
+                   %html/live.sim_text [s, "[\"0\", \"Ev[Inc]\", []]"] ~> =[_, ps]
                    ps"#,
             ]
             .concat(),
@@ -541,16 +546,16 @@ fn test_sim_text_submit_pairs_reach_decode() {
                  mount: #'%http { "" },
                  update: #[Str['bin], 'ev] { =[_, Set[t]]; t },
                  view: #Str['bin] { %html{ <p>{$}</p> } },
-                 decode: #['%json, '%http.pairs] {
-                   =[j, form]
-                   j ~> ="set"
+                 decode: #[Str['bin], '%http.pairs] {
+                   =[t, form]
+                   %data.decode<Ev[Submit]> t ~> =Ev[Submit]
                    %http.get [form, "v"] ~> =Str[v]
                    Ev[Set[Str[v]]]
                  },
                ]
                req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
                s = %html/live.sim [req, comp]
-               %html/live.sim_text [s, "[\"0\", \"set\", [[\"v\", \"hello\"]]]"] ~> =[_, ps]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Submit]\", [[\"v\", \"hello\"]]]"] ~> =[_, ps]
                ps"#,
         )
         .expect(r#"Cons[SetText[path: Cons[0, Nil], value: "hello"], Nil]"#);
@@ -574,7 +579,7 @@ fn test_sim_changed_rerenders_after_store_step() {
                    mount: #'%http { [store: &store] },
                    update: #['state, Ok] { =[s, _]; s },
                    view: #'state { =(store: st); ?st ~> %str.from_int ~> %html{ <p>{~}</p> } },
-                   decode: #['%json, '%http.pairs] { [] },
+                   decode: #[Str['bin], '%http.pairs] { [] },
                  ]
                }
                st = 0 ~> @'int { !'int ~> { =n => ^ n } }

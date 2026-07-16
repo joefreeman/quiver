@@ -27,8 +27,9 @@
 //   - `{` always opens a hole; a literal brace in text is an entity (`&#123;`/`&#125;`).
 //   - Attribute values: `name` (boolean), `name="literal"` (verbatim bytes), or
 //     `name={ … }` (a hole; nil omits the attribute, `Ok` renders it bare).
-//   - `on:NAME={ … }` is an event attribute: the hole is a '%json payload, serialized
-//     into an emitted `data-q-NAME` attribute for the live layer's client to echo back.
+//   - `on:NAME={ … }` is an event attribute: the hole is a typed event payload, encoded
+//     (%data notation, in the `Ev` envelope) into an emitted `data-q-NAME` attribute for
+//     the live layer's client to echo back.
 //   - Void elements (`br`, `img`, …) take no close tag; `<div/>` self-closes any element.
 //   - Comments (`<!-- … -->`) are skipped. The doctype comes from `page`, not the template.
 //   - Inline `<script>`/`<style>` bodies are not supported (v1); link external assets.
@@ -244,7 +245,7 @@ reserved? = #Str['bin] {
 }
 
 // An `on:NAME` event attribute's emitted name — `data-q-NAME` — or nil for ordinary
-// names. Event payloads are data ('%json), serialized into the attribute at tree
+// names. Event payloads are typed data, encoded into the attribute at tree
 // construction; the client echoes the attribute text verbatim.
 event_name? = #Str['bin] {
   =Str[b]
@@ -312,7 +313,7 @@ attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
       =[_, st3]
       {
         | ev ~> =Str[_] => {
-          // Event attributes take exactly `={ … }` — the payload is a '%json hole.
+          // Event attributes take exactly `={ … }` — the payload is a typed-value hole.
           {
             | peek_at st3 ~> =61 => Ok
             | %parse.fail_in [
@@ -837,10 +838,13 @@ attr_value = #(Str['bin] | 'int | Ok | []) {
   | =[] => []
 }
 
-// Normalizes an event attribute's payload (`on:NAME={ … }`): a '%json value, serialized
-// into the emitted `data-q-NAME` attribute. The client echoes the attribute text back
-// verbatim, so the payload round-trips as data — events are data, never callbacks.
-event_value = #'%json { %json.stringify $ }
+// Normalizes an event attribute's payload (`on:NAME={ … }`): any data value, wrapped in
+// the `Ev` envelope and encoded as %data notation into the emitted `data-q-NAME`
+// attribute. The client echoes the attribute text back verbatim, so the payload
+// round-trips as *typed* data — events are data, never callbacks — and a live component
+// decodes it with `%data.decode<Ev['ev]>`, the wrapper discriminating a decoded event
+// from a dropped one.
+event_value = #<'t>'t { %data.encode Ev[$] }
 
 // Attaches the template provenance to an expansion's tree (dialect plumbing): the
 // instrumented statics and the normalized hole values, as the `:template` annotation.

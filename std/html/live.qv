@@ -32,7 +32,7 @@
 // wakeups its renders subscribe it to. `Park` stops rendering (wakeups are absorbed —
 // the app's buffer, not the view, is what keeps late frames correct); `Wake` drains and
 // re-renders once against the held frame, so a warm attach diffs to silence.
-'view_msg = Event['%json, '%http.pairs] | Nav['%http] | Park | Wake | '%sup.down | '%proc.changed
+'view_msg = Event[Str['bin], '%http.pairs] | Nav['%http] | Park | Wake | '%sup.down | '%proc.changed
 
 // What the app receives: the socket from a successful claim, encoded frame messages
 // from its views, and route (dis)registrations as views spawn and kill children.
@@ -528,13 +528,16 @@ encode = #[Str['bin], 'patches] {
 
 // A view definition. `'i` is the mount init: the root view mounts from the HTTP
 // request; a child view mounts from whatever its parent's `child [comp, init, key]`
-// passes. `decode` receives the event payload and the form pairs (empty for clicks;
-// a submit's named fields, in the shape `%http`'s form helpers read). `nav` re-derives
-// state from a new URL without remounting — the root view's live-navigation hook,
-// receiving the raw request the app synthesized for the target; a component that
-// doesn't navigate omits it (the `_base` record) and gets an identity `nav`.
-'component<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #['%json, '%http.pairs] -> (Ev['e] | []), nav: #['s, '%http] -> 's]
-'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #['%json, '%http.pairs] -> (Ev['e] | [])]
+// passes. `decode` receives the event payload — %data notation in the `Ev` envelope,
+// exactly as `on:*` holes encode it, so the common form is one line,
+// `decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 }` — and the form
+// pairs (empty for clicks; a submit's named fields, in the shape `%http`'s form helpers
+// read). `nav` re-derives state from a new URL without remounting — the root view's
+// live-navigation hook, receiving the raw request the app synthesized for the target; a
+// component that doesn't navigate omits it (the `_base` record) and gets an identity
+// `nav`.
+'component<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #[Str['bin], '%http.pairs] -> (Ev['e] | []), nav: #['s, '%http] -> 's]
+'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html, decode: #[Str['bin], '%http.pairs] -> (Ev['e] | [])]
 
 // Fill in a default (identity) `nav` when the record omits it, so most components —
 // which never navigate — stay four fields. Both the `component` constructor and the
@@ -594,18 +597,19 @@ pairs_of = #['jsons, '%http.pairs] {
 }
 
 // A wire event is the envelope `[vid, payload, [[name, value], …]]` — the target
-// view's id, then the payload (a click sends an empty pair list, a submit its form's
-// fields). Answers `[vid, payload, pairs]`, or nil for anything malformed.
+// view's id, then the payload (a JSON *string* carrying the echoed attribute's %data
+// notation; a click sends an empty pair list, a submit its form's fields). Answers
+// `[vid, payload, pairs]`, or nil for anything malformed.
 env_of = #Str['bin] {
   %json.parse $ ~> =('%json)env
   env ~> =Array[es]
   es ~> =Cons[vidj, r1]
   vidj ~> jval ~> =Str[vb]
   r1 ~> =Cons[payloadj, r2]
-  payload = payloadj ~> jval
+  payloadj ~> jval ~> =Str[pb]
   r2 ~> =Cons[formj, Nil]
   formj ~> jval ~> =Array[fs]
-  [Str[vb], payload, pairs_of [fs, Nil]]
+  [Str[vb], Str[pb], pairs_of [fs, Nil]]
 }
 
 // A live-navigation message is `["nav", "/path?query"]` — the two-element shape the
@@ -624,7 +628,7 @@ nav_of = #Str['bin] {
 // Decode and fold one client event through `update`: a decode answering nil drops
 // the event (stale or forged — `update` never sees it) and answers the state
 // unchanged.
-fold_event = #<'i, 's, 'e>['s, 'component<'i, 's, 'e>, '%json, '%http.pairs] {
+fold_event = #<'i, 's, 'e>['s, 'component<'i, 's, 'e>, Str['bin], '%http.pairs] {
   =[state, comp, payload, pairs]
   {
     | comp.decode [payload, pairs] ~> =Ev[ev] => comp.update [state, ev]
@@ -1039,7 +1043,7 @@ view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, Str['bin], @'app_msg, 'vboo
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
 component = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
-  :doc "Defines a component from its `[mount, update, view, decode]` record (add a `nav: #['s, '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` receives the `on:*` payload as %data notation in the `Ev` envelope, so the common form is `decode: #[Str['bin], '%http.pairs] \{ %data.decode<Ev['ev]> $0 }` (add a `nav: #['s, '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
   comp = with_nav $
   #<'i>'place<'i> {
     i = $init
@@ -1836,9 +1840,11 @@ client_js = """
     });
     return found;
   };
+  // The payload is the attribute text echoed verbatim — %data notation, not JSON — so
+  // it rides the envelope as a JSON string.
   document.addEventListener('click', (e) => \{
     const el = live(e, 'data-q-click');
-    if (el) ws.send('[' + JSON.stringify(vidOf(el)) + ',' + el.getAttribute('data-q-click') + ',[]]');
+    if (el) ws.send('[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute('data-q-click')) + ',[]]');
   });
   document.addEventListener('submit', (e) => \{
     const el = live(e, 'data-q-submit');
@@ -1847,7 +1853,7 @@ client_js = """
     new FormData(el).forEach((v, k) => \{
       if (typeof v === 'string') pairs.push([k, v]);
     });
-    ws.send('[' + JSON.stringify(vidOf(el)) + ',' + el.getAttribute('data-q-submit') + ',' + JSON.stringify(pairs) + ']');
+    ws.send('[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute('data-q-submit')) + ',' + JSON.stringify(pairs) + ']');
     el.reset();
   });
   // Live navigation: a plain left-click on a `data-q-nav` link is sent as a nav

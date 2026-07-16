@@ -36,7 +36,7 @@ fn test_socket_round_trip_with_parking() {
               mount: #[] { 0 },
               update: #['int, 'ev] { =[n, _]; %num.add [n, 1] },
               view: #'int { %str.from_int $ ~> %html{ <p>Count: {~}</p> } },
-              decode: #['%json, '%http.pairs] { =[j, _]; j ~> { | ="inc" => Ev[Inc] | [] } },
+              decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
             ]
             counterc = %html/live.component counter
             a = %html/live.app [root: &counterc]
@@ -81,7 +81,7 @@ fn test_socket_round_trip_with_parking() {
 
             up = "GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
             tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, 0x00000000]
-            evf = %http/websocket.encode_masked_frame [1, "[\"0\",\"inc\",[]]" ~> .0, 0x00000000]
+            evf = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Inc]\",[]]" ~> .0, 0x00000000]
 
             // Upgrade + token + event in one write. The 101 response is 129 bytes and
             // the patch frame 25; reading to exactly 154 asserts the attach's silence
@@ -118,7 +118,7 @@ fn test_nested_child_view_over_socket() {
     // Boundaries end to end, with settle-wait: the dead render COMPOSES the
     // child's settled first frame into its boundary markers, so the page ships
     // complete (the SEO/no-JS posture) and nothing flushes at attach. The parent
-    // and child DELIBERATELY collide on the "inc" payload: routing by vid means
+    // and child DELIBERATELY collide on the `Ev[Bump]` payload: routing by vid means
     // each decodes independently. Dropping the child's key kills it — after the
     // parent's removal patch, an event to the dead vid is dropped, and the next
     // frame on the wire is provably the parent's.
@@ -133,17 +133,17 @@ fn test_nested_child_view_over_socket() {
               mount: #'int,
               update: #['int, 'cev] { =[n, _]; %num.add [n, 1] },
               view: #'int { %str.from_int $ ~> %html{ <em>{~}</em> } },
-              decode: #['%json, '%http.pairs] { =[j, _]; j ~> { | ="inc" => Ev[Bump] | [] } },
+              decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['cev]> $0 },
             ]
             ccf = %html/live.component cc
             'pstate = [n: 'int, kid?: (Ok | [])]
-            'pev = PInc | Drop
+            'pev = Bump | Drop
             parent = %html/live.component [
               mount: #'int { [n: $, kid?: Ok] },
               update: #['pstate, 'pev] {
                 =[s, e]
                 e ~> {
-                  | =PInc => [n: %num.add [s.n, 1], kid?: s.kid?]
+                  | =Bump => [n: %num.add [s.n, 1], kid?: s.kid?]
                   | [n: s.n, kid?: []]
                 }
               },
@@ -151,10 +151,7 @@ fn test_nested_child_view_over_socket() {
                 s = $
                 %html{ <div><p>{%str.from_int s.n}</p>{ { | s.kid? ~> =Ok => ccf [init: 100, key: "w"] | [] } }</div> }
               },
-              decode: #['%json, '%http.pairs] {
-                =[j, _]
-                j ~> { | ="inc" => Ev[PInc] | ="drop" => Ev[Drop] | [] }
-              },
+              decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['pev]> $0 },
             ]
             a = %html/live.app [root: &parent, init: #'%http { 0 }]
             handler = #'%http { %html/live.handle [$, a] }
@@ -187,18 +184,18 @@ fn test_nested_child_view_over_socket() {
             s2 = [0x7f000001, 4187] ~> __tcp_connect__
             __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
-            // The colliding payload routes by vid: the child's "inc" bumps 100 -> 101…
-            ev_child = %http/websocket.encode_masked_frame [1, "[\"0.1\",\"inc\",[]]" ~> .0, 0x00000000]
+            // The colliding payload routes by vid: the child's Bump bumps 100 -> 101…
+            ev_child = %http/websocket.encode_masked_frame [1, "[\"0.1\",\"Ev[Bump]\",[]]" ~> .0, 0x00000000]
             __tcp_socket_write__ [s2, ev_child]
             r1 = read_to [s2, 0x, "[1,\"0.1\",[[\"t\",[0],\"101\"]]]"] ~> Str[~]
 
-            // …and the parent's "inc" bumps its own 0 -> 1, untouched by the child's.
-            ev_parent = %http/websocket.encode_masked_frame [1, "[\"0\",\"inc\",[]]" ~> .0, 0x00000000]
+            // …and the parent's Bump bumps its own 0 -> 1, untouched by the child's.
+            ev_parent = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Bump]\",[]]" ~> .0, 0x00000000]
             __tcp_socket_write__ [s2, ev_parent]
             r2 = read_to [s2, 0x, "[1,\"0\",[[\"t\",[0],\"1\"]]]"] ~> Str[~]
 
             // Dropping the key kills the child; the parent's removal patch lands…
-            ev_drop = %http/websocket.encode_masked_frame [1, "[\"0\",\"drop\",[]]" ~> .0, 0x00000000]
+            ev_drop = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Drop]\",[]]" ~> .0, 0x00000000]
             __tcp_socket_write__ [s2, ev_drop]
             r3 = read_to [s2, 0x, "[1,\"0\",[[\"h\",[1],\"\"]]]"] ~> Str[~]
 
@@ -244,13 +241,10 @@ fn test_child_crash_restart_and_budget() {
                 }
               },
               view: #'int { %str.from_int $ ~> %html{ <em>{~}</em> } },
-              decode: #['%json, '%http.pairs] {
-                =[j, _]
-                j ~> { | ="inc" => Ev[Bump] | ="boom" => Ev[Boom] | [] }
-              },
+              decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['cev]> $0 },
             ]
             ccf = %html/live.component cc
-            'pev = PInc
+            'pev = Bump
             parent = %html/live.component [
               mount: #[] { 0 },
               update: #['int, 'pev] { =[n, _]; %num.add [n, 1] },
@@ -258,7 +252,7 @@ fn test_child_crash_restart_and_budget() {
                 n = $
                 %html{ <div><p>{%str.from_int n}</p>{ ccf [init: 100, key: "w"] }</div> }
               },
-              decode: #['%json, '%http.pairs] { =[j, _]; j ~> { | ="inc" => Ev[PInc] | [] } },
+              decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['pev]> $0 },
             ]
             a = %html/live.app [root: &parent]
             handler = #'%http { %html/live.handle [$, a] }
@@ -288,9 +282,9 @@ fn test_child_crash_restart_and_budget() {
 
             up = "GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
             tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, 0x00000000]
-            ev_bump = %http/websocket.encode_masked_frame [1, "[\"0.1\",\"inc\",[]]" ~> .0, 0x00000000]
-            ev_boom = %http/websocket.encode_masked_frame [1, "[\"0.1\",\"boom\",[]]" ~> .0, 0x00000000]
-            ev_parent = %http/websocket.encode_masked_frame [1, "[\"0\",\"inc\",[]]" ~> .0, 0x00000000]
+            ev_bump = %http/websocket.encode_masked_frame [1, "[\"0.1\",\"Ev[Bump]\",[]]" ~> .0, 0x00000000]
+            ev_boom = %http/websocket.encode_masked_frame [1, "[\"0.1\",\"Ev[Boom]\",[]]" ~> .0, 0x00000000]
+            ev_parent = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Bump]\",[]]" ~> .0, 0x00000000]
 
             s2 = [0x7f000001, 4188] ~> __tcp_connect__
             __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
@@ -346,7 +340,7 @@ fn test_live_navigation_patches_root() {
               mount: #'%http { seg0 $ },
               update: #[Str['bin], 'cev] { =[s, _]; s },
               view: #Str['bin] { %html{ <p>{$}</p> } },
-              decode: #['%json, '%http.pairs] { [] },
+              decode: #[Str['bin], '%http.pairs] { [] },
               nav: #[Str['bin], '%http] { =[_, req]; seg0 req },
             ]
             a = %html/live.app [root: &root, init: #'%http { $ }]
@@ -413,7 +407,7 @@ fn test_server_redirect_syncs_url() {
               mount: #'%http { [page: "home"] },
               update: #['st, 'ev] { =[s, _]; [page: "seven"] ~> { :redirect "/posts/7" } },
               view: #'st { %html{ <p>{$.page}</p> } },
-              decode: #['%json, '%http.pairs] { =[j, _]; j ~> { | ="jump" => Ev[Jump] | [] } },
+              decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
             ]
             a = %html/live.app [root: &root, init: #'%http { $ }]
             handler = #'%http { %html/live.handle [$, a] }
@@ -447,7 +441,7 @@ fn test_server_redirect_syncs_url() {
             __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
             // The jump event: the server sends a URL-sync frame and patches the view.
-            ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"jump\",[]]" ~> .0, 0x00000000]
+            ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Jump]\",[]]" ~> .0, 0x00000000]
             __tcp_socket_write__ [s2, ev_jump]
             r1 = read_to [s2, 0x, "[1,\"0\",[[\"t\",[0],\"seven\"]]]"] ~> Str[~]
             s2 ~> __tcp_socket_close__
@@ -492,10 +486,7 @@ fn test_stale_redirect_mark_is_not_resynced() {
                 }
               },
               view: #'st { %html{ <p>{$.page}</p> } },
-              decode: #['%json, '%http.pairs] {
-                =[j, _]
-                j ~> { | ="jump" => Ev[Jump] | ="noop" => Ev[Noop] | ="two" => Ev[Two] | ="fin" => Ev[Fin] | [] }
-              },
+              decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
             ]
             a = %html/live.app [root: &root, init: #'%http { $ }]
             handler = #'%http { %html/live.handle [$, a] }
@@ -539,10 +530,10 @@ fn test_stale_redirect_mark_is_not_resynced() {
             s2 = [0x7f000001, 4191] ~> __tcp_connect__
             __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
-            ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"jump\",[]]" ~> .0, 0x00000000]
-            ev_noop = %http/websocket.encode_masked_frame [1, "[\"0\",\"noop\",[]]" ~> .0, 0x00000000]
-            ev_two = %http/websocket.encode_masked_frame [1, "[\"0\",\"two\",[]]" ~> .0, 0x00000000]
-            ev_fin = %http/websocket.encode_masked_frame [1, "[\"0\",\"fin\",[]]" ~> .0, 0x00000000]
+            ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Jump]\",[]]" ~> .0, 0x00000000]
+            ev_noop = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Noop]\",[]]" ~> .0, 0x00000000]
+            ev_two = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Two]\",[]]" ~> .0, 0x00000000]
+            ev_fin = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Fin]\",[]]" ~> .0, 0x00000000]
             __tcp_socket_write__ [s2, ev_jump]
             __tcp_socket_write__ [s2, ev_noop]
             __tcp_socket_write__ [s2, ev_two]
