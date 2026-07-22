@@ -11,14 +11,12 @@
 
 // Floored division and modulo (the builtins truncate, which misplaces negative
 // timestamps by a day/second).
-fmod = #['int, 'int] {
-  =[a, b]
-  __integer_modulo__ [__integer_add__ [__integer_modulo__ [a, b], b], b]
+fmod = #[(a): 'int, (b): 'int] {
+  __integer_modulo__ [__integer_add__ [__integer_modulo__ [$a, $b], $b], $b]
 }
 
-fdiv = #['int, 'int] {
-  =[a, b]
-  __integer_divide__ [__integer_subtract__ [a, fmod [a, b]], b]
+fdiv = #[(a): 'int, (b): 'int] {
+  __integer_divide__ [__integer_subtract__ [$a, fmod [$a, $b]], $b]
 }
 
 parts = #'int {

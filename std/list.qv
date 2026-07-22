@@ -78,14 +78,14 @@ list_dialect = #(content: Str['bin], chain: '%meta.cb) {
     =Nil => Ok
   },
 
-  prepend: #<'t>['<'t>, 't] {
+  prepend: #<'t>[(list): '<'t>, (item): 't] {
     :doc "The list with an element added at the front."
-    Cons[$1, $0]
+    Cons[$item, $list]
   },
 
-  append: #<'t>['<'t>, 't] {
+  append: #<'t>[(list): '<'t>, (item): 't] {
     :doc "The list with an element added at the end."
-    reverse [$0, Nil] ~> reverse [Cons[$1, ~], Nil]
+    reverse [$list, Nil] ~> reverse [Cons[$item, ~], Nil]
   },
 
   reverse: #<'t>'<'t> {
@@ -103,53 +103,52 @@ list_dialect = #(content: Str['bin], chain: '%meta.cb) {
     from_iter
   },
 
-  map: #<'t, 'u>['<'t>, #'t -> 'u] {
+  map: #<'t, 'u>[(list): '<'t>, (f): #'t -> 'u] {
     :doc "The list with each element transformed by a function."
-    =[xs, f]; to_iter xs ~> %iter.map [~, &f] ~> from_iter
+    to_iter $list ~> %iter.map [~, &$f] ~> from_iter
   },
 
-  filter: #<'t>['<'t>, #'t -> ('t | [])] {
+  filter: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
     :doc "The elements for which the predicate is non-nil."
-    =[xs, keep?]
-    to_iter xs ~> %iter.filter [~, &keep?] ~> from_iter
+    to_iter $list ~> %iter.filter [~, &$pred] ~> from_iter
   },
 
-  take: #<'t>['<'t>, 'int] {
+  take: #<'t>[(list): '<'t>, (n): 'int] {
     :doc "The first n elements, or the whole list when it is shorter."
-    =[xs, n]; to_iter xs ~> %iter.take [~, n] ~> from_iter
+    to_iter $list ~> %iter.take [~, $n] ~> from_iter
   },
 
-  drop: #<'t>['<'t>, 'int] {
+  drop: #<'t>[(list): '<'t>, (n): 'int] {
     :doc "The list without its first n elements."
-    =[xs, n]; to_iter xs ~> %iter.drop [~, n] ~> from_iter
+    to_iter $list ~> %iter.drop [~, $n] ~> from_iter
   },
 
-  take_while: #<'t>['<'t>, #'t -> ('t | [])] {
+  take_while: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
     :doc "The leading elements for which the predicate is non-nil."
-    =[xs, pred]
-    to_iter xs ~> %iter.take_while [~, &pred] ~> from_iter
+    to_iter $list ~> %iter.take_while [~, &$pred] ~> from_iter
   },
 
-  drop_while: #<'t>['<'t>, #'t -> ('t | [])] {
+  drop_while: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
     :doc "The list without its leading elements for which the predicate is non-nil."
-    =[xs, pred]
-    to_iter xs ~> %iter.drop_while [~, &pred] ~> from_iter
+    to_iter $list ~> %iter.drop_while [~, &$pred] ~> from_iter
   },
 
-  flat_map: #<'t, 'u>['<'t>, #'t -> '<'u>] {
+  flat_map: #<'t, 'u>[(list): '<'t>, (f): #'t -> '<'u>] {
     :doc "Maps each element to a list and concatenates the results."
-    =[xs, f]
-    to_iter xs ~> %iter.flat_map [~, #{ f $ ~> to_iter }] ~> from_iter
+    // The nested literal closes over `f` (an inner `$` would be its own parameter), so
+    // bind the field locally — by reference, as a bare `$f` term would call it.
+    f = &$f
+    to_iter $list ~> %iter.flat_map [~, #{ f $ ~> to_iter }] ~> from_iter
   },
 
-  chain: #<'t>['<'t>, '<'t>] {
+  chain: #<'t>[(list): '<'t>, (with): '<'t>] {
     :doc "The first list's elements followed by the second's."
-    =[xs, ys]; %iter.chain [to_iter xs, to_iter ys] ~> from_iter
+    %iter.chain [to_iter $list, to_iter $with] ~> from_iter
   },
 
-  zip: #<'t, 'u>['<'t>, '<'u>] {
+  zip: #<'t, 'u>[(list): '<'t>, (with): '<'u>] {
     :doc "Pairs up elements from two lists, ending when either runs out."
-    =[xs, ys]; %iter.zip [to_iter xs, to_iter ys] ~> from_iter
+    %iter.zip [to_iter $list, to_iter $with] ~> from_iter
   },
 
   enumerate: #<'t>'<'t> {
@@ -157,15 +156,14 @@ list_dialect = #(content: Str['bin], chain: '%meta.cb) {
     to_iter ~> %iter.enumerate ~> from_iter
   },
 
-  intersperse: #<'t>['<'t>, 't] {
+  intersperse: #<'t>[(list): '<'t>, (sep): 't] {
     :doc "The list with the separator inserted between consecutive elements."
-    =[xs, sep]
-    to_iter xs ~> %iter.intersperse [~, sep] ~> from_iter
+    to_iter $list ~> %iter.intersperse [~, $sep] ~> from_iter
   },
 
-  fold: #<'t, 'acc>['<'t>, 'acc, #['acc, 't] -> 'acc] {
+  fold: #<'t, 'acc>[(list): '<'t>, (init): 'acc, (f): #['acc, 't] -> 'acc] {
     :doc "Reduces a list by folding each element into an accumulator."
-    =[xs, acc, f]; to_iter xs ~> %iter.fold [~, acc, &f]
+    to_iter $list ~> %iter.fold [~, $init, &$f]
   },
 
   count: #<'t>'<'t> {
@@ -173,28 +171,28 @@ list_dialect = #(content: Str['bin], chain: '%meta.cb) {
     to_iter ~> %iter.count
   },
 
-  nth: #<'t>['<'t>, 'int] {
+  nth: #<'t>[(list): '<'t>, (n): 'int] {
     :doc "The element at the given zero-based index, or nil when the list is too short."
-    =[xs, n]; to_iter xs ~> %iter.nth [~, n]
+    to_iter $list ~> %iter.nth [~, $n]
   },
 
-  find: #<'t>['<'t>, #'t -> ('t | [])] {
+  find: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
     :doc "The first element for which the predicate is non-nil, or nil when none matches."
-    =[xs, pred]; to_iter xs ~> %iter.find [~, &pred]
+    to_iter $list ~> %iter.find [~, &$pred]
   },
 
-  find_index: #<'t>['<'t>, #'t -> ('t | [])] {
+  find_index: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
     :doc "The zero-based index of the first matching element, or nil when none matches."
-    =[xs, pred]; to_iter xs ~> %iter.find_index [~, &pred]
+    to_iter $list ~> %iter.find_index [~, &$pred]
   },
 
-  any?: #<'t>['<'t>, #'t -> ('t | [])] {
+  any?: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
     :doc "Whether any element satisfies the predicate."
-    =[xs, pred]; to_iter xs ~> %iter.any? [~, &pred]
+    to_iter $list ~> %iter.any? [~, &$pred]
   },
 
-  all?: #<'t>['<'t>, #'t -> ('t | [])] {
+  all?: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
     :doc "Whether every element satisfies the predicate."
-    =[xs, pred]; to_iter xs ~> %iter.all? [~, &pred]
+    to_iter $list ~> %iter.all? [~, &$pred]
   },
 ] ~> { :dialect &list_dialect }

@@ -29,20 +29,18 @@ serve = #\File {
 }
 
 // Send a read request to a file process and wait for the correlated reply.
-do_read = #[', 'int, 'int] {
-  =[f, offset, length]
+do_read = #[(f): ', (offset): 'int, (length): 'int] {
   id = %ref
-  Read[offset, length, &., id] ~> f.0
+  Read[$offset, $length, &., id] ~> $f.0
   !Reply['ref, 'bin] { =Reply[&id, _]; Ok } ~> { =Reply[_, data] => data }
 }
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
-read_all = #[', 'int, 'bin] {
-  =[f, offset, acc]
-  chunk = do_read [f, offset, 65536]
+read_all = #[(f): ', (offset): 'int, (acc): 'bin] {
+  chunk = do_read [$f, $offset, 65536]
   %bin.length chunk ~> {
-    | =0 => acc
-    | =n => %bin.concat [acc, chunk] ~> ^ [f, %num.add [offset, n], ~]
+    | =0 => $acc
+    | =n => %bin.concat [$acc, chunk] ~> ^ [$f, %num.add [$offset, n], ~]
   }
 }
 
@@ -91,9 +89,9 @@ lines_step = #[', 'int, 'bin, 'int] {
     File[__file_open__ [name, flags, 420] ~> @serve]
   },
 
-  read: #[', 'int, 'int] {
+  read: #[(file): ', (offset): 'int, (len): 'int] {
     :doc "Reads from the file at the given offset, up to the given number of bytes."
-    do_read
+    do_read [$file, $offset, $len]
   },
 
   read_all: #' {
@@ -106,11 +104,10 @@ lines_step = #[', 'int, 'bin, 'int] {
     %iter.unfold [[~, 0, 0x, 0], &lines_step]
   },
 
-  write: #[', 'int, 'bin] {
+  write: #[(file): ', (offset): 'int, (data): 'bin] {
     :doc "Writes data at the given offset, returning the number of bytes written."
-    =[f, offset, data]
     id = %ref
-    Write[offset, data, &., id] ~> f.0
+    Write[$offset, $data, &., id] ~> $file.0
     !Reply['ref, 'int] { =Reply[&id, _]; Ok } ~> { =Reply[_, written] => written }
   },
 

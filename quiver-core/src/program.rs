@@ -25,6 +25,12 @@ pub struct Program {
     /// carried by `GetNamed`. Only load-time table construction reads the names.
     #[serde(default)]
     field_names: Vec<String>,
+    /// `(tuple_id, field_index)` pairs whose field label was written omittable
+    /// (`[(foo): 'int]`). Metadata about written spellings, consulted when a positional
+    /// tuple literal is checked against the tuple type — never part of type identity,
+    /// so structurally identical spellings share one entry (marking any marks all).
+    #[serde(default)]
+    omittable_labels: std::collections::HashSet<(usize, usize)>,
     /// Failure-provenance table (debug builds only): sites indexed by `Stamp`
     /// instructions, plus the tuple/key ids the executor needs to prebuild the values.
     #[serde(default)]
@@ -42,6 +48,10 @@ impl TypeLookup for Program {
 
     fn lookup_annotation_key_name(&self, key: usize) -> Option<&str> {
         self.annotation_keys.get(key).map(|name| name.as_str())
+    }
+
+    fn label_omittable(&self, tuple_id: usize, field_index: usize) -> bool {
+        self.omittable_labels.contains(&(tuple_id, field_index))
     }
 }
 
@@ -65,6 +75,7 @@ impl Program {
             types: Vec::new(),
             annotation_keys: Vec::new(),
             field_names: Vec::new(),
+            omittable_labels: std::collections::HashSet::new(),
             debug: None,
         };
 
@@ -184,6 +195,11 @@ impl Program {
         let tuple_id = self.tuples.len();
         self.tuples.push(TupleTypeInfo { name, fields });
         tuple_id
+    }
+
+    /// Mark a tuple field's label as omittable at checked literals (`[(foo): 'int]`).
+    pub fn mark_label_omittable(&mut self, tuple_id: usize, field_index: usize) {
+        self.omittable_labels.insert((tuple_id, field_index));
     }
 
     /// Register a type for use with IsType instruction

@@ -1203,3 +1203,52 @@ fn test_value_position_match_bindings_rejected_in_apply_argument() {
             },
         );
 }
+
+// --- Block-parameter narrowing must not mis-resolve scope-relative provenance --------
+// A `$field` scrutinee piped into a matching block gives the block parameter a
+// `Field(Parameter, i)` source provenance minted in the enclosing scope. Propagating a
+// branch complement upward through that chain used to resolve `Parameter` against the
+// block scope itself — annihilating the scrutinee's type (internal error) or silently
+// corrupting its reconstructed type. The propagation is now skipped for
+// Parameter-rooted sources (precision-only loss).
+
+#[test]
+fn test_field_scrutinee_nested_tuple_pattern() {
+    quiver()
+        .evaluate(
+            r#"
+            'opt = Nil | Cons[['bin, 'int], Done]
+            bg = #[(entries): 'opt] { $entries ~> { | =Nil => [] | =Cons[[k, v], t] => v } }
+            bg [Cons[[0x61, 7], Done]]
+            "#,
+        )
+        .expect("7");
+}
+
+#[test]
+fn test_positional_field_scrutinee_recursive_union() {
+    quiver()
+        .evaluate(
+            r#"
+            'pairs = Nil | Cons[[Str['bin], Str['bin]], ^]
+            hf = #['pairs, 'int] { $0 ~> { | =Nil => [] | =Cons[[n, v], rest] => v } }
+            hf [Cons[["a", "b"], Nil], 0]
+            "#,
+        )
+        .expect("\"b\"");
+}
+
+#[test]
+fn test_field_scrutinee_two_step_destructure() {
+    // The binding extracted from the matched member must keep its type through the
+    // guard step (the silent-miscompile shape).
+    quiver()
+        .evaluate(
+            r#"
+            'opt = Nil | Cons[['bin, 'int], Done]
+            bg = #[(entries): 'opt] { $entries ~> { | =Nil => [] | =Cons[x, t]; x ~> =[k, v] => v } }
+            bg [Cons[[0x61, 7], Done]]
+            "#,
+        )
+        .expect("7");
+}

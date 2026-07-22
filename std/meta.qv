@@ -48,21 +48,19 @@
 
 'elist = Nil | Cons['expr, ^]
 
-rev = #['elist, 'elist] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
-    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+rev = #[(items): 'elist, (acc): 'elist] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
   }
 }
 
-build_rev = #['elist, 'expr] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
+build_rev = #[(items): 'elist, (acc): 'expr] {
+  $items ~> {
+    | =Nil => $acc
     | =Cons[h, t] => ^ [
       t,
-      Tuple[name: "Cons", fields: Cons[h, Cons[acc, Nil]]],
+      Tuple[name: "Cons", fields: Cons[h, Cons[$acc, Nil]]],
     ]
   }
 }

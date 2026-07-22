@@ -1220,17 +1220,33 @@ fn field_type(input: Span) -> IResult<Span, FieldType> {
                 }
             },
         ),
+        // Optional-name field: (name): type — the label is adoptable by a positional
+        // literal checked against this type. The `):` is glued, like other glued forms.
+        map(
+            separated_pair(
+                delimited(char('('), identifier, char(')')),
+                tuple((char(':'), ws1)),
+                type_definition,
+            ),
+            |(name, type_def)| FieldType::Field {
+                name: Some(name),
+                omittable: true,
+                type_def,
+            },
+        ),
         // Named field: name: type
         map(
             separated_pair(identifier, tuple((char(':'), ws1)), type_definition),
             |(name, type_def)| FieldType::Field {
                 name: Some(name),
+                omittable: false,
                 type_def,
             },
         ),
         // Unnamed field: type
         map(type_definition, |type_def| FieldType::Field {
             name: None,
+            omittable: false,
             type_def,
         }),
     ))(input)

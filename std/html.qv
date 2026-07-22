@@ -87,47 +87,44 @@
 
 'items<'t> = Nil | Cons['t, ^]
 
-rev = #<'t>['items<'t>, 'items<'t>] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
-    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+rev = #<'t>[(items): 'items<'t>, (acc): 'items<'t>] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
   }
 }
 
 // === Escaping ===========================================================================
 
 // Append text bytes onto `acc`, escaping `&`, `<`, `>`.
-esc_text = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
+esc_text = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
     | {
-      b = %bin.get_byte [data, pos]
+      b = %bin.get_byte [$data, $pos]
       acc2 = b ~> {
-        | =38 => %bin.concat [acc, "&amp;" ~> .0]
-        | =60 => %bin.concat [acc, "&lt;" ~> .0]
-        | =62 => %bin.concat [acc, "&gt;" ~> .0]
-        | %bin.append [acc, b, 1]
+        | =38 => %bin.concat [$acc, "&amp;" ~> .0]
+        | =60 => %bin.concat [$acc, "&lt;" ~> .0]
+        | =62 => %bin.concat [$acc, "&gt;" ~> .0]
+        | %bin.append [$acc, b, 1]
       }
-      ^ [data, __integer_add__ [pos, 1], len, acc2]
+      ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
     }
   }
 }
 
 // Append attribute-value bytes onto `acc`, escaping `&` and `"`.
-esc_attr = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
+esc_attr = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
     | {
-      b = %bin.get_byte [data, pos]
+      b = %bin.get_byte [$data, $pos]
       acc2 = b ~> {
-        | =38 => %bin.concat [acc, "&amp;" ~> .0]
-        | =34 => %bin.concat [acc, "&quot;" ~> .0]
-        | %bin.append [acc, b, 1]
+        | =38 => %bin.concat [$acc, "&amp;" ~> .0]
+        | =34 => %bin.concat [$acc, "&quot;" ~> .0]
+        | %bin.append [$acc, b, 1]
       }
-      ^ [data, __integer_add__ [pos, 1], len, acc2]
+      ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
     }
   }
 }
@@ -171,36 +168,33 @@ tag_rest = %parse.take_while &tag_char?
 attr_rest = %parse.take_while &attr_char?
 
 // The end of a text run: the next `<` or `{`, or end of input.
-text_end = #['bin, 'int, 'int] {
-  =[data, pos, len]
+text_end = #[(data): 'bin, (pos): 'int, (len): 'int] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => pos
-    | %bin.get_byte [data, pos] ~> =(60 | 123) => pos
-    | ^ [data, __integer_add__ [pos, 1], len]
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $pos
+    | %bin.get_byte [$data, $pos] ~> =(60 | 123) => $pos
+    | ^ [$data, __integer_add__ [$pos, 1], $len]
   }
 }
 
 // The index of the closing `"` of an attribute literal (verbatim bytes; no escapes), or nil.
-lit_end = #['bin, 'int, 'int] {
-  =[data, pos, len]
+lit_end = #[(data): 'bin, (pos): 'int, (len): 'int] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => []
-    | %bin.get_byte [data, pos] ~> =34 => pos
-    | ^ [data, __integer_add__ [pos, 1], len]
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => []
+    | %bin.get_byte [$data, $pos] ~> =34 => $pos
+    | ^ [$data, __integer_add__ [$pos, 1], $len]
   }
 }
 
 // The position just past `-->` at or after `pos`, or nil when unterminated.
-comment_end = #['bin, 'int, 'int] {
-  =[data, pos, len]
+comment_end = #[(data): 'bin, (pos): 'int, (len): 'int] {
   {
-    | __integer_compare__ [__integer_add__ [pos, 3], len] ~> =1 => []
-    | %bin.get_byte [data, pos] ~> =45
+    | __integer_compare__ [__integer_add__ [$pos, 3], $len] ~> =1 => []
+    | %bin.get_byte [$data, $pos] ~> =45
 
-      %bin.get_byte [data, __integer_add__ [pos, 1]] ~> =45
+      %bin.get_byte [$data, __integer_add__ [$pos, 1]] ~> =45
 
-      %bin.get_byte [data, __integer_add__ [pos, 2]] ~> =62 => __integer_add__ [pos, 3]
-    | ^ [data, __integer_add__ [pos, 1], len]
+      %bin.get_byte [$data, __integer_add__ [$pos, 2]] ~> =62 => __integer_add__ [$pos, 3]
+    | ^ [$data, __integer_add__ [$pos, 1], $len]
   }
 }
 
@@ -215,11 +209,10 @@ at_comment? = #'%parse {
   Ok
 }
 
-ws_only_from = #['bin, 'int] {
-  =[data, pos]
+ws_only_from = #[(data): 'bin, (pos): 'int] {
   {
-    | __integer_compare__ [pos, %bin.length data] ~> =(0 | 1) => Ok
-    | %bin.get_byte [data, pos] ~> =(32 | 9 | 10 | 13) => ^ [data, __integer_add__ [pos, 1]]
+    | __integer_compare__ [$pos, %bin.length $data] ~> =(0 | 1) => Ok
+    | %bin.get_byte [$data, $pos] ~> =(32 | 9 | 10 | 13) => ^ [$data, __integer_add__ [$pos, 1]]
   }
 }
 
@@ -260,9 +253,8 @@ event_name? = #Str['bin] {
 
 // An attribute value after its `=`: a `"…"` literal (verbatim bytes) or a `{ … }` hole
 // (recorded as its content span).
-attr_value_p = #['%meta.cb, '%parse] {
-  =[cb, st0]
-  %parse.ws st0
+attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
+  %parse.ws $state
   =[_, st]
   {
     | peek_at st ~> =34 => {
@@ -275,7 +267,7 @@ attr_value_p = #['%meta.cb, '%parse] {
         | %parse.fail_in [st, "'\"' (unterminated attribute value)"]
       }
     }
-    | peek_at st ~> =123 => cb [st.data, st.pos] ~> {
+    | peek_at st ~> =123 => $cb [st.data, st.pos] ~> {
       | =('int)end => [
         AHole[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
         st ~> ~[..., pos: end],
@@ -287,9 +279,8 @@ attr_value_p = #['%meta.cb, '%parse] {
 }
 
 // Zero or more attributes, in source order: `name`, `name="literal"`, or `name={ … }`.
-attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
-  =[cb, st0, acc]
-  %parse.ws st0
+attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
+  %parse.ws $state
   =[_, st]
   {
     | peek_at st ~> =('int)b; letter? b => {
@@ -306,7 +297,7 @@ attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
         | name
       }
       {
-        | seen? [acc, stored] => %parse.fail [st.pos, "a unique attribute name"]
+        | seen? [$acc, stored] => %parse.fail [st.pos, "a unique attribute name"]
         | reserved? name => %parse.fail [
           st.pos,
           "an attribute name ('data-q' is reserved for template instrumentation)",
@@ -325,13 +316,13 @@ attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
               "'=' (an event attribute takes a '\{ … }' payload)",
             ]
           }
-          attr_value_p [&cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
+          attr_value_p [&$cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
           =[v, st4]
           v ~> {
             | =AHole[offset: o, length: l] => ^ [
-              &cb,
+              &$cb,
               st4,
-              Cons[[stored, EHole[offset: o, length: l]], acc],
+              Cons[[stored, EHole[offset: o, length: l]], $acc],
             ]
             | %parse.fail [
               st3.pos,
@@ -340,14 +331,14 @@ attrs_loop = #['%meta.cb, '%parse, 'pattrs] {
           }
         }
         | peek_at st3 ~> =61 => {
-          attr_value_p [&cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
+          attr_value_p [&$cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
           =[v, st4]
-          ^ [&cb, st4, Cons[[stored, v], acc]]
+          ^ [&$cb, st4, Cons[[stored, v], $acc]]
         }
-        | ^ [&cb, st3, Cons[[stored, Flag], acc]]
+        | ^ [&$cb, st3, Cons[[stored, Flag], $acc]]
       }
     }
-    | [rev [acc, Nil], st]
+    | [rev [$acc, Nil], st]
   }
 }
 
@@ -374,35 +365,33 @@ drop_ws = #'pfxs { =Cons[[_, Ok], t] => ^ t | $ }
 trim_root = #'pfxs { drop_ws ~> rev [~, Nil] ~> drop_ws ~> rev [~, Nil] }
 
 // The nodes of a flagged node list, in order.
-strip = #['pfxs, 'pnodes] {
-  =[items, acc]
-  items ~> {
-    | =Nil => rev [acc, Nil]
-    | =Cons[[n, _], t] => ^ [t, Cons[n, acc]]
+strip = #[(items): 'pfxs, (acc): 'pnodes] {
+  $items ~> {
+    | =Nil => rev [$acc, Nil]
+    | =Cons[[n, _], t] => ^ [t, Cons[n, $acc]]
   }
 }
 
 // The node-list loop: elements, holes, and text runs, in source order, stopping before a
 // close tag (`</`) or end of input. Self-passed to tie the element↔children recursion.
-nodes_loop = #[#^ -> (['pfxs, '%parse] | []), '%meta.cb, '%parse, 'pfxs] {
-  =[self, cb, st, acc]
+nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): '%parse, (acc): 'pfxs] {
   {
-    | peek_at st ~> =('int)b => {
+    | peek_at $state ~> =('int)b => {
       | b ~> =60 => {
-        | peek_at2 st ~> =47 => [rev [acc, Nil], st]
-        | peek_at2 st ~> =33 => {
-          | at_comment? st => comment_end [st.data, __integer_add__ [st.pos, 4], st.len] ~> {
-            | =('int)after => ^ [&self, &cb, st ~> ~[..., pos: after], acc]
-            | %parse.fail [st.pos, "'-->'"]
+        | peek_at2 $state ~> =47 => [rev [$acc, Nil], $state]
+        | peek_at2 $state ~> =33 => {
+          | at_comment? $state => comment_end [$state.data, __integer_add__ [$state.pos, 4], $state.len] ~> {
+            | =('int)after => ^ [&$self, &$cb, $state ~> ~[..., pos: after], $acc]
+            | %parse.fail [$state.pos, "'-->'"]
           }
           | %parse.fail [
-            st.pos,
+            $state.pos,
             "a comment ('<!--'; the doctype comes from html.page)",
           ]
         }
         | {
           // An element: `<` tag attrs (`/>` | `>` children `</` tag `>`).
-          st1 = st ~> ~[..., pos: __integer_add__ [st.pos, 1]]
+          st1 = $state ~> ~[..., pos: __integer_add__ [$state.pos, 1]]
           tag_name st1
           =[tag, st2]
           {
@@ -412,7 +401,7 @@ nodes_loop = #[#^ -> (['pfxs, '%parse] | []), '%meta.cb, '%parse, 'pfxs] {
             ]
             | Ok
           }
-          attrs_loop [&cb, st2, Nil]
+          attrs_loop [&$cb, st2, Nil]
           =[alist, st3]
           {
             | peek_at st3 ~> =47 => {
@@ -427,7 +416,7 @@ nodes_loop = #[#^ -> (['pfxs, '%parse] | []), '%meta.cb, '%parse, 'pfxs] {
               {
                 | void? tag => [PElem[tag: tag, attrs: alist, children: Nil], st4]
                 | {
-                  self [&self, &cb, st4, Nil]
+                  $self [&$self, &$cb, st4, Nil]
                   =[fkids, st5]
                   kids = strip [fkids, Nil]
                   {
@@ -465,24 +454,24 @@ nodes_loop = #[#^ -> (['pfxs, '%parse] | []), '%meta.cb, '%parse, 'pfxs] {
             | %parse.fail_in [st3, "'>'"]
           }
           =[node, stn]
-          ^ [&self, &cb, stn, Cons[[node, []], acc]]
+          ^ [&$self, &$cb, stn, Cons[[node, []], $acc]]
         }
       }
-      | b ~> =123 => cb [st.data, st.pos] ~> {
+      | b ~> =123 => $cb [$state.data, $state.pos] ~> {
         | =('int)end => {
-          hole = PHole[offset: st.pos, length: __integer_subtract__ [end, st.pos]]
-          ^ [&self, &cb, st ~> ~[..., pos: end], Cons[[hole, []], acc]]
+          hole = PHole[offset: $state.pos, length: __integer_subtract__ [end, $state.pos]]
+          ^ [&$self, &$cb, $state ~> ~[..., pos: end], Cons[[hole, []], $acc]]
         }
-        | %parse.fail [st.pos, "an expression"]
+        | %parse.fail [$state.pos, "an expression"]
       }
       | {
-        end = text_end [st.data, st.pos, st.len]
-        bytes = %bin.slice [st.data, st.pos, end]
+        end = text_end [$state.data, $state.pos, $state.len]
+        bytes = %bin.slice [$state.data, $state.pos, end]
         ws = ws_only_from [bytes, 0]
-        ^ [&self, &cb, st ~> ~[..., pos: end], Cons[[PText[bytes], ws], acc]]
+        ^ [&$self, &$cb, $state ~> ~[..., pos: end], Cons[[PText[bytes], ws], $acc]]
       }
     }
-    | [rev [acc, Nil], st]
+    | [rev [$acc, Nil], $state]
   }
 }
 
@@ -497,19 +486,17 @@ emit_attr_val = #'pattr_val {
 }
 
 // Attribute pairs as a list of `[name, value]` tuple expressions.
-emit_attrs = #['pattrs, 'xs] {
-  =[items, acc]
-  items ~> {
-    | =Nil => rev [acc, Nil]
-    | =Cons[[n, v], t] => ^ [t, Cons[%meta.pair2 [n, emit_attr_val v], acc]]
+emit_attrs = #[(items): 'pattrs, (acc): 'xs] {
+  $items ~> {
+    | =Nil => rev [$acc, Nil]
+    | =Cons[[n, v], t] => ^ [t, Cons[%meta.pair2 [n, emit_attr_val v], $acc]]
   }
 }
 
 // Node-list expressions, in order; self-passed to recurse into element children.
-emit_list = #[#^ -> 'xs, 'pnodes, 'xs] {
-  =[self, items, acc]
-  items ~> {
-    | =Nil => rev [acc, Nil]
+emit_list = #[(self): #^ -> 'xs, (items): 'pnodes, (acc): 'xs] {
+  $items ~> {
+    | =Nil => rev [$acc, Nil]
     | =Cons[node, rest] => {
       e = node ~> {
         | =PText[b] => Tuple[name: "Raw", fields: Cons[Str[b], Nil]]
@@ -521,7 +508,7 @@ emit_list = #[#^ -> 'xs, 'pnodes, 'xs] {
             Cons[
               Labeled[label: "attrs", value: emit_attrs [alist, Nil] ~> %meta.list_expr],
               Cons[
-                Labeled[label: "children", value: self [&self, kids, Nil] ~> %meta.list_expr],
+                Labeled[label: "children", value: $self [&$self, kids, Nil] ~> %meta.list_expr],
                 Nil,
               ],
             ],
@@ -531,7 +518,7 @@ emit_list = #[#^ -> 'xs, 'pnodes, 'xs] {
         // through the inner recursive union (see render_list).
         | Tuple[name: Nil, fields: Nil]
       }
-      ^ [&self, rest, Cons[e, acc]]
+      ^ [&$self, rest, Cons[e, $acc]]
     }
   }
 }
@@ -566,26 +553,25 @@ has_hole? = #'pattrs {
 
 // Instrument one element's attributes: statics append ` name` / ` name="escaped"`; a
 // hole cuts the run and records an `Attr[elem, name, value]` entry.
-instrument_attrs = #['pattrs, 'ist, 'int] {
-  =[items, ist, elem]
-  items ~> {
-    | =Nil => ist
+instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
+  $items ~> {
+    | =Nil => $ist
     | =Cons[[Str[n], v], rest] => {
       ist2 = v ~> {
-        | =Lit[Str[lv]] => ist ~> ~[
+        | =Lit[Str[lv]] => $ist ~> ~[
           ...,
-          cur: %bin.concat [%bin.append [ist.cur, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [lv, 0, %bin.length lv, ~] ~> %bin.append [
+          cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [lv, 0, %bin.length lv, ~] ~> %bin.append [
             ~,
             34,
             1,
           ],
         ]
-        | =Flag => ist ~> ~[..., cur: %bin.concat [%bin.append [ist.cur, 32, 1], n]]
+        | =Flag => $ist ~> ~[..., cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n]]
         | =AHole[offset: o, length: l] => {
           entry = Tuple[
             name: "Attr",
             fields: Cons[
-              Labeled[label: "elem", value: elem],
+              Labeled[label: "elem", value: $elem],
               Cons[
                 Labeled[label: "name", value: Str[n]],
                 Cons[
@@ -598,19 +584,19 @@ instrument_attrs = #['pattrs, 'ist, 'int] {
               ],
             ],
           ]
-          ist ~> ~[
+          $ist ~> ~[
             ...,
             cur: 0x,
-            runs: Cons[ist.cur, ist.runs],
-            holes: Cons[entry, ist.holes],
-            ci: __integer_add__ [ist.ci, 1],
+            runs: Cons[$ist.cur, $ist.runs],
+            holes: Cons[entry, $ist.holes],
+            ci: __integer_add__ [$ist.ci, 1],
           ]
         }
         | =EHole[offset: o, length: l] => {
           entry = Tuple[
             name: "Attr",
             fields: Cons[
-              Labeled[label: "elem", value: elem],
+              Labeled[label: "elem", value: $elem],
               Cons[
                 Labeled[label: "name", value: Str[n]],
                 Cons[
@@ -623,31 +609,30 @@ instrument_attrs = #['pattrs, 'ist, 'int] {
               ],
             ],
           ]
-          ist ~> ~[
+          $ist ~> ~[
             ...,
             cur: 0x,
-            runs: Cons[ist.cur, ist.runs],
-            holes: Cons[entry, ist.holes],
-            ci: __integer_add__ [ist.ci, 1],
+            runs: Cons[$ist.cur, $ist.runs],
+            holes: Cons[entry, $ist.holes],
+            ci: __integer_add__ [$ist.ci, 1],
           ]
         }
       }
-      ^ [rest, ist2, elem]
+      ^ [rest, ist2, $elem]
     }
   }
 }
 
 // Instrument a node list; self-passed to recurse into element children.
-instrument_list = #[#^ -> 'ist, 'pnodes, 'ist] {
-  =[self, items, ist]
-  items ~> {
-    | =Nil => ist
+instrument_list = #[(self): #^ -> 'ist, (items): 'pnodes, (ist): 'ist] {
+  $items ~> {
+    | =Nil => $ist
     | =Cons[node, rest] => {
       ist2 = node ~> {
-        | =PText[b] => ist ~> ~[..., cur: %bin.concat [ist.cur, b]]
+        | =PText[b] => $ist ~> ~[..., cur: %bin.concat [$ist.cur, b]]
         | =PHole[offset: o, length: l] => {
-          i = %str.from_int ist.ci ~> .0
-          opened = %bin.concat [ist.cur, "<!--q:" ~> .0] ~> %bin.concat [~, i] ~> %bin.concat [
+          i = %str.from_int $ist.ci ~> .0
+          opened = %bin.concat [$ist.cur, "<!--q:" ~> .0] ~> %bin.concat [~, i] ~> %bin.concat [
             ~,
             "-->" ~> .0,
           ]
@@ -658,17 +643,17 @@ instrument_list = #[#^ -> 'ist, 'pnodes, 'ist] {
               Nil,
             ],
           ]
-          ist ~> ~[
+          $ist ~> ~[
             ...,
             cur: %bin.concat ["<!--/q:" ~> .0, i] ~> %bin.concat [~, "-->" ~> .0],
-            runs: Cons[opened, ist.runs],
-            holes: Cons[entry, ist.holes],
-            ci: __integer_add__ [ist.ci, 1],
+            runs: Cons[opened, $ist.runs],
+            holes: Cons[entry, $ist.holes],
+            ci: __integer_add__ [$ist.ci, 1],
           ]
         }
         | =PElem[tag: Str[t], attrs: alist, children: kids] => {
-          e_ix = ist.ei
-          open0 = %bin.concat [%bin.append [ist.cur, 60, 1], t]
+          e_ix = $ist.ei
+          open0 = %bin.concat [%bin.append [$ist.cur, 60, 1], t]
           opened = {
             | has_hole? alist => %bin.concat [open0, " data-q=\"" ~> .0] ~> %bin.concat [~, %str.from_int e_ix ~> .0] ~> %bin.append [
               ~,
@@ -679,14 +664,14 @@ instrument_list = #[#^ -> 'ist, 'pnodes, 'ist] {
           }
           ist1 = instrument_attrs [
             alist,
-            ist ~> ~[..., cur: opened, ei: __integer_add__ [e_ix, 1]],
+            $ist ~> ~[..., cur: opened, ei: __integer_add__ [e_ix, 1]],
             e_ix,
           ]
           ist2 = ist1 ~> ~[..., cur: %bin.append [ist1.cur, 62, 1]]
           {
             | void? Str[t] => ist2
             | {
-              ist3 = self [&self, kids, ist2]
+              ist3 = $self [&$self, kids, ist2]
               ist3 ~> ~[
                 ...,
                 cur: %bin.concat [ist3.cur, 0x3c2f] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1],
@@ -695,19 +680,18 @@ instrument_list = #[#^ -> 'ist, 'pnodes, 'ist] {
           }
         }
         // Unreachable: the arms above cover every variant (see render_list).
-        | ist
+        | $ist
       }
-      ^ [&self, rest, ist2]
+      ^ [&$self, rest, ist2]
     }
   }
 }
 
 // Completed static runs arrive reversed; emit them as `Str` expressions in order.
-statics_exprs = #['bins, 'xs] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
-    | =Cons[b, t] => ^ [t, Cons[Str[b], acc]]
+statics_exprs = #[(items): 'bins, (acc): 'xs] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[b, t] => ^ [t, Cons[Str[b], $acc]]
   }
 }
 
@@ -753,22 +737,21 @@ html_dialect = #(content: Str['bin], term: '%meta.cb) {
 // Append rendered attributes onto `acc`: ` name`, ` name="escaped value"`; nil omits.
 // An event value renders as its %data notation (in the `Ev` envelope) — the attribute
 // text the live client echoes back.
-render_attrs = #<'e>['attrs<'e>, 'bin] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
+render_attrs = #<'e>[(items): 'attrs<'e>, (acc): 'bin] {
+  $items ~> {
+    | =Nil => $acc
     | =Cons[[Str[n], v], rest] => {
       acc2 = v ~> {
-        | =[] => acc
-        | =Ok => %bin.concat [%bin.append [acc, 32, 1], n]
-        | =Str[vb] => %bin.concat [%bin.append [acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [vb, 0, %bin.length vb, ~] ~> %bin.append [
+        | =[] => $acc
+        | =Ok => %bin.concat [%bin.append [$acc, 32, 1], n]
+        | =Str[vb] => %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [vb, 0, %bin.length vb, ~] ~> %bin.append [
           ~,
           34,
           1,
         ]
         | =Ev[_] => {
           %data.encode v ~> =Str[eb]
-          %bin.concat [%bin.append [acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [eb, 0, %bin.length eb, ~] ~> %bin.append [
+          %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [eb, 0, %bin.length eb, ~] ~> %bin.append [
             ~,
             34,
             1,
@@ -781,22 +764,21 @@ render_attrs = #<'e>['attrs<'e>, 'bin] {
 }
 
 // Render a list of nodes onto `acc`, self-passed to recurse into children.
-render_list = #<'e>[#^ -> 'bin, 'nodes<'e>, 'bin] {
-  =[self, items, acc]
-  items ~> {
-    | =Nil => acc
+render_list = #<'e>[(self): #^ -> 'bin, (items): 'nodes<'e>, (acc): 'bin] {
+  $items ~> {
+    | =Nil => $acc
     | =Cons[node, rest] => {
       acc2 = node ~> {
-        | =Raw[Str[b]] => %bin.concat [acc, b]
-        | =Text[Str[b]] => esc_text [b, 0, %bin.length b, acc]
-        | =Fragment[kids] => self [&self, kids, acc]
+        | =Raw[Str[b]] => %bin.concat [$acc, b]
+        | =Text[Str[b]] => esc_text [b, 0, %bin.length b, $acc]
+        | =Fragment[kids] => $self [&$self, kids, $acc]
         | =Element[tag: Str[t], attrs: attrs, children: kids] => {
-            opened = %bin.concat [%bin.append [acc, 60, 1], t] ~> render_attrs [attrs, ~]
+            opened = %bin.concat [%bin.append [$acc, 60, 1], t] ~> render_attrs [attrs, ~]
 
             {
               | void? Str[t] => %bin.append [opened, 62, 1]
               | {
-                inner = self [&self, kids, %bin.append [opened, 62, 1]]
+                inner = $self [&$self, kids, %bin.append [opened, 62, 1]]
 
                 %bin.concat [inner, 0x3c2f] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1]
               }
@@ -805,9 +787,9 @@ render_list = #<'e>[#^ -> 'bin, 'nodes<'e>, 'bin] {
         // Unreachable: the arms above cover every node variant, but exhaustiveness
         // can't see through the inner recursive union, so a catch-all keeps the
         // dispatch infallible (and the accumulator typed 'bin).
-        | acc
+        | $acc
       }
-      ^ [&self, rest, acc2]
+      ^ [&$self, rest, acc2]
     }
   }
 }
@@ -865,8 +847,8 @@ event_value = #<'t>'t { Ev[$] }
 // Attaches the template provenance to an expansion's tree (dialect plumbing): the
 // instrumented statics and the normalized hole values, as the `:template` annotation.
 // Identity on the tree; the annotation is invisible to matching, equality, and render.
-with_template = #<'e>['node<'e>, 'statics, 'holes<'e>] {
-  =[tree, statics, holes]; tree ~> { :template [statics: statics, holes: holes] }
+with_template = #<'e>[(tree): 'node<'e>, (statics): 'statics, (holes): 'holes<'e>] {
+  $tree ~> { :template [statics: $statics, holes: $holes] }
 }
 
 escape_text = #Str['bin] {

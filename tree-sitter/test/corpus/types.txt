@@ -183,3 +183,22 @@ function type alias
         name: (type_name))
       output: (type_identifier
         name: (type_name)))))
+
+==================
+omittable field labels
+==================
+
+'point = [(x): 'int, y: 'int]
+
+---
+
+(source_file
+  (type_alias
+    name: (type_name)
+    definition: (tuple_type
+      name: (identifier)
+      (type_identifier
+        name: (type_name))
+      name: (identifier)
+      (type_identifier
+        name: (type_name)))))

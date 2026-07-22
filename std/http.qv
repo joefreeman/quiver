@@ -26,21 +26,19 @@
 
 'items<'t> = Nil | Cons['t, ^]
 
-rev = #<'t>['items<'t>, 'items<'t>] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
-    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+rev = #<'t>[(items): 'items<'t>, (acc): 'items<'t>] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
   }
 }
 
 // ASCII-lowercased bytes (for case-insensitive names).
-lower_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
+lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
     | {
-      b = %bin.get_byte [data, pos]
+      b = %bin.get_byte [$data, $pos]
       b2 = {
         | __integer_compare__ [b, 65] ~> =(0 | 1); __integer_compare__ [b, 90] ~> =(-1 | 0) => __integer_add__ [
           b,
@@ -48,7 +46,7 @@ lower_loop = #['bin, 'int, 'int, 'bin] {
         ]
         | b
       }
-      ^ [data, __integer_add__ [pos, 1], len, %bin.append [acc, b2, 1]]
+      ^ [$data, __integer_add__ [$pos, 1], $len, %bin.append [$acc, b2, 1]]
     }
   }
 }
@@ -59,9 +57,10 @@ lower = #Str['bin] {
 }
 
 // The first value whose name matches case-insensitively, or nil.
-header_find = #['pairs, 'bin] {
-  =[pairs, target]
-  pairs ~> {
+header_find = #[(pairs): 'pairs, (target): 'bin] {
+  // The pin below needs a variable, so bind the field locally.
+  target = $target
+  $pairs ~> {
     | =Nil => []
     | =Cons[[n, v], rest] => {
       | lower n ~> =Str[nb]; nb ~> =&target => v
@@ -70,15 +69,16 @@ header_find = #['pairs, 'bin] {
   }
 }
 
-header = #['pairs, Str['bin]] {
+header = #[(pairs): 'pairs, (name): Str['bin]] {
   :doc "The first value of a header by case-insensitive name, or nil when absent."
-  =[pairs, name]; lower name ~> =Str[target]; header_find [pairs, target]
+  lower $name ~> =Str[target]; header_find [$pairs, target]
 }
 
-get = #['pairs, Str['bin]] {
+get = #[(pairs): 'pairs, (name): Str['bin]] {
   :doc "The first value for an exact name (query or form pairs), or nil when absent."
-  =[pairs, name]
-  pairs ~> {
+  // The pin below needs a variable, so bind the field locally.
+  name = $name
+  $pairs ~> {
     | =Nil => []
     | =Cons[[n, v], rest] => { n ~> =&name => v | ^ [rest, name] }
   }
@@ -102,32 +102,31 @@ hex_val = #'int {
 
 // Percent-decode; `plus?` = 1 also turns `+` into a space (the urlencoded rule).
 // An invalid escape passes through verbatim (lenient).
-pct_loop = #['bin, 'int, 'int, 'int, 'bin] {
-  =[data, pos, len, plus?, acc]
+pct_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (plus?): 'int, (acc): 'bin] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
     | {
-      b = %bin.get_byte [data, pos]
+      b = %bin.get_byte [$data, $pos]
       {
         | b ~> =37
 
-          __integer_compare__ [__integer_add__ [pos, 2], len] ~> =-1
+          __integer_compare__ [__integer_add__ [$pos, 2], $len] ~> =-1
 
-          [data, __integer_add__ [pos, 1]] ~> hex_val %bin.get_byte ~> =('int)h1
+          [$data, __integer_add__ [$pos, 1]] ~> hex_val %bin.get_byte ~> =('int)h1
 
-          [data, __integer_add__ [pos, 2]] ~> hex_val %bin.get_byte ~> =('int)h2 => {
+          [$data, __integer_add__ [$pos, 2]] ~> hex_val %bin.get_byte ~> =('int)h2 => {
           decoded = __integer_add__ [__integer_multiply__ [h1, 16], h2]
 
-          ^ [data, __integer_add__ [pos, 3], len, plus?, %bin.append [acc, decoded, 1]]
+          ^ [$data, __integer_add__ [$pos, 3], $len, $plus?, %bin.append [$acc, decoded, 1]]
         }
-        | b ~> =43; plus? ~> =1 => ^ [
-          data,
-          __integer_add__ [pos, 1],
-          len,
-          plus?,
-          %bin.append [acc, 32, 1],
+        | b ~> =43; $plus? ~> =1 => ^ [
+          $data,
+          __integer_add__ [$pos, 1],
+          $len,
+          $plus?,
+          %bin.append [$acc, 32, 1],
         ]
-        | ^ [data, __integer_add__ [pos, 1], len, plus?, %bin.append [acc, b, 1]]
+        | ^ [$data, __integer_add__ [$pos, 1], $len, $plus?, %bin.append [$acc, b, 1]]
       }
     }
   }
@@ -139,18 +138,17 @@ pct_decode = #['bin, 'int] { pct_loop [$0, 0, %bin.length $0, $1, 0x] }
 
 // Path segments, in order: one leading `/` stripped, one empty trailing segment dropped
 // (`/posts/` ≡ `/posts`), interior empties preserved, each segment percent-decoded.
-segs_loop = #['bin, 'int, 'int, 'int, 'segments] {
-  =[data, start, pos, len, acc]
+segs_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'segments] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => Cons[
-      pct_decode [%bin.slice [data, start, pos], 0] ~> Str[~],
-      acc,
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => Cons[
+      pct_decode [%bin.slice [$data, $start, $pos], 0] ~> Str[~],
+      $acc,
     ]
-    | %bin.get_byte [data, pos] ~> =47 => {
-      seg = pct_decode [%bin.slice [data, start, pos], 0] ~> Str[~]
-      ^ [data, __integer_add__ [pos, 1], __integer_add__ [pos, 1], len, Cons[seg, acc]]
+    | %bin.get_byte [$data, $pos] ~> =47 => {
+      seg = pct_decode [%bin.slice [$data, $start, $pos], 0] ~> Str[~]
+      ^ [$data, __integer_add__ [$pos, 1], __integer_add__ [$pos, 1], $len, Cons[seg, $acc]]
     }
-    | ^ [data, start, __integer_add__ [pos, 1], len, acc]
+    | ^ [$data, $start, __integer_add__ [$pos, 1], $len, $acc]
   }
 }
 
@@ -191,25 +189,24 @@ part_pair = #'bin {
   }
 }
 
-qp_loop = #['bin, 'int, 'int, 'int, 'pairs] {
-  =[data, start, pos, len, acc]
+qp_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'pairs] {
   next = {
-    | __integer_compare__ [start, pos] ~> =-1 => Cons[
-      [data, start, pos] ~> part_pair %bin.slice,
-      acc,
+    | __integer_compare__ [$start, $pos] ~> =-1 => Cons[
+      [$data, $start, $pos] ~> part_pair %bin.slice,
+      $acc,
     ]
-    | acc
+    | $acc
   }
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => rev [next, Nil]
-    | %bin.get_byte [data, pos] ~> =38 => ^ [
-      data,
-      __integer_add__ [pos, 1],
-      __integer_add__ [pos, 1],
-      len,
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => rev [next, Nil]
+    | %bin.get_byte [$data, $pos] ~> =38 => ^ [
+      $data,
+      __integer_add__ [$pos, 1],
+      __integer_add__ [$pos, 1],
+      $len,
       next,
     ]
-    | ^ [data, start, __integer_add__ [pos, 1], len, acc]
+    | ^ [$data, $start, __integer_add__ [$pos, 1], $len, $acc]
   }
 }
 
@@ -226,53 +223,49 @@ form = #' {
 // --- the wire codec ----------------------------------------------------------------------
 
 // The index of the first `\r\n\r\n`, or nil.
-head_end = #['bin, 'int, 'int] {
-  =[data, pos, len]
+head_end = #[(data): 'bin, (pos): 'int, (len): 'int] {
   {
-    | __integer_compare__ [__integer_add__ [pos, 4], len] ~> =1 => []
-    | %bin.get_byte [data, pos] ~> =13
+    | __integer_compare__ [__integer_add__ [$pos, 4], $len] ~> =1 => []
+    | %bin.get_byte [$data, $pos] ~> =13
 
-      %bin.get_byte [data, __integer_add__ [pos, 1]] ~> =10
+      %bin.get_byte [$data, __integer_add__ [$pos, 1]] ~> =10
 
-      %bin.get_byte [data, __integer_add__ [pos, 2]] ~> =13
+      %bin.get_byte [$data, __integer_add__ [$pos, 2]] ~> =13
 
-      %bin.get_byte [data, __integer_add__ [pos, 3]] ~> =10 => pos
-    | ^ [data, __integer_add__ [pos, 1], len]
+      %bin.get_byte [$data, __integer_add__ [$pos, 3]] ~> =10 => $pos
+    | ^ [$data, __integer_add__ [$pos, 1], $len]
   }
 }
 
 // The index of the next `\r\n` before `end`, or `end` when the last line is unterminated.
-line_end = #['bin, 'int, 'int] {
-  =[data, pos, end]
+line_end = #[(data): 'bin, (pos): 'int, (end): 'int] {
   {
-    | __integer_compare__ [__integer_add__ [pos, 1], end] ~> =(0 | 1) => end
-    | %bin.get_byte [data, pos] ~> =13
+    | __integer_compare__ [__integer_add__ [$pos, 1], $end] ~> =(0 | 1) => $end
+    | %bin.get_byte [$data, $pos] ~> =13
 
-      %bin.get_byte [data, __integer_add__ [pos, 1]] ~> =10 => pos
-    | ^ [data, __integer_add__ [pos, 1], end]
+      %bin.get_byte [$data, __integer_add__ [$pos, 1]] ~> =10 => $pos
+    | ^ [$data, __integer_add__ [$pos, 1], $end]
   }
 }
 
 ows? = #'int { $ ~> =(32 | 9); $ }
 
-trim_start = #['bin, 'int, 'int] {
-  =[data, pos, end]
+trim_start = #[(data): 'bin, (pos): 'int, (end): 'int] {
   {
-    | __integer_compare__ [pos, end] ~> =(0 | 1) => pos
-    | [data, pos] ~> ows? %bin.get_byte => ^ [data, __integer_add__ [pos, 1], end]
-    | pos
+    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $pos
+    | [$data, $pos] ~> ows? %bin.get_byte => ^ [$data, __integer_add__ [$pos, 1], $end]
+    | $pos
   }
 }
 
-trim_end = #['bin, 'int, 'int] {
-  =[data, pos, end]
+trim_end = #[(data): 'bin, (pos): 'int, (end): 'int] {
   {
-    | __integer_compare__ [end, pos] ~> =(0 | -1) => end
+    | __integer_compare__ [$end, $pos] ~> =(0 | -1) => $end
     | [
-        data,
-        __integer_subtract__ [end, 1],
-      ] ~> ows? %bin.get_byte => ^ [data, pos, __integer_subtract__ [end, 1]]
-    | end
+        $data,
+        __integer_subtract__ [$end, 1],
+      ] ~> ows? %bin.get_byte => ^ [$data, $pos, __integer_subtract__ [$end, 1]]
+    | $end
   }
 }
 
@@ -288,22 +281,21 @@ parse_header_line = #'bin {
   [Str[%bin.slice [line, 0, c]], Str[%bin.slice [line, vs, ve]]]
 }
 
-parse_headers = #['bin, 'int, 'int, 'pairs] {
-  =[data, pos, end, acc]
+parse_headers = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'pairs] {
   {
-    | __integer_compare__ [pos, end] ~> =(0 | 1) => rev [acc, Nil]
+    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => rev [$acc, Nil]
     | {
-      le = line_end [data, pos, end]
+      le = line_end [$data, $pos, $end]
       {
         | [
-            data,
-            pos,
+            $data,
+            $pos,
             le,
           ] ~> parse_header_line %bin.slice ~> =[n, v] => ^ [
-            data,
+            $data,
             __integer_add__ [le, 2],
-            end,
-            Cons[[n, v], acc],
+            $end,
+            Cons[[n, v], $acc],
           ]
         | Bad[status: 400, reason: "malformed header"]
       }
@@ -333,9 +325,9 @@ parse_request_line = #'bin {
   target = %bin.slice [line, __integer_add__ [a, 1], b]
   { %bin.length target ~> =0 => [] | Ok }
   [
-    %bin.slice [line, 0, a] ~> method_of Str[~],
-    Str[target],
-    Str[
+    method: %bin.slice [line, 0, a] ~> method_of Str[~],
+    target: Str[target],
+    version: Str[
       %bin.slice [line, __integer_add__ [b, 1], %bin.length line],
     ],
   ]
@@ -372,26 +364,25 @@ content_length = #'pairs {
   }
 }
 
-parse_request_with = #['bin, 'int, 'int] {
+parse_request_with = #[(data): 'bin, (max_head): 'int, (max_body): 'int] {
   :doc "Parses one request from a byte buffer with explicit head/body size caps: Incomplete (read more), Bad[status, reason], or the request plus the leftover bytes."
-  =[data, max_head, max_body]
-  len = %bin.length data
-  he = head_end [data, 0, len]
+  len = %bin.length $data
+  he = head_end [$data, 0, len]
   {
     | he ~> =('int)h => {
-      | __integer_compare__ [h, max_head] ~> =1 => Bad[
+      | __integer_compare__ [h, $max_head] ~> =1 => Bad[
         status: 431,
         reason: "request head too large",
       ]
       | {
-        rle = line_end [data, 0, h]
+        rle = line_end [$data, 0, h]
         {
-          | [data, 0, rle] ~> parse_request_line %bin.slice ~> =[m, target, version] => {
+          | [$data, 0, rle] ~> parse_request_line %bin.slice ~> =(method: m, target, version) => {
               hstart = {
                 | __integer_compare__ [rle, h] ~> =-1 => __integer_add__ [rle, 2]
                 | h
               }
-              parse_headers [data, hstart, h, Nil] ~> {
+              parse_headers [$data, hstart, h, Nil] ~> {
                 | =Bad[status: bs, reason: br] => Bad[status: bs, reason: br]
                 | =hs => {
                   | header [hs, "transfer-encoding"] ~> =Str[_] => Bad[
@@ -399,7 +390,7 @@ parse_request_with = #['bin, 'int, 'int] {
                     reason: "transfer encodings are not supported",
                   ]
                   | content_length hs ~> =('int)cl => {
-                    | __integer_compare__ [cl, max_body] ~> =1 => Bad[
+                    | __integer_compare__ [cl, $max_body] ~> =1 => Bad[
                       status: 413,
                       reason: "request body too large",
                     ]
@@ -418,9 +409,9 @@ parse_request_with = #['bin, 'int, 'int] {
                               query: query,
                               version: version,
                               headers: hs,
-                              body: %bin.slice [data, bstart, bend],
+                              body: %bin.slice [$data, bstart, bend],
                             ],
-                            %bin.slice [data, bend, len],
+                            %bin.slice [$data, bend, len],
                           ]
                         }
                         | Incomplete
@@ -436,7 +427,7 @@ parse_request_with = #['bin, 'int, 'int] {
       }
     }
     | {
-      | __integer_compare__ [len, max_head] ~> =1 => Bad[
+      | __integer_compare__ [len, $max_head] ~> =1 => Bad[
         status: 431,
         reason: "request head too large",
       ]
@@ -471,11 +462,10 @@ reason = #'int {
   | ""
 }
 
-serialize_headers = #['pairs, Str['bin]] {
-  =[hs, acc]
-  hs ~> {
-    | =Nil => acc
-    | =Cons[[n, v], rest] => ^ [rest, "{acc}{n}: {v}\r\n"]
+serialize_headers = #[(hs): 'pairs, (acc): Str['bin]] {
+  $hs ~> {
+    | =Nil => $acc
+    | =Cons[[n, v], rest] => ^ [rest, "{$acc}{n}: {v}\r\n"]
   }
 }
 
@@ -507,36 +497,34 @@ hex_upper = #'int {
   | __integer_add__ [$, 55]
 }
 
-pct_enc_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
+pct_enc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
     | {
-      b = %bin.get_byte [data, pos]
+      b = %bin.get_byte [$data, $pos]
       acc2 = {
-        | enc_plain? b => %bin.append [acc, b, 1]
-        | b ~> =32 => %bin.append [acc, 43, 1]
-        | %bin.append [acc, 37, 1] ~> %bin.append [~, __integer_divide__ [b, 16] ~> hex_upper, 1] ~> %bin.append [
+        | enc_plain? b => %bin.append [$acc, b, 1]
+        | b ~> =32 => %bin.append [$acc, 43, 1]
+        | %bin.append [$acc, 37, 1] ~> %bin.append [~, __integer_divide__ [b, 16] ~> hex_upper, 1] ~> %bin.append [
           ~,
           __integer_modulo__ [b, 16] ~> hex_upper,
           1,
         ]
       }
-      ^ [data, __integer_add__ [pos, 1], len, acc2]
+      ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
     }
   }
 }
 
 pct_encode = #'bin { pct_enc_loop [$, 0, %bin.length $, 0x] }
 
-form_encode_loop = #['pairs, 'bin, 'int] {
-  =[pairs, acc, first]
-  pairs ~> {
-    | =Nil => acc
+form_encode_loop = #[(pairs): 'pairs, (acc): 'bin, (first): 'int] {
+  $pairs ~> {
+    | =Nil => $acc
     | =Cons[[Str[n], Str[v]], rest] => {
       sep = {
-        | first ~> =1 => acc
-        | %bin.append [acc, 38, 1]
+        | $first ~> =1 => $acc
+        | %bin.append [$acc, 38, 1]
       }
 
       acc2 = %bin.concat [sep, pct_encode n] ~> %bin.append [~, 61, 1] ~> %bin.concat [
@@ -556,39 +544,39 @@ form_encode = #'pairs {
 
 // One `k=v` cookie segment (edges trimmed, value verbatim) prepended to the accumulator;
 // segments without an `=` or with an empty name are skipped.
-cookie_seg = #['bin, 'int, 'int, 'pairs] {
-  =[data, s0, e0, acc]
-  s = trim_start [data, s0, e0]
-  e = trim_end [data, s, e0]
+cookie_seg = #[(data): 'bin, (s0): 'int, (e0): 'int, (acc): 'pairs] {
+  s = trim_start [$data, $s0, $e0]
+  e = trim_end [$data, s, $e0]
   {
-    | %bin.index [data, 61, s] ~> =('int)eq; __integer_compare__ [eq, e] ~> =-1; __integer_compare__ [eq, s] ~> =1 => Cons[
-      [Str[%bin.slice [data, s, eq]], Str[%bin.slice [data, __integer_add__ [eq, 1], e]]],
-      acc,
+    | %bin.index [$data, 61, s] ~> =('int)eq; __integer_compare__ [eq, e] ~> =-1; __integer_compare__ [eq, s] ~> =1 => Cons[
+      [
+        Str[%bin.slice [$data, s, eq]],
+        Str[%bin.slice [$data, __integer_add__ [eq, 1], e]],
+      ],
+      $acc,
     ]
-    | acc
+    | $acc
   }
 }
 
-cookies_loop = #['bin, 'int, 'int, 'int, 'pairs] {
-  =[data, start, pos, len, acc]
+cookies_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'pairs] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => cookie_seg [data, start, pos, acc]
-    | %bin.get_byte [data, pos] ~> =59 => {
-      acc2 = cookie_seg [data, start, pos, acc]
-      ^ [data, __integer_add__ [pos, 1], __integer_add__ [pos, 1], len, acc2]
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => cookie_seg [$data, $start, $pos, $acc]
+    | %bin.get_byte [$data, $pos] ~> =59 => {
+      acc2 = cookie_seg [$data, $start, $pos, $acc]
+      ^ [$data, __integer_add__ [$pos, 1], __integer_add__ [$pos, 1], $len, acc2]
     }
-    | ^ [data, start, __integer_add__ [pos, 1], len, acc]
+    | ^ [$data, $start, __integer_add__ [$pos, 1], $len, $acc]
   }
 }
 
-cookies_hdrs = #['pairs, 'pairs] {
-  =[hs, acc]
-  hs ~> {
-    | =Nil => rev [acc, Nil]
+cookies_hdrs = #[(hs): 'pairs, (acc): 'pairs] {
+  $hs ~> {
+    | =Nil => rev [$acc, Nil]
     | =Cons[[n, Str[vb]], rest] => {
       acc2 = {
-        | lower n ~> ="cookie" => cookies_loop [vb, 0, 0, %bin.length vb, acc]
-        | acc
+        | lower n ~> ="cookie" => cookies_loop [vb, 0, 0, %bin.length vb, $acc]
+        | $acc
       }
       ^ [rest, acc2]
     }
@@ -602,18 +590,16 @@ cookies = #' {
 
 'attrs = Nil | Cons[Str['bin], ^]
 
-attrs_join = #['attrs, Str['bin]] {
-  =[attrs, acc]
-  attrs ~> {
-    | =Nil => acc
-    | =Cons[a, rest] => ^ [rest, "{acc}; {a}"]
+attrs_join = #[(attrs): 'attrs, (acc): Str['bin]] {
+  $attrs ~> {
+    | =Nil => $acc
+    | =Cons[a, rest] => ^ [rest, "{$acc}; {a}"]
   }
 }
 
-set_cookie = #[Str['bin], Str['bin], 'attrs] {
+set_cookie = #[(name): Str['bin], (value): Str['bin], (attrs): 'attrs] {
   :doc "A Set-Cookie header pair for the name and value, with the given attribute strings (e.g. \"Path=/\", \"HttpOnly\")."
-  =[name, value, attrs]
-  ["set-cookie", attrs_join [attrs, "{name}={value}"]]
+  ["set-cookie", attrs_join [$attrs, "{$name}={$value}"]]
 }
 
 [

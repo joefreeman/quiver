@@ -24,21 +24,18 @@ hex_val = #'int {
   ]
 }
 
-to_hex_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
-    | {
-      b = __binary_get__ [data, pos, 0, 8]
+to_hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
+  | {
+    b = __binary_get__ [$data, $pos, 0, 8]
 
-      acc2 = __binary_append__ [acc, __integer_divide__ [b, 16] ~> hex_digit, 1] ~> __binary_append__ [
-        ~,
-        __integer_modulo__ [b, 16] ~> hex_digit,
-        1,
-      ]
+    acc2 = __binary_append__ [$acc, __integer_divide__ [b, 16] ~> hex_digit, 1] ~> __binary_append__ [
+      ~,
+      __integer_modulo__ [b, 16] ~> hex_digit,
+      1,
+    ]
 
-      ^ [data, __integer_add__ [pos, 1], len, acc2]
-    }
+    ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
   }
 }
 
@@ -47,25 +44,22 @@ to_hex = #'bin {
   to_hex_loop [$, 0, __binary_length__ $, 0x] ~> Str[~]
 }
 
-from_hex_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
-    | __binary_get__ [data, pos, 0, 8] ~> hex_val
-    ~> =('int)hi
+from_hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
+  | __binary_get__ [$data, $pos, 0, 8] ~> hex_val
+  ~> =('int)hi
 
-      __binary_get__ [data, __integer_add__ [pos, 1], 0, 8] ~> hex_val
-      ~> =('int)lo => ^ [
-      data,
-      __integer_add__ [pos, 2],
-      len,
-      __binary_append__ [
-        acc,
-        __integer_add__ [__integer_multiply__ [hi, 16], lo],
-        1,
-      ],
-    ]
-  }
+    __binary_get__ [$data, __integer_add__ [$pos, 1], 0, 8] ~> hex_val
+    ~> =('int)lo => ^ [
+    $data,
+    __integer_add__ [$pos, 2],
+    $len,
+    __binary_append__ [
+      $acc,
+      __integer_add__ [__integer_multiply__ [hi, 16], lo],
+      1,
+    ],
+  ]
 }
 
 from_hex = #Str['bin] {
@@ -104,15 +98,14 @@ b64_val = #'int {
   | $ ~> =47 => 63
 }
 
-to_base64_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  rem = __integer_subtract__ [len, pos]
+to_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  rem = __integer_subtract__ [$len, $pos]
   {
-    | rem ~> =0 => acc
+    | rem ~> =0 => $acc
     | rem ~> =1 => {
-      b0 = __binary_get__ [data, pos, 0, 8]
+      b0 = __binary_get__ [$data, $pos, 0, 8]
 
-      acc
+      $acc
       ~> __binary_append__ [~, __integer_divide__ [b0, 4] ~> b64_digit, 1] ~> __binary_append__ [
         ~,
         __integer_modulo__ [b0, 4] ~> __integer_multiply__ [~, 16] ~> b64_digit,
@@ -120,10 +113,10 @@ to_base64_loop = #['bin, 'int, 'int, 'bin] {
       ] ~> __binary_concat__ [~, 0x3d3d]
     }
     | rem ~> =2 => {
-      b0 = __binary_get__ [data, pos, 0, 8]
-      b1 = __binary_get__ [data, __integer_add__ [pos, 1], 0, 8]
+      b0 = __binary_get__ [$data, $pos, 0, 8]
+      b1 = __binary_get__ [$data, __integer_add__ [$pos, 1], 0, 8]
 
-      acc
+      $acc
       ~> __binary_append__ [~, __integer_divide__ [b0, 4] ~> b64_digit, 1] ~> __binary_append__ [
         ~,
         __integer_add__ [
@@ -138,11 +131,11 @@ to_base64_loop = #['bin, 'int, 'int, 'bin] {
       ] ~> __binary_concat__ [~, 0x3d]
     }
     | {
-      b0 = __binary_get__ [data, pos, 0, 8]
-      b1 = __binary_get__ [data, __integer_add__ [pos, 1], 0, 8]
-      b2 = __binary_get__ [data, __integer_add__ [pos, 2], 0, 8]
+      b0 = __binary_get__ [$data, $pos, 0, 8]
+      b1 = __binary_get__ [$data, __integer_add__ [$pos, 1], 0, 8]
+      b2 = __binary_get__ [$data, __integer_add__ [$pos, 2], 0, 8]
 
-      acc2 = acc
+      acc2 = $acc
       ~> __binary_append__ [~, __integer_divide__ [b0, 4] ~> b64_digit, 1] ~> __binary_append__ [
         ~,
         __integer_add__ [
@@ -159,7 +152,7 @@ to_base64_loop = #['bin, 'int, 'int, 'bin] {
         1,
       ] ~> __binary_append__ [~, __integer_modulo__ [b2, 64] ~> b64_digit, 1]
 
-      ^ [data, __integer_add__ [pos, 3], len, acc2]
+      ^ [$data, __integer_add__ [$pos, 3], $len, acc2]
     }
   }
 }
@@ -170,68 +163,65 @@ to_base64 = #'bin {
 }
 
 // Decode one 4-character quantum at pos; the last may carry one or two `=` pads.
-from_base64_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
-    | {
-      c0 = __binary_get__ [data, pos, 0, 8]
-      c1 = __binary_get__ [data, __integer_add__ [pos, 1], 0, 8]
-      c2 = __binary_get__ [data, __integer_add__ [pos, 2], 0, 8]
-      c3 = __binary_get__ [data, __integer_add__ [pos, 3], 0, 8]
-      last? = __integer_compare__ [__integer_add__ [pos, 4], len] ~> { =(0 | 1) => Ok | [] }
-      b64_val c0 ~> =('int)v0
-      b64_val c1 ~> =('int)v1
-      {
-        // "xx==" — one output byte; only legal in the final quantum.
-        | [c2, c3] ~> =[61, 61] => {
-          last?
-          __binary_append__ [
-            acc,
-            __integer_add__ [__integer_multiply__ [v0, 4], __integer_divide__ [v1, 16]],
-            1,
-          ]
-        }
-        // "xxx=" — two output bytes; only legal in the final quantum.
-        | c3 ~> =61 => {
-          last?
-          b64_val c2 ~> =('int)v2
-          __binary_append__ [
-            acc,
-            __integer_add__ [__integer_multiply__ [v0, 4], __integer_divide__ [v1, 16]],
-            1,
-          ] ~> __binary_append__ [
-            ~,
-            __integer_add__ [
-              __integer_modulo__ [v1, 16] ~> __integer_multiply__ [~, 16],
-              __integer_divide__ [v2, 4],
-            ],
-            1,
-          ]
-        }
-        | {
-          b64_val c2 ~> =('int)v2
-          b64_val c3 ~> =('int)v3
+from_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
+  | {
+    c0 = __binary_get__ [$data, $pos, 0, 8]
+    c1 = __binary_get__ [$data, __integer_add__ [$pos, 1], 0, 8]
+    c2 = __binary_get__ [$data, __integer_add__ [$pos, 2], 0, 8]
+    c3 = __binary_get__ [$data, __integer_add__ [$pos, 3], 0, 8]
+    last? = __integer_compare__ [__integer_add__ [$pos, 4], $len] ~> { =(0 | 1) => Ok | [] }
+    b64_val c0 ~> =('int)v0
+    b64_val c1 ~> =('int)v1
+    {
+      // "xx==" — one output byte; only legal in the final quantum.
+      | [c2, c3] ~> =[61, 61] => {
+        last?
+        __binary_append__ [
+          $acc,
+          __integer_add__ [__integer_multiply__ [v0, 4], __integer_divide__ [v1, 16]],
+          1,
+        ]
+      }
+      // "xxx=" — two output bytes; only legal in the final quantum.
+      | c3 ~> =61 => {
+        last?
+        b64_val c2 ~> =('int)v2
+        __binary_append__ [
+          $acc,
+          __integer_add__ [__integer_multiply__ [v0, 4], __integer_divide__ [v1, 16]],
+          1,
+        ] ~> __binary_append__ [
+          ~,
+          __integer_add__ [
+            __integer_modulo__ [v1, 16] ~> __integer_multiply__ [~, 16],
+            __integer_divide__ [v2, 4],
+          ],
+          1,
+        ]
+      }
+      | {
+        b64_val c2 ~> =('int)v2
+        b64_val c3 ~> =('int)v3
 
-          acc2 = __binary_append__ [
-            acc,
-            __integer_add__ [__integer_multiply__ [v0, 4], __integer_divide__ [v1, 16]],
-            1,
-          ] ~> __binary_append__ [
-            ~,
-            __integer_add__ [
-              __integer_modulo__ [v1, 16] ~> __integer_multiply__ [~, 16],
-              __integer_divide__ [v2, 4],
-            ],
-            1,
-          ] ~> __binary_append__ [
-            ~,
-            __integer_add__ [__integer_modulo__ [v2, 4] ~> __integer_multiply__ [~, 64], v3],
-            1,
-          ]
+        acc2 = __binary_append__ [
+          $acc,
+          __integer_add__ [__integer_multiply__ [v0, 4], __integer_divide__ [v1, 16]],
+          1,
+        ] ~> __binary_append__ [
+          ~,
+          __integer_add__ [
+            __integer_modulo__ [v1, 16] ~> __integer_multiply__ [~, 16],
+            __integer_divide__ [v2, 4],
+          ],
+          1,
+        ] ~> __binary_append__ [
+          ~,
+          __integer_add__ [__integer_modulo__ [v2, 4] ~> __integer_multiply__ [~, 64], v3],
+          1,
+        ]
 
-          ^ [data, __integer_add__ [pos, 4], len, acc2]
-        }
+        ^ [$data, __integer_add__ [$pos, 4], $len, acc2]
       }
     }
   }
@@ -289,24 +279,24 @@ from_base64 = #Str['bin] {
     :doc "The index of the first occurrence of a byte at or after the given offset, or nil when absent."
   },
 
-  get_byte: #['bin, 'int] {
+  get_byte: #[(bin): 'bin, (index): 'int] {
     :doc "The byte at the given index, as an integer 0 to 255."
-    __binary_get__ [..., 0, 8]
+    __binary_get__ [$bin, $index, 0, 8]
   },
 
-  get_bit: #['bin, 'int] {
+  get_bit: #[(bin): 'bin, (index): 'int] {
     :doc "The bit at the given index (most significant first), as 0 or 1."
-    byte_bit $1 ~> __binary_get__ [$0, ..., 1]
+    byte_bit $index ~> __binary_get__ [$bin, ..., 1]
   },
 
-  set_byte: #['bin, 'int, 'int] {
+  set_byte: #[(bin): 'bin, (index): 'int, (value): 'int] {
     :doc "The binary with the byte at the given index replaced by an integer 0 to 255."
-    __binary_set__ [$0, $1, 0, $2, 8]
+    __binary_set__ [$bin, $index, 0, $value, 8]
   },
 
-  set_bit: #['bin, 'int, 'int] {
+  set_bit: #[(bin): 'bin, (index): 'int, (value): 'int] {
     :doc "The binary with the bit at the given index (most significant first) set to 0 or 1."
-    byte_bit $1 ~> __binary_set__ [$0, ..., $2, 1]
+    byte_bit $index ~> __binary_set__ [$bin, ..., $value, 1]
   },
 
   to_hex: &to_hex,

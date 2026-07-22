@@ -11,14 +11,14 @@
     Range[~, None, 1]
   },
 
-  between: #['int, 'int] {
+  between: #[(from): 'int, (to): 'int] {
     :doc "A range from the first integer up to the second (exclusive), stepping by 1."
-    Range[..., 1]
+    Range[$from, $to, 1]
   },
 
-  new: #['int, ('int | None), 'int] {
+  new: #[(from): 'int, (to): ('int | None), (step): 'int] {
     :doc "A range with the given start, stop (an integer, or None for unbounded), and step."
-    Range[...]
+    Range[$from, $to, $step]
   },
 
   // A `Range` is entirely integer-valued, so this generator runs once per yielded element

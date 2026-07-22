@@ -1,14 +1,13 @@
 ' = Root | Relative['int] | Path['%str, ^]
 
-join = #[#^ -> (' | []), ', '] {
-  =[self, p1, p2]
-  [p1, p2] ~> {
+join = #[(self): #^ -> (' | []), (path): ', (with): '] {
+  [$path, $with] ~> {
     | =[_, Root] => []
-    | =[_, Relative[0]] => p1
+    | =[_, Relative[0]] => $path
     | =[Root, Relative[_]] => []
     | =[Relative[m], Relative[n]] => %num.add [m, n] ~> Relative[~]
-    | =[Path[_, p], Relative[n]] => self [&self, p, Relative[%num.sub [n, 1]]]
-    | =[_, Path[s, parent]] => self [&self, p1, parent] ~> { =[] => [] | Path[s, ~] }
+    | =[Path[_, p], Relative[n]] => $self [&$self, p, Relative[%num.sub [n, 1]]]
+    | =[_, Path[s, parent]] => $self [&$self, $path, parent] ~> { =[] => [] | Path[s, ~] }
   }
 }
 
@@ -94,8 +93,8 @@ parse = #['%list<'%str>, '] {
     | =Path[_, p] => ^ p
   },
 
-  join: #[', '] {
+  join: #[(path): ', (with): '] {
     :doc "Joins the second path onto the first; nil when the second is absolute or escapes the root."
-    join [&join, ...]
+    join [&join, $path, $with]
   },
 ]

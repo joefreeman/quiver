@@ -5,48 +5,45 @@ is_continuation = #['bin, 'int] {
   ~> %bin.get_byte [~, $1] ~> %int.and [~, 192] ~> =128
 }
 
-skip_continuation = #['bin, 'int, 'int] {
-  =[data, byte_pos, data_len]
-  {
-    | byte_pos ~> %num.ge? [~, data_len] => byte_pos
-    | is_continuation [data, byte_pos] => byte_pos ~> %num.add [~, 1] ~> ^ [data, ~, data_len]
-    | byte_pos
-  }
+skip_continuation = #[(data): 'bin, (byte_pos): 'int, (data_len): 'int] {
+  | $byte_pos ~> %num.ge? [~, $data_len] => $byte_pos
+  | is_continuation [$data, $byte_pos] => $byte_pos ~> %num.add [~, 1] ~> ^ [$data, ~, $data_len]
+  | $byte_pos
 }
 
 // The byte index in [offset, end] where `needle` first occurs, or nil. Rather than
 // slice-and-compare at every position, jump straight to each occurrence of the needle's
 // first byte (a native rope scan) and verify the rest there — so a scan skips the runs
 // between candidates instead of stepping a byte at a time.
-find_index = #['bin, 'bin, 'int, 'int] {
-  =[haystack, needle, offset, end]
+find_index = #[(haystack): 'bin, (needle): 'bin, (offset): 'int, (end): 'int] {
+  // The verification pins the needle (`=&needle`), and a pin checks a variable, so bind
+  // the field locally.
+  needle = $needle
   {
-    | %bin.length needle ~> =0 => offset
-    | %bin.index [haystack, %bin.get_byte [needle, 0], offset] ~> =('int)pos; %num.le? [pos, end] => {
-      | %bin.length needle ~> %num.add [pos, ~] ~> %bin.slice [haystack, pos, ~] ~> =&needle => pos
-      | %num.add [pos, 1] ~> ^ [haystack, needle, ~, end]
+    | %bin.length needle ~> =0 => $offset
+    | %bin.index [$haystack, %bin.get_byte [needle, 0], $offset] ~> =('int)pos
+      %num.le? [pos, $end] => {
+      | %bin.length needle ~> %num.add [pos, ~] ~> %bin.slice [$haystack, pos, ~] ~> =&needle => pos
+      | %num.add [pos, 1] ~> ^ [$haystack, needle, ~, $end]
     }
     | []
   }
 }
 
 // Convert byte position to character index by counting non-continuation bytes from start
-byte_pos_to_char_idx = #['bin, 'int, 'int, 'int] {
-  =[data, current_pos, target_pos, char_idx]
-  {
-    | %num.ge? [current_pos, target_pos] => char_idx
-    | is_continuation [data, current_pos] => current_pos ~> %num.add [~, 1] ~> ^ [
-      data,
-      ~,
-      target_pos,
-      char_idx,
-    ]
-    | {
-      // Start of character - count it
-      new_char_idx = %num.add [char_idx, 1]
+byte_pos_to_char_idx = #[(data): 'bin, (current_pos): 'int, (target_pos): 'int, (char_idx): 'int] {
+  | %num.ge? [$current_pos, $target_pos] => $char_idx
+  | is_continuation [$data, $current_pos] => $current_pos ~> %num.add [~, 1] ~> ^ [
+    $data,
+    ~,
+    $target_pos,
+    $char_idx,
+  ]
+  | {
+    // Start of character - count it
+    new_char_idx = %num.add [$char_idx, 1]
 
-      current_pos ~> %num.add [~, 1] ~> ^ [data, ~, target_pos, new_char_idx]
-    }
+    $current_pos ~> %num.add [~, 1] ~> ^ [$data, ~, $target_pos, new_char_idx]
   }
 }
 
@@ -97,33 +94,27 @@ from_chars = #'%iter<'int> {
   ] ~> Str[~]
 }
 
-// Decimal digits from byte pos, accumulating onto acc: [value, end-pos]. Zero or more.
-int_digits = #['bin, 'int, 'int, 'int] {
-  =[data, pos, len, acc]
-  {
-    | %num.lt? [pos, len]; %bin.get_byte [data, pos] ~> =('int)b; %num.ge? [b, 48]; %num.le? [b, 57] => %num.add [%num.mul [acc, 10], %num.sub [b, 48]] ~> ^ [
-      data,
-      %num.add [pos, 1],
-      len,
-      ~,
-    ]
-    | [acc, pos]
-  }
+// Decimal digits from byte pos, accumulating onto acc: [n: value, end: pos]. Zero or more.
+int_digits = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'int] {
+  | %num.lt? [$pos, $len]; %bin.get_byte [$data, $pos] ~> =('int)b; %num.ge? [b, 48]; %num.le? [b, 57] => %num.add [%num.mul [$acc, 10], %num.sub [b, 48]] ~> ^ [
+    $data,
+    %num.add [$pos, 1],
+    $len,
+    ~,
+  ]
+  | [n: $acc, end: $pos]
 }
 
 // The decimal digit bytes of a positive integer, prepended (lowest digit first) onto acc.
 // The raw division builtins (rather than `%int.div`/`%int.mod`) keep this total: the divisor
 // is the constant 10, so the zero-divisor nil the stdlib wrappers add can never arise.
-int_bytes = #['int, 'bin] {
-  =[n, acc]
-  {
-    | n ~> =0 => acc
-    | {
-      d = __integer_modulo__ [n, 10]
-      q = __integer_divide__ [n, 10]
-      digit = %bin.append [0x, %num.add [d, 48], 1]
-      ^ [q, %bin.concat [digit, acc]]
-    }
+int_bytes = #[(n): 'int, (acc): 'bin] {
+  | $n ~> =0 => $acc
+  | {
+    d = __integer_modulo__ [$n, 10]
+    q = __integer_divide__ [$n, 10]
+    digit = %bin.append [0x, %num.add [d, 48], 1]
+    ^ [q, %bin.concat [digit, $acc]]
   }
 }
 
@@ -143,7 +134,7 @@ int_bytes = #['int, 'bin] {
     }
     %num.lt? [start, len]
     int_digits [data, start, len, 0]
-    =[n, end]
+    =(n, end)
     end ~> =&len
     { start ~> =1 => %num.sub [0, n] | n }
   },
@@ -167,9 +158,10 @@ int_bytes = #['int, 'bin] {
     =[Str[a], Str[b]]; %bin.concat [a, b] ~> Str[~]
   },
 
-  starts_with?: #[', '] {
+  starts_with?: #[(str): ', (prefix): '] {
     :doc "Whether a string starts with a prefix."
-    =[Str[target], Str[prefix]]
+    Str[target] = $str
+    Str[prefix] = $prefix
     prefix_len = %bin.length prefix
     target_len = %bin.length target
     %num.le? [prefix_len, target_len]
@@ -180,9 +172,10 @@ int_bytes = #['int, 'bin] {
     Ok
   },
 
-  ends_with?: #[', '] {
+  ends_with?: #[(str): ', (suffix): '] {
     :doc "Whether a string ends with a suffix."
-    =[Str[target], Str[suffix]]
+    Str[target] = $str
+    Str[suffix] = $suffix
     suffix_len = %bin.length suffix
     target_len = %bin.length target
     %num.le? [suffix_len, target_len]
@@ -193,9 +186,10 @@ int_bytes = #['int, 'bin] {
     Ok
   },
 
-  contains?: #[', '] {
+  contains?: #[(str): ', (needle): '] {
     :doc "Whether a string contains a substring."
-    =[Str[haystack], Str[needle]]
+    Str[haystack] = $str
+    Str[needle] = $needle
     needle_len = %bin.length needle
     haystack_len = %bin.length haystack
     {
@@ -205,9 +199,10 @@ int_bytes = #['int, 'bin] {
     }
   },
 
-  split: #[', '] {
+  split: #[(str): ', (sep): '] {
     :doc "Splits a string on a delimiter, yielding an iterator of the pieces."
-    =[Str[haystack], Str[delim]]
+    Str[haystack] = $str
+    Str[delim] = $sep
     haystack_len = %bin.length haystack
     delim_len = %bin.length delim
     end = %num.sub [haystack_len, delim_len]
@@ -237,16 +232,17 @@ int_bytes = #['int, 'bin] {
     .0 ~> chars ~> %iter.count
   },
 
-  slice: #[', 'int, 'int] {
+  slice: #[(str): ', (start): 'int, (end): 'int] {
     :doc "The substring from start (inclusive) to end (exclusive), in character indices."
-    =[Str[data], start, end]
+    Str[data] = $str
 
-    chars data ~> %iter.drop [~, start] ~> [~, %num.sub [end, start]] ~> from_chars %iter.take
+    chars data ~> %iter.drop [~, $start] ~> %iter.take [~, %num.sub [$end, $start]] ~> from_chars
   },
 
-  index_of: #[', '] {
+  index_of: #[(str): ', (needle): '] {
     :doc "The character index of the first occurrence of a substring, or nil when absent."
-    =[Str[haystack], Str[needle]]
+    Str[haystack] = $str
+    Str[needle] = $needle
     needle_len = %bin.length needle
     haystack_len = %bin.length haystack
     {
@@ -275,10 +271,10 @@ int_bytes = #['int, 'bin] {
     from_chars
   },
 
-  join: #['%iter<'>, '] {
+  join: #[(strs): '%iter<'>, (sep): '] {
     :doc "Joins an iterator of strings with a separator between each."
-    =[it, Str[sep]]
-    it ~> %iter.map [~, #' { .0 }] ~> %iter.intersperse [~, sep] ~> %iter.fold [~, 0x, &%bin.concat] ~> Str[
+    Str[sep] = $sep
+    $strs ~> %iter.map [~, #' { .0 }] ~> %iter.intersperse [~, sep] ~> %iter.fold [~, 0x, &%bin.concat] ~> Str[
       ~,
     ]
   },

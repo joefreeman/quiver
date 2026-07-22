@@ -46,24 +46,30 @@
 'table = Nil | Cons['row, ^]
 'state = [table: 'table, max: 'int, window: 'int]
 
-watch = #<'r>[Str['bin], (@-> 'r), @'down] {
+watch = #<'r>[(id): Str['bin], (child): (@-> 'r), (sup): @'down] {
   :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start closure, passing the child and supervisor by reference."
-  =[i, c, s]
+  // The spawned watcher closes over these (an inner `$` would be its own
+  // parameter), so bind the fields locally — the pids by reference, as bare
+  // pid terms would send.
+  id = $id
+  child = &$child
+  sup = &$sup
   @{
-    r = !c
+    r = !child
     o = {
       | r:('%proc.crash)crash ~> =('%proc.crash)e => Crashed[e]
       | Done
     }
-    Down[id: i, pid: &c, outcome: o] ~> s
+    Down[id: id, pid: &child, outcome: o] ~> sup
   }
   Ok
 }
 
 // One table row per child: spawn via the spec's start closure (which wires the
 // watcher) and record the pid.
-start_row = #['spec, @'down] {
-  =[s, sup]; p = s ~> ~.start [s.id, &sup]; [id: s.id, pid: &p, spec: s, restarts: Nil]
+start_row = #[(spec): 'spec, (sup): @'down] {
+  p = $spec ~> ~.start [$spec.id, &$sup]
+  [id: $spec.id, pid: &p, spec: $spec, restarts: Nil]
 }
 
 seed = #['specs, @'down, 'table] {
@@ -84,7 +90,7 @@ remove_loop = #['table, Str['bin], 'table] {
   | =[Cons[r, rest], id, acc] => ^ [rest, id, Cons[r, acc]]
 }
 
-remove = #['table, Str['bin]] { =[t, id]; remove_loop [t, id, Nil] }
+remove = #[(t): 'table, (id): Str['bin]] { remove_loop [$t, $id, Nil] }
 
 // Timestamps newer than the cutoff (the sliding intensity window); order irrelevant.
 prune_loop = #['stamps, 'int, 'stamps] {
@@ -96,7 +102,7 @@ prune_loop = #['stamps, 'int, 'stamps] {
   | =[Cons[_, rest], cutoff, acc] => ^ [rest, cutoff, acc]
 }
 
-prune = #['stamps, 'int] { =[ts, cutoff]; prune_loop [ts, cutoff, Nil] }
+prune = #[(ts): 'stamps, (cutoff): 'int] { prune_loop [$ts, $cutoff, Nil] }
 
 len = #['stamps, 'int] {
   | =[Nil, n] => n
@@ -120,12 +126,11 @@ allow? = #[stamps: 'stamps, now: 'int, max: 'int, window: 'int] -> 'verdict {
 
 // Whether the child's restart type wants a restart for this outcome: Permanent
 // always, Temporary never, Transient only after a crash.
-restart? = #['row, 'outcome] {
-  =[r, o]
-  r.spec.restart ~> {
+restart? = #[(r): 'row, (o): 'outcome] {
+  $r.spec.restart ~> {
     | =Permanent => Ok
     | =Temporary => []
-    | o ~> =Crashed[_] => Ok
+    | $o ~> =Crashed[_] => Ok
     | []
   }
 }
@@ -188,14 +193,14 @@ start = #[children: 'specs, max_restarts: 'int, window: 'int] {
   =[children: ss, max_restarts: m, window: w]; [specs: ss, max: m, window: w] ~> @run
 }
 
-add = #[@'msg, 'spec] {
+add = #[(sup): @'msg, (spec): 'spec] {
   :doc "Adds a child to a running supervisor and awaits the verdict: Started[pid] (widened to an inert `(@)`), or Duplicate for an id the table already holds. The child is spawned in the supervisor's process — owned by it, supervised like any startup spec."
-  =[sup, spec]; Add[spec, &.] ~> sup; !'started
+  Add[$spec, &.] ~> $sup; !'started
 }
 
-drop = #[@'msg, Str['bin]] {
+drop = #[(sup): @'msg, (id): Str['bin]] {
   :doc "Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its watcher's report is disregarded, and the id may be supervised again. Asynchronous: the supervisor applies it in mailbox order."
-  =[sup, id]; Drop[id] ~> sup; Ok
+  Drop[$id] ~> $sup; Ok
 }
 
 [start: &start, add: &add, drop: &drop, watch: &watch]

@@ -98,11 +98,10 @@
 
 'items<'t> = Nil | Cons['t, ^]
 
-rev = #<'t>['items<'t>, 'items<'t>] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
-    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+rev = #<'t>[(items): 'items<'t>, (acc): 'items<'t>] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
   }
 }
 
@@ -116,44 +115,44 @@ enc_attr = #<'e>'%html.attr_val<'e> {
 }
 
 // A node's frame; self-passed to recurse into template slots.
-frame_of = #<'e>[#^ -> 'frame, '%html<'e>] {
-  =[self, node]
+frame_of = #<'e>[(self): #^ -> 'frame, (node): '%html<'e>] {
+  // The nested literals close over `self` (an inner `$` would be their own parameter),
+  // so bind the field locally — by reference, as a bare `$self` term would call it.
+  self = &$self
   {
-    | node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: &st]
-    | node:('%html.tmpl<'e>)template
+    | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: &st]
+    | $node:('%html.tmpl<'e>)template
       ~> =(statics: s, holes: h) => {
-        slots = #['%html.holes<'e>, 'frames] {
-          =[items, acc]
-          items ~> {
-            | =Nil => rev [acc, Nil]
+        slots = #[(items): '%html.holes<'e>, (acc): 'frames] {
+          $items ~> {
+            | =Nil => rev [$acc, Nil]
             | =Cons[hd, t] => {
               f = hd ~> {
                 | =Child[n] => self [&self, n]
                 | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
               }
-              ^ [t, Cons[f, acc]]
+              ^ [t, Cons[f, $acc]]
             }
           }
         }
         Tmpl[statics: s, slots: slots [h, Nil]]
       }
-    | node ~> =Text[str] => Leaf[str]
-    | node ~> =Fragment[items] => {
+    | $node ~> =Text[str] => Leaf[str]
+    | $node ~> =Fragment[items] => {
       // An un-annotated Fragment in a child slot is a node list: a Many of per-item
       // frames (chat items being their own templates diff granularly), each carrying
       // its optional `:key`.
-      row_frames = #['%html.nodes<'e>, 'rows] {
-        =[ns, acc]
-        ns ~> {
-          | =Nil => rev [acc, Nil]
+      row_frames = #[(nodes): '%html.nodes<'e>, (acc): 'rows] {
+        $nodes ~> {
+          | =Nil => rev [$acc, Nil]
           | =Cons[n, t] => {
-            k = n:(Str['bin])key; ^ [t, Cons[[key: k, row: self [&self, n]], acc]]
+            k = n:(Str['bin])key; ^ [t, Cons[[key: k, row: self [&self, n]], $acc]]
           }
         }
       }
       Many[row_frames [items, Nil]]
     }
-    | Opaque[%html.render node]
+    | Opaque[%html.render $node]
   }
 }
 
@@ -163,69 +162,69 @@ frame = #<'e>'%html<'e> {
 }
 
 // Render a frame onto `acc`; self-passed to recurse into template slots.
-render_of = #[#^ -> 'bin, 'frame, 'bin] {
-  =[self, f, acc]
-  f ~> {
-    | =Leaf[s] => { et = %html.escape_text s ~> .0; %bin.concat [acc, et] }
+render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
+  // The nested literals close over `self` (an inner `$` would be their own parameter),
+  // so bind the field locally — by reference, as a bare `$self` term would call it.
+  self = &$self
+  $f ~> {
+    | =Leaf[s] => { et = %html.escape_text s ~> .0; %bin.concat [$acc, et] }
     | =ALeaf[elem: _, name: Str[n], value: v] => v ~> {
-      | =[] => acc
-      | =Ok => %bin.concat [%bin.append [acc, 32, 1], n]
+      | =[] => $acc
+      | =Ok => %bin.concat [%bin.append [$acc, 32, 1], n]
       | =Str[vb] => {
         ev = %html.escape_attr Str[vb] ~> .0
-        %bin.concat [%bin.append [acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> %bin.concat [~, ev] ~> %bin.append [
+        %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> %bin.concat [~, ev] ~> %bin.append [
           ~,
           34,
           1,
         ]
       }
     }
-    | =Opaque[Str[h]] => %bin.concat [acc, h]
+    | =Opaque[Str[h]] => %bin.concat [$acc, h]
     | =Tmpl[statics: ss, slots: sl] => {
-      weave = #['statics, 'frames, 'bin] {
-        =[statics, slots, a]
-        statics ~> {
+      weave = #[(statics): 'statics, (slots): 'frames, (a): 'bin] {
+        $statics ~> {
           | =Cons[Str[st], srest] => {
-            a2 = %bin.concat [a, st]
-            slots ~> {
+            a2 = %bin.concat [$a, st]
+            $slots ~> {
               | =Cons[fr, frest] => ^ [srest, frest, self [&self, fr, a2]]
               | a2
             }
           }
-          | a
+          | $a
         }
       }
-      weave [ss, sl, acc]
+      weave [ss, sl, $acc]
     }
     | =Many[rows] => {
       // Each row is delimited by anonymous `<!--r-->`/`<!--/r-->` markers — the client
       // indexes rows positionally at apply time, so the markers carry no numbers and
       // never need renumbering.
-      render_rows = #['rows, 'bin] {
-        =[rs, a]
-        rs ~> {
-          | =Nil => a
+      render_rows = #[(rows): 'rows, (a): 'bin] {
+        $rows ~> {
+          | =Nil => $a
           | =Cons[[key: _, row: r], t] => {
-            a2 = %bin.concat [a, "<!--r-->" ~> .0]
+            a2 = %bin.concat [$a, "<!--r-->" ~> .0]
             a3 = self [&self, r, a2]
             ^ [t, %bin.concat [a3, "<!--/r-->" ~> .0]]
           }
         }
       }
-      render_rows [rows, acc]
+      render_rows [rows, $acc]
     }
     // A boundary renders as its empty vid markers — the child's own first frame
     // message fills the interior. An unresolved boundary (nil vid — a frame that
     // never went through reconcile, e.g. under the sim) renders nothing.
     | =Boundary[key: _, vid: v, start: _] => v ~> {
-      | =Str[vb] => %bin.concat [acc, "<!--v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [~, "--><!--/v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [
+      | =Str[vb] => %bin.concat [$acc, "<!--v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [~, "--><!--/v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [
         ~,
         "-->" ~> .0,
       ]
-      | acc
+      | $acc
     }
     // Unreachable: the arms above cover every variant, but exhaustiveness can't see
     // through the inner recursive union.
-    | acc
+    | $acc
   }
 }
 
@@ -252,19 +251,19 @@ keyed_rows? = #'rows {
   | []
 }
 
-key_in? = #['rows, Str['bin]] {
-  =[rs, k]
-  rs ~> {
+key_in? = #[(rs): 'rows, (k): Str['bin]] {
+  // The pin below needs a variable, so bind the field locally.
+  k = $k
+  $rs ~> {
     | =Nil => []
     | =Cons[r, t] => { r ~> =(key: rk); { rk ~> =&k => Ok | ^ [t, k] } }
   }
 }
 
-cat_rows = #['rows, 'rows] {
-  =[a, b]
-  a ~> {
-    | =Nil => b
-    | =Cons[h, t] => ^ [t, Cons[h, b]]
+cat_rows = #[(a): 'rows, (b): 'rows] {
+  $a ~> {
+    | =Nil => $b
+    | =Cons[h, t] => ^ [t, Cons[h, $b]]
   }
 }
 
@@ -272,15 +271,16 @@ cat_rows = #['rows, 'rows] {
 
 // Remove the first row keyed `k`, answering it with its absolute index:
 // [RHit[row, index] | RMiss, the remaining rows]. `j` is the first row's index.
-take_row = #['rows, Str['bin], 'rows, 'int] -> ['taken, 'rows] {
-  =[rs, k, acc, j]
-  rs ~> {
-    | =Nil => [RMiss, rev [acc, Nil]]
+take_row = #[(rs): 'rows, (k): Str['bin], (acc): 'rows, (j): 'int] -> ['taken, 'rows] {
+  // The pin below needs a variable, so bind the field locally.
+  k = $k
+  $rs ~> {
+    | =Nil => [RMiss, rev [$acc, Nil]]
     | =Cons[r, t] => {
       r ~> =(key: rk)
       {
-        | rk ~> =&k => [RHit[r, j], cat_rows [acc, t]]
-        | ^ [t, k, Cons[r, acc], __integer_add__ [j, 1]]
+        | rk ~> =&k => [RHit[r, $j], cat_rows [$acc, t]]
+        | ^ [t, k, Cons[r, $acc], __integer_add__ [$j, 1]]
       }
     }
   }
@@ -290,22 +290,28 @@ take_row = #['rows, Str['bin], 'rows, 'int] -> ['taken, 'rows] {
 // survivor-relative index (the count of kept rows before it — each applied removal
 // shifts the rest down, so the indices are sequential-apply-correct). Answers
 // [the survivors in order, the patch accumulator].
-prune_rows = #['rows, 'rows, 'int, 'rows, 'patches, 'path] -> ['rows, 'patches] {
-  =[old, new, idx, keep, acc, rpath]
-  old ~> {
-    | =Nil => [rev [keep, Nil], acc]
+prune_rows = #[(old): 'rows, (new): 'rows, (index): 'int, (keep): 'rows, (acc): 'patches, (rpath): 'path] -> ['rows, 'patches] {
+  $old ~> {
+    | =Nil => [rev [$keep, Nil], $acc]
     | =Cons[r, t] => {
       r ~> =(key: rk)
       {
-        | rk ~> =Str[kb]; key_in? [new, Str[kb]] => ^ [
+        | rk ~> =Str[kb]; key_in? [$new, Str[kb]] => ^ [
           t,
-          new,
-          __integer_add__ [idx, 1],
-          Cons[r, keep],
-          acc,
-          rpath,
+          $new,
+          __integer_add__ [$index, 1],
+          Cons[r, $keep],
+          $acc,
+          $rpath,
         ]
-        | ^ [t, new, idx, keep, Cons[DelRow[path: rev [rpath, Nil], at: idx], acc], rpath]
+        | ^ [
+          t,
+          $new,
+          $index,
+          $keep,
+          Cons[DelRow[path: rev [$rpath, Nil], at: $index], $acc],
+          $rpath,
+        ]
       }
     }
   }
@@ -313,23 +319,27 @@ prune_rows = #['rows, 'rows, 'int, 'rows, 'patches, 'path] -> ['rows, 'patches] 
 
 // The patches turning `prev` into `next` at one slot, prepended (reversed) onto `acc`.
 // `rpath` is the reversed path to the slot. Self-passed to recurse into template slots.
-diff_of = #[#^ -> 'patches, 'frame, 'frame, 'path, 'patches] {
-  =[self, prev, next, rpath, acc]
-  [prev, next] ~> {
+diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'path, (acc): 'patches] {
+  // The nested literals close over `self` and `rpath` (an inner `$` would be their
+  // own parameter), so bind the fields locally — `self` by reference, as a bare
+  // `$self` term would call it.
+  self = &$self
+  rpath = $rpath
+  [$prev, $next] ~> {
     | =[Leaf[a], Leaf[b]] => {
-      | a ~> =&b => acc
-      | Cons[SetText[path: rev [rpath, Nil], value: b], acc]
+      | a ~> =&b => $acc
+      | Cons[SetText[path: rev [rpath, Nil], value: b], $acc]
     }
     | =[ALeaf[elem: e, name: n, value: a], ALeaf[elem: _, name: _, value: b]] => {
-        | a ~> =&b => acc
+        | a ~> =&b => $acc
         | Cons[
           SetAttr[path: rev [rpath, Nil], elem: e, name: n, value: b],
-          acc,
+          $acc,
         ]
       }
     | =[Opaque[a], Opaque[b]] => {
-      | a ~> =&b => acc
-      | Cons[SetHtml[path: rev [rpath, Nil], html: b], acc]
+      | a ~> =&b => $acc
+      | Cons[SetHtml[path: rev [rpath, Nil], html: b], $acc]
     }
     // Matching statics recurse slot-by-slot; mismatched statics fall through to the
     // final replacement arm. The statics test is a guard *step* (`;`): a chain never
@@ -337,19 +347,18 @@ diff_of = #[#^ -> 'patches, 'frame, 'frame, 'path, 'patches] {
     // unconditionally, reading nil-filled bindings.
     | =[Tmpl[statics: s1, slots: sl1], Tmpl[statics: s2, slots: sl2]]
       s2 ~> =&s1 => {
-      walk = #['frames, 'frames, 'int, 'patches] {
-        =[ps, ns, i, a]
-        [ps, ns] ~> {
+      walk = #[(prev): 'frames, (next): 'frames, (i): 'int, (a): 'patches] {
+        [$prev, $next] ~> {
           | =[Cons[p, pt], Cons[nx, nt]] => ^ [
             pt,
             nt,
-            __integer_add__ [i, 1],
-            self [&self, p, nx, Cons[i, rpath], a],
+            __integer_add__ [$i, 1],
+            self [&self, p, nx, Cons[$i, rpath], $a],
           ]
-          | a
+          | $a
         }
       }
-      walk [sl1, sl2, 0, acc]
+      walk [sl1, sl2, 0, $acc]
     }
     | =[Many[pr], Many[nr]] => {
       // Positional row diff: pairwise recursion over the shared prefix, then the tail
@@ -357,26 +366,25 @@ diff_of = #[#^ -> 'patches, 'frame, 'frame, 'path, 'patches] {
       // deletions DON'T — removing row i shifts the rest down, so "delete the tail"
       // is `DelRow[at: i]` repeated. In-row patches use pre-structural indices, which
       // stay valid because all structural ops are at the tail.
-      walk_rows = #['rows, 'rows, 'int, 'patches] {
-        =[ps, ns, i, a]
-        [ps, ns] ~> {
+      walk_rows = #[(prev): 'rows, (next): 'rows, (i): 'int, (a): 'patches] {
+        [$prev, $next] ~> {
           | =[Cons[[key: _, row: p], pt], Cons[[key: _, row: nx], nt]] => ^ [
               pt,
               nt,
-              __integer_add__ [i, 1],
-              self [&self, p, nx, Cons[i, rpath], a],
+              __integer_add__ [$i, 1],
+              self [&self, p, nx, Cons[$i, rpath], $a],
             ]
           | =[Nil, Cons[[key: _, row: nx], nt]] => ^ [
             Nil,
             nt,
-            __integer_add__ [i, 1],
+            __integer_add__ [$i, 1],
             Cons[
-              InsRow[path: rev [rpath, Nil], at: i, html: render_row nx],
-              a,
+              InsRow[path: rev [rpath, Nil], at: $i, html: render_row nx],
+              $a,
             ],
           ]
-          | =[Cons[_, pt], Nil] => ^ [pt, Nil, i, Cons[DelRow[path: rev [rpath, Nil], at: i], a]]
-          | a
+          | =[Cons[_, pt], Nil] => ^ [pt, Nil, $i, Cons[DelRow[path: rev [rpath, Nil], at: $i], $a]]
+          | $a
         }
       }
       // Phase B of the keyed diff: walk the new rows with the surviving old rows as
@@ -384,40 +392,39 @@ diff_of = #[#^ -> 'patches, 'frame, 'frame, 'path, 'patches] {
       // recurse; found later → move it here (backward moves only, so `to` is stable
       // across the extraction) and recurse; absent → insert. Leftover working rows
       // (duplicate keys) are removed at the fixed index.
-      keyed_walk = #['rows, 'rows, 'int, 'patches] {
-        =[working, new, i, a]
-        new ~> {
-          | =Nil => working ~> {
-            | =Nil => a
-            | =Cons[_, wt] => ^ [wt, Nil, i, Cons[DelRow[path: rev [rpath, Nil], at: i], a]]
+      keyed_walk = #[(working): 'rows, (new): 'rows, (i): 'int, (a): 'patches] {
+        $new ~> {
+          | =Nil => $working ~> {
+            | =Nil => $a
+            | =Cons[_, wt] => ^ [wt, Nil, $i, Cons[DelRow[path: rev [rpath, Nil], at: $i], $a]]
           }
           | =Cons[nr, nt] => {
             nr ~> =(key: nk, row: nf)
             nkb = nk ~> { =Str[b] => Str[b] | "" }
-            working ~> {
+            $working ~> {
               | =Cons[wr, wt] => {
                 wr ~> =(key: wk, row: wf)
                 {
                   | wk ~> =&nk => {
-                    a2 = self [&self, wf, nf, Cons[i, rpath], a]
-                    ^ [wt, nt, __integer_add__ [i, 1], a2]
+                    a2 = self [&self, wf, nf, Cons[$i, rpath], $a]
+                    ^ [wt, nt, __integer_add__ [$i, 1], a2]
                   }
                   | {
-                    tw = take_row [wt, nkb, Nil, __integer_add__ [i, 1]]
+                    tw = take_row [wt, nkb, Nil, __integer_add__ [$i, 1]]
                     wrest = tw.1
                     tw.0 ~> {
                       | =RHit[mr, j] => {
                         mr ~> =(row: mf)
-                        a2 = Cons[MovRow[path: rev [rpath, Nil], from: j, to: i], a]
-                        a3 = self [&self, mf, nf, Cons[i, rpath], a2]
-                        ^ [Cons[wr, wrest], nt, __integer_add__ [i, 1], a3]
+                        a2 = Cons[MovRow[path: rev [rpath, Nil], from: j, to: $i], $a]
+                        a3 = self [&self, mf, nf, Cons[$i, rpath], a2]
+                        ^ [Cons[wr, wrest], nt, __integer_add__ [$i, 1], a3]
                       }
                       | {
                         a2 = Cons[
-                          InsRow[path: rev [rpath, Nil], at: i, html: render_row nf],
-                          a,
+                          InsRow[path: rev [rpath, Nil], at: $i, html: render_row nf],
+                          $a,
                         ]
-                        ^ [Cons[wr, wt], nt, __integer_add__ [i, 1], a2]
+                        ^ [Cons[wr, wt], nt, __integer_add__ [$i, 1], a2]
                       }
                     }
                   }
@@ -425,10 +432,10 @@ diff_of = #[#^ -> 'patches, 'frame, 'frame, 'path, 'patches] {
               }
               | =Nil => {
                 a2 = Cons[
-                  InsRow[path: rev [rpath, Nil], at: i, html: render_row nf],
-                  a,
+                  InsRow[path: rev [rpath, Nil], at: $i, html: render_row nf],
+                  $a,
                 ]
-                ^ [Nil, nt, __integer_add__ [i, 1], a2]
+                ^ [Nil, nt, __integer_add__ [$i, 1], a2]
               }
             }
           }
@@ -438,26 +445,29 @@ diff_of = #[#^ -> 'patches, 'frame, 'frame, 'path, 'patches] {
         | keyed_rows? pr; keyed_rows? nr => {
           // Field access rather than destructuring: a tuple-shape pattern types
           // fallibly, and diff_of's self-type requires a nil-free 'patches result.
-          pruned = prune_rows [pr, nr, 0, Nil, acc, rpath]
+          pruned = prune_rows [pr, nr, 0, Nil, $acc, rpath]
           keyed_walk [pruned.0, nr, 0, pruned.1]
         }
-        | walk_rows [pr, nr, 0, acc]
+        | walk_rows [pr, nr, 0, $acc]
       }
     }
     // Boundaries compare by key and the differ NEVER descends: the interior is the
     // child view's own. A changed key falls through to the replacement arm — the
     // parent re-renders fresh (empty) markers and the new child's first frame fills
     // them.
-    | =[Boundary(key: k1), Boundary(key: k2)]; k2 ~> =&k1 => acc
+    | =[Boundary(key: k1), Boundary(key: k2)]; k2 ~> =&k1 => $acc
     // A differing kind, a switched template (statics mismatch), or an Opaque next to
     // anything else: one replacement patch, subsuming the slot's descendants.
-    | Cons[SetHtml[path: rev [rpath, Nil], html: render next], acc]
+    | Cons[
+      SetHtml[path: rev [rpath, Nil], html: render $next],
+      $acc,
+    ]
   }
 }
 
-diff = #['frame, 'frame] {
+diff = #[(prev): 'frame, (next): 'frame] {
   :doc "The patch list turning the first frame into the second, in document order: recursing where statics match, and emitting one subsuming patch where a slot's kind, template, or opaque content changed. Equal frames answer Nil. A Nil path addresses the root."
-  =[prev, next]; diff_of [&diff_of, prev, next, Nil, Nil] ~> rev [~, Nil]
+  diff_of [&diff_of, $prev, $next, Nil, Nil] ~> rev [~, Nil]
 }
 
 // === The wire ===========================================================================
@@ -477,11 +487,10 @@ diff = #['frame, 'frame] {
 
 'jsons = Nil | Cons['%json, ^]
 
-enc_path = #['path, 'jsons] {
-  =[p, acc]
-  p ~> {
-    | =Nil => Array[rev [acc, Nil]]
-    | =Cons[i, t] => ^ [t, Cons[i, acc]]
+enc_path = #[(p): 'path, (acc): 'jsons] {
+  $p ~> {
+    | =Nil => Array[rev [$acc, Nil]]
+    | =Cons[i, t] => ^ [t, Cons[i, $acc]]
   }
 }
 
@@ -509,19 +518,20 @@ enc_patch = #'patch {
   ]
 }
 
-enc_patches = #['patches, 'jsons] {
-  =[items, acc]
-  items ~> {
-    | =Nil => rev [acc, Nil]
-    | =Cons[p, t] => ^ [t, Cons[enc_patch p, acc]]
+enc_patches = #[(items): 'patches, (acc): 'jsons] {
+  $items ~> {
+    | =Nil => rev [$acc, Nil]
+    | =Cons[p, t] => ^ [t, Cons[enc_patch p, $acc]]
   }
 }
 
-encode = #[Str['bin], 'patches] {
+encode = #[(vid): Str['bin], (ps): 'patches] {
   :doc "A frame message: one view's patches for one render as JSON text, `[1, vid, [patch, …]]`. Vids are hierarchical strings — the root view is \"0\", its children \"0.1\", \"0.2\", … — minted locally by each view, so no allocation is coordinated."
-  =[vid, ps]
   Array[
-    Cons[1, Cons[vid, Cons[Array[enc_patches [ps, Nil]], Nil]]],
+    Cons[
+      1,
+      Cons[$vid, Cons[Array[enc_patches [$ps, Nil]], Nil]],
+    ],
   ] ~> %json.stringify
 }
 
@@ -577,8 +587,12 @@ with_nav = #<'i, 's, 'e, 'w>('component_base<'i, 's, 'e, 'w> | 'component<'i, 's
 
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
-render_view = #<'i, 's, 'e, 'w>['s, 'component<'i, 's, 'e, 'w>] {
-  =[state, comp]; %proc.track #{ state ~> comp.view } ~> frame
+render_view = #<'i, 's, 'e, 'w>[(state): 's, (comp): 'component<'i, 's, 'e, 'w>] {
+  // The tracked thunk closes over the fields (an inner `$` would be its own
+  // parameter), so bind them locally.
+  state = $state
+  comp = $comp
+  %proc.track #{ state ~> comp.view } ~> frame
 }
 
 // Re-root a value bound out of a '%json recursive position at the union's root: the
@@ -596,14 +610,13 @@ pair_of = #'%json {
   [Str[n], Str[v]]
 }
 
-pairs_of = #['jsons, '%http.pairs] {
-  =[items, acc]
-  items ~> {
-    | =Nil => rev [acc, Nil]
+pairs_of = #[(items): 'jsons, (acc): '%http.pairs] {
+  $items ~> {
+    | =Nil => rev [$acc, Nil]
     | =Cons[pj, t] => {
       acc2 = {
-        | pair_of pj ~> =[n, v] => Cons[[n, v], acc]
-        | acc
+        | pair_of pj ~> =[n, v] => Cons[[n, v], $acc]
+        | $acc
       }
       ^ [t, acc2]
     }
@@ -642,12 +655,9 @@ nav_of = #Str['bin] {
 // Decode and fold one client event through `update`: a decode answering nil drops
 // the event (stale or forged — `update` never sees it) and answers the state
 // unchanged.
-fold_event = #<'i, 's, 'e, 'w>['s, 'component<'i, 's, 'e, 'w>, Str['bin], '%http.pairs] {
-  =[state, comp, payload, pairs]
-  {
-    | comp.decode [payload, pairs] ~> =Ev[ev] => comp.update [state, ev]
-    | state
-  }
+fold_event = #<'i, 's, 'e, 'w>[(state): 's, (comp): 'component<'i, 's, 'e, 'w>, (payload): Str['bin], (pairs): '%http.pairs] {
+  | $comp.decode [$payload, $pairs] ~> =Ev[ev] => $comp.update [$state, ev]
+  | $state
 }
 
 // The wire frame for a URL sync: `[2, "/path"]` (the client `pushState`s to it). An
@@ -666,9 +676,12 @@ url_sync = #Str['bin] { "[2," ~> %str.concat [~, %json.stringify $] ~> %str.conc
 // (`synced`, the path last emitted) resolves it: only a mark that CHANGED since the
 // last sync emits, and an absent mark resets the tracker so a later redirect to the
 // same path fires again. Answers the new tracker.
-sync_redirect = #<'s>['s, (Str['bin] | []), @'app_msg] {
-  =[s, synced, app]
-  m = s:(Str['bin])redirect
+sync_redirect = #<'s>[(state): 's, (synced): (Str['bin] | []), (app): @'app_msg] {
+  // The pin below needs a variable, and the pid is taken by reference (a bare
+  // access would send), so bind the fields locally.
+  synced = $synced
+  app = &$app
+  m = $state:(Str['bin])redirect
   {
     | m ~> =&synced => synced
     | m ~> =Str[p] => { Frame[url_sync Str[p]] ~> app; Str[p] }
@@ -729,39 +742,40 @@ settle_quiet = 100
 settle_deadline = 3000
 
 // The boundaries of a frame; self-passed to recurse into slots and rows.
-collect_of = #[#^ -> 'bounds, 'frame, 'bounds] {
-  =[self, f, acc]
-  f ~> {
-    | =Boundary[key: k, vid: _, start: st] => Cons[[key: k, start: &st], acc]
+collect_of = #[(self): #^ -> 'bounds, (f): 'frame, (acc): 'bounds] {
+  // The nested literals close over `self` (an inner `$` would be their own parameter),
+  // so bind the field locally — by reference, as a bare `$self` term would call it.
+  self = &$self
+  $f ~> {
+    | =Boundary[key: k, vid: _, start: st] => Cons[[key: k, start: &st], $acc]
     | =Tmpl[statics: _, slots: sl] => {
-      walk = #['frames, 'bounds] {
-        =[items, a]
-        items ~> {
-          | =Nil => a
-          | =Cons[h, t] => ^ [t, self [&self, h, a]]
+      walk = #[(items): 'frames, (a): 'bounds] {
+        $items ~> {
+          | =Nil => $a
+          | =Cons[h, t] => ^ [t, self [&self, h, $a]]
         }
       }
-      walk [sl, acc]
+      walk [sl, $acc]
     }
     | =Many[rows] => {
-      walkr = #['rows, 'bounds] {
-        =[items, a]
-        items ~> {
-          | =Nil => a
-          | =Cons[[key: _, row: r], t] => ^ [t, self [&self, r, a]]
+      walkr = #[(items): 'rows, (a): 'bounds] {
+        $items ~> {
+          | =Nil => $a
+          | =Cons[[key: _, row: r], t] => ^ [t, self [&self, r, $a]]
         }
       }
-      walkr [rows, acc]
+      walkr [rows, $acc]
     }
-    | acc
+    | $acc
   }
 }
 
 // Whether a key is already assigned (duplicate keys: first wins; the duplicate
 // boundary shares the vid, which the client resolves to the first marker).
-key_assigned? = #['assigns, Str['bin]] {
-  =[items, k]
-  items ~> {
+key_assigned? = #[(items): 'assigns, (k): Str['bin]] {
+  // The pin below needs a variable, so bind the field locally.
+  k = $k
+  $items ~> {
     | =Nil => []
     | =Cons[a, t] => { a ~> =(key: ak); { ak ~> =&k => Ok | ^ [t, k] } }
   }
@@ -770,38 +784,39 @@ key_assigned? = #['assigns, Str['bin]] {
 'kid_hit = KFound['kid] | KMissing
 
 // A kid by key (reconcile) or by vid (crash reports).
-kid_of = #['kids, Str['bin]] -> 'kid_hit {
-  =[items, k]
-  items ~> {
+kid_of = #[(items): 'kids, (k): Str['bin]] -> 'kid_hit {
+  // The pin below needs a variable, so bind the field locally.
+  k = $k
+  $items ~> {
     | =Nil => KMissing
     | =Cons[kd, t] => { kd ~> =(key: kk); { kk ~> =&k => KFound[kd] | ^ [t, k] } }
   }
 }
 
-kid_by_vid = #['kids, Str['bin]] -> 'kid_hit {
-  =[items, v]
-  items ~> {
+kid_by_vid = #[(items): 'kids, (v): Str['bin]] -> 'kid_hit {
+  // The pin below needs a variable, so bind the field locally.
+  v = $v
+  $items ~> {
     | =Nil => KMissing
     | =Cons[kd, t] => { kd ~> =(vid: kv); { kv ~> =&v => KFound[kd] | ^ [t, v] } }
   }
 }
 
 // Assign a vid to every distinct boundary key. Answers [assigns, next-ordinal].
-assign_bounds = #['bounds, 'kids, Str['bin], 'int, 'assigns] -> ['assigns, 'int] {
-  =[bs, kids, vid, n, acc]
-  bs ~> {
-    | =Nil => [acc, n]
+assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): Str['bin], (n): 'int, (acc): 'assigns] -> ['assigns, 'int] {
+  $bs ~> {
+    | =Nil => [$acc, $n]
     | =Cons[b, t] => {
       b ~> =(key: k, start: st)
       {
-        | key_assigned? [acc, k] => ^ [t, kids, vid, n, acc]
-        | kid_of [kids, k] ~> =KFound[kd] => {
+        | key_assigned? [$acc, k] => ^ [t, $kids, $vid, $n, $acc]
+        | kid_of [$kids, k] ~> =KFound[kd] => {
           kd ~> =(vid: v, pid: p)
-          ^ [t, kids, vid, n, Cons[AOld[key: k, vid: v, pid: &p], acc]]
+          ^ [t, $kids, $vid, $n, Cons[AOld[key: k, vid: v, pid: &p], $acc]]
         }
         | {
-          v = %str.concat [vid, %str.concat [".", %str.from_int n]]
-          ^ [t, kids, vid, __integer_add__ [n, 1], Cons[ANew[key: k, vid: v, start: &st], acc]]
+          v = %str.concat [$vid, %str.concat [".", %str.from_int $n]]
+          ^ [t, $kids, $vid, __integer_add__ [$n, 1], Cons[ANew[key: k, vid: v, start: &st], $acc]]
         }
       }
     }
@@ -809,60 +824,62 @@ assign_bounds = #['bounds, 'kids, Str['bin], 'int, 'assigns] -> ['assigns, 'int]
 }
 
 // The assigned vid for a key, or nil for a boundary the assignment somehow missed.
-assigned_vid = #['assigns, Str['bin]] {
-  =[items, k]
-  items ~> {
+assigned_vid = #[(items): 'assigns, (k): Str['bin]] {
+  // The pin below needs a variable, so bind the field locally.
+  k = $k
+  $items ~> {
     | =Nil => []
     | =Cons[a, t] => { a ~> =(key: ak, vid: av); { ak ~> =&k => Str[av ~> .0] | ^ [t, k] } }
   }
 }
 
 // Rebuild a frame with its boundary vids assigned; other nodes pass through.
-resolve_of = #[#^ -> 'frame, 'frame, 'assigns] {
-  =[self, f, assigns]
-  f ~> {
+resolve_of = #[(self): #^ -> 'frame, (f): 'frame, (assigns): 'assigns] {
+  // The nested literals close over `self` and `assigns` (an inner `$` would be their
+  // own parameter), so bind the fields locally — `self` by reference, as a bare
+  // `$self` term would call it.
+  self = &$self
+  assigns = $assigns
+  $f ~> {
     | =Boundary[key: k, vid: _, start: st] => Boundary[
       key: k,
       vid: assigned_vid [assigns, k],
       start: &st,
     ]
     | =Tmpl[statics: ss, slots: sl] => {
-      walk = #['frames, 'frames] {
-        =[items, acc]
-        items ~> {
-          | =Nil => rev [acc, Nil]
-          | =Cons[h, t] => ^ [t, Cons[self [&self, h, assigns], acc]]
+      walk = #[(items): 'frames, (acc): 'frames] {
+        $items ~> {
+          | =Nil => rev [$acc, Nil]
+          | =Cons[h, t] => ^ [t, Cons[self [&self, h, assigns], $acc]]
         }
       }
       Tmpl[statics: ss, slots: walk [sl, Nil]]
     }
     | =Many[rows] => {
-      walkr = #['rows, 'rows] {
-        =[items, acc]
-        items ~> {
-          | =Nil => rev [acc, Nil]
+      walkr = #[(items): 'rows, (acc): 'rows] {
+        $items ~> {
+          | =Nil => rev [$acc, Nil]
           | =Cons[[key: rk, row: r], t] => ^ [
             t,
-            Cons[[key: rk, row: self [&self, r, assigns]], acc],
+            Cons[[key: rk, row: self [&self, r, assigns]], $acc],
           ]
         }
       }
       Many[walkr [rows, Nil]]
     }
-    | f
+    | $f
   }
 }
 
 // The previous kids whose keys the new render dropped.
-dropped_kids = #['kids, 'assigns, 'kids] {
-  =[kids, assigns, acc]
-  kids ~> {
-    | =Nil => acc
+dropped_kids = #[(kids): 'kids, (assigns): 'assigns, (acc): 'kids] {
+  $kids ~> {
+    | =Nil => $acc
     | =Cons[kd, t] => {
       kd ~> =(key: k)
       {
-        | key_assigned? [assigns, k] => ^ [t, assigns, acc]
-        | ^ [t, assigns, Cons[kd, acc]]
+        | key_assigned? [$assigns, k] => ^ [t, $assigns, $acc]
+        | ^ [t, $assigns, Cons[kd, $acc]]
       }
     }
   }
@@ -876,23 +893,26 @@ dropped_kids = #['kids, 'assigns, 'kids] {
 // this view's involvement. The view watches the SUPERVISOR: its death is the
 // budget giving up (or a bug), and the only crash signal the view handles.
 // Answers the new kids list (each pid the child's supervisor).
-exec_bounds = #['assigns, 'kids, @'app_msg, @'view_msg, 'kids] -> 'kids {
-  =[assigns, drops, app, me, acc]
-  drops ~> {
+exec_bounds = #[(assigns): 'assigns, (drops): 'kids, (app): @'app_msg, (me): @'view_msg, (acc): 'kids] -> 'kids {
+  // The start closure closes over `app`, and the pids are taken by reference (a
+  // bare access would send), so bind them locally.
+  app = &$app
+  me = &$me
+  $drops ~> {
     | =Cons[kd, t] => {
       kd ~> =(vid: v, pid: p)
       %proc.kill &p
       Unroute[Str[v ~> .0]] ~> app
-      ^ [assigns, t, &app, &me, acc]
+      ^ [$assigns, t, &app, &me, $acc]
     }
-    | assigns ~> {
-      | =Nil => acc
+    | $assigns ~> {
+      | =Nil => $acc
       | =Cons[AOld[key: k, vid: v, pid: p], t] => ^ [
         t,
         Nil,
         &app,
         &me,
-        Cons[[key: k, vid: v, pid: &p], acc],
+        Cons[[key: k, vid: v, pid: &p], $acc],
       ]
       | =Cons[ANew[key: k, vid: v, start: st], t] => {
         cs = #[Str['bin], @'%sup.down] {
@@ -911,7 +931,7 @@ exec_bounds = #['assigns, 'kids, @'app_msg, @'view_msg, 'kids] -> 'kids {
           ] ~> %sup.start
 
         %sup.watch [Str[v ~> .0], &csup, &me]
-        ^ [t, Nil, &app, &me, Cons[[key: k, vid: v, pid: &csup], acc]]
+        ^ [t, Nil, &app, &me, Cons[[key: k, vid: v, pid: &csup], $acc]]
       }
     }
   }
@@ -925,16 +945,18 @@ as_frame = #'frame
 // One render step of a view: render, assign boundary vids, diff against the frame
 // the client holds, send the delta (an empty diff sends nothing), then execute the
 // reconcile. Answers [the new frame, the new kids, the next child ordinal].
-step_view = #<'i, 's, 'e, 'w>['s, 'frame, 'component<'i, 's, 'e, 'w>, Str['bin], @'app_msg, @'view_msg, 'kids, 'int] {
-  =[state, prev, comp, vid, app, me, kids, n]
-  f2 = render_view [state, comp]
-  ar = assign_bounds [collect_of [&collect_of, f2, Nil], kids, vid, n, Nil]
+step_view = #<'i, 's, 'e, 'w>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's, 'e, 'w>, (vid): Str['bin], (app): @'app_msg, (me): @'view_msg, (kids): 'kids, (n): 'int] {
+  // The pids are taken by reference (a bare access would send), so bind them locally.
+  app = &$app
+  me = &$me
+  f2 = render_view [$state, $comp]
+  ar = assign_bounds [collect_of [&collect_of, f2, Nil], $kids, $vid, $n, Nil]
   rf = resolve_of [&resolve_of, f2, ar.0] ~> as_frame
-  diff [prev, rf] ~> {
+  diff [$prev, rf] ~> {
     | =Nil => Ok
-    | =ps => { Frame[encode [vid, ps]] ~> app; Ok }
+    | =ps => { Frame[encode [$vid, ps]] ~> app; Ok }
   }
-  kids2 = exec_bounds [ar.0, dropped_kids [kids, ar.0, Nil], &app, &me, Nil]
+  kids2 = exec_bounds [ar.0, dropped_kids [$kids, ar.0, Nil], &app, &me, Nil]
   [rf, kids2, ar.1]
 }
 
@@ -948,50 +970,51 @@ step_view = #<'i, 's, 'e, 'w>['s, 'frame, 'component<'i, 's, 'e, 'w>, Str['bin],
 // corpse so reconcile won't quietly respawn a repeat offender. (A deliberate
 // kill's Down finds no tracked vid — the entry is removed before the kill — and
 // is dropped.)
-vlife = #<'i, 's, 'e, 'w>['vmode, 's, 'frame, 'component<'i, 's, 'e, 'w>, Str['bin], @'app_msg, 'kids, 'int, (Str['bin] | [])] {
-  =[mode, state, f, comp, vid, app, kids, n, synced]
+vlife = #<'i, 's, 'e, 'w>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e, 'w>, (vid): Str['bin], (app): @'app_msg, (kids): 'kids, (n): 'int, (synced): (Str['bin] | [])] {
+  // The pid is taken by reference (a bare access would send), so bind it locally.
+  app = &$app
   me = &.
   !'view_msg ~> {
     | =Event[payload, pairs] => {
-      s2 = fold_event [state, comp, payload, pairs]
+      s2 = fold_event [$state, $comp, payload, pairs]
       // A `redirect` mark on the update result moves the client's address bar to match
       // the page this same update set — server-initiated navigation.
-      sy2 = sync_redirect [s2, synced, &app]
-      r = step_view [s2, f, comp, vid, &app, &me, kids, n]
-      ^ [mode, s2, r.0, comp, vid, &app, r.1, r.2, sy2]
+      sy2 = sync_redirect [s2, $synced, &app]
+      r = step_view [s2, $f, $comp, $vid, &app, &me, $kids, $n]
+      ^ [$mode, s2, r.0, $comp, $vid, &app, r.1, r.2, sy2]
     }
     // A URL change: re-derive state from the new request (no remount — local state
     // survives), then re-render and patch like any other step. A `nav` may itself mark
     // its result with `:redirect` (URL canonicalization) — synced like an update's.
     | =Nav[req] => {
-      s2 = comp.nav [state, req]
-      sy2 = sync_redirect [s2, synced, &app]
-      r = step_view [s2, f, comp, vid, &app, &me, kids, n]
-      ^ [mode, s2, r.0, comp, vid, &app, r.1, r.2, sy2]
+      s2 = $comp.nav [$state, req]
+      sy2 = sync_redirect [s2, $synced, &app]
+      r = step_view [s2, $f, $comp, $vid, &app, &me, $kids, $n]
+      ^ [$mode, s2, r.0, $comp, $vid, &app, r.1, r.2, sy2]
     }
-    | =Park => ^ [Idle, state, f, comp, vid, &app, kids, n, synced]
+    | =Park => ^ [Idle, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
     | =Wake => {
       drain_changed []
-      r = step_view [state, f, comp, vid, &app, &me, kids, n]
-      ^ [Live, state, r.0, comp, vid, &app, r.1, r.2, synced]
+      r = step_view [$state, $f, $comp, $vid, &app, &me, $kids, $n]
+      ^ [Live, $state, r.0, $comp, $vid, &app, r.1, r.2, $synced]
     }
-    | =Down(id: dv) => kid_by_vid [kids, dv] ~> {
+    | =Down(id: dv) => kid_by_vid [$kids, dv] ~> {
       | =KFound[_] => {
         Frame[
           encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]],
         ] ~> app
         Unroute[dv] ~> app
-        ^ [mode, state, f, comp, vid, &app, kids, n, synced]
+        ^ [$mode, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
       }
-      | ^ [mode, state, f, comp, vid, &app, kids, n, synced]
+      | ^ [$mode, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
     }
-    | ='%proc.changed => mode ~> {
+    | ='%proc.changed => $mode ~> {
       | =Live => {
         drain_changed []
-        r = step_view [state, f, comp, vid, &app, &me, kids, n]
-        ^ [Live, state, r.0, comp, vid, &app, r.1, r.2, synced]
+        r = step_view [$state, $f, $comp, $vid, &app, &me, $kids, $n]
+        ^ [Live, $state, r.0, $comp, $vid, &app, r.1, r.2, $synced]
       }
-      | ^ [Idle, state, f, comp, vid, &app, kids, n, synced]
+      | ^ [Idle, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
     }
   }
 }
@@ -999,17 +1022,16 @@ vlife = #<'i, 's, 'e, 'w>['vmode, 's, 'frame, 'component<'i, 's, 'e, 'w>, Str['b
 // Settle: drain `Changed` in quiet-window steps, re-rendering after each burst,
 // until a window passes silently (or the deadline lapses). Answers the settled
 // frame. `left` is the remaining deadline budget.
-settle = #<'i, 's, 'e, 'w>['s, 'frame, 'component<'i, 's, 'e, 'w>, 'int] {
-  =[state, f, comp, left]
+settle = #<'i, 's, 'e, 'w>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e, 'w>, (left): 'int] {
   {
-    | %num.lt? [0, left] => ![#'%proc.changed, settle_quiet] ~> {
+    | %num.lt? [0, $left] => ![#'%proc.changed, settle_quiet] ~> {
       | ='%proc.changed => {
         drain_changed []
-        ^ [state, render_view [state, comp], comp, %num.sub [left, settle_quiet]]
+        ^ [$state, render_view [$state, $comp], $comp, %num.sub [$left, settle_quiet]]
       }
-      | f
+      | $f
     }
-    | f
+    | $f
   }
 }
 
@@ -1096,37 +1118,36 @@ park_ms = 60000
 prune_ms = 45000
 
 // The entries younger than the cutoff (order irrelevant).
-prune_entries = #['reg_entries, 'int, 'reg_entries] {
-  =[items, cutoff, acc]
-  items ~> {
-    | =Nil => acc
+prune_entries = #[(items): 'reg_entries, (cutoff): 'int, (acc): 'reg_entries] {
+  $items ~> {
+    | =Nil => $acc
     | =Cons[e, t] => {
-      | __integer_compare__ [e.at, cutoff] ~> =(0 | 1) => ^ [t, cutoff, Cons[e, acc]]
-      | ^ [t, cutoff, acc]
+      | __integer_compare__ [e.at, $cutoff] ~> =(0 | 1) => ^ [t, $cutoff, Cons[e, $acc]]
+      | ^ [t, $cutoff, $acc]
     }
   }
 }
 
-cat_entries = #['reg_entries, 'reg_entries] {
-  =[a, b]
-  a ~> {
-    | =Nil => b
-    | =Cons[h, t] => ^ [t, Cons[h, b]]
+cat_entries = #[(a): 'reg_entries, (b): 'reg_entries] {
+  $a ~> {
+    | =Nil => $b
+    | =Cons[h, t] => ^ [t, Cons[h, $b]]
   }
 }
 
-// Remove and answer a token's entry: [Found[pid] | Missing, the remaining entries].
+// Remove and answer a token's entry: `[found: Found[pid] | Missing, rest: …]`.
 // The pid is extracted by *pattern* and passed by reference — a pid reached through
 // an access in flow position, or bare in a field, would be *sent* the flowing value.
-take_entry = #['reg_entries, Str['bin], 'reg_entries] {
-  =[items, token, acc]
-  items ~> {
-    | =Nil => [Missing, acc]
+take_entry = #[(items): 'reg_entries, (token): Str['bin], (acc): 'reg_entries] {
+  // The pin below needs a variable, so bind the field locally.
+  token = $token
+  $items ~> {
+    | =Nil => [found: Missing, rest: $acc]
     | =Cons[e, t] => {
       e ~> =(token: et, pid: ep)
       {
-        | et ~> =&token => [Found[&ep], cat_entries [acc, t]]
-        | ^ [t, token, Cons[e, acc]]
+        | et ~> =&token => [found: Found[&ep], rest: cat_entries [$acc, t]]
+        | ^ [t, token, Cons[e, $acc]]
       }
     }
   }
@@ -1141,7 +1162,7 @@ registry_loop = #'reg_entries {
   live = prune_entries [$, __integer_subtract__ [now, prune_ms], Nil]
   msg ~> {
     | =Register[t, p] => ^ Cons[[token: t, pid: &p, at: now], live]
-    | =Claim[t, reply] => { take_entry [live, t, Nil]; =[found, rest]; found ~> reply; ^ rest }
+    | =Claim[t, reply] => { take_entry [live, t, Nil]; =(found, rest); found ~> reply; ^ rest }
   }
 }
 
@@ -1191,11 +1212,10 @@ app = #<'i>('root_free | 'root_mapped<'i>) {
 'strs = Nil | Cons[Str['bin], ^]
 
 // Send a list of encoded frame messages down the socket, in order.
-flush_frames = #['strs, '%http/websocket] {
-  =[items, conn]
-  items ~> {
+flush_frames = #[(items): 'strs, (conn): '%http/websocket] {
+  $items ~> {
     | =Nil => Ok
-    | =Cons[s, t] => { %http/websocket.send_text [conn, s]; ^ [t, conn] }
+    | =Cons[s, t] => { %http/websocket.send_text [$conn, s]; ^ [t, $conn] }
   }
 }
 
@@ -1205,55 +1225,57 @@ flush_frames = #['strs, '%http/websocket] {
 
 'route_hit = RFound[@'view_msg] | RMissing
 
-route_of = #['routes, Str['bin]] -> 'route_hit {
-  =[rs, v]
-  rs ~> {
+route_of = #[(rs): 'routes, (v): Str['bin]] -> 'route_hit {
+  // The pin below needs a variable, so bind the field locally.
+  v = $v
+  $rs ~> {
     | =Nil => RMissing
     | =Cons[r, t] => { r ~> =(vid: rv, pid: rp); { rv ~> =&v => RFound[&rp] | ^ [t, v] } }
   }
 }
 
-del_route = #['routes, Str['bin], 'routes] {
-  =[rs, v, acc]
-  rs ~> {
-    | =Nil => acc
+del_route = #[(rs): 'routes, (v): Str['bin], (acc): 'routes] {
+  // The pin below needs a variable, so bind the field locally.
+  v = $v
+  $rs ~> {
+    | =Nil => $acc
     | =Cons[r, t] => {
       r ~> =(vid: rv)
       {
-        | rv ~> =&v => ^ [t, v, acc]
-        | ^ [t, v, Cons[r, acc]]
+        | rv ~> =&v => ^ [t, v, $acc]
+        | ^ [t, v, Cons[r, $acc]]
       }
     }
   }
 }
 
 // Fan a park/wake signal out to every routed view.
-tell_views = #['routes, (Park | Wake)] {
-  =[rs, m]
-  rs ~> {
+tell_views = #[(routes): 'routes, (m): (Park | Wake)] {
+  $routes ~> {
     | =Nil => Ok
-    | =Cons[r, t] => { r ~> =(pid: p); m ~> p; ^ [t, m] }
+    | =Cons[r, t] => { r ~> =(pid: p); $m ~> p; ^ [t, $m] }
   }
 }
 
 // Unpack a batch of socket messages and forward each event to its vid's view; an
 // unknown vid (a just-killed child; a forged id) or a malformed envelope is dropped.
 // A ws Close answers `Halt` (the app terminates, and ownership tears the views down).
-route_events = #['%http, '%http/websocket.messages, 'routes] {
-  =[req, msgs, routes]
-  msgs ~> {
+route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes): 'routes] {
+  // The nav arm below spreads `req`, so bind the field locally.
+  req = $req
+  $messages ~> {
     | =Nil => Go
     | =Cons[Text[t], rest] => {
       {
         // The three-element event envelope first — events dominate, so the common path
         // parses once (a two-element nav message can't match it).
-        | env_of t ~> =[v, payload, pairs]; route_of [routes, v] ~> =RFound[p] => {
+        | env_of t ~> =[v, payload, pairs]; route_of [$routes, v] ~> =RFound[p] => {
           Event[payload, pairs] ~> p; Ok
         }
         // A live-navigation message re-derives the root: build the request for the new
         // target (keeping the initial request's method/headers/cookies) and hand it to
         // the root view, which folds it through `nav`.
-        | nav_of t ~> =Str[tb]; route_of [routes, "0"] ~> =RFound[p] => {
+        | nav_of t ~> =Str[tb]; route_of [$routes, "0"] ~> =RFound[p] => {
           %http.split_target Str[tb] ~> =[path, query]
           Nav[
             ~[...req, target: Str[tb], path: path, query: query],
@@ -1262,10 +1284,10 @@ route_events = #['%http, '%http/websocket.messages, 'routes] {
         }
         | Ok
       }
-      ^ [req, rest, routes]
+      ^ [req, rest, $routes]
     }
     | =Cons[Close[code: _, reason: _], _] => Halt
-    | =Cons[Binary[_], rest] => ^ [req, rest, routes]
+    | =Cons[Binary[_], rest] => ^ [req, rest, $routes]
   }
 }
 
@@ -1277,30 +1299,31 @@ route_events = #['%http, '%http/websocket.messages, 'routes] {
 // bytes. The attached select receives frames and route changes from the mailbox (an
 // `Attach` cannot arrive while attached — the registry claim is one-shot — and would
 // wait queued regardless).
-alife = #['%http, 'amode, 'strs, (Str['bin] | []), @'reg_msg, 'routes] {
-  =[req, mode, buf, token, reg, routes]
-  mode ~> {
+alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): (Str['bin] | []), (registry): @'reg_msg, (routes): 'routes] {
+  // The pid is taken by reference (a bare access would send), so bind it locally.
+  reg = &$registry
+  $mode ~> {
     | =Parked => ![#'app_msg, park_ms] ~> {
       | =Attach[conn] => {
-        flush_frames [rev [buf, Nil], conn]
-        tell_views [routes, Wake]
+        flush_frames [rev [$buffer, Nil], conn]
+        tell_views [$routes, Wake]
         %http/websocket.on_data [conn, 0x]
         =[msgs, c2]
-        route_events [req, msgs, routes] ~> {
-          | =Go => ^ [req, Attached[c2], Nil, token, &reg, routes]
+        route_events [$req, msgs, $routes] ~> {
+          | =Go => ^ [$req, Attached[c2], Nil, $token, &reg, $routes]
           | Ok
         }
       }
-      | =Frame[s] => ^ [req, Parked, Cons[s, buf], token, &reg, routes]
+      | =Frame[s] => ^ [$req, Parked, Cons[s, $buffer], $token, &reg, $routes]
       | =Route[v, p] => ^ [
-        req,
+        $req,
         Parked,
-        buf,
-        token,
+        $buffer,
+        $token,
         &reg,
-        Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
+        Cons[[vid: v, pid: &p], del_route [$routes, v, Nil]],
       ]
-      | =Unroute[v] => ^ [req, Parked, buf, token, &reg, del_route [routes, v, Nil]]
+      | =Unroute[v] => ^ [$req, Parked, $buffer, $token, &reg, del_route [$routes, v, Nil]]
       | Ok
     }
     | =Attached[conn] => ![
@@ -1310,28 +1333,29 @@ alife = #['%http, 'amode, 'strs, (Str['bin] | []), @'reg_msg, 'routes] {
       | =Data[sock: _, data: d] => {
         %http/websocket.on_data [conn, d]
         =[msgs, c2]
-        route_events [req, msgs, routes] ~> {
-          | =Go => ^ [req, Attached[c2], Nil, token, &reg, routes]
+        route_events [$req, msgs, $routes] ~> {
+          | =Go => ^ [$req, Attached[c2], Nil, $token, &reg, $routes]
           | Ok
         }
       }
       | =Frame[s] => {
-        %http/websocket.send_text [conn, s]; ^ [req, Attached[conn], Nil, token, &reg, routes]
+        %http/websocket.send_text [conn, s]
+        ^ [$req, Attached[conn], Nil, $token, &reg, $routes]
       }
       | =Route[v, p] => ^ [
-        req,
+        $req,
         Attached[conn],
         Nil,
-        token,
+        $token,
         &reg,
-        Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
+        Cons[[vid: v, pid: &p], del_route [$routes, v, Nil]],
       ]
-      | =Unroute[v] => ^ [req, Attached[conn], Nil, token, &reg, del_route [routes, v, Nil]]
-      | =Closed[sock: _] => token ~> {
+      | =Unroute[v] => ^ [$req, Attached[conn], Nil, $token, &reg, del_route [$routes, v, Nil]]
+      | =Closed[sock: _] => $token ~> {
         | =Str[tb] => {
-          tell_views [routes, Park]
+          tell_views [$routes, Park]
           Register[Str[tb], &.] ~> reg
-          ^ [req, Parked, Nil, Str[tb], &reg, routes]
+          ^ [$req, Parked, Nil, Str[tb], &reg, $routes]
         }
         | Ok
       }
@@ -1379,48 +1403,46 @@ classify_frame = #Str['bin] -> 'fclass {
 
 // Insert a view's HTML between its empty boundary markers; a page without the
 // markers (a raced unroute) passes through unchanged.
-splice = #[Str['bin], Str['bin], Str['bin]] {
-  =[page, vid, html]
-  page ~> =Str[pgb]
-  open = %str.concat ["<!--v:", %str.concat [vid, "-->"]]
+splice = #[(page): Str['bin], (vid): Str['bin], (html): Str['bin]] {
+  $page ~> =Str[pgb]
+  open = %str.concat ["<!--v:", %str.concat [$vid, "-->"]]
   open ~> =Str[ob]
   {
-    | %str.index_of [page, open] ~> =('int)i => {
+    | %str.index_of [$page, open] ~> =('int)i => {
       cut = %num.add [i, %bin.length ob]
-      pre = %str.slice [page, 0, cut]
-      post = %str.slice [page, cut, %bin.length pgb]
-      %str.concat [pre, %str.concat [html, post]]
+      pre = %str.slice [$page, 0, cut]
+      post = %str.slice [$page, cut, %bin.length pgb]
+      %str.concat [pre, %str.concat [$html, post]]
     }
-    | page
+    | $page
   }
 }
 
 // Whether the page still holds an EMPTY boundary marker pair — `<!--v:ID-->`
 // immediately followed by `<!--/v:ID-->` — i.e. a placed view whose first frame
 // hasn't arrived. Walks every open marker.
-unfilled_from = #[Str['bin], 'int] {
-  =[page, from]
-  page ~> =Str[pgb]
+unfilled_from = #[(page): Str['bin], (from): 'int] {
+  $page ~> =Str[pgb]
   plen = %bin.length pgb
-  rest = %str.slice [page, from, plen]
+  rest = %str.slice [$page, $from, plen]
   {
     | %str.index_of [rest, "<!--v:"] ~> =('int)i => {
-      idstart = %num.add [from, %num.add [i, 6]]
-      tail1 = %str.slice [page, idstart, plen]
+      idstart = %num.add [$from, %num.add [i, 6]]
+      tail1 = %str.slice [$page, idstart, plen]
       {
         | %str.index_of [tail1, "-->"] ~> =('int)j => {
-          id = %str.slice [page, idstart, %num.add [idstart, j]]
+          id = %str.slice [$page, idstart, %num.add [idstart, j]]
           closepos = %num.add [idstart, %num.add [j, 3]]
           needle = %str.concat ["<!--/v:", %str.concat [id, "-->"]]
           needle ~> =Str[nb]
           nend = %num.add [closepos, %bin.length nb]
           {
-            | %num.lt? [plen, nend] => ^ [page, closepos]
+            | %num.lt? [plen, nend] => ^ [$page, closepos]
             | {
-              seg = %str.slice [page, closepos, nend]
+              seg = %str.slice [$page, closepos, nend]
               {
                 | seg ~> =&needle => Ok
-                | ^ [page, closepos]
+                | ^ [$page, closepos]
               }
             }
           }
@@ -1444,13 +1466,12 @@ composed? = #(Str['bin] | []) {
 // Reclassify frames that raced ahead of the root's `Region` (cross-process
 // delivery order is not guaranteed): walk the pending frames oldest-first,
 // splicing first frames into the page and keeping the rest buffered.
-reprocess = #[Str['bin], 'strs, 'strs] -> [Str['bin], 'strs] {
-  =[page, pending, keep]
-  pending ~> {
-    | =Nil => [page, keep]
+reprocess = #[(page): Str['bin], (pending): 'strs, (keep): 'strs] -> [Str['bin], 'strs] {
+  $pending ~> {
+    | =Nil => [$page, $keep]
     | =Cons[fs, t] => classify_frame fs ~> {
-      | =FirstFrame[vid: Str[vb], html: Str[hb]] => ^ [splice [page, Str[vb], Str[hb]], t, keep]
-      | ^ [page, t, Cons[fs, keep]]
+      | =FirstFrame[vid: Str[vb], html: Str[hb]] => ^ [splice [$page, Str[vb], Str[hb]], t, $keep]
+      | ^ [$page, t, Cons[fs, $keep]]
     }
   }
 }
@@ -1458,52 +1479,66 @@ reprocess = #[Str['bin], 'strs, 'strs] -> [Str['bin], 'strs] {
 // The composition loop: collect the root's `Region` and the views' first frames
 // (splicing as they arrive), buffer everything else, and answer the handler the
 // complete page — or whatever assembled by the deadline. Then park.
-compose = #[@Str['bin], (Str['bin] | []), 'strs, (Str['bin] | []), @'reg_msg, 'routes, 'int, '%http] {
-  =[handler, page, buf, token, reg, routes, end, req]
+compose = #[(handler): @Str['bin], (page): (Str['bin] | []), (buffer): 'strs, (token): (Str['bin] | []), (registry): @'reg_msg, (routes): 'routes, (end): 'int, (req): '%http] {
+  // The pids are taken by reference (a bare access would send), so bind them locally.
+  handler = &$handler
+  reg = &$registry
   {
-    | composed? page => {
-      page ~> =Str[pb]; Str[pb] ~> handler; alife [req, Parked, buf, token, &reg, routes]
+    | composed? $page => {
+      $page ~> =Str[pb]
+      Str[pb] ~> handler
+      alife [$req, Parked, $buffer, $token, &reg, $routes]
     }
-    | %num.lt? [%time.monotonic, end] => ![#'app_msg, settle_quiet] ~> {
+    | %num.lt? [%time.monotonic, $end] => ![#'app_msg, settle_quiet] ~> {
       | =Region[h] => {
-        r = reprocess [h, rev [buf, Nil], Nil]
-        ^ [&handler, r.0, r.1, token, &reg, routes, end, req]
+        r = reprocess [h, rev [$buffer, Nil], Nil]
+        ^ [&handler, r.0, r.1, $token, &reg, $routes, $end, $req]
       }
-      | =Frame[s] => page ~> {
+      | =Frame[s] => $page ~> {
         | =Str[pb] => classify_frame s ~> {
           | =FirstFrame[vid: Str[vb], html: Str[hb]] => ^ [
             &handler,
             splice [Str[pb], Str[vb], Str[hb]],
-            buf,
-            token,
+            $buffer,
+            $token,
             &reg,
-            routes,
-            end,
-            req,
+            $routes,
+            $end,
+            $req,
           ]
-          | ^ [&handler, Str[pb], Cons[s, buf], token, &reg, routes, end, req]
+          | ^ [&handler, Str[pb], Cons[s, $buffer], $token, &reg, $routes, $end, $req]
         }
-        | ^ [&handler, [], Cons[s, buf], token, &reg, routes, end, req]
+        | ^ [&handler, [], Cons[s, $buffer], $token, &reg, $routes, $end, $req]
       }
       | =Route[v, p] => ^ [
         &handler,
-        page,
-        buf,
-        token,
+        $page,
+        $buffer,
+        $token,
         &reg,
-        Cons[[vid: v, pid: &p], del_route [routes, v, Nil]],
-        end,
-        req,
+        Cons[[vid: v, pid: &p], del_route [$routes, v, Nil]],
+        $end,
+        $req,
       ]
-      | =Unroute[v] => ^ [&handler, page, buf, token, &reg, del_route [routes, v, Nil], end, req]
+      | =Unroute[v] => ^ [
+        &handler,
+        $page,
+        $buffer,
+        $token,
+        &reg,
+        del_route [$routes, v, Nil],
+        $end,
+        $req,
+      ]
       // An Attach cannot arrive before the page (the token is in it); dropping the
       // impossible conn closes it and the client retries cold.
-      | =Attach[_] => ^ [&handler, page, buf, token, &reg, routes, end, req]
-      | ^ [&handler, page, buf, token, &reg, routes, end, req]
+      | =Attach[_] => ^ [&handler, $page, $buffer, $token, &reg, $routes, $end, $req]
+      | ^ [&handler, $page, $buffer, $token, &reg, $routes, $end, $req]
     }
     // Deadline: answer with what assembled (a stuck view's boundary stays empty).
     | {
-      page ~> { =Str[pb] => Str[pb] ~> handler | Ok }; alife [req, Parked, buf, token, &reg, routes]
+      $page ~> { =Str[pb] => Str[pb] ~> handler | Ok }
+      alife [$req, Parked, $buffer, $token, &reg, $routes]
     }
   }
 }
@@ -1547,27 +1582,24 @@ app_run = #['%http, 'root_view, @'reg_msg, (Str['bin] | []), 'aboot] {
 // mount) whose first frame replaces the live region. The app is spawned tokenless,
 // so it terminates on disconnect instead of parking, and detached, so it survives
 // this connection process ending.
-run_cold = #['%http/websocket, '%http, 'root_view, @'reg_msg] {
-  =[conn, req, root, reg]
-  a = [req, &root, &reg, [], Cold] ~> @app_run
-  %proc.detach &a
-  Attach[conn] ~> a
-  Ok
+run_cold = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry): @'reg_msg] {
+  a = [$req, &$root, &$registry, [], Cold] ~> @app_run; %proc.detach &a; Attach[$conn] ~> a; Ok
 }
 
 // The upgrade side: the client's first frame is its token. A claimed app is sent
 // the connection — socket ownership rides the message, and this connection process
 // then ends owning nothing. Anything else falls back to the cold path.
-join = #['%http/websocket, '%http, 'root_view, @'reg_msg] {
-  =[conn, req, root, reg]
-  %http/websocket.recv conn
+join = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry): @'reg_msg] {
+  // The pid is taken by reference (a bare access would send), so bind it locally.
+  reg = &$registry
+  %http/websocket.recv $conn
   =[first, c2]
   first ~> {
     | =Text[tok] => {
       Claim[tok, &.] ~> reg
       !'claim ~> {
         | =Found[p] => { Attach[c2] ~> p; Ok }
-        | run_cold [c2, req, &root, &reg]
+        | run_cold [c2, $req, &$root, &reg]
       }
     }
     | Ok
@@ -1588,33 +1620,30 @@ join = #['%http/websocket, '%http, 'root_view, @'reg_msg] {
 
 'sim<'i, 's, 'e, 'w> = Sim[comp: 'component<'i, 's, 'e, 'w>, state: 's, frame: 'frame]
 
-sim = #<'w, 'i, 's, 'e>['i, ('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>)] {
+sim = #<'w, 'i, 's, 'e>[(init): 'i, (cfg): ('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>)] {
   :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`. Pin the wire-event type — `sim<'ev> [...]` — to compile-check the view's `on:*` payloads."
-  =[init, cfg]
-  comp = with_nav cfg
-  state = comp.mount init
+  comp = with_nav $cfg
+  state = comp.mount $init
   Sim[comp: comp, state: state, frame: render_view [state, comp]]
 }
 
-sim_text = #<'i, 's, 'e, 'w>['sim<'i, 's, 'e, 'w>, Str['bin]] {
+sim_text = #<'i, 's, 'e, 'w>[(s): 'sim<'i, 's, 'e, 'w>, (text): Str['bin]] {
   :doc "Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, [[name, value], …]]` — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the state untouched, exactly as the live path drops them."
-  =[s, text]
-  s ~> =Sim(comp: comp, state: state, frame: prev)
+  $s ~> =Sim(comp: comp, state: state, frame: prev)
   {
-    | env_of text ~> =[_, payload, pairs] => {
+    | env_of $text ~> =[_, payload, pairs] => {
       s2 = fold_event [state, comp, payload, pairs]
       f2 = render_view [s2, comp]
       [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
     }
-    | [s, Nil]
+    | [$s, Nil]
   }
 }
 
-sim_event = #<'i, 's, 'e, 'w>['sim<'i, 's, 'e, 'w>, 'e] {
+sim_event = #<'i, 's, 'e, 'w>[(s): 'sim<'i, 's, 'e, 'w>, (ev): 'e] {
   :doc "Feeds a sim one already-decoded event, straight to `update` — the app-level step, for asserting `update`/`view` behavior without wire shapes. Answers `[sim2, patches]` (`Nil` when the render's diff is empty — the empty-frame suppression seam)."
-  =[s, ev]
-  s ~> =Sim(comp: comp, state: state, frame: prev)
-  s2 = comp.update [state, ev]
+  $s ~> =Sim(comp: comp, state: state, frame: prev)
+  s2 = comp.update [state, $ev]
   f2 = render_view [s2, comp]
   [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
 }
@@ -1901,18 +1930,19 @@ client_js = """
 
 // The dead render's page shell: the instrumented region in a container the client owns,
 // plus the client script. Whole-page concerns (title, head) are the caller's, later.
-page_shell = #[Str['bin], Str['bin]] {
-  =[Str[region], Str[token]]
-  "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"q-root\" data-q-token=\"" ~> %str.concat [~, Str[token]] ~> %str.concat [~, "\">"] ~> %str.concat [~, Str[region]] ~> %str.concat [~, "</div>"] ~> %str.concat [~, client_js] ~> %str.concat [
+page_shell = #[(region): Str['bin], (token): Str['bin]] {
+  "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"q-root\" data-q-token=\"" ~> %str.concat [~, $token] ~> %str.concat [~, "\">"] ~> %str.concat [~, $region] ~> %str.concat [~, "</div>"] ~> %str.concat [~, client_js] ~> %str.concat [
     ~,
     "</body></html>",
   ]
 }
 
-handle = #['%http, 'app] {
+handle = #[(req): '%http, (app): 'app] {
   :doc "The app's HTTP handler body. A plain GET spawns a detached app process whose root view mounts once; the view answers the region HTML and the app parks behind the page's claim token. A websocket-upgrade request reads the token from the client's first frame and hands the claimed app the socket (an unknown token falls back to a cold fresh mount). Wire it as `#'%http \{ %html/live.handle [$, app] }` with an `%html/live.app [root: &comp]` created once at startup."
-  =[req, a]
-  a ~> =(root: rt, reg: rg)
+  // The upgrade handler closes over `req` (an inner `$` would be its own
+  // parameter), so bind the field locally.
+  req = $req
+  $app ~> =(root: rt, reg: rg)
   {
     | %http.header [req.headers, "sec-websocket-key"] => Upgrade[
       handler: #'%http/websocket { join [$, req, &rt, &rg] },

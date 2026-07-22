@@ -107,6 +107,18 @@ impl Default for Narrowing {
 /// When a type check succeeds on a value with known provenance, this function
 /// records the narrowed type in the current scope so subsequent lookups return
 /// the narrowed type.
+/// Whether a provenance chain is rooted at `Provenance::Parameter`. Such a chain is
+/// scope-relative — created where `Parameter` named the then-current scope's parameter —
+/// so it cannot be resolved through `scopes` from a different (inner) scope, which would
+/// read that scope's own parameter instead. See `apply_narrowing`'s Parameter arm.
+fn rooted_at_parameter(provenance: &Provenance) -> bool {
+    match provenance {
+        Provenance::Parameter => true,
+        Provenance::Field(parent, _) => rooted_at_parameter(parent),
+        _ => false,
+    }
+}
+
 pub fn apply_narrowing(
     scopes: &mut [Scope],
     provenance: &Provenance,
@@ -169,13 +181,23 @@ pub fn apply_narrowing(
 
             // Now recurse with the borrow released. Only propagate the narrowing up the parameter's
             // source provenance when it actually changed the type: once it reaches a fixpoint there
-            // is nothing left to tighten, and continuing would not terminate. (A block parameter
-            // whose source is a field of an enclosing parameter resolves `Parameter` against the
-            // current scope, so without this guard a stable `never` narrowing recurses forever —
-            // Field → Parameter → Field …)
+            // is nothing left to tighten, and continuing would not terminate.
+            //
+            // A `Parameter`-ROOTED source provenance is never propagated: provenance is
+            // scope-relative, and such a chain was minted where `Parameter` meant the
+            // *enclosing* scope's parameter. Resolving it here reads the current block's
+            // parameter instead (e.g. `$xs ~> { =Nil => … | =Cons[[k, v], t] => … }`:
+            // the block parameter's source is `Field(Parameter, 0)`, whose root names
+            // the function parameter — resolved against the block scope it denotes the
+            // union being matched, and filtering *its* variants by field annihilates
+            // them, narrowing the scrutinee to never or corrupting its reconstructed
+            // type). Skipping the hop costs only precision on the outer field, never
+            // soundness. Variable-rooted chains resolve by name across the scope stack,
+            // which is unambiguous, so they still propagate.
             if let Some((source_prov, current, intersected)) = narrowing_info
                 && intersected != current
-                && !matches!(source_prov, Provenance::Parameter | Provenance::Unknown)
+                && !matches!(source_prov, Provenance::Unknown)
+                && !rooted_at_parameter(&source_prov)
             {
                 apply_narrowing(scopes, &source_prov, intersected, program);
             }

@@ -115,6 +115,9 @@ module.exports = grammar({
     // (`(x: …)`, `(x, …)`) or the first alternative of an or-pattern (`(x | …)`); the `:`/`,`
     // versus `|` that follows decides, via GLR.
     [$._pattern, $._partial_field],
+    // In a tuple type, `(name` may open an omittable label (`(foo): 'int`) or a
+    // partial-type field type (`(foo: 'int)`); the `)` versus `:` decides, via GLR.
+    [$._partial_field, $._field_type],
     // A parenthesised group of `|`-separated atoms can be read as an or-pattern (of tuple/type
     // patterns) or as a parenthesised type union; both are accepted for editor purposes.
     [$.pattern_tuple, $.tuple_type],
@@ -713,6 +716,9 @@ module.exports = grammar({
 
     _field_type: $ => choice(
       $.type_spread,
+      // Omittable label `(name): 'type` — a literal checked against the type may
+      // state the label or leave the field positional. Tuple types only.
+      seq('(', field('name', $.identifier), ')', ':', optional($._nl), $._type),
       seq(field('name', $.identifier), ':', optional($._nl), $._type),
       $._type,
     ),

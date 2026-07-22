@@ -7,8 +7,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-shopt -s nullglob
-files=(../std/*.qv ../examples/*.qv)
+shopt -s nullglob globstar
+files=(../std/**/*.qv ../examples/**/*.qv)
 if [ ${#files[@]} -eq 0 ]; then
   echo "No .qv files found to check." >&2
   exit 1

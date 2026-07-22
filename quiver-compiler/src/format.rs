@@ -1564,11 +1564,20 @@ fn render_field_type(field_type: &FieldType) -> String {
     match field_type {
         FieldType::Field {
             name: Some(name),
+            omittable,
             type_def,
-        } => format!("{}: {}", name, render_type(type_def)),
+        } => {
+            let label = if *omittable {
+                format!("({})", name)
+            } else {
+                name.clone()
+            };
+            format!("{}: {}", label, render_type(type_def))
+        }
         FieldType::Field {
             name: None,
             type_def,
+            ..
         } => render_type(type_def),
         FieldType::Spread {
             identifier: None, ..

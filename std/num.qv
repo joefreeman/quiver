@@ -106,62 +106,52 @@ rcompare = #['rational, 'rational] {
 
 // Largest square divisor: `n = k²·m` with `m` square-free. Called as `[1, n, 2] sqfree`
 // for `n > 0`; pure trial division (O(√n)).
-sqfree = #['int, 'int, 'int] {
-  =[k, m, d]
-  {
-    | __integer_compare__ [__integer_multiply__ [d, d], m] ~> =1 => [k, m]
-    | __integer_modulo__ [m, __integer_multiply__ [d, d]] ~> =0 => ^ [
-        __integer_multiply__ [k, d],
-        __integer_divide__ [m, __integer_multiply__ [d, d]],
-        d,
-      ]
-    | ^ [k, m, __integer_add__ [d, 1]]
-  }
+sqfree = #[(k): 'int, (m): 'int, (d): 'int] {
+  | __integer_compare__ [__integer_multiply__ [$d, $d], $m] ~> =1 => [k: $k, m: $m]
+  | __integer_modulo__ [$m, __integer_multiply__ [$d, $d]] ~> =0 => ^ [
+      __integer_multiply__ [$k, $d],
+      __integer_divide__ [$m, __integer_multiply__ [$d, $d]],
+      $d,
+    ]
+  | ^ [$k, $m, __integer_add__ [$d, 1]]
 }
 
-// Expand a number to `[a, b, n]` (rational a, rational b, radical n); a pure rational is
-// `[a, 0, 1]`. The inverse of `build`.
+// Expand a number to `[a: …, b: …, n: …]` (rational a, rational b, radical n); a pure
+// rational has a zero `b` and radical 1. The inverse of `build`.
 explode = #' {
-  | =Surd[a, b, n] => [to_rational a, to_rational b, n]
-  | =r => [to_rational r, Rational[0, 1], 1]
+  | =Surd[a, b, n] => [a: to_rational a, b: to_rational b, n: n]
+  | =r => [a: to_rational r, b: Rational[0, 1], n: 1]
 }
 
 // The radical shared by two operands, or nil if they carry different (incompatible) radicals.
 // An operand with a zero surd coefficient (a pure rational) defers to the other's radical.
-radical = #['rational, 'int, 'rational, 'int] {
-  =[b1, n1, b2, n2]
-  {
-    | rsign b1 ~> =0 => n2
-    | rsign b2 ~> =0 => n1
-    | __integer_compare__ [n1, n2] ~> =0 => n1
-    | []
-  }
+radical = #[(b1): 'rational, (n1): 'int, (b2): 'rational, (n2): 'int] {
+  | rsign $b1 ~> =0 => $n2
+  | rsign $b2 ~> =0 => $n1
+  | __integer_compare__ [$n1, $n2] ~> =0 => $n1
+  | []
 }
 
 // Build a canonical number from `[a, b, n]`, collapsing to the simplest representation:
 // `√1` folds into the rational part, a zero `b` yields a plain rational/integer, and
 // integral coefficients are lowered.
-build = #['rational, 'rational, 'int] {
-  =[a, b, n]
-  {
-    | __integer_compare__ [n, 1] ~> =0 => radd [a, b] ~> lower
-    | rsign b ~> =0 => lower a
-    | Surd[lower a, lower b, n]
-  }
+build = #[(a): 'rational, (b): 'rational, (n): 'int] {
+  | __integer_compare__ [$n, 1] ~> =0 => radd [$a, $b] ~> lower
+  | rsign $b ~> =0 => lower $a
+  | Surd[lower $a, lower $b, $n]
 }
 
 // Sign (-1/0/1) of `a + b·√n` for rational a, b and square-free `n > 1`. When the rational
 // and surd parts have opposing signs the decision reduces to comparing `a²` with `b²·n`.
-ssign = #['rational, 'rational, 'int] {
-  =[a, b, n]
-  sb = rsign b
+ssign = #[(a): 'rational, (b): 'rational, (n): 'int] {
+  sb = rsign $b
   {
-    | __integer_compare__ [sb, 0] ~> =0 => rsign a
+    | __integer_compare__ [sb, 0] ~> =0 => rsign $a
     | {
-      a2 = rmul [a, a]
-      b2n = rmul [rmul [b, b], Rational[n, 1]]
+      a2 = rmul [$a, $a]
+      b2n = rmul [rmul [$b, $b], Rational[$n, 1]]
       dsign = rcompare [a2, b2n]
-      sa = rsign a
+      sa = rsign $a
       {
         | __integer_compare__ [sb, 0] ~> =1 => {
           | __integer_compare__ [sa, 0] ~> =-1 => __integer_multiply__ [dsign, -1]
@@ -178,25 +168,22 @@ ssign = #['rational, 'rational, 'int] {
 
 // Surd-aware binary operations. At least one operand is a surd; mixed radicals fail to nil
 // (`[...] radical` returns nil and the re-emitted `n` short-circuits the whole chain).
-surd_add = #[', '] {
-  =[x, y]
-  explode x ~> =[a1, b1, n1]
-  explode y ~> =[a2, b2, n2]
+surd_add = #[(x): ', (y): '] {
+  explode $x ~> =[a: a1, b: b1, n: n1]
+  explode $y ~> =[a: a2, b: b2, n: n2]
   radical [b1, n1, b2, n2] ~> =('int)n
   build [radd [a1, a2], radd [b1, b2], n]
 }
-surd_sub = #[', '] {
-  =[x, y]
-  explode x ~> =[a1, b1, n1]
-  explode y ~> =[a2, b2, n2]
+surd_sub = #[(x): ', (y): '] {
+  explode $x ~> =[a: a1, b: b1, n: n1]
+  explode $y ~> =[a: a2, b: b2, n: n2]
   radical [b1, n1, b2, n2] ~> =('int)n
   build [rsub [a1, a2], rsub [b1, b2], n]
 }
 // (a₁ + b₁√n)(a₂ + b₂√n) = (a₁a₂ + b₁b₂·n) + (a₁b₂ + a₂b₁)√n.
-surd_mul = #[', '] {
-  =[x, y]
-  explode x ~> =[a1, b1, n1]
-  explode y ~> =[a2, b2, n2]
+surd_mul = #[(x): ', (y): '] {
+  explode $x ~> =[a: a1, b: b1, n: n1]
+  explode $y ~> =[a: a2, b: b2, n: n2]
   radical [b1, n1, b2, n2] ~> =('int)n
   build [
     radd [rmul [a1, a2], rmul [rmul [b1, b2], Rational[n, 1]]],
@@ -205,10 +192,9 @@ surd_mul = #[', '] {
   ]
 }
 // Multiply by the conjugate: divide by `a₂ + b₂√n` via the rational denominator a₂² − b₂²·n.
-surd_div = #[', '] {
-  =[x, y]
-  explode x ~> =[a1, b1, n1]
-  explode y ~> =[a2, b2, n2]
+surd_div = #[(x): ', (y): '] {
+  explode $x ~> =[a: a1, b: b1, n: n1]
+  explode $y ~> =[a: a2, b: b2, n: n2]
   radical [b1, n1, b2, n2] ~> =('int)n
 
   dd = rsub [rmul [a2, a2], rmul [rmul [b2, b2], Rational[n, 1]]]
@@ -225,10 +211,9 @@ surd_div = #[', '] {
     ]
   }
 }
-surd_compare = #[', '] {
-  =[x, y]
-  explode x ~> =[a1, b1, n1]
-  explode y ~> =[a2, b2, n2]
+surd_compare = #[(x): ', (y): '] {
+  explode $x ~> =[a: a1, b: b1, n: n1]
+  explode $y ~> =[a: a2, b: b2, n: n2]
   radical [b1, n1, b2, n2] ~> =('int)n
   ssign [rsub [a1, a2], rsub [b1, b2], n]
 }
@@ -297,7 +282,7 @@ max = #['opt, 'opt] {
 }
 
 // Clamp x to the range [lo, hi] (nil if any operand is nil).
-clamp = #['opt, 'opt, 'opt] {
+clamp = #[(value): 'opt, (min): 'opt, (max): 'opt] {
   :doc "Clamps a number to the range from lo to hi; nil when any operand is nil."
   // The caller must give a non-empty range (`lo ≤ hi`); the result then lies within it.
   // Comparisons that are nil (a nil operand, or incompatible surds) can't witness a
@@ -311,11 +296,9 @@ clamp = #['opt, 'opt, 'opt] {
     }
   }
   | =([[], _, _] | [_, [], _] | [_, _, []]) => []
-  | =[x, lo, hi] => {
-    | compare [x, lo] ~> =-1 => lo
-    | compare [x, hi] ~> =1 => hi
-    | x
-  }
+  | compare [$value, $min] ~> =-1 => $min
+  | compare [$value, $max] ~> =1 => $max
+  | $value
 }
 
 // Floor / ceil to a bare integer (nil for a nil operand). Built on the toward-zero `to_int`,
@@ -415,8 +398,11 @@ d_expr_of = #'%parse.p<'dexpr> {
 // The factor grammar, self-passed (together with the host-term operand parser) to tie
 // the factor↔parenthesized-expression recursion. Alternative order matters: the
 // dialect's own parens and number literals first, the host term last.
-d_factor_step = #[#^ -> (['dexpr, '%parse] | []), '%parse.p<'dexpr>, '%parse] {
-  =[self, term, st]
+d_factor_step = #[(self): #^ -> (['dexpr, '%parse] | []), (term): '%parse.p<'dexpr>, (st): '%parse] {
+  // The nested factor literal closes over `self` and `term` (an inner `$` would be its
+  // own parameter), so bind the fields locally — by reference, as callables.
+  self = &$self
+  term = &$term
   factor = #'%parse { self [&self, &term, $] }
   expr = d_expr_of &factor
 
@@ -433,7 +419,7 @@ d_factor_step = #[#^ -> (['dexpr, '%parse] | []), '%parse.p<'dexpr>, '%parse] {
   core = %parse.alt4 [&paren, &%parse.int, &neg, &term]
 
   core_ws = %parse.right [&%parse.ws, &core]
-  core_ws st
+  core_ws $st
 }
 
 num_dialect = #(content: Str['bin], term: '%meta.cb) {
@@ -470,7 +456,7 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
         | __integer_compare__ [p, 0] ~> =-1 => []
         | __integer_compare__ [p, 0] ~> =0 => 0
         | {
-          sqfree [1, __integer_multiply__ [p, q], 2] ~> =[k, m]
+          sqfree [1, __integer_multiply__ [p, q], 2] ~> =(k, m)
 
           build [Rational[0, 1], reduce Rational[k, q], m]
         }

@@ -17,6 +17,12 @@ pub trait TypeLookup {
     fn lookup_annotation_key_name(&self, _key: usize) -> Option<&str> {
         None
     }
+    /// Whether a tuple field's label was written omittable (`[(foo): 'int]`), letting a
+    /// positional literal checked against the tuple type adopt it. Spelling metadata,
+    /// never part of type identity.
+    fn label_omittable(&self, _tuple_id: usize, _field_index: usize) -> bool {
+        false
+    }
     /// Look up a type, seeing through an annotation row to its base shape. Most
     /// structural questions ("is this callable?", "which tuple?") want this — a bare
     /// `lookup_type` on an annotated id sees `Type::Annotated` and fails shape matches.

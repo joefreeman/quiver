@@ -34,77 +34,71 @@ handshake_response = #Str['bin] {
 
 // XOR a payload with the repeating 4-byte mask (its own inverse). The repeated key
 // is sliced to the payload length — XOR of unequal lengths zero-pads to the longer.
-apply_mask = #['bin, 'bin] {
-  =[payload, key]
-  n = %bin.length payload
+apply_mask = #[(payload): 'bin, (key): 'bin] {
+  n = %bin.length $payload
   {
     | n ~> =0 => 0x
     | {
       reps = __integer_divide__ [__integer_add__ [n, 3], 4]
-      %bin.xor [payload, __binary_repeat__ [key, reps] ~> %bin.slice [~, 0, n]]
+      %bin.xor [$payload, __binary_repeat__ [$key, reps] ~> %bin.slice [~, 0, n]]
     }
   }
 }
 
 // The first two header bytes for a frame: FIN plus opcode, then the 7-bit length
 // code (with the mask bit when `mask_bit` is 128) and any extended length bytes.
-frame_head = #['int, 'int, 'int] {
-  =[opcode, n, mask_bit]
-  b0 = __binary_append__ [0x, __integer_add__ [128, opcode], 1]
+frame_head = #[(opcode): 'int, (n): 'int, (mask_bit): 'int] {
+  b0 = __binary_append__ [0x, __integer_add__ [128, $opcode], 1]
   {
-    | __integer_compare__ [n, 126] ~> =-1 => __binary_append__ [
+    | __integer_compare__ [$n, 126] ~> =-1 => __binary_append__ [
       b0,
-      __integer_add__ [mask_bit, n],
+      __integer_add__ [$mask_bit, $n],
       1,
     ]
-    | __integer_compare__ [n, 65536] ~> =-1 => __binary_append__ [b0, __integer_add__ [mask_bit, 126], 1] ~> __binary_append__ [
+    | __integer_compare__ [$n, 65536] ~> =-1 => __binary_append__ [b0, __integer_add__ [$mask_bit, 126], 1] ~> __binary_append__ [
       ~,
-      n,
+      $n,
       2,
     ]
-    | __binary_append__ [b0, __integer_add__ [mask_bit, 127], 1] ~> __binary_append__ [~, n, 8]
+    | __binary_append__ [b0, __integer_add__ [$mask_bit, 127], 1] ~> __binary_append__ [~, $n, 8]
   }
 }
 
-encode_frame = #['int, 'bin] {
+encode_frame = #[(opcode): 'int, (payload): 'bin] {
   :doc "One unfragmented server-to-client frame (FIN set, unmasked): [opcode, payload]."
-  =[opcode, payload]
-  %bin.concat [frame_head [opcode, %bin.length payload, 0], payload]
+  %bin.concat [frame_head [$opcode, %bin.length $payload, 0], $payload]
 }
 
-encode_masked_frame = #['int, 'bin, 'bin] {
+encode_masked_frame = #[(opcode): 'int, (payload): 'bin, (key): 'bin] {
   :doc "One unfragmented client-to-server frame, masked with the 4-byte key — the client half of the codec."
-  =[opcode, payload, key]
-
-  frame_head [opcode, %bin.length payload, 128] ~> %bin.concat [~, key] ~> %bin.concat [
+  frame_head [$opcode, %bin.length $payload, 128] ~> %bin.concat [~, $key] ~> %bin.concat [
     ~,
-    apply_mask [payload, key],
+    apply_mask [$payload, $key],
   ]
 }
 
 // The frame proper, once the payload length and mask offset are known.
-frame_tail = #['bin, 'int, 'int, 'int, 'int] {
-  =[buf, fin, opcode, plen, moff]
+frame_tail = #[(buf): 'bin, (fin): 'int, (opcode): 'int, (plen): 'int, (moff): 'int] {
   {
-    | __integer_compare__ [plen, max_payload] ~> =1 => Bad["frame too large"]
-    | __integer_compare__ [opcode, 8] ~> =(0 | 1)
+    | __integer_compare__ [$plen, max_payload] ~> =1 => Bad["frame too large"]
+    | __integer_compare__ [$opcode, 8] ~> =(0 | 1)
       {
-        | fin ~> =0 => Ok
-        | __integer_compare__ [plen, 125] ~> =1 => Ok
+        | $fin ~> =0 => Ok
+        | __integer_compare__ [$plen, 125] ~> =1 => Ok
         | []
       } => Bad["malformed control frame"]
     | {
-      total = __integer_add__ [moff, 4] ~> __integer_add__ [~, plen]
+      total = __integer_add__ [$moff, 4] ~> __integer_add__ [~, $plen]
       {
-        | __integer_compare__ [%bin.length buf, total] ~> =-1 => Incomplete
+        | __integer_compare__ [%bin.length $buf, total] ~> =-1 => Incomplete
         | {
-          key = %bin.slice [buf, moff, __integer_add__ [moff, 4]]
+          key = %bin.slice [$buf, $moff, __integer_add__ [$moff, 4]]
 
-          payload = %bin.slice [buf, __integer_add__ [moff, 4], total] ~> apply_mask [~, key]
+          payload = %bin.slice [$buf, __integer_add__ [$moff, 4], total] ~> apply_mask [~, key]
 
           [
-            Frame[fin: fin, opcode: opcode, payload: payload],
-            %bin.slice [buf, total, %bin.length buf],
+            Frame[fin: $fin, opcode: $opcode, payload: payload],
+            %bin.slice [$buf, total, %bin.length $buf],
           ]
         }
       }
@@ -152,10 +146,10 @@ parse_frame = #'bin {
   }
 }
 
-// A Close payload decoded to [code, reason] — 1005 ("no status") when empty.
+// A Close payload decoded to its code and reason — 1005 ("no status") when empty.
 close_info = #'bin {
-  | __integer_compare__ [%bin.length $, 2] ~> =-1 => [1005, ""]
-  | [__binary_get__ [$, 0, 0, 16], %bin.slice [$, 2, %bin.length $] ~> Str[~]]
+  | __integer_compare__ [%bin.length $, 2] ~> =-1 => [code: 1005, reason: ""]
+  | [code: __binary_get__ [$, 0, 0, 16], reason: %bin.slice [$, 2, %bin.length $] ~> Str[~]]
 }
 
 // A Close payload from a code and reason.
@@ -163,9 +157,9 @@ close_payload = #['int, Str['bin]] {
   =[code, Str[r]]; __binary_append__ [0x, code, 2] ~> %bin.concat [~, r]
 }
 
-conn = #[\TcpSocket, 'bin] {
+conn = #[(sock): \TcpSocket, (buf): 'bin] {
   :doc "A connection over an upgraded socket, seeded with any bytes already read past the handshake."
-  =[sock, buf]; Conn[sock: sock, buf: buf, part: Nil]
+  Conn[sock: $sock, buf: $buf, part: Nil]
 }
 
 // Wrap an assembled data payload as its message.
@@ -203,7 +197,7 @@ recv = #' {
       }
       | op ~> =10 => ^ Conn[sock: sock, buf: rest, part: part]
       | op ~> =8 => {
-        close_info p ~> =[code, reason]
+        close_info p ~> =(code, reason)
         __tcp_socket_write__ [sock, encode_frame [8, p]]
         __tcp_socket_close__ sock
         [Close[code: code, reason: reason], Conn[sock: sock, buf: rest, part: Nil]]
@@ -235,11 +229,10 @@ recv = #' {
   }
 }
 
-rev_messages = #['messages, 'messages] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
-    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+rev_messages = #[(items): 'messages, (acc): 'messages] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
   }
 }
 
@@ -261,7 +254,7 @@ drain = #[', 'messages] {
       }
       | op ~> =10 => ^ [Conn[sock: sock, buf: rest, part: part], acc]
       | op ~> =8 => {
-        close_info p ~> =[code, reason]
+        close_info p ~> =(code, reason)
         __tcp_socket_write__ [sock, encode_frame [8, p]]
         __tcp_socket_close__ sock
         [

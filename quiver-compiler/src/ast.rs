@@ -434,6 +434,10 @@ pub struct TupleType {
 pub enum FieldType {
     Field {
         name: Option<String>,
+        /// Written `(name): type` — the label may be omitted by a tuple literal checked
+        /// against this type (the literal's field adopts the label positionally). Purely
+        /// a property of the written spelling: it never distinguishes types.
+        omittable: bool,
         type_def: Type,
     },
     Spread {

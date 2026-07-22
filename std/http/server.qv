@@ -47,25 +47,24 @@ keep_alive? = #'request {
 // The connection pump: serve every complete request in the buffer, reading more only
 // when the parse is incomplete; close on end-of-input, a malformed request, or a
 // non-keep-alive exchange.
-conn_loop = #[\TcpSocket, 'handler, 'bin] {
-  =[sock, h, buf]
-  %http.parse_request buf ~> {
+conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
+  %http.parse_request $buf ~> {
     | =Incomplete => {
-      chunk = __tcp_socket_read__ [sock, 8192]
+      chunk = __tcp_socket_read__ [$sock, 8192]
       {
-        | %bin.length chunk ~> =0 => __tcp_socket_close__ sock
-        | ^ [sock, &h, %bin.concat [buf, chunk]]
+        | %bin.length chunk ~> =0 => __tcp_socket_close__ $sock
+        | ^ [$sock, &$handler, %bin.concat [$buf, chunk]]
       }
     }
     | =Bad[status: s, reason: r] => {
       out = plain [s, r] ~> %http.serialize_response
-      __tcp_socket_write__ [sock, out]
-      __tcp_socket_close__ sock
+      __tcp_socket_write__ [$sock, out]
+      __tcp_socket_close__ $sock
     }
     | =[req, rest] => {
       // Run the handler in its own process: a crash surfaces here as a stamped nil,
       // degrading to the 500 below exactly like a plain failed handler.
-      hp = req ~> @h
+      hp = req ~> @$handler
       r = !hp
       {
         | r ~> =Upgrade[handler: wh] => {
@@ -74,15 +73,15 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
           // with the upgrade handler, auto-closing a socket it leaves open. Any
           // bytes already read past the request seed the connection's buffer.
           | %http.header [req.headers, "sec-websocket-key"] ~> =Str[k] => {
-              __tcp_socket_write__ [sock, %http/websocket.handshake_response Str[k]]
-              %http/websocket.conn [sock, rest] ~> wh
+              __tcp_socket_write__ [$sock, %http/websocket.handshake_response Str[k]]
+              %http/websocket.conn [$sock, rest] ~> wh
             }
           | {
             out =
               plain [400, "Bad Request"] ~> %http.serialize_response
 
-            __tcp_socket_write__ [sock, out]
-            __tcp_socket_close__ sock
+            __tcp_socket_write__ [$sock, out]
+            __tcp_socket_close__ $sock
           }
         }
         | {
@@ -101,10 +100,10 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
             ]
             | resp
           }
-          __tcp_socket_write__ [sock, %http.serialize_response resp2]
+          __tcp_socket_write__ [$sock, %http.serialize_response resp2]
           {
-            | keep_alive? req => ^ [sock, &h, rest]
-            | __tcp_socket_close__ sock
+            | keep_alive? req => ^ [$sock, &$handler, rest]
+            | __tcp_socket_close__ $sock
           }
         }
       }
@@ -114,8 +113,9 @@ conn_loop = #[\TcpSocket, 'handler, 'bin] {
 
 conn = #[\TcpSocket, 'handler] { =[sock, h]; conn_loop [sock, &h, 0x] }
 
-accept_loop = #[\TcpListener, 'handler] {
-  =[l, h]; __tcp_listener_accept__ l ~> [~, &h] ~> @conn; ^ [l, &h]
+accept_loop = #[(listener): \TcpListener, (handler): 'handler] {
+  __tcp_listener_accept__ $listener ~> [~, &$handler] ~> @conn
+  ^ [$listener, &$handler]
 }
 
 serve = #[port: 'int, handler: 'handler] {

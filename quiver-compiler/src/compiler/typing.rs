@@ -431,8 +431,44 @@ fn resolve_tuple_name(
     }
 }
 
-type FieldSet = Vec<(Option<String>, usize)>;
+type FieldSet = Vec<(Option<String>, usize, bool)>; // (field_name, type_id, omittable label)
 type NamedFieldVariants = Vec<(Option<String>, FieldSet)>; // (tuple_name, fields)
+
+/// Register a resolved (non-partial) tuple type, recording which field labels were
+/// written omittable (`[(foo): 'int]`) so positional literals checked against the type
+/// can adopt them. Recording is monotonic on the interned tuple id: structurally
+/// identical spellings share the id, so marking any spelling marks the type.
+fn register_tuple_with_omittable_labels(
+    program: &mut Program,
+    name: Option<String>,
+    fields: FieldSet,
+) -> usize {
+    let omittable: Vec<usize> = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, omittable))| omittable.then_some(index))
+        .collect();
+    let tuple_id = program.register_tuple(
+        name,
+        fields.into_iter().map(|(name, ty, _)| (name, ty)).collect(),
+    );
+    for index in omittable {
+        program.mark_label_omittable(tuple_id, index);
+    }
+    tuple_id
+}
+
+/// Reject `(name):` markers in a partial type: partials match by name, so an omittable
+/// label has nothing to mean there.
+fn check_no_omittable_in_partial(fields: &FieldSet) -> Result<(), Error> {
+    if fields.iter().any(|(_, _, omittable)| *omittable) {
+        return Err(Error::TypeUnresolved(
+            "Optional field labels (`(name): ...`) apply to tuple types, not partial types"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// Resolve tuple fields that contain spreads
 /// Returns a vector of (name, field_set) pairs - multiple pairs if spreading creates union variants
@@ -451,7 +487,11 @@ fn resolve_tuple_fields_with_spread(
     // Process fields left to right
     for field in fields {
         match field {
-            ast::FieldType::Field { name, type_def } => {
+            ast::FieldType::Field {
+                name,
+                omittable,
+                type_def,
+            } => {
                 // Resolve the field type
                 let field_type_id = resolve_ast_type_impl(
                     recursion_depth,
@@ -468,12 +508,13 @@ fn resolve_tuple_fields_with_spread(
                     if let Some(pos) = name.as_ref().and_then(|n| {
                         variant_fields
                             .iter()
-                            .position(|(field_name, _)| field_name.as_ref() == Some(n))
+                            .position(|(field_name, _, _)| field_name.as_ref() == Some(n))
                     }) {
                         variant_fields[pos].1 = field_type_id;
+                        variant_fields[pos].2 = *omittable;
                         continue;
                     }
-                    variant_fields.push((name.clone(), field_type_id));
+                    variant_fields.push((name.clone(), field_type_id, *omittable));
                 }
             }
             ast::FieldType::Spread {
@@ -532,18 +573,24 @@ fn resolve_tuple_fields_with_spread(
                         let new_name = existing_name.clone().or_else(|| spread_name.clone());
 
                         // Merge spread fields into variant fields
-                        for (spread_field_name, spread_field_type_id) in spread_fields {
+                        for (spread_field_name, spread_field_type_id, spread_omittable) in
+                            spread_fields
+                        {
                             // Check if we should replace an existing field
                             if let Some(pos) = spread_field_name.as_ref().and_then(|n| {
                                 new_variant_fields
                                     .iter()
-                                    .position(|(field_name, _)| field_name.as_ref() == Some(n))
+                                    .position(|(field_name, _, _)| field_name.as_ref() == Some(n))
                             }) {
                                 new_variant_fields[pos].1 = *spread_field_type_id;
+                                new_variant_fields[pos].2 = *spread_omittable;
                                 continue;
                             }
-                            new_variant_fields
-                                .push((spread_field_name.clone(), *spread_field_type_id));
+                            new_variant_fields.push((
+                                spread_field_name.clone(),
+                                *spread_field_type_id,
+                                *spread_omittable,
+                            ));
                         }
 
                         new_variants.push((new_name, new_variant_fields));
@@ -573,13 +620,22 @@ fn extract_tuples_from_type_with_names(
             let tuple_info = program
                 .lookup_tuple(tuple_id)
                 .ok_or(Error::TupleNotInRegistry { tuple_id })?;
-            Ok(vec![(tuple_info.name.clone(), tuple_info.fields.clone())])
+            // Spread fields keep their source's omittable-label markers.
+            let fields: FieldSet = tuple_info
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, (name, ty))| {
+                    (name.clone(), *ty, program.label_omittable(tuple_id, index))
+                })
+                .collect();
+            Ok(vec![(tuple_info.name.clone(), fields)])
         }
         Type::Partial { name, fields } => {
             // Convert partial fields (all named) to tuple field format
-            let tuple_fields: Vec<(Option<String>, usize)> = fields
+            let tuple_fields: FieldSet = fields
                 .iter()
-                .map(|(fname, ftype)| (Some(fname.clone()), *ftype))
+                .map(|(fname, ftype)| (Some(fname.clone()), *ftype, false))
                 .collect();
             Ok(vec![(name.clone(), tuple_fields)])
         }
@@ -641,7 +697,8 @@ fn resolve_ast_type_impl(
                 for (variant_name, fields) in field_variants {
                     // Validate partial types
                     if is_partial {
-                        for (field_name, _) in &fields {
+                        check_no_omittable_in_partial(&fields)?;
+                        for (field_name, _, _) in &fields {
                             if field_name.is_none() {
                                 return Err(Error::TypeUnresolved(
                                     "All fields in a partial type must be named".to_string(),
@@ -668,7 +725,7 @@ fn resolve_ast_type_impl(
                         // Create inline partial type (not in tuples registry)
                         let partial_fields: Vec<(String, usize)> = fields
                             .into_iter()
-                            .map(|(name, type_id)| {
+                            .map(|(name, type_id, _)| {
                                 (name.expect("Partial fields must be named"), type_id)
                             })
                             .collect();
@@ -677,7 +734,8 @@ fn resolve_ast_type_impl(
                             fields: partial_fields,
                         })
                     } else {
-                        let tuple_id = program.register_tuple(final_name, fields);
+                        let tuple_id =
+                            register_tuple_with_omittable_labels(program, final_name, fields);
                         program.register_type(Type::Tuple(tuple_id))
                     };
                     variant_type_ids.push(type_id);
@@ -688,10 +746,14 @@ fn resolve_ast_type_impl(
             }
 
             // No spreads - process fields normally
-            let mut fields = Vec::new();
+            let mut fields: FieldSet = Vec::new();
             for field in tuple.fields {
                 match field {
-                    ast::FieldType::Field { name, type_def } => {
+                    ast::FieldType::Field {
+                        name,
+                        omittable,
+                        type_def,
+                    } => {
                         let field_type_id = resolve_ast_type_impl(
                             recursion_depth,
                             env,
@@ -700,7 +762,7 @@ fn resolve_ast_type_impl(
                             program,
                             type_bindings,
                         )?;
-                        fields.push((name, field_type_id));
+                        fields.push((name, field_type_id, omittable));
                     }
                     ast::FieldType::Spread { .. } => unreachable!(),
                 }
@@ -708,8 +770,9 @@ fn resolve_ast_type_impl(
 
             // Validate partial types
             if tuple.is_partial {
+                check_no_omittable_in_partial(&fields)?;
                 // All fields must be named
-                for (field_name, _) in &fields {
+                for (field_name, _, _) in &fields {
                     if field_name.is_none() {
                         return Err(Error::TypeUnresolved(
                             "All fields in a partial type must be named".to_string(),
@@ -726,14 +789,16 @@ fn resolve_ast_type_impl(
                 // Create inline partial type (not in tuples registry)
                 let partial_fields: Vec<(String, usize)> = fields
                     .into_iter()
-                    .map(|(name, type_id)| (name.expect("Partial fields must be named"), type_id))
+                    .map(|(name, type_id, _)| {
+                        (name.expect("Partial fields must be named"), type_id)
+                    })
                     .collect();
                 Ok(program.register_type(Type::Partial {
                     name: resolved_name,
                     fields: partial_fields,
                 }))
             } else {
-                let tuple_id = program.register_tuple(resolved_name, fields);
+                let tuple_id = register_tuple_with_omittable_labels(program, resolved_name, fields);
                 Ok(program.register_type(Type::Tuple(tuple_id)))
             }
         }
@@ -1303,7 +1368,15 @@ pub fn substitute(
 
                 // If any field changed, register a new tuple type
                 if any_changed {
+                    let field_count = new_fields.len();
                     let new_tuple_id = program.register_tuple(type_info.name.clone(), new_fields);
+                    // Omittable-label markers survive instantiation (`'pair<'int, 'bin>`
+                    // keeps the markers written on `'pair<'a, 'b>`).
+                    for index in 0..field_count {
+                        if program.label_omittable(tuple_id, index) {
+                            program.mark_label_omittable(new_tuple_id, index);
+                        }
+                    }
                     program.register_type(Type::Tuple(new_tuple_id))
                 } else {
                     type_id

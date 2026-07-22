@@ -1363,7 +1363,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // un-annotated function-literal fields (e.g. `map [xs, #{ $0 }, Nil]`). `bindings` solves
         // the expected type's variables left-to-right, so an earlier field (`xs`) can pin a
         // variable (`'t`) that a later function field's parameter (`#'t -> 'u`) depends on.
-        let expected_fields = expected.and_then(|e| self.expected_tuple_fields(e, fields.len()));
+        let expected_tuple = expected.and_then(|e| self.expected_tuple_fields(e, fields.len()));
+        let expected_fields = expected_tuple.as_ref().map(|(_, fields)| fields.clone());
         let mut bindings: HashMap<String, usize> = HashMap::new();
 
         // Compile field values and collect their types and provenances
@@ -1426,7 +1427,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 );
             }
 
-            field_types.push((field.name.clone(), field_type));
+            // An unnamed field adopts the expected field's label when the written type
+            // marked it omittable (`[(foo): 'int]`): the value is built fully labeled, so
+            // omission is purely a spelling convenience — matching, equality, and partial
+            // access see one shape however the literal was written.
+            let field_name = field.name.clone().or_else(|| {
+                let (expected_tuple_id, _) = expected_tuple.as_ref()?;
+                if !self
+                    .program
+                    .label_omittable(*expected_tuple_id, fields_compiled)
+                {
+                    return None;
+                }
+                self.program.lookup_tuple(*expected_tuple_id)?.fields[fields_compiled]
+                    .0
+                    .clone()
+            });
+            field_types.push((field_name, field_type));
             field_provenances.push(field_prov);
         }
 
@@ -1451,10 +1468,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok((result_type, Provenance::Tuple(field_provenances)))
     }
 
-    /// The positional field types of `expected` if it is a tuple type with exactly `arity`
-    /// fields, for driving per-field inference. A non-tuple or mismatched arity yields `None`
-    /// (no inference), so the existing all-or-nothing call check still produces any real error.
-    fn expected_tuple_fields(&self, expected: usize, arity: usize) -> Option<Vec<usize>> {
+    /// The tuple id and positional field types of `expected` if it is a tuple type with exactly
+    /// `arity` fields, for driving per-field inference and omittable-label adoption. A non-tuple
+    /// or mismatched arity yields `None` (no inference), so the existing all-or-nothing call
+    /// check still produces any real error.
+    fn expected_tuple_fields(&self, expected: usize, arity: usize) -> Option<(usize, Vec<usize>)> {
         let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(expected) else {
             return None;
         };
@@ -1462,7 +1480,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if info.fields.len() != arity {
             return None;
         }
-        Some(info.fields.iter().map(|(_, ty)| *ty).collect())
+        Some((*tuple_id, info.fields.iter().map(|(_, ty)| *ty).collect()))
     }
 
     /// The parameter type of an applied head (`f` in `f [args]`), resolved without emitting code,
@@ -1490,6 +1508,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.resolve_import(module, &access.accessors)
                     .ok()
                     .map(|(_, _, ty, _)| ty)?
+            }
+            Some(ast::AccessSource::TailCall(None)) => {
+                // Bare `^` recurses into the current function, whose declared parameter is
+                // already in scope — so a positional `^ [args]` literal can adopt a labeled
+                // parameter's field labels like any other call argument.
+                return scopes::get_function_parameter(&self.scopes)
+                    .ok()
+                    .map(|(ty, _)| ty);
             }
             Some(ast::AccessSource::Builtin(name)) => {
                 // A builtin's signature gives its parameter directly — no need to assemble a
@@ -2093,6 +2119,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if let ast::FieldType::Field {
                     name: Some(field_name),
                     type_def,
+                    ..
                 } = field
                 {
                     let mut env = typing::TypeEnv {
@@ -3440,10 +3467,39 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let last_index = terms.len().saturating_sub(1);
         for (i, term) in terms.iter().enumerate() {
             // Only the chain's final term produces the chain's value, so only it receives the
-            // chain's expected type. `#{…}` parameter inference is Apply-site only: a literal
-            // in a call's argument infers from the callee (`f [.., #{…}]`), never from a
-            // downstream chain term.
-            let term_expected = if i == last_index { expected } else { None };
+            // chain's expected type. An earlier literal term flows its result into the next
+            // term, so when that next term is a statically-resolvable callable (a piped call,
+            // `[1, 2] ~> f`), *its* parameter type is this term's expected type — the piped
+            // counterpart of an Apply argument. This is what lets a piped tuple literal adopt
+            // omittable field labels, and a piped `#{…}` literal infer its parameter, exactly
+            // as they do at `f [1, 2]` / `f [.., #{…}]`.
+            let term_expected = if i == last_index {
+                expected
+            } else if matches!(term, ast::Term::Tuple(_) | ast::Term::Function(_))
+                && let Some(next) = terms.get(i + 1)
+            {
+                match next {
+                    ast::Term::Access(next) => self.callee_parameter_type(next),
+                    // `x ~> f g`: the flow becomes `g`'s argument when `g` is a bare
+                    // callable, so `g`'s parameter is the previous literal's expected
+                    // type. A ripple head (`~ g`, `^~ g`) consumes the flow itself, so
+                    // its argument receives nothing.
+                    ast::Term::Apply(head, argument)
+                        if !matches!(
+                            head.source,
+                            Some(ast::AccessSource::Ripple | ast::AccessSource::TailCallRipple)
+                        ) =>
+                    {
+                        match argument.as_ref() {
+                            ast::Term::Access(callable) => self.callee_parameter_type(callable),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let (term_type, term_prov) = self.compile_term(
                 term.clone(),
                 FlowingValue {
@@ -5366,7 +5422,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     });
                 // With no callable expected type, an un-annotated literal falls back to a nil
                 // parameter. If its body then fails while actually reading `$`, the real
-                // problem is almost always the missed inference: point at the Apply-site rule.
+                // problem is almost always the missed inference: point at where it works.
                 let inference_fell_back = func.parameter_type.is_none()
                     && expected_parameter.is_none()
                     && func
@@ -5380,9 +5436,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 Error::Noted {
                                     error: Box::new(e),
                                     note: "this `#{…}` literal's parameter defaulted to nil — \
-                                       parameter inference is Apply-site only, so write the \
-                                       call callee-first (`f […, #{…}]`) or annotate the \
-                                       parameter"
+                                       inference needs a known callee (`f […, #{…}]`, or piped \
+                                       directly: `[…, #{…}] ~> f`), so restructure the call or \
+                                       annotate the parameter"
                                         .to_string(),
                                 }
                             } else {

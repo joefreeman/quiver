@@ -85,13 +85,16 @@ fn test_explicit_nil_parameter_form() {
 }
 
 #[test]
-fn test_chain_position_no_longer_infers() {
-    // A literal that is merely a *chain term* before the callee (`[~, #{…}] ~> f`) gets no
-    // expected type: it falls back to nil, and a body that reads `$` fails with a note
-    // pointing at the Apply-site rule.
-    let result = quiver()
-        .evaluate("Cons[1, Nil] ~> %list.iter ~> [~, #{ %int.mod [$, 2] ~> =0 }] ~> %iter.filter");
-    result.expect_error_containing("parameter inference is Apply-site only");
+fn test_chain_position_infers_from_next_callable() {
+    // A literal chain term flowing into a statically-resolvable callable
+    // (`[~, #{…}] ~> f`) takes that callable's parameter as its expected type — the
+    // piped counterpart of Apply-site inference.
+    quiver()
+        .evaluate(
+            "Cons[1, Cons[2, Nil]] ~> %list.iter ~> [~, #{ %int.mod [$, 2] ~> =0 }] \
+             ~> %iter.filter ~> %list.collect",
+        )
+        .expect("Cons[2, Nil]");
 }
 
 #[test]

@@ -12,30 +12,25 @@
 
 'pairs = '%http.pairs
 
-or_loop = #['bin, 'int, 'int, 'int] {
-  =[data, pos, len, acc]
+or_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'int] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
-    | ^ [data, __integer_add__ [pos, 1], len, __integer_or__ [acc, %bin.get_byte [data, pos]]]
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
+    | ^ [$data, __integer_add__ [$pos, 1], $len, __integer_or__ [$acc, %bin.get_byte [$data, $pos]]]
   }
 }
 
 // Constant-time equality: same length, and the OR of all XORed bytes is zero.
-const_eq? = #['bin, 'bin] {
-  =[a, b]
+const_eq? = #[(a): 'bin, (b): 'bin] {
+  __integer_compare__ [%bin.length $a, %bin.length $b] ~> =0
 
-  __integer_compare__ [%bin.length a, %bin.length b] ~> =0
-
-  x = %bin.xor [a, b]
+  x = %bin.xor [$a, $b]
   or_loop [x, 0, %bin.length x, 0] ~> =0
   Ok
 }
 
-get = #['%http, 'bin] {
+get = #[(req): '%http, (key): 'bin] {
   :doc "The request's verified session pairs, or nil (no session cookie, malformed, or bad signature)."
-  =[req, key]
-
-  %http.cookies req ~> %http.get [~, "session"] ~> =Str[raw]
+  %http.cookies $req ~> %http.get [~, "session"] ~> =Str[raw]
 
   %bin.index [raw, 46, 0] ~> =('int)dot
 
@@ -43,15 +38,14 @@ get = #['%http, 'bin] {
 
   %bin.slice [raw, __integer_add__ [dot, 1], %bin.length raw] ~> %bin.from_hex Str[~] ~> =('bin)mac
 
-  const_eq? [%hash.hmac_sha256 [key, payload], mac]
+  const_eq? [%hash.hmac_sha256 [$key, payload], mac]
   %http.form_decode payload
 }
 
-put = #['%http.response, 'bin, 'pairs] {
+put = #[(resp): '%http.response, (key): 'bin, (sess): 'pairs] {
   :doc "The response with a Set-Cookie header carrying the signed session (Path=/; HttpOnly; SameSite=Lax)."
-  =[resp, key, sess]
-  payload = %http.form_encode sess
-  value = "{%bin.to_hex payload}.{%hash.hmac_sha256 [key, payload] ~> %bin.to_hex}"
+  payload = %http.form_encode $sess
+  value = "{%bin.to_hex payload}.{%hash.hmac_sha256 [$key, payload] ~> %bin.to_hex}"
 
   h = %http.set_cookie [
     "session",
@@ -59,7 +53,7 @@ put = #['%http.response, 'bin, 'pairs] {
     Cons["Path=/", Cons["HttpOnly", Cons["SameSite=Lax", Nil]]],
   ]
 
-  Response[status: resp.status, headers: Cons[h, resp.headers], body: resp.body]
+  Response[status: $resp.status, headers: Cons[h, $resp.headers], body: $resp.body]
 }
 
 clear = #'%http.response {

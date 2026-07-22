@@ -827,9 +827,14 @@ fn check_match_tuple_match(
         .lookup_tuple(tuple_id)
         .ok_or(Error::TupleNotInRegistry { tuple_id })?;
 
-    if tuple.name.as_ref() != tuple_info.name.as_ref()
-        || tuple.fields.len() != tuple_info.fields.len()
-    {
+    // A stated tuple name must match. An unnamed pattern with fields destructures any
+    // tuple name (state the name to require it) — but the empty unnamed pattern `[]` is
+    // the nil literal, an exact test, so it never matches a named empty tuple.
+    let name_compatible = match &tuple.name {
+        Some(name) => tuple_info.name.as_ref() == Some(name),
+        None => !tuple.fields.is_empty() || tuple_info.name.is_none(),
+    };
+    if !name_compatible || tuple.fields.len() != tuple_info.fields.len() {
         return Ok(None);
     }
 
@@ -837,7 +842,15 @@ fn check_match_tuple_match(
     for (pattern_idx, field) in tuple.fields.iter().enumerate() {
         let tuple_field = &tuple_info.fields[pattern_idx];
         if field.name.as_ref() != tuple_field.0.as_ref() {
-            return Ok(None);
+            // An unlabeled pattern field adopts a label the type marked omittable
+            // (`[(foo): 'int]`), positionally — the pattern-side dual of literal
+            // adoption. A stated label must always match.
+            let adopts = field.name.is_none()
+                && tuple_field.0.is_some()
+                && program.label_omittable(tuple_id, pattern_idx);
+            if !adopts {
+                return Ok(None);
+            }
         }
 
         field_mappings.push((pattern_idx, pattern_idx));

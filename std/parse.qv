@@ -40,41 +40,35 @@
 'builder<'t> = #['p<'t>, '] -> (['t, '] | [])
 
 // A failure at a position: nil carrying the standard payload.
-fail = #['int, Str['bin]] {
+fail = #[(offset): 'int, (message): Str['bin]] {
   :doc "A failure at a position: nil carrying `Expected[offset, message]` as its `:error` payload."
-  [] ~> { :error Expected[offset: $0, message: $1] }
+  [] ~> { :error Expected[offset: $offset, message: $message] }
 }
 
 // The byte at the state's position, or nil at end of input.
 peek = #' { __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] }
 
-advance = #[', 'int] { $0 ~> ~[..., pos: __integer_add__ [$0.pos, $1]] }
+advance = #[(st): ', (n): 'int] { $st ~> ~[..., pos: __integer_add__ [$st.pos, $n]] }
 
-rev = #<'t>['items<'t>, 'items<'t>] {
-  =[items, acc]
-  items ~> {
-    | =Nil => acc
-    | =Cons[h, t] => ^ [t, Cons[h, acc]]
+rev = #<'t>[(items): 'items<'t>, (acc): 'items<'t>] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
   }
 }
 
 // The failure payload that got further through the input (the first on a tie).
-further = #[('perr | []), ('perr | [])] {
-  =[a, b]
-  {
-    | a ~> =Expected(offset: ao); b ~> =Expected(offset: bo); __integer_compare__ [ao, bo] ~> =(0 | 1) => a
-    | b ~> =('perr)x => x
-    | a
-  }
+further = #[(a): ('perr | []), (b): ('perr | [])] {
+  | $a ~> =Expected(offset: ao); $b ~> =Expected(offset: bo); __integer_compare__ [ao, bo] ~> =(0 | 1) => $a
+  | $b ~> =('perr)x => x
+  | $a
 }
 
 // A failure at the state's position, merged against the state's stashed failure — the
 // deeper of the two surfaces (the fresh one on a tie).
-fail_in = #[', Str['bin]] {
+fail_in = #[(st): ', (msg): Str['bin]] {
   :doc "A failure at the state's position, merged against the state's stashed (backtracked-over) failure; the deeper one surfaces."
-  =[st, msg]
-
-  e = further [Expected[offset: st.pos, message: msg], st.err]
+  e = further [Expected[offset: $st.pos, message: $msg], $st.err]
 
   [] ~> { :error e }
 }
@@ -82,9 +76,12 @@ fail_in = #[', Str['bin]] {
 // --- primitive parsers ---------------------------------------------------------------
 
 // The exact byte `b`, described as `what` in failures.
-byte = #['int, Str['bin]] {
+byte = #[(b): 'int, (what): Str['bin]] {
   :doc "A parser for the exact byte, described as `what` in failures."
-  =[b, what]
+  // The returned parser closes over the fields (an inner `$` is its own parameter), so
+  // bind them locally.
+  b = $b
+  what = $what
   #' {
     | peek $ ~> =&b => [b, advance [$, 1]]
     | fail_in [$, what]
@@ -93,9 +90,10 @@ byte = #['int, Str['bin]] {
 
 // A byte satisfying `pred` (which yields a value for the byte, or nil) — e.g. a digit's
 // numeric value.
-satisfy = #['pred<'int>, Str['bin]] {
+satisfy = #[(pred): 'pred<'int>, (what): Str['bin]] {
   :doc "A parser for one byte satisfying the predicate, yielding the predicate's value for it."
-  =[pred, what]
+  pred = &$pred
+  what = $what
   #' {
     | peek $ ~> =('int)b; pred b ~> =('int)v => [v, advance [$, 1]]
     | fail_in [$, what]
@@ -111,17 +109,14 @@ ws = #' {
   }
 }
 
-tw_end = #<'t>['bin, 'int, 'int, 'pred<'t>] {
-  =[data, pos, len, pred]
-  {
-    | __integer_compare__ [pos, len] ~> =-1; [data, pos] ~> pred %bin.get_byte => ^ [
-      data,
-      __integer_add__ [pos, 1],
-      len,
-      &pred,
-    ]
-    | pos
-  }
+tw_end = #<'t>[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<'t>] {
+  | __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] ~> $pred => ^ [
+    $data,
+    __integer_add__ [$pos, 1],
+    $len,
+    &$pred,
+  ]
+  | $pos
 }
 
 // The longest (possibly empty) run of bytes satisfying `pred`, as a slice.
@@ -140,15 +135,12 @@ digit_val = #'int {
   __integer_subtract__ [$, 48]
 }
 
-int_digits = #[', 'int] {
-  =[st, acc]
-  {
-    | peek st ~> =('int)b; digit_val b ~> =('int)d => ^ [
-      advance [st, 1],
-      __integer_add__ [__integer_multiply__ [acc, 10], d],
-    ]
-    | [acc, st]
-  }
+int_digits = #[(st): ', (acc): 'int] {
+  | peek $st ~> =('int)b; digit_val b ~> =('int)d => ^ [
+    advance [$st, 1],
+    __integer_add__ [__integer_multiply__ [$acc, 10], d],
+  ]
+  | [n: $acc, st: $st]
 }
 
 // An optionally signed decimal integer.
@@ -159,7 +151,7 @@ int = #' {
   {
     | peek st ~> =('int)b; digit_val b => {
       int_digits [st, 0]
-      =[n, st2]
+      =[n: n, st: st2]
       {
         | peek st0 ~> =45 => [__integer_subtract__ [0, n], st2]
         | [n, st2]
@@ -177,14 +169,15 @@ ident_char? = #'int {
 }
 
 // The position after an optional single byte `b` at `pos` (unchanged when absent).
-opt_byte_end = #['bin, 'int, 'int, 'int] {
-  =[data, pos, len, b]
+opt_byte_end = #[(data): 'bin, (pos): 'int, (len): 'int, (b): 'int] {
+  // Bound locally: the pattern pins against a variable (`=&b`), not a parameter field.
+  b = $b
   {
-    | __integer_compare__ [pos, len] ~> =-1; %bin.get_byte [data, pos] ~> =&b => __integer_add__ [
-      pos,
+    | __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] ~> =&b => __integer_add__ [
+      $pos,
       1,
     ]
-    | pos
+    | $pos
   }
 }
 
@@ -205,38 +198,35 @@ ident = #' {
   | fail_in [$, "a name"]
 }
 
-qstr_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => [] ~> {
-      :error Expected[offset: pos, message: "'\"' (unterminated string)"]
-    }
-    | b = %bin.get_byte [data, pos]
-      {
-        | b ~> =34 => [acc, __integer_add__ [pos, 1]]
-        | b ~> =92 => {
-          p1 = __integer_add__ [pos, 1]
-          {
-            | __integer_compare__ [p1, len] ~> =-1
+qstr_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  | __integer_compare__ [$pos, $len] ~> =(0 | 1) => [] ~> {
+    :error Expected[offset: $pos, message: "'\"' (unterminated string)"]
+  }
+  | b = %bin.get_byte [$data, $pos]
+    {
+      | b ~> =34 => [bytes: $acc, end: __integer_add__ [$pos, 1]]
+      | b ~> =92 => {
+        p1 = __integer_add__ [$pos, 1]
+        {
+          | __integer_compare__ [p1, $len] ~> =-1
 
-              %bin.get_byte [data, p1] ~> {
-                | =34 => 34
-                | =92 => 92
-                | =47 => 47
-                | =98 => 8
-                | =102 => 12
-                | =110 => 10
-                | =116 => 9
-                | =114 => 13
-              } ~> =('int)r => ^ [data, __integer_add__ [p1, 1], len, %bin.append [acc, r, 1]]
-            | [] ~> {
-              :error Expected[offset: p1, message: "an escape character"]
-            }
+            %bin.get_byte [$data, p1] ~> {
+              | =34 => 34
+              | =92 => 92
+              | =47 => 47
+              | =98 => 8
+              | =102 => 12
+              | =110 => 10
+              | =116 => 9
+              | =114 => 13
+            } ~> =('int)r => ^ [$data, __integer_add__ [p1, 1], $len, %bin.append [$acc, r, 1]]
+          | [] ~> {
+            :error Expected[offset: p1, message: "an escape character"]
           }
         }
-        | ^ [data, __integer_add__ [pos, 1], len, %bin.append [acc, b, 1]]
       }
-  }
+      | ^ [$data, __integer_add__ [$pos, 1], $len, %bin.append [$acc, b, 1]]
+    }
 }
 
 // A double-quoted string with `\" \\ \/ \b \f \n \t \r` escapes, as a Str.
@@ -244,16 +234,17 @@ quoted = #' {
   :doc "A double-quoted string with `\\\" \\\\ \\/ \\b \\f \\n \\t \\r` escapes, as a Str."
   | peek $ ~> =34 => {
     qstr_loop [$data, __integer_add__ [$pos, 1], $len, 0x]
-    =[bytes, p2]
-    [Str[bytes], $ ~> ~[..., pos: p2]]
+    =(bytes, end)
+    [Str[bytes], $ ~> ~[..., pos: end]]
   }
   | fail_in [$, "a string"]
 }
 
 // The exact bytes of `s`, described as `what` in failures.
-literal = #[Str['bin], Str['bin]] {
+literal = #[(s): Str['bin], (what): Str['bin]] {
   :doc "A parser for the exact bytes of a string, described as `what` in failures."
-  =[Str[expected], what]
+  $s ~> =Str[expected]
+  what = $what
   n = %bin.length expected
   #' {
     | end = __integer_add__ [$pos, n]; __integer_compare__ [end, $len] ~> =(-1 | 0); %bin.slice [$data, $pos, end] ~> =&expected => [
@@ -330,17 +321,16 @@ alt4 = #<'t>['p<'t>, 'p<'t>, 'p<'t>, 'p<'t>] {
   =[p, q, r, s]; pq = alt2 [&p, &q]; rs = alt2 [&r, &s]; alt2 [&pq, &rs]
 }
 
-many_run = #<'t>['p<'t>, ', 'items<'t>] {
-  =[p, st, acc]
-  r = p st
+many_run = #<'t>[(p): 'p<'t>, (st): ', (acc): 'items<'t>] {
+  r = $p $st
   {
     | r ~> =[v, st2] => {
       // Stop when the parser succeeds without consuming, or repetition would never end.
       // The zero-width value is discarded: it matched nothing.
-      | __integer_compare__ [st2.pos, st.pos] ~> =1 => ^ [&p, st2, Cons[v, acc]]
-      | [rev [acc, Nil], st2]
+      | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [&$p, st2, Cons[v, $acc]]
+      | [rev [$acc, Nil], st2]
     }
-    | [rev [acc, Nil], st ~> ~[..., err: further [r:('perr)error, st.err]]]
+    | [rev [$acc, Nil], $st ~> ~[..., err: further [r:('perr)error, $st.err]]]
   }
 }
 
@@ -350,25 +340,24 @@ many0 = #<'t>'p<'t> {
   =p; #' { many_run [&p, $, Nil] }
 }
 
-sep_run = #<'t, 's>['p<'t>, 'p<'s>, ', 'items<'t>] {
-  =[p, sep, st, acc]
-  r = sep st
+sep_run = #<'t, 's>[(p): 'p<'t>, (sep): 'p<'s>, (st): ', (acc): 'items<'t>] {
+  r = $sep $st
   {
     | r ~> =[_, st1] => {
-      r2 = p st1
+      r2 = $p st1
       {
         // Recurse only on progress: a separator and element that both matched empty
         // would repeat forever. The zero-width element is discarded: it matched nothing.
         | r2 ~> =[v, st2] => {
-          | __integer_compare__ [st2.pos, st.pos] ~> =1 => ^ [&p, &sep, st2, Cons[v, acc]]
-          | [rev [acc, Nil], st2]
+          | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [&$p, &$sep, st2, Cons[v, $acc]]
+          | [rev [$acc, Nil], st2]
         }
         // Backtracking over the separator: stash the element's failure — it's the
         // furthest this path got.
-        | [rev [acc, Nil], st ~> ~[..., err: further [r2:('perr)error, st.err]]]
+        | [rev [$acc, Nil], $st ~> ~[..., err: further [r2:('perr)error, $st.err]]]
       }
     }
-    | [rev [acc, Nil], st ~> ~[..., err: further [r:('perr)error, st.err]]]
+    | [rev [$acc, Nil], $st ~> ~[..., err: further [r:('perr)error, $st.err]]]
   }
 }
 
@@ -407,34 +396,36 @@ sep_end_by = #<'t, 's>['p<'t>, 'p<'s>] {
   =[p, sep]; body = sep_by [&p, &sep]; left [&body, opt &sep]
 }
 
-// Replace `p`'s failure with `msg` at the position where `p` started.
-label = #<'t>['p<'t>, Str['bin]] {
+// Replace `p`'s failure with `message` at the position where `p` started.
+label = #<'t>[(p): 'p<'t>, (message): Str['bin]] {
   :doc "Replaces the parser's failure with a message at the position where it started."
-  =[p, msg]
+  // The returned parser closes over the fields (an inner `$` is its own parameter), so
+  // bind them locally — the parser by reference.
+  p = &$p
+  message = $message
   #' {
     r = p $
     {
       | r ~> =[v, st] => [v, st]
-      | fail_in [$, msg]
+      | fail_in [$, message]
     }
   }
 }
 
-chain_run = #<'t>['p<'t>, 'p<#['t, 't] -> 't>, ', 't] {
-  =[p, op, st, lhs]
-  r = op st
+chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
+  r = $op $st
   {
     | r ~> =[f, st1] => {
-      p st1
+      $p st1
       =[rhs, st2]
       {
         // Recurse only on progress: an operator and operand that both matched empty
         // would repeat forever.
-        | __integer_compare__ [st2.pos, st.pos] ~> =1 => ^ [&p, &op, st2, f [lhs, rhs]]
-        | [lhs, st]
+        | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [&$p, &$op, st2, f [$lhs, rhs]]
+        | [$lhs, $st]
       }
     }
-    | [lhs, st ~> ~[..., err: further [r:('perr)error, st.err]]]
+    | [$lhs, $st ~> ~[..., err: further [r:('perr)error, $st.err]]]
   }
 }
 
@@ -457,10 +448,10 @@ rec = #<'t>'builder<'t> {
 
 // Apply a parser to a whole string: the value, or nil with a positioned `:error` — the
 // dialect contract, so a `:dialect` function can be `#Str['bin] { [~, &grammar] %parse.run }`.
-run = #<'t>[Str['bin], 'p<'t>] {
+run = #<'t>[(s): Str['bin], (p): 'p<'t>] {
   :doc "Applies a parser to a whole string: the value, or nil with a positioned `:error` payload — the dialect failure contract."
-  =[Str[data], p]
-  p P[data: data, pos: 0, len: %bin.length data, err: []]
+  $s ~> =Str[data]
+  $p P[data: data, pos: 0, len: %bin.length data, err: []]
   =[v, st]
   {
     | __integer_compare__ [st.pos, st.len] ~> =(0 | 1) => v

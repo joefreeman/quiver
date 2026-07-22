@@ -4,17 +4,16 @@
 // reproducible PRNG (games, property tests) would be a separate, pure module.
 
 // A big-endian binary read as an unsigned integer.
-int_loop = #['bin, 'int, 'int, 'int] {
-  =[data, pos, len, acc]
+int_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'int] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
     | {
-      b = %bin.get_byte [data, pos]
+      b = %bin.get_byte [$data, $pos]
       ^ [
-        data,
-        __integer_add__ [pos, 1],
-        len,
-        __integer_add__ [__integer_multiply__ [acc, 256], b],
+        $data,
+        __integer_add__ [$pos, 1],
+        $len,
+        __integer_add__ [__integer_multiply__ [$acc, 256], b],
       ]
     }
   }
@@ -22,23 +21,21 @@ int_loop = #['bin, 'int, 'int, 'int] {
 
 bin_int = #'bin { int_loop [$, 0, %bin.length $, 0] }
 
-// The smallest `k` (and `256^k`) such that `256^k >= n`, starting from k = 1.
-klen_loop = #['int, 'int, 'int] {
-  =[n, k, p]
+// The smallest byte count `k` (and its `power` 256^k) such that `256^k >= n`, from k = 1.
+klen_loop = #[(n): 'int, (k): 'int, (p): 'int] {
   {
-    | __integer_compare__ [p, n] ~> =(0 | 1) => [k, p]
-    | ^ [n, __integer_add__ [k, 1], __integer_multiply__ [p, 256]]
+    | __integer_compare__ [$p, $n] ~> =(0 | 1) => [count: $k, power: $p]
+    | ^ [$n, __integer_add__ [$k, 1], __integer_multiply__ [$p, 256]]
   }
 }
 
 // Draw k bytes as an integer until it falls below `limit` (a multiple of n), then take
 // the remainder — uniform in [0, n) with no modulo bias.
-draw_loop = #['int, 'int, 'int] {
-  =[n, k, limit]
-  v = __random_bytes__ k ~> bin_int
+draw_loop = #[(n): 'int, (k): 'int, (limit): 'int] {
+  v = __random_bytes__ $k ~> bin_int
   {
-    | __integer_compare__ [v, limit] ~> =-1 => __integer_modulo__ [v, n]
-    | ^ [n, k, limit]
+    | __integer_compare__ [v, $limit] ~> =-1 => __integer_modulo__ [v, $n]
+    | ^ [$n, $k, $limit]
   }
 }
 
@@ -47,22 +44,21 @@ below = #'int {
   =n
   __integer_compare__ [n, 0] ~> =1
   klen_loop [n, 1, 256]
-  =[k, p]
+  =(count, power)
 
-  limit = __integer_subtract__ [p, __integer_modulo__ [p, n]]
+  limit = __integer_subtract__ [power, __integer_modulo__ [power, n]]
 
-  draw_loop [n, k, limit]
+  draw_loop [n, count, limit]
 }
 
-between = #['int, 'int] {
+between = #[(min): 'int, (max): 'int] {
   :doc "A uniform random integer from lo to hi inclusive; nil when lo > hi."
-  =[lo, hi]
-  __integer_compare__ [lo, hi] ~> =(-1 | 0)
+  __integer_compare__ [$min, $max] ~> =(-1 | 0)
 
-  __integer_add__ [__integer_subtract__ [hi, lo], 1] ~> below
+  __integer_add__ [__integer_subtract__ [$max, $min], 1] ~> below
   ~> =('int)r
 
-  __integer_add__ [lo, r]
+  __integer_add__ [$min, r]
 }
 
 // A nibble as a lowercase hex character code.
@@ -71,20 +67,19 @@ hex_digit = #'int {
   | __integer_add__ [$, 87]
 }
 
-hex_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
+hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
     | {
-      b = %bin.get_byte [data, pos]
+      b = %bin.get_byte [$data, $pos]
 
-      acc2 = %bin.append [acc, __integer_divide__ [b, 16] ~> hex_digit, 1] ~> %bin.append [
+      acc2 = %bin.append [$acc, __integer_divide__ [b, 16] ~> hex_digit, 1] ~> %bin.append [
         ~,
         __integer_modulo__ [b, 16] ~> hex_digit,
         1,
       ]
 
-      ^ [data, __integer_add__ [pos, 1], len, acc2]
+      ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
     }
   }
 }

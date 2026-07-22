@@ -561,3 +561,63 @@ fn test_as_pattern_with_union_type() {
         .expect("0x0a");
     quiver().evaluate("42 ~> =('int | 'bin)x; x").expect("42");
 }
+
+// --- Unnamed tuple patterns destructure any tuple name ---------------------------
+// An unnamed tuple pattern with fields doesn't constrain the value's name (state the
+// name to require it); the empty unnamed pattern `[]` is the nil literal, an exact
+// test. This matches the spec's destructuring examples.
+
+#[test]
+fn test_unnamed_pattern_destructures_named_value() {
+    quiver()
+        .evaluate("[x: a, y: b] = Point[x: 10, y: 20]; a")
+        .expect("10");
+}
+
+#[test]
+fn test_unnamed_positional_pattern_destructures_named_value() {
+    quiver().evaluate("[x, _] = Point[10, 20]; x").expect("10");
+}
+
+#[test]
+fn test_named_pattern_still_requires_name() {
+    quiver()
+        .evaluate("{ Size[10, 20] ~> =Point[a, _] => a | NoMatch }")
+        .expect("NoMatch");
+}
+
+#[test]
+fn test_unnamed_pattern_matches_across_union_members() {
+    quiver()
+        .evaluate(
+            r#"
+            'shape = Point['int, 'int] | Size['int, 'int]
+            f = #'shape { =[a, _]; a }
+            [f Point[1, 2], f Size[3, 4]]
+            "#,
+        )
+        .expect("[1, 3]");
+}
+
+#[test]
+fn test_empty_pattern_is_exact_nil_test() {
+    // `=[]` is the nil literal: it never matches a named empty tuple.
+    quiver()
+        .evaluate("{ Blue ~> =[] => Matched | NotNil }")
+        .expect("NotNil");
+    quiver()
+        .evaluate("{ [] ~> =[] => Matched | NotNil }")
+        .expect("Matched");
+}
+
+#[test]
+fn test_ascription_stays_name_strict() {
+    // The exact-shape test is a type: ascription requires the unnamed tuple type,
+    // where the bracket pattern would destructure any name.
+    quiver()
+        .evaluate("{ A[1] ~> =(['int])v => v | No }")
+        .expect("No");
+    quiver()
+        .evaluate("{ [1] ~> =(['int])v => v | No }")
+        .expect("[1]");
+}

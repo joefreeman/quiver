@@ -30,7 +30,7 @@
 'expr = '%meta.expr
 
 // A byte token with leading whitespace skipped.
-tok = #['int, Str['bin]] { %parse.right [&%parse.ws, %parse.byte [$0, $1]] }
+tok = #[(b): 'int, (what): Str['bin]] { %parse.right [&%parse.ws, %parse.byte [$b, $what]] }
 
 // `~`: the value flowing into the dialect term, spliced as its own 1-byte host span.
 ripple_p = #'%parse {
@@ -120,12 +120,9 @@ json = #(content: Str['bin]) {
 // codec has no unquoting and `null`/`true`/`false` are the only bare words it accepts.
 
 // `10^k` for `k >= 0`. Shared by the number parser (scaling) and the rational formatter.
-pow10 = #['int, 'int] {
-  =[acc, k]
-  {
-    | k ~> =0 => acc
-    | ^ [__integer_multiply__ [acc, 10], __integer_subtract__ [k, 1]]
-  }
+pow10 = #[(acc): 'int, (k): 'int] {
+  | $k ~> =0 => $acc
+  | ^ [__integer_multiply__ [$acc, 10], __integer_subtract__ [$k, 1]]
 }
 
 // A canonical rational with denominator 1 is an integer; hand back the plain `'int`. Keeps
@@ -146,13 +143,11 @@ peek_at = #'%parse { %num.lt? [$pos, $len]; %bin.get_byte [$data, $pos] }
 // part digit bytes, and the exponent. Exact: the value is `sign · M · 10^(exp − |frac|)`,
 // where `M` is the integer- and fractional-part digits read as one integer — an `'int` when
 // that power is non-negative (a whole number), otherwise a reduced `'rational`.
-build_number = #[sign: 'int, int_b: 'bin, frac_b: 'bin, exp: 'int] {
-  =[sign: s, int_b: ib, frac_b: fb, exp: e]
+build_number = #[(sign): 'int, (int_b): 'bin, (frac_b): 'bin, (exp): 'int] {
+  %bin.concat [$int_b, $frac_b] ~> %str.parse_int Str[~] ~> =('int)mag
 
-  %bin.concat [ib, fb] ~> %str.parse_int Str[~] ~> =('int)mag
-
-  m = __integer_multiply__ [s, mag]
-  total_exp = __integer_subtract__ [e, %bin.length fb]
+  m = __integer_multiply__ [$sign, mag]
+  total_exp = __integer_subtract__ [$exp, %bin.length $frac_b]
   {
     | __integer_compare__ [total_exp, 0] ~> =(0 | 1) => __integer_multiply__ [
       m,
@@ -191,12 +186,12 @@ number = #'%parse {
 
       {
         | %bin.length fbb ~> =0 => %parse.fail_in [st2, "digits after '.'"]
-        | [fbb, st3a]
+        | [bytes: fbb, st: st3a]
       }
     }
-    | [0x, st2]
+    | [bytes: 0x, st: st2]
   }
-  frac ~> =[fb, st3]
+  frac ~> =[bytes: fb, st: st3]
 
   ex = {
     | peek_at st3 ~> =(101 | 69) => {
@@ -209,12 +204,13 @@ number = #'%parse {
       digits est2 ~> =[ebb, st4a]
       {
         | %bin.length ebb ~> =0 => %parse.fail_in [st3, "digits in the exponent"]
-        | ebb ~> %str.parse_int Str[~] ~> =('int)emag; [__integer_multiply__ [esign, emag], st4a]
+        | ebb ~> %str.parse_int Str[~] ~> =('int)emag
+          [exponent: __integer_multiply__ [esign, emag], st: st4a]
       }
     }
-    | [0, st3]
+    | [exponent: 0, st: st3]
   }
-  ex ~> =[expv, st4]
+  ex ~> =[exponent: expv, st: st4]
 
   val = build_number [sign: sign, int_b: ib, frac_b: fb, exp: expv]
 
@@ -275,24 +271,21 @@ parse = #Str['bin] {
 
 // Escape a string's interior bytes. Only the escapes the parser understands are emitted
 // (`\" \\ \b \f \n \r \t`); every other byte passes through verbatim (no `\uXXXX`).
-esc_loop = #['bin, 'int, 'int, 'bin] {
-  =[data, pos, len, acc]
-  {
-    | __integer_compare__ [pos, len] ~> =(0 | 1) => acc
-    | {
-      b = %bin.get_byte [data, pos]
-      acc2 = b ~> {
-        | =34 => %bin.concat [acc, 0x5c22]
-        | =92 => %bin.concat [acc, 0x5c5c]
-        | =8 => %bin.concat [acc, 0x5c62]
-        | =12 => %bin.concat [acc, 0x5c66]
-        | =10 => %bin.concat [acc, 0x5c6e]
-        | =13 => %bin.concat [acc, 0x5c72]
-        | =9 => %bin.concat [acc, 0x5c74]
-        | %bin.append [acc, b, 1]
-      }
-      ^ [data, %num.add [pos, 1], len, acc2]
+esc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
+  | {
+    b = %bin.get_byte [$data, $pos]
+    acc2 = b ~> {
+      | =34 => %bin.concat [$acc, 0x5c22]
+      | =92 => %bin.concat [$acc, 0x5c5c]
+      | =8 => %bin.concat [$acc, 0x5c62]
+      | =12 => %bin.concat [$acc, 0x5c66]
+      | =10 => %bin.concat [$acc, 0x5c6e]
+      | =13 => %bin.concat [$acc, 0x5c72]
+      | =9 => %bin.concat [$acc, 0x5c74]
+      | %bin.append [$acc, b, 1]
     }
+    ^ [$data, %num.add [$pos, 1], $len, acc2]
   }
 }
 
@@ -305,28 +298,24 @@ escape_str = #Str['bin] {
 
 // Concatenate a `Nil`/`Cons` list's elements — each rendered to a string by `render` —
 // separated by commas. `first?` is 1 until the first element has been emitted.
-join_strs = #<'x>[(Nil | Cons['x, ^]), #'x -> Str['bin], Str['bin], 'int] {
-  =[items, render, acc, first]
-  items ~> {
-    | =Nil => acc
+join_strs = #<'x>[(items): (Nil | Cons['x, ^]), (render): #'x -> Str['bin], (acc): Str['bin], (first): 'int] {
+  $items ~> {
+    | =Nil => $acc
     | =Cons[h, t] => {
-      piece = render h
+      piece = $render h
       acc2 = {
-        | first ~> =1 => %str.concat [acc, piece]
-        | %str.concat [acc, ","] ~> %str.concat [~, piece]
+        | $first ~> =1 => %str.concat [$acc, piece]
+        | %str.concat [$acc, ","] ~> %str.concat [~, piece]
       }
-      ^ [t, &render, acc2, 0]
+      ^ [t, &$render, acc2, 0]
     }
   }
 }
 
 // A binary of `n` copies of byte `b`.
-repeat_byte = #['bin, 'int, 'int] {
-  =[acc, b, n]
-  {
-    | n ~> =0 => acc
-    | ^ [%bin.append [acc, b, 1], b, __integer_subtract__ [n, 1]]
-  }
+repeat_byte = #[(acc): 'bin, (b): 'int, (n): 'int] {
+  | $n ~> =0 => $acc
+  | ^ [%bin.append [$acc, $b, 1], $b, __integer_subtract__ [$n, 1]]
 }
 
 // Drop trailing `0x30` (`'0'`) bytes from a binary.
@@ -344,10 +333,9 @@ strip_zeros = #'bin {
 
 // The `width`-digit, zero-padded decimal of `fracpart` (which is `< 10^width`), with trailing
 // zeros stripped — the digits that follow the decimal point.
-frac_bytes = #['int, 'int] {
-  =[fracpart, width]
-  ds = %str.from_int fracpart ~> .0
-  pad = __integer_subtract__ [width, %bin.length ds]
+frac_bytes = #[(fracpart): 'int, (width): 'int] {
+  ds = %str.from_int $fracpart ~> .0
+  pad = __integer_subtract__ [$width, %bin.length ds]
 
   [repeat_byte [0x, 48, pad], ds] ~> strip_zeros %bin.concat
 }
@@ -356,18 +344,20 @@ frac_bytes = #['int, 'int] {
 // decimal when it terminates within 12 fractional places, else rounded (half away from zero)
 // to 12 places. `scaled` is `round(|n|·10^12 / d)` via the exact integer identity
 // `(2·|n|·10^12 + d) / (2d)`; trailing zeros are then stripped.
-format_rational = #['int, 'int] {
-  =[n, d]
-  neg? = __integer_compare__ [n, 0] ~> =-1
-  mag = { neg? => __integer_subtract__ [0, n] | n }
+format_rational = #[(n): 'int, (d): 'int] {
+  neg? = __integer_compare__ [$n, 0] ~> =-1
+  mag = {
+    | neg? => __integer_subtract__ [0, $n]
+    | $n
+  }
   p10 = pow10 [1, 12]
 
   scaled = __integer_divide__ [
     __integer_add__ [
       __integer_multiply__ [2, __integer_multiply__ [mag, p10]],
-      d,
+      $d,
     ],
-    __integer_multiply__ [2, d],
+    __integer_multiply__ [2, $d],
   ]
 
   {
