@@ -477,3 +477,28 @@ d = #(content: Str['bin], chain: 'cb) {
         .evaluate("x = 5; %m{x, junk}")
         .expect("5");
 }
+
+#[test]
+fn test_dict_dialect_expression_keys() {
+    // Keys are host expressions exactly like values: ints, tuples, variables.
+    quiver()
+        .evaluate("%dict{ 5 => 50, 6 => 60 } ~> [~, 6] ~> %dict.get")
+        .expect("60");
+    quiver()
+        .evaluate("%dict{ Point[1, 2] => 9 } ~> [~, Point[1, 2]] ~> %dict.get")
+        .expect("9");
+    quiver()
+        .evaluate(r#"k = "a"; %dict{ k => 1 } ~> [~, "a"] ~> %dict.get"#)
+        .expect("1");
+}
+
+#[test]
+fn test_dict_dialect_key_chain_and_flow() {
+    // A key expression sees the dialect's flowing value and full call chains.
+    quiver()
+        .evaluate(r#"7 ~> %dict{ ~ => "seven" } ~> [~, 7] ~> %dict.get"#)
+        .expect("\"seven\"");
+    quiver()
+        .evaluate(r#"%dict{ %num.add [1, 2] => "three" } ~> [~, 3] ~> %dict.get"#)
+        .expect("\"three\"");
+}

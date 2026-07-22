@@ -1,32 +1,35 @@
-// A persistent hash map (HAMT) keyed by binaries or strings.
+// A persistent hash map (HAMT) keyed by data values.
 //
-// Keys are binaries (`'bin`) or strings (`Str['bin]`); values are any type. The map is an
-// immutable, structurally-shared 32-way hash-array-mapped trie. Each internal `Node` carries a
-// 32-bit `bitmap` recording which of its 32 slots are occupied, plus its children in slot
-// order; a 5-bit slice of a key's 32-bit hash selects a slot at each level, and
-// `popcount(bitmap & (bit - 1))` gives the child's position in the compact child list. Keys
-// whose full hashes collide land in a `Collision` node holding a bucket of [key, value] entries.
+// Keys are any data value — integers, binaries, and tuples (strings included), nested
+// freely; values are any type. A key is hashed by encoding it as %data notation and
+// hashing the text, and stored entries keep the original key value (compared with
+// structural equality), so keys never need decoding. Anything %data cannot encode —
+// functions, processes, refs, resources — is a runtime error when used as a key. The map
+// is an immutable, structurally-shared 32-way hash-array-mapped trie. Each internal
+// `Node` carries a 32-bit `bitmap` recording which of its 32 slots are occupied, plus its
+// children in slot order; a 5-bit slice of a key's 32-bit hash selects a slot at each
+// level, and `popcount(bitmap & (bit - 1))` gives the child's position in the compact
+// child list. Keys whose full hashes collide land in a `Collision` node holding a bucket
+// of [key, value] entries.
 //
-// `get` returns the stored value or nil (`[]`), so a dict cannot usefully store nil as a value.
+// `get` returns the stored value or nil (`[]`), so a dict cannot usefully store nil as a
+// value.
 //
 // Non-tail tree operations (`put`, `remove`) recurse with the self-passing idiom `f [&f, ...]`,
 // since `^` is tail-only and a binding isn't in scope in its own body. A `Node`'s children are
 // the inline recursive list `(Nil | Cons[^, ^1])` because a type can't name itself; helpers
 // nonetheless take the `'list` alias, which unifies with the inline form.
 
-'key = Str['bin] | 'bin
 'list<'t> = Nil | Cons['t, ^]
 
-'<'v> =
+'<'k, 'v> =
   | Empty
-  | Leaf['int, 'key, 'v]
-  | Collision['int, 'list<['key, 'v]>]
+  | Leaf['int, 'k, 'v]
+  | Collision['int, 'list<['k, 'v]>]
   | Node['int, (Nil | Cons[^, ^1])]
 
 // --- key hashing -------------------------------------------------------------
-key_bytes = #'key { =Str[b] => b | ='bin => $ }
-
-hash = #'key { key_bytes ~> __binary_hash32__ }
+hash = #<'k>'k { __data_encode__ ~> __binary_hash32__ }
 
 // 5-bit hash fragment at `shift` bits, and the compact child index for a slot bit.
 fragment = #[(hash): 'int, (shift): 'int] {
@@ -61,7 +64,7 @@ map = #<'t, 'u>[(list): 'list<'t>, (f): #'t -> 'u, (acc): 'list<'u>] {
 
 // child at a compact index; `Empty` past the end (never reached for a set slot). Returning a
 // node — total, rather than failing to nil on `Nil` — keeps `[]` out of the tree-op result types.
-child_at = #<'v>[(children): 'list<'<'v>>, (index): 'int] {
+child_at = #<'k, 'v>[(children): 'list<'<'k, 'v>>, (index): 'int] {
   $children ~> {
     | =Nil => Empty
     | =Cons[h, t] => {
@@ -100,14 +103,14 @@ remove_at = #<'t>[(list): 'list<'t>, (index): 'int, (acc): 'list<'t>] {
 }
 
 // --- collision buckets -------------------------------------------------------
-bucket_get = #<'v>[(entries): 'list<['key, 'v]>, (key): 'key] {
+bucket_get = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k] {
   $entries ~> {
     | =Nil => []
     | =Cons[[k, v], t] => { $key ~> =&k => v | ^ [t, $key] }
   }
 }
 
-bucket_put = #<'v>[(entries): 'list<['key, 'v]>, (key): 'key, (value): 'v, (acc): 'list<['key, 'v]>] {
+bucket_put = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (value): 'v, (acc): 'list<['k, 'v]>] {
   $entries ~> {
     | =Nil => Cons[[$key, $value], Nil] ~> revcat [$acc, ~]
     | =Cons[[k, v], t] => {
@@ -117,7 +120,7 @@ bucket_put = #<'v>[(entries): 'list<['key, 'v]>, (key): 'key, (value): 'v, (acc)
   }
 }
 
-bucket_remove = #<'v>[(entries): 'list<['key, 'v]>, (key): 'key, (acc): 'list<['key, 'v]>] {
+bucket_remove = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (acc): 'list<['k, 'v]>] {
   $entries ~> {
     | =Nil => revcat [$acc, Nil]
     | =Cons[[k, v], t] => {
@@ -128,7 +131,7 @@ bucket_remove = #<'v>[(entries): 'list<['key, 'v]>, (key): 'key, (acc): 'list<['
 }
 
 // --- tree operations ---------------------------------------------------------
-get = #<'v>[(node): '<'v>, (key): 'key, (hash): 'int, (shift): 'int] {
+get = #<'k, 'v>[(node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
   $node ~> {
     | =Empty => []
     | =Leaf[_, k, v] => { $key ~> =&k => v | [] }
@@ -149,7 +152,7 @@ get = #<'v>[(node): '<'v>, (key): 'key, (hash): 'int, (shift): 'int] {
 }
 
 // split two single entries (differing keys) into a fresh subtree at `shift`.
-split_pair = #<'v>[(self): #^ -> '<'v>, (h1): 'int, (k1): 'key, (v1): 'v, (h2): 'int, (k2): 'key, (v2): 'v, (shift): 'int] {
+split_pair = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (h1): 'int, (k1): 'k, (v1): 'v, (h2): 'int, (k2): 'k, (v2): 'v, (shift): 'int] {
   // A pattern `&` can only reference a variable, not a parameter field, so bind the
   // second hash locally for the equality check.
   h2 = $h2
@@ -188,7 +191,7 @@ split_pair = #<'v>[(self): #^ -> '<'v>, (h1): 'int, (k1): 'key, (v1): 'v, (h2): 
 }
 
 // split an existing node (a collision) against a new entry whose hash differs from it.
-split_node = #<'v>[(self): #^ -> '<'v>, (cnode): '<'v>, (chash): 'int, (hash): 'int, (key): 'key, (value): 'v, (shift): 'int] {
+split_node = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (cnode): '<'k, 'v>, (chash): 'int, (hash): 'int, (key): 'k, (value): 'v, (shift): 'int] {
   fc = fragment [$chash, $shift]
   fh = fragment [$hash, $shift]
   {
@@ -208,7 +211,7 @@ split_node = #<'v>[(self): #^ -> '<'v>, (cnode): '<'v>, (chash): 'int, (hash): '
   }
 }
 
-put = #<'v>[(self): #^ -> '<'v>, (node): '<'v>, (key): 'key, (value): 'v, (hash): 'int, (shift): 'int] {
+put = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (value): 'v, (hash): 'int, (shift): 'int] {
   $node ~> {
     | =Empty => Leaf[$hash, $key, $value]
     | =Leaf[lhash, lkey, lvalue] => {
@@ -242,7 +245,7 @@ put = #<'v>[(self): #^ -> '<'v>, (node): '<'v>, (key): 'key, (value): 'v, (hash)
 // lone child that is a `Leaf`/`Collision` is hoisted up — insertion never builds a single-`Leaf`
 // node, so leaving one would be non-canonical. A lone `Node` child is a real shared-hash-prefix
 // level and is kept.
-collapse_node = #<'v>[(bitmap): 'int, (children): 'list<'<'v>>] {
+collapse_node = #<'k, 'v>[(bitmap): 'int, (children): 'list<'<'k, 'v>>] {
   | $children ~> =Nil => Empty
   | $children ~> =Cons[only, Nil] => only ~> {
     | =Node[_, _] => Node[$bitmap, $children]
@@ -254,11 +257,11 @@ collapse_node = #<'v>[(bitmap): 'int, (children): 'list<'<'v>>] {
 // Drop the slot for `bit` (its child became `Empty`), then canonicalize. Non-recursive so the
 // generic `remove_at` call sits outside `remove`'s self-passing recursion — where (a quirk of
 // the type inferencer) it would otherwise leak its function type into the result type.
-remove_slot = #<'v>[(bitmap): 'int, (bit): 'int, (children): 'list<'<'v>>, (index): 'int] {
+remove_slot = #<'k, 'v>[(bitmap): 'int, (bit): 'int, (children): 'list<'<'k, 'v>>, (index): 'int] {
   collapse_node [%int.and [$bitmap, %int.not $bit], remove_at [$children, $index, Nil]]
 }
 
-remove = #<'v>[(self): #^ -> '<'v>, (node): '<'v>, (key): 'key, (hash): 'int, (shift): 'int] {
+remove = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
   $node ~> {
     | =Empty => Empty
     | =Leaf[lhash, k, v] => {
@@ -289,7 +292,7 @@ remove = #<'v>[(self): #^ -> '<'v>, (node): '<'v>, (key): 'key, (hash): 'int, (s
 }
 
 // collect every entry by walking a worklist of pending nodes (order is unspecified).
-entries = #<'v>[(worklist): 'list<'<'v>>, (acc): 'list<['key, 'v]>] {
+entries = #<'k, 'v>[(worklist): 'list<'<'k, 'v>>, (acc): 'list<['k, 'v]>] {
   $worklist ~> {
     | =Nil => $acc
     | =Cons[node, rest] => node ~> {
@@ -301,7 +304,7 @@ entries = #<'v>[(worklist): 'list<'<'v>>, (acc): 'list<['key, 'v]>] {
   }
 }
 
-from = #<'v>[(self): #^ -> '<'v>, (d): '<'v>, (pairs): 'list<['key, 'v]>] {
+from = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (d): '<'k, 'v>, (pairs): 'list<['k, 'v]>] {
   $pairs ~> {
     | =Nil => $d
     | =Cons[[k, val], t] => put [&put, $d, k, val, hash k, 0] ~> $self [&$self, ~, t]
@@ -310,39 +313,37 @@ from = #<'v>[(self): #^ -> '<'v>, (d): '<'v>, (pairs): 'list<['key, 'v]>] {
 
 // The iterable/collectable pair, shared by the exported `iter`/`collect` and the eager
 // sequence functions below (which compose them around the lazy `%iter` operations).
-to_iter = #<'v>'<'v> {
+to_iter = #<'k, 'v>'<'k, 'v> {
   Cons[~, Nil] ~> entries [~, Nil] ~> %iter.unfold [
     ~,
-    #<'v>'list<['key, 'v]> { =Cons[e, t] => [e, t] | =Nil => [] },
+    #<'k, 'v>'list<['k, 'v]> { =Cons[e, t] => [e, t] | =Nil => [] },
   ]
 }
 
-from_iter = #<'v>'%iter<['key, 'v]> {
+from_iter = #<'k, 'v>'%iter<['k, 'v]> {
   %iter.fold [
     ~,
     Empty,
-    #<'v>['<'v>, ['key, 'v]] { put [&put, $0, $1.0, $1.1, hash $1.0, 0] },
+    #<'k, 'v>['<'k, 'v>, ['k, 'v]] { put [&put, $0, $1.0, $1.1, hash $1.0, 0] },
   ]
 }
 
 // --- the `%dict{ … }` dialect --------------------------------------------------------
-// `%dict{ "a" => 1, "b" => x }` builds a dict at compile time from `key => value`
-// entries: keys are quoted strings; each value is an ordinary host expression (one
+// `%dict{ "a" => 1, Point[2, 3] => x, n => 7 }` builds a dict at compile time from
+// `key => value` entries: key and value are each an ordinary host expression (one
 // chain), located by the host's `chain` prefix-parser and spliced as an `Unquote` —
 // evaluated in the caller's scope with the dialect term's flowing value as input, so
 // variables, `~`, `&f`, tuples, and full call chains all work. Chain parsing stops
-// before `,`, so the dialect keeps the commas (and `=>`). Expands to a `from` call over
-// the entry list. Built from `%parse` combinators and the `%meta` constructors.
-
-d_key = %parse.right [&%parse.ws, &%parse.quoted]
+// before `,` and `=>`, so the dialect keeps both. Expands to a `from` call over the
+// entry list. Built from `%parse` combinators and the `%meta` constructors.
 
 d_arrow = %parse.right [&%parse.ws, %parse.literal ["=>", "'=>'"]]
 
 d_comma = %parse.right [&%parse.ws, %parse.byte [44, "','"]]
 
-// One value: skip whitespace, then hand the host prefix-parser the exact start of the
-// expression and splice the span it reports.
-d_value = #'%meta.cb {
+// One expression (a key or a value): skip whitespace, then hand the host prefix-parser
+// the exact start of the expression and splice the span it reports.
+d_expr = #'%meta.cb {
   =cb
   #'%parse {
     =st
@@ -358,11 +359,11 @@ d_value = #'%meta.cb {
 
 dict_dialect = #(content: Str['bin], chain: '%meta.cb) {
   $ ~> =(content, chain: cb)
-  value = d_value &cb
-  value_ws = %parse.right [&%parse.ws, &value]
-  k = %parse.left [&d_key, &d_arrow]
+  expr = d_expr &cb
+  expr_ws = %parse.right [&%parse.ws, &expr]
+  k = %parse.left [&expr_ws, &d_arrow]
 
-  entry = %parse.map [%parse.then [&k, &value_ws], #{ %meta.pair2 [$0, $1] }]
+  entry = %parse.map [%parse.then [&k, &expr_ws], #{ %meta.pair2 [$0, $1] }]
 
   entries = %parse.sep_by [&entry, &d_comma]
   e2 = %parse.left [&entries, %parse.opt &d_comma]
@@ -379,91 +380,91 @@ dict_dialect = #(content: Str['bin], chain: '%meta.cb) {
     Empty
   },
 
-  get: #<'v>[(dict): '<'v>, (key): 'key] {
+  get: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
     :doc "The value stored for the key, or nil when the key is absent."
     get [$dict, $key, hash $key, 0]
   },
 
-  put: #<'v>[(dict): '<'v>, (key): 'key, (value): 'v] {
-    :doc "A dict with the key mapped to the value, replacing any existing mapping."
+  put: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k, (value): 'v] {
+    :doc "A dict with the key mapped to the value, replacing any existing mapping. Keys are data values (integers, binaries, tuples); a non-data key is a runtime error."
     put [&put, $dict, $key, $value, hash $key, 0]
   },
 
-  remove: #<'v>[(dict): '<'v>, (key): 'key] {
+  remove: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
     :doc "A dict with the key removed, or the dict unchanged when the key is absent."
     remove [&remove, $dict, $key, hash $key, 0]
   },
 
-  has?: #<'v>[(dict): '<'v>, (key): 'key] {
+  has?: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
     :doc "Whether the dict contains the key."
     get [$dict, $key, hash $key, 0]; Ok
   },
 
-  count: #<'v>'<'v> {
+  count: #<'k, 'v>'<'k, 'v> {
     :doc "The number of entries in the dict."
     Cons[~, Nil] ~> entries [~, Nil] ~> length [~, 0]
   },
 
-  entries: #<'v>'<'v> {
+  entries: #<'k, 'v>'<'k, 'v> {
     :doc "All entries as a list of [key, value] pairs, in unspecified order."
     Cons[~, Nil] ~> entries [~, Nil]
   },
 
-  keys: #<'v>'<'v> {
+  keys: #<'k, 'v>'<'k, 'v> {
     :doc "All keys in the dict as a list, in unspecified order."
     Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #{ $0 }, Nil]
   },
-  values: #<'v>'<'v> {
+  values: #<'k, 'v>'<'k, 'v> {
     :doc "All values in the dict as a list, in unspecified order."
     Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #{ $1 }, Nil]
   },
 
-  iter: #<'v>'<'v> {
+  iter: #<'k, 'v>'<'k, 'v> {
     :doc "An iterator over the dict's [key, value] entries, in unspecified order."
     to_iter
   },
 
-  collect: #<'v>'%iter<['key, 'v]> {
+  collect: #<'k, 'v>'%iter<['k, 'v]> {
     :doc "Builds a dict from an iterator of [key, value] pairs; later pairs win on duplicate keys."
     from_iter
   },
 
-  map: #<'v, 'u>[(dict): '<'v>, (f): #['key, 'v] -> ['key, 'u]] {
+  map: #<'k, 'v, 'j, 'u>[(dict): '<'k, 'v>, (f): #['k, 'v] -> ['j, 'u]] {
     :doc "A dict rebuilt with each [key, value] entry transformed; duplicate result keys collapse."
     to_iter $dict ~> %iter.map [~, &$f] ~> from_iter
   },
 
-  filter: #<'v>[(dict): '<'v>, (pred): #['key, 'v] -> (['key, 'v] | [])] {
+  filter: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "A dict keeping only the entries for which the predicate is non-nil."
     to_iter $dict ~> %iter.filter [~, &$pred] ~> from_iter
   },
 
-  fold: #<'v, 'acc>[(dict): '<'v>, (init): 'acc, (f): #['acc, ['key, 'v]] -> 'acc] {
+  fold: #<'k, 'v, 'acc>[(dict): '<'k, 'v>, (init): 'acc, (f): #['acc, ['k, 'v]] -> 'acc] {
     :doc "Reduces a dict by folding each [key, value] entry into an accumulator, in unspecified order."
     to_iter $dict ~> %iter.fold [~, $init, &$f]
   },
 
-  find: #<'v>[(dict): '<'v>, (pred): #['key, 'v] -> (['key, 'v] | [])] {
+  find: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "An entry for which the predicate is non-nil, or nil when none matches (unspecified order)."
     to_iter $dict ~> %iter.find [~, &$pred]
   },
 
-  any?: #<'v>[(dict): '<'v>, (pred): #['key, 'v] -> (['key, 'v] | [])] {
+  any?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "Whether any [key, value] entry satisfies the predicate."
     to_iter $dict ~> %iter.any? [~, &$pred]
   },
 
-  all?: #<'v>[(dict): '<'v>, (pred): #['key, 'v] -> (['key, 'v] | [])] {
+  all?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "Whether every [key, value] entry satisfies the predicate."
     to_iter $dict ~> %iter.all? [~, &$pred]
   },
 
-  from: #<'v>'list<['key, 'v]> {
+  from: #<'k, 'v>'list<['k, 'v]> {
     :doc "Builds a dict from a list of [key, value] pairs; later pairs win on duplicate keys."
     from [&from, Empty, ~]
   },
 
-  merge: #<'v>[(dict): '<'v>, (with): '<'v>] {
+  merge: #<'k, 'v>[(dict): '<'k, 'v>, (with): '<'k, 'v>] {
     :doc "A dict with every entry of the second dict added; the second's values win on conflict."
     Cons[$with, Nil] ~> entries [~, Nil] ~> from [&from, $dict, ~]
   },

@@ -9,23 +9,24 @@ const FROM: &str = r#"
     Nil]]]]]]]]]]]] ~> %dict.from
 "#;
 
-// Two distinct binary keys with the same 32-bit FNV-1a hash (3521592947), found by search.
-// FNV-1a is injective over short inputs, so a colliding pair is needed to exercise the
-// `Collision`-node / bucket code paths that ordinary keys never reach. `DA` builds a dict
-// holding both (which forms a single `Collision` node).
-const KA: &str = "0x0a59538016";
-const KB: &str = "0xfd3eb827ca";
+// Two distinct binary keys whose *encoded notation* ("0x…" text) has the same 32-bit
+// FNV-1a hash (216258148), found by search. FNV-1a is injective over short inputs, so a
+// colliding pair is needed to exercise the `Collision`-node / bucket code paths that
+// ordinary keys never reach. `DA` builds a dict holding both (which forms a single
+// `Collision` node).
+const KA: &str = "0x86f15d4023";
+const KB: &str = "0xe6619cfcd4";
 const DA: &str =
-    "%dict.new ~> [~, 0x0a59538016, 1] ~> %dict.put ~> [~, 0xfd3eb827ca, 2] ~> %dict.put";
+    "%dict.new ~> [~, 0x86f15d4023, 1] ~> %dict.put ~> [~, 0xe6619cfcd4, 2] ~> %dict.put";
 
 #[test]
 fn test_collision_forms_collision_node() {
     // Documents that the two keys really do collide: both land in one Collision bucket. If FNV
-    // ever changes, this fails loudly (the other collision tests would otherwise silently stop
-    // testing collisions).
+    // or the key encoding ever changes, this fails loudly (the other collision tests would
+    // otherwise silently stop testing collisions).
     quiver()
         .evaluate(DA)
-        .expect("Collision[3521592947, Cons[[0x0a59538016, 1], Cons[[0xfd3eb827ca, 2], Nil]]]");
+        .expect("Collision[216258148, Cons[[0x86f15d4023, 1], Cons[[0xe6619cfcd4, 2], Nil]]]");
 }
 
 #[test]
@@ -151,7 +152,7 @@ fn test_remove_collapses_node_to_leaf() {
     // was — the same shape as a one-key dict — rather than leaving a degenerate single-child Node.
     quiver()
         .evaluate(r#"%dict.new ~> [~, "a", 1] ~> %dict.put ~> [~, "b", 2] ~> %dict.put ~> [~, "b"] ~> %dict.remove"#)
-        .expect(r#"Leaf[3826002220, "a", 1]"#);
+        .expect(r#"Leaf[1637994474, "a", 1]"#);
 }
 
 #[test]
@@ -159,7 +160,7 @@ fn test_remove_collapses_collision_to_leaf() {
     // removing one of two colliding keys collapses the Collision bucket back to a Leaf
     quiver()
         .evaluate(&format!("{DA} ~> [~, {KA}] ~> %dict.remove"))
-        .expect(r#"Leaf[3521592947, 0xfd3eb827ca, 2]"#);
+        .expect(r#"Leaf[216258148, 0xe6619cfcd4, 2]"#);
 }
 
 #[test]
@@ -478,4 +479,57 @@ fn test_all() {
             "{FROM} ~> %dict.all? [~, #{{ %num.gt? [$1, 1]; $ }}]"
         ))
         .expect("[]");
+}
+
+// --- generic (data-value) keys -----------------------------------------------
+
+#[test]
+fn test_int_keys() {
+    quiver()
+        .evaluate("%dict.new ~> [~, 42, 7] ~> %dict.put ~> [~, 42] ~> %dict.get")
+        .expect("7");
+    quiver()
+        .evaluate("%dict.new ~> [~, -3, 1] ~> %dict.put ~> [~, 3] ~> %dict.get")
+        .expect("[]");
+}
+
+#[test]
+fn test_tuple_keys() {
+    quiver()
+        .evaluate("%dict.new ~> [~, Point[x: 1, y: 2], 9] ~> %dict.put ~> [~, Point[x: 1, y: 2]] ~> %dict.get")
+        .expect("9");
+    // a structurally different tuple is a different key
+    quiver()
+        .evaluate("%dict.new ~> [~, Point[x: 1, y: 2], 9] ~> %dict.put ~> [~, Point[x: 1, y: 3]] ~> %dict.get")
+        .expect("[]");
+}
+
+#[test]
+fn test_nested_tuple_keys() {
+    quiver()
+        .evaluate(r#"k = A[B[1, "x"], 0x0a]; %dict.new ~> [~, k, 5] ~> %dict.put ~> [~, A[B[1, "x"], 0x0a]] ~> %dict.get"#)
+        .expect("5");
+}
+
+#[test]
+fn test_mixed_key_types_distinct() {
+    // The int 1, the string "1", and the binary 0x31 encode distinctly, so they are
+    // distinct keys in one dict (the key type widens to their union).
+    quiver()
+        .evaluate(r#"%dict.new ~> [~, 1, 10] ~> %dict.put ~> [~, "1", 20] ~> %dict.put ~> [~, 0x31, 30] ~> %dict.put ~> %dict.count"#)
+        .expect("3");
+    quiver()
+        .evaluate(r#"%dict.new ~> [~, 1, 10] ~> %dict.put ~> [~, "1", 20] ~> %dict.put ~> [~, 1] ~> %dict.get"#)
+        .expect("10");
+}
+
+#[test]
+fn test_non_data_key_is_runtime_error() {
+    quiver()
+        .evaluate("%dict.new ~> [~, &__integer_add__, 1] ~> %dict.put")
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "cannot encode a builtin: %data notation carries data only (integers, binaries, \
+             and tuples)"
+                .to_string(),
+        ));
 }
