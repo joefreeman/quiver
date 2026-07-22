@@ -5,6 +5,22 @@ reverse = #<'t>['<'t>, '<'t>] {
   | =[Cons[head, tail], xs] => Cons[head, xs] ~> ^ [tail, ~]
 }
 
+// The iterable/collectable pair, shared by the exported `iter`/`collect` and the eager
+// sequence functions below (which compose them around the lazy `%iter` operations).
+to_iter = #<'t>'<'t> {
+  %iter.unfold [
+    ~,
+    #<'t>'<'t> {
+      | =Cons[head, tail] => [head, tail]
+      | =Nil => []
+    },
+  ]
+}
+
+from_iter = #<'t>'%iter<'t> {
+  %iter.fold [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> reverse [~, Nil]
+}
+
 // --- the `%list{ … }` dialect --------------------------------------------------------
 // `%list{ 1, "two", x, ~, [3, 4] }` builds a list at compile time. Each element is an
 // ordinary host expression (one chain), located by the host's `chain` prefix-parser and
@@ -79,17 +95,106 @@ list_dialect = #(content: Str['bin], chain: '%meta.cb) {
 
   iter: #<'t>'<'t> {
     :doc "A lazy iterator over the elements of a list."
-    %iter.unfold [
-      ~,
-      #<'t>'<'t> {
-        | =Cons[head, tail] => [head, tail]
-        | =Nil => []
-      },
-    ]
+    to_iter
   },
 
   collect: #<'t>'%iter<'t> {
     :doc "Collects the elements of an iterator into a list."
-    %iter.fold [~, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> reverse [~, Nil]
+    from_iter
+  },
+
+  map: #<'t, 'u>['<'t>, #'t -> 'u] {
+    :doc "The list with each element transformed by a function."
+    =[xs, f]; to_iter xs ~> %iter.map [~, &f] ~> from_iter
+  },
+
+  filter: #<'t>['<'t>, #'t -> ('t | [])] {
+    :doc "The elements for which the predicate is non-nil."
+    =[xs, keep?]
+    to_iter xs ~> %iter.filter [~, &keep?] ~> from_iter
+  },
+
+  take: #<'t>['<'t>, 'int] {
+    :doc "The first n elements, or the whole list when it is shorter."
+    =[xs, n]; to_iter xs ~> %iter.take [~, n] ~> from_iter
+  },
+
+  drop: #<'t>['<'t>, 'int] {
+    :doc "The list without its first n elements."
+    =[xs, n]; to_iter xs ~> %iter.drop [~, n] ~> from_iter
+  },
+
+  take_while: #<'t>['<'t>, #'t -> ('t | [])] {
+    :doc "The leading elements for which the predicate is non-nil."
+    =[xs, pred]
+    to_iter xs ~> %iter.take_while [~, &pred] ~> from_iter
+  },
+
+  drop_while: #<'t>['<'t>, #'t -> ('t | [])] {
+    :doc "The list without its leading elements for which the predicate is non-nil."
+    =[xs, pred]
+    to_iter xs ~> %iter.drop_while [~, &pred] ~> from_iter
+  },
+
+  flat_map: #<'t, 'u>['<'t>, #'t -> '<'u>] {
+    :doc "Maps each element to a list and concatenates the results."
+    =[xs, f]
+    to_iter xs ~> %iter.flat_map [~, #{ f $ ~> to_iter }] ~> from_iter
+  },
+
+  chain: #<'t>['<'t>, '<'t>] {
+    :doc "The first list's elements followed by the second's."
+    =[xs, ys]; %iter.chain [to_iter xs, to_iter ys] ~> from_iter
+  },
+
+  zip: #<'t, 'u>['<'t>, '<'u>] {
+    :doc "Pairs up elements from two lists, ending when either runs out."
+    =[xs, ys]; %iter.zip [to_iter xs, to_iter ys] ~> from_iter
+  },
+
+  enumerate: #<'t>'<'t> {
+    :doc "The list with each element paired with its zero-based index."
+    to_iter ~> %iter.enumerate ~> from_iter
+  },
+
+  intersperse: #<'t>['<'t>, 't] {
+    :doc "The list with the separator inserted between consecutive elements."
+    =[xs, sep]
+    to_iter xs ~> %iter.intersperse [~, sep] ~> from_iter
+  },
+
+  fold: #<'t, 'acc>['<'t>, 'acc, #['acc, 't] -> 'acc] {
+    :doc "Reduces a list by folding each element into an accumulator."
+    =[xs, acc, f]; to_iter xs ~> %iter.fold [~, acc, &f]
+  },
+
+  count: #<'t>'<'t> {
+    :doc "The number of elements in the list."
+    to_iter ~> %iter.count
+  },
+
+  nth: #<'t>['<'t>, 'int] {
+    :doc "The element at the given zero-based index, or nil when the list is too short."
+    =[xs, n]; to_iter xs ~> %iter.nth [~, n]
+  },
+
+  find: #<'t>['<'t>, #'t -> ('t | [])] {
+    :doc "The first element for which the predicate is non-nil, or nil when none matches."
+    =[xs, pred]; to_iter xs ~> %iter.find [~, &pred]
+  },
+
+  find_index: #<'t>['<'t>, #'t -> ('t | [])] {
+    :doc "The zero-based index of the first matching element, or nil when none matches."
+    =[xs, pred]; to_iter xs ~> %iter.find_index [~, &pred]
+  },
+
+  any?: #<'t>['<'t>, #'t -> ('t | [])] {
+    :doc "Whether any element satisfies the predicate."
+    =[xs, pred]; to_iter xs ~> %iter.any? [~, &pred]
+  },
+
+  all?: #<'t>['<'t>, #'t -> ('t | [])] {
+    :doc "Whether every element satisfies the predicate."
+    =[xs, pred]; to_iter xs ~> %iter.all? [~, &pred]
   },
 ] ~> { :dialect &list_dialect }

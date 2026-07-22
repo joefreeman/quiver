@@ -1771,7 +1771,20 @@ pub fn unify(
                 return Ok(()); // the empty union (NEVER) is a subtype of anything
             }
 
-            let pattern_variants = pattern_variants.clone();
+            // Structural variants first, variable variants last: a bound variable member
+            // accepts any concrete variant by widening, so trying it before the union's
+            // own structural members would absorb variants they match exactly (the nil of
+            // a fallible result `'t | []` widening `'t` to `T | []`). A variable member
+            // only takes what no structural member matched.
+            let (variable_variants, structural_variants): (Vec<usize>, Vec<usize>) =
+                pattern_variants
+                    .iter()
+                    .copied()
+                    .partition(|&v| matches!(program.lookup_type(v), Some(Type::Variable(_))));
+            let pattern_variants: Vec<usize> = structural_variants
+                .into_iter()
+                .chain(variable_variants)
+                .collect();
             let concrete_variants = concrete_variants.clone();
 
             for &concrete_variant in &concrete_variants {
@@ -1809,9 +1822,17 @@ pub fn unify(
             Ok(())
         }
 
-        // Pattern union with concrete non-union - try each variant
+        // Pattern union with concrete non-union - try each variant (structural members
+        // before variable members, for the same reason as the union-union arm above)
         (Type::Union(variants), _) => {
-            let variants = variants.clone();
+            let (variable_variants, structural_variants): (Vec<usize>, Vec<usize>) = variants
+                .iter()
+                .copied()
+                .partition(|&v| matches!(program.lookup_type(v), Some(Type::Variable(_))));
+            let variants: Vec<usize> = structural_variants
+                .into_iter()
+                .chain(variable_variants)
+                .collect();
             // Try to unify with at least one variant, remembering the *near miss* — the
             // variant the author plainly meant, whose inner failure explains the
             // mismatch far better than an every-variant dump (`Ev[Bogus]` against an

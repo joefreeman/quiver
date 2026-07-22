@@ -335,6 +335,23 @@ from = #<'v>[#^ -> '<'v>, '<'v>, 'list<['key, 'v]>] {
   }
 }
 
+// The iterable/collectable pair, shared by the exported `iter`/`collect` and the eager
+// sequence functions below (which compose them around the lazy `%iter` operations).
+to_iter = #<'v>'<'v> {
+  Cons[~, Nil] ~> entries [~, Nil] ~> %iter.unfold [
+    ~,
+    #<'v>'list<['key, 'v]> { =Cons[e, t] => [e, t] | =Nil => [] },
+  ]
+}
+
+from_iter = #<'v>'%iter<['key, 'v]> {
+  %iter.fold [
+    ~,
+    Empty,
+    #<'v>['<'v>, ['key, 'v]] { put [&put, $0, $1.0, $1.1, hash $1.0, 0] },
+  ]
+}
+
 // --- the `%dict{ … }` dialect --------------------------------------------------------
 // `%dict{ "a" => 1, "b" => x }` builds a dict at compile time from `key => value`
 // entries: keys are quoted strings; each value is an ordinary host expression (one
@@ -430,10 +447,42 @@ dict_dialect = #(content: Str['bin], chain: '%meta.cb) {
 
   iter: #<'v>'<'v> {
     :doc "An iterator over the dict's [key, value] entries, in unspecified order."
-    Cons[~, Nil] ~> entries [~, Nil] ~> %iter.unfold [
-      ~,
-      #<'v>'list<['key, 'v]> { =Cons[e, t] => [e, t] | =Nil => [] },
-    ]
+    to_iter
+  },
+
+  collect: #<'v>'%iter<['key, 'v]> {
+    :doc "Builds a dict from an iterator of [key, value] pairs; later pairs win on duplicate keys."
+    from_iter
+  },
+
+  map: #<'v, 'u>['<'v>, #['key, 'v] -> ['key, 'u]] {
+    :doc "A dict rebuilt with each [key, value] entry transformed; duplicate result keys collapse."
+    =[d, f]; to_iter d ~> %iter.map [~, &f] ~> from_iter
+  },
+
+  filter: #<'v>['<'v>, #['key, 'v] -> (['key, 'v] | [])] {
+    :doc "A dict keeping only the entries for which the predicate is non-nil."
+    =[d, keep?]; to_iter d ~> %iter.filter [~, &keep?] ~> from_iter
+  },
+
+  fold: #<'v, 'acc>['<'v>, 'acc, #['acc, ['key, 'v]] -> 'acc] {
+    :doc "Reduces a dict by folding each [key, value] entry into an accumulator, in unspecified order."
+    =[d, acc, f]; to_iter d ~> %iter.fold [~, acc, &f]
+  },
+
+  find: #<'v>['<'v>, #['key, 'v] -> (['key, 'v] | [])] {
+    :doc "An entry for which the predicate is non-nil, or nil when none matches (unspecified order)."
+    =[d, pred]; to_iter d ~> %iter.find [~, &pred]
+  },
+
+  any?: #<'v>['<'v>, #['key, 'v] -> (['key, 'v] | [])] {
+    :doc "Whether any [key, value] entry satisfies the predicate."
+    =[d, pred]; to_iter d ~> %iter.any? [~, &pred]
+  },
+
+  all?: #<'v>['<'v>, #['key, 'v] -> (['key, 'v] | [])] {
+    :doc "Whether every [key, value] entry satisfies the predicate."
+    =[d, pred]; to_iter d ~> %iter.all? [~, &pred]
   },
 
   from: #<'v>'list<['key, 'v]> {

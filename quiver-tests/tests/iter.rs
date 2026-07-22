@@ -324,3 +324,38 @@ fn test_intersperse() {
         )
         .expect("Nil");
 }
+
+#[test]
+fn test_reference_predicate_keeps_element_type() {
+    // Regression: a referenced predicate with a declared union result `('t | [])` used
+    // to widen the iterator's element type with `| []` — the unifier's bound-variable
+    // arm absorbed the result's nil variant (by widening) before the expected union's
+    // own `[]` member was tried. A consumer demanding the exact element type then
+    // failed with "[] is not ...", and generic consumers silently carried the widened
+    // element. The strict `#'%iter<'int>` consumer here only compiles if the filtered
+    // iterator's element stays exactly 'int.
+    quiver()
+        .evaluate(
+            r#"
+            pred = #'int -> ('int | []) { %num.gt? [$, 1]; $ }
+            strict = #'%iter<'int> { %iter.count }
+            Cons[1, Cons[2, Nil]] ~> %list.iter ~> %iter.filter [~, &pred] ~> strict
+            "#,
+        )
+        .expect("1");
+
+    // The same shape with a tuple element (where the nil variant used to be paired
+    // against the tuple member), collected by a consumer that demands the pair exactly.
+    quiver()
+        .evaluate(
+            r#"
+            'lst<'t> = Nil | Cons['t, ^]
+            keep? = #[Str['bin], 'int] -> ([Str['bin], 'int] | []) { $ }
+            from_it = #'%iter<[Str['bin], 'int]> {
+              %iter.fold [~, Nil, #['lst<[Str['bin], 'int]>, [Str['bin], 'int]] { Cons[$1, $0] }]
+            }
+            Cons[["a", 1], Nil] ~> %list.iter ~> %iter.filter [~, &keep?] ~> from_it
+            "#,
+        )
+        .expect(r#"Cons[["a", 1], Nil]"#);
+}

@@ -380,3 +380,102 @@ fn test_string_and_binary_keys_distinct() {
         .evaluate(r#"%dict.new ~> [~, "A", 1] ~> %dict.put ~> [~, 0x41, 2] ~> %dict.put ~> [~, 0x41] ~> %dict.get"#)
         .expect("2");
 }
+
+#[test]
+fn test_collect_roundtrip() {
+    quiver()
+        .evaluate(&format!(
+            r#"{FROM} ~> %dict.iter ~> %dict.collect ~> [~, "echo"] ~> %dict.get"#
+        ))
+        .expect("5");
+
+    quiver()
+        .evaluate(&format!(
+            "{FROM} ~> %dict.iter ~> %dict.collect ~> %dict.count"
+        ))
+        .expect("12");
+}
+
+#[test]
+fn test_map() {
+    quiver()
+        .evaluate(&format!(
+            r#"{FROM} ~> %dict.map [~, #{{ [$0, %num.mul [$1, 10]] }}] ~> [~, "juliet"] ~> %dict.get"#
+        ))
+        .expect("100");
+
+    quiver()
+        .evaluate(&format!(
+            "{FROM} ~> %dict.map [~, #{{ [$0, %num.mul [$1, 10]] }}] ~> %dict.count"
+        ))
+        .expect("12");
+}
+
+#[test]
+fn test_filter() {
+    quiver()
+        .evaluate(&format!(
+            "{FROM} ~> %dict.filter [~, #{{ %num.le? [$1, 4]; $ }}] ~> %dict.count"
+        ))
+        .expect("4");
+
+    quiver()
+        .evaluate(&format!(
+            r#"{FROM} ~> %dict.filter [~, #{{ %num.le? [$1, 4]; $ }}] ~> [~, "delta"] ~> %dict.get"#
+        ))
+        .expect("4");
+
+    quiver()
+        .evaluate(&format!(
+            r#"{FROM} ~> %dict.filter [~, #{{ %num.le? [$1, 4]; $ }}] ~> [~, "echo"] ~> %dict.get"#
+        ))
+        .expect("[]");
+}
+
+#[test]
+fn test_fold() {
+    quiver()
+        .evaluate(&format!(
+            "{FROM} ~> %dict.fold [~, 0, #{{ %num.add [$0, $1.1] }}]"
+        ))
+        .expect("78");
+}
+
+#[test]
+fn test_find() {
+    quiver()
+        .evaluate(&format!(
+            "{FROM} ~> %dict.find [~, #{{ $1 ~> =7; $ }}] ~> =[_, v]; v"
+        ))
+        .expect("7");
+
+    quiver()
+        .evaluate(&format!("{FROM} ~> %dict.find [~, #{{ $1 ~> =99; $ }}]"))
+        .expect("[]");
+}
+
+#[test]
+fn test_any() {
+    quiver()
+        .evaluate(&format!("{FROM} ~> %dict.any? [~, #{{ $1 ~> =12; $ }}]"))
+        .expect("Ok");
+
+    quiver()
+        .evaluate(&format!("{FROM} ~> %dict.any? [~, #{{ $1 ~> =99; $ }}]"))
+        .expect("[]");
+}
+
+#[test]
+fn test_all() {
+    quiver()
+        .evaluate(&format!(
+            "{FROM} ~> %dict.all? [~, #{{ %num.gt? [$1, 0]; $ }}]"
+        ))
+        .expect("Ok");
+
+    quiver()
+        .evaluate(&format!(
+            "{FROM} ~> %dict.all? [~, #{{ %num.gt? [$1, 1]; $ }}]"
+        ))
+        .expect("[]");
+}
