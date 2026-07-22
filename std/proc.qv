@@ -7,7 +7,7 @@
 // The `'crash` type names the payload a never-lethal await answers for a crashed
 // source, read with a checked retrieval: `r = !p; r:('%proc.crash)crash`.
 
-'crash = Error[pid: @, message: Str['bin]] | Panic[pid: @, message: Str['bin]] | Killed
+'crash = Error[pid: @, message: '%str] | Panic[pid: @, message: '%str] | Killed
 
 // The reactive wakeup a tracked render receives when one of its sampled dependencies
 // changes state. A reactive loop receives it alongside its own

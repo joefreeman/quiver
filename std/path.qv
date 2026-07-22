@@ -34,21 +34,23 @@ to_string = #[', '%str] {
   }
 }
 
-parse = #['%list<'%str>, '] {
-  | =[Nil, acc] => acc
-  | =[Cons[head, tail], acc] => head ~> {
-    | %str.empty? => ^ [tail, acc]
-    | =Str[0x2e] => ^ [tail, acc]
-    | =Str[0x2e2e] => {
-      new_acc = acc ~> {
-        | =Path[_, parent] => parent
-        | =Relative[n] => %num.add [n, 1] ~> Relative[~]
-        | =Root => Root
+parse = #[(segments): '%list<'%str>, (init): '] {
+  %list.fold [
+    $segments,
+    $init,
+    #{
+      $1 ~> {
+        | %str.empty? => $0
+        | =Str[0x2e] => $0
+        | =Str[0x2e2e] => $0 ~> {
+          | =Path[_, parent] => parent
+          | =Relative[n] => %num.add [n, 1] ~> Relative[~]
+          | =Root => Root
+        }
+        | Path[~, $0]
       }
-      ^ [tail, new_acc]
-    }
-    | ^ [tail, Path[~, acc]]
-  }
+    },
+  ]
 }
 
 [

@@ -12,14 +12,14 @@
 
 ' = Conn[sock: \TcpSocket, buf: 'bin, part: (Nil | Part[opcode: 'int, data: 'bin])]
 
-'message = Text[Str['bin]] | Binary['bin] | Close[code: 'int, reason: Str['bin]]
-'messages = Nil | Cons['message, ^]
+'message = Text['%str] | Binary['bin] | Close[code: 'int, reason: '%str]
+'messages = '%list<'message>
 'frame = Frame[fin: 'int, opcode: 'int, payload: 'bin]
 
 // Frame and assembled-message size cap (16 MiB).
 max_payload = 16777216
 
-accept_key = #Str['bin] {
+accept_key = #'%str {
   :doc "The Sec-WebSocket-Accept value for a Sec-WebSocket-Key: base64(sha1(key ++ GUID))."
   =Str[k]
 
@@ -27,7 +27,7 @@ accept_key = #Str['bin] {
   ~> %bin.to_base64
 }
 
-handshake_response = #Str['bin] {
+handshake_response = #'%str {
   :doc "The 101 Switching Protocols bytes answering a handshake with the given Sec-WebSocket-Key."
   "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept_key $}\r\n\r\n" ~> .0
 }
@@ -153,7 +153,7 @@ close_info = #'bin {
 }
 
 // A Close payload from a code and reason.
-close_payload = #['int, Str['bin]] {
+close_payload = #['int, '%str] {
   =[code, Str[r]]; __binary_append__ [0x, code, 2] ~> %bin.concat [~, r]
 }
 
@@ -167,7 +167,7 @@ wrap_message = #['int, 'bin] { $0 ~> =1 => Text[Str[$1]] | Binary[$1] }
 
 // Fail the connection (RFC 6455 §7.1.7): send a Close, drop the TCP socket, yield
 // the Close.
-fail = #[', 'int, Str['bin]] {
+fail = #[', 'int, '%str] {
   =[Conn(sock: sock), code, reason]
   __tcp_socket_write__ [sock, close_payload [code, reason] ~> encode_frame [8, ~]]
   __tcp_socket_close__ sock
@@ -229,23 +229,16 @@ recv = #' {
   }
 }
 
-rev_messages = #[(items): 'messages, (acc): 'messages] {
-  $items ~> {
-    | =Nil => $acc
-    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
-  }
-}
-
 // The select-mode drain: like `recv`'s dispatch, but an incomplete frame ends the
 // drain (the next select supplies more bytes) instead of reading the socket, and
 // completed messages accumulate (reversed; flipped on exit).
 drain = #[', 'messages] {
   =[Conn[sock: sock, buf: buf, part: part], acc]
   parse_frame buf ~> {
-    | =Incomplete => [rev_messages [acc, Nil], Conn[sock: sock, buf: buf, part: part]]
+    | =Incomplete => [%list.reverse acc, Conn[sock: sock, buf: buf, part: part]]
     | =Bad[r] => {
       fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, r] ~> =[close, c2]
-      [rev_messages [Cons[close, acc], Nil], c2]
+      [%list.reverse Cons[close, acc], c2]
     }
     | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
       | op ~> =9 => {
@@ -258,7 +251,7 @@ drain = #[', 'messages] {
         __tcp_socket_write__ [sock, encode_frame [8, p]]
         __tcp_socket_close__ sock
         [
-          rev_messages [Cons[Close[code: code, reason: reason], acc], Nil],
+          %list.reverse Cons[Close[code: code, reason: reason], acc],
           Conn[sock: sock, buf: rest, part: Nil],
         ]
       }
@@ -268,7 +261,7 @@ drain = #[', 'messages] {
           {
             | __integer_compare__ [%bin.length joined, max_payload] ~> =1 => {
                 fail [Conn[sock: sock, buf: 0x, part: Nil], 1009, "message too big"] ~> =[close, c2]
-                [rev_messages [Cons[close, acc], Nil], c2]
+                [%list.reverse Cons[close, acc], c2]
               }
             | fin ~> =0 => ^ [
               Conn[sock: sock, buf: rest, part: Part[opcode: o, data: joined]],
@@ -283,7 +276,7 @@ drain = #[', 'messages] {
             1002,
             "unexpected continuation",
           ] ~> =[close, c2]
-          [rev_messages [Cons[close, acc], Nil], c2]
+          [%list.reverse Cons[close, acc], c2]
         }
       }
       | part ~> {
@@ -293,7 +286,7 @@ drain = #[', 'messages] {
             1002,
             "interleaved data frame",
           ] ~> =[close, c2]
-          [rev_messages [Cons[close, acc], Nil], c2]
+          [%list.reverse Cons[close, acc], c2]
         }
         | fin ~> =0 => ^ [
           Conn[sock: sock, buf: rest, part: Part[opcode: op, data: p]],
@@ -314,7 +307,7 @@ on_data = #[', 'bin] {
   ]
 }
 
-send_text = #[', Str['bin]] {
+send_text = #[', '%str] {
   :doc "Send a text message (one unfragmented frame)."
   =[Conn(sock: sock), Str[b]]; __tcp_socket_write__ [sock, encode_frame [1, b]]; Ok
 }
@@ -329,7 +322,7 @@ ping = #[', 'bin] {
   =[Conn(sock: sock), b]; __tcp_socket_write__ [sock, encode_frame [9, b]]; Ok
 }
 
-close = #[', 'int, Str['bin]] {
+close = #[', 'int, '%str] {
   :doc "Close the connection: send a Close frame with the code and reason, then drop the TCP socket (a server may close immediately, RFC 6455 §5.5.1)."
   =[Conn(sock: sock), code, reason]
   __tcp_socket_write__ [sock, close_payload [code, reason] ~> encode_frame [8, ~]]

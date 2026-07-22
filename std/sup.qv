@@ -15,12 +15,12 @@
 // watcher sees that crash as an ordinary Down: escalation is just crashing.
 //
 //   spec = [id: "worker", restart: Permanent, start: &start_worker]
-//   sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+//   sup = [children: %list{ spec }, max_restarts: 3, window: 5000] ~> %sup.start
 //
 // A start closure spawns the child, wires its watcher, and answers the (widened)
 // pid — note the reference idiom, `&w`, wherever a pid sits in argument position:
 //
-//   start_worker = #[Str['bin], (@'%sup.down)] {
+//   start_worker = #['%str, (@'%sup.down)] {
 //     =[id, sup]
 //     w = @worker
 //     %sup.watch [id, &w, &sup]
@@ -29,24 +29,24 @@
 
 'restart = Permanent | Transient | Temporary
 'outcome = Done | Crashed['%proc.crash]
-'down = Down[id: Str['bin], pid: @, outcome: 'outcome]
+'down = Down[id: '%str, pid: @, outcome: 'outcome]
 
-'start = #[Str['bin], @'down] -> @
-'spec = [id: Str['bin], restart: 'restart, start: 'start]
+'start = #['%str, @'down] -> @
+'spec = [id: '%str, restart: 'restart, start: 'start]
 // A dynamic start's verdict: the child's pid (widened to an inert `(@)`), or a
 // rejection for an id the table already holds.
 'started = Started[@] | Duplicate
 
 // What a supervisor receives: watcher reports, and the dynamic-children requests.
-'msg = 'down | Add['spec, @'started] | Drop[Str['bin]]
-'specs = Nil | Cons['spec, ^]
+'msg = 'down | Add['spec, @'started] | Drop['%str]
+'specs = '%list<'spec>
 
-'stamps = Nil | Cons['int, ^]
-'row = [id: Str['bin], pid: @, spec: 'spec, restarts: 'stamps]
-'table = Nil | Cons['row, ^]
+'stamps = '%list<'int>
+'row = [id: '%str, pid: @, spec: 'spec, restarts: 'stamps]
+'table = '%dict<'%str, 'row>
 'state = [table: 'table, max: 'int, window: 'int]
 
-watch = #<'r>[(id): Str['bin], (child): (@-> 'r), (sup): @'down] {
+watch = #<'r>[(id): '%str, (child): (@-> 'r), (sup): @'down] {
   :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start closure, passing the child and supervisor by reference."
   // The spawned watcher closes over these (an inner `$` would be its own
   // parameter), so bind the fields locally — the pids by reference, as bare
@@ -72,54 +72,28 @@ start_row = #[(spec): 'spec, (sup): @'down] {
   [id: $spec.id, pid: &p, spec: $spec, restarts: Nil]
 }
 
-seed = #['specs, @'down, 'table] {
-  | =[Nil, _, acc] => acc
-  | =[Cons[s, rest], sup, acc] => ^ [rest, &sup, Cons[start_row [s, &sup], acc]]
-}
-
-find = #['table, Str['bin]] {
-  | =[Nil, _] => []
-  | =[Cons[r, _], id] ~> r.id ~> =&id => r
-  | =[Cons[_, rest], id] => ^ [rest, id]
-}
-
-// Table order is irrelevant, so removal accumulates (reversing as it goes).
-remove_loop = #['table, Str['bin], 'table] {
-  | =[Nil, _, acc] => acc
-  | =[Cons[r, rest], id, acc] ~> r.id ~> =&id => ^ [rest, id, acc]
-  | =[Cons[r, rest], id, acc] => ^ [rest, id, Cons[r, acc]]
-}
-
-remove = #[(t): 'table, (id): Str['bin]] { remove_loop [$t, $id, Nil] }
-
-// Timestamps newer than the cutoff (the sliding intensity window); order irrelevant.
-prune_loop = #['stamps, 'int, 'stamps] {
-  | =[Nil, _, acc] => acc
-  | =[Cons[t, rest], cutoff, acc] ~> __integer_compare__ [
-      t,
-      cutoff,
-    ] ~> =1 => ^ [rest, cutoff, Cons[t, acc]]
-  | =[Cons[_, rest], cutoff, acc] => ^ [rest, cutoff, acc]
-}
-
-prune = #[(ts): 'stamps, (cutoff): 'int] { prune_loop [$ts, $cutoff, Nil] }
-
-len = #['stamps, 'int] {
-  | =[Nil, n] => n
-  | =[Cons[_, rest], n] => ^ [rest, __integer_add__ [n, 1]]
+seed = #[(specs): 'specs, (sup): @'down] {
+  // The fold's closure closes over the supervisor pid — by reference, as a bare
+  // pid term would send.
+  sup = &$sup
+  %list.fold [$specs, %dict.new, #{ %dict.put [$0, $1.id, start_row [$1, &sup]] }]
 }
 
 'verdict = Allowed['stamps] | Exceeded
 
-// The sliding-window restart policy: stamp `now`, prune stamps older than the
-// window, and allow while at most `max` remain. `Allowed` carries the pruned
-// stamps to store back. (Internal; exportable if an embedded supervisor — a
-// live-view boundary, say — ever wants to share the policy.)
+// The sliding-window restart policy: stamp `now`, keep only stamps newer than the
+// cutoff (the sliding intensity window), and allow while at most `max` remain.
+// `Allowed` carries the pruned stamps to store back. (Internal; exportable if an
+// embedded supervisor — a live-view boundary, say — ever wants to share the policy.)
 allow? = #[stamps: 'stamps, now: 'int, max: 'int, window: 'int] -> 'verdict {
   =[stamps: ts, now: now, max: m, window: w]
-  recent = Cons[now, prune [ts, __integer_subtract__ [now, w]]]
+  cutoff = __integer_subtract__ [now, w]
+  recent = Cons[
+    now,
+    %list.filter [ts, #{ __integer_compare__ [~, cutoff] ~> =1; $ }],
+  ]
   {
-    | __integer_compare__ [len [recent, 0], m] ~> =1 => Exceeded
+    | __integer_compare__ [%list.count recent, m] ~> =1 => Exceeded
     | Allowed[recent]
   }
 }
@@ -141,14 +115,14 @@ loop = #'state {
     | =Down[id: i, pid: dp, outcome: o] => {
       // The row must hold the SAME incarnation the watcher awaited — a late report
       // for a reused id (drop, then add again) pin-fails and is dropped.
-      | find [t, i] ~> =('row)r; r ~> =(pid: &dp) => {
+      | %dict.get [t, i] ~> =('row)r; r ~> =(pid: &dp) => {
         | restart? [r, o] => {
           now = %time.monotonic
           allow? [stamps: r.restarts, now: now, max: m, window: w] ~> {
             | =Allowed[recent] => {
               p = r.spec ~> ~.start [i, &.]
               ^ [
-                table: Cons[[id: i, pid: &p, spec: r.spec, restarts: recent], remove [t, i]],
+                table: %dict.put [t, i, [id: i, pid: &p, spec: r.spec, restarts: recent]],
                 max: m,
                 window: w,
               ]
@@ -157,7 +131,7 @@ loop = #'state {
           }
         }
         // No restart wanted: the child is done — drop its row.
-        | ^ [table: remove [t, i], max: m, window: w]
+        | ^ [table: %dict.remove [t, i], max: m, window: w]
       }
       // A Down for an id no longer in the table (e.g. a deliberately dropped
       // child's watcher reporting the kill), or for a previous incarnation of a
@@ -165,18 +139,18 @@ loop = #'state {
       | ^ [table: t, max: m, window: w]
     }
     | =Add[s, reply] => {
-      | find [t, s.id] ~> =('row)dup => { Duplicate ~> reply; ^ [table: t, max: m, window: w] }
+      | %dict.has? [t, s.id] => { Duplicate ~> reply; ^ [table: t, max: m, window: w] }
       | {
         row = start_row [s, &.]
         row ~> =(pid: p)
         Started[&p] ~> reply
-        ^ [table: Cons[row, t], max: m, window: w]
+        ^ [table: %dict.put [t, s.id, row], max: m, window: w]
       }
     }
     | =Drop[i] => {
       // Remove the row BEFORE the kill, so the watcher's report finds nothing.
-      | find [t, i] ~> =('row)r => {
-        t2 = remove [t, i]; r ~> =(pid: p); %proc.kill &p; ^ [table: t2, max: m, window: w]
+      | %dict.get [t, i] ~> =('row)r => {
+        t2 = %dict.remove [t, i]; r ~> =(pid: p); %proc.kill &p; ^ [table: t2, max: m, window: w]
       }
       | ^ [table: t, max: m, window: w]
     }
@@ -184,8 +158,7 @@ loop = #'state {
 }
 
 run = #[specs: 'specs, max: 'int, window: 'int] {
-  =[specs: ss, max: m, window: w]
-  ^loop [table: seed [ss, &., Nil], max: m, window: w]
+  =[specs: ss, max: m, window: w]; ^loop [table: seed [ss, &.], max: m, window: w]
 }
 
 start = #[children: 'specs, max_restarts: 'int, window: 'int] {
@@ -198,7 +171,7 @@ add = #[(sup): @'msg, (spec): 'spec] {
   Add[$spec, &.] ~> $sup; !'started
 }
 
-drop = #[(sup): @'msg, (id): Str['bin]] {
+drop = #[(sup): @'msg, (id): '%str] {
   :doc "Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its watcher's report is disregarded, and the id may be supervised again. Asynchronous: the supervisor applies it in mailbox order."
   Drop[$id] ~> $sup; Ok
 }

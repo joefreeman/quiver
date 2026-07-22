@@ -58,25 +58,24 @@ of = #['opt, '%list<'int>] {
   | =[v, Cons[x, rest]] => ^ [push [v, x], rest]
 }
 
-// lcm of the denominators of a list of numbers (tail-recursive over an accumulator). The
-// finest scale `1/lcm` represents every value exactly.
-lcm_denoms = #['int, '%list<'%num>] {
-  | =[acc, Nil] => acc
-  | =[acc, Cons[x, rest]] => {
-    %num.denom x ~> =('int)dx
-
-    __integer_divide__ [__integer_multiply__ [acc, dx], __integer_gcd__ [acc, dx]] ~> =acc2
-
-    ^ [acc2, rest]
-  }
+// lcm of the denominators of a list of numbers. The finest scale `1/lcm` represents
+// every value exactly.
+lcm_denoms = #[(acc): 'int, (nums): '%list<'%num>] {
+  %list.fold [
+    $nums,
+    $acc,
+    #{
+      %num.denom $1 ~> =('int)dx
+      __integer_divide__ [__integer_multiply__ [$0, dx], __integer_gcd__ [$0, dx]]
+    },
+  ]
 }
 
-// Fold a list of *values* onto a vector, mapping each through `f` to its stored lane. The
-// accumulator carries the mapper by reference. A value that maps to nil (overflow or not
-// representable) turns the accumulator nil, which propagates. `[[opt, mapper], values] -> 'opt`.
-buildValues = #[['opt, 'mapper], '%list<'%num>] {
-  | =[[v, _], Nil] => v
-  | =[[v, f], Cons[x, rest]] => ^ [[push [v, f x], &f], rest]
+// Fold a list of *values* onto a vector, mapping each through `f` to its stored lane. A
+// value that maps to nil (overflow or not representable) turns the accumulator nil,
+// which propagates through `push`.
+buildValues = #[(vec): 'opt, (f): 'mapper, (values): '%list<'%num>] {
+  f = &$f; %list.fold [$values, $vec, #{ push [$0, f $1] }]
 }
 
 // Multiply every lane of a buffer by an integer `factor` (used to rescale to a finer scale).
@@ -150,7 +149,7 @@ align = #['vec, 'vec] {
     $values ~> =('%list<'%num>)values
     norm scale ~> =s
     m = #'%num { %num.div [~, s] ~> =Rational[n, 1]; n }
-    buildValues [[Vec[dtype: $dtype, scale: s, data: 0x], &m], values]
+    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], &m, values]
   },
 
   // Like `of_exact`, but each lane is `value / scale` rounded to the nearest integer (halves
@@ -161,7 +160,7 @@ align = #['vec, 'vec] {
     $values ~> =('%list<'%num>)values
     norm scale ~> =s
     m = #'%num { %num.div [~, s] ~> %num.round }
-    buildValues [[Vec[dtype: $dtype, scale: s, data: 0x], &m], values]
+    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], &m, values]
   },
 
   // Build from a list of values alone, inferring the finest scale (`1/lcm` of all
@@ -173,7 +172,7 @@ align = #['vec, 'vec] {
     lcm_denoms [1, values] ~> =('int)cap
     norm Rational[1, cap] ~> =s
     m = #'%num { %num.mul [~, cap] ~> %num.numer }
-    buildValues [[Vec[dtype: $dtype, scale: s, data: 0x], &m], values]
+    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], &m, values]
   },
 
   // Append one stored lane.

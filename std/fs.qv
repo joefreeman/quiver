@@ -4,7 +4,7 @@
 'kind = File | Dir | Symlink | Other
 
 // A single directory entry: its name and its kind.
-'entry = Entry[name: Str['bin], kind: 'kind]
+'entry = Entry[name: '%str, kind: 'kind]
 
 // Metadata about a path. `size` is in bytes, `modified` is the mtime in nanoseconds since the Unix
 // epoch, and `mode` is the permission bits (e.g. 0o644 == 420).
@@ -13,7 +13,7 @@
 // Look up metadata for a path, following symlinks. Yields nil if the path does not exist; other
 // failures (e.g. permission denied) are runtime errors. The builtin returns a transient
 // `[kind, size, modified, mode]` tuple read by index, with `kind` already a `'kind` tag.
-stat = #Str['bin] {
+stat = #'%str {
   .0 ~> __filesystem_stat__ ~> {
     | =[] => []
     | =s ~> Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
@@ -23,7 +23,7 @@ stat = #Str['bin] {
 [
   // Entries come in the order the filesystem returns them (unsorted, excluding `.` and `..`).
   // The underlying directory handle is closed automatically once the iterator is exhausted.
-  list: #Str['bin] {
+  list: #'%str {
     :doc "Lazily iterates the entries of a directory, yielding an Entry (name and kind) each."
     // Each step yields an `Entry` or nil at the end, with `kind` already a `'kind` tag.
     .0 ~> __directory_read__ ~> %iter.unfold [
@@ -37,22 +37,22 @@ stat = #Str['bin] {
     ]
   },
 
-  stat: #Str['bin] {
+  stat: #'%str {
     :doc "Metadata for a path, following symlinks, or nil when the path does not exist."
     stat
   },
 
-  exists?: #Str['bin] {
+  exists?: #'%str {
     :doc "Whether a path exists."
     stat => Ok
   },
 
-  dir?: #Str['bin] {
+  dir?: #'%str {
     :doc "Whether a path exists and is a directory."
     stat ~> =(kind: Dir) => Ok
   },
 
-  file?: #Str['bin] {
+  file?: #'%str {
     :doc "Whether a path exists and is a regular file."
     stat ~> =(kind: File) => Ok
   },

@@ -23,14 +23,14 @@
   | True
   | False
   | '%num.coeff
-  | Str['bin]
+  | '%str
   | Array[(Nil | Cons[^, ^1])]
-  | Object[(Nil | Cons[[Str['bin], ^], ^1])]
+  | Object[(Nil | Cons[['%str, ^], ^1])]
 
 'expr = '%meta.expr
 
 // A byte token with leading whitespace skipped.
-tok = #[(b): 'int, (what): Str['bin]] { %parse.right [&%parse.ws, %parse.byte [$b, $what]] }
+tok = #[(b): 'int, (what): '%str] { %parse.right [&%parse.ws, %parse.byte [$b, $what]] }
 
 // `~`: the value flowing into the dialect term, spliced as its own 1-byte host span.
 ripple_p = #'%parse {
@@ -109,12 +109,10 @@ value = #'%parse { value_step [&value_step, $] }
 
 // The dialect entry point: the compiler calls this with the dialect context record; the
 // grammar needs only the content (escape spans come from its own positions).
-json = #(content: Str['bin]) {
-  full = %parse.left [&value, &%parse.ws]; %parse.run [$content, &full]
-}
+json = #(content: '%str) { full = %parse.left [&value, &%parse.ws]; %parse.run [$content, &full] }
 
 // === Runtime codec ======================================================================
-// `parse`/`stringify` read and write JSON at runtime, over `Str['bin]`. They share the
+// `parse`/`stringify` read and write JSON at runtime, over `'%str`. They share the
 // `%parse` combinators with the dialect but not its grammar: the dialect builds `%meta`
 // code to splice into the caller, whereas these build `'%json` values directly — so the
 // codec has no unquoting and `null`/`true`/`false` are the only bare words it accepts.
@@ -218,7 +216,7 @@ number = #'%parse {
 }
 
 // The runtime value grammar, its recursion tied with `%parse.rec`. `%parse.quoted` already
-// yields the `Str['bin]` leaf verbatim; `number` yields the `'%num.coeff` leaf; only the
+// yields the `'%str` leaf verbatim; `number` yields the `'%num.coeff` leaf; only the
 // composite and keyword actions build the rest of `'%json`.
 parse_value = #['%parse.p<'>, '%parse] {
   =[value_p, st]
@@ -264,7 +262,7 @@ parse_value = #['%parse.p<'>, '%parse] {
 
 parse_p = %parse.rec &parse_value
 
-parse = #Str['bin] {
+parse = #'%str {
   :doc "Parses a JSON string into a '%json value, or nil with a positioned :error on malformed input."
   full = %parse.left [&parse_p, &%parse.ws]; %parse.run [$, &full]
 }
@@ -290,26 +288,16 @@ esc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 }
 
 // A JSON string literal: the bytes escaped and wrapped in double quotes.
-escape_str = #Str['bin] {
+escape_str = #'%str {
   =Str[bytes]
   inner = esc_loop [bytes, 0, %bin.length bytes, 0x]
   %bin.concat [0x22, inner] ~> %bin.concat [~, 0x22] ~> Str[~]
 }
 
-// Concatenate a `Nil`/`Cons` list's elements — each rendered to a string by `render` —
-// separated by commas. `first?` is 1 until the first element has been emitted.
-join_strs = #<'x>[(items): (Nil | Cons['x, ^]), (render): #'x -> Str['bin], (acc): Str['bin], (first): 'int] {
-  $items ~> {
-    | =Nil => $acc
-    | =Cons[h, t] => {
-      piece = $render h
-      acc2 = {
-        | $first ~> =1 => %str.concat [$acc, piece]
-        | %str.concat [$acc, ","] ~> %str.concat [~, piece]
-      }
-      ^ [t, &$render, acc2, 0]
-    }
-  }
+// Concatenate a list's elements — each rendered to a string by `render` — separated by
+// commas.
+join_strs = #<'x>[(items): '%list<'x>, (render): #'x -> '%str] {
+  %list.iter $items ~> %iter.map [~, &$render] ~> %str.join [~, ","]
 }
 
 // A binary of `n` copies of byte `b`.
@@ -379,7 +367,7 @@ format_rational = #[(n): 'int, (d): 'int] {
 }
 
 // Serialize a `'%json` value to its compact string form, self-passed to recurse.
-str_step = #[#^ -> Str['bin], '] -> Str['bin] {
+str_step = #[#^ -> '%str, '] -> '%str {
   =[self, v]
   go = #' { self [&self, $] }
   v ~> {
@@ -390,13 +378,13 @@ str_step = #[#^ -> Str['bin], '] -> Str['bin] {
     | =Rational[n, d] => format_rational [n, d]
     | =Str[bytes] => escape_str Str[bytes]
     | =Array[items] => {
-      body = join_strs [items, &go, "", 1]
+      body = join_strs [items, &go]
 
       %str.concat ["[", body] ~> %str.concat [~, "]"]
     }
     | =Object[pairs] => {
-      render = #[Str['bin], '] { %str.concat [escape_str $0, ":"] ~> %str.concat [~, go $1] }
-      body = join_strs [pairs, &render, "", 1]
+      render = #['%str, '] { %str.concat [escape_str $0, ":"] ~> %str.concat [~, go $1] }
+      body = join_strs [pairs, &render]
 
       %str.concat ["\{", body] ~> %str.concat [~, "}"]
     }

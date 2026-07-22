@@ -47,20 +47,16 @@ put = #[(resp): '%http.response, (key): 'bin, (sess): 'pairs] {
   payload = %http.form_encode $sess
   value = "{%bin.to_hex payload}.{%hash.hmac_sha256 [$key, payload] ~> %bin.to_hex}"
 
-  h = %http.set_cookie [
-    "session",
-    value,
-    Cons["Path=/", Cons["HttpOnly", Cons["SameSite=Lax", Nil]]],
-  ]
+  h = %http.set_cookie ["session", value, %list{ "Path=/", "HttpOnly", "SameSite=Lax" }]
 
-  Response[status: $resp.status, headers: Cons[h, $resp.headers], body: $resp.body]
+  Response[status: $resp.status, headers: %list.prepend [$resp.headers, h], body: $resp.body]
 }
 
 clear = #'%http.response {
   :doc "The response with a Set-Cookie header that expires the session cookie."
-  h = %http.set_cookie ["session", "", Cons["Path=/", Cons["Max-Age=0", Nil]]]
+  h = %http.set_cookie ["session", "", %list{ "Path=/", "Max-Age=0" }]
 
-  Response[status: $status, headers: Cons[h, $headers], body: $body]
+  Response[status: $status, headers: %list.prepend [$headers, h], body: $body]
 }
 
 [get: &get, put: &put, clear: &clear]

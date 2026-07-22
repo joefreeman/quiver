@@ -13,25 +13,16 @@
 // cookies; a repeated form field is a list). `header` looks up case-insensitively,
 // `get` exactly.
 
-'method = GET | HEAD | POST | PUT | DELETE | PATCH | OPTIONS | Other[Str['bin]]
+'method = GET | HEAD | POST | PUT | DELETE | PATCH | OPTIONS | Other['%str]
 
-'pairs = Nil | Cons[[Str['bin], Str['bin]], ^]
-'segments = Nil | Cons[Str['bin], ^]
+'pairs = '%list<['%str, '%str]>
+'segments = '%list<'%str>
 
-' = Request[method: 'method, target: Str['bin], path: 'segments, query: 'pairs, version: Str['bin], headers: 'pairs, body: 'bin]
+' = Request[method: 'method, target: '%str, path: 'segments, query: 'pairs, version: '%str, headers: 'pairs, body: 'bin]
 
 'response = Response[status: 'int, headers: 'pairs, body: 'bin]
 
-'parsed = Incomplete | Bad[status: 'int, reason: Str['bin]] | [', 'bin]
-
-'items<'t> = Nil | Cons['t, ^]
-
-rev = #<'t>[(items): 'items<'t>, (acc): 'items<'t>] {
-  $items ~> {
-    | =Nil => $acc
-    | =Cons[h, t] => ^ [t, Cons[h, $acc]]
-  }
-}
+'parsed = Incomplete | Bad[status: 'int, reason: '%str] | [', 'bin]
 
 // ASCII-lowercased bytes (for case-insensitive names).
 lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
@@ -51,7 +42,7 @@ lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   }
 }
 
-lower = #Str['bin] {
+lower = #'%str {
   :doc "The string with ASCII letters lowercased."
   =Str[b]; lower_loop [b, 0, %bin.length b, 0x] ~> Str[~]
 }
@@ -60,28 +51,24 @@ lower = #Str['bin] {
 header_find = #[(pairs): 'pairs, (target): 'bin] {
   // The pin below needs a variable, so bind the field locally.
   target = $target
-  $pairs ~> {
-    | =Nil => []
-    | =Cons[[n, v], rest] => {
-      | lower n ~> =Str[nb]; nb ~> =&target => v
-      | ^ [rest, target]
-    }
-  }
+  %list.find [
+    $pairs,
+    #{ =[n, _]; lower n ~> =Str[nb]; nb ~> =&target; $ },
+  ] ~> =[_, v]
+  v
 }
 
-header = #[(pairs): 'pairs, (name): Str['bin]] {
+header = #[(pairs): 'pairs, (name): '%str] {
   :doc "The first value of a header by case-insensitive name, or nil when absent."
   lower $name ~> =Str[target]; header_find [$pairs, target]
 }
 
-get = #[(pairs): 'pairs, (name): Str['bin]] {
+get = #[(pairs): 'pairs, (name): '%str] {
   :doc "The first value for an exact name (query or form pairs), or nil when absent."
   // The pin below needs a variable, so bind the field locally.
   name = $name
-  $pairs ~> {
-    | =Nil => []
-    | =Cons[[n, v], rest] => { n ~> =&name => v | ^ [rest, name] }
-  }
+  %list.find [$pairs, #{ =[n, _]; n ~> =&name; $ }] ~> =[_, v]
+  v
 }
 
 // The numeric value of an ASCII hex digit, or nil.
@@ -168,7 +155,7 @@ path_segments = #'bin {
         | revd ~> =Cons[Str[last], rest]; %bin.length last ~> =0 => rest
         | revd
       }
-      rev [trimmed, Nil]
+      %list.reverse trimmed
     }
   }
 }
@@ -198,7 +185,7 @@ qp_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'pairs
     | $acc
   }
   {
-    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => rev [next, Nil]
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => %list.reverse next
     | %bin.get_byte [$data, $pos] ~> =38 => ^ [
       $data,
       __integer_add__ [$pos, 1],
@@ -283,7 +270,7 @@ parse_header_line = #'bin {
 
 parse_headers = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'pairs] {
   {
-    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => rev [$acc, Nil]
+    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => %list.reverse $acc
     | {
       le = line_end [$data, $pos, $end]
       {
@@ -303,7 +290,7 @@ parse_headers = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'pairs] {
   }
 }
 
-method_of = #Str['bin] {
+method_of = #'%str {
   | ="GET" => GET
   | ="HEAD" => HEAD
   | ="POST" => POST
@@ -334,7 +321,7 @@ parse_request_line = #'bin {
 }
 
 // The request-target split into decoded path segments and query pairs.
-split_target = #Str['bin] {
+split_target = #'%str {
   :doc "Splits a request target into `[path segments, query pairs]` — the same split `parse_request` applies, exposed for deriving a request from a new URL (live navigation)."
   =Str[t]
   qi = %bin.index [t, 63, 0]
@@ -462,11 +449,8 @@ reason = #'int {
   | ""
 }
 
-serialize_headers = #[(hs): 'pairs, (acc): Str['bin]] {
-  $hs ~> {
-    | =Nil => $acc
-    | =Cons[[n, v], rest] => ^ [rest, "{$acc}{n}: {v}\r\n"]
-  }
+serialize_headers = #[(hs): 'pairs, (acc): '%str] {
+  %list.fold [$hs, $acc, #{ "{$0}{$1.0}: {$1.1}\r\n" }]
 }
 
 serialize_response = #'response {
@@ -475,7 +459,7 @@ serialize_response = #'response {
   status_line = "HTTP/1.1 {%str.from_int s} {reason s}\r\n"
   hs2 = {
     | header [hs, "content-length"] ~> =Str[_] => hs
-    | Cons[["content-length", %bin.length b ~> %str.from_int], hs]
+    | %list.prepend [hs, ["content-length", %bin.length b ~> %str.from_int]]
   }
   head = serialize_headers [hs2, status_line]
   %bin.concat ["{head}\r\n" ~> .0, b]
@@ -518,28 +502,13 @@ pct_enc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 
 pct_encode = #'bin { pct_enc_loop [$, 0, %bin.length $, 0x] }
 
-form_encode_loop = #[(pairs): 'pairs, (acc): 'bin, (first): 'int] {
-  $pairs ~> {
-    | =Nil => $acc
-    | =Cons[[Str[n], Str[v]], rest] => {
-      sep = {
-        | $first ~> =1 => $acc
-        | %bin.append [$acc, 38, 1]
-      }
-
-      acc2 = %bin.concat [sep, pct_encode n] ~> %bin.append [~, 61, 1] ~> %bin.concat [
-        ~,
-        pct_encode v,
-      ]
-
-      ^ [rest, acc2, 0]
-    }
-  }
-}
-
 form_encode = #'pairs {
   :doc "Ordered [name, value] pairs as an application/x-www-form-urlencoded body — the inverse of form_decode."
-  form_encode_loop [$, 0x, 1]
+  %list.iter
+  ~> %iter.map [
+    ~,
+    #{ =[Str[n], Str[v]]; pct_encode n ~> %bin.append [~, 61, 1] ~> %bin.concat [~, pct_encode v] },
+  ] ~> %iter.intersperse [~, 0x26] ~> %iter.fold [~, 0x, &%bin.concat]
 }
 
 // One `k=v` cookie segment (edges trimmed, value verbatim) prepended to the accumulator;
@@ -570,34 +539,26 @@ cookies_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): '
   }
 }
 
-cookies_hdrs = #[(hs): 'pairs, (acc): 'pairs] {
-  $hs ~> {
-    | =Nil => rev [$acc, Nil]
-    | =Cons[[n, Str[vb]], rest] => {
-      acc2 = {
-        | lower n ~> ="cookie" => cookies_loop [vb, 0, 0, %bin.length vb, $acc]
-        | $acc
-      }
-      ^ [rest, acc2]
-    }
-  }
-}
-
 cookies = #' {
   :doc "The cookies sent with the request (its Cookie headers), as ordered [name, value] pairs; values are verbatim bytes."
-  cookies_hdrs [$headers, Nil]
+  %list.fold [
+    $headers,
+    Nil,
+    #{
+      $1 ~> =[n, Str[vb]]
+      {
+        | lower n ~> ="cookie" => cookies_loop [vb, 0, 0, %bin.length vb, $0]
+        | $0
+      }
+    },
+  ] ~> %list.reverse
 }
 
-'attrs = Nil | Cons[Str['bin], ^]
+'attrs = '%list<'%str>
 
-attrs_join = #[(attrs): 'attrs, (acc): Str['bin]] {
-  $attrs ~> {
-    | =Nil => $acc
-    | =Cons[a, rest] => ^ [rest, "{$acc}; {a}"]
-  }
-}
+attrs_join = #[(attrs): 'attrs, (acc): '%str] { %list.fold [$attrs, $acc, #{ "{$0}; {$1}" }] }
 
-set_cookie = #[(name): Str['bin], (value): Str['bin], (attrs): 'attrs] {
+set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs] {
   :doc "A Set-Cookie header pair for the name and value, with the given attribute strings (e.g. \"Path=/\", \"HttpOnly\")."
   ["set-cookie", attrs_join [$attrs, "{$name}={$value}"]]
 }

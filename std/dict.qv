@@ -357,7 +357,7 @@ d_expr = #'%meta.cb {
   }
 }
 
-dict_dialect = #(content: Str['bin], chain: '%meta.cb) {
+dict_dialect = #(content: '%str, chain: '%meta.cb) {
   $ ~> =(content, chain: cb)
   expr = d_expr &cb
   expr_ws = %parse.right [&%parse.ws, &expr]

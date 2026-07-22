@@ -26,11 +26,11 @@
 'handler = #'request -> ('response | 'upgrade | [])
 
 // A plain-text response with the given status.
-plain = #['int, Str['bin]] {
+plain = #['int, '%str] {
   =[s, Str[b]]
   Response[
     status: s,
-    headers: Cons[["content-type", "text/plain; charset=utf-8"], Nil],
+    headers: %list{ ["content-type", "text/plain; charset=utf-8"] },
     body: b,
   ]
 }
@@ -92,9 +92,9 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
           resp2 = {
             | req.method ~> =HEAD => resp ~> ~[
               ...,
-              headers: Cons[
-                ["content-length", %bin.length resp.body ~> %str.from_int],
+              headers: %list.prepend [
                 resp.headers,
+                ["content-length", %bin.length resp.body ~> %str.from_int],
               ],
               body: 0x,
             ]
@@ -130,7 +130,7 @@ html = #<'e>'%html<'e> {
   %html.render $ ~> =Str[b]
   Response[
     status: 200,
-    headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],
+    headers: %list{ ["content-type", "text/html; charset=utf-8"] },
     body: b,
   ]
 }
@@ -140,12 +140,12 @@ page = #<'e>'%html<'e> {
   %html.page $ ~> =Str[b]
   Response[
     status: 200,
-    headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],
+    headers: %list{ ["content-type", "text/html; charset=utf-8"] },
     body: b,
   ]
 }
 
-text = #Str['bin] {
+text = #'%str {
   :doc "A 200 text/plain response."
   plain [200, $]
 }
@@ -153,12 +153,12 @@ text = #Str['bin] {
 json = #'%json {
   :doc "A 200 application/json response of the serialized value."
   %json.stringify $ ~> =Str[b]
-  Response[status: 200, headers: Cons[["content-type", "application/json"], Nil], body: b]
+  Response[status: 200, headers: %list{ ["content-type", "application/json"] }, body: b]
 }
 
-redirect = #Str['bin] {
+redirect = #'%str {
   :doc "A 303 See Other redirect to the location — the POST-then-redirect-to-GET idiom."
-  Response[status: 303, headers: Cons[["location", $], Nil], body: 0x]
+  Response[status: 303, headers: %list{ ["location", $] }, body: 0x]
 }
 
 not_found = #{

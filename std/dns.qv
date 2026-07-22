@@ -1,7 +1,7 @@
 'ip = IPv4['bin] | IPv6['bin]
 
 [
-  resolve: #Str['bin] {
+  resolve: #'%str {
     :doc "Resolves a hostname, lazily yielding its addresses as IPv4 or IPv6 values."
     .0 ~> __dns_resolve__ ~> %iter.unfold [
       ~,

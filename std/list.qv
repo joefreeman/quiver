@@ -46,7 +46,7 @@ d_elem = #'%meta.cb {
   }
 }
 
-list_dialect = #(content: Str['bin], chain: '%meta.cb) {
+list_dialect = #(content: '%str, chain: '%meta.cb) {
   $ ~> =(content, chain: cb)
   elem = d_elem &cb
   elem_ws = %parse.right [&%parse.ws, &elem]
