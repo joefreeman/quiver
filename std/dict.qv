@@ -16,17 +16,12 @@
 // value.
 //
 // Non-tail tree operations (`put`, `remove`) recurse with the self-passing idiom `f [&f, ...]`,
-// since `^` is tail-only and a binding isn't in scope in its own body. A `Node`'s children are
-// the inline recursive list `(Nil | Cons[^, ^1])` because a type can't name itself; helpers
-// nonetheless take the `'list` alias, which unifies with the inline form.
+// since `^` is tail-only and a binding isn't in scope in its own body. A `Node`'s children
+// are `'list<^>` — the list alias instantiated with the dict's own recursion reference.
 
 'list<'t> = Nil | Cons['t, ^]
 
-'<'k, 'v> =
-  | Empty
-  | Leaf['int, 'k, 'v]
-  | Collision['int, 'list<['k, 'v]>]
-  | Node['int, (Nil | Cons[^, ^1])]
+'<'k, 'v> = Empty | Leaf['int, 'k, 'v] | Collision['int, 'list<['k, 'v]>] | Node['int, 'list<^>]
 
 // --- key hashing -------------------------------------------------------------
 hash = #<'k>'k { __data_encode__ ~> __binary_hash32__ }

@@ -18,14 +18,7 @@
 //   - String escapes: `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\t`, `\r` (no `\u`).
 //   - A trailing comma before `]`/`}` is tolerated.
 
-' =
-  | Null
-  | True
-  | False
-  | '%num.coeff
-  | '%str
-  | Array[(Nil | Cons[^, ^1])]
-  | Object[(Nil | Cons[['%str, ^], ^1])]
+' = Null | True | False | '%num.coeff | '%str | Array['%list<^>] | Object['%list<['%str, ^]>]
 
 'expr = '%meta.expr
 

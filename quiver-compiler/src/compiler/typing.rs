@@ -884,9 +884,19 @@ fn resolve_ast_type_impl(
                     program,
                     type_bindings,
                 )?;
-                // Flatten nested unions
-                if let Some(Type::Union(variants)) = program.lookup_type(member_type_id) {
-                    resolved_type_ids.extend(variants.iter().cloned());
+                // Flatten nested unions. Flattening strips one binder from the path of
+                // any cycle inside a union member that reaches through that member's own
+                // root (a parenthesised `(B[^] | C)` member counted both unions), so
+                // shorten those references first; a member whose cycles are
+                // self-contained (an alias-typed member) is untouched, and non-union
+                // members keep their references to the union being built.
+                if matches!(program.lookup_type(member_type_id), Some(Type::Union(_))) {
+                    let shifted = shift_free_cycles_at(member_type_id, -1, 0, program);
+                    if let Some(Type::Union(variants)) = program.lookup_type(shifted) {
+                        resolved_type_ids.extend(variants.iter().cloned());
+                    } else {
+                        resolved_type_ids.push(shifted);
+                    }
                 } else {
                     resolved_type_ids.push(member_type_id);
                 }
@@ -1331,9 +1341,182 @@ pub fn close_unpinned_result(
     }
 }
 
+/// Shift every *free* `Cycle` in `type_id` by `shift` binder levels. A `Cycle(k)` at a
+/// position `cutoff` binders deep within the walked fragment is free iff `k > cutoff` —
+/// it reaches above the fragment's root — and becomes `Cycle(k + shift)`; bound cycles
+/// (self-contained recursion) are position-independent and travel unchanged. Binders are
+/// unions and callables, mirroring written-type resolution's `recursion_depth`.
+///
+/// This is the hygiene step for splicing a type under binders: `substitute` lengthens a
+/// type argument's outward references by the depth of the `Variable` it replaces, and
+/// union flattening (which strips one binder) shortens them by one.
+fn shift_free_cycles_at(
+    type_id: usize,
+    shift: isize,
+    cutoff: usize,
+    program: &mut Program,
+) -> usize {
+    if shift == 0 {
+        return type_id;
+    }
+    let Some(typ) = program.lookup_type(type_id).cloned() else {
+        return type_id;
+    };
+
+    match typ {
+        Type::Cycle(depth) => {
+            if depth > cutoff {
+                let shifted = usize::try_from(depth as isize + shift)
+                    .expect("cycle shift must keep the reference within its binders");
+                program.register_type(Type::Cycle(shifted))
+            } else {
+                type_id
+            }
+        }
+        Type::Union(variants) => {
+            let new_variants: Vec<usize> = variants
+                .iter()
+                .map(|&v| shift_free_cycles_at(v, shift, cutoff + 1, program))
+                .collect();
+            if new_variants == variants {
+                type_id
+            } else {
+                program.register_type(Type::Union(new_variants))
+            }
+        }
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+            states,
+        } => {
+            let new_param = shift_free_cycles_at(parameter, shift, cutoff + 1, program);
+            let new_result = shift_free_cycles_at(result, shift, cutoff + 1, program);
+            let new_receive = shift_free_cycles_at(receive, shift, cutoff + 1, program);
+            let new_states = states.map(|s| shift_free_cycles_at(s, shift, cutoff + 1, program));
+            if new_param == parameter
+                && new_result == result
+                && new_receive == receive
+                && new_states == states
+            {
+                type_id
+            } else {
+                program.register_type(Type::Callable {
+                    parameter: new_param,
+                    result: new_result,
+                    receive: new_receive,
+                    states: new_states,
+                })
+            }
+        }
+        Type::Tuple(tuple_id) => {
+            if let Some(type_info) = program.lookup_tuple(tuple_id).cloned() {
+                let mut any_changed = false;
+                let new_fields: Vec<(Option<String>, usize)> = type_info
+                    .fields
+                    .iter()
+                    .map(|(name, field_type_id)| {
+                        let new_type_id =
+                            shift_free_cycles_at(*field_type_id, shift, cutoff, program);
+                        any_changed = any_changed || new_type_id != *field_type_id;
+                        (name.clone(), new_type_id)
+                    })
+                    .collect();
+                if any_changed {
+                    let field_count = new_fields.len();
+                    let new_tuple_id = program.register_tuple(type_info.name.clone(), new_fields);
+                    for index in 0..field_count {
+                        if program.label_omittable(tuple_id, index) {
+                            program.mark_label_omittable(new_tuple_id, index);
+                        }
+                    }
+                    program.register_type(Type::Tuple(new_tuple_id))
+                } else {
+                    type_id
+                }
+            } else {
+                type_id
+            }
+        }
+        Type::Partial { name, fields } => {
+            let mut any_changed = false;
+            let new_fields: Vec<(String, usize)> = fields
+                .iter()
+                .map(|(fname, field_type_id)| {
+                    let new_type_id = shift_free_cycles_at(*field_type_id, shift, cutoff, program);
+                    any_changed = any_changed || new_type_id != *field_type_id;
+                    (fname.clone(), new_type_id)
+                })
+                .collect();
+            if any_changed {
+                program.register_type(Type::Partial {
+                    name,
+                    fields: new_fields,
+                })
+            } else {
+                type_id
+            }
+        }
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => {
+            let new_send = send.map(|s| shift_free_cycles_at(s, shift, cutoff, program));
+            let new_receive = receive.map(|r| shift_free_cycles_at(r, shift, cutoff, program));
+            let new_state = state.map(|s| shift_free_cycles_at(s, shift, cutoff, program));
+            if new_send == send && new_receive == receive && new_state == state {
+                type_id
+            } else {
+                program.register_type(Type::Process {
+                    send: new_send,
+                    receive: new_receive,
+                    state: new_state,
+                })
+            }
+        }
+        Type::Annotated {
+            base,
+            exact,
+            entries,
+        } => {
+            let new_base = shift_free_cycles_at(base, shift, cutoff, program);
+            let mut any_changed = new_base != base;
+            let new_entries: Vec<(usize, usize)> = entries
+                .iter()
+                .map(|(key, value_type)| {
+                    let new_value = shift_free_cycles_at(*value_type, shift, cutoff, program);
+                    any_changed = any_changed || new_value != *value_type;
+                    (*key, new_value)
+                })
+                .collect();
+            if any_changed {
+                program.annotate_type(new_base, exact, new_entries)
+            } else {
+                type_id
+            }
+        }
+        Type::Variable(_) | Type::Integer | Type::Binary | Type::Reference | Type::Resource(_) => {
+            type_id
+        }
+    }
+}
+
 pub fn substitute(
     type_id: usize,
     bindings: &HashMap<String, usize>,
+    program: &mut Program,
+) -> usize {
+    substitute_at(type_id, bindings, 0, program)
+}
+
+/// `substitute`, tracking how many binders (unions/callables) the walk has descended
+/// through, so that a spliced argument's free `Cycle`s can be lengthened to keep
+/// pointing at the binders they were written under (see `shift_free_cycles_at`).
+fn substitute_at(
+    type_id: usize,
+    bindings: &HashMap<String, usize>,
+    depth: usize,
     program: &mut Program,
 ) -> usize {
     let Some(typ) = program.lookup_type(type_id).cloned() else {
@@ -1341,11 +1524,30 @@ pub fn substitute(
     };
 
     match typ {
-        Type::Variable(name) => bindings.get(&name).copied().unwrap_or(type_id),
+        Type::Variable(name) => match bindings.get(&name).copied() {
+            // The argument was resolved at the alias-reference position; spliced `depth`
+            // binders below it, its outward references must reach that much further.
+            Some(bound) => shift_free_cycles_at(bound, depth as isize, 0, program),
+            None => type_id,
+        },
         Type::Union(variants) => {
             let new_variants: Vec<usize> = variants
                 .iter()
-                .map(|&v| substitute(v, bindings, program))
+                .map(|&v| {
+                    let substituted = substitute_at(v, bindings, depth + 1, program);
+                    // `union_type_ids` flattens a variant that is itself a union,
+                    // stripping one binder from the path of any cycle inside it that
+                    // reaches through its root — compensate. Only substitution
+                    // introduces union-shaped variants (resolution already flattens),
+                    // so gate on the variant having become one.
+                    let was_union = matches!(program.lookup_type(v), Some(Type::Union(_)));
+                    let is_union = matches!(program.lookup_type(substituted), Some(Type::Union(_)));
+                    if is_union && !was_union {
+                        shift_free_cycles_at(substituted, -1, 0, program)
+                    } else {
+                        substituted
+                    }
+                })
                 .collect();
             union_type_ids(program, new_variants)
         }
@@ -1358,7 +1560,7 @@ pub fn substitute(
                     .fields
                     .iter()
                     .map(|(name, field_type_id)| {
-                        let new_type_id = substitute(*field_type_id, bindings, program);
+                        let new_type_id = substitute_at(*field_type_id, bindings, depth, program);
                         if !any_changed && new_type_id != *field_type_id {
                             any_changed = true;
                         }
@@ -1392,7 +1594,7 @@ pub fn substitute(
             let new_fields: Vec<(String, usize)> = fields
                 .iter()
                 .map(|(fname, field_type_id)| {
-                    let new_type_id = substitute(*field_type_id, bindings, program);
+                    let new_type_id = substitute_at(*field_type_id, bindings, depth, program);
                     if !any_changed && new_type_id != *field_type_id {
                         any_changed = true;
                     }
@@ -1419,10 +1621,10 @@ pub fn substitute(
             receive,
             states,
         } => {
-            let new_param = substitute(parameter, bindings, program);
-            let new_result = substitute(result, bindings, program);
-            let new_receive = substitute(receive, bindings, program);
-            let new_states = states.map(|s| substitute(s, bindings, program));
+            let new_param = substitute_at(parameter, bindings, depth + 1, program);
+            let new_result = substitute_at(result, bindings, depth + 1, program);
+            let new_receive = substitute_at(receive, bindings, depth + 1, program);
+            let new_states = states.map(|s| substitute_at(s, bindings, depth + 1, program));
             if new_param == parameter
                 && new_result == result
                 && new_receive == receive
@@ -1443,9 +1645,9 @@ pub fn substitute(
             receive,
             state,
         } => {
-            let new_send = send.map(|s| substitute(s, bindings, program));
-            let new_receive = receive.map(|r| substitute(r, bindings, program));
-            let new_state = state.map(|s| substitute(s, bindings, program));
+            let new_send = send.map(|s| substitute_at(s, bindings, depth, program));
+            let new_receive = receive.map(|r| substitute_at(r, bindings, depth, program));
+            let new_state = state.map(|s| substitute_at(s, bindings, depth, program));
             if new_send == send && new_receive == receive && new_state == state {
                 type_id
             } else {
@@ -1461,12 +1663,12 @@ pub fn substitute(
             exact,
             entries,
         } => {
-            let new_base = substitute(base, bindings, program);
+            let new_base = substitute_at(base, bindings, depth, program);
             let mut any_changed = new_base != base;
             let new_entries: Vec<(usize, usize)> = entries
                 .iter()
                 .map(|(key, value_type)| {
-                    let new_value = substitute(*value_type, bindings, program);
+                    let new_value = substitute_at(*value_type, bindings, depth, program);
                     any_changed = any_changed || new_value != *value_type;
                     (*key, new_value)
                 })

@@ -1414,3 +1414,99 @@ fn test_alias_and_binding_share_name_across_repl_lines() {
         .then_evaluate(r#"["hi" ~> f, room]"#)
         .expect("[Ok, 42]");
 }
+
+// --- hygienic alias instantiation: `^` as a type argument ------------------------------
+// A recursive back-reference passed as a type argument must keep pointing at the
+// caller's binder once spliced under the alias body's own binders — previously the two
+// knots collapsed (`Cons[μ1, μ1]`), rejecting valid values.
+
+#[test]
+fn test_recursive_argument_to_module_alias() {
+    quiver()
+        .evaluate(
+            r#"
+            'tree = Leaf['int] | Node['%list<^>]
+            f = #'tree { =Node[kids] => %list.count kids }
+            Node[Cons[Leaf[1], Cons[Leaf[2], Nil]]] ~> f
+            "#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_recursive_argument_to_local_alias() {
+    quiver()
+        .evaluate(
+            r#"
+            'mylist<'t> = Nil | Cons['t, ^]
+            'tree = Leaf['int] | Node['mylist<^>]
+            f = #'tree { =Node[kids] => %list.count kids }
+            Node[Cons[Leaf[1], Cons[Leaf[2], Nil]]] ~> f
+            "#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_recursive_argument_deep_fold() {
+    // Both knots survive in depth: the element cycle reaches the tree, the tail cycle
+    // stays the list, through multiple levels of nesting.
+    quiver()
+        .evaluate(
+            r#"
+            'tree = Leaf['int] | Node['%list<^>]
+            sum = #[#^ -> 'int, 'tree, 'int] {
+              | =[_, Leaf[n], acc] => __integer_add__ [n, acc]
+              | =[self, Node[kids], acc] => %list.fold [kids, acc, #{ self [&self, $1, $0] }]
+            }
+            sum [&sum, Node[Cons[Leaf[1], Cons[Node[Cons[Leaf[2], Cons[Leaf[3], Nil]]], Nil]]], 0]
+            "#,
+        )
+        .expect("6");
+}
+
+#[test]
+fn test_recursive_argument_in_variant_position() {
+    // An 'opt-style alias splices the argument as a union member; flattening strips a
+    // binder, which the substitution compensates for. Both member shapes construct.
+    quiver()
+        .evaluate(
+            r#"
+            'opt<'t> = 't | []
+            'tree = Leaf['int] | Node['opt<^>]
+            [Node[Leaf[7]] ~> ='tree, Node[[]] ~> ='tree]
+            "#,
+        )
+        .expect("[Ok, Ok]");
+}
+
+#[test]
+fn test_recursive_argument_two_occurrences() {
+    // The same parameter substituted at two different binder depths: each occurrence
+    // shifts by its own depth (the tuple field by one binder, the list element by two).
+    quiver()
+        .evaluate(
+            r#"
+            'both<'t> = ['t, (Nil | Cons['t, ^])]
+            'tree = A | B['both<^>]
+            f = #'tree { =B[[first, list]] => %list.count Cons[first, list] }
+            f B[[A, Nil]]
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_nested_union_member_cycle_flattening() {
+    // A parenthesised union member is flattened into its parent; a cycle inside it that
+    // counted both binders is shortened to match. The value must still satisfy the type.
+    quiver()
+        .evaluate(
+            r#"
+            'x = A | (B[^] | C)
+            f = #'x { | =B[inner] => inner | =A => A | =C => C }
+            f B[A] ~> %data.encode
+            "#,
+        )
+        .expect("\"A\"");
+}
