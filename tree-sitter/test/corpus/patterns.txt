@@ -81,6 +81,40 @@ Point[x, &y] = Point[1, 2]
           (integer))))))
 
 ==================
+pinned match with access path
+==================
+
+1 ~> =&p.a.0
+$y ~> =&$x.q
+5 ~> =&$
+
+---
+
+(source_file
+  (expression
+    (chain
+      (integer)
+      (bind_match
+        (pattern_pin
+          (identifier)
+          field: (identifier)
+          field: (index))))
+    (chain
+      (access
+        source: (parameter
+          field: (identifier)))
+      (bind_match
+        (pattern_pin
+          (parameter
+            field: (identifier))
+          field: (identifier))))
+    (chain
+      (integer)
+      (bind_match
+        (pattern_pin
+          (parameter))))))
+
+==================
 or-pattern
 ==================
 

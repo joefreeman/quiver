@@ -775,6 +775,32 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
     }
 }
 
+/// Collect every pin target in a pattern (`&name`, `&$x.y`) for language-server recording —
+/// the pattern's read references, the counterpart of `collect_binding_spans`' write sites.
+fn collect_pin_targets<'m>(pattern: &'m ast::Match, out: &mut Vec<&'m ast::PinTarget>) {
+    match pattern {
+        ast::Match::Reference(target) => out.push(target),
+        ast::Match::Tuple(tuple) => {
+            for field in &tuple.fields {
+                collect_pin_targets(&field.pattern, out);
+            }
+        }
+        ast::Match::Partial(partial) => {
+            for field in &partial.fields {
+                if let Some(nested) = &field.pattern {
+                    collect_pin_targets(nested, out);
+                }
+            }
+        }
+        ast::Match::Or(alternatives) => {
+            for alternative in alternatives {
+                collect_pin_targets(alternative, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Compile a program. `program` and `module_cache` are caller-owned and mutated in
     /// place — the caller keeps them after the call returns, whether it succeeds or fails.
@@ -2402,6 +2428,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // A binding site has no accessor path, so the label is just the name.
                     self.record_reference(Some(span), &name, name.clone(), type_id);
                 }
+            }
+
+            // Pin targets are the pattern's read references (`&name`, `&$x.y`): record each
+            // root and accessor so hover, references, and highlight see them exactly like the
+            // equivalent expression access. The pattern's own bindings aren't in scope yet,
+            // which is right — a pin only ever references pre-existing values.
+            let mut pin_targets = Vec::new();
+            collect_pin_targets(&pattern, &mut pin_targets);
+            for target in pin_targets {
+                self.record_pin_target(target);
             }
         }
 
@@ -4858,6 +4894,56 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             } else {
                 self.record_typed(Some(span), ty, SymbolKind::Field, Some(label));
             }
+        }
+    }
+
+    /// Record a pin pattern's components for the language server, mirroring
+    /// `record_access_components`: the root (a variable reference with go-to-definition, or
+    /// the parameter) and each accessor with the type after applying it. Called from the
+    /// pattern-recording chokepoint in `compile_match`, before the pattern's own bindings
+    /// enter scope — a pin references pre-existing values only.
+    fn record_pin_target(&mut self, target: &ast::PinTarget) {
+        if self.recorder.is_none() {
+            return;
+        }
+
+        let (base_type, base_name) = match &target.root {
+            ast::PinRoot::Variable(name) => {
+                let Some((ty, _)) = scopes::lookup_variable(&self.scopes, name, &[]) else {
+                    return;
+                };
+                self.record_reference(target.base_span.get(), name, name.clone(), ty);
+                (ty, name.clone())
+            }
+            ast::PinRoot::Parameter => {
+                let Ok((ty, _)) = scopes::get_function_parameter(&self.scopes) else {
+                    return;
+                };
+                self.record_typed(
+                    target.base_span.get(),
+                    ty,
+                    SymbolKind::Parameter,
+                    Some("$".to_string()),
+                );
+                (ty, "$".to_string())
+            }
+        };
+
+        for (i, accessor) in target.accessors.iter().enumerate() {
+            let Some(span) = target.accessor_spans.get(i).and_then(|s| s.get()) else {
+                continue;
+            };
+            let Ok(ty) = self.peek_accessor_type(base_type, &target.accessors[..=i], &base_name)
+            else {
+                continue;
+            };
+            let label = match accessor {
+                ast::AccessPath::Field(name) => name.clone(),
+                ast::AccessPath::Index(index) => index.to_string(),
+                // Pin targets carry no annotation steps.
+                ast::AccessPath::Annotation(..) => continue,
+            };
+            self.record_typed(Some(span), ty, SymbolKind::Field, Some(label));
         }
     }
 

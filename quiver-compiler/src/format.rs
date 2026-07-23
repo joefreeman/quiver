@@ -1332,7 +1332,28 @@ fn render_match(pattern: &Match) -> String {
         Match::Star(None) => "*".to_string(),
         Match::Star(Some(name)) => format!("{}*", name),
         Match::Placeholder => "_".to_string(),
-        Match::Reference(name, _) => format!("&{}", name),
+        Match::Reference(target) => {
+            let mut out = String::from("&");
+            // As in `render_access`, a first accessor on `$` is written dotless (`&$x`, `&$0`).
+            let dotless_first = matches!(target.root, PinRoot::Parameter);
+            match &target.root {
+                PinRoot::Variable(name) => out.push_str(name),
+                PinRoot::Parameter => out.push('$'),
+            }
+            for (index, accessor) in target.accessors.iter().enumerate() {
+                if !(index == 0 && dotless_first) {
+                    out.push('.');
+                }
+                match accessor {
+                    AccessPath::Field(field) => out.push_str(field),
+                    AccessPath::Index(value) => out.push_str(&value.to_string()),
+                    AccessPath::Annotation(..) => {
+                        unreachable!("pin targets have no annotation steps")
+                    }
+                }
+            }
+            out
+        }
         Match::Type(type_def) => render_match_type(type_def),
         Match::Or(alternatives) => format!(
             "({})",

@@ -139,6 +139,109 @@ fn test_pin_default_type() {
 }
 
 #[test]
+fn test_pin_variable_field_path() {
+    // A pin target may walk fields of an existing variable.
+    quiver()
+        .evaluate("p = Point[x: 1, y: 2]; 1 ~> =&p.x")
+        .expect("Ok");
+    quiver()
+        .evaluate("p = Point[x: 1, y: 2]; 2 ~> =&p.x")
+        .expect("[]");
+    quiver()
+        .evaluate("p = [a: [b: 7]]; 7 ~> =&p.a.b")
+        .expect("Ok");
+    quiver().evaluate("p = [3, 4]; 4 ~> =&p.1").expect("Ok");
+}
+
+#[test]
+fn test_pin_parameter() {
+    // `&$` pins the whole parameter; `&$x` / `&$0` pin its fields (glued sugar, as in `$x`).
+    quiver()
+        .evaluate("f = #'int { 5 ~> =&$ }; f 5")
+        .expect("Ok");
+    quiver()
+        .evaluate("f = #'int { 5 ~> =&$ }; f 6")
+        .expect("[]");
+    quiver()
+        .evaluate("f = #[x: 'int, y: 'int] { $y ~> =&$x }; f [x: 3, y: 3]")
+        .expect("Ok");
+    quiver()
+        .evaluate("f = #[x: 'int, y: 'int] { $y ~> =&$x }; f [x: 3, y: 4]")
+        .expect("[]");
+    quiver()
+        .evaluate("f = #['int, 'int] { $1 ~> =&$0 }; f [3, 3]")
+        .expect("Ok");
+    quiver()
+        .evaluate("f = #[p: [q: 'int]] { 9 ~> =&$p.q }; f [p: [q: 9]]")
+        .expect("Ok");
+}
+
+#[test]
+fn test_pin_path_in_tuple_pattern() {
+    // Path pins compose inside tuple patterns like plain pins.
+    quiver()
+        .evaluate(
+            "f = #[x: 'int, pair: ['int, 'int]] { $pair ~> =[&$x, b]; b }; f [x: 5, pair: [5, 9]]",
+        )
+        .expect("9");
+    quiver()
+        .evaluate(
+            "f = #[x: 'int, pair: ['int, 'int]] { $pair ~> =[&$x, b]; b }; f [x: 5, pair: [6, 9]]",
+        )
+        .expect("[]");
+    quiver()
+        .evaluate("p = [limit: 10]; [v: 10] ~> =(v: &p.limit)")
+        .expect("Ok");
+}
+
+#[test]
+fn test_pin_path_captured_in_closure() {
+    // A pin path rooted at an outer variable is captured like the equivalent expression access.
+    quiver()
+        .evaluate("p = [x: 42]; f = #'int { $ ~> =&p.x }; f 42")
+        .expect("Ok");
+    quiver()
+        .evaluate("p = [x: 42]; f = #'int { $ ~> =&p.x }; f 41")
+        .expect("[]");
+}
+
+#[test]
+fn test_pin_path_through_union_root() {
+    // The field sits at different positions across the union's members, so the pin's
+    // access step resolves by name at runtime.
+    let src = "'u = A[pad: 'int, x: 'int] | B[x: 'int];\n\
+               f = #'u { { 5 ~> =&$x => Yes | No } };\n\
+               [f A[pad: 0, x: 5], f B[x: 5], f B[x: 6]]";
+    quiver().evaluate(src).expect("[Yes, Yes, No]");
+}
+
+#[test]
+fn test_pin_path_in_alternation() {
+    // Path pins bind nothing, so alternatives stay balanced.
+    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =(&$x | &$y) => Yes | No } };\n\
+               [f [x: 3, y: 9], f [x: 9, y: 3], f [x: 9, y: 9]]";
+    quiver().evaluate(src).expect("[Yes, Yes, No]");
+}
+
+#[test]
+fn test_pin_path_unknown_field() {
+    // A pin path is resolved against the root's static type, so a missing field is a
+    // compile error, not a failed match.
+    quiver()
+        .evaluate("f = #[x: 'int] { 1 ~> =&$z }; f [x: 1]")
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "z".to_string(),
+            target: "$".to_string(),
+        });
+    quiver()
+        .evaluate("p = [x: 1]; 1 ~> =&p.z")
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "z".to_string(),
+            target: "p".to_string(),
+        });
+}
+
+#[test]
 fn test_or_pattern_no_bindings() {
     // `(p | q)` matches if either alternative matches; here neither binds anything.
     let src = r#"[[], 5] ~> { =([[], _] | [_, []]) => "nil" | "ok" }"#;

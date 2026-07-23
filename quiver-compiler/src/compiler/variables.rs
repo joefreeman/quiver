@@ -159,9 +159,13 @@ impl<'a> FreeVariableCollector<'a> {
 
     fn visit_match(&mut self, pattern: &ast::Match) {
         match pattern {
-            ast::Match::Reference(name, _) => {
-                // `&name` references an existing variable.
-                self.visit_identifier(name, vec![]);
+            ast::Match::Reference(target) => {
+                // `&name` / `&name.field` reference an existing variable (with its access path,
+                // so a closure captures exactly what expression accesses would). A `$`-rooted pin
+                // reads the enclosing parameter and captures nothing.
+                if let ast::PinRoot::Variable(name) = &target.root {
+                    self.visit_identifier(name, target.accessors.clone());
+                }
             }
             ast::Match::Tuple(tuple) => {
                 // Recursively visit fields in tuple patterns

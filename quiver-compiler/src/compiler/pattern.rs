@@ -8,7 +8,8 @@ use quiver_core::{
 };
 
 use super::{
-    Error, codegen::InstructionBuilder, narrowing::intersect_types, typing::union_type_ids,
+    Error, codegen::InstructionBuilder, narrowing::intersect_types, type_queries,
+    typing::union_type_ids,
 };
 
 // Type aliases for complex pattern matching types (using type IDs)
@@ -61,8 +62,24 @@ impl<'a> IdentifierScope<'a> {
 enum RuntimeCheck {
     TypeId(usize), // Type ID to check against
     Literal(ast::Literal),
-    Variable(String),
+    /// A pin (`&name`, `&name.field`, `&$x`): load the referenced value and compare. The
+    /// access steps are resolved against the root's static type at analysis; the root itself
+    /// is looked up again at codegen, like every variable reference.
+    Pin {
+        load: PinLoad,
+        steps: Vec<Access>,
+    },
     Path(AccessPath),
+}
+
+/// How a pin's root value is loaded at codegen.
+#[derive(Debug, Clone)]
+enum PinLoad {
+    /// A variable, with the accessors it resolved under — non-empty exactly when the whole
+    /// path resolved as a single pre-evaluated capture (in which case `steps` is empty).
+    Variable(String, Vec<ast::AccessPath>),
+    /// The enclosing function's parameter (`$`).
+    Parameter,
 }
 
 /// A requirement that must be satisfied for a pattern to match
@@ -91,6 +108,48 @@ fn emit_access(codegen: &mut InstructionBuilder, access: Access) {
         Access::Position(index) => Instruction::GetPositional(index),
         Access::Named(name) => Instruction::GetNamed(name),
     });
+}
+
+/// Resolve a pin target's accessors against the root's static type: how each step locates its
+/// field at runtime, and the type of the accessed value (which narrows the scrutinee).
+fn resolve_pin_steps(
+    program: &mut Program,
+    root_type_id: usize,
+    accessors: &[ast::AccessPath],
+    target_name: &str,
+) -> Result<(Vec<Access>, usize), Error> {
+    let mut current_type_id = root_type_id;
+    let mut steps = Vec::with_capacity(accessors.len());
+    for accessor in accessors {
+        let (access, field_types) = match accessor {
+            ast::AccessPath::Field(field_name) => {
+                let (access, field_types) = type_queries::get_field_by_name(
+                    program,
+                    current_type_id,
+                    field_name,
+                    target_name,
+                )?;
+                let access = match access {
+                    type_queries::FieldAccess::Position(index) => Access::Position(index),
+                    type_queries::FieldAccess::Named { name, .. } => Access::Named(name),
+                };
+                (access, field_types)
+            }
+            ast::AccessPath::Index(index) => {
+                let field_types = type_queries::get_field_at_index(
+                    program,
+                    current_type_id,
+                    *index,
+                    target_name,
+                )?;
+                (Access::Position(*index), field_types)
+            }
+            ast::AccessPath::Annotation(..) => unreachable!("pin targets have no annotation steps"),
+        };
+        steps.push(access);
+        current_type_id = union_type_ids(program, field_types);
+    }
+    Ok((steps, current_type_id))
 }
 
 /// Tracks information about identifiers encountered during pattern analysis
@@ -137,9 +196,7 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
         bs.requirements.iter().any(|req| {
             match &req.check {
                 // Value-based checks prevent complement narrowing
-                RuntimeCheck::Literal(_) | RuntimeCheck::Variable(_) | RuntimeCheck::Path(_) => {
-                    true
-                }
+                RuntimeCheck::Literal(_) | RuntimeCheck::Pin { .. } | RuntimeCheck::Path(_) => true,
                 // Concrete type checks — at any depth — are fine: `compute_complement` is
                 // structural over tuple fields (and sound on recursive types), so a failed inner
                 // check soundly refines the outer type. Partial checks remain an exception, as
@@ -268,13 +325,22 @@ pub fn generate_pattern_code(
                     }
                     codegen.add_instruction(Instruction::Equal(2));
                 }
-                RuntimeCheck::Variable(name) => {
+                RuntimeCheck::Pin { load, steps } => {
                     generate_value_access(codegen, &requirement.path);
-                    let (_var_type, var_index) = super::scopes::lookup_variable(scopes, name, &[])
-                        .ok_or_else(|| Error::InternalError {
-                            message: format!("Pin variable '{}' not found in scope", name),
-                        })?;
-                    codegen.add_instruction(Instruction::Load(var_index));
+                    let index = match load {
+                        PinLoad::Variable(name, accessors) => {
+                            super::scopes::lookup_variable(scopes, name, accessors)
+                                .ok_or_else(|| Error::InternalError {
+                                    message: format!("Pin variable '{}' not found in scope", name),
+                                })?
+                                .1
+                        }
+                        PinLoad::Parameter => super::scopes::get_function_parameter(scopes)?.1,
+                    };
+                    codegen.add_instruction(Instruction::Load(index));
+                    for &step in steps {
+                        emit_access(codegen, step);
+                    }
                     codegen.add_instruction(Instruction::Equal(2));
                 }
             }
@@ -444,23 +510,55 @@ fn analyze_match_pattern(
             }],
             value_type_id,
         )),
-        ast::Match::Reference(name, _) => {
-            // Pin pattern `&name`: check the value equals the value bound to `name` at runtime.
-            // `name` must reference a binding already in scope — if it isn't found it's undefined,
-            // e.g. a name bound by a *sibling* sub-pattern of the same compound pattern (`=[x, &x]`),
-            // which isn't visible yet.
-            let Some((var_type_id, _var_index)) = super::scopes::lookup_variable(scopes, name, &[])
-            else {
-                return Err(Error::VariableUndefined(name.clone()));
+        ast::Match::Reference(target) => {
+            // Pin pattern `&name` / `&name.field` / `&$x`: check the value equals the referenced
+            // value at runtime. A variable root must reference a binding already in scope — if it
+            // isn't found it's undefined, e.g. a name bound by a *sibling* sub-pattern of the same
+            // compound pattern (`=[x, &x]`), which isn't visible yet.
+            let accessors = &target.accessors;
+            let (load, steps, pinned_type_id) = match &target.root {
+                ast::PinRoot::Variable(name) => {
+                    // A captured access path materialises as a single pre-evaluated local;
+                    // prefer it, exactly as expression accesses do (`compile_member_access`).
+                    if !accessors.is_empty()
+                        && let Some((capture_type_id, _)) =
+                            super::scopes::lookup_variable(scopes, name, accessors)
+                    {
+                        (
+                            PinLoad::Variable(name.clone(), accessors.clone()),
+                            vec![],
+                            capture_type_id,
+                        )
+                    } else {
+                        let Some((base_type_id, _)) =
+                            super::scopes::lookup_variable(scopes, name, &[])
+                        else {
+                            return Err(Error::VariableUndefined(name.clone()));
+                        };
+                        let (steps, accessed_type_id) =
+                            resolve_pin_steps(program, base_type_id, accessors, name)?;
+                        (
+                            PinLoad::Variable(name.clone(), vec![]),
+                            steps,
+                            accessed_type_id,
+                        )
+                    }
+                }
+                ast::PinRoot::Parameter => {
+                    let (param_type_id, _) = super::scopes::get_function_parameter(scopes)?;
+                    let (steps, accessed_type_id) =
+                        resolve_pin_steps(program, param_type_id, accessors, "$")?;
+                    (PinLoad::Parameter, steps, accessed_type_id)
+                }
             };
 
             let requirements = vec![Requirement {
                 path,
-                check: RuntimeCheck::Variable(name.clone()),
+                check: RuntimeCheck::Pin { load, steps },
             }];
 
-            // Narrow the type by intersecting with the pinned variable's type.
-            let narrowed_type_id = intersect_types(value_type_id, var_type_id, program);
+            // Narrow the type by intersecting with the pinned value's type.
+            let narrowed_type_id = intersect_types(value_type_id, pinned_type_id, program);
 
             Ok((
                 vec![BindingSet {

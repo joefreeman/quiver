@@ -74,6 +74,7 @@
 (access field: (identifier) @property)
 (tail_call field: (identifier) @property)
 (parameter field: (identifier) @property)  ; the dotless sugar: `$name` ≡ `$.name`
+(pattern_pin field: (identifier) @property)  ; the path steps of `&p.x` / `&$x.q`
 
 ; ---------------------------------------------------------------- annotations
 

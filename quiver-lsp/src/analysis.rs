@@ -546,6 +546,71 @@ mod tests {
     }
 
     #[test]
+    fn pin_pattern_resolves_to_the_binding() {
+        // A pattern pin (`=&x`) is a read reference: go-to-definition resolves it to the
+        // binding, and references from the binding include the pin — which is exactly what
+        // document-highlight renders (the binding as WRITE, the pin as READ).
+        let text = "x = 5\n5 ~> =&x";
+        let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
+        let semantics = analysis.semantics.expect("semantics");
+        let pin_offset = text.rfind('x').unwrap();
+
+        let def = semantics
+            .local_definition_at(pin_offset)
+            .expect("definition");
+        assert_eq!(def.offset, 0);
+        let refs = semantics.local_references(0, true);
+        assert!(
+            refs.iter().any(|span| span.offset == pin_offset),
+            "references from the binding include the pin: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn pin_path_components_resolve_separately() {
+        // In `&p.x` the root and the accessor are recorded separately, as in an expression
+        // access: `p` resolves to its binding, `.x` hovers as a field with its own type.
+        let text = "p = [x: 42]\n42 ~> =&p.x";
+        let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
+        let semantics = analysis.semantics.expect("semantics");
+        let root_offset = text.rfind("p.x").unwrap();
+        let field_offset = root_offset + 2;
+
+        // The root is a reference to the binding — highlight groups it with `p`'s other uses.
+        assert_eq!(
+            semantics
+                .local_definition_at(root_offset)
+                .map(|def| def.offset),
+            Some(0)
+        );
+        // The accessor records its own field entry (hover), not a reference to `p`.
+        let info = semantics.at_offset(field_offset).expect("field entry");
+        assert_eq!(info.kind, quiver_compiler::recorder::SymbolKind::Field);
+        assert_eq!(info.label.as_deref(), Some("x"));
+        assert_eq!(semantics.local_definition_at(field_offset), None);
+    }
+
+    #[test]
+    fn parameter_pin_components_are_hoverable() {
+        // In `&$x` the `$` hovers as the parameter and `x` as a field, as in `$x` accesses.
+        let text = "f = #[x: 'int, y: 'int] { $y ~> =&$x }";
+        let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
+        let semantics = analysis.semantics.expect("semantics");
+        let dollar_offset = text.rfind("&$").unwrap() + 1;
+        let field_offset = dollar_offset + 1;
+
+        let dollar = semantics.at_offset(dollar_offset).expect("parameter entry");
+        assert_eq!(
+            dollar.kind,
+            quiver_compiler::recorder::SymbolKind::Parameter
+        );
+        assert_eq!(dollar.label.as_deref(), Some("$"));
+        let field = semantics.at_offset(field_offset).expect("field entry");
+        assert_eq!(field.kind, quiver_compiler::recorder::SymbolKind::Field);
+        assert_eq!(field.label.as_deref(), Some("x"));
+    }
+
+    #[test]
     fn import_references_match_a_member_across_a_file() {
         use quiver_compiler::PackageResolver;
 

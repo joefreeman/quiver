@@ -331,6 +331,27 @@ pub struct PartialPattern {
     pub fields: Vec<PartialPatternField>,
 }
 
+/// The root of a pin pattern's target: an existing variable, or the enclosing function's
+/// parameter (`$`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PinRoot {
+    Variable(String),
+    Parameter,
+}
+
+/// A pin pattern's target: an access path rooted at a variable or the enclosing function's
+/// parameter (`&name.field`, `&$x.0`). `accessor_spans` parallels `accessors` and `base_span`
+/// covers the root — as in `Access` — so the language server can hover/navigate each component
+/// separately; `span` covers the whole target after the `&`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PinTarget {
+    pub root: PinRoot,
+    pub accessors: Vec<AccessPath>,
+    pub accessor_spans: Vec<Spanned>,
+    pub base_span: Spanned,
+    pub span: Spanned,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Match {
     /// A binding identifier (`x` in `[x, y] = ...` or `~> =x`). The span covers the
@@ -347,9 +368,11 @@ pub enum Match {
     /// requires the value to be named, mirroring a named partial pattern.
     Star(Option<String>),
     Placeholder,
-    /// A pin against an existing binding: `&name` matches only if the value equals the value
-    /// currently bound to `name`. The `Spanned` covers the `name` (for go-to-definition).
-    Reference(String, Spanned),
+    /// A pin against an existing value: `&name`, `&name.field`, `&$`, `&$x.0` — matches only
+    /// if the value equals the referenced value. The target is an access path rooted at a
+    /// variable or the enclosing function's parameter (with the parameter's usual glued first
+    /// accessor, as in `$x`); annotation accessors are not part of a pin target.
+    Reference(PinTarget),
     Type(Type),
     /// An alternation of patterns (`(p | q | …)`): matches if any alternative matches. Every
     /// alternative must bind the same set of variables (so the body sees them regardless of which

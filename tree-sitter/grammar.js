@@ -588,7 +588,15 @@ module.exports = grammar({
       $.identifier,
     ),
 
-    pattern_pin: $ => seq('&', $.identifier),
+    // A pin: `&` + an access path rooted at a variable (`&x`, `&x.y.0`) or the parameter
+    // (`&$`, `&$x`, `&$0.y` — the parameter rule carries the glued first-accessor sugar).
+    // Field/index steps only: a pin compares by value, so annotation retrieval has no
+    // place in its target.
+    pattern_pin: $ => prec.right(seq(
+      '&',
+      choice($.identifier, $.parameter),
+      repeat(seq('.', field('field', choice($.identifier, $.index)))),
+    )),
 
     // A type-ascribed binding: a *parenthesised type* immediately followed by a binding
     // identifier — `('int)x`, `('int | 'bin)v`. Asserts the value's type and binds the whole

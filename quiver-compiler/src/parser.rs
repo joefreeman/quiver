@@ -1075,6 +1075,39 @@ fn literal(input: Span) -> IResult<Span, Literal> {
 
 // Pattern parsers for terms
 
+/// Parse a pin pattern: `&` followed by an access path rooted at an existing variable
+/// (`&x`, `&x.y.0`) or the function parameter (`&$`, `&$x`, `&$0.y` — a single accessor may
+/// be glued to the `$`, as usual). Only field/index accessors: a pin compares by value, so
+/// annotation retrieval has no place in its target.
+fn pin_pattern(input: Span) -> IResult<Span, Match> {
+    let (input, _) = char('&')(input)?;
+    let start = input;
+    let (after_root, root) = alt((
+        map(char('$'), |_| PinRoot::Parameter),
+        map(identifier, PinRoot::Variable),
+    ))(input)?;
+    // The base span covers just the root (`p` / `$`), before any accessors.
+    let base_span = span_between(start, after_root);
+    // `$foo` / `$0` sugar: with a parameter root a single accessor may follow with no dot.
+    let (after_root, leading) = if root == PinRoot::Parameter {
+        opt(accessor)(after_root)?
+    } else {
+        (after_root, None)
+    };
+    let (rest, dotted) = many0(preceded(char('.'), accessor))(after_root)?;
+    let (accessors, accessor_spans): (Vec<_>, Vec<_>) = leading.into_iter().chain(dotted).unzip();
+    Ok((
+        rest,
+        Match::Reference(PinTarget {
+            root,
+            accessors,
+            accessor_spans,
+            base_span: Spanned(Some(base_span)),
+            span: Spanned(Some(span_between(start, rest))),
+        }),
+    ))
+}
+
 /// Parse a star pattern, which binds all named fields: bare `*`, or `Name*` which
 /// additionally requires the matched value to carry that tuple name.
 fn star_pattern(input: Span) -> IResult<Span, Match> {
@@ -1092,10 +1125,8 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
     // We use a limited pattern parser here to avoid left recursion
     fn nested_pattern(input: Span) -> IResult<Span, Match> {
         alt((
-            // Variable pin with & prefix
-            map(preceded(char('&'), spanned(identifier)), |(span, name)| {
-                Match::Reference(name, Spanned(Some(span)))
-            }),
+            // Pin with & prefix (a variable- or `$`-rooted access path)
+            pin_pattern,
             // String literal
             match_string,
             // Star (optionally named) and placeholder. Before `match_tuple` so `Name*` isn't
@@ -2403,10 +2434,8 @@ fn as_pattern(input: Span) -> IResult<Span, Match> {
 
 fn match_pattern(input: Span) -> IResult<Span, Match> {
     alt((
-        // Variable pin with & prefix: &name checks against an existing variable's value.
-        map(preceded(char('&'), spanned(identifier)), |(span, name)| {
-            Match::Reference(name, Spanned(Some(span)))
-        }),
+        // Pin with & prefix: a variable- or `$`-rooted access path to check the value against.
+        pin_pattern,
         // Try string literals first (before tuples and literals)
         match_string,
         // Star (optionally named): `*` or `Name*`. Before match_tuple so `Name*` isn't

@@ -729,9 +729,14 @@ fn walk_access_spans(access: &mut ast::Access, f: &mut impl FnMut(&mut ast::Span
 
 fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spanned)) {
     match pattern {
-        ast::Match::Identifier(_, span)
-        | ast::Match::Reference(_, span)
-        | ast::Match::As(_, _, span) => f(span),
+        ast::Match::Identifier(_, span) | ast::Match::As(_, _, span) => f(span),
+        ast::Match::Reference(target) => {
+            for span in &mut target.accessor_spans {
+                f(span);
+            }
+            f(&mut target.base_span);
+            f(&mut target.span);
+        }
         ast::Match::Literal(_)
         | ast::Match::String(_, _)
         | ast::Match::Star(_)
