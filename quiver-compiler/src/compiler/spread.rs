@@ -69,6 +69,81 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
     }
 }
 
+/// Emit the loads for a sourced spread (`...a.b`, `...$conn`, `...$$x`, `...~.f`) and answer
+/// its type. Mirrors ordinary access compilation: identifier paths resolve through captures,
+/// outer parameters through their capture locals, ripples off the flowing value. Also records
+/// the source's components for the language server, exactly as an expression access would.
+fn compile_spread_source<E: quiver_core::effects::Effect>(
+    compiler: &mut Compiler<'_, E>,
+    access: &ast::Access,
+    ripple_context: Option<&RippleContext>,
+    stack_size: usize,
+) -> Result<usize, Error> {
+    let type_id = match &access.source {
+        Some(ast::AccessSource::Identifier(name)) => {
+            let (type_id, _) = compiler.compile_member_access(name, access.accessors.clone())?;
+            type_id
+        }
+        Some(ast::AccessSource::Parameter { depth: 0 }) => {
+            let (param_type, param_local) =
+                super::scopes::get_function_parameter(&compiler.scopes)?;
+            compiler
+                .codegen
+                .add_instruction(Instruction::Load(param_local));
+            let (type_id, _) = compiler.compile_accessor(
+                param_type,
+                access.accessors.clone(),
+                "$",
+                Provenance::Unknown,
+            )?;
+            type_id
+        }
+        Some(ast::AccessSource::Parameter { depth }) => {
+            // An outer parameter is this function's capture, a local named by its sigil run.
+            let name = super::variables::CaptureSource::OuterParameter(*depth).scope_name();
+            if super::scopes::lookup_variable(&compiler.scopes, &name, &access.accessors)
+                .or_else(|| super::scopes::lookup_variable(&compiler.scopes, &name, &[]))
+                .is_none()
+            {
+                return Err(Error::ParameterDepthExceeded {
+                    written: ast::parameter_sigils(*depth),
+                });
+            }
+            let (type_id, _) = compiler.compile_member_access(&name, access.accessors.clone())?;
+            type_id
+        }
+        Some(ast::AccessSource::Ripple) => {
+            let ctx = ripple_context.ok_or_else(|| {
+                Error::FeatureUnsupported(
+                    "Chained spread (...~) requires a piped value".to_string(),
+                )
+            })?;
+            compiler
+                .codegen
+                .add_instruction(Instruction::Pick(ctx.stack_offset + stack_size));
+            let (type_id, _) = compiler.compile_accessor(
+                ctx.value_type_id,
+                access.accessors.clone(),
+                "~",
+                Provenance::Unknown,
+            )?;
+            type_id
+        }
+        _ => unreachable!("parser restricts spread sources"),
+    };
+
+    let accessor_spans: Vec<Option<crate::parser::SourceSpan>> =
+        access.accessor_spans.iter().map(|s| s.get()).collect();
+    compiler.record_access_components(
+        &access.source,
+        &access.accessors,
+        access.base_span.get(),
+        &accessor_spans,
+        ripple_context.map(|c| c.value_type_id),
+    );
+    Ok(type_id)
+}
+
 /// Compile all field values and spread sources, returning compiled values and stack size
 fn compile_field_values<E: quiver_core::effects::Effect>(
     compiler: &mut Compiler<'_, E>,
@@ -104,15 +179,8 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
             }
             ast::FieldValue::Spread(spread_source) => {
                 let spread_type_id = match spread_source {
-                    Some(id) => {
-                        // Named spread: ...identifier
-                        let (var_type_id, var_index) =
-                            super::scopes::lookup_variable(&compiler.scopes, id, &[])
-                                .ok_or_else(|| Error::VariableUndefined(id.clone()))?;
-                        compiler
-                            .codegen
-                            .add_instruction(Instruction::Load(var_index));
-                        var_type_id
+                    Some(access) => {
+                        compile_spread_source(compiler, access, ripple_context, stack_size)?
                     }
                     None => {
                         // Bare spread: ...

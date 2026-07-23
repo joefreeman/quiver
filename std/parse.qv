@@ -48,7 +48,7 @@ fail = #[(offset): 'int, (message): Str['bin]] {
 // The byte at the state's position, or nil at end of input.
 peek = #' { __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] }
 
-advance = #[(st): ', (n): 'int] { $st ~> ~[..., pos: __integer_add__ [$st.pos, $n]] }
+advance = #[(st): ', (n): 'int] { $st[..., pos: __integer_add__ [$st.pos, $n]] }
 
 rev = #<'t>[(items): 'items<'t>, (acc): 'items<'t>] {
   $items ~> {
@@ -123,10 +123,7 @@ tw_end = #<'t>[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<'t>] {
 take_while = #<'t>'pred<'t> {
   :doc "A parser for the longest (possibly empty) run of bytes satisfying the predicate, as a slice."
   =pred
-  #' {
-    end = tw_end [$data, $pos, $len, &pred]
-    [%bin.slice [$data, $pos, end], $ ~> ~[..., pos: end]]
-  }
+  #' { end = tw_end [$data, $pos, $len, &pred]; [%bin.slice [$data, $pos, end], $[..., pos: end]] }
 }
 
 digit_val = #'int {
@@ -193,7 +190,7 @@ ident = #' {
       33,
     ]
 
-    [%bin.slice [$data, $pos, end] ~> Str[~], $ ~> ~[..., pos: end]]
+    [%bin.slice [$data, $pos, end] ~> Str[~], $[..., pos: end]]
   }
   | fail_in [$, "a name"]
 }
@@ -235,7 +232,7 @@ quoted = #' {
   | peek $ ~> =34 => {
     qstr_loop [$data, __integer_add__ [$pos, 1], $len, 0x]
     =(bytes, end)
-    [Str[bytes], $ ~> ~[..., pos: end]]
+    [Str[bytes], $[..., pos: end]]
   }
   | fail_in [$, "a string"]
 }
@@ -299,7 +296,7 @@ alt2 = #<'t>['p<'t>, 'p<'t>] {
       | {
         r2 = q $
         {
-          | r2 ~> =[v, st] => [v, st ~> ~[..., err: further [r:('perr)error, st.err]]]
+          | r2 ~> =[v, st] => [v, st[..., err: further [r:('perr)error, st.err]]]
           | e = further [r:('perr)error, r2:('perr)error]
             {
               | e ~> =('perr)x => [] ~> { :error x }
@@ -330,7 +327,7 @@ many_run = #<'t>[(p): 'p<'t>, (st): ', (acc): 'items<'t>] {
       | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [&$p, st2, Cons[v, $acc]]
       | [rev [$acc, Nil], st2]
     }
-    | [rev [$acc, Nil], $st ~> ~[..., err: further [r:('perr)error, $st.err]]]
+    | [rev [$acc, Nil], $st[..., err: further [r:('perr)error, $st.err]]]
   }
 }
 
@@ -354,10 +351,10 @@ sep_run = #<'t, 's>[(p): 'p<'t>, (sep): 'p<'s>, (st): ', (acc): 'items<'t>] {
         }
         // Backtracking over the separator: stash the element's failure — it's the
         // furthest this path got.
-        | [rev [$acc, Nil], $st ~> ~[..., err: further [r2:('perr)error, $st.err]]]
+        | [rev [$acc, Nil], $st[..., err: further [r2:('perr)error, $st.err]]]
       }
     }
-    | [rev [$acc, Nil], $st ~> ~[..., err: further [r:('perr)error, $st.err]]]
+    | [rev [$acc, Nil], $st[..., err: further [r:('perr)error, $st.err]]]
   }
 }
 
@@ -371,7 +368,7 @@ sep_by = #<'t, 's>['p<'t>, 'p<'s>] {
     r = p $
     {
       | r ~> =[v, st1] => sep_run [&p, &sep, st1, Cons[v, Nil]]
-      | [Nil, $ ~> ~[..., err: further [r:('perr)error, $err]]]
+      | [Nil, $[..., err: further [r:('perr)error, $err]]]
     }
   }
 }
@@ -384,7 +381,7 @@ opt = #<'t>'p<'t> {
     r = p $
     {
       | r ~> =[v, st] => [Some[v], st]
-      | [None, $ ~> ~[..., err: further [r:('perr)error, $err]]]
+      | [None, $[..., err: further [r:('perr)error, $err]]]
     }
   }
 }
@@ -425,7 +422,7 @@ chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
         | [$lhs, $st]
       }
     }
-    | [$lhs, $st ~> ~[..., err: further [r:('perr)error, $st.err]]]
+    | [$lhs, $st[..., err: further [r:('perr)error, $st.err]]]
   }
 }
 

@@ -87,7 +87,7 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
             | plain [500, "Internal Server Error"]
           }
           resp2 = {
-            | req.method ~> =HEAD => resp ~> ~[
+            | req.method ~> =HEAD => resp[
               ...,
               headers: %list.prepend [
                 resp.headers,

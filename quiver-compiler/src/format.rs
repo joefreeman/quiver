@@ -566,12 +566,28 @@ fn escape_single_line_text(text: &str) -> String {
 }
 
 fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
+    // A sourced spread-update re-parses via its source head (`a[..., y]`, `$conn[..., y]`),
+    // with the head's own spread elided back to `...`. The `~`-headed form remains for
+    // flowing-value updates — and whenever a later bare `...` sits among the fields, which
+    // only the `~` head leaves un-rewritten on re-parse.
+    let mut elide_first_spread = false;
     let name = match &tuple.name {
         TupleName::Anonymous => String::new(),
         TupleName::Named(name) if tuple.fields.is_empty() => return pretty::text(name.clone()),
         TupleName::Named(name) => name.clone(),
-        // An inherited spread-update always re-parses via the `~`-headed form.
-        TupleName::Inherit => "~".to_string(),
+        TupleName::Inherit => match tuple.fields.first() {
+            Some(TupleField {
+                value: FieldValue::Spread(Some(access)),
+                ..
+            }) if !tuple.fields[1..]
+                .iter()
+                .any(|f| matches!(f.value, FieldValue::Spread(None))) =>
+            {
+                elide_first_spread = true;
+                render_access(access)
+            }
+            _ => "~".to_string(),
+        },
     };
     if tuple.fields.is_empty() {
         return pretty::text(format!("{}[]", name));
@@ -583,7 +599,14 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
         tuple
             .fields
             .iter()
-            .map(|field| field_doc(trivia, field))
+            .enumerate()
+            .map(|(index, field)| {
+                if index == 0 && elide_first_spread {
+                    pretty::text("...")
+                } else {
+                    field_doc(trivia, field)
+                }
+            })
             .collect(),
         true,
     )
@@ -670,7 +693,7 @@ fn protect_trailing_spaces(line: String) -> String {
 fn field_doc(trivia: &Trivia, field: &TupleField) -> Doc {
     let value = match &field.value {
         FieldValue::Spread(None) => pretty::text("..."),
-        FieldValue::Spread(Some(name)) => pretty::text(format!("...{}", name)),
+        FieldValue::Spread(Some(access)) => pretty::text(format!("...{}", render_access(access))),
         FieldValue::Chain(chain) => match &field.name {
             Some(name) => pretty::concat(vec![
                 pretty::text(format!("{}: ", name)),

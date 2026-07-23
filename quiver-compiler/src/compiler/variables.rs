@@ -96,11 +96,10 @@ impl<'a> FreeVariableCollector<'a> {
                 for field in &tuple.fields {
                     match &field.value {
                         ast::FieldValue::Chain(chain) => self.visit_chain(chain),
-                        // A named spread (`...a`, including the `a` of an `a[..., y]` spread-
-                        // update) references the variable `a`, so a closure must capture it.
-                        ast::FieldValue::Spread(Some(name)) => {
-                            self.visit_identifier(name, vec![], ast::Spanned::default())
-                        }
+                        // A sourced spread (`...a.b`, `...$$conn`, including the source of an
+                        // `a[..., y]` spread-update) reads its access, so a closure captures
+                        // exactly what the equivalent expression access would.
+                        ast::FieldValue::Spread(Some(access)) => self.visit_access_capture(access),
                         // A bare spread (`...`) is the chained value, not a variable.
                         ast::FieldValue::Spread(None) => {}
                     }

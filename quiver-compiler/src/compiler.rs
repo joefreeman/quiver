@@ -255,7 +255,13 @@ fn term_references_parameter(term: &ast::Term) -> bool {
         }
         ast::Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
             ast::FieldValue::Chain(c) => chain(c),
-            ast::FieldValue::Spread(_) => false,
+            // A sourced spread reads its access: `...$k` is an own-parameter read.
+            ast::FieldValue::Spread(source) => source.as_ref().is_some_and(|access| {
+                matches!(
+                    access.source,
+                    Some(ast::AccessSource::Parameter { depth: 0 })
+                )
+            }),
         }),
         ast::Term::String(_, segments) => segments.iter().any(|segment| match segment {
             ast::StrSegment::Hole(expression) => expression_references_parameter(expression),
@@ -1337,10 +1343,49 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Resolve the name a name-inheriting spread (`~[...]`, `a[...]`) takes from its first
-    /// spread's source: the variable's tuple type for `...a`, or the flowing value's for `...`.
+    /// The static type of a spread source access, resolved without emitting code: through a
+    /// capture where the whole path is one, else the base plus an accessor walk. Ripple
+    /// sources read the flowing value's type.
+    fn peek_spread_source_type(
+        &mut self,
+        access: &ast::Access,
+        ripple_context: Option<&RippleContext>,
+    ) -> Option<usize> {
+        match &access.source {
+            Some(ast::AccessSource::Identifier(name)) => {
+                scopes::lookup_variable(&self.scopes, name, &access.accessors)
+                    .map(|(ty, _)| ty)
+                    .or_else(|| {
+                        let (base, _) = scopes::lookup_variable(&self.scopes, name, &[])?;
+                        self.peek_accessor_type(base, &access.accessors, name).ok()
+                    })
+            }
+            Some(ast::AccessSource::Parameter { depth: 0 }) => {
+                let (base, _) = scopes::get_function_parameter(&self.scopes).ok()?;
+                self.peek_accessor_type(base, &access.accessors, "$").ok()
+            }
+            Some(ast::AccessSource::Parameter { depth }) => {
+                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
+                scopes::lookup_variable(&self.scopes, &name, &access.accessors)
+                    .map(|(ty, _)| ty)
+                    .or_else(|| {
+                        let (base, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
+                        self.peek_accessor_type(base, &access.accessors, &name).ok()
+                    })
+            }
+            Some(ast::AccessSource::Ripple) => {
+                let base = ripple_context?.value_type_id;
+                self.peek_accessor_type(base, &access.accessors, "~").ok()
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve the name a name-inheriting spread (`~[...]`, `a[...]`, `$conn[...]`) takes from
+    /// its first spread's source: the source access's tuple type, or the flowing value's for
+    /// a bare `...`.
     fn inherited_spread_name(
-        &self,
+        &mut self,
         fields: &[ast::TupleField],
         ripple_context: Option<&RippleContext>,
     ) -> Option<String> {
@@ -1349,7 +1394,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             _ => None,
         })?;
         let source_type = match source {
-            Some(var) => scopes::lookup_variable(&self.scopes, var, &[]).map(|(ty, _)| ty)?,
+            Some(access) => {
+                let access = access.clone();
+                self.peek_spread_source_type(&access, ripple_context)?
+            }
             None => ripple_context?.value_type_id,
         };
         // The source may be a union — e.g. an ascribed response alongside a fallback,

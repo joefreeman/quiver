@@ -383,7 +383,7 @@ d_term = #'%meta.cb {
     cb [st.data, st.pos] ~> {
       | =('int)end => [
         Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-        st ~> ~[..., pos: end],
+        st[..., pos: end],
       ]
       | %parse.fail [st.pos, "an expression"]
     }

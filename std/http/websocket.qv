@@ -169,7 +169,7 @@ wrap_message = #['int, 'bin] { $0 ~> =1 => Text[Str[$1]] | Binary[$1] }
 fail = #[(conn): ', (code): 'int, (reason): '%str] {
   __tcp_socket_write__ [$conn.sock, close_payload [$code, $reason] ~> encode_frame [8, ~]]
   __tcp_socket_close__ $conn.sock
-  [Close[code: $code, reason: $reason], $conn ~> ~[..., buf: 0x, part: Nil]]
+  [Close[code: $code, reason: $reason], $conn[..., buf: 0x, part: Nil]]
 }
 
 recv = #' {
@@ -183,22 +183,23 @@ recv = #' {
           // The peer vanished without a Close: abnormal closure (1006 is never on
           // the wire — it names the absence of a close handshake).
           __tcp_socket_close__ $sock
-          [Close[code: 1006, reason: ""], $ ~> ~[..., buf: 0x, part: Nil]]
+          [Close[code: 1006, reason: ""], $[..., buf: 0x, part: Nil]]
         }
-        | $ ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^
+        | {
+          $
+          ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^
+        }
       }
     }
     | =Bad[r] => fail [$ ~> Conn[..., buf: 0x, part: Nil], 1002, r]
     | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
-      | op ~> =9 => {
-        __tcp_socket_write__ [$sock, encode_frame [10, p]]; $ ~> ~[..., buf: rest] ~> ^
-      }
-      | op ~> =10 => $ ~> ~[..., buf: rest] ~> ^
+      | op ~> =9 => { __tcp_socket_write__ [$sock, encode_frame [10, p]]; ^ $[..., buf: rest] }
+      | op ~> =10 => ^ $[..., buf: rest]
       | op ~> =8 => {
         close_info p ~> =(code, reason)
         __tcp_socket_write__ [$sock, encode_frame [8, p]]
         __tcp_socket_close__ $sock
-        [Close[code: code, reason: reason], $ ~> ~[..., buf: rest, part: Nil]]
+        [Close[code: code, reason: reason], $[..., buf: rest, part: Nil]]
       }
       | op ~> =0 => $part ~> {
         | =Part[opcode: o, data: d] => {
@@ -207,21 +208,21 @@ recv = #' {
             | __integer_compare__ [
                 %bin.length joined,
                 max_payload,
-              ] ~> =1 => $ ~> ~[..., buf: 0x, part: Nil] ~> fail [~, 1009, "message too big"]
-            | fin ~> =0 => $ ~> ~[..., buf: rest, part: Part[opcode: o, data: joined]] ~> ^
-            | [wrap_message [o, joined], $ ~> ~[..., buf: rest, part: Nil]]
+              ] ~> =1 => $[..., buf: 0x, part: Nil] ~> fail [~, 1009, "message too big"]
+            | fin ~> =0 => ^ $[..., buf: rest, part: Part[opcode: o, data: joined]]
+            | [wrap_message [o, joined], $[..., buf: rest, part: Nil]]
           }
         }
-        | $ ~> ~[..., buf: 0x, part: Nil] ~> fail [~, 1002, "unexpected continuation"]
+        | $[..., buf: 0x, part: Nil] ~> fail [~, 1002, "unexpected continuation"]
       }
       | $part ~> {
         | =Part[opcode: _, data: _] => fail [
-          $ ~> ~[..., buf: 0x, part: Nil],
+          $[..., buf: 0x, part: Nil],
           1002,
           "interleaved data frame",
         ]
-        | fin ~> =0 => $ ~> ~[..., buf: rest, part: Part[opcode: op, data: p]] ~> ^
-        | [wrap_message [op, p], $ ~> ~[..., buf: rest, part: Nil]]
+        | fin ~> =0 => ^ $[..., buf: rest, part: Part[opcode: op, data: p]]
+        | [wrap_message [op, p], $[..., buf: rest, part: Nil]]
       }
     }
   }

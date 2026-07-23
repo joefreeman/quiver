@@ -122,6 +122,48 @@ a[..., y: 3]
             (integer)))))))
 
 ==================
+sourced spreads
+==================
+
+$conn[..., buf: 9]
+a.inner[..., y: 5]
+B[...$c.q, y: 3]
+
+---
+
+(source_file
+  (expression
+    (chain
+      (spread_update
+        source: (parameter
+          field: (identifier))
+        (spread)
+        (named_field
+          name: (identifier)
+          (chain
+            (integer)))))
+    (chain
+      (spread_update
+        source: (identifier)
+        field: (identifier)
+        (spread)
+        (named_field
+          name: (identifier)
+          (chain
+            (integer)))))
+    (chain
+      (tuple
+        name: (tuple_name)
+        (spread
+          source: (parameter
+            field: (identifier))
+          field: (identifier))
+        (named_field
+          name: (identifier)
+          (chain
+            (integer)))))))
+
+==================
 ripple
 ==================
 

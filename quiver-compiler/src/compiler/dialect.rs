@@ -658,7 +658,8 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
                 f(&mut field.span);
                 match &mut field.value {
                     ast::FieldValue::Chain(chain) => walk_chain_spans(chain, f),
-                    ast::FieldValue::Spread(_) => {}
+                    ast::FieldValue::Spread(Some(access)) => walk_access_spans(access, f),
+                    ast::FieldValue::Spread(None) => {}
                 }
             }
         }

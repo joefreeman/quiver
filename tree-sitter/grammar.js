@@ -90,6 +90,9 @@ module.exports = grammar({
     // `&x` inside brackets may be a pinned pattern (`[&y, x]`) or a reference term
     // (`[&inc, 100]`).
     [$._access_source, $.pattern_pin],
+    // `~.f` / `a.b` / `$x.y` may be an ordinary access or the source path of a
+    // spread-update (`~.f[..., y]`); the glued `[` decides via GLR.
+    [$._access_source, $.spread_update],
     // A type atom may stand alone or be the first variant of a multi-line union; the
     // newline-then-`|` lookahead chooses (and likewise whether a trailing newline
     // extends the union or terminates the statement).
@@ -279,11 +282,14 @@ module.exports = grammar({
       $.access,
     ),
 
-    // Name-preserving spread-update: `a[..., y]` / `~[..., y]`. The bracket is adjacent (no
-    // space) and begins with a spread, distinguishing it from `a [..., y]` (two terms) and
-    // from a plain spread tuple `[...a, y]`. The result inherits the source tuple's name.
+    // Name-preserving spread-update: `a[..., y]` / `~[..., y]` / `$conn[..., y]`. The source
+    // is an access path — a variable path, a parameter or its fields (sigil runs included),
+    // or a ripple field. The bracket is adjacent (no space) and begins with a spread,
+    // distinguishing it from `a [..., y]` (two terms) and from a plain spread tuple
+    // `[...a, y]`. The result inherits the source tuple's name.
     spread_update: $ => seq(
-      field('source', choice($.ripple, $.identifier)),
+      field('source', choice($.ripple, $.identifier, $.parameter)),
+      repeat(seq('.', field('field', choice($.identifier, $.index)))),
       token.immediate('['), optional($._nl),
       $.spread,
       repeat(seq(optional($._nl), ',', optional($._nl), $._field)),
@@ -565,7 +571,12 @@ module.exports = grammar({
     ),
 
     named_field: $ => seq(field('name', $.identifier), ':', optional($._nl), $.chain),
-    spread: $ => seq('...', optional(field('source', $.identifier))),
+    // `...` (the flowing value), or a sourced `...a.b` / `...$conn` / `...~.f` — the same
+    // access-path sources as a spread-update's head, glued to the dots.
+    spread: $ => seq('...', optional(seq(
+      field('source', choice($.identifier, $.parameter, $.ripple)),
+      repeat(seq('.', field('field', choice($.identifier, $.index)))),
+    ))),
 
     // --------------------------------------------------------------------- patterns
 

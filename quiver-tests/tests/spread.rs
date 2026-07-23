@@ -251,3 +251,80 @@ fn test_name_inheriting_spread_over_union_source() {
         )
         .expect_type_mismatch();
 }
+
+// Sourced spreads: the spread's source may be an access path — a variable path (`a.b`),
+// a parameter or its fields (`$`, `$conn`, `$$x`), or a ripple field (`~.f`) — in both
+// the in-tuple form (`[...$c, y]`) and the name-preserving update (`$conn[..., y]`).
+
+#[test]
+fn test_spread_update_parameter_field() {
+    quiver()
+        .evaluate(
+            "f = #[conn: Conn[sock: 'int, buf: 'int]] { $conn[..., buf: 9] }; f [conn: Conn[sock: 1, buf: 2]]",
+        )
+        .expect("Conn[sock: 1, buf: 9]");
+}
+
+#[test]
+fn test_spread_update_whole_parameter() {
+    quiver()
+        .evaluate("f = #P[a: 'int, b: 'int] { $[..., b: 9] }; f P[a: 1, b: 2]")
+        .expect("P[a: 1, b: 9]");
+}
+
+#[test]
+fn test_spread_update_variable_path() {
+    quiver()
+        .evaluate("a = [inner: P[x: 1, y: 2]]; a.inner[..., y: 5]")
+        .expect("P[x: 1, y: 5]");
+}
+
+#[test]
+fn test_spread_update_ripple_field() {
+    // `~.f[..., y]` updates a field of the flowing value, keeping its name.
+    quiver()
+        .evaluate("[w: P[x: 1, y: 2]] ~> ~.w[..., y: 8]")
+        .expect("P[x: 1, y: 8]");
+}
+
+#[test]
+fn test_spread_update_outer_parameter() {
+    quiver()
+        .evaluate("f = #[c: P[x: 'int]] { g = #{ $$c[..., x: 9] }; g }; f [c: P[x: 1]]")
+        .expect("P[x: 9]");
+}
+
+#[test]
+fn test_sourced_spread_in_tuple() {
+    // The in-tuple form drops or renames the source's tuple name, as for `...a`.
+    quiver()
+        .evaluate("f = #[c: P[x: 'int]] { [...$c, extra: 7] }; f [c: P[x: 1]]")
+        .expect("[x: 1, extra: 7]");
+    quiver()
+        .evaluate("a = [q: [x: 1, y: 2]]; B[...a.q, y: 3]")
+        .expect("B[x: 1, y: 3]");
+    quiver()
+        .evaluate("[w: P[x: 1]] ~> [...~.w, y: 5]")
+        .expect("[x: 1, y: 5]");
+}
+
+#[test]
+fn test_spread_source_captured_path_in_closure() {
+    // A sourced spread in a closure captures its access path, like the expression would.
+    quiver()
+        .evaluate("p = [q: A[x: 1]]; f = #{ p.q[..., x: 2] }; f")
+        .expect("A[x: 2]");
+}
+
+#[test]
+fn test_spread_source_unknown_field_is_a_compile_error() {
+    quiver()
+        .evaluate("f = #[c: P[x: 'int]] { $c[..., y: 2] ~> .y }; f [c: P[x: 1]]")
+        .expect("2");
+    quiver()
+        .evaluate("a = [x: 1]; a.z[..., y: 2]")
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "z".to_string(),
+            target: "a".to_string(),
+        });
+}

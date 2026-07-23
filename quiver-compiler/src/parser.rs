@@ -1780,15 +1780,54 @@ fn access(input: Span) -> IResult<Span, Access> {
 /// Parse a name-preserving tuple spread-update: `~[..., y]` (spread the chained value) or
 /// `a[..., y]` (spread the variable `a`), each inheriting the source's tuple name. Produces a
 /// `Term::Tuple` — the spread-update that `Access` used to carry as an argument now lives here.
+/// A spread's source: an access restricted to variable (`a`, `a.b.0`), parameter (`$x`,
+/// `$$conn` — sigil runs, with the glued first-accessor sugar), or ripple (`~`, `~.f`)
+/// roots, with field/index steps only — no annotation retrieval, no type arguments.
+fn spread_source_access(input: Span) -> IResult<Span, Access> {
+    let start = input;
+    let (after_root, source) = alt((
+        map(take_while1(|c| c == '$'), |s: Span| {
+            AccessSource::Parameter {
+                depth: s.fragment().len() - 1,
+            }
+        }),
+        map(char('~'), |_| AccessSource::Ripple),
+        map(identifier, AccessSource::Identifier),
+    ))(input)?;
+    let base_span = span_between(start, after_root);
+    let (after_root, leading) = if matches!(source, AccessSource::Parameter { .. }) {
+        opt(accessor)(after_root)?
+    } else {
+        (after_root, None)
+    };
+    let (rest, dotted) = many0(preceded(char('.'), accessor))(after_root)?;
+    let (accessors, accessor_spans): (Vec<_>, Vec<_>) = leading.into_iter().chain(dotted).unzip();
+    Ok((
+        rest,
+        Access {
+            source: Some(source),
+            accessors,
+            accessor_spans,
+            type_arguments: vec![],
+            base_span: Spanned(Some(base_span)),
+            span: Spanned(Some(span_between(start, rest))),
+        },
+    ))
+}
+
 fn spread_update(input: Span) -> IResult<Span, Term> {
-    let (input, source) = alt((map(char('~'), |_| None::<String>), map(identifier, Some)))(input)?;
+    let (input, source) = spread_source_access(input)?;
     let (input, (bracket_span, mut fields)) = adjacent_spread_args(input)?;
-    // For `a[...]`, the bare spread `...` spreads `a`; rewrite it so the compiler loads from `a`.
-    // A `~` appearing in a *field value* is a chained-value ripple and is left untouched.
-    if let Some(name) = &source {
+    // For `a[...]` / `$conn[...]` / `~.f[...]`, the bare spread `...` spreads the source;
+    // rewrite it so the compiler loads through it. A bare-`~` source is the chained value —
+    // exactly what bare `...` already means — so it stays `None` (and a `~` appearing in a
+    // *field value* is likewise a chained-value ripple, left untouched).
+    let bare_ripple =
+        matches!(source.source, Some(AccessSource::Ripple)) && source.accessors.is_empty();
+    if !bare_ripple {
         for field in &mut fields {
             if matches!(field.value, FieldValue::Spread(None)) {
-                field.value = FieldValue::Spread(Some(name.clone()));
+                field.value = FieldValue::Spread(Some(source.clone()));
             }
         }
     }
@@ -2010,19 +2049,15 @@ fn tuple_field(input: Span) -> IResult<Span, TupleField> {
                 value: FieldValue::Chain(chain_value),
             },
         ),
-        // Spread with identifier: ...identifier
-        map(preceded(tag("..."), identifier), |id| TupleField {
-            name: None,
-            name_span: Spanned::default(),
-            span: Spanned::default(),
-            value: FieldValue::Spread(Some(id)),
-        }),
-        // Spread chained value: ...
-        map(tag("..."), |_| TupleField {
-            name: None,
-            name_span: Spanned::default(),
-            span: Spanned::default(),
-            value: FieldValue::Spread(None),
+        // Spread: bare `...` (the chained value), or a sourced `...a.b` / `...$conn` /
+        // `...$$x` / `...~.f` — an access glued to the dots.
+        map(preceded(tag("..."), opt(spread_source_access)), |source| {
+            TupleField {
+                name: None,
+                name_span: Spanned::default(),
+                span: Spanned::default(),
+                value: FieldValue::Spread(source),
+            }
         }),
         // Unnamed chain: chain
         map(chain, |chain_value| TupleField {

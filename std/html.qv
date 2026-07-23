@@ -254,7 +254,7 @@ attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
       {
         | lit_end [st.data, qstart, st.len] ~> =('int)endq => [
           Lit[Str[%bin.slice [st.data, qstart, endq]]],
-          st ~> ~[..., pos: __integer_add__ [endq, 1]],
+          st[..., pos: __integer_add__ [endq, 1]],
         ]
         | %parse.fail_in [st, "'\"' (unterminated attribute value)"]
       }
@@ -262,7 +262,7 @@ attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
     | peek_at st ~> =123 => $cb [st.data, st.pos] ~> {
       | =('int)end => [
         AHole[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-        st ~> ~[..., pos: end],
+        st[..., pos: end],
       ]
       | %parse.fail [st.pos, "an expression"]
     }
@@ -308,7 +308,7 @@ attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
               "'=' (an event attribute takes a '\{ … }' payload)",
             ]
           }
-          attr_value_p [&$cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
+          attr_value_p [&$cb, st3[..., pos: __integer_add__ [st3.pos, 1]]]
           =[v, st4]
           v ~> {
             | =AHole[offset: o, length: l] => ^ [
@@ -323,7 +323,7 @@ attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
           }
         }
         | peek_at st3 ~> =61 => {
-          attr_value_p [&$cb, st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]]
+          attr_value_p [&$cb, st3[..., pos: __integer_add__ [st3.pos, 1]]]
           =[v, st4]
           ^ [&$cb, st4, Cons[[stored, v], $acc]]
         }
@@ -373,7 +373,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
         | peek_at2 $state ~> =47 => [%list.reverse $acc, $state]
         | peek_at2 $state ~> =33 => {
           | at_comment? $state => comment_end [$state.data, __integer_add__ [$state.pos, 4], $state.len] ~> {
-            | =('int)after => ^ [&$self, &$cb, $state ~> ~[..., pos: after], $acc]
+            | =('int)after => ^ [&$self, &$cb, $state[..., pos: after], $acc]
             | %parse.fail [$state.pos, "'-->'"]
           }
           | %parse.fail [
@@ -383,7 +383,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
         }
         | {
           // An element: `<` tag attrs (`/>` | `>` children `</` tag `>`).
-          st1 = $state ~> ~[..., pos: __integer_add__ [$state.pos, 1]]
+          st1 = $state[..., pos: __integer_add__ [$state.pos, 1]]
           tag_name st1
           =[tag, st2]
           {
@@ -399,12 +399,12 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
             | peek_at st3 ~> =47 => {
               | peek_at2 st3 ~> =62 => [
                 PElem[tag: tag, attrs: alist, children: Nil],
-                st3 ~> ~[..., pos: __integer_add__ [st3.pos, 2]],
+                st3[..., pos: __integer_add__ [st3.pos, 2]],
               ]
               | %parse.fail_in [st3, "'/>'"]
             }
             | peek_at st3 ~> =62 => {
-              st4 = st3 ~> ~[..., pos: __integer_add__ [st3.pos, 1]]
+              st4 = st3[..., pos: __integer_add__ [st3.pos, 1]]
               {
                 | void? tag => [PElem[tag: tag, attrs: alist, children: Nil], st4]
                 | {
@@ -413,7 +413,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
                   kids = fkids ~> strip
                   {
                     | peek_at st5 ~> =60; peek_at2 st5 ~> =47 => {
-                      st6 = st5 ~> ~[..., pos: __integer_add__ [st5.pos, 2]]
+                      st6 = st5[..., pos: __integer_add__ [st5.pos, 2]]
                       tag_name st6
                       =[ctag, st7]
                       {
@@ -429,7 +429,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
                       {
                         | peek_at st8 ~> =62 => [
                           PElem[tag: tag, attrs: alist, children: kids],
-                          st8 ~> ~[..., pos: __integer_add__ [st8.pos, 1]],
+                          st8[..., pos: __integer_add__ [st8.pos, 1]],
                         ]
                         | %parse.fail_in [st8, "'>'"]
                       }
@@ -452,7 +452,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
       | b ~> =123 => $cb [$state.data, $state.pos] ~> {
         | =('int)end => {
           hole = PHole[offset: $state.pos, length: __integer_subtract__ [end, $state.pos]]
-          ^ [&$self, &$cb, $state ~> ~[..., pos: end], Cons[[hole, []], $acc]]
+          ^ [&$self, &$cb, $state[..., pos: end], Cons[[hole, []], $acc]]
         }
         | %parse.fail [$state.pos, "an expression"]
       }
@@ -460,7 +460,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
         end = text_end [$state.data, $state.pos, $state.len]
         bytes = %bin.slice [$state.data, $state.pos, end]
         ws = ws_only_from [bytes, 0]
-        ^ [&$self, &$cb, $state ~> ~[..., pos: end], Cons[[PText[bytes], ws], $acc]]
+        ^ [&$self, &$cb, $state[..., pos: end], Cons[[PText[bytes], ws], $acc]]
       }
     }
     | [%list.reverse $acc, $state]
@@ -542,7 +542,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
     | =Nil => $ist
     | =Cons[[Str[n], v], rest] => {
       ist2 = v ~> {
-        | =Lit[Str[lv]] => $ist ~> ~[
+        | =Lit[Str[lv]] => $ist[
           ...,
           cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [lv, 0, %bin.length lv, ~] ~> %bin.append [
             ~,
@@ -550,7 +550,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
             1,
           ],
         ]
-        | =Flag => $ist ~> ~[..., cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n]]
+        | =Flag => $ist[..., cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n]]
         | =AHole[offset: o, length: l] => {
           entry = Tuple[
             name: "Attr",
@@ -568,7 +568,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
               ],
             ],
           ]
-          $ist ~> ~[
+          $ist[
             ...,
             cur: 0x,
             runs: Cons[$ist.cur, $ist.runs],
@@ -593,7 +593,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
               ],
             ],
           ]
-          $ist ~> ~[
+          $ist[
             ...,
             cur: 0x,
             runs: Cons[$ist.cur, $ist.runs],
@@ -613,7 +613,7 @@ instrument_list = #[(self): #^ -> 'ist, (items): 'pnodes, (ist): 'ist] {
     | =Nil => $ist
     | =Cons[node, rest] => {
       ist2 = node ~> {
-        | =PText[b] => $ist ~> ~[..., cur: %bin.concat [$ist.cur, b]]
+        | =PText[b] => $ist[..., cur: %bin.concat [$ist.cur, b]]
         | =PHole[offset: o, length: l] => {
           i = %str.from_int $ist.ci ~> .0
           opened = %bin.concat [$ist.cur, "<!--q:" ~> .0] ~> %bin.concat [~, i] ~> %bin.concat [
@@ -627,7 +627,7 @@ instrument_list = #[(self): #^ -> 'ist, (items): 'pnodes, (ist): 'ist] {
               Nil,
             ],
           ]
-          $ist ~> ~[
+          $ist[
             ...,
             cur: %bin.concat ["<!--/q:" ~> .0, i] ~> %bin.concat [~, "-->" ~> .0],
             runs: Cons[opened, $ist.runs],
@@ -648,15 +648,15 @@ instrument_list = #[(self): #^ -> 'ist, (items): 'pnodes, (ist): 'ist] {
           }
           ist1 = instrument_attrs [
             alist,
-            $ist ~> ~[..., cur: opened, ei: __integer_add__ [e_ix, 1]],
+            $ist[..., cur: opened, ei: __integer_add__ [e_ix, 1]],
             e_ix,
           ]
-          ist2 = ist1 ~> ~[..., cur: %bin.append [ist1.cur, 62, 1]]
+          ist2 = ist1[..., cur: %bin.append [ist1.cur, 62, 1]]
           {
             | void? Str[t] => ist2
             | {
               ist3 = $self [&$self, kids, ist2]
-              ist3 ~> ~[
+              ist3[
                 ...,
                 cur: %bin.concat [ist3.cur, 0x3c2f] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1],
               ]

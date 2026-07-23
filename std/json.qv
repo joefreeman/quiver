@@ -158,7 +158,7 @@ number = #'%parse {
   =st0
   neg? = { peek_at st0 ~> =45 => Ok | [] }
   st1 = {
-    | neg? => st0 ~> ~[..., pos: %num.add [st0.pos, 1]]
+    | neg? => st0[..., pos: %num.add [st0.pos, 1]]
     | st0
   }
   sign = { neg? => -1 | 1 }
@@ -171,8 +171,7 @@ number = #'%parse {
 
   frac = {
     | peek_at st2 ~> =46 => {
-      st2
-      ~> ~[..., pos: %num.add [st2.pos, 1]] ~> digits
+      st2[..., pos: %num.add [st2.pos, 1]] ~> digits
       ~> =[fbb, st3a]
 
       {
@@ -186,10 +185,10 @@ number = #'%parse {
 
   ex = {
     | peek_at st3 ~> =(101 | 69) => {
-      est = st3 ~> ~[..., pos: %num.add [st3.pos, 1]]
+      est = st3[..., pos: %num.add [st3.pos, 1]]
       esign = { peek_at est ~> =45 => -1 | 1 }
       est2 = {
-        | peek_at est ~> =(43 | 45) => est ~> ~[..., pos: %num.add [est.pos, 1]]
+        | peek_at est ~> =(43 | 45) => est[..., pos: %num.add [est.pos, 1]]
         | est
       }
       digits est2 ~> =[ebb, st4a]

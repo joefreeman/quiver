@@ -233,8 +233,10 @@ pub struct Tuple {
 #[allow(clippy::large_enum_variant)]
 pub enum FieldValue {
     Chain(Chain),
-    /// Spread: None for bare `...`, Some(name) for `...name`
-    Spread(Option<String>),
+    /// Spread: `None` for bare `...` (the flowing value); `Some` for a sourced spread
+    /// (`...a`, `...a.b`, `...$conn`, `...$$x`, `...~.f`) — an access restricted by the
+    /// parser to variable/parameter/ripple roots with field/index steps.
+    Spread(Option<Access>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
