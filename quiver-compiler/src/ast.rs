@@ -259,12 +259,24 @@ pub struct Function {
     pub span: Spanned,
 }
 
+/// The written spelling of a parameter reference at `depth`: `0` → `$`, `1` → `$$`, ….
+/// Every depth-driven rendering of the sigil run (formatting, labels, diagnostics) goes
+/// through here, so the surface spelling lives in one place; only fixed depth-0 display
+/// strings (`"$"` in error text and hover labels) are written literally.
+pub fn parameter_sigils(depth: usize) -> String {
+    "$".repeat(depth + 1)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AccessSource {
     /// Identifier like `foo`
     Identifier(String),
-    /// Function parameter `$`
-    Parameter,
+    /// Function parameter: `$` is the enclosing function's own parameter (`depth` 0); each
+    /// extra glued sigil reaches one function further out (`$$` is the next enclosing
+    /// function's parameter, depth 1, and so on). Outer parameters are captured by value at
+    /// closure creation — per accessed path, like any capture — so `$$x` sees the enclosing
+    /// activation's argument as it was when the closure was built.
+    Parameter { depth: usize },
     /// Ripple `~` - references the piped value
     Ripple,
     /// Import like `%num` or `%mathx/vec`
@@ -331,12 +343,13 @@ pub struct PartialPattern {
     pub fields: Vec<PartialPatternField>,
 }
 
-/// The root of a pin pattern's target: an existing variable, or the enclosing function's
-/// parameter (`$`).
+/// The root of a pin pattern's target: an existing variable, or a function parameter —
+/// `depth` counts enclosing functions exactly as in `AccessSource::Parameter` (`&$x` is
+/// depth 0, `&$$x` depth 1, …).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PinRoot {
     Variable(String),
-    Parameter,
+    Parameter { depth: usize },
 }
 
 /// A pin pattern's target: an access path rooted at a variable or the enclosing function's

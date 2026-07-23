@@ -1247,7 +1247,7 @@ fn render_access(access: &Access) -> String {
     match &access.source {
         None => {}
         Some(AccessSource::Identifier(name)) => out.push_str(name),
-        Some(AccessSource::Parameter) => out.push('$'),
+        Some(AccessSource::Parameter { depth }) => out.push_str(&parameter_sigils(*depth)),
         Some(AccessSource::Ripple) => out.push('~'),
         Some(AccessSource::Import(parts)) => {
             out.push('%');
@@ -1268,7 +1268,7 @@ fn render_access(access: &Access) -> String {
     }
     // A single field/index directly after `$` is sugar for `$.x`/`$.0`, so the first accessor on a
     // parameter is written without its dot (`$0`, `$foo`); the rest keep their dots.
-    let dotless_first = matches!(access.source, Some(AccessSource::Parameter));
+    let dotless_first = matches!(access.source, Some(AccessSource::Parameter { .. }));
     for (index, accessor) in access.accessors.iter().enumerate() {
         // An annotation accessor carries its own `:` sigil; fields/indexes get their `.`
         // (except a first accessor on `$`, which is written dotless: `$0`, `$foo`).
@@ -1335,10 +1335,10 @@ fn render_match(pattern: &Match) -> String {
         Match::Reference(target) => {
             let mut out = String::from("&");
             // As in `render_access`, a first accessor on `$` is written dotless (`&$x`, `&$0`).
-            let dotless_first = matches!(target.root, PinRoot::Parameter);
+            let dotless_first = matches!(target.root, PinRoot::Parameter { .. });
             match &target.root {
                 PinRoot::Variable(name) => out.push_str(name),
-                PinRoot::Parameter => out.push('$'),
+                PinRoot::Parameter { depth } => out.push_str(&parameter_sigils(*depth)),
             }
             for (index, accessor) in target.accessors.iter().enumerate() {
                 if !(index == 0 && dotless_first) {

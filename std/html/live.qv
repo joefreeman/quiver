@@ -107,36 +107,31 @@ enc_attr = #<'e>'%html.attr_val<'e> {
 
 // A node's frame; self-passed to recurse into template slots.
 frame_of = #<'e>[(self): #^ -> 'frame, (node): '%html<'e>] {
-  // The nested literals close over `self` (an inner `$` would be their own parameter),
-  // so bind the field locally — by reference, as a bare `$self` term would call it.
-  self = &$self
-  {
-    | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: &st]
-    | $node:('%html.tmpl<'e>)template
-      ~> =(statics: s, holes: h) => {
-        slots = %list.map [
-          h,
-          #{
-            | =Child[n] => self [&self, n]
-            | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
-          },
-        ]
-        Tmpl[statics: s, slots: slots]
-      }
-    | $node ~> =Text[str] => Leaf[str]
-    | $node ~> =Fragment[items] => {
-      // An un-annotated Fragment in a child slot is a node list: a Many of per-item
-      // frames (chat items being their own templates diff granularly), each carrying
-      // its optional `:key`.
-      Many[
-        %list.map [
-          items,
-          #{ k = $:('%str)key; [key: k, row: self [&self, $]] },
-        ],
+  | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: &st]
+  | $node:('%html.tmpl<'e>)template
+    ~> =(statics: s, holes: h) => {
+      slots = %list.map [
+        h,
+        #{
+          | =Child[n] => $$self [&$$self, n]
+          | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
+        },
       ]
+      Tmpl[statics: s, slots: slots]
     }
-    | Opaque[%html.render $node]
+  | $node ~> =Text[str] => Leaf[str]
+  | $node ~> =Fragment[items] => {
+    // An un-annotated Fragment in a child slot is a node list: a Many of per-item
+    // frames (chat items being their own templates diff granularly), each carrying
+    // its optional `:key`.
+    Many[
+      %list.map [
+        items,
+        #{ k = $:('%str)key; [key: k, row: $$self [&$$self, $]] },
+      ],
+    ]
   }
+  | Opaque[%html.render $node]
 }
 
 frame = #<'e>'%html<'e> {
@@ -146,9 +141,6 @@ frame = #<'e>'%html<'e> {
 
 // Render a frame onto `acc`; self-passed to recurse into template slots.
 render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
-  // The nested literals close over `self` (an inner `$` would be their own parameter),
-  // so bind the field locally — by reference, as a bare `$self` term would call it.
-  self = &$self
   $f ~> {
     | =Leaf[s] => { et = %html.escape_text s ~> .0; %bin.concat [$acc, et] }
     | =ALeaf[elem: _, name: Str[n], value: v] => v ~> {
@@ -170,7 +162,7 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
           | =Cons[Str[st], srest] => {
             a2 = %bin.concat [$a, st]
             $slots ~> {
-              | =Cons[fr, frest] => ^ [srest, frest, self [&self, fr, a2]]
+              | =Cons[fr, frest] => ^ [srest, frest, $$self [&$$self, fr, a2]]
               | a2
             }
           }
@@ -188,7 +180,7 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
           | =Nil => $a
           | =Cons[[key: _, row: r], t] => {
             a2 = %bin.concat [$a, "<!--r-->" ~> .0]
-            a3 = self [&self, r, a2]
+            a3 = $$self [&$$self, r, a2]
             ^ [t, %bin.concat [a3, "<!--/r-->" ~> .0]]
           }
         }
@@ -295,23 +287,21 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
   // The nested literals close over `self` and `rpath` (an inner `$` would be their
   // own parameter), so bind the fields locally — `self` by reference, as a bare
   // `$self` term would call it.
-  self = &$self
-  rpath = $rpath
   [$prev, $next] ~> {
     | =[Leaf[a], Leaf[b]] => {
       | a ~> =&b => $acc
-      | Cons[SetText[path: %list.reverse rpath, value: b], $acc]
+      | Cons[SetText[path: %list.reverse $rpath, value: b], $acc]
     }
     | =[ALeaf[elem: e, name: n, value: a], ALeaf[elem: _, name: _, value: b]] => {
         | a ~> =&b => $acc
         | Cons[
-          SetAttr[path: %list.reverse rpath, elem: e, name: n, value: b],
+          SetAttr[path: %list.reverse $rpath, elem: e, name: n, value: b],
           $acc,
         ]
       }
     | =[Opaque[a], Opaque[b]] => {
       | a ~> =&b => $acc
-      | Cons[SetHtml[path: %list.reverse rpath, html: b], $acc]
+      | Cons[SetHtml[path: %list.reverse $rpath, html: b], $acc]
     }
     // Matching statics recurse slot-by-slot; mismatched statics fall through to the
     // final replacement arm. The statics test is a guard *step* (`;`): a chain never
@@ -325,7 +315,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
             pt,
             nt,
             __integer_add__ [$i, 1],
-            self [&self, p, nx, Cons[$i, rpath], $a],
+            $$self [&$$self, p, nx, Cons[$i, $$rpath], $a],
           ]
           | $a
         }
@@ -344,14 +334,14 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
               pt,
               nt,
               __integer_add__ [$i, 1],
-              self [&self, p, nx, Cons[$i, rpath], $a],
+              $$self [&$$self, p, nx, Cons[$i, $$rpath], $a],
             ]
           | =[Nil, Cons[[key: _, row: nx], nt]] => ^ [
             Nil,
             nt,
             __integer_add__ [$i, 1],
             Cons[
-              InsRow[path: %list.reverse rpath, at: $i, html: render_row nx],
+              InsRow[path: %list.reverse $$rpath, at: $i, html: render_row nx],
               $a,
             ],
           ]
@@ -359,7 +349,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
             pt,
             Nil,
             $i,
-            Cons[DelRow[path: %list.reverse rpath, at: $i], $a],
+            Cons[DelRow[path: %list.reverse $$rpath, at: $i], $a],
           ]
           | $a
         }
@@ -377,7 +367,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
               wt,
               Nil,
               $i,
-              Cons[DelRow[path: %list.reverse rpath, at: $i], $a],
+              Cons[DelRow[path: %list.reverse $$rpath, at: $i], $a],
             ]
           }
           | =Cons[nr, nt] => {
@@ -388,7 +378,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
                 wr ~> =(key: wk, row: wf)
                 {
                   | wk ~> =&nk => {
-                    a2 = self [&self, wf, nf, Cons[$i, rpath], $a]
+                    a2 = $$self [&$$self, wf, nf, Cons[$i, $$rpath], $a]
                     ^ [wt, nt, __integer_add__ [$i, 1], a2]
                   }
                   | {
@@ -397,13 +387,16 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
                     tw.0 ~> {
                       | =RHit[mr, j] => {
                         mr ~> =(row: mf)
-                        a2 = Cons[MovRow[path: %list.reverse rpath, from: j, to: $i], $a]
-                        a3 = self [&self, mf, nf, Cons[$i, rpath], a2]
+                        a2 = Cons[
+                          MovRow[path: %list.reverse $$rpath, from: j, to: $i],
+                          $a,
+                        ]
+                        a3 = $$self [&$$self, mf, nf, Cons[$i, $$rpath], a2]
                         ^ [Cons[wr, wrest], nt, __integer_add__ [$i, 1], a3]
                       }
                       | {
                         a2 = Cons[
-                          InsRow[path: %list.reverse rpath, at: $i, html: render_row nf],
+                          InsRow[path: %list.reverse $$rpath, at: $i, html: render_row nf],
                           $a,
                         ]
                         ^ [Cons[wr, wt], nt, __integer_add__ [$i, 1], a2]
@@ -414,7 +407,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
               }
               | =Nil => {
                 a2 = Cons[
-                  InsRow[path: %list.reverse rpath, at: $i, html: render_row nf],
+                  InsRow[path: %list.reverse $$rpath, at: $i, html: render_row nf],
                   $a,
                 ]
                 ^ [Nil, nt, __integer_add__ [$i, 1], a2]
@@ -427,7 +420,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
         | keyed_rows? pr; keyed_rows? nr => {
           // Field access rather than destructuring: a tuple-shape pattern types
           // fallibly, and diff_of's self-type requires a nil-free 'patches result.
-          pruned = prune_rows [pr, nr, 0, Nil, $acc, rpath]
+          pruned = prune_rows [pr, nr, 0, Nil, $acc, $rpath]
           keyed_walk [pruned.0, nr, 0, pruned.1]
         }
         | walk_rows [pr, nr, 0, $acc]
@@ -441,7 +434,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
     // A differing kind, a switched template (statics mismatch), or an Opaque next to
     // anything else: one replacement patch, subsuming the slot's descendants.
     | Cons[
-      SetHtml[path: %list.reverse rpath, html: render $next],
+      SetHtml[path: %list.reverse $rpath, html: render $next],
       $acc,
     ]
   }
@@ -557,11 +550,7 @@ with_nav = #<'i, 's, 'e, 'w>('component_base<'i, 's, 'e, 'w> | 'component<'i, 's
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
 render_view = #<'i, 's, 'e, 'w>[(state): 's, (comp): 'component<'i, 's, 'e, 'w>] {
-  // The tracked thunk closes over the fields (an inner `$` would be its own
-  // parameter), so bind them locally.
-  state = $state
-  comp = $comp
-  %proc.track #{ state ~> comp.view } ~> frame
+  %proc.track #{ $$state ~> $$comp.view } ~> frame
 }
 
 // Re-root a value bound out of a '%json recursive position at the union's root: the
@@ -570,14 +559,7 @@ render_view = #<'i, 's, 'e, 'w>[(state): 's, (comp): 'component<'i, 's, 'e, 'w>]
 jval = #'%json
 
 // A form field from its wire pair `[name, value]`; nil (skipped) for anything else.
-pair_of = #'%json {
-  =Array[ps]
-  ps ~> =Cons[nj, rest]
-  nj ~> jval ~> =Str[n]
-  rest ~> =Cons[vj, Nil]
-  vj ~> jval ~> =Str[v]
-  [Str[n], Str[v]]
-}
+pair_of = #'%json { =Array[Cons[Str[n], Cons[Str[v], Nil]]]; [Str[n], Str[v]] }
 
 pairs_of = #'jsons {
   %list.fold [
@@ -1054,9 +1036,6 @@ prune_entries = #[(items): 'reg_entries, (cutoff): 'int] {
   ]
 }
 
-// The first list's elements (which arrive reversed) onto the front of the second.
-cat_entries = #[(a): 'reg_entries, (b): 'reg_entries] { %list.chain [%list.reverse $a, $b] }
-
 // Remove and answer a token's entry: `[found: Found[pid] | Missing, rest: …]`.
 // The pid is extracted by *pattern* and passed by reference — a pid reached through
 // an access in flow position, or bare in a field, would be *sent* the flowing value.
@@ -1066,11 +1045,8 @@ take_entry = #[(items): 'reg_entries, (token): '%str, (acc): 'reg_entries] {
   $items ~> {
     | =Nil => [found: Missing, rest: $acc]
     | =Cons[e, t] => {
-      e ~> =(token: et, pid: ep)
-      {
-        | et ~> =&token => [found: Found[&ep], rest: cat_entries [$acc, t]]
-        | ^ [t, token, Cons[e, $acc]]
-      }
+      | e.token ~> =&token => [found: Found[&e.pid], rest: %list.chain [%list.reverse $acc, t]]
+      | ^ [t, token, Cons[e, $acc]]
     }
   }
 }
@@ -1081,10 +1057,10 @@ take_entry = #[(items): 'reg_entries, (token): '%str, (acc): 'reg_entries] {
 registry_loop = #'reg_entries {
   !'reg_msg ~> =msg
   now = %time.monotonic
-  live = prune_entries [$, __integer_subtract__ [now, prune_ms]]
+  live = __integer_subtract__ [now, prune_ms] ~> prune_entries [$, ~]
   msg ~> {
     | =Register[t, p] => ^ Cons[[token: t, pid: &p, at: now], live]
-    | =Claim[t, reply] => { take_entry [live, t, Nil]; =(found, rest); found ~> reply; ^ rest }
+    | =Claim[t, reply] => { (found, rest) = take_entry [live, t, Nil]; found ~> reply; ^ rest }
   }
 }
 
@@ -1113,17 +1089,14 @@ registry = #[] { Nil ~> @registry_loop }
 
 app = #<'i>('root_free | 'root_mapped<'i>) {
   :doc "Declares an app — the unit `handle` serves. `[root: &comp]` names the root view (a placeable component from `component`, referenced with `&`), which mounts from nil; add `init: #'%http -> 'i` to derive the root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself). Further views are placed in view markup, not declared here. Spawns the app's parking registry, so create once at startup — the calling process owns it — and share the record with every `handle` call."
-  cfg = $
-  {
-    | cfg ~> =(init: f, root: r) => {
-      rooted = #'place<'%http> { k = $key; r [init: f $init, key: k] }
-      [root: &rooted, reg: registry]
-    }
-    | {
-      cfg ~> =(root: r)
-      rooted = #'place<'%http> { k = $key; r [init: [], key: k] }
-      [root: &rooted, reg: registry]
-    }
+  | =(init: f, root: r) => {
+    rooted = #'place<'%http> { k = $key; r [init: f $init, key: k] }
+    [root: &rooted, reg: registry]
+  }
+  | {
+    =(root: r)
+    rooted = #'place<'%http> { k = $key; r [init: [], key: k] }
+    [root: &rooted, reg: registry]
   }
 }
 

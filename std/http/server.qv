@@ -26,20 +26,17 @@
 'handler = #'request -> ('response | 'upgrade | [])
 
 // A plain-text response with the given status.
-plain = #['int, '%str] {
-  =[s, Str[b]]
+plain = #[(status): 'int, (body): '%str] {
   Response[
-    status: s,
+    status: $status,
     headers: %list{ ["content-type", "text/plain; charset=utf-8"] },
-    body: b,
+    body: $body.0,
   ]
 }
 
 // Whether the connection should be kept open after answering the request.
 keep_alive? = #'request {
-  | %http.header [$headers, "connection"] ~> =Str[cb]
-
-    %http.lower Str[cb] ~> ="close" => []
+  | %http.header [$headers, "connection"] ~> =Str[cb]; %http.lower Str[cb] ~> ="close" => []
   | $version ~> ="HTTP/1.1" => Ok
   | []
 }

@@ -42,6 +42,11 @@ use quiver_core::{
 pub enum Error {
     // Undefined errors
     VariableUndefined(String),
+    /// An outer-parameter reference (`$$`, `$$$x`) names more enclosing functions than
+    /// surround it — the sigil run reaches above the outermost function.
+    ParameterDepthExceeded {
+        written: String,
+    },
     BuiltinUndefined(String),
     FunctionUndefined(usize),
 
@@ -237,10 +242,16 @@ fn term_references_parameter(term: &ast::Term) -> bool {
     let chain = |chain: &ast::Chain| chain.terms.iter().any(term_references_parameter);
     match term {
         ast::Term::Access(access) | ast::Term::Reference(access) => {
-            matches!(access.source, Some(ast::AccessSource::Parameter))
+            matches!(
+                access.source,
+                Some(ast::AccessSource::Parameter { depth: 0 })
+            )
         }
         ast::Term::State(access, _) => {
-            matches!(access.source, Some(ast::AccessSource::Parameter))
+            matches!(
+                access.source,
+                Some(ast::AccessSource::Parameter { depth: 0 })
+            )
         }
         ast::Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
             ast::FieldValue::Chain(c) => chain(c),
@@ -254,8 +265,10 @@ fn term_references_parameter(term: &ast::Term) -> bool {
         // A nested function literal's `$` is its own parameter.
         ast::Term::Function(_) => false,
         ast::Term::Apply(access, argument) => {
-            matches!(access.source, Some(ast::AccessSource::Parameter))
-                || term_references_parameter(argument)
+            matches!(
+                access.source,
+                Some(ast::AccessSource::Parameter { depth: 0 })
+            ) || term_references_parameter(argument)
         }
         ast::Term::Spawn(inner, argument, _) => {
             term_references_parameter(inner)
@@ -275,6 +288,10 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::VariableUndefined(name) => write!(f, "Undefined variable: {name}"),
+            Error::ParameterDepthExceeded { written } => write!(
+                f,
+                "'{written}' reaches above the outermost function: each '$' names one enclosing function"
+            ),
             Error::Noted { error, note } => write!(f, "{error} ({note})"),
             Error::BuiltinUndefined(name) => write!(
                 f,
@@ -1563,11 +1580,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.record_builtin_type_params(name, callable, parameter, result);
                 callable
             }
-            Some(ast::AccessSource::Parameter) => {
+            Some(ast::AccessSource::Parameter { depth: 0 }) => {
                 let base = scopes::get_function_parameter(&self.scopes)
                     .ok()
                     .map(|(ty, _)| ty)?;
                 self.follow_accessors(base, &access.accessors)?
+            }
+            Some(ast::AccessSource::Parameter { depth }) => {
+                // An outer parameter (`$$f`) peeks through its capture: the exact path when
+                // that's what was captured, else the bare run plus the accessor walk.
+                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
+                if let Some((ty, _)) =
+                    scopes::lookup_variable(&self.scopes, &name, &access.accessors)
+                {
+                    ty
+                } else {
+                    let (base, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
+                    self.follow_accessors(base, &access.accessors)?
+                }
             }
             _ => return None,
         };
@@ -2038,101 +2068,140 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Define captures as first locals in function body scope
         for capture in &unique_captures {
             // Determine the type of the captured value
-            // First check if the full path is already available (for nested captures)
-            let capture_type = if let Some((full_type, _)) =
-                scopes::lookup_variable(&saved_scopes, &capture.base, &capture.accessors)
-            {
-                // The full path is already available from parent, use its type
-                full_type
-            } else if capture.accessors.is_empty() {
-                // Simple capture - use the base variable's type
-                if let Some((var_type, _)) =
-                    scopes::lookup_variable(&saved_scopes, &capture.base, &[])
-                {
-                    var_type
-                } else {
-                    continue;
-                }
-            } else {
-                // Capture with accessors - need to compute the accessed type
-                if let Some((var_type, _)) =
-                    scopes::lookup_variable(&saved_scopes, &capture.base, &[])
-                {
-                    // Use compile_accessor logic to determine type
-                    // We need to compute this without generating bytecode
-                    let mut last_type = var_type;
-
-                    for accessor in &capture.accessors {
-                        let field_types = match accessor {
-                            ast::AccessPath::Field(field_name) => {
-                                match type_queries::get_field_by_name(
-                                    self.program,
-                                    last_type,
-                                    field_name,
-                                    &capture.base,
-                                ) {
-                                    Ok((_, types)) => types,
-                                    _ => continue,
-                                }
-                            }
-                            ast::AccessPath::Index(index) => {
-                                match type_queries::get_field_at_index(
-                                    &*self.program,
-                                    last_type,
-                                    *index,
-                                    &capture.base,
-                                ) {
-                                    Ok(types) => types,
-                                    _ => continue,
-                                }
-                            }
-                            ast::AccessPath::Annotation(name, expected) => match expected {
-                                None => {
-                                    match annotations::retrieval_type(self.program, last_type, name)
-                                    {
-                                        Ok((_, result_type)) => vec![result_type],
-                                        _ => continue,
-                                    }
-                                }
-                                Some(ast_type) => {
-                                    let mut env = typing::TypeEnv {
-                                        resolver: self.resolver,
-                                        module_cache: &mut *self.module_cache,
-                                        package: &self.current_package,
-                                    };
-                                    match typing::resolve_ast_type(
-                                        &mut env,
-                                        &self.scopes,
-                                        ast_type.clone(),
-                                        self.program,
-                                    ) {
-                                        Ok(asked) => {
-                                            let (_, result_type, _) =
-                                                annotations::checked_retrieval_type(
-                                                    self.program,
-                                                    last_type,
-                                                    name,
-                                                    asked,
-                                                );
-                                            vec![result_type]
-                                        }
-                                        _ => continue,
-                                    }
-                                }
-                            },
+            let capture_type = match &capture.source {
+                variables::CaptureSource::OuterParameter(levels) => {
+                    // The value lives in the creation scope, one level shallower there —
+                    // level 1 is that scope's own parameter; a deeper level is that scope's
+                    // own outer-parameter capture, already registered because functions
+                    // compile outside-in. Failure is a real user error (the reference
+                    // reaches above the outermost function), never a skippable capture —
+                    // and it must point at the reference, not wherever compilation last
+                    // recorded a span: materialisation runs far from the referencing site.
+                    self.current_span = capture.span.get().or(self.current_span);
+                    let exceeded = || Error::ParameterDepthExceeded {
+                        written: ast::parameter_sigils(*levels),
+                    };
+                    if *levels == 1 {
+                        let (param_type, _) = scopes::get_function_parameter(&saved_scopes)
+                            .map_err(|_| exceeded())?;
+                        self.peek_accessor_type(
+                            param_type,
+                            &capture.accessors,
+                            &ast::parameter_sigils(*levels),
+                        )?
+                    } else {
+                        let relay = variables::CaptureSource::OuterParameter(levels - 1);
+                        let Some((outer_type, _)) = scopes::lookup_variable(
+                            &saved_scopes,
+                            &relay.scope_name(),
+                            &capture.accessors,
+                        ) else {
+                            return Err(exceeded());
                         };
-                        last_type = typing::union_type_ids(self.program, field_types);
+                        outer_type
                     }
-                    last_type
-                } else {
-                    continue;
+                }
+                variables::CaptureSource::Variable(base) => {
+                    // First check if the full path is already available (for nested captures)
+                    if let Some((full_type, _)) =
+                        scopes::lookup_variable(&saved_scopes, base, &capture.accessors)
+                    {
+                        // The full path is already available from parent, use its type
+                        full_type
+                    } else if capture.accessors.is_empty() {
+                        // Simple capture - use the base variable's type
+                        if let Some((var_type, _)) =
+                            scopes::lookup_variable(&saved_scopes, base, &[])
+                        {
+                            var_type
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        // Capture with accessors - need to compute the accessed type
+                        if let Some((var_type, _)) =
+                            scopes::lookup_variable(&saved_scopes, base, &[])
+                        {
+                            // Use compile_accessor logic to determine type
+                            // We need to compute this without generating bytecode
+                            let mut last_type = var_type;
+
+                            for accessor in &capture.accessors {
+                                let field_types = match accessor {
+                                    ast::AccessPath::Field(field_name) => {
+                                        match type_queries::get_field_by_name(
+                                            self.program,
+                                            last_type,
+                                            field_name,
+                                            base,
+                                        ) {
+                                            Ok((_, types)) => types,
+                                            _ => continue,
+                                        }
+                                    }
+                                    ast::AccessPath::Index(index) => {
+                                        match type_queries::get_field_at_index(
+                                            &*self.program,
+                                            last_type,
+                                            *index,
+                                            base,
+                                        ) {
+                                            Ok(types) => types,
+                                            _ => continue,
+                                        }
+                                    }
+                                    ast::AccessPath::Annotation(name, expected) => match expected {
+                                        None => {
+                                            match annotations::retrieval_type(
+                                                self.program,
+                                                last_type,
+                                                name,
+                                            ) {
+                                                Ok((_, result_type)) => vec![result_type],
+                                                _ => continue,
+                                            }
+                                        }
+                                        Some(ast_type) => {
+                                            let mut env = typing::TypeEnv {
+                                                resolver: self.resolver,
+                                                module_cache: &mut *self.module_cache,
+                                                package: &self.current_package,
+                                            };
+                                            match typing::resolve_ast_type(
+                                                &mut env,
+                                                &self.scopes,
+                                                ast_type.clone(),
+                                                self.program,
+                                            ) {
+                                                Ok(asked) => {
+                                                    let (_, result_type, _) =
+                                                        annotations::checked_retrieval_type(
+                                                            self.program,
+                                                            last_type,
+                                                            name,
+                                                            asked,
+                                                        );
+                                                    vec![result_type]
+                                                }
+                                                _ => continue,
+                                            }
+                                        }
+                                    },
+                                };
+                                last_type = typing::union_type_ids(self.program, field_types);
+                            }
+                            last_type
+                        } else {
+                            continue;
+                        }
+                    }
                 }
             };
 
             scopes::define_variable(
                 &mut self.scopes,
                 &mut self.local_count,
-                &capture.base,
+                &capture.source.scope_name(),
                 &capture.accessors,
                 capture_type,
                 Provenance::Unknown, // Captures don't track provenance
@@ -2338,26 +2407,63 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Emit instructions to push capture values onto the stack
         // These will be popped by the Function instruction
         for capture in &unique_captures {
-            // First check if the full path is available (for nested captures)
-            if let Some((_, full_index)) =
-                scopes::lookup_variable(&self.scopes, &capture.base, &capture.accessors)
-            {
-                // The full path is already captured, just load it
-                self.codegen.add_instruction(Instruction::Load(full_index));
-            } else if let Some((var_type, base_index)) =
-                scopes::lookup_variable(&self.scopes, &capture.base, &[])
-            {
-                // Load the base variable
-                self.codegen.add_instruction(Instruction::Load(base_index));
+            match &capture.source {
+                variables::CaptureSource::OuterParameter(levels) => {
+                    // Load from the creation scope — its own parameter for level 1 (walking
+                    // any accessors, so only the named field is captured), its own capture
+                    // one level shallower for deeper levels. Errors point at the reference,
+                    // as in the registration loop above.
+                    self.current_span = capture.span.get().or(self.current_span);
+                    let exceeded = || Error::ParameterDepthExceeded {
+                        written: ast::parameter_sigils(*levels),
+                    };
+                    if *levels == 1 {
+                        let (param_type, param_index) =
+                            scopes::get_function_parameter(&self.scopes).map_err(|_| exceeded())?;
+                        self.codegen.add_instruction(Instruction::Load(param_index));
+                        if !capture.accessors.is_empty() {
+                            self.compile_accessor(
+                                param_type,
+                                capture.accessors.clone(),
+                                &ast::parameter_sigils(*levels),
+                                Provenance::Unknown,
+                            )?;
+                        }
+                    } else {
+                        let relay = variables::CaptureSource::OuterParameter(levels - 1);
+                        let Some((_, index)) = scopes::lookup_variable(
+                            &self.scopes,
+                            &relay.scope_name(),
+                            &capture.accessors,
+                        ) else {
+                            return Err(exceeded());
+                        };
+                        self.codegen.add_instruction(Instruction::Load(index));
+                    }
+                }
+                variables::CaptureSource::Variable(base) => {
+                    // First check if the full path is available (for nested captures)
+                    if let Some((_, full_index)) =
+                        scopes::lookup_variable(&self.scopes, base, &capture.accessors)
+                    {
+                        // The full path is already captured, just load it
+                        self.codegen.add_instruction(Instruction::Load(full_index));
+                    } else if let Some((var_type, base_index)) =
+                        scopes::lookup_variable(&self.scopes, base, &[])
+                    {
+                        // Load the base variable
+                        self.codegen.add_instruction(Instruction::Load(base_index));
 
-                if !capture.accessors.is_empty() {
-                    // Apply accessors to get the final value
-                    self.compile_accessor(
-                        var_type,
-                        capture.accessors.clone(),
-                        &capture.base,
-                        Provenance::Unknown,
-                    )?;
+                        if !capture.accessors.is_empty() {
+                            // Apply accessors to get the final value
+                            self.compile_accessor(
+                                var_type,
+                                capture.accessors.clone(),
+                                base,
+                                Provenance::Unknown,
+                            )?;
+                        }
+                    }
                 }
             }
         }
@@ -4791,12 +4897,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.record_reference(base_span, name, name.clone(), ty);
                 (ty, name.clone())
             }
-            Some(ast::AccessSource::Parameter) => {
+            Some(ast::AccessSource::Parameter { depth: 0 }) => {
                 let Ok((ty, _)) = scopes::get_function_parameter(&self.scopes) else {
                     return;
                 };
                 self.record_typed(base_span, ty, SymbolKind::Parameter, Some("$".to_string()));
                 (ty, "$".to_string())
+            }
+            Some(ast::AccessSource::Parameter { depth }) => {
+                // An outer parameter resolves through its captures; when nothing is bare-
+                // captured the helper records per-path entries and there's no base type to
+                // thread into the shared accessor loop below.
+                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
+                match self.record_outer_parameter(&name, accessors, base_span, accessor_spans) {
+                    Some(ty) => (ty, name),
+                    None => return,
+                }
             }
             Some(ast::AccessSource::Import(module)) => {
                 let Ok((_, _, ty, origin)) = self.resolve_import(module, &[]) else {
@@ -4902,6 +5018,39 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// the parameter) and each accessor with the type after applying it. Called from the
     /// pattern-recording chokepoint in `compile_match`, before the pattern's own bindings
     /// enter scope — a pin references pre-existing values only.
+    /// Record the components of an outer-parameter access (`$$`, `$$k.q`) from its captures:
+    /// the base when the whole argument was captured bare, else each accessor whose exact
+    /// path was captured (fields are captured per path, so that is what there is to show).
+    /// Returns the base type when the caller's shared accessor loop should proceed.
+    fn record_outer_parameter(
+        &mut self,
+        name: &str,
+        accessors: &[ast::AccessPath],
+        base_span: Option<SourceSpan>,
+        accessor_spans: &[Option<SourceSpan>],
+    ) -> Option<usize> {
+        if let Some((ty, _)) = scopes::lookup_variable(&self.scopes, name, &[]) {
+            self.record_typed(base_span, ty, SymbolKind::Parameter, Some(name.to_string()));
+            return Some(ty);
+        }
+        for (i, accessor) in accessors.iter().enumerate() {
+            let Some(span) = accessor_spans.get(i).copied().flatten() else {
+                continue;
+            };
+            let Some((ty, _)) = scopes::lookup_variable(&self.scopes, name, &accessors[..=i])
+            else {
+                continue;
+            };
+            let label = match accessor {
+                ast::AccessPath::Field(field) => field.clone(),
+                ast::AccessPath::Index(index) => index.to_string(),
+                ast::AccessPath::Annotation(..) => continue,
+            };
+            self.record_typed(Some(span), ty, SymbolKind::Field, Some(label));
+        }
+        None
+    }
+
     fn record_pin_target(&mut self, target: &ast::PinTarget) {
         if self.recorder.is_none() {
             return;
@@ -4915,7 +5064,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.record_reference(target.base_span.get(), name, name.clone(), ty);
                 (ty, name.clone())
             }
-            ast::PinRoot::Parameter => {
+            ast::PinRoot::Parameter { depth: 0 } => {
                 let Ok((ty, _)) = scopes::get_function_parameter(&self.scopes) else {
                     return;
                 };
@@ -4926,6 +5075,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Some("$".to_string()),
                 );
                 (ty, "$".to_string())
+            }
+            ast::PinRoot::Parameter { depth } => {
+                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
+                let accessor_spans: Vec<Option<SourceSpan>> =
+                    target.accessor_spans.iter().map(|s| s.get()).collect();
+                match self.record_outer_parameter(
+                    &name,
+                    &target.accessors,
+                    target.base_span.get(),
+                    &accessor_spans,
+                ) {
+                    Some(ty) => (ty, name),
+                    None => return,
+                }
             }
         };
 
@@ -4976,7 +5139,45 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
                 Ok((accessed_type, accessed_prov))
             }
-            Some(ast::AccessSource::Parameter) => {
+            Some(ast::AccessSource::Parameter { depth }) if depth > 0 => {
+                // An outer parameter (`$$`, `$$$x`) resolves to the capture the collector
+                // recorded for this literal — a local named by its sigil run — and behaves
+                // exactly like a captured-variable access from there (a callable field is
+                // called with the flowing value, and so on).
+                let name = variables::CaptureSource::OuterParameter(depth).scope_name();
+                let peeked_type = scopes::lookup_variable(&self.scopes, &name, &access.accessors)
+                    .map(|(ty, _)| ty)
+                    .or_else(|| {
+                        let (base_type, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
+                        self.peek_accessor_type(base_type, &access.accessors, &name)
+                            .ok()
+                    });
+                let Some(peeked_type) = peeked_type else {
+                    // Only reachable outside any enclosing literal (module top level): a
+                    // closure always carries the captures its collector recorded.
+                    return Err(Error::ParameterDepthExceeded {
+                        written: ast::parameter_sigils(depth),
+                    });
+                };
+                let is_applicable = self.is_applicable_type(peeked_type);
+
+                // Non-applicable accessed with a flowing value: drop the value before loading.
+                if !is_applicable && value_type.is_some() {
+                    self.codegen.add_instruction(Instruction::Pop);
+                }
+                let (accessed_type, accessed_prov) =
+                    self.compile_member_access(&name, access.accessors)?;
+                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+
+                if let (true, Some(val_type)) = (is_applicable, value_type) {
+                    let ty =
+                        self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
+                    Ok((ty, Provenance::Unknown))
+                } else {
+                    Ok((accessed_type, accessed_prov))
+                }
+            }
+            Some(ast::AccessSource::Parameter { .. }) => {
                 // $ accesses the function parameter.
                 let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
 
@@ -5857,7 +6058,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         self.record_reference(ref_span, name, label, accessed_type);
                         Ok((accessed_type, accessed_prov))
                     }
-                    Some(ast::AccessSource::Parameter) => {
+                    Some(ast::AccessSource::Parameter { depth: 0 }) => {
                         // &$ - reference to function parameter
                         let (param_type, param_local) =
                             scopes::get_function_parameter(&self.scopes)?;
@@ -5873,6 +6074,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             accessed_type,
                             SymbolKind::Parameter,
                             Some("$".to_string()),
+                        );
+                        Ok((accessed_type, accessed_prov))
+                    }
+                    Some(ast::AccessSource::Parameter { depth }) => {
+                        // `&$$…` references the captured outer value, like a captured variable.
+                        let name = variables::CaptureSource::OuterParameter(depth).scope_name();
+                        if scopes::lookup_variable(&self.scopes, &name, &access.accessors)
+                            .or_else(|| scopes::lookup_variable(&self.scopes, &name, &[]))
+                            .is_none()
+                        {
+                            return Err(Error::ParameterDepthExceeded {
+                                written: ast::parameter_sigils(depth),
+                            });
+                        }
+                        let (accessed_type, accessed_prov) =
+                            self.compile_member_access(&name, access.accessors)?;
+                        self.record_typed(
+                            ref_span,
+                            accessed_type,
+                            SymbolKind::Parameter,
+                            Some(name),
                         );
                         Ok((accessed_type, accessed_prov))
                     }

@@ -544,11 +544,37 @@ fn analyze_match_pattern(
                         )
                     }
                 }
-                ast::PinRoot::Parameter => {
+                ast::PinRoot::Parameter { depth: 0 } => {
                     let (param_type_id, _) = super::scopes::get_function_parameter(scopes)?;
                     let (steps, accessed_type_id) =
                         resolve_pin_steps(program, param_type_id, accessors, "$")?;
                     (PinLoad::Parameter, steps, accessed_type_id)
+                }
+                ast::PinRoot::Parameter { depth } => {
+                    // `&$$x`: an outer parameter is this function's capture — a local named
+                    // by the sigil run — so the pin resolves like a variable-rooted one.
+                    let name = super::variables::CaptureSource::OuterParameter(*depth).scope_name();
+                    if let Some((capture_type_id, _)) =
+                        super::scopes::lookup_variable(scopes, &name, accessors)
+                    {
+                        (
+                            PinLoad::Variable(name, accessors.clone()),
+                            vec![],
+                            capture_type_id,
+                        )
+                    } else if let Some((base_type_id, _)) =
+                        super::scopes::lookup_variable(scopes, &name, &[])
+                    {
+                        let (steps, accessed_type_id) =
+                            resolve_pin_steps(program, base_type_id, accessors, &name)?;
+                        (PinLoad::Variable(name, vec![]), steps, accessed_type_id)
+                    } else {
+                        // Only reachable outside any enclosing literal (module top level):
+                        // within one, the collector recorded the capture or errored earlier.
+                        return Err(Error::ParameterDepthExceeded {
+                            written: ast::parameter_sigils(*depth),
+                        });
+                    }
                 }
             };
 

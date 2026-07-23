@@ -140,6 +140,52 @@ g = #{ 10 }; f = #'int { &g ~> ^~ 5 }
                   argument: (integer))))))))))
 
 ==================
+outer parameter sigil runs
+==================
+
+f = #'int { [$, $$u, $$$] }
+g = #'int { 1 ~> =&$$k }
+
+---
+
+(source_file
+  (expression
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (type_identifier
+          name: (type_name))
+        (block
+          (branch
+            (expression
+              (chain
+                (tuple
+                  (chain
+                    (access
+                      source: (parameter)))
+                  (chain
+                    (access
+                      source: (parameter
+                        field: (identifier))))
+                  (chain
+                    (access
+                      source: (parameter))))))))))
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (type_identifier
+          name: (type_name))
+        (block
+          (branch
+            (expression
+              (chain
+                (integer)
+                (bind_match
+                  (pattern_pin
+                    (parameter
+                      field: (identifier))))))))))))
+
+==================
 dollar accessor sugar
 ==================
 

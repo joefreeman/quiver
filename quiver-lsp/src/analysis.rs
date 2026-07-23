@@ -591,6 +591,33 @@ mod tests {
     }
 
     #[test]
+    fn outer_parameter_over_reach_diagnostic_points_at_the_reference() {
+        // The depth error fires when the closure's captures are materialised — far from
+        // the reference — so the diagnostic must carry the referencing site's span, not
+        // wherever compilation last happened to record one.
+        let text = "x = 5\nf = #[k: 'int] { [x, $$k] }";
+        let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
+        assert_eq!(analysis.diagnostics.len(), 1, "{:?}", analysis.diagnostics);
+        let range = analysis.diagnostics[0].range;
+        assert_eq!((range.start.line, range.start.character), (1, 21));
+        assert_eq!((range.end.line, range.end.character), (1, 23));
+    }
+
+    #[test]
+    fn outer_parameter_field_is_hoverable() {
+        // `$$k` resolves through the closure's capture of the outer field: the accessor
+        // records a field entry with the captured type.
+        let text = "f = #[k: 'int] { g = #'int { [$, $$k] }; g 9 }";
+        let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
+        let semantics = analysis.semantics.expect("semantics");
+        let field_offset = text.find("$$k").unwrap() + 2;
+
+        let info = semantics.at_offset(field_offset).expect("field entry");
+        assert_eq!(info.kind, quiver_compiler::recorder::SymbolKind::Field);
+        assert_eq!(info.label.as_deref(), Some("k"));
+    }
+
+    #[test]
     fn parameter_pin_components_are_hoverable() {
         // In `&$x` the `$` hovers as the parameter and `x` as a field, as in `$x` accesses.
         let text = "f = #[x: 'int, y: 'int] { $y ~> =&$x }";

@@ -322,10 +322,12 @@ module.exports = grammar({
       $.import,
     ),
 
-    // `$`, with the dotless single-accessor sugar: `$x` ≡ `$.x`, `$0` ≡ `$.0` (further
-    // accessors are dotted: `$0.pos`). The sugar is glued — a spaced `$ x` is an
-    // application of the parameter to an argument, never the sugar.
-    parameter: $ => seq('$', optional(field('field', choice(
+    // A glued sigil run — `$` is the function's own parameter, each extra `$` one function
+    // further out (`$$`, `$$$`) — with the dotless single-accessor sugar: `$x` ≡ `$.x`,
+    // `$0` ≡ `$.0`, `$$x` likewise (further accessors are dotted: `$0.pos`). The sugar is
+    // glued — a spaced `$ x` is an application of the parameter to an argument, never the
+    // sugar, and a spaced `$ $` is an application, never a run.
+    parameter: $ => seq(token(/\$+/), optional(field('field', choice(
       alias($._identifier_immediate, $.identifier),
       alias($._index_immediate, $.index),
     )))),

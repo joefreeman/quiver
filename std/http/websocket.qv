@@ -108,13 +108,12 @@ frame_tail = #[(buf): 'bin, (fin): 'int, (opcode): 'int, (plen): 'int, (moff): '
 
 parse_frame = #'bin {
   :doc "One client frame off the front of the buffer, unmasked: [frame, rest], Incomplete (read more), or Bad (a protocol violation — fail the connection)."
-  =buf
-  have = %bin.length buf
+  have = %bin.length $
   {
     | __integer_compare__ [have, 2] ~> =-1 => Incomplete
     | {
-      b0 = %bin.get_byte [buf, 0]
-      b1 = %bin.get_byte [buf, 1]
+      b0 = %bin.get_byte [$, 0]
+      b1 = %bin.get_byte [$, 1]
       {
         | __integer_modulo__ [
             __integer_divide__ [b0, 16],
@@ -132,13 +131,13 @@ parse_frame = #'bin {
           {
             | len7 ~> =126 => {
               | __integer_compare__ [have, 4] ~> =-1 => Incomplete
-              | frame_tail [buf, fin, opcode, __binary_get__ [buf, 2, 0, 16], 4]
+              | frame_tail [$, fin, opcode, __binary_get__ [$, 2, 0, 16], 4]
             }
             | len7 ~> =127 => {
               | __integer_compare__ [have, 10] ~> =-1 => Incomplete
-              | frame_tail [buf, fin, opcode, __binary_get__ [buf, 2, 0, 64], 10]
+              | frame_tail [$, fin, opcode, __binary_get__ [$, 2, 0, 64], 10]
             }
-            | frame_tail [buf, fin, opcode, len7, 2]
+            | frame_tail [$, fin, opcode, len7, 2]
           }
         }
       }
@@ -153,8 +152,8 @@ close_info = #'bin {
 }
 
 // A Close payload from a code and reason.
-close_payload = #['int, '%str] {
-  =[code, Str[r]]; __binary_append__ [0x, code, 2] ~> %bin.concat [~, r]
+close_payload = #[(code): 'int, (reason): '%str] {
+  __binary_append__ [0x, $code, 2] ~> %bin.concat [~, $reason.0]
 }
 
 conn = #[(sock): \TcpSocket, (buf): 'bin] {
@@ -167,63 +166,62 @@ wrap_message = #['int, 'bin] { $0 ~> =1 => Text[Str[$1]] | Binary[$1] }
 
 // Fail the connection (RFC 6455 §7.1.7): send a Close, drop the TCP socket, yield
 // the Close.
-fail = #[', 'int, '%str] {
-  =[Conn(sock: sock), code, reason]
-  __tcp_socket_write__ [sock, close_payload [code, reason] ~> encode_frame [8, ~]]
-  __tcp_socket_close__ sock
-  [Close[code: code, reason: reason], Conn[sock: sock, buf: 0x, part: Nil]]
+fail = #[(conn): ', (code): 'int, (reason): '%str] {
+  __tcp_socket_write__ [$conn.sock, close_payload [$code, $reason] ~> encode_frame [8, ~]]
+  __tcp_socket_close__ $conn.sock
+  [Close[code: $code, reason: $reason], $conn ~> ~[..., buf: 0x, part: Nil]]
 }
 
 recv = #' {
   :doc "The next message as [message, conn]: Text or Binary — pings answered, pongs skipped, fragments assembled — or Close (echoed, and the socket closed); stop on Close."
-  =Conn[sock: sock, buf: buf, part: part]
-  parse_frame buf ~> {
+  // =Conn[sock: sock, buf: buf, part: part]
+  parse_frame $buf ~> {
     | =Incomplete => {
-      chunk = __tcp_socket_read__ [sock, 8192]
+      chunk = __tcp_socket_read__ [$sock, 8192]
       {
         | %bin.length chunk ~> =0 => {
           // The peer vanished without a Close: abnormal closure (1006 is never on
           // the wire — it names the absence of a close handshake).
-          __tcp_socket_close__ sock
-          [Close[code: 1006, reason: ""], Conn[sock: sock, buf: 0x, part: Nil]]
+          __tcp_socket_close__ $sock
+          [Close[code: 1006, reason: ""], $ ~> ~[..., buf: 0x, part: Nil]]
         }
-        | ^ Conn[sock: sock, buf: %bin.concat [buf, chunk], part: part]
+        | $ ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^
       }
     }
-    | =Bad[r] => fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, r]
+    | =Bad[r] => fail [$ ~> Conn[..., buf: 0x, part: Nil], 1002, r]
     | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
       | op ~> =9 => {
-        __tcp_socket_write__ [sock, encode_frame [10, p]]; ^ Conn[sock: sock, buf: rest, part: part]
+        __tcp_socket_write__ [$sock, encode_frame [10, p]]; $ ~> ~[..., buf: rest] ~> ^
       }
-      | op ~> =10 => ^ Conn[sock: sock, buf: rest, part: part]
+      | op ~> =10 => $ ~> ~[..., buf: rest] ~> ^
       | op ~> =8 => {
         close_info p ~> =(code, reason)
-        __tcp_socket_write__ [sock, encode_frame [8, p]]
-        __tcp_socket_close__ sock
-        [Close[code: code, reason: reason], Conn[sock: sock, buf: rest, part: Nil]]
+        __tcp_socket_write__ [$sock, encode_frame [8, p]]
+        __tcp_socket_close__ $sock
+        [Close[code: code, reason: reason], $ ~> ~[..., buf: rest, part: Nil]]
       }
-      | op ~> =0 => part ~> {
+      | op ~> =0 => $part ~> {
         | =Part[opcode: o, data: d] => {
           joined = %bin.concat [d, p]
           {
             | __integer_compare__ [
                 %bin.length joined,
                 max_payload,
-              ] ~> =1 => fail [Conn[sock: sock, buf: 0x, part: Nil], 1009, "message too big"]
-            | fin ~> =0 => ^ Conn[sock: sock, buf: rest, part: Part[opcode: o, data: joined]]
-            | [wrap_message [o, joined], Conn[sock: sock, buf: rest, part: Nil]]
+              ] ~> =1 => $ ~> ~[..., buf: 0x, part: Nil] ~> fail [~, 1009, "message too big"]
+            | fin ~> =0 => $ ~> ~[..., buf: rest, part: Part[opcode: o, data: joined]] ~> ^
+            | [wrap_message [o, joined], $ ~> ~[..., buf: rest, part: Nil]]
           }
         }
-        | fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, "unexpected continuation"]
+        | $ ~> ~[..., buf: 0x, part: Nil] ~> fail [~, 1002, "unexpected continuation"]
       }
-      | part ~> {
+      | $part ~> {
         | =Part[opcode: _, data: _] => fail [
-          Conn[sock: sock, buf: 0x, part: Nil],
+          $ ~> ~[..., buf: 0x, part: Nil],
           1002,
           "interleaved data frame",
         ]
-        | fin ~> =0 => ^ Conn[sock: sock, buf: rest, part: Part[opcode: op, data: p]]
-        | [wrap_message [op, p], Conn[sock: sock, buf: rest, part: Nil]]
+        | fin ~> =0 => $ ~> ~[..., buf: rest, part: Part[opcode: op, data: p]] ~> ^
+        | [wrap_message [op, p], $ ~> ~[..., buf: rest, part: Nil]]
       }
     }
   }

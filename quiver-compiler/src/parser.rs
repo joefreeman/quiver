@@ -2,7 +2,7 @@ use crate::ast::*;
 use nom::{
     IResult, Slice,
     branch::alt,
-    bytes::complete::{tag, take_while},
+    bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, digit1, line_ending, multispace0, multispace1, satisfy, space1},
     combinator::{map, map_res, not, opt, peek, recognize, success, value as nom_value, verify},
     multi::{many0, separated_list0, separated_list1},
@@ -1083,13 +1083,15 @@ fn pin_pattern(input: Span) -> IResult<Span, Match> {
     let (input, _) = char('&')(input)?;
     let start = input;
     let (after_root, root) = alt((
-        map(char('$'), |_| PinRoot::Parameter),
+        map(take_while1(|c| c == '$'), |s: Span| PinRoot::Parameter {
+            depth: s.fragment().len() - 1,
+        }),
         map(identifier, PinRoot::Variable),
     ))(input)?;
-    // The base span covers just the root (`p` / `$`), before any accessors.
+    // The base span covers just the root (`p` / `$` / `$$`), before any accessors.
     let base_span = span_between(start, after_root);
     // `$foo` / `$0` sugar: with a parameter root a single accessor may follow with no dot.
-    let (after_root, leading) = if root == PinRoot::Parameter {
+    let (after_root, leading) = if matches!(root, PinRoot::Parameter { .. }) {
         opt(accessor)(after_root)?
     } else {
         (after_root, None)
@@ -1707,7 +1709,13 @@ fn annotation_accessor(input: Span) -> IResult<Span, (AccessPath, Spanned)> {
 fn access(input: Span) -> IResult<Span, Access> {
     let start = input;
     let (after_source, source) = opt(alt((
-        map(char('$'), |_| AccessSource::Parameter),
+        // A glued sigil run: `$` is the enclosing function's parameter, each extra `$`
+        // reaches one function further out (`$$`, `$$$`, …).
+        map(take_while1(|c| c == '$'), |s: Span| {
+            AccessSource::Parameter {
+                depth: s.fragment().len() - 1,
+            }
+        }),
         map(char('~'), |_| AccessSource::Ripple),
         // Import: %module or %module/submodule
         map(import, AccessSource::Import),
@@ -1719,9 +1727,10 @@ fn access(input: Span) -> IResult<Span, Access> {
     let base_span = span_between(start, after_source);
 
     // `$foo` / `$0` are sugar for `$.foo` / `$.0`: when the parameter is the source, a single
-    // accessor may follow immediately, with no dot. Restricted to the parameter source — `~`,
-    // imports and identifiers keep requiring the dot (e.g. `foo` is a variable, not `f.oo`).
-    let (after_source, leading) = if matches!(source, Some(AccessSource::Parameter)) {
+    // accessor may follow immediately, with no dot (after the last sigil of a `$$` run).
+    // Restricted to the parameter source — `~`, imports and identifiers keep requiring the
+    // dot (e.g. `foo` is a variable, not `f.oo`).
+    let (after_source, leading) = if matches!(source, Some(AccessSource::Parameter { .. })) {
         opt(accessor)(after_source)?
     } else {
         (after_source, None)

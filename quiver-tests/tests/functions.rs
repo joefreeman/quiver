@@ -443,3 +443,98 @@ fn test_nilary_call_explicit_nil_argument() {
     // A nilary function ignores the flowing value, so flowing nil into it just calls it.
     quiver().evaluate("make = #{ 99 }; [] ~> make").expect("99");
 }
+
+// Outer-parameter access: `$$` reaches the enclosing function's argument (`$$$` one further,
+// and so on), captured by value — per accessed path — when the closure is built.
+
+#[test]
+fn test_outer_parameter_whole_argument() {
+    quiver()
+        .evaluate("f = #'int { g = #'int { [$, $$] }; g 9 }; f 7")
+        .expect("[9, 7]");
+}
+
+#[test]
+fn test_outer_parameter_field_and_index() {
+    quiver()
+        .evaluate("f = #[user: 'int] { g = #'int { [$, $$user] }; g 9 }; f [user: 7]")
+        .expect("[9, 7]");
+    quiver()
+        .evaluate("f = #['int, 'int] { g = #'int { [$, $$1] }; g 9 }; f [7, 8]")
+        .expect("[9, 8]");
+    quiver()
+        .evaluate("f = #[a: [b: 'int]] { g = #'int { [$, $$a.b] }; g 9 }; f [a: [b: 7]]")
+        .expect("[9, 7]");
+}
+
+#[test]
+fn test_outer_parameter_three_levels() {
+    quiver()
+        .evaluate("f = #'int { g = #'int { h = #'int { [$, $$, $$$] }; h 2 }; g 1 }; f 0")
+        .expect("[2, 1, 0]");
+}
+
+#[test]
+fn test_outer_parameter_relayed_through_middle_closure() {
+    // `$$$k` two closures deep: the middle closure never mentions the value, yet its own
+    // capture pass must relay it from the outer function.
+    quiver()
+        .evaluate("f = #[k: 'int] { g = #'int { h = #'int { $$$k }; h 0 }; g 0 }; f [k: 42]")
+        .expect("42");
+}
+
+#[test]
+fn test_outer_parameter_skips_blocks() {
+    // Blocks are transparent: only function literals count as levels, as for `$` itself.
+    quiver()
+        .evaluate("f = #'int { g = #'int { { { [$, $$] } } }; g 9 }; f 7")
+        .expect("[9, 7]");
+}
+
+#[test]
+fn test_outer_parameter_callable_field() {
+    // A captured outer field that is a function is called, like any callable variable.
+    quiver()
+        .evaluate(
+            "f = #[add: #['int, 'int] -> 'int] { g = #'int { $$add [$, 100] }; g 5 }; f [add: &__integer_add__]",
+        )
+        .expect("105");
+}
+
+#[test]
+fn test_outer_parameter_pin() {
+    quiver()
+        .evaluate(
+            "f = #[k: 'int] { g = #'int { { $ ~> =&$$k => Yes | No } }; [g 5, g 6] }; f [k: 5]",
+        )
+        .expect("[Yes, No]");
+}
+
+#[test]
+fn test_outer_parameter_in_spawn_and_string_hole() {
+    // Spawned closures capture outer parameters like any capture (moving them to the child).
+    quiver()
+        .evaluate("f = #'int { p = @#{ $$ }; !p }; f 7")
+        .expect("7");
+    quiver()
+        .evaluate("f = #[name: '%str] { g = #{ \"hi {$$name}\" }; g }; f [name: \"joe\"]")
+        .expect("\"hi joe\"");
+}
+
+#[test]
+fn test_outer_parameter_capture_time_snapshot() {
+    // `$$` is captured when the closure is built: a tail call re-entering the outer
+    // function does not retroactively change an existing closure's view.
+    quiver()
+        .evaluate("f = #'int { | %num.gt? [$, 0] => #{ $$ } | ^ 5 }; g = 0 ~> f; g")
+        .expect("5");
+}
+
+#[test]
+fn test_outer_parameter_depth_exceeded() {
+    quiver()
+        .evaluate("f = #'int { $$ }; f 1")
+        .expect_compile_error(quiver_compiler::compiler::Error::ParameterDepthExceeded {
+            written: "$$".to_string(),
+        });
+}

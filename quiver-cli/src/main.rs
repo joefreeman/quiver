@@ -296,7 +296,13 @@ fn compile_command(
                     None, // no semantic recorder for the CLI
                     options,
                 )
-                .map_err(|e| format!("Compile error: {:?}", e.error))?;
+                .map_err(|e| match e.span {
+                    Some(span) => format!(
+                        "Compile error at {}:{}: {:?}",
+                        span.line, span.column, e.error
+                    ),
+                    None => format!("Compile error: {:?}", e.error),
+                })?;
                 (program, None)
             }
         };
