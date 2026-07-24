@@ -256,12 +256,16 @@ pub fn analyze_pattern(
         }
     }
 
-    // Sort by name to ensure consistent ordering (must match generate_pattern_code)
-    let mut all_bindings: Vec<(String, usize)> = bindings_map
+    // Sort by name to ensure consistent ordering (must match generate_pattern_code) —
+    // and sort BEFORE registering the union types: `union_type_ids` interns into the
+    // program, so mapping during HashMap iteration would make type-id assignment
+    // depend on hash order, breaking reproducible compilation.
+    let mut all_bindings: Vec<(String, Vec<usize>)> = bindings_map.into_iter().collect();
+    all_bindings.sort_by(|a, b| a.0.cmp(&b.0));
+    let all_bindings: Vec<(String, usize)> = all_bindings
         .into_iter()
         .map(|(name, types)| (name, union_type_ids(program, types)))
         .collect();
-    all_bindings.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Include [] in the result type if there are runtime requirements (might match)
     let result_type_id = if will_match {

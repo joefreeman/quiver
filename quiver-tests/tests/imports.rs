@@ -267,3 +267,74 @@ fn test_self_default_type_parameterised() {
         )
         .expect("1");
 }
+
+#[test]
+fn test_module_ref_minting_rejected() {
+    // A module's value must be identity-free (deterministic, shareable across the
+    // sessions that import it), so minting a ref during compile-time module
+    // evaluation is rejected — like host-state reads.
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["tagged".to_string()],
+        r#"tag = %ref; [tag: tag]"#.to_string(),
+    );
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("%tagged.tag")
+        .expect_error_containing("creating a ref is not supported in compile-time execution");
+}
+
+#[test]
+fn test_module_host_read_rejected() {
+    let mut modules = HashMap::new();
+    modules.insert(vec!["stamped".to_string()], "[at: %time.now]".to_string());
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("%stamped.at")
+        .expect_error_containing("reading host state is not supported in compile-time execution");
+}
+
+#[test]
+fn test_module_may_reference_ref_minting_function() {
+    // Referencing the minting function is fine — only evaluation-time minting is
+    // banned; the ref is minted at runtime, by the importer.
+    let mut modules = HashMap::new();
+    modules.insert(vec!["util".to_string()], "[mk: &%ref]".to_string());
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("%util.mk ~> ='ref")
+        .expect("Ok");
+}
+
+#[test]
+fn test_reexported_closure_with_foreign_capture() {
+    // Transitive value embedding: %c re-exports %b's closure, whose captures embed
+    // a function of %a — a module %c's own source never references. %a sits in
+    // %c's transitive value-import closure (through %b), so its Merkle key covers
+    // %a and %c's artifact records an ordinary import of it. Two sessions, so the
+    // second links %c from the artifact the first extracted.
+    let modules = || {
+        let mut modules = HashMap::new();
+        modules.insert(
+            vec!["a".to_string()],
+            "[inc: #'int { [~, 1] ~> __integer_add__ }]".to_string(),
+        );
+        modules.insert(
+            vec!["b".to_string()],
+            "inc = &%a.inc\n[wrapped: #'int { $ ~> inc }]".to_string(),
+        );
+        modules.insert(vec!["c".to_string()], "[go: &%b.wrapped]".to_string());
+        modules
+    };
+    quiver()
+        .with_modules(modules())
+        .evaluate("5 ~> %c.go")
+        .expect("6");
+    quiver()
+        .with_modules(modules())
+        .evaluate("7 ~> %c.go")
+        .expect("8");
+}

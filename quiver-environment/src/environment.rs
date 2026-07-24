@@ -4,10 +4,9 @@ use crate::transport::WorkerHandle;
 use quiver_compiler::compiler::{
     Bindings, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
 };
-use quiver_core::bytecode::{Bytecode, Constant, Function, Instruction};
+use quiver_core::bytecode::{Bytecode, Constant, Function};
 use quiver_core::compatibility::{
-    CompatibilityInput, compute_canonical_tuples, compute_field_offsets,
-    compute_param_compatibility, compute_type_compatibility,
+    CompatibilityInput, CompatibilityTables, compute_canonical_tuples, compute_field_offsets,
 };
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::ProgramUpdate;
@@ -258,70 +257,6 @@ fn import_tuple(
     new_id
 }
 
-/// Remap a Function's indices according to the remap tables
-/// The id remap tables built while merging one bytecode into the environment's program.
-#[derive(Default)]
-struct MergeRemaps {
-    constants: HashMap<usize, usize>,
-    functions: HashMap<usize, usize>,
-    tuples: HashMap<usize, usize>,
-    types: HashMap<usize, usize>,
-    builtins: HashMap<usize, usize>,
-    annotation_keys: HashMap<usize, usize>,
-    field_names: HashMap<usize, usize>,
-    sites: HashMap<usize, usize>,
-}
-
-fn remap_function(function: Function, remaps: &MergeRemaps) -> Function {
-    let remapped_instructions: Vec<Instruction> = function
-        .instructions
-        .into_iter()
-        .map(|inst| match inst {
-            Instruction::Constant(idx) => {
-                Instruction::Constant(*remaps.constants.get(&idx).unwrap_or(&idx))
-            }
-            Instruction::Function(idx) => {
-                Instruction::Function(*remaps.functions.get(&idx).unwrap_or(&idx))
-            }
-            Instruction::Builtin(idx, type_argument) => Instruction::Builtin(
-                *remaps.builtins.get(&idx).unwrap_or(&idx),
-                // A type-consuming builtin's type argument is a type reference like
-                // GetAnnotation's check: remap it with the type table.
-                type_argument.map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
-            ),
-            Instruction::Tuple(type_id) => {
-                Instruction::Tuple(*remaps.tuples.get(&type_id).unwrap_or(&type_id))
-            }
-            Instruction::IsType(type_id) => {
-                Instruction::IsType(*remaps.types.get(&type_id).unwrap_or(&type_id))
-            }
-            Instruction::GetNamed(name_id) => {
-                Instruction::GetNamed(*remaps.field_names.get(&name_id).unwrap_or(&name_id))
-            }
-            Instruction::Annotate(key) => {
-                Instruction::Annotate(*remaps.annotation_keys.get(&key).unwrap_or(&key))
-            }
-            Instruction::GetAnnotation(key, check) => Instruction::GetAnnotation(
-                *remaps.annotation_keys.get(&key).unwrap_or(&key),
-                check.map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
-            ),
-            Instruction::Stamp(site) => {
-                Instruction::Stamp(*remaps.sites.get(&site).unwrap_or(&site))
-            }
-            other => other,
-        })
-        .collect();
-
-    Function {
-        instructions: remapped_instructions,
-        captures: function.captures,
-        type_id: *remaps
-            .types
-            .get(&function.type_id)
-            .unwrap_or(&function.type_id),
-    }
-}
-
 // Type aliases for complex types
 pub type ValueWithHeap = (Value, Vec<Vec<u8>>);
 pub type RuntimeResult = Result<ValueWithHeap, quiver_core::error::Error>;
@@ -492,6 +427,10 @@ pub struct Environment<E: Effect> {
     runtime_declarations: quiver_core::builtins::RuntimeDeclarations,
     resource_ownership: HashMap<ResourceId, ProcessId>,
 
+    /// Compatibility tables for the merged program, extended incrementally at each merge
+    /// (the program grows append-only) and shipped whole to the workers.
+    compatibility: CompatibilityTables,
+
     // Process reclamation. At most one round runs
     // at a time; `spawns_since_collection` drives the auto-trigger, `reclaimed_total` is a
     // cumulative metric / test hook.
@@ -517,6 +456,7 @@ impl<E: Effect> Environment<E> {
             effect_backend: None,
             runtime_declarations: quiver_core::builtins::RuntimeDeclarations::default(),
             resource_ownership: HashMap::new(),
+            compatibility: CompatibilityTables::default(),
             collection: None,
             spawns_since_collection: 0,
             collection_threshold: DEFAULT_COLLECTION_THRESHOLD,
@@ -1013,7 +953,7 @@ impl<E: Effect> Environment<E> {
         let old_types_len = self.program.get_types().len();
 
         // Build remapping tables using Program::register_* methods
-        let mut remaps = MergeRemaps::default();
+        let mut remaps = quiver_core::bytecode::IdRemaps::default();
 
         // Merge constants using Program::register_constant
         for (old_idx, constant) in bytecode.constants.iter().enumerate() {
@@ -1096,12 +1036,38 @@ impl<E: Effect> Environment<E> {
 
         // Merge functions (type_id is remapped by remap_function)
         for (old_idx, function) in bytecode.functions.iter().enumerate() {
-            let remapped_function = remap_function(function.clone(), &remaps);
+            let remapped_function = function.clone().remap_ids(&remaps);
 
             let new_idx = self.program.register_function(remapped_function);
             remaps.functions.insert(old_idx, new_idx);
         }
 
+        self.send_program_update(
+            old_constants_len,
+            old_functions_len,
+            old_tuples_len,
+            old_types_len,
+            old_builtins_len,
+        )?;
+
+        // Return remapped entry function index
+        Ok(*remaps
+            .functions
+            .get(&entry_fn)
+            .expect("Entry function should be in remap table"))
+    }
+
+    /// Refresh the derived tables over the merged program and ship every registry item
+    /// beyond the given watermarks to the workers (pass zeros to ship everything, as a
+    /// seed does). No-op when nothing is new.
+    fn send_program_update(
+        &mut self,
+        old_constants_len: usize,
+        old_functions_len: usize,
+        old_tuples_len: usize,
+        old_types_len: usize,
+        old_builtins_len: usize,
+    ) -> Result<(), EnvironmentError> {
         // Ensure the crash-delivery shapes exist in the merged program *before* the
         // deltas below are computed, so the workers receive their tuple infos and the
         // compatibility tables cover them (checked `:crash` retrievals test against
@@ -1129,7 +1095,6 @@ impl<E: Effect> Environment<E> {
             || !new_types.is_empty()
             || !new_builtins.is_empty()
         {
-            // Recompute compatibility tables for the FULL merged program state
             let resource_names = self.program.collect_resource_names();
 
             let input = CompatibilityInput {
@@ -1140,12 +1105,18 @@ impl<E: Effect> Environment<E> {
                 resource_names: &resource_names,
             };
 
-            let type_compatibility = compute_type_compatibility(&input);
+            // Extend the incrementally-maintained compatibility tables to the merged
+            // program; workers receive them whole and replace their copies.
+            self.compatibility.update(&input);
+            if std::env::var("QUIVER_VERIFY_COMPAT").is_ok() {
+                self.compatibility.assert_matches_full(&input);
+            }
+            let type_compatibility = self.compatibility.type_compatibility.clone();
+            let function_param_compatibility = self.compatibility.function_params.clone();
+            let builtin_param_compatibility = self.compatibility.builtin_params.clone();
             let canonical_tuples = compute_canonical_tuples(self.program.get_tuples());
             let field_offsets =
                 compute_field_offsets(self.program.get_field_names(), self.program.get_tuples());
-            let (function_param_compatibility, builtin_param_compatibility) =
-                compute_param_compatibility(&input);
 
             let update = ProgramUpdate {
                 constants: new_constants,
@@ -1177,11 +1148,22 @@ impl<E: Effect> Environment<E> {
             self.push_type_ids_to_backend();
         }
 
-        // Return remapped entry function index
-        Ok(*remaps
-            .functions
-            .get(&entry_fn)
-            .expect("Entry function should be in remap table"))
+        Ok(())
+    }
+
+    /// Assert the incrementally-maintained compatibility tables equal a full
+    /// recomputation over the merged program. A validation hook for tests; the
+    /// `QUIVER_VERIFY_COMPAT` environment variable applies the same check at every
+    /// merge.
+    pub fn verify_compatibility_tables(&self) {
+        let resource_names = self.program.collect_resource_names();
+        self.compatibility.assert_matches_full(&CompatibilityInput {
+            types: self.program.get_types(),
+            tuples: self.program.get_tuples(),
+            functions: self.program.get_functions(),
+            builtins: self.program.get_builtins(),
+            resource_names: &resource_names,
+        });
     }
 
     fn handle_event(&mut self, event: Event<E>) -> Result<(), EnvironmentError> {

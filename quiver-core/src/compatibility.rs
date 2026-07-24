@@ -177,6 +177,211 @@ pub fn compute_param_compatibility(
     (function_params, builtin_params)
 }
 
+/// Compatibility tables maintained incrementally across an append-only program's growth.
+///
+/// The environment merges a REPL line's bytecode into its program and ships refreshed
+/// tables to the workers on every line; recomputing them from scratch each time is
+/// quadratic in session length. Registries only ever grow, and `is_compatible` over
+/// existing ids never changes, so the tables can be *extended* instead: new concrete
+/// types are tested against the already-known pattern types, and new pattern types get
+/// one full scan. `update` yields exactly what the from-scratch functions produce
+/// (`assert_matches_full` checks this, for validation runs).
+#[derive(Debug, Clone, Default)]
+pub struct CompatibilityTables {
+    /// Registry sizes as of the last `update`; entries beyond these are the new items.
+    types_len: usize,
+    tuples_len: usize,
+    functions_len: usize,
+    builtins_len: usize,
+    resources_len: usize,
+    /// Pattern type ids (`IsType` / checked `GetAnnotation` targets) already computed.
+    pattern_ids: HashSet<usize>,
+    /// Per-type compatibility, as `compute_type_compatibility` returns.
+    pub type_compatibility: Vec<HashSet<ConcreteType>>,
+    /// Per-function parameter compatibility, as `compute_param_compatibility` returns.
+    pub function_params: Vec<HashSet<ConcreteType>>,
+    /// Per-builtin parameter compatibility, as `compute_param_compatibility` returns.
+    pub builtin_params: Vec<HashSet<ConcreteType>>,
+}
+
+impl CompatibilityTables {
+    /// Extend the tables to cover `input`, which must describe an append-only extension
+    /// of the program covered by the previous call (the environment's merged program).
+    pub fn update(&mut self, input: &CompatibilityInput) {
+        let lookup = TypeLookupImpl::new(input.types, input.tuples);
+        let index = TypeIndex::build(input, &lookup);
+
+        self.type_compatibility
+            .resize(input.types.len(), HashSet::new());
+
+        // Newly testable concrete types, with the type id representing each in
+        // `is_compatible` checks. A concrete becomes testable when its own id is new
+        // (tuple/function/builtin/resource) or when the type-table entry the checks go
+        // through first appears (`TypeIndex` keeps first occurrences, so an index entry
+        // with a new type id means there was none before).
+        let mut new_concretes: Vec<(ConcreteType, usize)> = Vec::new();
+
+        for (concrete, slot) in [
+            (ConcreteType::Integer, index.integer),
+            (ConcreteType::Binary, index.binary),
+            (ConcreteType::Reference, index.reference),
+        ] {
+            if let Some(id) = slot
+                && id >= self.types_len
+            {
+                new_concretes.push((concrete, id));
+            }
+        }
+
+        for (tuple_id, slot) in index.tuple_to_type.iter().enumerate() {
+            if let Some(id) = slot
+                && *id >= self.types_len
+            {
+                new_concretes.push((ConcreteType::Tuple(tuple_id), *id));
+            }
+        }
+
+        for (func_id, func) in input.functions.iter().enumerate().skip(self.functions_len) {
+            let (_, callable, _, _, _) = extract_function_type_info(func, input.types);
+            new_concretes.push((ConcreteType::Function(func_id), callable));
+        }
+
+        // Process concretes exist where a function's (send, receive, state) key has a
+        // `Type::Process` entry: new functions against the index, plus old functions
+        // whose key entry only just appeared.
+        for (func_id, func) in input.functions.iter().enumerate() {
+            let (_, _, send, receive, state) = extract_function_type_info(func, input.types);
+            if let Some(&process_id) = index.process_to_type.get(&(send, receive, state))
+                && (func_id >= self.functions_len || process_id >= self.types_len)
+            {
+                new_concretes.push((ConcreteType::Process(func_id), process_id));
+            }
+        }
+
+        // Builtin concretes mirror processes, keyed by (param, result) callable entries.
+        for (builtin_id, info) in input.builtins.iter().enumerate() {
+            if let Some(&callable_id) = index
+                .callable_to_type
+                .get(&(info.param_type, info.result_type))
+                && (builtin_id >= self.builtins_len || callable_id >= self.types_len)
+            {
+                new_concretes.push((ConcreteType::Builtin(builtin_id), callable_id));
+            }
+        }
+
+        // Resource names derive from the type table in first-occurrence order, so a new
+        // name always has a new `Type::Resource` entry behind it.
+        for (resource_id, name) in input
+            .resource_names
+            .iter()
+            .enumerate()
+            .skip(self.resources_len)
+        {
+            if let Some(&type_id) = index.resource_to_type.get(name) {
+                new_concretes.push((ConcreteType::Resource(resource_id), type_id));
+            }
+        }
+
+        // Extend existing pattern entries and parameter rows with the new concretes,
+        // memoising verdicts per pattern id (parameters repeat heavily).
+        if !new_concretes.is_empty() {
+            let mut verdicts: HashMap<usize, Vec<bool>> = HashMap::new();
+            let mut verdicts_for = |pattern_id: usize| -> Vec<bool> {
+                verdicts
+                    .entry(pattern_id)
+                    .or_insert_with(|| {
+                        let stripped = Type::strip_annotations(pattern_id, &lookup);
+                        new_concretes
+                            .iter()
+                            .map(|&(_, rep)| is_compatible(rep, stripped, &lookup))
+                            .collect()
+                    })
+                    .clone()
+            };
+
+            for &pattern_id in &self.pattern_ids {
+                for (hit, &(concrete, _)) in verdicts_for(pattern_id).iter().zip(&new_concretes) {
+                    if *hit {
+                        self.type_compatibility[pattern_id].insert(concrete);
+                    }
+                }
+            }
+            for (func_id, func) in input.functions.iter().enumerate().take(self.functions_len) {
+                let (parameter, _, _, _, _) = extract_function_type_info(func, input.types);
+                for (hit, &(concrete, _)) in verdicts_for(parameter).iter().zip(&new_concretes) {
+                    if *hit {
+                        self.function_params[func_id].insert(concrete);
+                    }
+                }
+            }
+            for (builtin_id, info) in input.builtins.iter().enumerate().take(self.builtins_len) {
+                for (hit, &(concrete, _)) in
+                    verdicts_for(info.param_type).iter().zip(&new_concretes)
+                {
+                    if *hit {
+                        self.builtin_params[builtin_id].insert(concrete);
+                    }
+                }
+            }
+        }
+
+        // New pattern types (only new functions can introduce them) get a full scan.
+        for function in &input.functions[self.functions_len..] {
+            for instruction in &function.instructions {
+                if let Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) =
+                    instruction
+                    && *type_id < input.types.len()
+                    && self.pattern_ids.insert(*type_id)
+                {
+                    self.type_compatibility[*type_id] =
+                        compute_compatible_concrete_types(*type_id, input, &lookup, &index);
+                }
+            }
+        }
+
+        // New parameter rows get a full scan too, shared per parameter type.
+        let mut memo: HashMap<usize, HashSet<ConcreteType>> = HashMap::new();
+        let mut compatible_for = |param: usize| -> HashSet<ConcreteType> {
+            memo.entry(param)
+                .or_insert_with(|| compute_compatible_concrete_types(param, input, &lookup, &index))
+                .clone()
+        };
+        for func in &input.functions[self.functions_len..] {
+            let (parameter, _, _, _, _) = extract_function_type_info(func, input.types);
+            self.function_params.push(compatible_for(parameter));
+        }
+        for info in &input.builtins[self.builtins_len..] {
+            self.builtin_params.push(compatible_for(info.param_type));
+        }
+
+        self.types_len = input.types.len();
+        self.tuples_len = input.tuples.len();
+        self.functions_len = input.functions.len();
+        self.builtins_len = input.builtins.len();
+        self.resources_len = input.resource_names.len();
+    }
+
+    /// Assert the incremental tables equal a from-scratch computation over `input`.
+    /// For validation runs (opt-in, e.g. behind an environment variable) — a mismatch
+    /// is a bug in `update`.
+    pub fn assert_matches_full(&self, input: &CompatibilityInput) {
+        assert_eq!(
+            self.type_compatibility,
+            compute_type_compatibility(input),
+            "incremental type_compatibility diverged from full recomputation"
+        );
+        let (function_params, builtin_params) = compute_param_compatibility(input);
+        assert_eq!(
+            self.function_params, function_params,
+            "incremental function_params diverged from full recomputation"
+        );
+        assert_eq!(
+            self.builtin_params, builtin_params,
+            "incremental builtin_params diverged from full recomputation"
+        );
+    }
+}
+
 /// Precomputed lookups from concrete-type shapes to their type id, so that
 /// `compute_compatible_concrete_types` avoids re-scanning the whole type table on every call.
 struct TypeIndex {
@@ -273,42 +478,20 @@ fn compute_compatible_concrete_types(
     // against `T @ row` must behave exactly as against `T`.
     let pattern_id = Type::strip_annotations(pattern_id, lookup);
 
-    // We need to register primitive types to check compatibility
-    // For Integer and Binary, we check by constructing their type IDs on-the-fly
-    // and using is_compatible
-
-    // Check Integer
-    if let Some(int_id) = index.integer {
-        if is_compatible(int_id, pattern_id, lookup) {
-            compat_set.insert(ConcreteType::Integer);
+    // A primitive is testable only through a type-table entry representing it (the
+    // `TypeIndex` slot): a pattern that could match a primitive names it, so the
+    // entry exists whenever the verdict could be positive. No fallback — in
+    // particular an empty union matches nothing, consistent with `is_compatible`.
+    for (slot, concrete) in [
+        (index.integer, ConcreteType::Integer),
+        (index.binary, ConcreteType::Binary),
+        (index.reference, ConcreteType::Reference),
+    ] {
+        if let Some(type_id) = slot
+            && is_compatible(type_id, pattern_id, lookup)
+        {
+            compat_set.insert(concrete);
         }
-    } else if let Some(pattern) = lookup.lookup_type(pattern_id)
-        && (matches!(pattern, Type::Integer) || matches!(pattern, Type::Union(v) if v.is_empty()))
-    {
-        // Integer not in types vec, check if pattern matches Integer directly
-        compat_set.insert(ConcreteType::Integer);
-    }
-
-    // Check Binary
-    if let Some(bin_id) = index.binary {
-        if is_compatible(bin_id, pattern_id, lookup) {
-            compat_set.insert(ConcreteType::Binary);
-        }
-    } else if let Some(pattern) = lookup.lookup_type(pattern_id)
-        && (matches!(pattern, Type::Binary) || matches!(pattern, Type::Union(v) if v.is_empty()))
-    {
-        compat_set.insert(ConcreteType::Binary);
-    }
-
-    // Check Reference
-    if let Some(ref_id) = index.reference {
-        if is_compatible(ref_id, pattern_id, lookup) {
-            compat_set.insert(ConcreteType::Reference);
-        }
-    } else if let Some(pattern) = lookup.lookup_type(pattern_id)
-        && (matches!(pattern, Type::Reference) || matches!(pattern, Type::Union(v) if v.is_empty()))
-    {
-        compat_set.insert(ConcreteType::Reference);
     }
 
     // Check all Tuples

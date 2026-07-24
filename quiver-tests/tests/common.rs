@@ -1,13 +1,23 @@
 use quiver::spawn_worker;
-use quiver_compiler::PackageResolver;
+use quiver_compiler::{ArtifactStore, PackageResolver};
 use quiver_core::value::Value;
 use quiver_environment::{Environment, Repl, ReplError, WorkerHandle};
 use quiver_io::NativeEffect;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 type ReplResult = Result<Option<(Value, Vec<Vec<u8>>)>, ReplError>;
+
+/// The artifact store shared by every non-scoped test session: content-addressed
+/// and disk-backed, so a module compiled by one test links everywhere else — across
+/// tests, binaries, and runs (keys carry the debug flag, so both compile modes
+/// share one store). Warming is organic: the first test to import a module compiles
+/// and saves it. Scoped (no-io) tests never carry a store: their capability model
+/// depends on io-referencing std modules failing to compile, which pre-built
+/// artifacts would defeat.
+#[allow(dead_code)]
+static ARTIFACTS: LazyLock<Arc<ArtifactStore>> = LazyLock::new(|| Arc::new(ArtifactStore::cache()));
 
 /// Evaluate source and return a TestResult
 fn evaluate(
@@ -226,6 +236,9 @@ impl TestBuilder {
         let resolver = Box::new(PackageResolver::memory(self.modules));
         let mut repl =
             Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
+        if !self.scoped_no_io {
+            repl.set_artifact_store(ARTIFACTS.clone());
+        }
         if self.debug {
             repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
                 debug: true,
@@ -503,8 +516,8 @@ impl TestResult {
                         self.source
                     );
                 } else {
-                    // Check the inferred type
-                    let actual = self.environment.format_type(&self.last_result_type);
+                    // Check the inferred type (a compiler-side type — REPL id space)
+                    let actual = self.repl.format_type(&self.last_result_type);
                     assert_eq!(
                         actual, expected,
                         "Expected result type '{}', got '{}' for source: {}",

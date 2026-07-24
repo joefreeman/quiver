@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod ast;
 pub mod compiler;
 pub mod format;
@@ -8,6 +9,9 @@ pub mod recorder;
 pub mod resolver;
 pub mod simplify;
 
+pub use artifact::{
+    ArtifactStore, ModuleArtifact, compiler_fingerprint, module_key, warm_std_store,
+};
 pub use compiler::Compiler;
 pub use format::format_program;
 pub use manifest::{Manifest, ManifestError};

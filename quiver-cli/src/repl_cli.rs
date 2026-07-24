@@ -26,6 +26,11 @@ pub struct ReplCli {
     repl: Option<Repl<NativeEffect>>,
     stepping_thread: Option<JoinHandle<()>>,
     shutdown_signal: Arc<AtomicBool>,
+    /// The content-addressed artifact store every REPL session links std (and, in
+    /// time, project) modules from — and extracts freshly-compiled modules into.
+    /// Attaching it is monotonic (it only affects future imports), so sessions use it
+    /// from the start with no readiness ceremony.
+    artifact_store: Arc<quiver_compiler::ArtifactStore>,
 }
 
 /// Build the resolver for a REPL session: project-aware when launched inside a project (the
@@ -101,12 +106,35 @@ impl ReplCli {
             }
         }));
 
+        // The artifact store is a lazily-probed cache directory — ready immediately.
+        // Warm it with the standard library in the background: on a cold cache
+        // (first run per compiler build) this compiles std once, per-module, so
+        // later imports — this session's included, once each module's artifact
+        // lands — link instead of compiling. Sessions never wait on it: a miss just
+        // compiles from source (and saves the artifact itself). Debug to match the
+        // REPL's compile options.
+        let artifact_store = Arc::new(quiver_compiler::ArtifactStore::cache());
+        {
+            let store = artifact_store.clone();
+            thread::spawn(move || {
+                quiver_compiler::warm_std_store(
+                    &store,
+                    &crate::build_builtin_registry(),
+                    quiver_compiler::compiler::CompileOptions {
+                        debug: true,
+                        source_name: "std".to_string(),
+                    },
+                );
+            });
+        }
+
         Ok(Self {
             editor,
             environment,
             repl: None,
             stepping_thread,
             shutdown_signal,
+            artifact_store,
         })
     }
 
@@ -137,6 +165,7 @@ impl ReplCli {
                 debug: true,
                 source_name: "repl".to_string(),
             });
+            repl.set_artifact_store(self.artifact_store.clone());
             repl
         };
 
@@ -269,8 +298,10 @@ impl ReplCli {
             }
 
             ["x"] => {
-                let result_type = self.repl.as_ref().unwrap().get_last_result_type();
-                let formatted_type = self.environment.lock().unwrap().format_type(result_type);
+                // The result type is compiler-side (REPL id space), so format it with the
+                // REPL's program, not the environment's merged one.
+                let repl = self.repl.as_ref().unwrap();
+                let formatted_type = repl.format_type(repl.get_last_result_type());
                 println!("{}", formatted_type.bright_black());
             }
 

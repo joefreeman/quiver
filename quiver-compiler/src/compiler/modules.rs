@@ -34,6 +34,18 @@ pub struct CachedModule {
     pub callable_type_params: HashMap<usize, Vec<String>>,
 }
 
+/// A module-compile recording frame (see [`ModuleCache::recording`]): tracks which
+/// modules this compile was *declared* to reference (per [`collect_module_references`],
+/// the same set its artifact key hashes) so any other reference discovered mid-compile
+/// — an import surfacing only inside a dialect expansion — marks the module hidden:
+/// its key would not cover the hidden dependency, so it must not be stored.
+#[derive(Clone)]
+pub struct RecordingFrame {
+    pub id: ModuleId,
+    pub declared: std::collections::HashSet<ModuleId>,
+    pub hidden: bool,
+}
+
 #[derive(Clone)]
 pub struct ModuleCache {
     pub ast_cache: HashMap<ModuleId, ast::Program>,
@@ -46,6 +58,33 @@ pub struct ModuleCache {
     pub type_namespace_cache: HashMap<ModuleId, ModuleTypeNamespace>,
     /// Modules whose type namespaces are currently being built, for cyclic-reference detection.
     pub type_namespace_stack: Vec<ModuleId>,
+    /// The artifact store this session links modules from and extracts them into (see
+    /// `crate::artifact`). None outside artifact-aware embedders.
+    pub artifact_store: Option<std::sync::Arc<crate::artifact::ArtifactStore>>,
+    /// Per cached module — linked *or* compiled from source — its own-function index →
+    /// session function id. The forward map every artifact link resolves its function
+    /// imports through; populated at link time and at source-compile time alike, so the
+    /// two paths compose. Session-local, never serialized.
+    pub module_functions: HashMap<ModuleId, Vec<usize>>,
+    /// The reverse of [`Self::module_functions`]: session function id → (owning module,
+    /// index in its own-function list). First writer wins, so a function `register_function`
+    /// deduplicated across modules stays attributed to its first registrant. Used by
+    /// artifact extraction to classify function references.
+    pub function_owners: HashMap<usize, (ModuleId, usize)>,
+    /// Per cached module: its *transitive value-import closure* — every module whose
+    /// functions can be embedded in or referenced from its compiled form. This is the
+    /// import-eligibility set for artifact extraction: each member is covered by the
+    /// module's Merkle key (directly or through a dependency's key) and guaranteed
+    /// linkable first, so an import entry naming it can never go stale or dangle. A
+    /// function owned by any module *outside* the closure (reachable only through a
+    /// hidden, key-invisible chain) makes the module uncacheable.
+    pub value_closures: HashMap<ModuleId, std::collections::HashSet<ModuleId>>,
+    /// In-progress module-compile frames, innermost last.
+    pub recording: Vec<RecordingFrame>,
+    /// Memoised artifact keys (see `crate::artifact::module_key`).
+    pub key_cache: HashMap<ModuleId, u64>,
+    /// Modules whose keys are currently being computed, for cycle detection.
+    pub key_stack: Vec<ModuleId>,
 }
 
 impl Default for ModuleCache {
@@ -62,7 +101,65 @@ impl ModuleCache {
             value_cache: HashMap::new(),
             type_namespace_cache: HashMap::new(),
             type_namespace_stack: Vec::new(),
+            artifact_store: None,
+            module_functions: HashMap::new(),
+            function_owners: HashMap::new(),
+            value_closures: HashMap::new(),
+            recording: Vec::new(),
+            key_cache: HashMap::new(),
+            key_stack: Vec::new(),
         }
+    }
+
+    /// Record a module's transitive value-import closure: its direct value imports
+    /// plus their closures (recorded before it — dependencies cache first).
+    pub fn record_value_closure(
+        &mut self,
+        id: &ModuleId,
+        direct: impl IntoIterator<Item = ModuleId>,
+    ) {
+        let mut closure = std::collections::HashSet::new();
+        for dep in direct {
+            if let Some(dep_closure) = self.value_closures.get(&dep) {
+                closure.extend(dep_closure.iter().cloned());
+            }
+            closure.insert(dep);
+        }
+        self.value_closures.insert(id.clone(), closure);
+    }
+
+    /// Note that the innermost module compile referenced `id` (a value import, dialect,
+    /// or type-namespace load). A reference the module's declared set does not cover
+    /// marks it hidden — its artifact key would miss the dependency, so it must not be
+    /// stored. No-op outside a module compile.
+    pub fn note_module_reference(&mut self, id: &ModuleId) {
+        if let Some(frame) = self.recording.last_mut()
+            && frame.id != *id
+            && !frame.declared.contains(id)
+        {
+            frame.hidden = true;
+        }
+    }
+
+    /// Record ownership of the module's functions: every function in
+    /// `start..functions_len` not already attributed belongs to `id` (nested module
+    /// compiles and links attribute theirs first, so insert-if-absent attributes
+    /// exactly the module's own — in registration order). Returns the own list.
+    pub fn record_module_functions(
+        &mut self,
+        id: &ModuleId,
+        start: usize,
+        functions_len: usize,
+    ) -> Vec<usize> {
+        let own: Vec<usize> = (start..functions_len)
+            .filter(|function_id| !self.function_owners.contains_key(function_id))
+            .collect();
+        for (index, function_id) in own.iter().enumerate() {
+            self.function_owners
+                .insert(*function_id, (id.clone(), index));
+        }
+        self.module_functions.insert(id.clone(), own.clone());
+        own
     }
 
     /// Get cached module value
@@ -168,6 +265,9 @@ pub fn module_type_namespace(
         .resolve(from_package, module)
         .map_err(Error::ModuleLoad)?;
     let id = resolved.id.clone();
+    // Before the cache check: cached or not, the innermost module compile depends on
+    // this namespace, and an undeclared dependency must mark it hidden.
+    module_cache.note_module_reference(&id);
 
     if let Some(namespace) = module_cache.type_namespace_cache.get(&id) {
         return Ok(namespace.clone());
@@ -262,4 +362,253 @@ fn build_type_namespace(
     }
 
     Ok(ModuleTypeNamespace { default, named })
+}
+
+/// Collect every module path the unit references by value — bare imports and
+/// import-rooted accesses (`%num`, `%num.add [..]`) and dialect invocations
+/// (`%mod{…}`) — in source order, deduplicated on first occurrence. Type-level
+/// references (`'%mod.t`) are excluded: resolving them builds only the module's
+/// type namespace, which registers no functions. This drives link-before-compile:
+/// the compiler fully compiles these modules before the unit's own body, so a
+/// module's registrations form a contiguous run in the program rather than
+/// interleaving with its importers'.
+pub fn collect_value_imports(program: &ast::Program) -> Vec<(Vec<String>, ast::Spanned)> {
+    collect(program, false)
+}
+
+/// Collect every module path the unit references at all — value imports and dialects
+/// as [`collect_value_imports`], *plus* type-level references (`'%mod`, `'%mod.name`)
+/// wherever a type can be written. This is the dependency set an artifact key hashes:
+/// a module's compiled form depends on its type-referenced modules' definitions just
+/// as on its value imports', so both must invalidate it.
+pub fn collect_module_references(program: &ast::Program) -> Vec<(Vec<String>, ast::Spanned)> {
+    collect(program, true)
+}
+
+fn collect(program: &ast::Program, types: bool) -> Vec<(Vec<String>, ast::Spanned)> {
+    let mut collector = Collector {
+        found: Vec::new(),
+        types,
+    };
+    for statement in &program.statements {
+        match statement {
+            ast::Statement::Expression(sequence) => collector.sequence(sequence),
+            ast::Statement::TypeAlias {
+                type_definition, ..
+            } => collector.type_def(type_definition),
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    collector
+        .found
+        .retain(|(path, _)| seen.insert(path.clone()));
+    collector.found
+}
+
+struct Collector {
+    found: Vec<(Vec<String>, ast::Spanned)>,
+    /// Whether to also collect type-level module references (`'%mod.t`). Off for
+    /// link-before-compile (namespaces register no functions), on for artifact keys.
+    types: bool,
+}
+
+impl Collector {
+    fn expression(&mut self, expression: &ast::Expression) {
+        for annotation in &expression.annotations {
+            self.chain(&annotation.value);
+        }
+        for branch in &expression.branches {
+            self.sequence(&branch.condition);
+            if let Some(consequence) = &branch.consequence {
+                self.sequence(consequence);
+            }
+        }
+    }
+
+    fn sequence(&mut self, sequence: &ast::Sequence) {
+        for chain in &sequence.chains {
+            self.chain(chain);
+        }
+    }
+
+    fn chain(&mut self, chain: &ast::Chain) {
+        if let Some(pattern) = &chain.match_pattern {
+            self.pattern(pattern);
+        }
+        for term in &chain.terms {
+            self.term(term);
+        }
+    }
+
+    fn term(&mut self, term: &ast::Term) {
+        match term {
+            // Pin roots are variables and parameters, so a pattern holds no value
+            // imports — but its type ascriptions may reference module types.
+            ast::Term::Literal(_) | ast::Term::Process(_) | ast::Term::Self_ => {}
+            ast::Term::Match(pattern) => self.pattern(pattern),
+            ast::Term::Tuple(tuple) => {
+                for field in &tuple.fields {
+                    match &field.value {
+                        ast::FieldValue::Chain(chain) => self.chain(chain),
+                        ast::FieldValue::Spread(Some(access)) => self.access(access),
+                        ast::FieldValue::Spread(None) => {}
+                    }
+                }
+            }
+            ast::Term::String(_, segments) => {
+                for segment in segments {
+                    if let ast::StrSegment::Hole(expression) = segment {
+                        self.expression(expression);
+                    }
+                }
+            }
+            ast::Term::Block(expression) => self.expression(expression),
+            ast::Term::Function(function) => {
+                if self.types {
+                    if let Some(parameter) = &function.parameter_type {
+                        self.type_def(parameter);
+                    }
+                    if let Some(result) = &function.return_type {
+                        self.type_def(result);
+                    }
+                }
+                if let Some(body) = &function.body {
+                    self.expression(body);
+                }
+            }
+            ast::Term::Access(access)
+            | ast::Term::Reference(access)
+            | ast::Term::State(access, _) => self.access(access),
+            ast::Term::Apply(access, argument) => {
+                self.access(access);
+                self.term(argument);
+            }
+            ast::Term::Spawn(target, argument, _) => {
+                self.term(target);
+                if let Some(argument) = argument {
+                    self.term(argument);
+                }
+            }
+            ast::Term::Select(sources, _) => {
+                for chain in sources.iter().flatten() {
+                    self.chain(chain);
+                }
+            }
+            ast::Term::Dialect(dialect) => self.found.push((dialect.path.clone(), dialect.span)),
+        }
+    }
+
+    fn access(&mut self, access: &ast::Access) {
+        if let Some(ast::AccessSource::Import(path)) = &access.source {
+            self.found.push((path.clone(), access.base_span));
+        }
+        if self.types {
+            for argument in &access.type_arguments {
+                self.type_def(argument);
+            }
+            for accessor in &access.accessors {
+                if let ast::AccessPath::Annotation(_, Some(check)) = accessor {
+                    self.type_def(check);
+                }
+            }
+        }
+    }
+
+    fn pattern(&mut self, pattern: &ast::Match) {
+        match pattern {
+            ast::Match::Identifier(..)
+            | ast::Match::Literal(_)
+            | ast::Match::String(..)
+            | ast::Match::Star(_)
+            | ast::Match::Placeholder
+            | ast::Match::Reference(_) => {}
+            ast::Match::Tuple(tuple) => {
+                for field in &tuple.fields {
+                    self.pattern(&field.pattern);
+                }
+            }
+            ast::Match::Partial(partial) => {
+                for field in &partial.fields {
+                    if let Some(pattern) = &field.pattern {
+                        self.pattern(pattern);
+                    }
+                }
+            }
+            ast::Match::Or(alternatives) => {
+                for alternative in alternatives {
+                    self.pattern(alternative);
+                }
+            }
+            ast::Match::Type(type_def) => self.type_def(type_def),
+            ast::Match::As(type_def, ..) => self.type_def(type_def),
+        }
+    }
+
+    fn type_def(&mut self, type_def: &ast::Type) {
+        if !self.types {
+            return;
+        }
+        match type_def {
+            ast::Type::Primitive(_) | ast::Type::Cycle(_) | ast::Type::Resource(_) => {}
+            ast::Type::Tuple(tuple) => {
+                for field in &tuple.fields {
+                    match field {
+                        ast::FieldType::Field { type_def, .. } => self.type_def(type_def),
+                        ast::FieldType::Spread { type_arguments, .. } => {
+                            for argument in type_arguments {
+                                self.type_def(argument);
+                            }
+                        }
+                    }
+                }
+            }
+            ast::Type::Function(function) => {
+                self.type_def(&function.input);
+                self.type_def(&function.output);
+                if let Some(receive) = &function.receive {
+                    self.type_def(receive);
+                }
+                if let Some(states) = &function.states {
+                    self.type_def(states);
+                }
+            }
+            ast::Type::Union(union) => {
+                for member in &union.types {
+                    self.type_def(member);
+                }
+            }
+            ast::Type::Intersection(members) => {
+                for member in members {
+                    self.type_def(member);
+                }
+            }
+            ast::Type::Identifier { arguments, .. } | ast::Type::SelfDefault { arguments } => {
+                for argument in arguments {
+                    self.type_def(argument);
+                }
+            }
+            ast::Type::Process(process) => {
+                for part in [
+                    &process.receive_type,
+                    &process.return_type,
+                    &process.state_type,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    self.type_def(part);
+                }
+            }
+            ast::Type::ModuleType {
+                module, arguments, ..
+            } => {
+                // The span is not tracked for type references; the compiler reports
+                // resolution errors at the use site itself.
+                self.found.push((module.clone(), ast::Spanned::default()));
+                for argument in arguments {
+                    self.type_def(argument);
+                }
+            }
+        }
+    }
 }

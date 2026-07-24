@@ -96,14 +96,84 @@ pub enum Type {
     Variable(String),
 }
 
+impl Type {
+    /// The same type with every table reference rewritten through `remaps` — for
+    /// transplanting types between programs. `Cycle` markers are relative (binder
+    /// depth, not a table id) and pass through untouched, as do names.
+    pub fn remap_ids(&self, remaps: &crate::bytecode::IdRemaps) -> Type {
+        let ty = |id: &usize| *remaps.types.get(id).unwrap_or(id);
+        match self {
+            Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) => self.clone(),
+            Type::Resource(_) | Type::Variable(_) => self.clone(),
+            Type::Tuple(tuple_id) => Type::Tuple(*remaps.tuples.get(tuple_id).unwrap_or(tuple_id)),
+            Type::Partial { name, fields } => Type::Partial {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(field, id)| (field.clone(), ty(id)))
+                    .collect(),
+            },
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+            } => Type::Callable {
+                parameter: ty(parameter),
+                result: ty(result),
+                receive: ty(receive),
+                states: states.as_ref().map(ty),
+            },
+            Type::Union(members) => Type::Union(members.iter().map(ty).collect()),
+            Type::Annotated {
+                base,
+                exact,
+                entries,
+            } => Type::Annotated {
+                base: ty(base),
+                exact: *exact,
+                entries: entries
+                    .iter()
+                    .map(|(key, value)| {
+                        (*remaps.annotation_keys.get(key).unwrap_or(key), ty(value))
+                    })
+                    .collect(),
+            },
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => Type::Process {
+                send: send.as_ref().map(ty),
+                receive: receive.as_ref().map(ty),
+                state: state.as_ref().map(ty),
+            },
+        }
+    }
+}
+
 /// Type alias for tuple field information: (optional name, type_id)
 pub type TupleField = (Option<String>, usize);
 
 /// Tuple type information: name and field definitions
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TupleTypeInfo {
     pub name: Option<String>,
     pub fields: Vec<TupleField>,
+}
+
+impl TupleTypeInfo {
+    /// The same tuple info with field type ids rewritten through `remaps`.
+    pub fn remap_ids(&self, remaps: &crate::bytecode::IdRemaps) -> TupleTypeInfo {
+        TupleTypeInfo {
+            name: self.name.clone(),
+            fields: self
+                .fields
+                .iter()
+                .map(|(name, id)| (name.clone(), *remaps.types.get(id).unwrap_or(id)))
+                .collect(),
+        }
+    }
 }
 
 /// Builtin function information with type IDs

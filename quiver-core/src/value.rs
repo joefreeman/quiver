@@ -26,7 +26,13 @@ pub enum Binary {
 /// O(1) instead of O(size of value). Computed once at construction from the elements'
 /// own cached flags, so it costs O(arity), not a deep walk.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(from = "PayloadData")]
 pub struct Payload {
+    /// Never serialized: the flag is a cache, so it is derived — not trusted — when
+    /// a payload is deserialized (see [`PayloadData`]). A stored flag would be the
+    /// one path an inconsistent value could enter by: every in-process construction
+    /// goes through the computing constructors.
+    #[serde(skip)]
     has_heap_refs: bool,
     elements: Vec<Value>,
     /// Annotations attached to the owning value: `(key id, value)` pairs, sorted by key id.
@@ -43,6 +49,30 @@ pub struct Payload {
     /// and function payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     type_argument: Option<usize>,
+}
+
+/// The serialized shape of [`Payload`]: the data without the cached `has_heap_refs`
+/// flag. Deserialization routes through the ordinary constructors, so the flag is
+/// recomputed by the same code that computes it everywhere else.
+#[derive(Deserialize)]
+struct PayloadData {
+    elements: Vec<Value>,
+    // Boxed to mirror the field it deserializes (see `Payload::annotations`).
+    #[allow(clippy::box_collection)]
+    #[serde(default)]
+    annotations: Option<Box<Vec<(usize, Value)>>>,
+    #[serde(default)]
+    type_argument: Option<usize>,
+}
+
+impl From<PayloadData> for Payload {
+    fn from(data: PayloadData) -> Self {
+        let payload = match data.annotations {
+            Some(annotations) => Payload::with_annotations(data.elements, *annotations),
+            None => Payload::new(data.elements),
+        };
+        payload.with_type_argument(data.type_argument)
+    }
 }
 
 impl Payload {
@@ -270,6 +300,58 @@ impl PartialEq for Value {
 }
 
 impl Value {
+    /// The same value with every table reference rewritten through `remaps` — for
+    /// transplanting a compile-time value (a cached module value) between programs.
+    /// Heap binary references are execution-local, not table references, and pass
+    /// through untouched, as do process/resource/ref identities (which cannot occur
+    /// in compile-time values anyway).
+    pub fn remap_ids(&self, remaps: &crate::bytecode::IdRemaps) -> Value {
+        fn remap_payload(payload: &Payload, remaps: &crate::bytecode::IdRemaps) -> Payload {
+            let elements = payload
+                .elements
+                .iter()
+                .map(|value| value.remap_ids(remaps))
+                .collect();
+            let annotations = payload
+                .annotations()
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        *remaps.annotation_keys.get(key).unwrap_or(key),
+                        value.remap_ids(remaps),
+                    )
+                })
+                .collect();
+            Payload::with_annotations(elements, annotations).with_type_argument(
+                payload
+                    .type_argument()
+                    .map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
+            )
+        }
+        match self {
+            Value::Int(_) | Value::BigInt(_) | Value::Reference(_) => self.clone(),
+            Value::Binary(Binary::Constant(idx)) => {
+                Value::Binary(Binary::Constant(*remaps.constants.get(idx).unwrap_or(idx)))
+            }
+            Value::Binary(Binary::Heap(_)) => self.clone(),
+            Value::Tuple(tuple_id, payload) => Value::Tuple(
+                *remaps.tuples.get(tuple_id).unwrap_or(tuple_id),
+                Arc::new(remap_payload(payload, remaps)),
+            ),
+            Value::Function(function_id, payload) => Value::Function(
+                *remaps.functions.get(function_id).unwrap_or(function_id),
+                Arc::new(remap_payload(payload, remaps)),
+            ),
+            Value::Builtin(builtin_id, payload) => Value::Builtin(
+                *remaps.builtins.get(builtin_id).unwrap_or(builtin_id),
+                payload
+                    .as_ref()
+                    .map(|payload| Arc::new(remap_payload(payload, remaps))),
+            ),
+            Value::Process(..) | Value::Resource(..) => self.clone(),
+        }
+    }
+
     /// Create a NIL tuple value
     pub fn nil() -> Self {
         Value::Tuple(NIL, Arc::new(Payload::new(vec![])))

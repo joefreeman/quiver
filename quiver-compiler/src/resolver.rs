@@ -16,6 +16,27 @@ use crate::manifest::{Manifest, Provider};
 /// the host runs. This is the source of the built-in `std` package.
 static STD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../std");
 
+/// Every standard-library module name, sorted: `"bin"`, `"http/websocket"`, … (the
+/// relative `.qv` paths without the extension). The fixed order gives whole-std
+/// artifacts such as [`crate::image::StdImage`] a canonical compilation sequence.
+pub fn std_module_names() -> Vec<String> {
+    fn walk(dir: &Dir, names: &mut Vec<String>) {
+        for file in dir.files() {
+            let path = file.path();
+            if path.extension().is_some_and(|extension| extension == "qv") {
+                names.push(path.with_extension("").to_string_lossy().into_owned());
+            }
+        }
+        for sub in dir.dirs() {
+            walk(sub, names);
+        }
+    }
+    let mut names = Vec::new();
+    walk(&STD_DIR, &mut names);
+    names.sort();
+    names
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModuleError {
     NotFound(String),
@@ -34,7 +55,9 @@ impl std::fmt::Display for ModuleError {
 }
 
 /// Identity of a package. Used (with a module name) as the canonical key for caching.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum PackageId {
     /// The built-in standard library.
     Std,
@@ -46,7 +69,9 @@ pub enum PackageId {
 }
 
 /// Canonical identity of a module: its package plus its name within that package.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct ModuleId {
     pub package: PackageId,
     pub name: Vec<String>,

@@ -846,6 +846,7 @@ dependencies = [
  "num-traits",
  "quiver-core",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -905,6 +906,7 @@ dependencies = [
  "quiver-core",
  "quiver-environment",
  "quiver-io",
+ "serde_json",
 ]
 
 [[package]]

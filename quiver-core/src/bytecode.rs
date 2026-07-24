@@ -2,7 +2,7 @@ use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
 pub enum Constant {
     // One form for all integers: the small/big split is a runtime-representation
     // concern, applied where a constant becomes a `Value` (`handle_constant`).
@@ -14,7 +14,7 @@ pub enum Constant {
 
 /// A concrete type that uniquely identifies a runtime value's type.
 /// This is used for O(1) type compatibility checking at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ConcreteType {
     Integer,
     Binary,
@@ -26,12 +26,83 @@ pub enum ConcreteType {
     Resource(usize), // resource_type_id
 }
 
+/// Id remap tables for transplanting bytecode between programs — the environment
+/// merging a compiled line into its program, or the linker loading a module artifact
+/// into a session. A missing entry means the id is unchanged.
+#[derive(Debug, Default)]
+pub struct IdRemaps {
+    pub constants: std::collections::HashMap<usize, usize>,
+    pub functions: std::collections::HashMap<usize, usize>,
+    pub tuples: std::collections::HashMap<usize, usize>,
+    pub types: std::collections::HashMap<usize, usize>,
+    pub builtins: std::collections::HashMap<usize, usize>,
+    pub annotation_keys: std::collections::HashMap<usize, usize>,
+    pub field_names: std::collections::HashMap<usize, usize>,
+    pub sites: std::collections::HashMap<usize, usize>,
+}
+
+impl IdRemaps {
+    fn map(table: &std::collections::HashMap<usize, usize>, id: usize) -> usize {
+        *table.get(&id).unwrap_or(&id)
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Function {
     pub instructions: Vec<Instruction>,
     pub captures: usize,
     /// Type ID referencing this function's callable type in the types vec
     pub type_id: usize,
+}
+
+impl Function {
+    /// The same function with every table reference rewritten through `remaps`.
+    /// Instruction operands that are not table ids (stack slots, jump offsets,
+    /// positions, arities) pass through untouched.
+    pub fn remap_ids(self, remaps: &IdRemaps) -> Function {
+        let instructions = self
+            .instructions
+            .into_iter()
+            .map(|instruction| match instruction {
+                Instruction::Constant(idx) => {
+                    Instruction::Constant(IdRemaps::map(&remaps.constants, idx))
+                }
+                Instruction::Function(idx) => {
+                    Instruction::Function(IdRemaps::map(&remaps.functions, idx))
+                }
+                Instruction::Builtin(idx, type_argument) => Instruction::Builtin(
+                    IdRemaps::map(&remaps.builtins, idx),
+                    // A type-consuming builtin's type argument is a type reference,
+                    // like GetAnnotation's check.
+                    type_argument.map(|type_id| IdRemaps::map(&remaps.types, type_id)),
+                ),
+                Instruction::Tuple(tuple_id) => {
+                    Instruction::Tuple(IdRemaps::map(&remaps.tuples, tuple_id))
+                }
+                Instruction::IsType(type_id) => {
+                    Instruction::IsType(IdRemaps::map(&remaps.types, type_id))
+                }
+                Instruction::GetNamed(name_id) => {
+                    Instruction::GetNamed(IdRemaps::map(&remaps.field_names, name_id))
+                }
+                Instruction::Annotate(key) => {
+                    Instruction::Annotate(IdRemaps::map(&remaps.annotation_keys, key))
+                }
+                Instruction::GetAnnotation(key, check) => Instruction::GetAnnotation(
+                    IdRemaps::map(&remaps.annotation_keys, key),
+                    check.map(|type_id| IdRemaps::map(&remaps.types, type_id)),
+                ),
+                Instruction::Stamp(site) => Instruction::Stamp(IdRemaps::map(&remaps.sites, site)),
+                other => other,
+            })
+            .collect();
+
+        Function {
+            instructions,
+            captures: self.captures,
+            type_id: IdRemaps::map(&remaps.types, self.type_id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

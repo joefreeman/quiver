@@ -70,15 +70,18 @@ fn top_level_host_reads_are_rejected() {
 }
 
 #[test]
-fn top_level_ref_minting_is_permitted() {
-    // Stateful-but-deterministic builtins stay legal at compile time: these refs are
-    // used and discarded during top-level evaluation. (Escaping a ref into the emitted
-    // bytecode is a separate lowering limitation.)
+fn top_level_ref_minting_is_rejected() {
+    // A compile-time value must be identity-free so compiled modules can be shared
+    // (and one day serialized) across the sessions that import them, so ref minting
+    // is rejected alongside host-state reads. Referencing the minting function is
+    // fine — the importer mints at runtime.
+    expect_rejected("a = %ref; #{ a }", "creating a ref");
+
     let out = quiv()
         .args([
             "run",
             "-e",
-            "a = %ref; b = %ref; x = { a ~> =&b => 1 | 2 }; #{ x }",
+            "mk = &%ref; #{ a = mk; b = mk; a ~> =&b => 1 | 2 }",
         ])
         .output()
         .unwrap();

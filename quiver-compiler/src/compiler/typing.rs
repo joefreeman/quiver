@@ -68,7 +68,7 @@ pub fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
 
 /// Type alias definition - a pre-resolved type ID with type parameters.
 /// The type_id may contain Type::Variable for generic parameters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeAliasDef {
     pub parameters: Vec<String>,
     pub type_id: usize,

@@ -11,4 +11,4 @@ quiver = { path = "../quiver-cli", package = "quiver-cli" }
 quiver-io = { path = "../quiver-io" }
 
 [dev-dependencies]
-# Test dependencies if needed
+serde_json.workspace = true

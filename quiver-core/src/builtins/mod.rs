@@ -332,19 +332,19 @@ pub type BuiltinFn<E> = fn(&Value, &mut BuiltinContext<'_, E>) -> Result<Complet
 /// How a builtin relates to state outside its argument — part of its signature contract,
 /// independent of any host. The dispatch site consults it before invoking: contexts that
 /// assume re-evaluation stability (receive filters, tracked renders) reject `Stateful`
-/// and `HostRead`, and compile-time execution (which must be deterministic) rejects
-/// `HostRead`. `Effect` and `Process` builtins are governed by their own gates — the
-/// effect-completion check and the context verbs — so the purity gate passes them
-/// through.
+/// and `HostRead`, and compile-time execution (which must be deterministic and produce
+/// identity-free values) rejects both as well. `Effect` and `Process` builtins are
+/// governed by their own gates — the effect-completion check and the context verbs — so
+/// the purity gate passes them through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purity {
     /// A pure function of its argument (and the heap data it references) — allowed
     /// everywhere.
     Pure,
-    /// Advances executor-local state (`%ref`'s counter): deterministic within a run —
-    /// so compile-time evaluation permits it — but unstable across re-evaluations.
-    /// (A compile-time ref is sound while it stays within the evaluation; escaping
-    /// into emitted bytecode is a separate lowering limitation.)
+    /// Advances executor-local state (`%ref`'s counter): unstable across
+    /// re-evaluations, and rejected at compile time — a ref is an identity, and a
+    /// compiled module's value must be identity-free so it can be shared (and one day
+    /// serialized) across the sessions that import it. Mint refs at runtime instead.
     Stateful,
     /// Reads host state (clock, entropy): nondeterministic across runs.
     HostRead,
@@ -793,7 +793,8 @@ pub fn register_vector_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 pub fn register_reference_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let nil = TypeSpec::Tuple(None, vec![]);
     // Stateful: each call advances the executor's ref counter, so a fresh identity per
-    // evaluation — unstable under re-evaluation, but deterministic at compile time.
+    // evaluation — unstable under re-evaluation, and banned at compile time (a module
+    // value must be identity-free).
     register_builtin!(registry, "reference", reference::builtin_reference, Purity::Stateful, nil => TypeSpec::Reference);
 }
 

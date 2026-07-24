@@ -16,7 +16,7 @@ unfold = #<'s, 't>[(self): #^ -> 'thunk<'t>, (state): 's, (step): #'s -> (['t, '
   #{ step state ~> =[value, next_state]; [value, self [&self, next_state, &step]] }
 }
 
-map = #<'t, 'u>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (f): #'t -> 'u] {
+map = #<'t, 'u>[(self): #^ -> 'thunk<'u>, (it): 'thunk<'t>, (f): #'t -> 'u] {
   self = &$self
   it = &$it
   f = &$f

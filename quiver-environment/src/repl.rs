@@ -82,6 +82,14 @@ impl<E: Effect> Repl<E> {
         self.module_cache = ModuleCache::new();
     }
 
+    /// Attach an artifact store: imports link from stored artifacts when their keys
+    /// match, and modules compiled from source are extracted into it (see
+    /// `quiver_compiler::artifact`). Safe at any point in a session — the store only
+    /// affects future imports.
+    pub fn set_artifact_store(&mut self, store: std::sync::Arc<quiver_compiler::ArtifactStore>) {
+        self.module_cache.artifact_store = Some(store);
+    }
+
     /// Compile and evaluate an expression
     /// Returns a request ID that can be polled for the result
     /// Returns None if the source only contains type definitions (no executable code)
@@ -338,6 +346,13 @@ impl<E: Effect> Repl<E> {
     /// in the REPL's program, not the Environment's.
     pub fn format_type_by_id(&self, type_id: usize) -> String {
         quiver_core::format::format_type_by_id(&self.program, type_id)
+    }
+
+    /// Format a type using the REPL's program. Compiler-produced types (such as
+    /// `get_last_result_type`) carry ids in the REPL's program space, so they must be
+    /// formatted here — the environment's merged program is a different id space.
+    pub fn format_type(&self, ty: &Type) -> String {
+        quiver_core::format::format_type(&self.program, ty)
     }
 
     /// Get the type of the last evaluated result

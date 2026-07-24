@@ -82,12 +82,19 @@ fn test_tcp_server_accept_and_respond() {
             .expect("Ok");
     });
 
-    // Give server time to start
-    thread::sleep(Duration::from_millis(100));
-
-    // Connect from Rust
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", test_port))
-        .expect("Failed to connect to Quiver server");
+    // Connect from Rust, retrying until the server binds (its first evaluation may
+    // pay one-off harness costs — e.g. loading the std image — before any code runs).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut stream = loop {
+        match TcpStream::connect(format!("127.0.0.1:{}", test_port)) {
+            Ok(stream) => break stream,
+            Err(e) if std::time::Instant::now() < deadline => {
+                let _ = e;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("Failed to connect to Quiver server: {e:?}"),
+        }
+    };
     stream
         .write_all(b"Hello from Rust!")
         .expect("Failed to write");

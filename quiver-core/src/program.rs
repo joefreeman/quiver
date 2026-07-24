@@ -30,11 +30,29 @@ pub struct Program {
     /// tuple literal is checked against the tuple type — never part of type identity,
     /// so structurally identical spellings share one entry (marking any marks all).
     #[serde(default)]
-    omittable_labels: std::collections::HashSet<(usize, usize)>,
+    omittable_labels: std::collections::BTreeSet<(usize, usize)>,
     /// Failure-provenance table (debug builds only): sites indexed by `Stamp`
     /// instructions, plus the tuple/key ids the executor needs to prebuild the values.
     #[serde(default)]
     debug: Option<crate::bytecode::SiteTable>,
+    /// Functions below this index are invisible to `register_function`'s structural
+    /// interning (see there). Transient compile state, 0 outside module compiles.
+    #[serde(skip)]
+    function_dedup_floor: usize,
+    /// Interning indexes (value → first-occurrence id) for the registries above, so the
+    /// `register_*` methods are hash lookups instead of scans of the whole table. Skipped
+    /// by serde and lazily rebuilt on first registration after deserialization; mapping
+    /// to the first occurrence matches the scan behaviour they replace.
+    #[serde(skip)]
+    constant_index: std::collections::HashMap<Constant, usize>,
+    #[serde(skip)]
+    type_index: std::collections::HashMap<Type, usize>,
+    #[serde(skip)]
+    tuple_index: std::collections::HashMap<TupleTypeInfo, usize>,
+    #[serde(skip)]
+    annotation_key_index: std::collections::HashMap<String, usize>,
+    #[serde(skip)]
+    field_name_index: std::collections::HashMap<String, usize>,
 }
 
 impl TypeLookup for Program {
@@ -75,8 +93,14 @@ impl Program {
             types: Vec::new(),
             annotation_keys: Vec::new(),
             field_names: Vec::new(),
-            omittable_labels: std::collections::HashSet::new(),
+            omittable_labels: std::collections::BTreeSet::new(),
             debug: None,
+            function_dedup_floor: 0,
+            constant_index: std::collections::HashMap::new(),
+            type_index: std::collections::HashMap::new(),
+            tuple_index: std::collections::HashMap::new(),
+            annotation_key_index: std::collections::HashMap::new(),
+            field_name_index: std::collections::HashMap::new(),
         };
 
         // Register built-in tuple types
@@ -90,12 +114,18 @@ impl Program {
     }
 
     pub fn register_constant(&mut self, constant: Constant) -> usize {
-        if let Some(index) = self.constants.iter().position(|c| c == &constant) {
-            index
-        } else {
-            self.constants.push(constant);
-            self.constants.len() - 1
+        if self.constant_index.is_empty() && !self.constants.is_empty() {
+            for (index, existing) in self.constants.iter().enumerate() {
+                self.constant_index.entry(existing.clone()).or_insert(index);
+            }
         }
+        if let Some(&index) = self.constant_index.get(&constant) {
+            return index;
+        }
+        let index = self.constants.len();
+        self.constants.push(constant.clone());
+        self.constant_index.insert(constant, index);
+        index
     }
 
     /// The number of registered types. Monotonically increasing, so it doubles as a
@@ -112,12 +142,35 @@ impl Program {
     /// Register a function and return its index.
     /// Deduplicates based on full equality (instructions, captures, type_id).
     pub fn register_function(&mut self, function: Function) -> usize {
-        if let Some(index) = self.functions.iter().position(|f| f == &function) {
-            index
+        // Structural interning never reaches below the dedup floor: while a module
+        // compiles (or links), its functions must not collapse onto other modules'
+        // structurally identical ones — function identity is attributed per module,
+        // and cross-module collapse would make that attribution depend on session
+        // history. Collapsing across the whole program is the runtime merge's job.
+        if let Some(index) = self.functions[self.function_dedup_floor..]
+            .iter()
+            .position(|f| f == &function)
+        {
+            self.function_dedup_floor + index
         } else {
             self.functions.push(function);
             self.functions.len() - 1
         }
+    }
+
+    /// Set the function-interning floor (see [`Self::register_function`]), returning
+    /// the previous one so callers can restore it stack-fashion around a module
+    /// compile.
+    pub fn set_function_dedup_floor(&mut self, floor: usize) -> usize {
+        std::mem::replace(&mut self.function_dedup_floor, floor)
+    }
+
+    /// Append a function without structural interning — the linker's registration
+    /// primitive. Ids are sequential, so a caller can precompute where a batch of
+    /// functions will land and remap mutually-referencing bodies before pushing any.
+    pub fn push_function(&mut self, function: Function) -> usize {
+        self.functions.push(function);
+        self.functions.len() - 1
     }
 
     pub fn get_functions(&self) -> &Vec<Function> {
@@ -185,15 +238,18 @@ impl Program {
         name: Option<String>,
         fields: Vec<(Option<String>, usize)>,
     ) -> usize {
-        // Check if type already exists
-        for (index, existing_type) in self.tuples.iter().enumerate() {
-            if existing_type.name == name && existing_type.fields == fields {
-                return index;
+        if self.tuple_index.is_empty() && !self.tuples.is_empty() {
+            for (index, existing) in self.tuples.iter().enumerate() {
+                self.tuple_index.entry(existing.clone()).or_insert(index);
             }
         }
-
+        let info = TupleTypeInfo { name, fields };
+        if let Some(&index) = self.tuple_index.get(&info) {
+            return index;
+        }
         let tuple_id = self.tuples.len();
-        self.tuples.push(TupleTypeInfo { name, fields });
+        self.tuples.push(info.clone());
+        self.tuple_index.insert(info, tuple_id);
         tuple_id
     }
 
@@ -204,23 +260,35 @@ impl Program {
 
     /// Register a type for use with IsType instruction
     pub fn register_type(&mut self, typ: Type) -> usize {
-        // Check if type already exists
-        if let Some(index) = self.types.iter().position(|t| t == &typ) {
+        if self.type_index.is_empty() && !self.types.is_empty() {
+            for (index, existing) in self.types.iter().enumerate() {
+                self.type_index.entry(existing.clone()).or_insert(index);
+            }
+        }
+        if let Some(&index) = self.type_index.get(&typ) {
             return index;
         }
-
         let type_id = self.types.len();
-        self.types.push(typ);
+        self.types.push(typ.clone());
+        self.type_index.insert(typ, type_id);
         type_id
     }
 
     /// Intern an annotation key name, returning its key id.
     pub fn register_annotation_key(&mut self, name: &str) -> usize {
-        if let Some(index) = self.annotation_keys.iter().position(|k| k == name) {
+        if self.annotation_key_index.is_empty() && !self.annotation_keys.is_empty() {
+            for (index, existing) in self.annotation_keys.iter().enumerate() {
+                self.annotation_key_index
+                    .entry(existing.clone())
+                    .or_insert(index);
+            }
+        }
+        if let Some(&index) = self.annotation_key_index.get(name) {
             return index;
         }
         let key_id = self.annotation_keys.len();
         self.annotation_keys.push(name.to_string());
+        self.annotation_key_index.insert(name.to_string(), key_id);
         key_id
     }
 
@@ -230,11 +298,19 @@ impl Program {
 
     /// Intern a field name for `GetNamed`, returning its field-name id.
     pub fn register_field_name(&mut self, name: &str) -> usize {
-        if let Some(index) = self.field_names.iter().position(|n| n == name) {
+        if self.field_name_index.is_empty() && !self.field_names.is_empty() {
+            for (index, existing) in self.field_names.iter().enumerate() {
+                self.field_name_index
+                    .entry(existing.clone())
+                    .or_insert(index);
+            }
+        }
+        if let Some(&index) = self.field_name_index.get(name) {
             return index;
         }
         let name_id = self.field_names.len();
         self.field_names.push(name.to_string());
+        self.field_name_index.insert(name.to_string(), name_id);
         name_id
     }
 

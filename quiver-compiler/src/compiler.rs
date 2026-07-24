@@ -19,7 +19,10 @@ mod typing;
 mod variables;
 
 pub use codegen::InstructionBuilder;
-pub use modules::ModuleCache;
+pub use modules::{
+    CachedModule, ModuleCache, ModuleTypeNamespace, collect_module_references,
+    collect_value_imports, module_type_namespace,
+};
 pub use provenance::{Narrowings, Provenance};
 pub use scopes::{Bindings, Parameter, Scope, ScopeKind, Variable};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_type_ids};
@@ -706,6 +709,16 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     /// The type-parameter uniquifying suffix of the top-level function definition being
     /// compiled, inherited by nested literals (see `compile_function`).
     type_param_suffix: Option<usize>,
+    /// One entry per in-progress module compile, innermost last: the module's display
+    /// name and its definition counter, from which fresh suffixes mint
+    /// deterministically (see `mint_type_param_suffix`). Empty at the entry level.
+    suffix_scopes: Vec<(String, usize)>,
+    /// Type parameters of *builtin* callables (see `record_builtin_type_params`),
+    /// kept apart from `callable_type_params`: they are registry vocabulary,
+    /// re-derived by every session on reference, so they must not ride in module
+    /// dispatch deltas (membership there would depend on which module referenced the
+    /// builtin first — session history an artifact must not contain).
+    builtin_type_params: HashMap<usize, Vec<String>>,
     /// How many function-literal bodies the compiler is currently inside. The dialect
     /// pre-expansion walk runs only at depth 0 — the outermost `compile_function` expands
     /// every nested body in one pass, so re-walking per nested literal would be
@@ -867,6 +880,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             callable_type_params: HashMap::new(),
             current_span: None,
             type_param_suffix: None,
+            suffix_scopes: Vec::new(),
+            builtin_type_params: HashMap::new(),
             function_depth: 0,
             debug: options.debug,
             current_module: options.source_name,
@@ -923,6 +938,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Initialize scope with bindings and optional parameter
         compiler.scopes = vec![Scope::new(scope_bindings, scope_parameter, ScopeKind::Root)];
+
+        // Link-before-compile: every module the program references compiles to
+        // completion before the program's own body (see `precompile_imports`). This
+        // must precede receive-type extraction: extraction resolves module types, and
+        // resolving one before its module is linked would build the namespace from
+        // source only for the link to overwrite it.
+        let entry_package = compiler.current_package.clone();
+        if let Err(error) = compiler.precompile_imports(&ast_program, &entry_package) {
+            return Err(LocatedError {
+                error,
+                span: compiler.current_span,
+            });
+        }
 
         // Extract receive type from statements (like we do for function bodies)
         // This seeds the receive type from explicit selects in the code.
@@ -1732,6 +1760,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(self.unify_receive_types(receive_types))
     }
 
+    /// Mint the uniquifying suffix for a fresh generic definition. Inside a module
+    /// compile it derives from (module, per-module definition counter): deterministic
+    /// — artifact content must not vary with session history — and unique across
+    /// modules by hashing, so rigid variables from different modules never alias. At
+    /// the entry level the historical seed (the program's type count) remains: entry
+    /// code is never extracted, and the count strictly grows, so fresh entry
+    /// definitions can't collide with cached module types.
+    fn mint_type_param_suffix(&mut self) -> usize {
+        match self.suffix_scopes.last_mut() {
+            Some((module, counter)) => {
+                *counter += 1;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                use std::hash::{Hash, Hasher};
+                module.hash(&mut hasher);
+                counter.hash(&mut hasher);
+                hasher.finish() as usize
+            }
+            None => self.program.type_count(),
+        }
+    }
+
     fn extract_receive_type_from_statements(
         &mut self,
         statements: &[ast::Statement],
@@ -2036,7 +2085,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // compiler instances, so a fresh REPL evaluation can't mint suffixes colliding
         // with cached module types (registering the renamed variable advances it).
         let inherited_suffix = self.type_param_suffix;
-        let type_param_suffix = inherited_suffix.unwrap_or_else(|| self.program.type_count());
+        let type_param_suffix = inherited_suffix.unwrap_or_else(|| self.mint_type_param_suffix());
         self.type_param_suffix = Some(type_param_suffix);
         let parameter_type = match &function.parameter_type {
             Some(t) => {
@@ -3807,6 +3856,92 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     /// Resolve an import with optional accessor chain, returning the cached module, resolved
     /// value, type, and the module's origin (for go-to-definition). Emits no instructions.
+    /// Fully compile (and cache) every module the parsed unit references by value,
+    /// before the unit's own body compiles — link-before-compile. Each module's
+    /// registrations then form a contiguous run in the program instead of
+    /// interleaving with its importers', and a module's dispatch-table delta
+    /// contains only its own contributions. `package` is the unit's own, so
+    /// resolution stays hermetic.
+    fn precompile_imports(
+        &mut self,
+        parsed: &ast::Program,
+        package: &crate::resolver::PackageId,
+    ) -> Result<(), Error> {
+        for (path, span) in modules::collect_value_imports(parsed) {
+            // Point errors (unresolvable module, failed module compile) at the
+            // import term that names the module.
+            self.current_span = span.get().or(self.current_span);
+            self.ensure_import_cached(&path, package)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_import_cached(
+        &mut self,
+        module: &[String],
+        package: &crate::resolver::PackageId,
+    ) -> Result<(), Error> {
+        let resolved = self
+            .resolver
+            .resolve(package, module)
+            .map_err(Error::ModuleLoad)?;
+        self.try_link_from_artifacts(&resolved)?;
+        if self.module_cache.get_cached_module(&resolved.id).is_some()
+            || self.module_cache.import_stack.contains(&resolved.id)
+        {
+            // Already compiled — or currently compiling further up the stack, in
+            // which case the in-body import reports the cycle exactly as before.
+            return Ok(());
+        }
+        self.module_cache.import_stack.push(resolved.id.clone());
+        let result = self.import_and_cache_module(&resolved);
+        self.module_cache.import_stack.pop();
+        result.map(|_| ())
+    }
+
+    /// If the session's artifact store holds an artifact under this module's key,
+    /// link it instead of compiling from source; the module-cache lookup that
+    /// follows then sees it as compiled. The module's declared value imports are
+    /// ensured first (linked or compiled, either way their function maps are
+    /// recorded) — the artifact's function imports are a subset of them.
+    fn try_link_from_artifacts(
+        &mut self,
+        resolved: &crate::resolver::ResolvedModule,
+    ) -> Result<(), Error> {
+        if self.module_cache.get_cached_module(&resolved.id).is_some() {
+            return Ok(());
+        }
+        let Some(store) = self.module_cache.artifact_store.clone() else {
+            return Ok(());
+        };
+        let Some(key) = crate::artifact::key_for_resolved(
+            self.resolver,
+            self.module_cache,
+            resolved,
+            self.debug,
+        ) else {
+            // Unresolvable references or a cyclic graph: compile from source, which
+            // reports the real error.
+            return Ok(());
+        };
+        let Some(artifact) = store.load(key) else {
+            return Ok(());
+        };
+        let parsed = self
+            .module_cache
+            .load_and_cache_ast(&resolved.id, &resolved.source)?;
+        for (path, _) in modules::collect_value_imports(&parsed) {
+            self.ensure_import_cached(&path, &resolved.package)?;
+        }
+        crate::artifact::link_module(
+            &artifact,
+            &resolved.id,
+            self.program,
+            self.module_cache,
+            self.builtins,
+        )
+    }
+
     fn resolve_import(
         &mut self,
         module: &[String],
@@ -3822,6 +3957,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .map_err(Error::ModuleLoad)?;
         let id = resolved.id.clone();
         let origin = resolved.origin.clone();
+        // An in-body reference the enclosing module compile did not declare (one only
+        // a dialect expansion surfaces) marks that module hidden — uncacheable.
+        self.module_cache.note_module_reference(&id);
 
         // Check for circular imports
         if self.module_cache.import_stack.contains(&id) {
@@ -3829,6 +3967,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 "Circular import detected".to_string(),
             ));
         }
+
+        self.try_link_from_artifacts(&resolved)?;
 
         // Get or compute cached module value
         let cached = if let Some(cached) = self.module_cache.get_cached_module(&id) {
@@ -3909,6 +4049,53 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .module_cache
             .load_and_cache_ast(&resolved.id, &resolved.source)?;
 
+        // Open a recording frame for this compile: the declared reference set (the
+        // same set the module's artifact key hashes) catches hidden dependencies —
+        // references only a dialect expansion surfaces — which make the compile
+        // uncacheable. Every exit below must pop the frame: callers of speculative
+        // import probes swallow errors and continue compiling.
+        let mut declared = std::collections::HashSet::new();
+        for (path, _) in modules::collect_module_references(&parsed) {
+            if let Ok(dep) = self.resolver.resolve(&resolved.package, &path) {
+                declared.insert(dep.id);
+            }
+        }
+        // The direct value imports seed the module's transitive value-import
+        // closure — extraction's import-eligibility set — recorded at the close.
+        let direct_imports: Vec<crate::resolver::ModuleId> =
+            modules::collect_value_imports(&parsed)
+                .into_iter()
+                .filter_map(|(path, _)| {
+                    self.resolver
+                        .resolve(&resolved.package, &path)
+                        .ok()
+                        .map(|dep| dep.id)
+                })
+                .collect();
+        self.module_cache.recording.push(modules::RecordingFrame {
+            id: resolved.id.clone(),
+            declared,
+            hidden: false,
+        });
+
+        // Link-before-compile: compile this module's own imports to completion first,
+        // so the body below compiles against fully-built dependencies and the
+        // dispatch snapshot taken next captures only this module's own additions.
+        if let Err(error) = self.precompile_imports(&parsed, &resolved.package) {
+            self.module_cache.recording.pop();
+            return Err(error);
+        }
+        // Functions registered from here on are this module's own (nested compiles
+        // and links attribute theirs first; see `record_module_functions`). The dedup
+        // floor keeps them the module's own even when structurally identical to an
+        // earlier module's: attribution must not depend on what happened to compile
+        // first in this session, or artifact content would vary with session history.
+        let functions_start = self.program.get_functions().len();
+        let previous_floor = self.program.set_function_dedup_floor(functions_start);
+        // Suffixes minted during this module's compile derive from a module-scoped
+        // counter (see `mint_type_param_suffix`); popped wherever the floor restores.
+        self.suffix_scopes.push((module_name.clone(), 0));
+
         // Save current compiler state
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
@@ -3917,15 +4104,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_package = std::mem::replace(&mut self.current_package, resolved.package.clone());
         // Provenance sites inside the module name it, not the importing unit.
         let saved_module = std::mem::replace(&mut self.current_module, module_name.clone());
-        // NOTE: `type_param_suffix` is deliberately *not* cleared here, although that means a
-        // module first imported from inside a function body compiles all its generics under
-        // the importer's suffix (import-order-dependent sharing). Clearing it — so each of the
-        // module's top-level definitions gets its own suffix, as a top-level import does — is
-        // the principled fix, but it currently trips a latent bug in cross-definition generic
-        // unification. Repro: `"." %fs.list [~, #'%fs.entry { .name }] %iter.map [~, " | "]
-        // %str.join` fails to compile with a leaked `'u | Entry | Entry` element type when
-        // %iter is first imported from inside fs.qv's `list` body. Fix that unification bug
-        // before clearing the suffix here.
+        // NOTE: `type_param_suffix` is deliberately *not* cleared here. Since
+        // link-before-compile, modules are pre-compiled at the top level (suffix state
+        // `None`, so each top-level definition gets its own suffix — the principled
+        // assignment); the only imports still triggered from inside a function body are
+        // ones the pre-scan cannot see (e.g. inside dialect expansions), which compile
+        // under the importer's suffix as before. Beware that suffix sharing can silently
+        // alias distinct definitions' type parameters, masking mis-declared generics —
+        // iter.qv's `map` self-type wrongly said `'thunk<'t>` for years because sharing
+        // repaired it; per-definition suffixes surfaced it.
         //
         // The module's own top-level functions need the dialect pre-expansion walk even when
         // the import was triggered from inside a function body.
@@ -3990,9 +4177,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.current_package = saved_package;
                 self.current_module = saved_module;
                 self.function_depth = saved_function_depth;
+                self.program.set_function_dedup_floor(previous_floor);
+                self.suffix_scopes.pop();
+                self.module_cache.recording.pop();
                 return Err(e);
             }
         };
+        self.program.set_function_dedup_floor(previous_floor);
+        self.suffix_scopes.pop();
         let module_type = self
             .program
             .lookup_type(result_type_id)
@@ -4032,15 +4224,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         bytecode.entry = Some(bytecode.functions.len() - 1);
 
         // Execute the module to get the result value
+        // Modules are executed at compile time only to produce their value; they don't
+        // receive messages, so skip the (expensive) parameter-compatibility tables.
         let (module_value, executor) =
-            // Modules are executed at compile time only to produce their value; they don't
-            // receive messages, so skip the (expensive) parameter-compatibility tables.
-            quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false).map_err(
-                |e| Error::ModuleExecution {
-                    module: module_name.clone(),
-                    error: Box::new(e),
-                },
-            )?;
+            match quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false) {
+                Ok(result) => result,
+                Err(e) => {
+                    self.module_cache.recording.pop();
+                    return Err(Error::ModuleExecution {
+                        module: module_name.clone(),
+                        error: Box::new(e),
+                    });
+                }
+            };
 
         // Extract binary data from the executor
         let mut binary_data = HashMap::new();
@@ -4048,16 +4244,34 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Capture the dispatch-table entries this module added (new or changed since the
         // snapshot), so a later cache hit can restore them without recompiling the module.
+        // The window also absorbs entries belonging to modules compiled *inside* it —
+        // undeclared (dialect-surfaced) imports — which are that module's vocabulary,
+        // not this one's: it records its own delta and restores it when imported, so
+        // they are filtered here rather than riding (and, in an artifact, escaping the
+        // key) with this module. At this point the module's own functions have no owner
+        // yet, so "unowned or declared" keeps exactly the module's world.
+        let foreign = |function_id: &usize| -> bool {
+            let declared = &self
+                .module_cache
+                .recording
+                .last()
+                .expect("module recording frame must be open")
+                .declared;
+            self.module_cache
+                .function_owners
+                .get(function_id)
+                .is_some_and(|(owner, _)| !declared.contains(owner))
+        };
         let fn_case_tables: HashMap<usize, Vec<(usize, usize)>> = self
             .fn_case_tables
             .iter()
-            .filter(|(k, v)| dispatch_fn_before.get(*k) != Some(*v))
+            .filter(|(k, v)| dispatch_fn_before.get(*k) != Some(*v) && !foreign(k))
             .map(|(k, v)| (*k, v.clone()))
             .collect();
         let case_tables: HashMap<usize, usize> = self
             .case_tables
             .iter()
-            .filter(|(k, v)| dispatch_case_before.get(*k) != Some(*v))
+            .filter(|(k, v)| dispatch_case_before.get(*k) != Some(*v) && !foreign(v))
             .map(|(k, v)| (*k, *v))
             .collect();
         let callable_type_params: HashMap<usize, Vec<String>> = self
@@ -4079,6 +4293,54 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Cache the module
         self.module_cache
             .cache_module(resolved.id.clone(), cached.clone());
+
+        // With a store attached, build the module's type namespace now — the artifact
+        // carries it — while the frame is still open: its loads are the module's own
+        // declared references, not the importer's.
+        if self.module_cache.artifact_store.is_some()
+            && let Err(error) = modules::module_type_namespace(
+                &resolved.id.name,
+                self.resolver,
+                self.module_cache,
+                &resolved.package,
+                self.program,
+            )
+        {
+            self.module_cache.recording.pop();
+            return Err(error);
+        }
+
+        // Close the recording: attribute the module's own functions, then — when the
+        // compile referenced only declared modules — extract its artifact into the
+        // store, making this compile the store's entry for its key.
+        let frame = self
+            .module_cache
+            .recording
+            .pop()
+            .expect("module recording frame must be open");
+        self.module_cache.record_module_functions(
+            &resolved.id,
+            functions_start,
+            self.program.get_functions().len(),
+        );
+        // Record the transitive value-import closure — extraction's
+        // import-eligibility set — for every cached module (hidden ones included:
+        // importers' closures build on theirs).
+        self.module_cache
+            .record_value_closure(&resolved.id, direct_imports);
+        if !frame.hidden
+            && let Some(store) = self.module_cache.artifact_store.clone()
+            && let Some(key) = crate::artifact::key_for_resolved(
+                self.resolver,
+                self.module_cache,
+                resolved,
+                self.debug,
+            )
+            && let Some(artifact) =
+                crate::artifact::extract(&resolved.id, self.program, self.module_cache)
+        {
+            store.save(key, artifact);
+        }
 
         Ok(cached)
     }
@@ -6529,7 +6791,32 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         ) {
             return Err(not_applicable(self.program));
         }
-        let Some(params) = self.callable_type_params.get(&base_id).cloned() else {
+        // A builtin's parameters are session vocabulary, never carried by cached
+        // modules (membership in a module's tables would be session history) — so a
+        // builtin member reached through a cached value derives them on demand here,
+        // matching the callable against the registry by signature.
+        if !self.callable_type_params.contains_key(&base_id)
+            && !self.builtin_type_params.contains_key(&base_id)
+            && let Some(Type::Callable {
+                parameter, result, ..
+            }) = self.program.lookup_type(base_id).cloned()
+            && let Some(name) = self
+                .program
+                .get_builtins()
+                .iter()
+                .find(|info| info.param_type == parameter && info.result_type == result)
+                .map(|info| info.name.clone())
+        {
+            self.record_builtin_type_params(&name, base_id, parameter, result);
+        }
+        // Function entries take precedence: a module function can share its callable
+        // type with a builtin, and the value being instantiated is more likely its own.
+        let Some(params) = self
+            .callable_type_params
+            .get(&base_id)
+            .or_else(|| self.builtin_type_params.get(&base_id))
+            .cloned()
+        else {
             return Err(not_applicable(self.program));
         };
         if type_arguments.len() > params.len() {
@@ -7149,7 +7436,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         param: usize,
         result: usize,
     ) {
-        if self.callable_type_params.contains_key(&callable_type_id) {
+        if self.builtin_type_params.contains_key(&callable_type_id) {
             return;
         }
         let declared = self.builtins.get_type_parameters(name).unwrap_or_default();
@@ -7162,7 +7449,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             names
         };
         if !names.is_empty() {
-            self.callable_type_params.insert(callable_type_id, names);
+            self.builtin_type_params.insert(callable_type_id, names);
         }
     }
 

@@ -2571,7 +2571,7 @@ impl<E: Effect> Executor<E> {
                     if let Some(context) = proc.restricted_context() {
                         return Err(Error::OperationNotAllowed { operation, context });
                     }
-                    if purity == crate::builtins::Purity::HostRead && self.compile_time {
+                    if self.compile_time {
                         return Err(Error::UnsupportedAtCompileTime { operation });
                     }
                 }
